@@ -240,6 +240,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     final result = await DevicePairingScannerScreen.show(
       context,
       showEnterCodeAction: false,
+      journeyId: _sessionId,
     );
     final payload = result?.payload;
     if (!mounted ||

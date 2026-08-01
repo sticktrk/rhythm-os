@@ -636,10 +636,16 @@ class AnalyticsService {
   Future<void> logDevicePairingCodeDetected({
     required String codeKind,
     required String outcome,
+    String? journeyId,
+    String? inputMethod,
+    String? profileId,
   }) async {
     await logEvent('device_pairing_code_detected', {
       'code_kind': codeKind,
       'outcome': outcome,
+      if (journeyId != null) 'journey_id': journeyId,
+      if (inputMethod != null) 'input_method': inputMethod,
+      if (profileId != null) 'profile_id': profileId,
     });
   }
 
@@ -707,6 +713,46 @@ class AnalyticsService {
   }) async {
     await logEvent('hue_ble_pairing_completed', {
       'journey_id': journeyId,
+      'source': source,
+      'input_method': inputMethod,
+      'attempt_number': attemptNumber,
+      'outcome': outcome,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
+  /// Track a local-BLE pairing attempt without retaining setup or identity.
+  Future<void> logLocalBlePairingAttempted({
+    required String journeyId,
+    required String profileId,
+    required String source,
+    required String inputMethod,
+    required int attemptNumber,
+  }) async {
+    await logEvent('local_ble_pairing_attempted', {
+      'journey_id': journeyId,
+      'profile_id': profileId,
+      'source': source,
+      'input_method': inputMethod,
+      'attempt_number': attemptNumber,
+    });
+  }
+
+  /// Track terminal local-BLE pairing without setup or device identity.
+  Future<void> logLocalBlePairingCompleted({
+    required String journeyId,
+    required String profileId,
+    required String source,
+    required String inputMethod,
+    required int attemptNumber,
+    required String outcome,
+    String? failureStage,
+    String? deduplicationId,
+  }) async {
+    await logEvent('local_ble_pairing_completed', {
+      if (deduplicationId != null) '\$insert_id': deduplicationId,
+      'journey_id': journeyId,
+      'profile_id': profileId,
       'source': source,
       'input_method': inputMethod,
       'attempt_number': attemptNumber,

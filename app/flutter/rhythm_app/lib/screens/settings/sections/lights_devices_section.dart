@@ -634,6 +634,8 @@ String _hubLabel(String type) {
       return 'Philips Hue';
     case 'hue_ble':
       return 'Hue Bluetooth';
+    case 'local_ble':
+      return 'Local Bluetooth';
     case 'home_assistant':
     case 'homeassistant':
     case 'ha':

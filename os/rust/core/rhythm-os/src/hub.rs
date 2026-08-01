@@ -181,6 +181,9 @@ pub struct HubType(pub String);
 impl HubType {
     pub const HUE: &'static str = "hue";
     pub const HUE_BLE: &'static str = "hue_ble";
+    /// Vendor-neutral local BLE profile host. Rich compatibility drivers may
+    /// retain a legacy hub type while sharing the same adapter runtime.
+    pub const LOCAL_BLE: &'static str = "local_ble";
     pub const HA: &'static str = "ha";
     pub const MATTER: &'static str = "matter";
 
@@ -201,14 +204,123 @@ impl HubType {
     }
 }
 
+/// Maximum serialized length shared by capability, pairing-history, registry,
+/// and local-store profile IDs.
+pub const DEVICE_PROFILE_ID_MAX_LEN: usize = 80;
+
+/// Parsed identity for one versioned device-profile protocol family.
+///
+/// IDs use `<family-segments>.v<positive version>`. The family is everything
+/// before the version segment; vendors and product names may be useful family
+/// segments, but callers must not infer behavior from them. Compatibility is
+/// declared explicitly by the active decoder instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParsedDeviceProfileId<'a> {
+    family: &'a str,
+    version: u32,
+}
+
+impl<'a> ParsedDeviceProfileId<'a> {
+    pub fn parse(value: &'a str) -> Option<Self> {
+        if value.is_empty()
+            || value.len() > DEVICE_PROFILE_ID_MAX_LEN
+            || !value.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+            })
+        {
+            return None;
+        }
+
+        let (family, version_segment) = value.rsplit_once('.')?;
+        let family_segments = family.split('.').collect::<Vec<_>>();
+        if family_segments.len() < 2 || family_segments.iter().any(|segment| segment.is_empty()) {
+            return None;
+        }
+
+        let version_digits = version_segment.strip_prefix('v')?;
+        if version_digits.is_empty()
+            || version_digits.starts_with('0')
+            || !version_digits.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        let version = version_digits.parse::<u32>().ok()?;
+        Some(Self { family, version })
+    }
+
+    pub fn family(self) -> &'a str {
+        self.family
+    }
+
+    pub fn version(self) -> u32 {
+        self.version
+    }
+}
+
+pub fn is_valid_device_profile_id(value: &str) -> bool {
+    ParsedDeviceProfileId::parse(value).is_some()
+}
+
+/// One device profile supported by a generic integration onboarding method.
+///
+/// Profile identifiers are stable protocol contracts rather than marketing
+/// names. Clients use this bounded metadata for routing and copy only; all
+/// identity verification remains appliance-side.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HubDeviceProfileCapability {
+    pub id: String,
+    /// Older IDs whose setup and persisted state the current profile decoder
+    /// explicitly understands. Clients may classify input with one of these
+    /// IDs, but must submit the advertised current `id` to the appliance.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compatible_profile_ids: Vec<String>,
+    pub device_type: String,
+    pub display_name: String,
+    pub input_only: bool,
+    /// Intake strategies implemented for this profile. A client must support
+    /// both the profile parser/handler and one advertised method before it
+    /// offers onboarding.
+    #[serde(default)]
+    pub onboarding_methods: Vec<String>,
+}
+
+impl HubDeviceProfileCapability {
+    /// Resolve an exact current ID or one explicitly compatible older ID to
+    /// this capability's current ID. Malformed/cross-family/newer claims fail
+    /// closed even if an integration accidentally advertises them.
+    pub fn canonical_id_for<'a>(&'a self, candidate: &str) -> Option<&'a str> {
+        let current = ParsedDeviceProfileId::parse(&self.id)?;
+        if candidate == self.id.as_str() {
+            return Some(self.id.as_str());
+        }
+        if !self
+            .compatible_profile_ids
+            .iter()
+            .any(|compatible_id| compatible_id == candidate)
+        {
+            return None;
+        }
+        let compatible = ParsedDeviceProfileId::parse(candidate)?;
+        (compatible.family() == current.family() && compatible.version() < current.version())
+            .then_some(self.id.as_str())
+    }
+}
+
 /// Shared API-facing capability metadata for a registered hub integration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HubIntegrationCapability {
     pub hub_type: String,
     pub configurable: bool,
     pub device_onboarding_methods: Vec<String>,
+    pub device_profiles: Vec<HubDeviceProfileCapability>,
     pub supports_unpairing: bool,
     pub supports_roomless_devices: bool,
+    /// Whether a configured-but-disconnected instance should hold the app's
+    /// Rooms startup gate because its control plane must rebuild authoritative
+    /// topology. This is deliberately integration-level, not inferred from a
+    /// device being an input or a light: an appliance-local store can restore
+    /// both kinds without blocking unrelated Rooms.
+    pub blocks_room_readiness: bool,
 }
 
 pub const DEVICE_ONBOARDING_METHOD_MATTER_ON_NETWORK_SETUP_CODE: &str =
@@ -217,6 +329,8 @@ pub const DEVICE_ONBOARDING_METHOD_MATTER_BLE_WIFI_COMMISSIONING: &str =
     "matter_ble_wifi_commissioning";
 /// Scan for and bond every newly advertising factory-reset Hue BLE bulb.
 pub const DEVICE_ONBOARDING_METHOD_HUE_BLE_NEARBY_SCAN: &str = "hue_ble_nearby_scan";
+/// Resolve a locally parsed, server-advertised BLE device profile.
+pub const DEVICE_ONBOARDING_METHOD_LOCAL_BLE_QR: &str = "local_ble_qr";
 /// Ask an already connected Hue Bridge to find one Zigbee light by its
 /// six-character printed serial.
 pub const DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_SERIAL_SEARCH: &str = "hue_bridge_serial_search";
@@ -227,8 +341,10 @@ impl HubIntegrationCapability {
             hub_type: hub_type.into(),
             configurable: true,
             device_onboarding_methods: Vec::new(),
+            device_profiles: Vec::new(),
             supports_unpairing: false,
             supports_roomless_devices: false,
+            blocks_room_readiness: true,
         }
     }
 }
@@ -507,6 +623,26 @@ pub trait ExternalLightHubIntegration: Send + Sync {
             "Pairing not supported for {}",
             self.hub_type()
         ))
+    }
+
+    /// Start pairing with the request's original monotonic acceptance time.
+    /// Integrations with an absolute end-to-end SLA override this; existing
+    /// integrations inherit the ordinary pairing behavior.
+    fn start_pairing_with_context(
+        &self,
+        state: &SharedState,
+        params: &serde_json::Value,
+        _context: crate::pairing::PairingRequestContext,
+    ) -> Result<crate::pairing::PairingSession> {
+        self.start_pairing(state, params)
+    }
+
+    /// Reconcile integration-owned durable completion receipts with the
+    /// shared pairing ledger. Implementations must not require their transport
+    /// to be available: this hook is used by status polling to repair the
+    /// response after an already-committed device activation.
+    fn reconcile_pairing_results(&self, _state: &SharedState) -> Result<()> {
+        Ok(())
     }
 
     /// Unpair/decommission a device (Matter fabric removal, Zigbee leave).
@@ -1088,10 +1224,20 @@ pub struct IntegrationCallbacks {
     >,
     /// Start a device pairing session (delegates to integration's `start_pairing`).
     pub start_pairing_fn: Arc<
-        dyn Fn(&SharedState, &str, &serde_json::Value) -> Result<crate::pairing::PairingSession>
+        dyn Fn(
+                &SharedState,
+                &str,
+                &serde_json::Value,
+                crate::pairing::PairingRequestContext,
+            ) -> Result<crate::pairing::PairingSession>
             + Send
             + Sync,
     >,
+    /// Repair durable integration completion receipts before pairing status
+    /// admission or lookup. `Some(hub_type)` targets one integration; `None`
+    /// reconciles all registered integrations.
+    pub reconcile_pairing_results_fn:
+        Arc<dyn Fn(&SharedState, Option<&str>) -> Result<()> + Send + Sync>,
     /// Start a device unpairing session (delegates to integration's `start_unpairing`).
     pub start_unpairing_fn: Arc<
         dyn Fn(&SharedState, &str, &serde_json::Value) -> Result<crate::pairing::UnpairingResult>
@@ -1196,11 +1342,26 @@ pub fn integration_callbacks(
     let start_pairing_fn = Arc::new(
         move |state: &SharedState,
               hub_type: &str,
-              params: &serde_json::Value|
+              params: &serde_json::Value,
+              context: crate::pairing::PairingRequestContext|
               -> Result<crate::pairing::PairingSession> {
             let integration = find_integration(integrations, hub_type)
                 .ok_or_else(|| anyhow::anyhow!("No integration for hub type '{}'", hub_type))?;
-            integration.start_pairing(state, params)
+            integration.start_pairing_with_context(state, params, context)
+        },
+    );
+
+    let reconcile_pairing_results_fn = Arc::new(
+        move |state: &SharedState, hub_type: Option<&str>| -> Result<()> {
+            if let Some(hub_type) = hub_type {
+                let integration = find_integration(integrations, hub_type)
+                    .ok_or_else(|| anyhow::anyhow!("No integration for hub type '{}'", hub_type))?;
+                return integration.reconcile_pairing_results(state);
+            }
+            for integration in integrations {
+                integration.reconcile_pairing_results(state)?;
+            }
+            Ok(())
         },
     );
 
@@ -1244,6 +1405,7 @@ pub fn integration_callbacks(
         sync_topology_groups_fn,
         prepare_hub_device_room_assignment_fn,
         start_pairing_fn,
+        reconcile_pairing_results_fn,
         start_unpairing_fn,
         run_device_test_fn,
         save_device_test_report_fn,
@@ -1259,6 +1421,59 @@ mod tests {
     use std::sync::Arc;
 
     use crate::discovery::{DiscoveredDevice, DiscoveredRoom, HubDiscovery};
+
+    #[test]
+    fn device_profile_ids_have_one_canonical_versioned_grammar() {
+        let parsed = ParsedDeviceProfileId::parse("orein.oc02001.button.v12").unwrap();
+        assert_eq!(parsed.family(), "orein.oc02001.button");
+        assert_eq!(parsed.version(), 12);
+
+        for invalid in [
+            "",
+            "button.v1",
+            "orein..button.v1",
+            "Orein.oc02001.button.v1",
+            "orein.oc02001.button.V1",
+            "orein.oc02001.button.v0",
+            "orein.oc02001.button.v01",
+            "orein.oc02001.button.latest",
+            "orein.oc02001.button.v4294967296",
+        ] {
+            assert!(
+                ParsedDeviceProfileId::parse(invalid).is_none(),
+                "accepted {invalid}"
+            );
+        }
+        assert!(!is_valid_device_profile_id(
+            &"a".repeat(DEVICE_PROFILE_ID_MAX_LEN + 1)
+        ));
+    }
+
+    #[test]
+    fn profile_capability_resolves_only_valid_explicit_older_lineage() {
+        let profile = HubDeviceProfileCapability {
+            id: "future.vendor.bulb.v2".to_string(),
+            compatible_profile_ids: vec![
+                "future.vendor.bulb.v1".to_string(),
+                "future.vendor.bulb.v3".to_string(),
+                "other.vendor.bulb.v1".to_string(),
+            ],
+            device_type: "light".to_string(),
+            display_name: "BLE bulb".to_string(),
+            input_only: false,
+            onboarding_methods: vec!["local_ble_qr".to_string()],
+        };
+        assert_eq!(
+            profile.canonical_id_for("future.vendor.bulb.v2"),
+            Some("future.vendor.bulb.v2")
+        );
+        assert_eq!(
+            profile.canonical_id_for("future.vendor.bulb.v1"),
+            Some("future.vendor.bulb.v2")
+        );
+        assert_eq!(profile.canonical_id_for("future.vendor.bulb.v3"), None);
+        assert_eq!(profile.canonical_id_for("other.vendor.bulb.v1"), None);
+    }
 
     // ── Mock integration for testing ──────────────────────────────────
 
@@ -1765,7 +1980,8 @@ mod tests {
         assert!(string_error((callbacks.start_pairing_fn)(
             &state,
             "unknown",
-            &serde_json::json!({})
+            &serde_json::json!({}),
+            crate::pairing::PairingRequestContext::accepted_now(),
         ))
         .contains("No integration for hub type"));
         assert!(string_error((callbacks.start_unpairing_fn)(

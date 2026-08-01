@@ -18,12 +18,13 @@ Future<void> startMatterPairingFlow(
   MatterAddMethod? preferredMethod,
   String analyticsSource = 'unknown',
   DevicePairingScannerResult? initialIntakeResult,
+  String? journeyId,
 }) async {
   final homeProvider = context.read<HomeProvider>();
   final syncProvider = context.read<ServerSyncProvider>();
   final serverHub = homeProvider.activeServerHub;
   if (serverHub == null) return;
-  final journeyId = 'matter-pair-${const Uuid().v4()}';
+  final activeJourneyId = journeyId ?? 'matter-pair-${const Uuid().v4()}';
 
   final addMethod = await _resolveMatterAddMethod(
     context,
@@ -48,15 +49,24 @@ Future<void> startMatterPairingFlow(
       intakeResult = pendingIntakeResult;
       pendingIntakeResult = null;
     } else if (supportsDevicePairingCamera) {
-      final scanResult = await DevicePairingScannerScreen.show(context);
+      final scanResult = await DevicePairingScannerScreen.show(
+        context,
+        journeyId: activeJourneyId,
+      );
       if (!context.mounted || scanResult == null) return;
       intakeResult = scanResult.action == DevicePairingScannerAction.enterCode
-          ? await DevicePairingCodeEntryScreen.show(context)
+          ? await DevicePairingCodeEntryScreen.show(
+              context,
+              journeyId: activeJourneyId,
+            )
           : scanResult;
       if (!context.mounted) return;
       if (intakeResult == null) continue;
     } else {
-      intakeResult = await DevicePairingCodeEntryScreen.show(context);
+      intakeResult = await DevicePairingCodeEntryScreen.show(
+        context,
+        journeyId: activeJourneyId,
+      );
       if (!context.mounted || intakeResult == null) return;
     }
 
@@ -70,7 +80,7 @@ Future<void> startMatterPairingFlow(
       authToken: serverEndpoint.hub.token,
       addMethod: addMethod,
       analyticsSource: analyticsSource,
-      journeyId: journeyId,
+      journeyId: activeJourneyId,
       initialSetupPayload: intakeResult.payload,
       initialInputMethod: intakeResult.inputMethod,
     );

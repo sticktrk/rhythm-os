@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/screens/hubs/device_pairing_flow.dart';
+import 'package:rhythm_app/screens/hubs/device_pairing_scanner_screen.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 void main() {
@@ -97,6 +98,33 @@ void main() {
   });
 
   group('Hue Bridge pairing targets', () {
+    test('preserves the universal intake journey for Bridge pairing', () {
+      const intake = DevicePairingScannerResult.hueBridge(
+        'E277DA',
+        journeyId: 'device-pair-outer',
+      );
+
+      expect(
+        pairingJourneyIdForIntake(
+          intake,
+          fallbackPrefix: 'hue-bridge-add',
+        ),
+        'device-pair-outer',
+      );
+    });
+
+    test('creates a scoped journey when intake has none', () {
+      const intake = DevicePairingScannerResult.hueBridge('E277DA');
+
+      expect(
+        pairingJourneyIdForIntake(
+          intake,
+          fallbackPrefix: 'hue-bridge-add',
+        ),
+        startsWith('hue-bridge-add-'),
+      );
+    });
+
     test('keeps every connected Bridge exact and uses configured labels', () {
       final targets = connectedHueBridgePairingTargets(
         serverHubs: const [

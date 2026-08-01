@@ -23,10 +23,13 @@ import '../services/analytics_service.dart';
 import '../services/auth_service.dart';
 import '../services/cloud_backed_server_api.dart';
 import '../services/demo_server_api.dart';
+import '../services/device_pairing_code.dart'
+    show locallyRegisteredLocalBleProfileIds;
 import '../services/hue/demo_hue_bridge_service.dart';
 import '../services/hue/hue_service_locator.dart';
 import '../services/local_rhythm_server_service.dart';
 import '../services/remote_access_service.dart';
+import '../services/server_identity.dart';
 import '../services/server_activity_cloud_provisioning_service.dart';
 import 'home_provider.dart';
 import 'room_provider.dart';
@@ -375,6 +378,16 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// The server entry currently selected for the active connection.
   Hub? get connectedServerHub => _serverHub;
+
+  /// Durable appliance identity from the most recent hello on the active
+  /// connection. Null means the current endpoint has not been authenticated by
+  /// a durable hello identity yet.
+  String? get connectedServerInstanceId {
+    final identity = normalizeServerIdentity(_lastServerInstanceId);
+    return serverIdentityKind(identity) == ServerIdentityKind.durable
+        ? identity
+        : null;
+  }
 
   /// Endpoint currently selected for the active SDK connection.
   HubEndpoint? get activeConnectionEndpoint => _activeConnectionEndpoint;
@@ -744,6 +757,7 @@ class ServerSyncProvider extends ChangeNotifier {
   bool get hasPendingAutomaticHubStartup {
     for (final hub in serverHubs) {
       if (hub.connected) continue;
+      if (hubCapabilities(hub.type)?.blocksRoomReadiness == false) continue;
       if (hub.startupRetry?.isManualRetryRequired == true) continue;
       if (hub.startupRetry?.isScheduled == true) return true;
       if (hub.startupRetry == null && _unclassifiedHubStartupGraceActive) {
@@ -780,6 +794,8 @@ class ServerSyncProvider extends ChangeNotifier {
   RhythmHubCapabilities? get matterCapabilities => hubCapabilities('matter');
 
   RhythmHubCapabilities? get hueBleCapabilities => hubCapabilities('hue_ble');
+  RhythmHubCapabilities? get localBleCapabilities =>
+      hubCapabilities('local_ble');
   RhythmHubCapabilities? get hueBridgeCapabilities => hubCapabilities('hue');
 
   /// Whether the server advertises explicit Matter add methods.
@@ -822,6 +838,54 @@ class ServerSyncProvider extends ChangeNotifier {
       ) ??
       false;
 
+  Map<String, String> get _localBleProfileRoutes {
+    final capabilities = localBleCapabilities;
+    if (capabilities?.supportsDeviceOnboardingMethod(
+          RhythmDeviceOnboardingMethod.localBleQr,
+        ) !=
+        true) {
+      return const {};
+    }
+    final routes = <String, String>{};
+    final ambiguousLocalIds = <String>{};
+    for (final profile in capabilities!.deviceProfiles) {
+      if (!profile.supportsOnboardingMethod(
+        RhythmDeviceOnboardingMethod.localBleQr,
+      )) {
+        continue;
+      }
+      for (final localId in locallyRegisteredLocalBleProfileIds) {
+        if (!profile.acceptsProfileId(localId) ||
+            ambiguousLocalIds.contains(localId)) {
+          continue;
+        }
+        final previous = routes[localId];
+        if (previous != null && previous != profile.id) {
+          routes.remove(localId);
+          ambiguousLocalIds.add(localId);
+        } else {
+          routes[localId] = profile.id;
+        }
+      }
+    }
+    return routes;
+  }
+
+  /// Parser IDs understood by this app build and accepted by the appliance.
+  /// Intake keeps using these IDs so older app parsers remain deterministic.
+  Set<String> get supportedLocalBleProfileIds =>
+      _localBleProfileRoutes.keys.toSet();
+
+  /// Resolve a parser-emitted compatible ID to the appliance's one current
+  /// profile ID. Only this canonical value should cross the pairing API.
+  String? canonicalLocalBleProfileId(String localProfileId) =>
+      _localBleProfileRoutes[localProfileId];
+
+  bool canAddLocalBleProfile(String profileId) =>
+      supportedLocalBleProfileIds.contains(profileId);
+
+  bool get canAddLocalBleDevice => supportedLocalBleProfileIds.isNotEmpty;
+
   /// Whether a connected Hue Bridge can search for a Zigbee bulb by the
   /// six-character serial printed on its label.
   bool get canAddHueBridgeDeviceBySerial =>
@@ -834,14 +898,23 @@ class ServerSyncProvider extends ChangeNotifier {
   bool get canUnpairHueBleDevices =>
       hueBleCapabilities?.supportsUnpairing ?? false;
 
+  bool get canUnpairLocalBleDevices =>
+      localBleCapabilities?.supportsUnpairing ?? false;
+
   bool get canUnpairHueBridgeDevices =>
       hueBridgeCapabilities?.supportsUnpairing ?? false;
 
   bool get supportsHueBleRoomlessDevices =>
       hueBleCapabilities?.supportsRoomlessDevices ?? false;
 
+  bool get supportsLocalBleRoomlessDevices =>
+      localBleCapabilities?.supportsRoomlessDevices ?? false;
+
   bool get canScanToAddDevice =>
-      canAddMatterDevice || canAddHueBridgeDeviceBySerial || canAddHueBleDevice;
+      canAddMatterDevice ||
+      canAddHueBridgeDeviceBySerial ||
+      canAddHueBleDevice ||
+      canAddLocalBleDevice;
 
   /// Whether no hubs are configured on the server.
   bool get hasNoHubConfigured =>
@@ -1749,6 +1822,11 @@ class ServerSyncProvider extends ChangeNotifier {
       if (hubChanged) {
         _hasBeenSynced = false;
         _resetConnectionMetadata();
+      } else {
+        // The Hub record is the same, but its connection target or
+        // credentials changed. Do not expose a hello identity learned from
+        // the previous target while the replacement connection is starting.
+        _lastServerInstanceId = null;
       }
       // Defer all side-effects to avoid notifyListeners during ProxyProvider build phase
       final pendingHub = serverHub;
@@ -1827,6 +1905,9 @@ class ServerSyncProvider extends ChangeNotifier {
       return;
     }
 
+    if (!_sameEndpoint(_activeConnectionEndpoint, endpoint)) {
+      _lastServerInstanceId = null;
+    }
     _activeConnectionEndpoint = endpoint;
     await _connection.connect(
       endpoint.host,
@@ -2925,6 +3006,15 @@ class ServerSyncProvider extends ChangeNotifier {
     }
     final previous = _previousConnectionState;
     _previousConnectionState = current;
+
+    if (current != previous &&
+        (current == RhythmConnectionState.connecting ||
+            current == RhythmConnectionState.disconnected ||
+            current == RhythmConnectionState.reconnecting)) {
+      // A hello identity authenticates one connection generation. Never carry
+      // it across a reconnect where the locator could now reach another Box.
+      _lastServerInstanceId = null;
+    }
 
     if (current != previous &&
         (current == RhythmConnectionState.disconnected ||

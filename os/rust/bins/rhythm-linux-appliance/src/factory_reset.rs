@@ -1,6 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+#[cfg(any(target_os = "linux", test))]
+use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use rhythm_server::bootstate;
@@ -343,6 +345,7 @@ fn bluetoothd_is_running() -> Result<bool> {
     process_is_running_in(Path::new("/proc"), "bluetoothd")
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn process_is_running_in(proc_root: &Path, process_name: &str) -> Result<bool> {
     let entries =
         fs::read_dir(proc_root).with_context(|| format!("reading {}", proc_root.display()))?;

@@ -227,6 +227,10 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["POST"],
     },
     SharedRoute {
+        path: "/api/devices/pair/:session_id",
+        methods: &["GET", "DELETE"],
+    },
+    SharedRoute {
         path: "/api/devices/unpair",
         methods: &["POST"],
     },

@@ -228,6 +228,10 @@ fn shared_routes() -> Router<SharedState> {
         )
         // Device pairing / unpairing (Matter commissioning, Zigbee permit join)
         .route("/api/devices/pair", post(post_pair_device))
+        .route(
+            "/api/devices/pair/:session_id",
+            get(get_pair_device).delete(delete_pair_device),
+        )
         .route("/api/devices/unpair", post(post_unpair_device))
         .route("/api/matter/captures", get(get_matter_captures))
         .route("/api/matter/captures/:id", get(get_matter_capture))
@@ -1079,6 +1083,20 @@ pub async fn post_pair_device(
     Json(body): Json<crate::pairing::PairingRequest>,
 ) -> ApiResponse {
     run_blocking(move || handlers::handle_pair_device(&state, &body)).await
+}
+
+pub async fn get_pair_device(
+    State(state): State<SharedState>,
+    Path(session_id): Path<String>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_get_pair_device(&state, &session_id)).await
+}
+
+pub async fn delete_pair_device(
+    State(state): State<SharedState>,
+    Path(session_id): Path<String>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_delete_pair_device(&state, &session_id)).await
 }
 
 pub async fn post_unpair_device(

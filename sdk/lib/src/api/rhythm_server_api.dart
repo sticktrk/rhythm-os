@@ -5,6 +5,7 @@ import '../json_parsing.dart';
 import '../models/rhythm_curve_config.dart';
 import '../models/rhythm_curve_data.dart';
 import '../models/rhythm_input_binding.dart';
+import '../models/rhythm_pairing.dart';
 import '../models/rhythm_room.dart';
 import '../models/rhythm_scene.dart';
 import '../models/rhythm_settings.dart';
@@ -1893,15 +1894,12 @@ class RhythmServerApi {
     String? sessionId,
   }) async {
     try {
-      final mergedParams = sessionId == null
-          ? params
-          : <String, dynamic>{...params, 'session_id': sessionId};
       final response = await _dio.post(
         'api/devices/pair',
         data: {
           'hub_type': hubType,
           if (sessionId != null) 'session_id': sessionId,
-          'params': mergedParams,
+          'params': params,
         },
         options: Options(
           receiveTimeout: receiveTimeout,
@@ -1917,12 +1915,25 @@ class RhythmServerApi {
           ...responseData,
           if (statusCode != null && statusCode != 200)
             'http_status': statusCode,
+          if (statusCode != null && statusCode >= 400)
+            'request_delivery': statusCode >= 400 &&
+                    statusCode < 500 &&
+                    statusCode != 408 &&
+                    statusCode != 499
+                ? 'rejected'
+                : 'accepted_or_unknown',
         };
       }
 
       if (statusCode != null && statusCode != 200) {
         return {
           'http_status': statusCode,
+          'request_delivery': statusCode >= 400 &&
+                  statusCode < 500 &&
+                  statusCode != 408 &&
+                  statusCode != 499
+              ? 'rejected'
+              : 'accepted_or_unknown',
           'error': _plainTextResponseError(responseData) ??
               'Pairing request failed with HTTP $statusCode.',
         };
@@ -1931,15 +1942,30 @@ class RhythmServerApi {
       _log.warning('pairDevice failed', e);
       if (e is DioException) {
         final responseData = e.response?.data;
+        final statusCode = e.response?.statusCode;
+        final requestDelivery = statusCode != null
+            ? statusCode >= 400 &&
+                    statusCode < 500 &&
+                    statusCode != 408 &&
+                    statusCode != 499
+                ? 'rejected'
+                : 'accepted_or_unknown'
+            : switch (e.type) {
+                DioExceptionType.connectionTimeout => 'not_sent',
+                DioExceptionType.sendTimeout ||
+                DioExceptionType.receiveTimeout ||
+                DioExceptionType.connectionError =>
+                  'accepted_or_unknown',
+                _ => 'unknown',
+              };
         if (responseData is Map<String, dynamic>) {
           return {
             ...responseData,
-            if (e.response?.statusCode != null)
-              'http_status': e.response!.statusCode,
+            if (statusCode != null) 'http_status': statusCode,
+            'request_delivery': requestDelivery,
           };
         }
 
-        final statusCode = e.response?.statusCode;
         final message = _plainTextResponseError(responseData) ??
             switch (e.type) {
               DioExceptionType.connectionTimeout ||
@@ -1952,11 +1978,62 @@ class RhythmServerApi {
 
         return {
           if (statusCode != null) 'http_status': statusCode,
+          'request_delivery': requestDelivery,
           'error': message,
         };
       }
     }
     return null;
+  }
+
+  /// Reconcile a pairing request after its POST response or SSE terminal
+  /// event was lost. A valid unknown ID is returned as [notFound], not `null`;
+  /// `null` is reserved for an unavailable/malformed status response.
+  Future<RhythmPairingResultStatus?> getPairingResult(
+    String sessionId,
+  ) async {
+    try {
+      final response = await _dio.get(
+        'api/devices/pair/${Uri.encodeComponent(sessionId)}',
+        options:
+            Options(validateStatus: (status) => status == 200 || status == 404),
+      );
+      final data = response.data;
+      if (data is Map) {
+        final status = RhythmPairingResultStatus.fromJson(
+          data.cast<String, dynamic>(),
+        );
+        final httpStatus = response.statusCode;
+        final statusMatchesHttp = switch (httpStatus) {
+          200 => status.state != RhythmPairingResultState.notFound,
+          404 => status.state == RhythmPairingResultState.notFound,
+          _ => false,
+        };
+        return statusMatchesHttp && status.sessionId == sessionId
+            ? status
+            : null;
+      }
+    } catch (e) {
+      _log.fine('getPairingResult failed', e);
+    }
+    return null;
+  }
+
+  /// Confirm that a durable terminal pairing result has been consumed by the
+  /// client. The server retains a small causal tombstone while releasing the
+  /// bounded result payload. Pending, missing, and transport failures return
+  /// `false` so callers keep their local recovery pointer visible.
+  Future<bool> acknowledgePairingResult(String sessionId) async {
+    try {
+      final response = await _dio.delete(
+        'api/devices/pair/${Uri.encodeComponent(sessionId)}',
+        options: Options(validateStatus: (_) => true),
+      );
+      return response.statusCode == 204;
+    } catch (e) {
+      _log.fine('acknowledgePairingResult failed', e);
+    }
+    return false;
   }
 
   /// Unpair / decommission a device (Matter, Zigbee, etc.).

@@ -5,6 +5,21 @@ import 'dart:io';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 import 'package:test/test.dart';
 
+Future<void> _writeHello(
+  HttpRequest request,
+  String serverInstanceId,
+) async {
+  request.response.headers.contentType = ContentType.json;
+  request.response.write(jsonEncode({
+    'version': '1.2.3',
+    'server_instance_id': serverInstanceId,
+    'platform': 'desktop',
+    'context': 'server',
+    'nodes': const [],
+  }));
+  await request.response.close();
+}
+
 void main() {
   group('RhythmConnection', () {
     late HttpServer server;
@@ -93,6 +108,300 @@ void main() {
 
     tearDown(() async {
       await server.close(force: true);
+    });
+
+    test('ignores a delayed hello from a superseded server transport',
+        () async {
+      final serverA = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final serverB = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final aRequestStarted = Completer<void>();
+      final releaseAResponse = Completer<void>();
+
+      serverA.listen((request) async {
+        if (request.uri.path != '/api/state') {
+          request.response.statusCode = HttpStatus.notFound;
+          await request.response.close();
+          return;
+        }
+        if (!aRequestStarted.isCompleted) aRequestStarted.complete();
+        await releaseAResponse.future;
+        await _writeHello(request, 'srv-appliance-a');
+      });
+      serverB.listen((request) async {
+        if (request.uri.path == '/api/state') {
+          await _writeHello(request, 'srv-appliance-b');
+          return;
+        }
+        request.response.statusCode = HttpStatus.notFound;
+        await request.response.close();
+      });
+      addTearDown(() async {
+        if (!releaseAResponse.isCompleted) releaseAResponse.complete();
+        await serverA.close(force: true);
+        await serverB.close(force: true);
+      });
+
+      final connection = RhythmConnection();
+      addTearDown(connection.dispose);
+      final hellos = <String?>[];
+      final helloSub = connection.helloEvents
+          .listen((hello) => hellos.add(hello.serverInstanceId));
+      addTearDown(helloSub.cancel);
+
+      final connectA = connection.connect('127.0.0.1', port: serverA.port);
+      await aRequestStarted.future.timeout(const Duration(seconds: 2));
+
+      await connection
+          .connect('127.0.0.1', port: serverB.port)
+          .timeout(const Duration(seconds: 2));
+      await Future<void>.delayed(Duration.zero);
+      expect(hellos, ['srv-appliance-b']);
+
+      // Dio closes non-forcibly, so A's already-active request is allowed to
+      // finish. Its response must not publish a hello against B's API client.
+      releaseAResponse.complete();
+      await connectA.timeout(const Duration(seconds: 2));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(hellos, ['srv-appliance-b']);
+      expect(connection.connectionState, RhythmConnectionState.connected);
+    });
+
+    test('disconnect prevents an in-flight hello from restoring connection',
+        () async {
+      final delayedServer =
+          await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final requestStarted = Completer<void>();
+      final releaseResponse = Completer<void>();
+      delayedServer.listen((request) async {
+        if (request.uri.path != '/api/state') {
+          request.response.statusCode = HttpStatus.notFound;
+          await request.response.close();
+          return;
+        }
+        if (!requestStarted.isCompleted) requestStarted.complete();
+        await releaseResponse.future;
+        await _writeHello(request, 'srv-disconnected-appliance');
+      });
+      addTearDown(() async {
+        if (!releaseResponse.isCompleted) releaseResponse.complete();
+        await delayedServer.close(force: true);
+      });
+
+      final connection = RhythmConnection();
+      addTearDown(connection.dispose);
+      final hellos = <RhythmHello>[];
+      final helloSub = connection.helloEvents.listen(hellos.add);
+      addTearDown(helloSub.cancel);
+
+      final connect = connection.connect('127.0.0.1', port: delayedServer.port);
+      await requestStarted.future.timeout(const Duration(seconds: 2));
+      connection.disconnect();
+
+      releaseResponse.complete();
+      await connect.timeout(const Duration(seconds: 2));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(hellos, isEmpty);
+      expect(connection.connectionState, RhythmConnectionState.disconnected);
+    });
+
+    test('only the newest overlapping reconnect may publish its hello',
+        () async {
+      final reconnectServer =
+          await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final olderRequestStarted = Completer<void>();
+      final newerRequestStarted = Completer<void>();
+      final releaseOlderResponse = Completer<void>();
+      final releaseNewerResponse = Completer<void>();
+      var stateRequests = 0;
+      reconnectServer.listen((request) async {
+        if (request.uri.path != '/api/state') {
+          request.response.statusCode = HttpStatus.notFound;
+          await request.response.close();
+          return;
+        }
+        stateRequests += 1;
+        switch (stateRequests) {
+          case 1:
+            await _writeHello(request, 'srv-initial');
+            return;
+          case 2:
+            olderRequestStarted.complete();
+            await releaseOlderResponse.future;
+            await _writeHello(request, 'srv-stale-reconnect');
+            return;
+          case 3:
+            newerRequestStarted.complete();
+            await releaseNewerResponse.future;
+            await _writeHello(request, 'srv-current-reconnect');
+            return;
+          default:
+            await _writeHello(request, 'srv-unexpected');
+        }
+      });
+      addTearDown(() async {
+        if (!releaseOlderResponse.isCompleted) releaseOlderResponse.complete();
+        if (!releaseNewerResponse.isCompleted) releaseNewerResponse.complete();
+        await reconnectServer.close(force: true);
+      });
+
+      final connection = RhythmConnection();
+      addTearDown(connection.dispose);
+      final hellos = <String?>[];
+      final helloSub = connection.helloEvents
+          .listen((hello) => hellos.add(hello.serverInstanceId));
+      addTearDown(helloSub.cancel);
+
+      await connection.connect('127.0.0.1', port: reconnectServer.port);
+      await Future<void>.delayed(Duration.zero);
+      expect(hellos, ['srv-initial']);
+
+      final olderReconnect = connection.reconnect();
+      await olderRequestStarted.future.timeout(const Duration(seconds: 2));
+      final newerReconnect = connection.reconnect();
+      await newerRequestStarted.future.timeout(const Duration(seconds: 2));
+
+      releaseNewerResponse.complete();
+      await newerReconnect.timeout(const Duration(seconds: 2));
+      await Future<void>.delayed(Duration.zero);
+      expect(hellos, ['srv-initial', 'srv-current-reconnect']);
+
+      releaseOlderResponse.complete();
+      await olderReconnect.timeout(const Duration(seconds: 2));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(hellos, ['srv-initial', 'srv-current-reconnect']);
+      expect(connection.connectionState, RhythmConnectionState.connected);
+    });
+
+    test('a stale failed ping cannot reconnect the replacement transport',
+        () async {
+      final serverA = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final serverB = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final pingStarted = Completer<void>();
+      final releasePing = Completer<void>();
+      var serverBStateRequests = 0;
+
+      serverA.listen((request) async {
+        switch (request.uri.path) {
+          case '/api/state':
+            await _writeHello(request, 'srv-ping-a');
+            return;
+          case '/health':
+            if (!pingStarted.isCompleted) pingStarted.complete();
+            await releasePing.future;
+            request.response.statusCode = HttpStatus.internalServerError;
+            await request.response.close();
+            return;
+          default:
+            request.response.statusCode = HttpStatus.notFound;
+            await request.response.close();
+        }
+      });
+      serverB.listen((request) async {
+        if (request.uri.path == '/api/state') {
+          serverBStateRequests += 1;
+          await _writeHello(request, 'srv-ping-b');
+          return;
+        }
+        request.response.statusCode = HttpStatus.notFound;
+        await request.response.close();
+      });
+      addTearDown(() async {
+        if (!releasePing.isCompleted) releasePing.complete();
+        await serverA.close(force: true);
+        await serverB.close(force: true);
+      });
+
+      final connection = RhythmConnection();
+      addTearDown(connection.dispose);
+      final hellos = <String?>[];
+      final helloSub = connection.helloEvents
+          .listen((hello) => hellos.add(hello.serverInstanceId));
+      addTearDown(helloSub.cancel);
+
+      await connection.connect('127.0.0.1', port: serverA.port);
+      await Future<void>.delayed(Duration.zero);
+      final stalePing = connection.pingOrReconnect();
+      await pingStarted.future.timeout(const Duration(seconds: 2));
+
+      await connection.connect('127.0.0.1', port: serverB.port);
+      await Future<void>.delayed(Duration.zero);
+      expect(hellos, ['srv-ping-a', 'srv-ping-b']);
+      expect(serverBStateRequests, 1);
+
+      releasePing.complete();
+      await stalePing.timeout(const Duration(seconds: 2));
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      expect(connection.connectionState, RhythmConnectionState.connected);
+      expect(serverBStateRequests, 1);
+      expect(hellos, ['srv-ping-a', 'srv-ping-b']);
+    });
+
+    test('stale poll failures cannot consume the replacement failure budget',
+        () async {
+      final serverA = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final serverB = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final pollsStarted = Completer<void>();
+      final releasePolls = Completer<void>();
+      var serverAPolls = 0;
+      var serverBStateRequests = 0;
+
+      serverA.listen((request) async {
+        switch (request.uri.path) {
+          case '/api/state':
+            await _writeHello(request, 'srv-poll-a');
+            return;
+          case '/api/nodes/state':
+            serverAPolls += 1;
+            if (serverAPolls == 3 && !pollsStarted.isCompleted) {
+              pollsStarted.complete();
+            }
+            await releasePolls.future;
+            request.response.statusCode = HttpStatus.internalServerError;
+            await request.response.close();
+            return;
+          default:
+            request.response.statusCode = HttpStatus.notFound;
+            await request.response.close();
+        }
+      });
+      serverB.listen((request) async {
+        if (request.uri.path == '/api/state') {
+          serverBStateRequests += 1;
+          await _writeHello(request, 'srv-poll-b');
+          return;
+        }
+        request.response.statusCode = HttpStatus.notFound;
+        await request.response.close();
+      });
+      addTearDown(() async {
+        if (!releasePolls.isCompleted) releasePolls.complete();
+        await serverA.close(force: true);
+        await serverB.close(force: true);
+      });
+
+      final connection = RhythmConnection();
+      addTearDown(connection.dispose);
+      final hellos = <String?>[];
+      final helloSub = connection.helloEvents
+          .listen((hello) => hellos.add(hello.serverInstanceId));
+      addTearDown(helloSub.cancel);
+
+      await connection.connect('127.0.0.1', port: serverA.port);
+      final stalePolls = List.generate(3, (_) => connection.pollNow());
+      await pollsStarted.future.timeout(const Duration(seconds: 2));
+
+      await connection.connect('127.0.0.1', port: serverB.port);
+      releasePolls.complete();
+      await Future.wait(stalePolls).timeout(const Duration(seconds: 2));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(connection.connectionState, RhythmConnectionState.connected);
+      expect(serverBStateRequests, 1);
+      expect(hellos, ['srv-poll-a', 'srv-poll-b']);
     });
 
     test('does not issue a fresh poll on every SSE disconnect edge', () async {

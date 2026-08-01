@@ -929,7 +929,13 @@ pub(crate) fn reconcile_hub_endpoint_visibility(
         let hidden_ids = report.hidden_device_ids.clone();
         let mut topology_changed = false;
         for device_id in &hidden_ids {
-            topology_changed |= !s.topology.remove_device_everywhere(device_id).is_empty();
+            // `remove_device_everywhere` reports affected parent rooms, so a
+            // standalone device returns an empty list even though its node was
+            // removed. Remember existence independently or that deletion is
+            // only in memory and the stale roomless node returns on restart.
+            let existed = s.topology.get_device_node(device_id).is_some();
+            let affected_rooms = s.topology.remove_device_everywhere(device_id);
+            topology_changed |= existed || !affected_rooms.is_empty();
             clear_removed_node_ephemeral_state(&mut s, device_id);
         }
         for device_id in &report.affected_device_ids {
@@ -2825,8 +2831,10 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
                     hub_type: capability.hub_type.clone(),
                     configurable: capability.configurable,
                     device_onboarding_methods: capability.device_onboarding_methods.clone(),
+                    device_profiles: capability.device_profiles.clone(),
                     supports_unpairing: capability.supports_unpairing,
                     supports_roomless_devices: capability.supports_roomless_devices,
+                    blocks_room_readiness: capability.blocks_room_readiness,
                 })
                 .collect(),
         };
@@ -5104,10 +5112,14 @@ fn backup_hub_credentials_from_state(
     }
 }
 
-/// Hue BLE bonds are adapter-local BlueZ state, so a portable backup must not
-/// resurrect their credentials, endpoints, or device nodes without link keys.
+/// Appliance-local BLE associations cannot be restored safely on another
+/// adapter, so portable backups omit their credentials, endpoints, and nodes.
 /// A canonical device that also has another endpoint remains in the backup.
-fn strip_nonportable_hue_ble_nodes(
+fn is_nonportable_local_ble(hub_type: &str) -> bool {
+    matches!(hub_type, HubType::HUE_BLE | HubType::LOCAL_BLE)
+}
+
+fn strip_nonportable_local_ble_nodes(
     rooms: &mut rhythm_core::RoomManager,
     topology: &mut crate::topology::RoomTopologyStore,
     canonical_registry: &mut crate::canonical::registry::CanonicalRegistry,
@@ -5118,7 +5130,7 @@ fn strip_nonportable_hue_ble_nodes(
             device
                 .endpoints
                 .iter()
-                .filter(|endpoint| endpoint.hub_key.hub_type.as_str() == HubType::HUE_BLE)
+                .filter(|endpoint| is_nonportable_local_ble(endpoint.hub_key.hub_type.as_str()))
                 .map(|endpoint| (endpoint.hub_key.clone(), endpoint.native_id.clone()))
         })
         .collect::<Vec<_>>();
@@ -5130,13 +5142,14 @@ fn strip_nonportable_hue_ble_nodes(
         }
     }
     for canonical_id in removed_devices {
+        topology.remove_input_bindings_for_source(&canonical_id);
         topology.remove_device_everywhere(&canonical_id);
         rooms.remove(&canonical_id);
     }
 }
 
 fn sanitize_nonportable_backup_installation(installation: &mut BackupInstallation) {
-    strip_nonportable_hue_ble_nodes(
+    strip_nonportable_local_ble_nodes(
         &mut installation.rooms,
         &mut installation.topology,
         &mut installation.canonical_registry,
@@ -5145,14 +5158,14 @@ fn sanitize_nonportable_backup_installation(installation: &mut BackupInstallatio
         credential
             .hub_type
             .as_ref()
-            .is_none_or(|hub_type| hub_type.as_str() != HubType::HUE_BLE)
+            .is_none_or(|hub_type| !is_nonportable_local_ble(hub_type.as_str()))
     });
     installation
         .hub_registries
-        .retain(|registry| registry.hub_key.hub_type.as_str() != HubType::HUE_BLE);
+        .retain(|registry| !is_nonportable_local_ble(registry.hub_key.hub_type.as_str()));
     installation
         .integration_files
-        .retain(|file| !file.path.starts_with("hue_ble/"));
+        .retain(|file| !file.path.starts_with("hue_ble/") && !file.path.starts_with("local_ble/"));
 }
 
 pub fn build_profile_bundle_dto(state: &SharedState) -> Result<ProfileBundle> {
@@ -5186,11 +5199,7 @@ pub fn build_factory_default_profile_bundle() -> Result<String> {
 }
 
 fn clear_factory_reset_storage(state: &SharedState) -> Result<()> {
-    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    if let Some(storage) = s.storage.as_ref() {
-        storage.clear_factory_reset_state()?;
-    }
-    Ok(())
+    crate::pairing::clear_persisted_state_for_factory_reset(state)
 }
 
 fn clear_factory_reset_ephemeral_state(state: &SharedState) -> Result<()> {
@@ -5321,7 +5330,11 @@ pub fn build_backup_bundle_dto(state: &SharedState, include_secrets: bool) -> Re
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let mut topology = s.topology.clone();
         let mut canonical_registry = s.canonical_registry.clone();
-        strip_nonportable_hue_ble_nodes(&mut room_manager, &mut topology, &mut canonical_registry);
+        strip_nonportable_local_ble_nodes(
+            &mut room_manager,
+            &mut topology,
+            &mut canonical_registry,
+        );
         let configuration = backup_configuration_from_parts(&s, &room_manager);
         let mut hub_credentials: Vec<_> = s
             .hub_credentials
@@ -5330,7 +5343,7 @@ pub fn build_backup_bundle_dto(state: &SharedState, include_secrets: bool) -> Re
                 creds
                     .hub_type
                     .as_ref()
-                    .is_none_or(|hub_type| hub_type.as_str() != HubType::HUE_BLE)
+                    .is_none_or(|hub_type| !is_nonportable_local_ble(hub_type.as_str()))
             })
             .map(|creds| backup_hub_credentials_from_state(creds, include_secrets))
             .collect();
@@ -5345,7 +5358,7 @@ pub fn build_backup_bundle_dto(state: &SharedState, include_secrets: bool) -> Re
         let hub_registries: Vec<_> = s
             .hubs
             .iter()
-            .filter(|(hub_key, _)| hub_key.hub_type.as_str() != HubType::HUE_BLE)
+            .filter(|(hub_key, _)| !is_nonportable_local_ble(hub_key.hub_type.as_str()))
             .filter_map(|(hub_key, hub)| {
                 hub.registry
                     .as_ref()
@@ -5356,7 +5369,9 @@ pub fn build_backup_bundle_dto(state: &SharedState, include_secrets: bool) -> Re
             Some(storage) => storage.load_integration_backup_files(include_secrets)?,
             None => Vec::new(),
         };
-        integration_files.retain(|file| !file.path.starts_with("hue_ble/"));
+        integration_files.retain(|file| {
+            !file.path.starts_with("hue_ble/") && !file.path.starts_with("local_ble/")
+        });
 
         (
             configuration,
@@ -10017,7 +10032,15 @@ pub fn do_device_hard_remove(
     let mut topology_changed = false;
 
     if let Some(device) = canonical_device {
+        // `remove_device_everywhere` reports affected parent rooms. A
+        // roomless/standalone node has no parent to report even though the
+        // node itself is removed, so include its prior existence in the
+        // persistence decision. Input bindings are separate topology records
+        // and must not outlive their physical source device.
+        let had_topology_node = s.topology.get_device_node(&device.id).is_some();
         topology_changed |= !s.topology.remove_device_everywhere(&device.id).is_empty();
+        topology_changed |= had_topology_node;
+        topology_changed |= s.topology.remove_input_bindings_for_source(&device.id) > 0;
         for endpoint in &device.endpoints {
             topology_changed |= !s
                 .topology
@@ -19054,6 +19077,46 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_visibility_reconcile_persists_roomless_node_removal() {
+        let (state, _runtime) = setup_state(vec![]);
+        let storage = Arc::new(TestStorage::default());
+        let local_ble_key = HubKey::new(HubType::new("local_ble"), "default");
+        let device_id = insert_canonical_device(
+            &state,
+            local_ble_key.clone(),
+            "local-ble-roomless",
+            "Roomless Button",
+            "",
+            "",
+        );
+
+        {
+            let mut s = state.lock().unwrap();
+            s.storage = Some(storage.clone());
+            s.topology.ensure_standalone_device(&device_id);
+            persist_topology(&s);
+        }
+
+        let (affected, hidden) =
+            reconcile_hub_endpoint_visibility(&state, &local_ble_key, &HashSet::new()).unwrap();
+        assert_eq!((affected, hidden), (1, 1));
+        assert!(state
+            .lock()
+            .unwrap()
+            .topology
+            .get_device_node(&device_id)
+            .is_none());
+
+        let persisted = storage
+            .load_topology()
+            .unwrap()
+            .expect("visibility reconciliation should persist topology");
+        let restored: crate::topology::RoomTopologyStore =
+            serde_json::from_value(persisted).unwrap();
+        assert!(restored.get_device_node(&device_id).is_none());
+    }
+
+    #[test]
     fn automation_mode_cycle_uses_matching_pair_transition() {
         let (state, _runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
         {
@@ -19719,7 +19782,7 @@ mod tests {
     }
 
     #[test]
-    fn backup_excludes_adapter_bound_hue_ble_state() {
+    fn backup_excludes_appliance_local_ble_state() {
         let (state, _runtime) = setup_state(vec![]);
         let hub_key = HubKey::new(HubType::new(HubType::HUE_BLE), "local");
         let device_id = insert_canonical_device(
@@ -19761,6 +19824,49 @@ mod tests {
             .get_device_node(&device_id)
             .is_none());
         assert!(bundle.installation.rooms.get(&device_id).is_none());
+
+        let local_ble_key = HubKey::new(HubType::new(HubType::LOCAL_BLE), "default");
+        let local_ble_id = insert_canonical_device(
+            &state,
+            local_ble_key.clone(),
+            "local-ble-synthetic-device-0001",
+            "Button",
+            "",
+            "",
+        );
+        {
+            let mut s = state.lock().unwrap();
+            s.topology.ensure_standalone_device(&local_ble_id);
+            s.topology.set_input_binding(InputBinding::day_sleep_toggle(
+                &local_ble_id,
+                Some(ButtonAction::OnPress),
+            ));
+            s.hub_credentials.insert(
+                local_ble_key,
+                HubCredentials::new(
+                    HubType::LOCAL_BLE,
+                    "default",
+                    serde_json::json!({ "adapter": "default" }),
+                ),
+            );
+        }
+        let bundle = build_backup_bundle_dto(&state, true).unwrap();
+        assert!(bundle
+            .installation
+            .canonical_registry
+            .get(&local_ble_id)
+            .is_none());
+        assert!(bundle
+            .installation
+            .topology
+            .get_device_node(&local_ble_id)
+            .is_none());
+        assert!(bundle
+            .installation
+            .topology
+            .input_bindings()
+            .iter()
+            .all(|binding| binding.source_node_id != local_ble_id));
     }
 
     #[test]
@@ -26520,6 +26626,66 @@ mod tests {
             runtime.engine_node_snapshot(&device_id).is_none(),
             "hard-removed device should be removed from runtime"
         );
+    }
+
+    #[test]
+    fn device_hard_remove_persists_roomless_node_and_source_binding_removal() {
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+        let storage = Arc::new(TestStorage::default());
+        let device_id = {
+            let identity = crate::canonical::identity::DiscoveredIdentity {
+                native_id: "local-ble-test-button".to_string(),
+                room_id: None,
+                room_name: None,
+                name: "Test Button".to_string(),
+                device_type: rhythm_core::runtime::hub_registry::DeviceType::Button,
+                hardware_ids: vec![crate::canonical::identity::HardwareId::serial(
+                    "local-ble-test-button",
+                )],
+                manufacturer: None,
+                model: None,
+            };
+            let mut s = state.lock().unwrap();
+            s.storage = Some(storage.clone());
+            let device_id = match s.canonical_registry.resolve(&identity, &hub_key, 1000) {
+                crate::canonical::registry::ResolveResult::Created { canonical_id }
+                | crate::canonical::registry::ResolveResult::AlreadyKnown { canonical_id } => {
+                    canonical_id
+                }
+                other => panic!("unexpected resolve result: {other:?}"),
+            };
+            s.topology.ensure_standalone_device(&device_id);
+            assert!(s.topology.set_input_binding(InputBinding::day_sleep_toggle(
+                &device_id,
+                Some(ButtonAction::OnPress),
+            )));
+            persist_topology(&s);
+            device_id
+        };
+
+        do_device_hard_remove(&state, &device_id, Some(&hub_key)).unwrap();
+
+        {
+            let s = state.lock().unwrap();
+            assert!(s.topology.get_device_node(&device_id).is_none());
+            assert!(s
+                .topology
+                .input_bindings()
+                .iter()
+                .all(|binding| binding.source_node_id != device_id));
+        }
+
+        let persisted = storage
+            .load_topology()
+            .unwrap()
+            .expect("hard removal should persist topology");
+        let restored: crate::topology::RoomTopologyStore =
+            serde_json::from_value(persisted).unwrap();
+        assert!(restored.get_device_node(&device_id).is_none());
+        assert!(restored
+            .input_bindings()
+            .iter()
+            .all(|binding| binding.source_node_id != device_id));
     }
 
     #[test]

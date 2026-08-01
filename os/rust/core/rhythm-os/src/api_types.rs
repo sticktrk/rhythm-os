@@ -308,8 +308,11 @@ pub struct HubCapabilityDto {
     pub configurable: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub device_onboarding_methods: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub device_profiles: Vec<crate::hub::HubDeviceProfileCapability>,
     pub supports_unpairing: bool,
     pub supports_roomless_devices: bool,
+    pub blocks_room_readiness: bool,
 }
 
 /// Location in state snapshot.
@@ -1130,20 +1133,37 @@ mod tests {
     #[test]
     fn hub_capability_dto_type_field_renamed() {
         let capability = HubCapabilityDto {
-            hub_type: "matter".into(),
-            configurable: true,
-            device_onboarding_methods: vec!["matter_on_network_setup_code".into()],
+            hub_type: "local_ble".into(),
+            configurable: false,
+            device_onboarding_methods: vec!["local_ble_qr".into()],
+            device_profiles: vec![crate::hub::HubDeviceProfileCapability {
+                id: "orein.oc02001.button.v2".into(),
+                compatible_profile_ids: vec!["orein.oc02001.button.v1".into()],
+                device_type: "button".into(),
+                display_name: "Button".into(),
+                input_only: true,
+                onboarding_methods: vec!["local_ble_qr".into()],
+            }],
             supports_unpairing: true,
             supports_roomless_devices: true,
+            blocks_room_readiness: false,
         };
         let json: Value = serde_json::to_value(&capability).unwrap();
-        assert_eq!(json["type"], "matter");
+        assert_eq!(json["type"], "local_ble");
         assert!(json.get("hub_type").is_none());
-        assert_eq!(
-            json["device_onboarding_methods"][0],
-            "matter_on_network_setup_code"
-        );
+        assert_eq!(json["device_onboarding_methods"][0], "local_ble_qr");
         assert_eq!(json["supports_roomless_devices"], true);
+        assert_eq!(json["device_profiles"][0]["id"], "orein.oc02001.button.v2");
+        assert_eq!(
+            json["device_profiles"][0]["compatible_profile_ids"][0],
+            "orein.oc02001.button.v1"
+        );
+        assert_eq!(json["device_profiles"][0]["input_only"], true);
+        assert_eq!(
+            json["device_profiles"][0]["onboarding_methods"][0],
+            "local_ble_qr"
+        );
+        assert_eq!(json["blocks_room_readiness"], false);
     }
 
     // ---- LocationDto ----
@@ -1372,8 +1392,10 @@ mod tests {
                     hub_type: "matter".into(),
                     configurable: true,
                     device_onboarding_methods: vec!["matter_on_network_setup_code".into()],
+                    device_profiles: Vec::new(),
                     supports_unpairing: true,
                     supports_roomless_devices: true,
+                    blocks_room_readiness: true,
                 }],
             },
             active_profile: ActiveProfileDto {

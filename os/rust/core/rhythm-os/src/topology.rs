@@ -1491,6 +1491,15 @@ impl RoomTopologyStore {
         self.input_bindings.len() != before
     }
 
+    /// Remove every persisted automation whose source is a device/node that
+    /// is being omitted or deleted.
+    pub fn remove_input_bindings_for_source(&mut self, source_node_id: &str) -> usize {
+        let before = self.input_bindings.len();
+        self.input_bindings
+            .retain(|binding| binding.source_node_id != source_node_id);
+        before - self.input_bindings.len()
+    }
+
     /// Find an explicit control target for a source node and control kind.
     pub fn explicit_control_target(&self, source_id: &str, kind: &NodeControlKind) -> Option<&str> {
         self.control_links

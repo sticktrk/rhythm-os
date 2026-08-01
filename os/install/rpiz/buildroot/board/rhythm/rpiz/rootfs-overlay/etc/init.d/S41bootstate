@@ -7,6 +7,8 @@ STATE_FILE="${RHYTHM_BOOTSTATE_FILE:-${BOOT_MOUNT}/rhythm-bootstate.env}"
 STATE_BACKUP_FILE="${RHYTHM_BOOTSTATE_BACKUP_FILE:-${STATE_FILE}.bak}"
 DATA_STATE_DIR="${RHYTHM_BOOTSTATE_DATA_DIR:-/data/ota}"
 DATA_STATE_FILE="${RHYTHM_BOOTSTATE_DATA_FILE:-${DATA_STATE_DIR}/bootstate.env}"
+DATA_DIR="${RHYTHM_DATA_DIR:-/data}"
+ROLLBACK_REQUIRED_LATCH="${RHYTHM_BOOTSTATE_ROLLBACK_REQUIRED_LATCH:-/run/rhythm-rollback-required}"
 SERVER_BIN="${RHYTHM_SERVER_BIN:-/usr/bin/rhythm-server}"
 CMDLINE_FILE="${RHYTHM_CMDLINE_FILE:-${BOOT_MOUNT}/cmdline.txt}"
 PROC_CMDLINE="${RHYTHM_PROC_CMDLINE:-/proc/cmdline}"
@@ -49,6 +51,43 @@ sync_parent() {
     sync "$parent" 2>/dev/null || sync
 }
 
+scrub_local_ble_rollback_state() {
+    local data_dir
+
+    data_dir="$DATA_DIR"
+    while [ "${data_dir%/}" != "$data_dir" ]; do
+        data_dir="${data_dir%/}"
+    done
+    case "$data_dir" in
+        /*) ;;
+        *)
+            printf 'S41bootstate: refusing local BLE rollback scrub outside an absolute data directory: %s\n' "$DATA_DIR" >&2
+            return 1
+            ;;
+    esac
+    case "$data_dir" in
+        ""|/|*/../*|*/..|*/./*|*/.)
+            printf 'S41bootstate: refusing unsafe local BLE rollback data directory: %s\n' "$DATA_DIR" >&2
+            return 1
+            ;;
+    esac
+    if [ ! -d "$data_dir" ] || [ -L "$data_dir" ]; then
+        printf 'S41bootstate: local BLE rollback data path is not a real directory: %s\n' "$data_dir" >&2
+        return 1
+    fi
+
+    rm -rf \
+        "$data_dir/local_ble" \
+        "$data_dir/aidot_ble"
+    rm -f \
+        "$data_dir/pairing_history.json" \
+        "$data_dir/pairing_history.json.tmp" \
+        "$data_dir/pairing_metadata.json" \
+        "$data_dir/pairing_metadata.json.tmp" \
+        "$data_dir/server_metadata.json.tmp"
+    sync_path "$data_dir"
+}
+
 atomic_write_text() {
     local target="$1"
     local text="$2"
@@ -59,6 +98,15 @@ atomic_write_text() {
     sync_path "$tmp"
     mv -f "$tmp" "$target"
     sync_parent "$target"
+}
+
+arm_rollback_required() {
+    # Same-boot latch first: even if persistent bootstate cannot be written,
+    # a respawned candidate must not later promote itself to last-good.
+    atomic_write_text "$ROLLBACK_REQUIRED_LATCH" "rollback_required"
+    RHYTHM_BOOT_STATUS="rollback_required"
+    write_state
+    mirror_state
 }
 
 bootstate_hash_valid() {
@@ -253,6 +301,12 @@ rollback_pending_boot() {
     [ "$rollback_to" != "$slot" ] || return 0
 
     rollback_version="${RHYTHM_PENDING_VERSION:-}"
+    arm_rollback_required
+    # An older slot cannot safely read or reset local-BLE state. Erase and
+    # durably commit that compatibility boundary before changing boot target.
+    # Any failure leaves the candidate slot armed so the next attempt retries
+    # instead of handing sensitive state to the previous binary.
+    scrub_local_ble_rollback_state
     rewrite_cmdline_slot "$rollback_to"
 
     RHYTHM_ACTIVE_SLOT="$slot"
@@ -278,10 +332,12 @@ start() {
     active_version="$(current_version || true)"
 
     if [ "${RHYTHM_PENDING_SLOT:-}" = "$slot" ]; then
-        if [ "${RHYTHM_BOOT_STATUS:-idle}" = "booting" ]; then
-            rollback_pending_boot "$slot" "$active_version"
-            return 0
-        fi
+        case "${RHYTHM_BOOT_STATUS:-idle}" in
+            booting|rollback_required)
+                rollback_pending_boot "$slot" "$active_version"
+                return 0
+                ;;
+        esac
 
         RHYTHM_ACTIVE_SLOT="$slot"
         [ -n "${RHYTHM_LAST_GOOD_SLOT:-}" ] || RHYTHM_LAST_GOOD_SLOT="$slot"
@@ -309,12 +365,16 @@ success() {
     [ -n "$slot" ] || return 0
 
     load_state
+    if [ -e "$ROLLBACK_REQUIRED_LATCH" ] || [ "${RHYTHM_BOOT_STATUS:-idle}" = "rollback_required" ]; then
+        printf 'S41bootstate: rollback is required; refusing to mark pending slot successful\n' >&2
+        return 1
+    fi
     [ "${RHYTHM_PENDING_SLOT:-}" = "$slot" ] || return 0
 
     active_version="$(current_version || true)"
     if [ -n "${RHYTHM_PENDING_VERSION:-}" ] && [ "$active_version" != "$RHYTHM_PENDING_VERSION" ]; then
-        rollback_pending_boot "$slot" "$active_version"
-        return 0
+        printf 'S41bootstate: running version %s does not match pending version %s; leaving rollback armed\n' "$active_version" "$RHYTHM_PENDING_VERSION" >&2
+        return 1
     fi
 
     RHYTHM_ACTIVE_SLOT="$slot"

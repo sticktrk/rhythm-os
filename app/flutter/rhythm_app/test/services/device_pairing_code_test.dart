@@ -1,8 +1,128 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/services/device_pairing_code.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 void main() {
   group('device pairing code classification', () {
+    const localBleQr = 'B:0A0B0C0D0E0F%G\$S:SYNTHETIC000001\$M:TESTMODEL001';
+
+    test('strictly parses a known local-BLE profile into bounded fields', () {
+      final setup = parseLocalBleSetupCode(localBleQr);
+      expect(setup?.profileId, RhythmDeviceProfileId.oreinOc02001Button);
+      expect(
+        locallyRegisteredLocalBleProfileIds,
+        contains(RhythmDeviceProfileId.oreinOc02001Button),
+      );
+      expect(
+        setup?.setupFields,
+        {
+          'ble_identity': '0A0B0C0D0E0F',
+          'serial_metadata': 'SYNTHETIC000001',
+          'model_metadata': 'TESTMODEL001',
+        },
+      );
+      expect(
+        setup?.pairingParams,
+        {
+          'profile_id': RhythmDeviceProfileId.oreinOc02001Button,
+          'setup': {
+            'ble_identity': '0A0B0C0D0E0F',
+            'serial_metadata': 'SYNTHETIC000001',
+            'model_metadata': 'TESTMODEL001',
+          },
+        },
+      );
+      final code = classifyDevicePairingCode(localBleQr);
+      expect(code.kind, DevicePairingCodeKind.localBle);
+      expect(code.payload, RhythmDeviceProfileId.oreinOc02001Button);
+      expect(code.payload, isNot(localBleQr));
+    });
+
+    test('copies setup fields and produces an order-independent dedupe key',
+        () {
+      final mutableFields = <String, String>{'second': '2', 'first': '1'};
+      final setup = LocalBleSetup(
+        profileId: 'test.profile.v1',
+        setupFields: mutableFields,
+      );
+      mutableFields['first'] = 'changed';
+
+      expect(setup.setupFields, {'second': '2', 'first': '1'});
+      expect(
+        () => setup.setupFields['third'] = '3',
+        throwsUnsupportedError,
+      );
+      expect(
+        setup.deduplicationKey,
+        LocalBleSetup(
+          profileId: 'test.profile.v1',
+          setupFields: const {'first': '1', 'second': '2'},
+        ).deduplicationKey,
+      );
+    });
+
+    test('rejects local-BLE profile QR near misses', () {
+      for (final value in [
+        'B:0A0B0C0D0E0%G\$S:SYNTHETIC000001\$M:TESTMODEL001',
+        'B:0A0B0C0D0E0G%G\$S:SYNTHETIC000001\$M:TESTMODEL001',
+        'B:0A0B0C0D0E0F\$S:SYNTHETIC000001\$M:TESTMODEL001',
+        'B:0A0B0C0D0E0F%G\$S:\$M:TESTMODEL001',
+        'B:0A0B0C0D0E0F%G\$S:SYNTHETIC000001\$M:TESTMODEL001\$M:EXTRA',
+      ]) {
+        expect(parseLocalBleSetupCode(value), isNull, reason: value);
+      }
+    });
+
+    test('local-BLE code requires the matching advertised profile', () {
+      expect(processDevicePairingCodes([localBleQr])?.canContinue, isFalse);
+      final supported = processDevicePairingCodes(
+        [localBleQr],
+        supportedLocalBleProfileIds: const {
+          RhythmDeviceProfileId.oreinOc02001Button,
+        },
+      );
+      expect(supported?.canContinue, isTrue);
+      expect(
+        supported?.code.localBleSetup?.profileId,
+        RhythmDeviceProfileId.oreinOc02001Button,
+      );
+    });
+
+    test('offers valid Matter and supported local-BLE codes as choices', () {
+      final supported = processDevicePairingCodes(
+        [localBleQr, 'MT:Y.K908OC16750648G00'],
+        supportedLocalBleProfileIds: const {
+          RhythmDeviceProfileId.oreinOc02001Button,
+        },
+      );
+
+      expect(supported?.requiresChoice, isTrue);
+      expect(
+        supported?.choices.map((code) => code.kind),
+        [DevicePairingCodeKind.matter, DevicePairingCodeKind.localBle],
+      );
+    });
+
+    test('Matter wins when the captured local-BLE profile is unsupported', () {
+      final decision = processDevicePairingCodes([
+        localBleQr,
+        'MT:Y.K908OC16750648G00',
+      ]);
+
+      expect(decision?.requiresChoice, isFalse);
+      expect(decision?.code.kind, DevicePairingCodeKind.matter);
+      expect(decision?.code.payload, 'MT:Y.K908OC16750648G00');
+    });
+
+    test('malformed BLE-looking data cannot mask valid Matter', () {
+      final decision = processDevicePairingCodes([
+        'B:0A0B0C0D0E0F%G\$S:bad',
+        '3497-011-2332',
+      ]);
+
+      expect(decision?.code.kind, DevicePairingCodeKind.matter);
+    });
+
     test('recognizes Matter before considering bulb brand', () {
       final result = classifyDevicePairingCode('  MT:Y.K908OC16750648G00  ');
 

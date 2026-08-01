@@ -1,9 +1,322 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_core/runner/runner_state_json.dart' as runner_json;
 import '../data/local_data_source.dart';
+import 'server_identity.dart';
+
+/// Appliance scope resolved from the active connection's hello identity.
+/// A persisted durable identity may fill the pre-hello gap, but a conflict
+/// between persisted and connected durable identities is never guessed away.
+/// An unidentified Hub never produces a persistence scope.
+String? localBlePairingConnectedServerScope(
+  Hub hub,
+  String? connectedServerInstanceId,
+) {
+  final persisted = normalizeServerIdentity(hub.serverInstanceId);
+  final connected = normalizeServerIdentity(connectedServerInstanceId);
+  final persistedDurable =
+      serverIdentityKind(persisted) == ServerIdentityKind.durable
+          ? persisted
+          : null;
+  final connectedDurable =
+      serverIdentityKind(connected) == ServerIdentityKind.durable
+          ? connected
+          : null;
+  if (persistedDurable != null &&
+      connectedDurable != null &&
+      persistedDurable != connectedDurable) {
+    return null;
+  }
+  final identity = connectedDurable ?? persistedDurable;
+  return identity == null ? null : '${hub.homeId}:$identity';
+}
+
+/// Stable in-memory route anchor used only while the first durable hello is
+/// still in flight. Local-BLE recovery pointers must never use this scope.
+String localBlePairingFallbackServerScope(Hub hub) => '${hub.homeId}:${hub.id}';
+
+/// Sanitized terminal outcome cached before the appliance result is
+/// acknowledged. This closes both crash windows around server acknowledgement:
+/// recovery can render this result without depending on another GET, then
+/// retry DELETE and the local pointer clear independently.
+class PendingLocalBleTerminalResult {
+  const PendingLocalBleTerminalResult({
+    required this.status,
+    this.deviceId,
+    this.deviceName,
+    this.deviceType,
+    this.manufacturer,
+    this.model,
+    this.warnings = const [],
+    this.error,
+  });
+
+  static const String complete = 'complete';
+  static const String failed = 'failed';
+  static const String notFound = 'not_found';
+
+  final String status;
+  final String? deviceId;
+  final String? deviceName;
+  final String? deviceType;
+  final String? manufacturer;
+  final String? model;
+  final List<String> warnings;
+  final String? error;
+
+  bool hasSameValue(PendingLocalBleTerminalResult other) =>
+      status == other.status &&
+      deviceId == other.deviceId &&
+      deviceName == other.deviceName &&
+      deviceType == other.deviceType &&
+      manufacturer == other.manufacturer &&
+      model == other.model &&
+      listEquals(warnings, other.warnings) &&
+      error == other.error;
+
+  Map<String, Object> toJson() => {
+        'status': status,
+        if (deviceId != null) 'device_id': deviceId!,
+        if (deviceName != null) 'device_name': deviceName!,
+        if (deviceType != null) 'device_type': deviceType!,
+        if (manufacturer != null) 'manufacturer': manufacturer!,
+        if (model != null) 'model': model!,
+        if (warnings.isNotEmpty) 'warnings': warnings,
+        if (error != null) 'error': error!,
+      };
+
+  static PendingLocalBleTerminalResult? fromJson(Object? value) {
+    if (value is! Map) return null;
+    final status = value['status'];
+    if (status != complete && status != failed && status != notFound) {
+      return null;
+    }
+    final deviceId = _boundedOptionalTerminalString(
+      value['device_id'],
+      maxLength: 256,
+    );
+    final deviceName = _boundedOptionalTerminalString(
+      value['device_name'],
+      maxLength: 256,
+    );
+    final deviceType = _boundedOptionalTerminalString(
+      value['device_type'],
+      maxLength: 64,
+    );
+    final manufacturer = _boundedOptionalTerminalString(
+      value['manufacturer'],
+      maxLength: 128,
+      allowEmpty: true,
+    );
+    final model = _boundedOptionalTerminalString(
+      value['model'],
+      maxLength: 128,
+      allowEmpty: true,
+    );
+    final error = _boundedOptionalTerminalString(
+      value['error'],
+      maxLength: 512,
+      allowEmpty: true,
+    );
+    if ((value['device_id'] != null && deviceId == null) ||
+        (value['device_name'] != null && deviceName == null) ||
+        (value['device_type'] != null && deviceType == null) ||
+        (value['manufacturer'] != null && manufacturer == null) ||
+        (value['model'] != null && model == null) ||
+        (value['error'] != null && error == null)) {
+      return null;
+    }
+    final rawWarnings = value['warnings'];
+    final warnings = <String>[];
+    if (rawWarnings != null) {
+      if (rawWarnings is! List || rawWarnings.length > 32) return null;
+      for (final warning in rawWarnings) {
+        if (warning is! String ||
+            warning.trim().isEmpty ||
+            warning.length > 512) {
+          return null;
+        }
+        warnings.add(warning);
+      }
+    }
+
+    final hasAnyDeviceField = deviceId != null ||
+        deviceName != null ||
+        deviceType != null ||
+        manufacturer != null ||
+        model != null;
+    if (status == complete) {
+      if (deviceId == null ||
+          deviceName == null ||
+          deviceType == null ||
+          error != null) {
+        return null;
+      }
+    } else if (hasAnyDeviceField || warnings.isNotEmpty) {
+      return null;
+    }
+
+    return PendingLocalBleTerminalResult(
+      status: status,
+      deviceId: deviceId,
+      deviceName: deviceName,
+      deviceType: deviceType,
+      manufacturer: manufacturer,
+      model: model,
+      warnings: List.unmodifiable(warnings),
+      error: error,
+    );
+  }
+}
+
+String? _boundedOptionalTerminalString(
+  Object? value, {
+  required int maxLength,
+  bool allowEmpty = false,
+}) {
+  if (value == null) return null;
+  if (value is! String ||
+      value.length > maxLength ||
+      (!allowEmpty && value.trim().isEmpty)) {
+    return null;
+  }
+  return value;
+}
+
+/// Privacy-bounded app-side pointer to an appliance pairing operation.
+/// Setup payloads must never be added here. A bounded, sanitized terminal
+/// result may be cached only after the appliance finishes the operation.
+class PendingLocalBlePairing {
+  const PendingLocalBlePairing({
+    required this.sessionId,
+    required this.journeyId,
+    required this.attemptNumber,
+    required this.profileId,
+    required this.serverScope,
+    required this.startedAtEpochMs,
+    this.terminalResult,
+  });
+
+  final String sessionId;
+  final String journeyId;
+  final int attemptNumber;
+  final String profileId;
+
+  /// Stable `home_id:server_instance_id` scope. It is a logical appliance
+  /// identity, never a network address or physical BLE identity.
+  final String serverScope;
+  final int startedAtEpochMs;
+  final PendingLocalBleTerminalResult? terminalResult;
+
+  Map<String, Object> toJson() => {
+        'session_id': sessionId,
+        'journey_id': journeyId,
+        'attempt_number': attemptNumber,
+        'profile_id': profileId,
+        'server_scope': serverScope,
+        'started_at_epoch_ms': startedAtEpochMs,
+        if (terminalResult != null) 'terminal_result': terminalResult!.toJson(),
+      };
+
+  PendingLocalBlePairing withTerminalResult(
+    PendingLocalBleTerminalResult result,
+  ) =>
+      PendingLocalBlePairing(
+        sessionId: sessionId,
+        journeyId: journeyId,
+        attemptNumber: attemptNumber,
+        profileId: profileId,
+        serverScope: serverScope,
+        startedAtEpochMs: startedAtEpochMs,
+        terminalResult: result,
+      );
+
+  static PendingLocalBlePairing? fromJson(Object? value) {
+    if (value is! Map) return null;
+    final sessionId = value['session_id'];
+    final journeyId = value['journey_id'];
+    final attemptNumber = value['attempt_number'];
+    final profileId = value['profile_id'];
+    final serverScope = value['server_scope'];
+    final startedAt = value['started_at_epoch_ms'];
+    final rawTerminalResult = value['terminal_result'];
+    final terminalResult = rawTerminalResult == null
+        ? null
+        : PendingLocalBleTerminalResult.fromJson(rawTerminalResult);
+    if (sessionId is! String ||
+        sessionId.isEmpty ||
+        sessionId.length > 96 ||
+        !RegExp(r'^[A-Za-z0-9_.:-]+$').hasMatch(sessionId) ||
+        journeyId is! String ||
+        journeyId.isEmpty ||
+        journeyId.length > 96 ||
+        !RegExp(r'^[A-Za-z0-9_.:-]+$').hasMatch(journeyId) ||
+        attemptNumber is! int ||
+        attemptNumber < 1 ||
+        attemptNumber > 100 ||
+        profileId is! String ||
+        profileId.isEmpty ||
+        profileId.length > 128 ||
+        serverScope is! String ||
+        serverScope.isEmpty ||
+        serverScope.length > 256 ||
+        startedAt is! int ||
+        startedAt < 0 ||
+        (rawTerminalResult != null && terminalResult == null)) {
+      return null;
+    }
+    return PendingLocalBlePairing(
+      sessionId: sessionId,
+      journeyId: journeyId,
+      attemptNumber: attemptNumber,
+      profileId: profileId,
+      serverScope: serverScope,
+      startedAtEpochMs: startedAt,
+      terminalResult: terminalResult,
+    );
+  }
+}
+
+/// Process-local ownership fence between the active pairing route and the
+/// app-shell recovery coordinator. Durable storage remains authoritative
+/// across process death; this fence only prevents two live UI surfaces from
+/// consuming the same terminal result.
+class LocalBlePairingRouteOwnership {
+  LocalBlePairingRouteOwnership._();
+
+  static final ValueNotifier<Set<String>> ownedKeys =
+      ValueNotifier<Set<String>>(const {});
+  static final Map<String, int> _claimCounts = {};
+
+  static String key(String serverScope, String sessionId) =>
+      '$serverScope\u0000$sessionId';
+
+  static void claim(String serverScope, String sessionId) {
+    final pairingKey = key(serverScope, sessionId);
+    final count = _claimCounts[pairingKey] ?? 0;
+    _claimCounts[pairingKey] = count + 1;
+    if (count > 0) return;
+    ownedKeys.value = {...ownedKeys.value, pairingKey};
+  }
+
+  static void release(String serverScope, String sessionId) {
+    final pairingKey = key(serverScope, sessionId);
+    final count = _claimCounts[pairingKey] ?? 0;
+    if (count > 1) {
+      _claimCounts[pairingKey] = count - 1;
+      return;
+    }
+    _claimCounts.remove(pairingKey);
+    if (!ownedKeys.value.contains(pairingKey)) return;
+    ownedKeys.value = {
+      for (final value in ownedKeys.value)
+        if (value != pairingKey) value,
+    };
+  }
+}
 
 /// Singleton service for device-specific settings.
 ///
@@ -21,6 +334,10 @@ class SettingsService {
   static const String _handledPasswordRecoveryLinksKey =
       'handled_password_recovery_links_v1';
   static const int _maxHandledPasswordRecoveryLinks = 20;
+  static const String _pendingLocalBlePairingKey =
+      'pending_local_ble_pairings_v4';
+  static const int _maxPendingLocalBlePairingScopes = 8;
+  static const int _maxPendingLocalBlePairingEncodedChars = 256 * 1024;
 
   static SettingsService? _instance;
   static SettingsService get instance => _instance ??= SettingsService._();
@@ -30,6 +347,7 @@ class SettingsService {
   LocalDataSource? _localDataSource;
   AppSettings _settings = AppSettings.defaults();
   bool _initialized = false;
+  Future<void> _pendingLocalBleMutationTail = Future.value();
 
   /// Whether the service has been initialized.
   bool get isInitialized => _initialized;
@@ -324,6 +642,207 @@ class SettingsService {
       return;
     }
     await _localDataSource!.saveSettingsValue(selectedHomeIdKey, homeId);
+  }
+
+  @visibleForTesting
+  static List<PendingLocalBlePairing> decodePendingLocalBlePairings(
+    Object? raw,
+  ) {
+    if (raw is String && raw.length > _maxPendingLocalBlePairingEncodedChars) {
+      throw const FormatException(
+        'Pending local-BLE pairing storage is too large.',
+      );
+    }
+    final decoded = raw is String ? jsonDecode(raw) : raw;
+    if (decoded is! List) {
+      throw const FormatException(
+        'Pending local-BLE pairing storage must be a list.',
+      );
+    }
+    if (decoded.length > _maxPendingLocalBlePairingScopes) {
+      throw const FormatException(
+        'Pending local-BLE pairing storage exceeds its scope limit.',
+      );
+    }
+    final byScope = <String, PendingLocalBlePairing>{};
+    for (final value in decoded) {
+      final record = PendingLocalBlePairing.fromJson(value);
+      if (record == null) {
+        throw const FormatException(
+          'Pending local-BLE pairing storage contains an invalid record.',
+        );
+      }
+      if (byScope.containsKey(record.serverScope)) {
+        throw const FormatException(
+          'Pending local-BLE pairing storage contains duplicate scopes.',
+        );
+      }
+      byScope[record.serverScope] = record;
+    }
+    final records = byScope.values.toList()
+      ..sort((left, right) =>
+          left.startedAtEpochMs.compareTo(right.startedAtEpochMs));
+    return records;
+  }
+
+  @visibleForTesting
+  static String encodePendingLocalBlePairings(
+    Iterable<PendingLocalBlePairing> records,
+  ) {
+    final values = records.map((record) => record.toJson()).toList();
+    if (values.length > _maxPendingLocalBlePairingScopes) {
+      throw const FormatException(
+        'Pending local-BLE pairing storage exceeds its scope limit.',
+      );
+    }
+    final encoded = jsonEncode(values);
+    if (encoded.length > _maxPendingLocalBlePairingEncodedChars) {
+      throw const FormatException(
+        'Pending local-BLE pairing storage is too large.',
+      );
+    }
+    return encoded;
+  }
+
+  /// Applies same-scope compare-and-set and capacity rules without evicting
+  /// another unresolved operation. A null result means the write conflicts.
+  @visibleForTesting
+  static List<PendingLocalBlePairing>? mergePendingLocalBlePairingForSave(
+    List<PendingLocalBlePairing> existing,
+    PendingLocalBlePairing pairing,
+  ) {
+    final matching = existing
+        .where((record) => record.serverScope == pairing.serverScope)
+        .toList(growable: false);
+    if (matching.any((record) => record.sessionId != pairing.sessionId)) {
+      return null;
+    }
+    final existingTerminals = matching
+        .where((record) => record.terminalResult != null)
+        .toList(growable: false);
+    if (existingTerminals.isNotEmpty) {
+      final replacementTerminal = pairing.terminalResult;
+      if (replacementTerminal == null) return null;
+      for (final record in existingTerminals) {
+        if (!record.terminalResult!.hasSameValue(replacementTerminal) ||
+            record.journeyId != pairing.journeyId ||
+            record.attemptNumber != pairing.attemptNumber ||
+            record.profileId != pairing.profileId ||
+            record.startedAtEpochMs != pairing.startedAtEpochMs) {
+          return null;
+        }
+      }
+    }
+    if (matching.isEmpty &&
+        existing.length >= _maxPendingLocalBlePairingScopes) {
+      return null;
+    }
+    final normalized = PendingLocalBlePairing(
+      sessionId: pairing.sessionId,
+      journeyId: pairing.journeyId,
+      attemptNumber: pairing.attemptNumber,
+      profileId: pairing.profileId,
+      serverScope: pairing.serverScope,
+      startedAtEpochMs: pairing.startedAtEpochMs,
+      terminalResult: pairing.terminalResult,
+    );
+    return [...existing]
+      ..removeWhere((record) => record.serverScope == pairing.serverScope)
+      ..add(normalized)
+      ..sort((left, right) =>
+          left.startedAtEpochMs.compareTo(right.startedAtEpochMs));
+  }
+
+  /// Load every unresolved pointer, independently scoped by appliance.
+  Future<List<PendingLocalBlePairing>> loadPendingLocalBlePairings() async {
+    if (_localDataSource?.isInitialized != true) return const [];
+    final raw = _localDataSource!.getSettingsValue(_pendingLocalBlePairingKey);
+    if (raw == null) return const [];
+    return decodePendingLocalBlePairings(raw);
+  }
+
+  Future<PendingLocalBlePairing?> loadPendingLocalBlePairing(
+    String serverScope,
+  ) async {
+    final records = await loadPendingLocalBlePairings();
+    for (final record in records) {
+      if (record.serverScope == serverScope) return record;
+    }
+    return null;
+  }
+
+  /// Save the operation pointer or its bounded terminal recovery snapshot.
+  Future<bool> savePendingLocalBlePairing(
+    PendingLocalBlePairing pairing,
+  ) async {
+    if (_localDataSource?.isInitialized != true ||
+        PendingLocalBlePairing.fromJson(pairing.toJson()) == null) {
+      return false;
+    }
+    return _serializePendingLocalBleMutation(() async {
+      try {
+        final records = await loadPendingLocalBlePairings();
+        final merged = mergePendingLocalBlePairingForSave(records, pairing);
+        if (merged == null) return false;
+        await _localDataSource!.saveSettingsValue(
+          _pendingLocalBlePairingKey,
+          encodePendingLocalBlePairings(merged),
+        );
+        return true;
+      } catch (_) {
+        return false;
+      }
+    });
+  }
+
+  Future<bool> clearPendingLocalBlePairing({
+    required String serverScope,
+    String? sessionId,
+  }) async {
+    if (_localDataSource?.isInitialized != true) return false;
+    return _serializePendingLocalBleMutation(() async {
+      try {
+        final records = await loadPendingLocalBlePairings();
+        PendingLocalBlePairing? existing;
+        for (final record in records) {
+          if (record.serverScope == serverScope) {
+            existing = record;
+            break;
+          }
+        }
+        if (sessionId != null &&
+            existing != null &&
+            existing.sessionId != sessionId) {
+          return false;
+        }
+        if (existing == null) return true;
+        records.removeWhere((record) => record.serverScope == serverScope);
+        if (records.isEmpty) {
+          await _localDataSource!
+              .deleteSettingsValue(_pendingLocalBlePairingKey);
+        } else {
+          await _localDataSource!.saveSettingsValue(
+            _pendingLocalBlePairingKey,
+            encodePendingLocalBlePairings(records),
+          );
+        }
+        return true;
+      } catch (_) {
+        // The unresolved pointer remains available for a future retry.
+        return false;
+      }
+    });
+  }
+
+  Future<T> _serializePendingLocalBleMutation<T>(
+    Future<T> Function() mutation,
+  ) {
+    final result = _pendingLocalBleMutationTail.then((_) => mutation());
+    _pendingLocalBleMutationTail = result.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace __) {},
+    );
+    return result;
   }
 
   // ============================================================

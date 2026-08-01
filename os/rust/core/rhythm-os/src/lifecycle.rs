@@ -228,22 +228,25 @@ pub(crate) fn persisted_rooms_look_corrupted(rooms: &rhythm_core::room::RoomMana
 }
 
 fn tag_hub_events(raw_rx: Receiver<HubEvent>, hub_key: HubKey) -> Receiver<HubEvent> {
-    let (tx, rx) = std::sync::mpsc::sync_channel::<HubEvent>(HUB_EVENT_CHANNEL_CAPACITY);
+    tag_hub_events_with_capacity(raw_rx, hub_key, HUB_EVENT_CHANNEL_CAPACITY)
+}
+
+fn tag_hub_events_with_capacity(
+    raw_rx: Receiver<HubEvent>,
+    hub_key: HubKey,
+    capacity: usize,
+) -> Receiver<HubEvent> {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<HubEvent>(capacity);
 
     let spawn_result = std::thread::Builder::new()
         .name(format!("hub-tag-{}", hub_key))
         .spawn(move || {
             while let Ok(event) = raw_rx.recv() {
-                match tx.try_send(event.with_hub_key(hub_key.clone())) {
-                    Ok(()) => {}
-                    Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                        warn!(
-                            target: "evt",
-                            "Hub event channel full (capacity={}), dropping tagged event",
-                            HUB_EVENT_CHANNEL_CAPACITY
-                        );
-                    }
-                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => return,
+                // Input events are non-coalescible. Backpressure the upstream
+                // receiver when the bounded event queue is full so a press is
+                // never acknowledged and then discarded by this adapter.
+                if tx.send(event.with_hub_key(hub_key.clone())).is_err() {
+                    return;
                 }
             }
         });
@@ -1067,6 +1070,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
     use std::sync::mpsc;
+    use std::time::Duration;
 
     use crate::canonical::identity::HubKey;
     use crate::hub::{
@@ -1393,6 +1397,37 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(1))
             .unwrap();
         assert_eq!(event.hub_key(), Some(&hub_key));
+    }
+
+    #[test]
+    fn hub_event_tagger_backpressures_instead_of_dropping_when_full() {
+        let hub_key = HubKey::new(HubType::new("test"), "backpressure");
+        let (raw_tx, raw_rx) = mpsc::sync_channel(0);
+        let event_rx = tag_hub_events_with_capacity(raw_rx, hub_key.clone(), 1);
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+
+        let producer = std::thread::spawn(move || {
+            for sequence in 1..=3 {
+                raw_tx.send(HubEvent::Heartbeat { hub_key: None }).unwrap();
+                accepted_tx.send(sequence).unwrap();
+            }
+            done_tx.send(()).unwrap();
+        });
+
+        // The tagger has accepted the second event but cannot receive the
+        // third while its one-slot output queue is full. A lossy try_send
+        // implementation would finish the producer by dropping both events.
+        assert_eq!(accepted_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
+        assert_eq!(accepted_rx.recv_timeout(Duration::from_secs(1)).unwrap(), 2);
+        assert!(done_rx.recv_timeout(Duration::from_millis(50)).is_err());
+
+        for _ in 0..3 {
+            let event = event_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert_eq!(event.hub_key(), Some(&hub_key));
+        }
+        done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        producer.join().unwrap();
     }
 
     #[test]

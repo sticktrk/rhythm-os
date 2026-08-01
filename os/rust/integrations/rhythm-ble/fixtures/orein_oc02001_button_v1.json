@@ -1,0 +1,199 @@
+{
+  "schema_version": 3,
+  "profile_id": "orein.oc02001.button.v1",
+  "device_type": "button",
+  "fixture_name": "synthetic_pair_and_press_replay",
+  "purpose": "Prove identity admission, normalized presses, forward gaps and wraparound, duplicate and stale rollback suppression, and malformed-frame rejection.",
+  "provenance": "synthetic",
+  "setup": {
+    "ble_identity": "0A0B0C0D0E0F",
+    "serial_metadata": "SYNTHETIC000001",
+    "model_metadata": "TESTMODEL001"
+  },
+  "identity_advertisement": {
+    "service_uuids": [
+      "00001511-0000-1000-8000-00805f9b34fb"
+    ],
+    "service_data": {
+      "00001511-0000-1000-8000-00805f9b34fb": "005000150a0b0c0d0e0faabbccddeeff"
+    },
+    "manufacturer_data": {}
+  },
+  "admission": {
+    "strategy": "gatt_services",
+    "matching_service_uuid": "00001000-1115-1000-4c44-5341524e4f4f"
+  },
+  "initial_replay": {
+    "press": "fc"
+  },
+  "observations": [
+    {
+      "at_ms": 0,
+      "advertisement": {
+        "service_uuids": [
+          "00001511-0000-1000-8000-00805f9b34fb"
+        ],
+        "service_data": {
+          "00001511-0000-1000-8000-00805f9b34fb": "005000150a0b0c0d0e0faabbccddeeff"
+        },
+        "manufacturer_data": {
+          "5393": "fc020100000000000000000000000000000000"
+        }
+      },
+      "events": [
+        {
+          "event": {
+            "kind": "button",
+            "endpoint_suffix": "button-1",
+            "action": "on_press"
+          },
+          "replay": {
+            "stream": "press",
+            "value_hex": "fc",
+            "expected_order": "duplicate"
+          },
+          "expected_emit": false
+        }
+      ]
+    },
+    {
+      "at_ms": 40,
+      "advertisement": {
+        "service_uuids": [
+          "00001511-0000-1000-8000-00805f9b34fb"
+        ],
+        "service_data": {
+          "00001511-0000-1000-8000-00805f9b34fb": "005000150a0b0c0d0e0faabbccddeeff"
+        },
+        "manufacturer_data": {
+          "5393": "fe020100000000000000000000000000000000"
+        }
+      },
+      "events": [
+        {
+          "event": {
+            "kind": "button",
+            "endpoint_suffix": "button-1",
+            "action": "on_press"
+          },
+          "replay": {
+            "stream": "press",
+            "value_hex": "fe",
+            "expected_order": "forward"
+          },
+          "expected_emit": true
+        }
+      ]
+    },
+    {
+      "at_ms": 80,
+      "advertisement": {
+        "service_uuids": [
+          "00001511-0000-1000-8000-00805f9b34fb"
+        ],
+        "service_data": {
+          "00001511-0000-1000-8000-00805f9b34fb": "005000150a0b0c0d0e0faabbccddeeff"
+        },
+        "manufacturer_data": {
+          "5393": "fc020100000000000000000000000000000000"
+        }
+      },
+      "events": [
+        {
+          "event": {
+            "kind": "button",
+            "endpoint_suffix": "button-1",
+            "action": "on_press"
+          },
+          "replay": {
+            "stream": "press",
+            "value_hex": "fc",
+            "expected_order": "stale"
+          },
+          "expected_emit": false
+        }
+      ]
+    },
+    {
+      "at_ms": 120,
+      "advertisement": {
+        "service_uuids": [
+          "00001511-0000-1000-8000-00805f9b34fb"
+        ],
+        "service_data": {
+          "00001511-0000-1000-8000-00805f9b34fb": "005000150a0b0c0d0e0faabbccddeeff"
+        },
+        "manufacturer_data": {
+          "5393": "ff020100000000000000000000000000000000"
+        }
+      },
+      "events": [
+        {
+          "event": {
+            "kind": "button",
+            "endpoint_suffix": "button-1",
+            "action": "on_press"
+          },
+          "replay": {
+            "stream": "press",
+            "value_hex": "ff",
+            "expected_order": "forward"
+          },
+          "expected_emit": true
+        }
+      ]
+    },
+    {
+      "at_ms": 160,
+      "advertisement": {
+        "service_uuids": [
+          "00001511-0000-1000-8000-00805f9b34fb"
+        ],
+        "service_data": {
+          "00001511-0000-1000-8000-00805f9b34fb": "005000150a0b0c0d0e0faabbccddeeff"
+        },
+        "manufacturer_data": {
+          "5393": "00020100000000000000000000000000000000"
+        }
+      },
+      "events": [
+        {
+          "event": {
+            "kind": "button",
+            "endpoint_suffix": "button-1",
+            "action": "on_press"
+          },
+          "replay": {
+            "stream": "press",
+            "value_hex": "00",
+            "expected_order": "forward"
+          },
+          "expected_emit": true
+        }
+      ]
+    }
+  ],
+  "negative_observations": [
+    {
+      "service_uuids": [],
+      "service_data": {},
+      "manufacturer_data": {
+        "5394": "85020100000000000000000000000000000000"
+      }
+    },
+    {
+      "service_uuids": [],
+      "service_data": {},
+      "manufacturer_data": {
+        "5393": "85020200000000000000000000000000000000"
+      }
+    },
+    {
+      "service_uuids": [],
+      "service_data": {},
+      "manufacturer_data": {
+        "5393": "850201000000000000000000000000000000"
+      }
+    }
+  ]
+}

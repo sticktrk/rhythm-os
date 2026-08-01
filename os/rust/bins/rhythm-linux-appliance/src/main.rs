@@ -127,7 +127,9 @@ fn main() -> Result<()> {
     // rootfs image) install over the running rootfs without an A/B slot
     // switch. Count this start attempt and restore the previous binaries if a
     // crash-looping build exhausts its probation; BusyBox init respawns us.
-    match rhythm_server::self_update::startup_update_health_check() {
+    match rhythm_server::self_update::startup_update_health_check_with_pre_rollback(|| {
+        rhythm_os::storage::scrub_local_ble_rollback_state(std::path::Path::new(&args.data_dir))
+    }) {
         rhythm_server::self_update::StartupUpdateDisposition::NoPendingUpdate => {}
         rhythm_server::self_update::StartupUpdateDisposition::PendingVerification { attempt } => {
             info!(
@@ -155,6 +157,20 @@ fn main() -> Result<()> {
                     "startup",
                     "rolled_back",
                 ),
+            );
+            std::process::exit(1);
+        }
+        rhythm_server::self_update::StartupUpdateDisposition::RollbackBlocked {
+            error,
+            previous_version,
+            target_version,
+        } => {
+            log::error!(
+                target: "sys",
+                "Self-update rollback from {:?} to {:?} is blocked before restoring previous binaries: {}",
+                target_version,
+                previous_version,
+                error
             );
             std::process::exit(1);
         }
@@ -195,7 +211,20 @@ fn main() -> Result<()> {
         s.prepare_hub_device_room_assignment_fn =
             Some(callbacks.prepare_hub_device_room_assignment_fn);
         s.start_pairing_fn = Some(callbacks.start_pairing_fn);
+        s.reconcile_pairing_results_fn = Some(callbacks.reconcile_pairing_results_fn);
         s.start_unpairing_fn = Some(callbacks.start_unpairing_fn);
+        #[cfg(target_os = "linux")]
+        {
+            s.pairing_resource_activity_fn = Some(Arc::new(|hub_type, slot, active| {
+                if hub_type == rhythm_os::hub::HubType::MATTER
+                    && slot == "appliance_bluetooth_adapter"
+                {
+                    rhythm_ble::bluez::set_external_adapter_reserved(active)
+                } else {
+                    Ok(())
+                }
+            }));
+        }
         s.run_device_test_fn = Some(callbacks.run_device_test_fn);
         s.save_device_test_report_fn = Some(callbacks.save_device_test_report_fn);
         s.hub_capabilities = callbacks.hub_capabilities.clone();
@@ -368,6 +397,18 @@ fn install_factory_reset_hook(state: &SharedState) -> Result<()> {
             .lock()
             .map_err(|_| anyhow::anyhow!("Hue BLE factory-reset quiescence lock poisoned"))? =
             quiescence;
+        #[cfg(target_os = "linux")]
+        {
+            if let Err(error) = rhythm_ble::bluez_lifecycle::quiesce_for_factory_reset(state) {
+                warn!(
+                    target: "sys",
+                    "Local Bluetooth observers did not quiesce cleanly before factory reset: {error:#}; scheduling a recovery reboot"
+                );
+                rhythm_server::self_update::schedule_factory_reset_restart();
+                return Err(error)
+                    .context("quiescing local Bluetooth profile observers for factory reset");
+            }
+        }
         Ok(())
     }));
     state.after_factory_reset_fn = Some(Arc::new(move |_| {
@@ -401,6 +442,11 @@ fn install_factory_reset_hook(state: &SharedState) -> Result<()> {
                 handoff.refreshed
             );
         }
+        #[cfg(target_os = "linux")]
+        final_shared_ble_quiesce_or_schedule_recovery(
+            rhythm_ble::bluez::quiesce_shared_runtime(),
+            rhythm_server::self_update::schedule_factory_reset_restart,
+        )?;
         // Every unrelated fallible platform write completed in the pre-reset
         // barrier. From here through key deletion, carry the vendor handoff
         // deadline and never restart BlueZ after a possibly partial scrub.
@@ -454,6 +500,24 @@ fn final_hue_handoff_or_schedule_recovery(
             );
             schedule_recovery();
             Err(error).context("refreshing final Hue BLE factory-reset handoffs")
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn final_shared_ble_quiesce_or_schedule_recovery(
+    result: Result<()>,
+    schedule_recovery: impl FnOnce(),
+) -> Result<()> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            warn!(
+                target: "sys",
+                "Shared Bluetooth runtime did not quiesce after factory-reset state deletion: {error:#}; scheduling a recovery reboot"
+            );
+            schedule_recovery();
+            Err(error).context("quiescing the shared Bluetooth runtime for factory reset")
         }
     }
 }
@@ -881,7 +945,13 @@ fn spawn_boot_success_marker(state: SharedState, gate_heartbeat: PeriodicGateHea
             loop {
                 match boot_success_health(&state, &gate_heartbeat) {
                     BootSuccessHealth::Ready => {
-                        run_bootstate_script_action(BOOTSTATE_SCRIPT, "success");
+                        if !run_bootstate_script_action(BOOTSTATE_SCRIPT, "success") {
+                            log::error!(
+                                target: "sys",
+                                "Could not mark OTA boot successful; exiting so the supervisor requests rollback after the server stops"
+                            );
+                            std::process::exit(1);
+                        }
                         return;
                     }
                     BootSuccessHealth::Waiting(reason) => {
@@ -896,12 +966,11 @@ fn spawn_boot_success_marker(state: SharedState, gate_heartbeat: PeriodicGateHea
                         if started.elapsed() >= std::time::Duration::from_secs(TIMEOUT_SECS) {
                             warn!(
                                 target: "sys",
-                                "OTA boot health did not become ready within {}s; requesting bootstate rollback (last reason: {})",
+                                "OTA boot health did not become ready within {}s; exiting so the supervisor requests rollback after the server stops (last reason: {})",
                                 TIMEOUT_SECS,
                                 reason
                             );
-                            run_bootstate_script_action(BOOTSTATE_SCRIPT, "fail");
-                            return;
+                            std::process::exit(1);
                         }
                     }
                 }
@@ -911,25 +980,32 @@ fn spawn_boot_success_marker(state: SharedState, gate_heartbeat: PeriodicGateHea
         .expect("Failed to spawn boot-success marker thread");
 }
 
-fn run_bootstate_script_action(script: &str, action: &str) {
+fn run_bootstate_script_action(script: &str, action: &str) -> bool {
     match std::process::Command::new(script).arg(action).status() {
         Ok(status) if status.success() => {
             info!(target: "sys", "OTA bootstate action '{}' succeeded", action);
+            true
         }
-        Ok(status) => warn!(
-            target: "sys",
-            "{} {} exited with {}",
-            script,
-            action,
-            status
-        ),
-        Err(e) => warn!(
-            target: "sys",
-            "Failed to exec {} {}: {}",
-            script,
-            action,
-            e
-        ),
+        Ok(status) => {
+            warn!(
+                target: "sys",
+                "{} {} exited with {}",
+                script,
+                action,
+                status
+            );
+            false
+        }
+        Err(e) => {
+            warn!(
+                target: "sys",
+                "Failed to exec {} {}: {}",
+                script,
+                action,
+                e
+            );
+            false
+        }
     }
 }
 
@@ -958,7 +1034,8 @@ fn extract_serial_suffix(raw: &str) -> Option<String> {
 mod tests {
     use super::{
         apply_appliance_matter_attestation_defaults, boot_success_health, env_value_is_truthy,
-        extract_serial_suffix, final_hue_handoff_or_schedule_recovery, install_factory_reset_hook,
+        extract_serial_suffix, final_hue_handoff_or_schedule_recovery,
+        final_shared_ble_quiesce_or_schedule_recovery, install_factory_reset_hook,
         periodic_startup_action, run_bootstate_script_action, save_commissioning_wifi_credentials,
         spawn_appliance_background_workers_with, startup_wifi_restore_action, BootSuccessHealth,
         PeriodicStartupAction, StartupWifiRestoreAction,
@@ -1255,6 +1332,21 @@ mod tests {
     }
 
     #[test]
+    fn failed_shared_ble_quiesce_schedules_post_barrier_recovery() {
+        let recovery_scheduled = Arc::new(AtomicBool::new(false));
+        let recovery_scheduled_for_callback = recovery_scheduled.clone();
+
+        let error = final_shared_ble_quiesce_or_schedule_recovery(
+            Err(anyhow::anyhow!("injected shared runtime join failure")),
+            move || recovery_scheduled_for_callback.store(true, Ordering::SeqCst),
+        )
+        .expect_err("a failed shared runtime join must schedule appliance recovery");
+
+        assert!(format!("{error:#}").contains("quiescing the shared Bluetooth runtime"));
+        assert!(recovery_scheduled.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn save_commissioning_wifi_credentials_persists_when_storage_is_configured() {
         let root = unique_test_dir("wifi-save");
         let state = test_state();
@@ -1402,9 +1494,12 @@ mod tests {
         std::fs::set_permissions(&script, permissions).unwrap();
         let script = script.to_str().unwrap();
 
-        run_bootstate_script_action(script, "success");
-        run_bootstate_script_action(script, "fail");
-        run_bootstate_script_action("/tmp/rhythm-definitely-missing-bootstate", "success");
+        assert!(run_bootstate_script_action(script, "success"));
+        assert!(!run_bootstate_script_action(script, "fail"));
+        assert!(!run_bootstate_script_action(
+            "/tmp/rhythm-definitely-missing-bootstate",
+            "success"
+        ));
 
         std::fs::remove_dir_all(root).ok();
     }
