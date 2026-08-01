@@ -7,6 +7,8 @@
 
 pub mod controller;
 pub mod discovery;
+#[cfg(any(test, all(target_os = "linux", feature = "bluez")))]
+mod gatt_runtime;
 pub mod lifecycle;
 pub mod protocol;
 pub mod store;
