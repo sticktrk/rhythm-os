@@ -66,6 +66,7 @@ use crate::room::Room;
 
 const DISPATCH_WARN_MS: u128 = 1000;
 const DEFAULT_HUB_DISPATCH_TIMEOUT: Duration = Duration::from_secs(10);
+const HUE_BLE_HUB_DISPATCH_TIMEOUT: Duration = Duration::from_secs(20);
 const DEFAULT_HUB_TIMEOUT_COOLDOWN: Duration = Duration::from_secs(30);
 const DEFAULT_MATTER_TIMEOUT_COOLDOWN: Duration = Duration::from_secs(120);
 const DEFAULT_QUERY_TIMEOUT: Duration = Duration::from_secs(6);
@@ -207,6 +208,15 @@ impl HubDispatchPolicy {
                 rate_limit: Some(HUE_RATE_LIMIT),
                 split_device_targets: false,
                 dispatch_timeout: DEFAULT_HUB_DISPATCH_TIMEOUT,
+                timeout_cooldown: DEFAULT_HUB_TIMEOUT_COOLDOWN,
+                timeout_scope: HubDispatchTimeoutScope::Target,
+                query_timeout: DEFAULT_QUERY_TIMEOUT,
+            },
+            "hue_ble" => Self {
+                max_in_flight: DEFAULT_MAX_IN_FLIGHT,
+                rate_limit: None,
+                split_device_targets: false,
+                dispatch_timeout: HUE_BLE_HUB_DISPATCH_TIMEOUT,
                 timeout_cooldown: DEFAULT_HUB_TIMEOUT_COOLDOWN,
                 timeout_scope: HubDispatchTimeoutScope::Target,
                 query_timeout: DEFAULT_QUERY_TIMEOUT,
@@ -1996,6 +2006,7 @@ mod tests {
     fn hub_dispatch_metadata_exposes_policy_by_hub_type() {
         let composite = CompositeController::new();
         composite.register_controller("hue@192.168.1.5", Arc::new(MockController::new("hue")));
+        composite.register_controller("hue_ble@local", Arc::new(MockController::new("hue-ble")));
         composite.register_controller("matter@local", Arc::new(MockController::new("matter")));
         composite.register_controller(
             "homeassistant@ha.local",
@@ -2011,6 +2022,10 @@ mod tests {
             .iter()
             .find(|entry| entry.hub_key == "matter@local")
             .unwrap();
+        let hue_ble = metadata
+            .iter()
+            .find(|entry| entry.hub_key == "hue_ble@local")
+            .unwrap();
         let home_assistant = metadata
             .iter()
             .find(|entry| entry.hub_key == "homeassistant@ha.local")
@@ -2019,6 +2034,12 @@ mod tests {
         assert!(hue.policy.rate_limit.is_some());
         assert!(!hue.policy.split_device_targets);
         assert_eq!(hue.policy.timeout_scope, HubDispatchTimeoutScope::Target);
+        assert_eq!(
+            hue_ble.policy.dispatch_timeout,
+            HUE_BLE_HUB_DISPATCH_TIMEOUT
+        );
+        assert!(hue_ble.policy.rate_limit.is_none());
+        assert!(!hue_ble.policy.split_device_targets);
         assert!(matter.policy.rate_limit.is_none());
         assert!(matter.policy.split_device_targets);
         assert_eq!(matter.policy.max_in_flight, MATTER_MAX_IN_FLIGHT);

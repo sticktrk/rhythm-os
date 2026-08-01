@@ -16,12 +16,13 @@ use super::protocol::{
     HUE_DEFAULT_MAX_MIRED, HUE_DEFAULT_MIN_MIRED, HUE_MAX_BRIGHTNESS, HUE_MIN_BRIGHTNESS,
 };
 use super::store::HueBleDeviceStore;
-use super::transport::{HueBleCommandTimeout, HueBleTransport};
+use super::transport::{HueBleCommandNotDispatched, HueBleCommandTimeout, HueBleTransport};
 use super::types::{HueBleColor, HueBleCommand, HueBleDevice};
 
-// The composite dispatcher gives a physical command ten seconds. Start every
-// target together and keep each real BLE future inside that outer boundary.
-const COMMAND_DISPATCH_TIMEOUT: Duration = Duration::from_secs(9);
+// The composite dispatcher gives cold Hue BLE commands twenty seconds. Start
+// every target together, retain two seconds for acknowledged cleanup, and
+// leave one second for the outer supervisor to observe the keyed outcomes.
+const COMMAND_DISPATCH_TIMEOUT: Duration = Duration::from_secs(19);
 
 pub struct HueBleLightController {
     transport: Arc<dyn HueBleTransport>,
@@ -163,12 +164,15 @@ impl HueBleLightController {
                         )
                     })
                     .collect::<HashMap<_, _>>();
-                let mut pending = labels.keys().cloned().collect::<HashSet<_>>();
-                let batch_result = self.transport.apply_commands_until(
-                    &guarded_commands,
-                    Instant::now() + COMMAND_DISPATCH_TIMEOUT,
-                );
-                drop(observation_guards);
+                let commands_by_id = guarded_commands
+                    .iter()
+                    .map(|(device, command)| (device.id.clone(), (device.clone(), *command)))
+                    .collect::<HashMap<_, _>>();
+                let deadline = Instant::now() + COMMAND_DISPATCH_TIMEOUT;
+                let batch_result = self
+                    .transport
+                    .apply_commands_until(&guarded_commands, deadline);
+                let mut retry_commands = Vec::new();
 
                 match batch_result {
                     Err(error) => {
@@ -176,6 +180,7 @@ impl HueBleLightController {
                         errors.push(format!("Hue BLE dispatch: {error:#}"));
                     }
                     Ok(outcomes) => {
+                        let mut pending = labels.keys().cloned().collect::<HashSet<_>>();
                         for (device_id, outcome) in outcomes {
                             let Some(display_name) = labels.get(&device_id) else {
                                 errors.push(format!(
@@ -190,8 +195,25 @@ impl HueBleLightController {
                                 continue;
                             }
                             if let Err(error) = outcome {
-                                timed_out |= error.is::<HueBleCommandTimeout>();
-                                errors.push(format!("{display_name}: {error:#}"));
+                                if error.is::<HueBleCommandNotDispatched>() {
+                                    if let Some(command) = commands_by_id.get(&device_id) {
+                                        tracing::info!(
+                                            target: "cmd",
+                                            event = "hue_ble_device_command_retry",
+                                            device_id,
+                                            reason = %error,
+                                            "Retrying Hue BLE command after a proven pre-write failure"
+                                        );
+                                        retry_commands.push(command.clone());
+                                    } else {
+                                        errors.push(format!(
+                                            "Hue BLE transport lost retry metadata for {display_name}"
+                                        ));
+                                    }
+                                } else {
+                                    timed_out |= error.is::<HueBleCommandTimeout>();
+                                    errors.push(format!("{display_name}: {error:#}"));
+                                }
                             }
                         }
                         for device_id in pending {
@@ -202,6 +224,49 @@ impl HueBleLightController {
                         }
                     }
                 }
+
+                if !retry_commands.is_empty() {
+                    let mut pending = retry_commands
+                        .iter()
+                        .map(|(device, _)| device.id.clone())
+                        .collect::<HashSet<_>>();
+                    match self
+                        .transport
+                        .apply_commands_until(&retry_commands, deadline)
+                    {
+                        Err(error) => {
+                            timed_out |= error.is::<HueBleCommandTimeout>();
+                            errors.push(format!("Hue BLE retry dispatch: {error:#}"));
+                        }
+                        Ok(outcomes) => {
+                            for (device_id, outcome) in outcomes {
+                                let Some(display_name) = labels.get(&device_id) else {
+                                    errors.push(format!(
+                                        "Hue BLE retry returned an unexpected outcome for {device_id}"
+                                    ));
+                                    continue;
+                                };
+                                if !pending.remove(&device_id) {
+                                    errors.push(format!(
+                                        "Hue BLE retry returned duplicate outcomes for {display_name}"
+                                    ));
+                                    continue;
+                                }
+                                if let Err(error) = outcome {
+                                    timed_out |= error.is::<HueBleCommandTimeout>();
+                                    errors.push(format!("{display_name}: {error:#}"));
+                                }
+                            }
+                            for device_id in pending {
+                                errors.push(format!(
+                                    "Hue BLE retry omitted an outcome for {}",
+                                    labels[&device_id]
+                                ));
+                            }
+                        }
+                    }
+                }
+                drop(observation_guards);
             }
         }
         if errors.is_empty() {
@@ -380,9 +445,11 @@ mod tests {
 
     struct TestTransport {
         expected_batch_commands: usize,
+        batch_sizes: Mutex<Vec<usize>>,
         started_commands: Mutex<Vec<String>>,
         command_failures: Mutex<HashSet<String>>,
         command_timeouts: Mutex<HashSet<String>>,
+        transient_prewrite_failures: Mutex<HashSet<String>>,
         live_states: Mutex<HashMap<String, HueBleState>>,
         live_failures: Mutex<HashSet<String>>,
         live_read_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
@@ -393,9 +460,11 @@ mod tests {
         fn new(expected_batch_commands: usize) -> Self {
             Self {
                 expected_batch_commands,
+                batch_sizes: Mutex::new(Vec::new()),
                 started_commands: Mutex::new(Vec::new()),
                 command_failures: Mutex::new(HashSet::new()),
                 command_timeouts: Mutex::new(HashSet::new()),
+                transient_prewrite_failures: Mutex::new(HashSet::new()),
                 live_states: Mutex::new(HashMap::new()),
                 live_failures: Mutex::new(HashSet::new()),
                 live_read_hook: Mutex::new(None),
@@ -409,6 +478,13 @@ mod tests {
 
         fn time_out_command_for(&self, id: &str) {
             self.command_timeouts.lock().unwrap().insert(id.to_string());
+        }
+
+        fn fail_before_write_once_for(&self, id: &str) {
+            self.transient_prewrite_failures
+                .lock()
+                .unwrap()
+                .insert(id.to_string());
         }
 
         fn set_live_state(&self, id: &str, state: HueBleState) {
@@ -463,7 +539,11 @@ mod tests {
             if deadline <= Instant::now() {
                 return Err(anyhow::Error::new(HueBleCommandTimeout));
             }
-            if commands.len() != self.expected_batch_commands {
+            let mut batch_sizes = self.batch_sizes.lock().unwrap();
+            let first_batch = batch_sizes.is_empty();
+            batch_sizes.push(commands.len());
+            drop(batch_sizes);
+            if first_batch && commands.len() != self.expected_batch_commands {
                 anyhow::bail!(
                     "received {} commands, expected {}",
                     commands.len(),
@@ -476,10 +556,14 @@ mod tests {
                 .extend(commands.iter().map(|(device, _)| device.id.clone()));
             let command_timeouts = self.command_timeouts.lock().unwrap();
             let command_failures = self.command_failures.lock().unwrap();
+            let mut transient_prewrite_failures = self.transient_prewrite_failures.lock().unwrap();
             Ok(commands
                 .iter()
                 .map(|(device, _)| {
-                    let result = if command_timeouts.contains(&device.id) {
+                    let result = if transient_prewrite_failures.remove(&device.id) {
+                        Err(anyhow::Error::new(HueBleCommandNotDispatched)
+                            .context("injected cold-connect failure"))
+                    } else if command_timeouts.contains(&device.id) {
                         Err(anyhow::Error::new(HueBleCommandTimeout))
                     } else if command_failures.contains(&device.id) {
                         Err(anyhow::anyhow!("injected command failure"))
@@ -676,6 +760,45 @@ mod tests {
         assert_eq!(started, expected);
         assert!(error.to_string().contains("bulb-two"));
         assert!(error.to_string().contains("injected command failure"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn proven_cold_connect_failure_retries_only_the_failed_bulb_once() {
+        let devices = vec![
+            test_device("bulb-one", false),
+            test_device("bulb-two", false),
+        ];
+        let ids = devices
+            .iter()
+            .map(|device| device.id.clone())
+            .collect::<Vec<_>>();
+        let (controller, transport, _store, dir) = test_controller(&devices, 2);
+        transport.fail_before_write_once_for("bulb-one");
+
+        controller
+            .apply_to_ids(&ids, |_| HueBleCommand {
+                on: Some(true),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(*transport.batch_sizes.lock().unwrap(), vec![2, 1]);
+        let started = transport.started_commands.lock().unwrap();
+        assert_eq!(
+            started
+                .iter()
+                .filter(|device_id| device_id.as_str() == "bulb-one")
+                .count(),
+            2
+        );
+        assert_eq!(
+            started
+                .iter()
+                .filter(|device_id| device_id.as_str() == "bulb-two")
+                .count(),
+            1
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 

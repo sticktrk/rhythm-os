@@ -18,6 +18,22 @@ impl std::fmt::Display for HueBleCommandTimeout {
 
 impl std::error::Error for HueBleCommandTimeout {}
 
+/// A physical command attempt failed before any GATT write began.
+///
+/// Absolute Hue light commands are safe to retry only across this boundary.
+/// A write error or cancelled write remains indeterminate and must never be
+/// replayed automatically.
+#[derive(Debug)]
+pub(crate) struct HueBleCommandNotDispatched;
+
+impl std::fmt::Display for HueBleCommandNotDispatched {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Hue BLE command did not reach a GATT write")
+    }
+}
+
+impl std::error::Error for HueBleCommandNotDispatched {}
+
 /// Result of an opportunistic adapter-health observation.
 ///
 /// `Busy` means foreground Hue work currently owns the shared adapter scope;
