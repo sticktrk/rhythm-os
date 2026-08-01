@@ -3487,7 +3487,7 @@ pub fn handle_pair_device(
                     "Pairing status changed",
                 ),
             };
-            crate::pairing::emit_pairing_progress_with_devices(
+            crate::pairing::emit_pairing_progress_with_devices_and_failure(
                 state,
                 &session.hub_type,
                 request.session_id.as_deref(),
@@ -3498,6 +3498,7 @@ pub fn handle_pair_device(
                 session.devices.clone(),
                 session.warnings.clone(),
                 session.error.clone(),
+                session.failure_stage,
             );
             if session.status == crate::pairing::PairingStatus::Complete {
                 commands::emit_triage_changed(state);
@@ -3512,8 +3513,15 @@ pub fn handle_pair_device(
             }
         }
         Err(e) => {
+            let failure_stage = e
+                .downcast_ref::<crate::pairing::PairingFailure>()
+                .map(crate::pairing::PairingFailure::stage);
             if request.hub_type == crate::hub::HubType::LOCAL_BLE {
-                log::error!(target: "pair", "Local Bluetooth pairing failed at a bounded integration stage");
+                log::error!(
+                    target: "pair",
+                    "Local Bluetooth pairing failed at stage={}",
+                    failure_stage.map_or("unknown", crate::pairing::PairingFailureStage::as_str)
+                );
             } else {
                 log::error!(target: "pair", "Pairing failed: {}", e);
             }
@@ -3523,6 +3531,7 @@ pub fn handle_pair_device(
                 device: None,
                 devices: Vec::new(),
                 error: Some(e.to_string()),
+                failure_stage,
                 warnings: Vec::new(),
                 details: None,
             };
@@ -3538,6 +3547,7 @@ pub fn handle_pair_device(
                         device: None,
                         devices: Vec::new(),
                         error: Some("Local Bluetooth pairing failed".to_string()),
+                        failure_stage,
                         warnings: Vec::new(),
                         details: None,
                     },
@@ -3568,7 +3578,7 @@ pub fn handle_pair_device(
                 ),
             );
             if request.hub_type != crate::hub::HubType::LOCAL_BLE || terminal_persisted {
-                crate::pairing::emit_pairing_progress(
+                crate::pairing::emit_pairing_progress_with_devices_and_failure(
                     state,
                     &request.hub_type,
                     request.session_id.as_deref(),
@@ -3576,7 +3586,10 @@ pub fn handle_pair_device(
                     crate::pairing::PairingStage::Failed,
                     "Pairing failed",
                     None,
+                    Vec::new(),
+                    Vec::new(),
                     failed_session.error.clone(),
+                    failed_session.failure_stage,
                 );
             }
             if request.hub_type == crate::hub::HubType::LOCAL_BLE {
@@ -4071,6 +4084,7 @@ mod tests {
                     device: Some(device.clone()),
                     devices: vec![device],
                     error: None,
+                    failure_stage: None,
                     warnings: vec!["A second candidate was out of range".to_string()],
                     details: None,
                 })
@@ -4152,6 +4166,77 @@ mod tests {
     }
 
     #[test]
+    fn structured_local_ble_failure_survives_status_history_and_sse() {
+        let (state, path) = pairing_test_state("structured-local-ble-failure");
+        let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+        {
+            let mut app = state.lock().unwrap();
+            app.event_tx = Some(tx);
+            app.start_pairing_fn = Some(Arc::new(|_, _, _, _| {
+                Err(anyhow::Error::new(crate::pairing::PairingFailure::new(
+                    crate::pairing::PairingFailureStage::CandidateConnect,
+                    "Device found, but the Rhythm Box could not connect. Reset it into pairing mode, keep it close, and try again.",
+                )))
+            }));
+        }
+
+        let response = handle_pair_device(
+            &state,
+            &PairingRequest {
+                hub_type: "local_ble".to_string(),
+                session_id: Some("local-pair-structured-failure".to_string()),
+                params: json!({"profile_id": "orein.oc02001.button.v1"}),
+            },
+        );
+
+        // Preserve the existing POST failure contract while the correlated
+        // terminal status carries actionable, additive diagnostics.
+        assert_eq!(response.status, 500);
+        assert_eq!(response.body, "Local Bluetooth pairing failed");
+        let status = handle_get_pair_device(&state, "local-pair-structured-failure");
+        assert_eq!(status.status, 200);
+        let status: crate::pairing::PairingResultStatus =
+            serde_json::from_str(&status.body).unwrap();
+        let result = status.result.unwrap();
+        assert_eq!(
+            result.failure_stage,
+            Some(crate::pairing::PairingFailureStage::CandidateConnect)
+        );
+        assert!(result
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("Reset it into pairing mode")));
+
+        let requested = rx.try_recv().unwrap();
+        assert!(matches!(
+            requested,
+            crate::server_event::ServerEvent::PairingProgress {
+                stage: PairingStage::Requested,
+                ..
+            }
+        ));
+        let failed = rx.try_recv().unwrap();
+        assert!(matches!(
+            failed,
+            crate::server_event::ServerEvent::PairingProgress {
+                status: PairingStatus::Failed,
+                failure_stage: Some(crate::pairing::PairingFailureStage::CandidateConnect),
+                ..
+            }
+        ));
+
+        let storage = state.lock().unwrap().storage.clone().unwrap();
+        let history = crate::storage::Storage::load_pairing_history(storage.as_ref())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            history.entries.last().unwrap().failure_stage,
+            Some(crate::pairing::PairingFailureStage::CandidateConnect)
+        );
+        fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
     fn terminal_pairing_post_is_idempotent_and_get_is_restart_safe() {
         let (state, path) = pairing_test_state("idempotent");
         let calls = Arc::new(AtomicUsize::new(0));
@@ -4172,6 +4257,7 @@ mod tests {
                     device: Some(device.clone()),
                     devices: vec![device],
                     error: None,
+                    failure_stage: None,
                     warnings: vec![
                         "Storage acknowledgement is degraded".to_string(),
                         "EA:84:C2:50:A8:65 needed a retry".to_string(),
@@ -4308,6 +4394,7 @@ mod tests {
                     device: Some(device.clone()),
                     devices: vec![device],
                     error: None,
+                    failure_stage: None,
                     warnings: Vec::new(),
                     details: None,
                 },
@@ -4391,6 +4478,7 @@ mod tests {
                     device: None,
                     devices: Vec::new(),
                     error: Some("fixture complete".to_string()),
+                    failure_stage: None,
                     warnings: Vec::new(),
                     details: None,
                 })
@@ -4479,6 +4567,7 @@ mod tests {
                     device: None,
                     devices: Vec::new(),
                     error: Some("should not be called".to_string()),
+                    failure_stage: None,
                     warnings: Vec::new(),
                     details: None,
                 })
@@ -4594,6 +4683,7 @@ mod tests {
                     device: None,
                     devices: Vec::new(),
                     error: Some("test failure".to_string()),
+                    failure_stage: None,
                     warnings: Vec::new(),
                     details: None,
                 })
@@ -4714,6 +4804,7 @@ mod tests {
                     device: None,
                     devices: Vec::new(),
                     error: Some("test failure".to_string()),
+                    failure_stage: None,
                     warnings: Vec::new(),
                     details: None,
                 })

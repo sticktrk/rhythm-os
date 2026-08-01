@@ -38,6 +38,42 @@ String? localBlePairingConnectedServerScope(
 /// still in flight. Local-BLE recovery pointers must never use this scope.
 String localBlePairingFallbackServerScope(Hub hub) => '${hub.homeId}:${hub.id}';
 
+const Set<String> _stableLocalBleAssociationFailureStages = {
+  'target_not_observed',
+  'candidate_open',
+  'candidate_connect',
+  'candidate_service_discovery',
+  'candidate_service_mismatch',
+  'candidate_cleanup',
+  'transport',
+};
+
+const Set<String> _persistedLocalBleFailureStages = {
+  ..._stableLocalBleAssociationFailureStages,
+  'pairing',
+  'terminal_event',
+  'terminal_event_missing_device',
+  'terminal_status',
+  'terminal_status_missing_device',
+  'terminal_status_not_found',
+  'invalid_response',
+};
+
+/// Accepts only the appliance's stable, privacy-safe local-BLE stage catalog.
+///
+/// Newer servers may add categories. Older apps deliberately collapse those
+/// values to their existing bounded fallback rather than creating unbounded
+/// analytics values or persisting an unreviewed diagnostic string.
+String localBleFailureStageOrFallback(
+  String? serverFailureStage, {
+  required String fallback,
+}) {
+  final stage = serverFailureStage?.trim();
+  return _stableLocalBleAssociationFailureStages.contains(stage)
+      ? stage!
+      : fallback;
+}
+
 /// Sanitized terminal outcome cached before the appliance result is
 /// acknowledged. This closes both crash windows around server acknowledgement:
 /// recovery can render this result without depending on another GET, then
@@ -52,6 +88,7 @@ class PendingLocalBleTerminalResult {
     this.model,
     this.warnings = const [],
     this.error,
+    this.failureStage,
   });
 
   static const String complete = 'complete';
@@ -66,6 +103,7 @@ class PendingLocalBleTerminalResult {
   final String? model;
   final List<String> warnings;
   final String? error;
+  final String? failureStage;
 
   bool hasSameValue(PendingLocalBleTerminalResult other) =>
       status == other.status &&
@@ -75,7 +113,8 @@ class PendingLocalBleTerminalResult {
       manufacturer == other.manufacturer &&
       model == other.model &&
       listEquals(warnings, other.warnings) &&
-      error == other.error;
+      error == other.error &&
+      failureStage == other.failureStage;
 
   Map<String, Object> toJson() => {
         'status': status,
@@ -86,6 +125,7 @@ class PendingLocalBleTerminalResult {
         if (model != null) 'model': model!,
         if (warnings.isNotEmpty) 'warnings': warnings,
         if (error != null) 'error': error!,
+        if (failureStage != null) 'failure_stage': failureStage!,
       };
 
   static PendingLocalBleTerminalResult? fromJson(Object? value) {
@@ -121,12 +161,19 @@ class PendingLocalBleTerminalResult {
       maxLength: 512,
       allowEmpty: true,
     );
+    final failureStage = _boundedOptionalTerminalString(
+      value['failure_stage'],
+      maxLength: 64,
+    );
     if ((value['device_id'] != null && deviceId == null) ||
         (value['device_name'] != null && deviceName == null) ||
         (value['device_type'] != null && deviceType == null) ||
         (value['manufacturer'] != null && manufacturer == null) ||
         (value['model'] != null && model == null) ||
-        (value['error'] != null && error == null)) {
+        (value['error'] != null && error == null) ||
+        (value['failure_stage'] != null &&
+            (failureStage == null ||
+                !_persistedLocalBleFailureStages.contains(failureStage)))) {
       return null;
     }
     final rawWarnings = value['warnings'];
@@ -152,7 +199,8 @@ class PendingLocalBleTerminalResult {
       if (deviceId == null ||
           deviceName == null ||
           deviceType == null ||
-          error != null) {
+          error != null ||
+          failureStage != null) {
         return null;
       }
     } else if (hasAnyDeviceField || warnings.isNotEmpty) {
@@ -168,6 +216,7 @@ class PendingLocalBleTerminalResult {
       model: model,
       warnings: List.unmodifiable(warnings),
       error: error,
+      failureStage: failureStage,
     );
   }
 }

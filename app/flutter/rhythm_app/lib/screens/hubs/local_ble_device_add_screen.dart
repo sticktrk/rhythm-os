@@ -148,6 +148,8 @@ class LocalBleDeviceAddScreen extends StatefulWidget {
     @visibleForTesting this.pendingPairingStoreFactory,
     @visibleForTesting this.serverScope,
     @visibleForTesting this.statusPollInterval = const Duration(seconds: 2),
+    @visibleForTesting
+    this.listenerReadinessFallback = const Duration(seconds: 3),
     // Rust owns a 120-second absolute completion budget. Keep 15 seconds for
     // the correlated HTTP/SSE terminal result to reach and reconcile here.
     @visibleForTesting this.pairingDeadline = const Duration(seconds: 135),
@@ -169,6 +171,7 @@ class LocalBleDeviceAddScreen extends StatefulWidget {
   final LocalBlePendingPairingStoreFactory? pendingPairingStoreFactory;
   final String? serverScope;
   final Duration statusPollInterval;
+  final Duration listenerReadinessFallback;
   final Duration pairingDeadline;
 
   static Future<RhythmPairedDevice?> show(
@@ -201,6 +204,8 @@ class _LocalBleDeviceAddScreenState extends State<LocalBleDeviceAddScreen> {
   static const _accent = Color(0xFF26A69A);
 
   bool _pairing = false;
+  bool _listenerReady = false;
+  bool _listenerReadyConfirmed = false;
   bool _completed = false;
   String? _error;
   String? _progressMessage;
@@ -208,6 +213,7 @@ class _LocalBleDeviceAddScreenState extends State<LocalBleDeviceAddScreen> {
   int _requestGeneration = 0;
   String _activeSessionId = '';
   StreamSubscription<RhythmPairingProgress>? _progressSubscription;
+  Timer? _listenerReadinessTimer;
   Timer? _deadlineTimer;
   Timer? _statusPollTimer;
   bool _statusPollInFlight = false;
@@ -296,6 +302,67 @@ class _LocalBleDeviceAddScreenState extends State<LocalBleDeviceAddScreen> {
         'profile_id': _pairingProfileId,
       };
 
+  bool get _hasOreinPairingGuidance =>
+      widget.setup.profileId == RhythmDeviceProfileId.oreinOc02001Button ||
+      _pairingProfileId == RhythmDeviceProfileId.oreinOc02001Button;
+
+  String get _pairingHeadline {
+    if (_successfulDevice != null) return 'Device added';
+    if (_terminalFailureNeedsAcknowledgement) return 'Bluetooth pairing failed';
+    if (_pendingPairingStoreUnreadable) return 'Pairing recovery unavailable';
+    if (_restoringPending) return 'Checking previous pairing';
+    if (_checkingUnresolved) return 'Confirming pairing result';
+    if (_reconciliationUnresolved) return 'Previous pairing needs confirmation';
+    if (!_pairing) return 'Start the Rhythm Box listener';
+    if (!_listenerReady) return 'Starting the Bluetooth listener';
+    return 'Put the device in pairing mode';
+  }
+
+  String get _pairingGuidance {
+    if (_successfulDevice != null) {
+      return '${_successfulDevice!.name} is connected. Review the note below '
+          'before continuing.';
+    }
+    if (_terminalFailureNeedsAcknowledgement) {
+      return 'Review the final result below and tap Continue. You can start a '
+          'new pairing after Rhythm saves your confirmation.';
+    }
+    if (_pendingPairingStoreUnreadable) {
+      return 'Review the recovery warning below. Rhythm cannot safely check or '
+          'start pairing until the saved record can be read.';
+    }
+    if (_restoringPending) {
+      return 'A previous pairing request may still be running. Keep the device '
+          'close and in pairing mode while Rhythm checks its status.';
+    }
+    if (_checkingUnresolved) {
+      return 'Keep the device close while Rhythm confirms and safely saves the '
+          'pairing result.';
+    }
+    if (_reconciliationUnresolved) {
+      return 'The Rhythm Box may still be listening for this device. Keep the '
+          'device close and in pairing mode, then tap Check Status Again.';
+    }
+    if (!_pairing) {
+      return 'Keep the device close to the Rhythm Box, but leave pairing mode '
+          'off for now. Tap Find Device first so Rhythm can start listening.';
+    }
+    if (!_listenerReady) {
+      return 'Keep the device out of pairing mode for a moment. Rhythm will '
+          'tell you when the Box is listening.';
+    }
+    final listenerLead = _listenerReadyConfirmed
+        ? 'The Rhythm Box is listening.'
+        : 'The Rhythm Box should be listening now.';
+    if (_hasOreinPairingGuidance) {
+      return '$listenerLead Now press and hold Reset for 3–5 '
+          'seconds until the red indicator blinks rapidly, then keep the '
+          'button close to the Box.';
+    }
+    return '$listenerLead Now follow the device’s pairing-mode '
+        'instructions and keep it close to the Box.';
+  }
+
   @override
   void initState() {
     super.initState();
@@ -315,6 +382,7 @@ class _LocalBleDeviceAddScreenState extends State<LocalBleDeviceAddScreen> {
   void dispose() {
     _releaseSessionOwnership();
     _deadlineTimer?.cancel();
+    _listenerReadinessTimer?.cancel();
     _statusPollTimer?.cancel();
     _progressSubscription?.cancel();
     super.dispose();
@@ -464,10 +532,10 @@ class _LocalBleDeviceAddScreenState extends State<LocalBleDeviceAddScreen> {
                     ? 'The Rhythm Box has no record of the previous request. '
                         'You can start a new pairing safely.'
                     : 'Bluetooth pairing failed. You can start a new pairing.',
-            failureStage:
-                cachedTerminal.status == PendingLocalBleTerminalResult.notFound
+            failureStage: cachedTerminal.failureStage ??
+                (cachedTerminal.status == PendingLocalBleTerminalResult.notFound
                     ? 'terminal_status_not_found'
-                    : 'terminal_status',
+                    : 'terminal_status'),
           );
         }
         return;
@@ -595,7 +663,10 @@ class _LocalBleDeviceAddScreenState extends State<LocalBleDeviceAddScreen> {
           result.error?.trim().isNotEmpty == true
               ? result.error!.trim()
               : 'Bluetooth pairing failed.',
-          failureStage: 'terminal_status',
+          failureStage: localBleFailureStageOrFallback(
+            result.failureStage,
+            fallback: 'terminal_status',
+          ),
           serverTerminal: true,
         );
         return;
@@ -627,6 +698,8 @@ class _LocalBleDeviceAddScreenState extends State<LocalBleDeviceAddScreen> {
 
   void _enterUnresolvedReconciliation(String message) {
     if (!mounted || _completed || _activeSessionId.isEmpty) return;
+    _listenerReadinessTimer?.cancel();
+    _listenerReadinessTimer = null;
     _deadlineTimer?.cancel();
     _deadlineTimer = null;
     _statusPollTimer?.cancel();
@@ -705,9 +778,26 @@ class _LocalBleDeviceAddScreenState extends State<LocalBleDeviceAddScreen> {
               : event.message.trim().isNotEmpty
                   ? event.message.trim()
                   : 'Bluetooth pairing failed.',
-          failureStage: 'terminal_event',
+          failureStage: localBleFailureStageOrFallback(
+            event.failureStage,
+            fallback: 'terminal_event',
+          ),
           serverTerminal: true,
         );
+        return;
+      }
+
+      if (_pairing &&
+          !_listenerReadyConfirmed &&
+          event.stage == RhythmPairingStage.searching) {
+        _listenerReadinessTimer?.cancel();
+        _listenerReadinessTimer = null;
+        setState(() {
+          _listenerReady = true;
+          _listenerReadyConfirmed = true;
+          _progressMessage =
+              'The Rhythm Box is listening for this Bluetooth device.';
+        });
         return;
       }
 
@@ -715,6 +805,29 @@ class _LocalBleDeviceAddScreenState extends State<LocalBleDeviceAddScreen> {
       if (message.isNotEmpty) {
         setState(() => _progressMessage = message);
       }
+    });
+  }
+
+  void _scheduleListenerReadinessFallback(int generation) {
+    // Pairing progress is a non-replayed broadcast. A short fallback preserves
+    // listener-first ordering without making an SSE gap consume the full
+    // association window while the user is told not to activate the device.
+    _listenerReadinessTimer?.cancel();
+    _listenerReadinessTimer = Timer(widget.listenerReadinessFallback, () {
+      _listenerReadinessTimer = null;
+      if (!mounted ||
+          _completed ||
+          !_pairing ||
+          _listenerReady ||
+          generation != _requestGeneration) {
+        return;
+      }
+      setState(() {
+        _listenerReady = true;
+        _listenerReadyConfirmed = false;
+        _progressMessage = 'The Bluetooth listener should be ready. Put the '
+            'device in pairing mode now.';
+      });
     });
   }
 
@@ -750,10 +863,12 @@ class _LocalBleDeviceAddScreenState extends State<LocalBleDeviceAddScreen> {
     );
     setState(() {
       _pairing = true;
+      _listenerReady = false;
+      _listenerReadyConfirmed = false;
       _reconciliationUnresolved = false;
       _reconciliationMessage = null;
       _error = null;
-      _progressMessage = 'Looking for the device near your Rhythm Box…';
+      _progressMessage = 'Starting the Bluetooth listener on your Rhythm Box…';
     });
     _scheduleDeadline(generation, widget.pairingDeadline);
     _subscribeToProgress();
@@ -787,6 +902,7 @@ class _LocalBleDeviceAddScreenState extends State<LocalBleDeviceAddScreen> {
     }
 
     try {
+      _scheduleListenerReadinessFallback(generation);
       final response = await _pair(_activeSessionId);
       if (!mounted || _completed || generation != _requestGeneration) return;
       final status = response?['status']?.toString().toLowerCase();
@@ -825,7 +941,10 @@ class _LocalBleDeviceAddScreenState extends State<LocalBleDeviceAddScreen> {
                   ? terminal.error!.trim()
                   : 'The Rhythm Box could not pair this device. Put it back '
                       'in pairing mode and try again.',
-              failureStage: 'pairing',
+              failureStage: localBleFailureStageOrFallback(
+                terminal.failureStage,
+                fallback: 'pairing',
+              ),
               serverTerminal: true,
             );
             return;
@@ -1151,6 +1270,7 @@ class _LocalBleDeviceAddScreenState extends State<LocalBleDeviceAddScreen> {
       PendingLocalBleTerminalResult(
         status: terminalStatus,
         error: safeMessage,
+        failureStage: failureStage,
       ),
     );
     if (!mounted) return;
@@ -1303,6 +1423,8 @@ class _LocalBleDeviceAddScreenState extends State<LocalBleDeviceAddScreen> {
   }
 
   void _stopActiveReconciliation() {
+    _listenerReadinessTimer?.cancel();
+    _listenerReadinessTimer = null;
     _deadlineTimer?.cancel();
     _deadlineTimer = null;
     _statusPollTimer?.cancel();
@@ -1380,9 +1502,7 @@ class _LocalBleDeviceAddScreenState extends State<LocalBleDeviceAddScreen> {
               ),
               const SizedBox(height: 20),
               Text(
-                _successfulDevice == null
-                    ? 'Put the device in pairing mode'
-                    : 'Device added',
+                _pairingHeadline,
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   color: CelestialColors.textPrimary,
@@ -1392,12 +1512,7 @@ class _LocalBleDeviceAddScreenState extends State<LocalBleDeviceAddScreen> {
               ),
               const SizedBox(height: 12),
               Text(
-                _successfulDevice == null
-                    ? 'Follow the device’s pairing-mode instructions, then '
-                        'keep it close to the Rhythm Box. Rhythm will verify '
-                        'that it matches the setup code you scanned.'
-                    : '${_successfulDevice!.name} is connected. Review the '
-                        'note below before continuing.',
+                _pairingGuidance,
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   color: CelestialColors.textSecondary.withValues(alpha: 0.86),

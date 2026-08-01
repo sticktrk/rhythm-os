@@ -425,7 +425,7 @@ void main() {
     await tester.tap(find.text('Open'));
     await tester.pumpAndSettle();
 
-    expect(find.text('Put the device in pairing mode'), findsOneWidget);
+    expect(find.text('Start the Rhythm Box listener'), findsOneWidget);
     expect(find.text('Find Device'), findsOneWidget);
     expect(find.text(qr), findsNothing);
     expect(capturedParams, isNull);
@@ -459,6 +459,199 @@ void main() {
         isNot(contains(setup.setupFields['ble_identity'])),
       );
     }
+  });
+
+  testWidgets(
+      'shows Orein reset guidance only after correlated listener confirmation',
+      (tester) async {
+    final request = Completer<Map<String, dynamic>?>();
+    final progress = StreamController<RhythmPairingProgress>();
+    addTearDown(progress.close);
+    var requestDispatched = false;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: LocalBleDeviceAddScreen(
+          setup: setup,
+          pairingProfileId: RhythmDeviceProfileId.oreinOc02001Button,
+          inputMethod: 'camera',
+          analyticsSource: 'test',
+          journeyId: 'journey-listener-order',
+          pairingRequest: ({
+            required hubType,
+            required params,
+            required receiveTimeout,
+            required sessionId,
+          }) {
+            requestDispatched = true;
+            return request.future;
+          },
+          progressEvents: progress.stream,
+          pairingDeadline: const Duration(hours: 1),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Start the Rhythm Box listener'), findsOneWidget);
+    expect(find.textContaining('red indicator'), findsNothing);
+
+    await tester.tap(find.text('Find Device'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(requestDispatched, isTrue);
+    expect(find.text('Starting the Bluetooth listener'), findsOneWidget);
+    expect(find.textContaining('red indicator'), findsNothing);
+
+    progress.add(
+      const RhythmPairingProgress(
+        hubType: 'local_ble',
+        sessionId: 'different-journey',
+        status: RhythmPairingStatus.searching,
+        stage: RhythmPairingStage.requested,
+        message: 'Pairing request received',
+      ),
+    );
+    await tester.pump();
+    expect(find.textContaining('red indicator'), findsNothing);
+
+    progress.add(
+      const RhythmPairingProgress(
+        hubType: 'local_ble',
+        sessionId: 'journey-listener-order',
+        status: RhythmPairingStatus.searching,
+        stage: RhythmPairingStage.requested,
+        message: 'Pairing request received',
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Starting the Bluetooth listener'), findsOneWidget);
+    expect(find.textContaining('red indicator'), findsNothing);
+
+    progress.add(
+      const RhythmPairingProgress(
+        hubType: 'local_ble',
+        sessionId: 'journey-listener-order',
+        status: RhythmPairingStatus.searching,
+        stage: RhythmPairingStage.searching,
+        message: 'Bluetooth listener ready; put the device in pairing mode now',
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Put the device in pairing mode'), findsOneWidget);
+    expect(find.textContaining('press and hold Reset for 3–5 seconds'),
+        findsOneWidget);
+    expect(find.textContaining('red indicator blinks rapidly'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    request.complete(null);
+    await tester.pump();
+  });
+
+  testWidgets(
+      'offers pairing mode after bounded fallback when searching event is missed',
+      (tester) async {
+    final request = Completer<Map<String, dynamic>?>();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: LocalBleDeviceAddScreen(
+          setup: setup,
+          pairingProfileId: RhythmDeviceProfileId.oreinOc02001Button,
+          inputMethod: 'camera',
+          analyticsSource: 'test',
+          journeyId: 'journey-listener-fallback',
+          pairingRequest: ({
+            required hubType,
+            required params,
+            required receiveTimeout,
+            required sessionId,
+          }) =>
+              request.future,
+          listenerReadinessFallback: const Duration(milliseconds: 100),
+          pairingDeadline: const Duration(hours: 1),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Find Device'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.text('Starting the Bluetooth listener'), findsOneWidget);
+    expect(find.textContaining('red indicator'), findsNothing);
+
+    await tester.pump(const Duration(milliseconds: 99));
+    expect(find.text('Starting the Bluetooth listener'), findsOneWidget);
+
+    await tester.pump(const Duration(milliseconds: 1));
+    expect(find.text('Put the device in pairing mode'), findsOneWidget);
+    expect(find.textContaining('should be listening now'), findsOneWidget);
+    expect(find.textContaining('press and hold Reset for 3–5 seconds'),
+        findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    request.complete(null);
+    await tester.pump();
+  });
+
+  testWidgets('keeps listener-ready guidance generic for other profiles',
+      (tester) async {
+    final request = Completer<Map<String, dynamic>?>();
+    final progress = StreamController<RhythmPairingProgress>();
+    addTearDown(progress.close);
+    final genericSetup = LocalBleSetup(
+      profileId: 'vendor.generic.button.v1',
+      setupFields: const {'identity': 'public-test-identity'},
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: LocalBleDeviceAddScreen(
+          setup: genericSetup,
+          pairingProfileId: 'vendor.generic.button.v1',
+          inputMethod: 'camera',
+          analyticsSource: 'test',
+          journeyId: 'journey-generic-listener-order',
+          pairingRequest: ({
+            required hubType,
+            required params,
+            required receiveTimeout,
+            required sessionId,
+          }) =>
+              request.future,
+          progressEvents: progress.stream,
+          pairingDeadline: const Duration(hours: 1),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Find Device'));
+    await tester.pump();
+    await tester.pump();
+
+    progress.add(
+      const RhythmPairingProgress(
+        hubType: 'local_ble',
+        sessionId: 'journey-generic-listener-order',
+        status: RhythmPairingStatus.searching,
+        stage: RhythmPairingStage.searching,
+        message: 'Looking for the nearby Bluetooth device',
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('Put the device in pairing mode'), findsOneWidget);
+    expect(find.textContaining('follow the device’s pairing-mode instructions'),
+        findsOneWidget);
+    expect(find.textContaining('red indicator'), findsNothing);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    request.complete(null);
+    await tester.pump();
   });
 
   testWidgets('blocks dismissal and reconciles a correlated terminal event',
@@ -978,6 +1171,62 @@ void main() {
     );
   });
 
+  testWidgets('restored pending session shows recovery-safe pairing guidance',
+      (tester) async {
+    final store = _FakePendingPairingStore(
+      pending: PendingLocalBlePairing(
+        sessionId: 'journey-pending-after-restart',
+        journeyId: 'journey-pending-after-restart',
+        attemptNumber: 1,
+        profileId: setup.profileId,
+        serverScope: 'injected-server',
+        startedAtEpochMs: DateTime.now().millisecondsSinceEpoch,
+      ),
+    );
+    var postCalls = 0;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: LocalBleDeviceAddScreen(
+          setup: setup,
+          inputMethod: 'camera',
+          journeyId: 'unused-new-journey',
+          pendingPairingStore: store,
+          pairingRequest: ({
+            required hubType,
+            required params,
+            required receiveTimeout,
+            required sessionId,
+          }) async {
+            postCalls += 1;
+            return null;
+          },
+          pairingStatusRequest: (sessionId) async {
+            expect(sessionId, 'journey-pending-after-restart');
+            return const RhythmPairingResultStatus(
+              sessionId: 'journey-pending-after-restart',
+              state: RhythmPairingResultState.pending,
+              hubType: 'local_ble',
+            );
+          },
+          pairingDeadline: const Duration(hours: 1),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(postCalls, 0);
+    expect(find.text('Previous pairing needs confirmation'), findsWidgets);
+    expect(find.textContaining('may still be listening'), findsOneWidget);
+    expect(find.textContaining('close and in pairing mode'), findsOneWidget);
+    expect(find.text('Check Status Again'), findsOneWidget);
+    expect(find.textContaining('leave pairing mode off'), findsNothing);
+    expect(find.textContaining('Tap Find Device'), findsNothing);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+  });
+
   testWidgets('caches typed not-found before acknowledgement and clearing',
       (tester) async {
     final store = _FakePendingPairingStore(
@@ -1287,6 +1536,7 @@ void main() {
               'hub_type': 'local_ble',
               'status': 'failed',
               'error': 'Another Bluetooth pairing is already in progress.',
+              'failure_stage': 'candidate_connect',
             };
           },
           pairingAcknowledgementRequest: (sessionId) async {
@@ -1306,6 +1556,7 @@ void main() {
     expect(store.saved, hasLength(2));
     expect(store.saved.last.terminalResult?.status,
         PendingLocalBleTerminalResult.failed);
+    expect(store.saved.last.terminalResult?.failureStage, 'candidate_connect');
     expect(store.cleared, isEmpty);
     expect(
       find.text('Another Bluetooth pairing is already in progress.'),
@@ -1317,6 +1568,10 @@ void main() {
       ),
       findsOneWidget,
     );
+    final completion = analytics.events.singleWhere(
+      (event) => event.name == 'local_ble_pairing_completed',
+    );
+    expect(completion.properties['failure_stage'], 'candidate_connect');
 
     await tester.tap(
       find.byKey(
@@ -1337,6 +1592,46 @@ void main() {
       ['journey-admission-busy', 'journey-admission-busy-attempt-2'],
     );
     expect(store.pending?.sessionId, 'journey-admission-busy-attempt-2');
+  });
+
+  testWidgets(
+      'unknown server failure stage falls back before cache and analytics',
+      (tester) async {
+    final store = _FakePendingPairingStore();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: LocalBleDeviceAddScreen(
+          setup: setup,
+          inputMethod: 'camera',
+          journeyId: 'journey-future-failure-stage',
+          pendingPairingStore: store,
+          pairingRequest: ({
+            required hubType,
+            required params,
+            required receiveTimeout,
+            required sessionId,
+          }) async =>
+              {
+            'hub_type': 'local_ble',
+            'status': 'failed',
+            'error': 'Local Bluetooth pairing failed.',
+            'failure_stage': 'future_radio_proof',
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Find Device'));
+    await tester.pumpAndSettle();
+
+    expect(store.pending?.terminalResult?.failureStage, 'pairing');
+    final completion = analytics.events.singleWhere(
+      (event) => event.name == 'local_ble_pairing_completed',
+    );
+    expect(completion.properties['failure_stage'], 'pairing');
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
   });
 
   testWidgets('local clear failure keeps successful device acknowledgement',

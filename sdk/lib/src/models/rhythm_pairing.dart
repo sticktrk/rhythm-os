@@ -137,6 +137,27 @@ String? _optionalBoundedString(
   return value;
 }
 
+const int _pairingFailureStageMaxLength = 128;
+
+String? _strictPairingFailureStage(Object? value) {
+  if (value == null) return null;
+  if (value is! String ||
+      value.trim().isEmpty ||
+      value.length > _pairingFailureStageMaxLength) {
+    throw const FormatException('Invalid failure_stage');
+  }
+  return value;
+}
+
+String? _tolerantPairingFailureStage(Object? value) {
+  if (value is! String ||
+      value.trim().isEmpty ||
+      value.length > _pairingFailureStageMaxLength) {
+    return null;
+  }
+  return value;
+}
+
 /// Terminal result persisted by the server for pairing reconciliation.
 class RhythmPairingSessionResult {
   final String hubType;
@@ -146,6 +167,12 @@ class RhythmPairingSessionResult {
   final List<String> warnings;
   final String? error;
 
+  /// Deepest privacy-safe stage reached by a failed pairing attempt.
+  ///
+  /// Unknown values are preserved so newer appliances remain compatible with
+  /// older SDK versions.
+  final String? failureStage;
+
   const RhythmPairingSessionResult({
     required this.hubType,
     required this.status,
@@ -153,6 +180,7 @@ class RhythmPairingSessionResult {
     this.devices = const [],
     this.warnings = const [],
     this.error,
+    this.failureStage,
   });
 
   factory RhythmPairingSessionResult.fromJson(Map<String, dynamic> json) {
@@ -201,6 +229,7 @@ class RhythmPairingSessionResult {
     final hubType = _requiredBoundedString(json, 'hub_type', 64);
     final status = _strictTerminalPairingStatus(json['status']);
     final error = _optionalBoundedString(json, 'error', 512);
+    final failureStage = _strictPairingFailureStage(json['failure_stage']);
     if (device != null && devices.isNotEmpty) {
       final first = devices.first;
       if (device.deviceId != first.deviceId ||
@@ -220,10 +249,13 @@ class RhythmPairingSessionResult {
       devices: List.unmodifiable(devices),
       warnings: List.unmodifiable(warnings),
       error: error,
+      failureStage: failureStage,
     );
     switch (status) {
       case RhythmPairingStatus.complete:
-        if (result.completedDevices.isEmpty || error != null) {
+        if (result.completedDevices.isEmpty ||
+            error != null ||
+            failureStage != null) {
           throw const FormatException('Invalid completed pairing result');
         }
         break;
@@ -315,6 +347,12 @@ class RhythmPairingProgress {
   final List<String> warnings;
   final String? error;
 
+  /// Deepest privacy-safe stage reached by a failed pairing attempt.
+  ///
+  /// Unknown values are preserved so future server categories can still be
+  /// surfaced by this SDK version.
+  final String? failureStage;
+
   const RhythmPairingProgress({
     required this.hubType,
     required this.status,
@@ -325,6 +363,7 @@ class RhythmPairingProgress {
     this.devices = const [],
     this.warnings = const [],
     this.error,
+    this.failureStage,
   });
 
   factory RhythmPairingProgress.fromJson(Map<String, dynamic> json) {
@@ -364,6 +403,7 @@ class RhythmPairingProgress {
       devices: List.unmodifiable(devices),
       warnings: List.unmodifiable(warnings),
       error: json['error'] as String?,
+      failureStage: _tolerantPairingFailureStage(json['failure_stage']),
     );
   }
 

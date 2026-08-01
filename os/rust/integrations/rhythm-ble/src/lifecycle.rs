@@ -20,7 +20,7 @@ use rhythm_os::state::SharedState;
 use crate::discovery::LocalBleDiscovery;
 use crate::profile::profile_by_id;
 use crate::store::{latch_reset_guard, LocalBleDevice, LocalBleDeviceStore};
-use crate::transport::LocalBleTransport;
+use crate::transport::{LocalBleAssociationError, LocalBleTransport};
 use crate::{HUB_ADDRESS, HUB_TYPE};
 
 const ASSOCIATION_TIMEOUT: Duration = Duration::from_secs(60);
@@ -116,6 +116,7 @@ fn terminal_session_for_device(device: &LocalBleDevice) -> Result<PairingSession
         device: Some(info.clone()),
         devices: vec![info],
         error: None,
+        failure_stage: None,
         warnings: Vec::new(),
         details: None,
     })
@@ -324,21 +325,34 @@ pub fn pair(
     let profile_id = profile.descriptor().id;
     let setup = profile.parse_pairing_setup(setup_value)?;
     let data = get_hub_data(state)?;
-    rhythm_os::pairing::emit_pairing_progress(
-        state,
-        HUB_TYPE,
-        Some(session_id),
-        PairingStatus::Searching,
-        PairingStage::Searching,
-        "Looking for the nearby Bluetooth device",
-        None,
-        None,
-    );
     let association_deadline = association_deadline(deadline)?;
+    let mut announce_listener_ready = || {
+        rhythm_os::pairing::emit_pairing_progress(
+            state,
+            HUB_TYPE,
+            Some(session_id),
+            PairingStatus::Searching,
+            PairingStage::Searching,
+            "Bluetooth listener ready; put the device in pairing mode now",
+            None,
+            None,
+        );
+    };
     let candidate = data
         .transport
-        .associate_until(profile_id, &setup, association_deadline)
-        .map_err(|_| anyhow::anyhow!("local Bluetooth association failed"))?;
+        .associate_until_with_readiness(
+            profile_id,
+            &setup,
+            association_deadline,
+            &mut announce_listener_ready,
+        )
+        .map_err(|error| match error.downcast::<LocalBleAssociationError>() {
+            Ok(error) => anyhow::Error::new(error.into_pairing_failure()),
+            Err(_) => anyhow::Error::new(rhythm_os::pairing::PairingFailure::new(
+                rhythm_os::pairing::PairingFailureStage::Transport,
+                "The Rhythm Box Bluetooth service was unavailable. Restart the Rhythm Box and try again.",
+            )),
+        })?;
     remaining_pairing_budget(deadline, "device finalization")?;
     rhythm_os::pairing::emit_pairing_progress(
         state,

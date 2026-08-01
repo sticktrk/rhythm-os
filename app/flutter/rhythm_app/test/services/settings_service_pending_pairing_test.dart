@@ -193,6 +193,44 @@ void main() {
         ['Button events begin after the next sync.']);
   });
 
+  test('round-trips a privacy-safe local BLE failure stage', () {
+    final terminal = _pairing(1).withTerminalResult(
+      const PendingLocalBleTerminalResult(
+        status: PendingLocalBleTerminalResult.failed,
+        error: 'Local Bluetooth pairing failed.',
+        failureStage: 'candidate_service_discovery',
+      ),
+    );
+
+    final decoded = SettingsService.decodePendingLocalBlePairings(
+      SettingsService.encodePendingLocalBlePairings([terminal]),
+    );
+
+    expect(decoded.single.terminalResult?.failureStage,
+        'candidate_service_discovery');
+  });
+
+  test('unknown server failure stage uses the bounded caller fallback', () {
+    expect(
+      localBleFailureStageOrFallback(
+        'candidate_connect',
+        fallback: 'terminal_status',
+      ),
+      'candidate_connect',
+    );
+    expect(
+      localBleFailureStageOrFallback(
+        'future_radio_proof',
+        fallback: 'terminal_status',
+      ),
+      'terminal_status',
+    );
+    expect(
+      localBleFailureStageOrFallback(null, fallback: 'terminal_event'),
+      'terminal_event',
+    );
+  });
+
   test('rejects malformed or unbounded terminal snapshots', () {
     final raw = _pairing(1).toJson();
     raw['terminal_result'] = {
@@ -207,6 +245,13 @@ void main() {
     raw['terminal_result'] = {
       'status': PendingLocalBleTerminalResult.failed,
       'error': List.filled(513, 'x').join(),
+    };
+    expect(PendingLocalBlePairing.fromJson(raw), isNull);
+
+    raw['terminal_result'] = {
+      'status': PendingLocalBleTerminalResult.failed,
+      'error': 'Local Bluetooth pairing failed.',
+      'failure_stage': 'future_radio_proof',
     };
     expect(PendingLocalBlePairing.fromJson(raw), isNull);
   });

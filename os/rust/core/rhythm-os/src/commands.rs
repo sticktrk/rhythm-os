@@ -12277,17 +12277,25 @@ pub fn persist_rooms(state: &SharedState) {
 
 /// Build JSON for all canonical devices.
 pub fn build_canonical_devices(state: &SharedState) -> Result<String> {
-    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    let registry = &s.canonical_registry;
-    let devices: Vec<_> = registry.devices().collect();
+    // Snapshot while holding the shared-state lock, then serialize outside it.
+    // Canonical payloads can be large on established homes, and an HTTP client
+    // should not prevent BLE/discovery work from updating shared state while
+    // serde walks the complete registry.
+    let devices: Vec<_> = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.canonical_registry.devices().cloned().collect()
+    };
     serde_json::to_string(&devices).map_err(|e| anyhow::anyhow!(e))
 }
 
 /// Build JSON for a single canonical device.
 pub fn build_canonical_device(state: &SharedState, id: &str) -> Result<String> {
-    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    match s.canonical_registry.get(id) {
-        Some(device) => serde_json::to_string(device).map_err(|e| anyhow::anyhow!(e)),
+    let device = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.canonical_registry.get(id).cloned()
+    };
+    match device {
+        Some(device) => serde_json::to_string(&device).map_err(|e| anyhow::anyhow!(e)),
         None => Err(anyhow::anyhow!("Device not found: {}", id)),
     }
 }

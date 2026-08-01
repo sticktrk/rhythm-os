@@ -348,6 +348,7 @@ impl ExternalLightHubIntegration for HueIntegration {
             device: devices.first().cloned(),
             devices,
             error: None,
+            failure_stage: None,
             warnings: Vec::new(),
             details: None,
         })
