@@ -35,8 +35,8 @@ pub enum HueDiscoveryMode {
     #[default]
     BridgeNative,
     /// Expose only rooms whose explicit IDs are in the ownership manifest.
-    /// Native Hue scenes and automations remain hidden while Rhythm owns the
-    /// bridge.
+    /// Native Hue scenes attached to those rooms remain discoverable, while
+    /// native automations remain hidden while Rhythm owns the bridge.
     RhythmAuthoritative { managed_room_ids: BTreeSet<String> },
 }
 
@@ -123,6 +123,27 @@ impl<H: HueTransport> HueDiscovery<H> {
                 Some(managed_room_ids.clone())
             }
         })
+    }
+
+    fn managed_scene_ids(&self) -> Result<BTreeSet<String>> {
+        let Some(source) = &self.ownership_source else {
+            return Ok(BTreeSet::new());
+        };
+        Ok(
+            crate::ownership::load_controller_ownership(
+                source.storage.as_ref(),
+                &source.bridge_id,
+            )?
+            .filter(|state| state.phase.is_managed())
+            .map(|state| {
+                state
+                    .managed_scenes()
+                    .values()
+                    .map(|scene| scene.hue_scene_id.clone())
+                    .collect()
+            })
+            .unwrap_or_default(),
+        )
     }
 
     fn is_authoritative(&self) -> Result<bool> {
@@ -537,7 +558,11 @@ impl<H: HueTransport> HueDiscovery<H> {
             .collect()
     }
 
-    fn scenes_for_room(response: &serde_json::Value, room_id: &str) -> Vec<SceneDefinition> {
+    fn scenes_for_room(
+        response: &serde_json::Value,
+        room_id: &str,
+        excluded_scene_ids: &BTreeSet<String>,
+    ) -> Vec<SceneDefinition> {
         let mut scenes: Vec<_> = response
             .get("data")
             .and_then(|value| value.as_array())
@@ -552,6 +577,9 @@ impl<H: HueTransport> HueDiscovery<H> {
             })
             .filter_map(|scene| {
                 let external_id = scene.get("id").and_then(|value| value.as_str())?;
+                if excluded_scene_ids.contains(external_id) {
+                    return None;
+                }
                 let name = scene
                     .pointer("/metadata/name")
                     .and_then(|value| value.as_str())
@@ -844,11 +872,9 @@ impl<H: HueTransport + 'static> HubDiscovery for HueDiscovery<H> {
     }
 
     fn discover_scenes(&self, room_id: &str) -> Result<Vec<SceneDefinition>> {
-        if self.is_authoritative()? {
-            return Ok(Vec::new());
-        }
         let response = self.transport.get_resources(&self.username, "scene")?;
-        let scenes = Self::scenes_for_room(&response, room_id);
+        let managed_scene_ids = self.managed_scene_ids()?;
+        let scenes = Self::scenes_for_room(&response, room_id, &managed_scene_ids);
         info!(
             target: "hue_scenes",
             "Discovered {} Hue scenes for room {}",
@@ -859,9 +885,6 @@ impl<H: HueTransport + 'static> HubDiscovery for HueDiscovery<H> {
     }
 
     fn recall_scene(&self, scene_id: &str, transition_ms: Option<u32>) -> Result<()> {
-        if self.is_authoritative()? {
-            anyhow::bail!("Native Hue scene recall is disabled while Rhythm owns the bridge");
-        }
         self.transport
             .recall_scene(&self.username, scene_id, transition_ms)
     }
@@ -1245,6 +1268,15 @@ mod tests {
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({ "data": [] })))
         }
+
+        fn recall_scene(
+            &self,
+            _username: &str,
+            _scene_id: &str,
+            _transition_ms: Option<u32>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -1615,7 +1647,11 @@ mod tests {
             ]
         });
 
-        let scenes = HueDiscovery::<StaticHueTransport>::scenes_for_room(&response, "room-1");
+        let scenes = HueDiscovery::<StaticHueTransport>::scenes_for_room(
+            &response,
+            "room-1",
+            &BTreeSet::new(),
+        );
 
         assert_eq!(scenes.len(), 2);
         let scene = &scenes[0];
@@ -1659,6 +1695,13 @@ mod tests {
             None,
             "ordinary Hue scenes must remain explicitly unmarked"
         );
+        let filtered = HueDiscovery::<StaticHueTransport>::scenes_for_room(
+            &response,
+            "room-1",
+            &BTreeSet::from(["scene-static".to_string()]),
+        );
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, "native-hue-scene-cool");
     }
 
     #[test]
@@ -1776,7 +1819,7 @@ mod tests {
     }
 
     #[test]
-    fn authoritative_discovery_exposes_only_manifest_rooms_and_hides_native_control_plane() {
+    fn authoritative_discovery_exposes_manifest_rooms_and_native_scenes_but_hides_automations() {
         let transport = StaticHueTransport::default()
             .with_resource(
                 "room",
@@ -1814,7 +1857,12 @@ mod tests {
                     "id": "native-scene",
                     "group": {"rtype": "room", "rid": "managed-room"},
                     "metadata": {"name": "Native scene"},
-                    "actions": []
+                    "actions": [{
+                        "action": {
+                            "on": {"on": true},
+                            "color_temperature": {"mirek": 300}
+                        }
+                    }]
                 }]}),
             )
             .with_resource(
@@ -1840,12 +1888,12 @@ mod tests {
         assert!(devices
             .iter()
             .any(|device| { device.device_id == "native-button" && device.room_id.is_none() }));
-        assert!(discovery
-            .discover_scenes("managed-room")
-            .unwrap()
-            .is_empty());
+        assert_eq!(
+            discovery.discover_scenes("managed-room").unwrap()[0].id,
+            "native-hue-native-scene"
+        );
         assert!(discovery.discover_configured_devices().unwrap().is_empty());
-        assert!(discovery.recall_scene("native-scene", None).is_err());
+        discovery.recall_scene("native-scene", None).unwrap();
     }
 
     #[test]
