@@ -8,7 +8,9 @@ use std::mem::ManuallyDrop;
 use std::time::Duration;
 
 use crate::api_types::{HueV2GroupedLight, HueV2Light, HueV2Response};
-use crate::transport::{HueBridgeSearchLight, HueTransport};
+use crate::transport::{
+    HueBridgeSearchLight, HueCreatedResource, HueCreatedRoom, HueRoomDefinition, HueTransport,
+};
 use anyhow::Result;
 
 const HUE_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -40,18 +42,88 @@ fn scene_recall_body(transition_ms: Option<u32>) -> serde_json::Value {
     body
 }
 
-fn validate_hue_v2_write_response(operation: &str, body: &str) -> Result<()> {
+fn room_definition_body(definition: &HueRoomDefinition) -> serde_json::Value {
+    let children = definition
+        .device_ids
+        .iter()
+        .map(|device_id| serde_json::json!({"rid": device_id, "rtype": "device"}))
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "children": children,
+        "metadata": {
+            "name": definition.name,
+            "archetype": definition.archetype,
+        }
+    })
+}
+
+fn room_rename_body(name: &str) -> serde_json::Value {
+    serde_json::json!({"metadata": {"name": name}})
+}
+
+fn validate_hue_v2_resource_write_response(
+    operation: &str,
+    body: &str,
+    expected_resource_id: &str,
+    expected_resource_type: &str,
+) -> Result<()> {
     let envelope: serde_json::Value = serde_json::from_str(body)
         .map_err(|error| anyhow::anyhow!("{operation} returned invalid JSON: {error}"))?;
-    if let Some(errors) = envelope.get("errors").and_then(|value| value.as_array()) {
-        if !errors.is_empty() {
-            return Err(anyhow::anyhow!(
-                "{operation} returned Hue errors: {}",
-                serde_json::Value::Array(errors.clone())
-            ));
+    let data = validate_hue_v2_envelope(operation, &envelope)?;
+    match data {
+        [receipt]
+            if receipt.get("rid").and_then(serde_json::Value::as_str)
+                == Some(expected_resource_id)
+                && receipt.get("rtype").and_then(serde_json::Value::as_str)
+                    == Some(expected_resource_type) =>
+        {
+            Ok(())
         }
+        _ => anyhow::bail!("{operation} did not confirm the expected Hue resource identity"),
     }
-    Ok(())
+}
+
+fn created_hue_v2_resource(
+    operation: &str,
+    expected_resource_type: &str,
+    body: &str,
+) -> Result<HueCreatedResource> {
+    let envelope: serde_json::Value = serde_json::from_str(body)
+        .map_err(|error| anyhow::anyhow!("{operation} returned invalid JSON: {error}"))?;
+    let data = validate_hue_v2_envelope(operation, &envelope)?;
+    match data {
+        [receipt]
+            if receipt.get("rtype").and_then(serde_json::Value::as_str)
+                == Some(expected_resource_type)
+                && receipt
+                    .get("rid")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|resource_id| !resource_id.trim().is_empty()) =>
+        {
+            Ok(HueCreatedResource {
+                resource_id: receipt["rid"].as_str().unwrap().to_string(),
+                resource_type: expected_resource_type.to_string(),
+            })
+        }
+        _ => anyhow::bail!(
+            "{operation} did not return exactly one created {expected_resource_type} identity"
+        ),
+    }
+}
+
+fn normalized_hue_api_path(path: &str) -> Result<&str> {
+    let normalized = path.trim_matches('/');
+    if normalized.is_empty()
+        || normalized.split('/').any(|component| {
+            component.is_empty()
+                || component == "."
+                || component == ".."
+                || component.contains(['?', '#', '\\'])
+        })
+    {
+        anyhow::bail!("Invalid Hue API path");
+    }
+    Ok(normalized)
 }
 
 fn hue_v1_error_description(error: &serde_json::Value) -> String {
@@ -59,15 +131,7 @@ fn hue_v1_error_description(error: &serde_json::Value) -> String {
         .get("type")
         .map(serde_json::Value::to_string)
         .unwrap_or_else(|| "unknown".to_string());
-    let address = error
-        .get("address")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("<unknown>");
-    let description = error
-        .get("description")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("<no description>");
-    format!("type {error_type} at {address}: {description}")
+    format!("type {error_type}")
 }
 
 fn hue_v1_errors(value: &serde_json::Value) -> Vec<String> {
@@ -94,6 +158,69 @@ fn validate_hue_v1_response(operation: &str, value: &serde_json::Value) -> Resul
     Ok(())
 }
 
+fn validated_v1_write_response(
+    method: &str,
+    response: reqwest::blocking::Response,
+) -> Result<serde_json::Value> {
+    let status = response.status();
+    let response_body = response.text().unwrap_or_default();
+    let operation = format!("{method} Hue V1 resource");
+    if !status.is_success() {
+        anyhow::bail!("{operation} failed with HTTP status {status}");
+    }
+    let value = serde_json::from_str(&response_body)
+        .map_err(|error| anyhow::anyhow!("{operation} returned invalid JSON: {error}"))?;
+    validate_hue_v1_response(&operation, &value)?;
+    Ok(value)
+}
+
+fn validate_hue_v1_update_success(
+    operation: &str,
+    value: &serde_json::Value,
+    path: &str,
+    body: &serde_json::Value,
+) -> Result<()> {
+    let fields = body
+        .as_object()
+        .filter(|fields| !fields.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("{operation} was given an invalid update body"))?;
+    for field in fields.keys() {
+        validate_hue_v1_success(operation, value, &format!("/{path}/{field}"))?;
+    }
+    Ok(())
+}
+
+fn validate_hue_v1_post_success(
+    operation: &str,
+    value: &serde_json::Value,
+    path: &str,
+) -> Result<()> {
+    validate_hue_v1_response(operation, value)?;
+    let entries = value
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("{operation} returned an invalid non-array response"))?;
+    let expected_prefix = format!("/{path}/");
+    let confirmed = entries.iter().any(|entry| {
+        entry
+            .get("success")
+            .and_then(serde_json::Value::as_object)
+            .is_some_and(|success| {
+                success
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|id| !id.trim().is_empty())
+                    || success.keys().any(|address| {
+                        address == &format!("/{path}") || address.starts_with(&expected_prefix)
+                    })
+            })
+    });
+    if confirmed {
+        Ok(())
+    } else {
+        anyhow::bail!("{operation} did not contain a valid Hue success receipt")
+    }
+}
+
 fn validate_hue_v1_success(
     operation: &str,
     value: &serde_json::Value,
@@ -111,7 +238,7 @@ fn validate_hue_v1_success(
     }) {
         return Ok(());
     }
-    anyhow::bail!("{operation} did not confirm success for {expected_address}: {value}")
+    anyhow::bail!("{operation} did not confirm the expected success address")
 }
 
 fn validate_hue_v1_delete_success(
@@ -137,7 +264,7 @@ fn validate_hue_v1_delete_success(
     }) {
         return Ok(());
     }
-    anyhow::bail!("{operation} did not confirm deletion of {expected_address}: {value}")
+    anyhow::bail!("{operation} did not confirm the expected deletion address")
 }
 
 fn hue_v1_is_exact_missing_resource(value: &serde_json::Value, expected_address: &str) -> bool {
@@ -239,8 +366,8 @@ fn validate_hue_v2_envelope<'a>(
         .ok_or_else(|| anyhow::anyhow!("{operation} returned an invalid V2 response"))?;
     if !errors.is_empty() {
         anyhow::bail!(
-            "{operation} returned Hue errors: {}",
-            serde_json::Value::Array(errors.clone())
+            "{operation} returned {} Hue application error(s)",
+            errors.len()
         );
     }
     value
@@ -299,12 +426,10 @@ fn zigbee_macs_for_device(
         })
         .collect::<BTreeSet<_>>();
     match macs.len() {
-        0 => anyhow::bail!(
-            "Hue V2 device {v2_device_id} has no usable zigbee_connectivity MAC address"
-        ),
+        0 => anyhow::bail!("Hue V2 device has no usable Zigbee connectivity MAC address"),
         1 => {}
         count => anyhow::bail!(
-            "Hue V2 device {v2_device_id} has {count} distinct zigbee_connectivity MAC addresses; refusing ambiguous V1 deletion"
+            "Hue V2 device has {count} distinct Zigbee connectivity MAC addresses; refusing ambiguous V1 deletion"
         ),
     }
     Ok(macs)
@@ -420,7 +545,8 @@ impl HueTransport for ReqwestHueTransport {
             .client
             .get(&url)
             .header("hue-application-key", username)
-            .send()?;
+            .send()
+            .map_err(|_| anyhow::anyhow!("Hue connection test failed"))?;
         Ok(resp.status().is_success())
     }
 
@@ -454,20 +580,22 @@ impl HueTransport for ReqwestHueTransport {
             .put(&url)
             .header("hue-application-key", username)
             .json(&body)
-            .send()?;
+            .send()
+            .map_err(|_| anyhow::anyhow!("Hue grouped-light update request failed"))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().unwrap_or_default();
             return Err(anyhow::anyhow!(
-                "PUT grouped_light/{} failed with status {}: {}",
-                grouped_light_id,
-                status,
-                body
+                "Hue grouped-light update failed with HTTP status {status}"
             ));
         }
-
-        Ok(())
+        let body = resp.text().unwrap_or_default();
+        validate_hue_v2_resource_write_response(
+            "Hue grouped-light update",
+            &body,
+            grouped_light_id,
+            "grouped_light",
+        )
     }
 
     fn set_light(
@@ -488,20 +616,17 @@ impl HueTransport for ReqwestHueTransport {
             .put(&url)
             .header("hue-application-key", username)
             .json(&body)
-            .send()?;
+            .send()
+            .map_err(|_| anyhow::anyhow!("Hue light update request failed"))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().unwrap_or_default();
             return Err(anyhow::anyhow!(
-                "PUT light/{} failed with status {}: {}",
-                light_id,
-                status,
-                body
+                "Hue light update failed with HTTP status {status}"
             ));
         }
-
-        Ok(())
+        let body = resp.text().unwrap_or_default();
+        validate_hue_v2_resource_write_response("Hue light update", &body, light_id, "light")
     }
 
     fn identify_light(&self, username: &str, light_id: &str) -> Result<()> {
@@ -513,20 +638,17 @@ impl HueTransport for ReqwestHueTransport {
             .put(&url)
             .header("hue-application-key", username)
             .json(&body)
-            .send()?;
+            .send()
+            .map_err(|_| anyhow::anyhow!("Hue light identify request failed"))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().unwrap_or_default();
             return Err(anyhow::anyhow!(
-                "PUT light/{} identify failed with status {}: {}",
-                light_id,
-                status,
-                body
+                "Hue light identify failed with HTTP status {status}"
             ));
         }
-
-        Ok(())
+        let body = resp.text().unwrap_or_default();
+        validate_hue_v2_resource_write_response("Hue light identify", &body, light_id, "light")
     }
 
     fn is_grouped_light_on(&self, username: &str, grouped_light_id: &str) -> Result<bool> {
@@ -540,18 +662,19 @@ impl HueTransport for ReqwestHueTransport {
             .client
             .get(&url)
             .header("hue-application-key", username)
-            .send()?;
+            .send()
+            .map_err(|_| anyhow::anyhow!("Hue grouped-light read request failed"))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             return Err(anyhow::anyhow!(
-                "GET grouped_light/{} failed with status {}",
-                grouped_light_id,
-                status
+                "Hue grouped-light read failed with HTTP status {status}"
             ));
         }
 
-        let envelope: HueV2Response<HueV2GroupedLight> = resp.json()?;
+        let envelope: HueV2Response<HueV2GroupedLight> = resp
+            .json()
+            .map_err(|_| anyhow::anyhow!("Hue grouped-light read returned invalid JSON"))?;
         Ok(envelope
             .data
             .first()
@@ -567,18 +690,19 @@ impl HueTransport for ReqwestHueTransport {
             .client
             .get(&url)
             .header("hue-application-key", username)
-            .send()?;
+            .send()
+            .map_err(|_| anyhow::anyhow!("Hue light read request failed"))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             return Err(anyhow::anyhow!(
-                "GET light/{} failed with status {}",
-                light_id,
-                status
+                "Hue light read failed with HTTP status {status}"
             ));
         }
 
-        let envelope: HueV2Response<HueV2Light> = resp.json()?;
+        let envelope: HueV2Response<HueV2Light> = resp
+            .json()
+            .map_err(|_| anyhow::anyhow!("Hue light read returned invalid JSON"))?;
         Ok(envelope
             .data
             .first()
@@ -594,34 +718,205 @@ impl HueTransport for ReqwestHueTransport {
             .client
             .get(&url)
             .header("hue-application-key", username)
-            .send()?;
+            .send()
+            .map_err(|_| anyhow::anyhow!("Hue V2 resource read request failed"))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body = resp.text().unwrap_or_default();
             return Err(anyhow::anyhow!(
-                "GET resource/{} failed with status {}: {}",
-                resource_type,
-                status,
-                body
+                "Hue V2 resource read failed with HTTP status {status}"
             ));
         }
 
-        Ok(resp.json()?)
+        let value = resp
+            .json()
+            .map_err(|_| anyhow::anyhow!("Hue V2 resource read returned invalid JSON"))?;
+        validate_hue_v2_envelope("GET Hue V2 resource", &value)?;
+        Ok(value)
+    }
+
+    fn create_resource(
+        &self,
+        username: &str,
+        resource_type: &str,
+        body: &serde_json::Value,
+    ) -> Result<HueCreatedResource> {
+        let resource_type = normalized_hue_api_path(resource_type)?;
+        if resource_type.contains('/') {
+            anyhow::bail!("Hue V2 resource type must be one path component");
+        }
+        let url = format!("{}/clip/v2/resource/{resource_type}", self.base_url());
+        let response = self
+            .client
+            .post(&url)
+            .header("hue-application-key", username)
+            .json(body)
+            .send()
+            .map_err(|_| anyhow::anyhow!("Hue V2 resource create request failed"))?;
+        let status = response.status();
+        let response_body = response.text().unwrap_or_default();
+        let operation = format!("POST Hue V2 {resource_type}");
+        if !status.is_success() {
+            anyhow::bail!("{operation} failed with HTTP status {status}");
+        }
+        created_hue_v2_resource(&operation, resource_type, &response_body)
+    }
+
+    fn update_resource(
+        &self,
+        username: &str,
+        resource_type: &str,
+        resource_id: &str,
+        body: &serde_json::Value,
+    ) -> Result<()> {
+        let resource_type = normalized_hue_api_path(resource_type)?;
+        let resource_id = normalized_hue_api_path(resource_id)?;
+        if resource_type.contains('/') || resource_id.contains('/') {
+            anyhow::bail!("Hue V2 resource type and ID must each be one path component");
+        }
+        let url = format!(
+            "{}/clip/v2/resource/{resource_type}/{resource_id}",
+            self.base_url()
+        );
+        let response = self
+            .client
+            .put(&url)
+            .header("hue-application-key", username)
+            .json(body)
+            .send()
+            .map_err(|_| anyhow::anyhow!("Hue V2 resource update request failed"))?;
+        let status = response.status();
+        let response_body = response.text().unwrap_or_default();
+        let operation = format!("PUT Hue V2 {resource_type}");
+        if !status.is_success() {
+            anyhow::bail!("{operation} failed with HTTP status {status}");
+        }
+        validate_hue_v2_resource_write_response(
+            &operation,
+            &response_body,
+            resource_id,
+            resource_type,
+        )
+    }
+
+    fn delete_resource(
+        &self,
+        username: &str,
+        resource_type: &str,
+        resource_id: &str,
+    ) -> Result<()> {
+        let resource_type = normalized_hue_api_path(resource_type)?;
+        let resource_id = normalized_hue_api_path(resource_id)?;
+        if resource_type.contains('/') || resource_id.contains('/') {
+            anyhow::bail!("Hue V2 resource type and ID must each be one path component");
+        }
+        let url = format!(
+            "{}/clip/v2/resource/{resource_type}/{resource_id}",
+            self.base_url()
+        );
+        let response = self
+            .client
+            .delete(&url)
+            .header("hue-application-key", username)
+            .send()
+            .map_err(|_| anyhow::anyhow!("Hue V2 resource delete request failed"))?;
+        let status = response.status();
+        let response_body = response.text().unwrap_or_default();
+        let operation = format!("DELETE Hue V2 {resource_type}");
+        if !status.is_success() {
+            anyhow::bail!("{operation} failed with HTTP status {status}");
+        }
+        validate_hue_v2_resource_write_response(
+            &operation,
+            &response_body,
+            resource_id,
+            resource_type,
+        )
+    }
+
+    fn get_v1(&self, username: &str, path: &str) -> Result<serde_json::Value> {
+        let path = normalized_hue_api_path(path)?;
+        let url = format!("{}/api/{username}/{path}", self.base_url());
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .map_err(|_| anyhow::anyhow!("Hue V1 resource read request failed"))?;
+        let status = response.status();
+        let response_body = response.text().unwrap_or_default();
+        let operation = "GET Hue V1 resource";
+        if !status.is_success() {
+            anyhow::bail!("{operation} failed with HTTP status {status}");
+        }
+        let value = serde_json::from_str(&response_body)
+            .map_err(|error| anyhow::anyhow!("{operation} returned invalid JSON: {error}"))?;
+        validate_hue_v1_response(&operation, &value)?;
+        Ok(value)
+    }
+
+    fn post_v1(
+        &self,
+        username: &str,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let path = normalized_hue_api_path(path)?;
+        let url = format!("{}/api/{username}/{path}", self.base_url());
+        let response = self
+            .client
+            .post(&url)
+            .json(body)
+            .send()
+            .map_err(|_| anyhow::anyhow!("Hue V1 resource create request failed"))?;
+        let value = validated_v1_write_response("POST", response)?;
+        validate_hue_v1_post_success("POST Hue V1 resource", &value, path)?;
+        Ok(value)
+    }
+
+    fn put_v1(
+        &self,
+        username: &str,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let path = normalized_hue_api_path(path)?;
+        let url = format!("{}/api/{username}/{path}", self.base_url());
+        let response = self
+            .client
+            .put(&url)
+            .json(body)
+            .send()
+            .map_err(|_| anyhow::anyhow!("Hue V1 resource update request failed"))?;
+        let value = validated_v1_write_response("PUT", response)?;
+        validate_hue_v1_update_success("PUT Hue V1 resource", &value, path, body)?;
+        Ok(value)
+    }
+
+    fn delete_v1(&self, username: &str, path: &str) -> Result<serde_json::Value> {
+        let path = normalized_hue_api_path(path)?;
+        let url = format!("{}/api/{username}/{path}", self.base_url());
+        let response = self
+            .client
+            .delete(&url)
+            .send()
+            .map_err(|_| anyhow::anyhow!("Hue V1 resource delete request failed"))?;
+        let value = validated_v1_write_response("DELETE", response)?;
+        validate_hue_v1_delete_success("DELETE Hue V1 resource", &value, &format!("/{path}"))?;
+        Ok(value)
     }
 
     fn search_new_lights(&self, username: &str, serial: &str) -> Result<Vec<HueBridgeSearchLight>> {
         let url = format!("{}/api/{}/lights", self.base_url(), username);
         let status_url = format!("{}/new", url);
-        let response = self.client.get(&status_url).send()?;
+        let response = self
+            .client
+            .get(&status_url)
+            .send()
+            .map_err(|_| anyhow::anyhow!("Hue light-search status request failed"))?;
         let status = response.status();
         let body = response.text().unwrap_or_default();
         if !status.is_success() {
-            anyhow::bail!(
-                "GET lights/new before search failed with status {}: {}",
-                status,
-                body
-            );
+            anyhow::bail!("GET lights/new before search failed with HTTP status {status}");
         }
         let before_value: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
             anyhow::anyhow!("GET lights/new before search returned invalid JSON: {error}")
@@ -637,11 +932,12 @@ impl HueTransport for ReqwestHueTransport {
             .client
             .post(&url)
             .json(&bridge_serial_search_body(serial))
-            .send()?;
+            .send()
+            .map_err(|_| anyhow::anyhow!("Hue light-search request failed"))?;
         let status = response.status();
         let body = response.text().unwrap_or_default();
         if !status.is_success() {
-            anyhow::bail!("POST lights search failed with status {}: {}", status, body);
+            anyhow::bail!("POST lights search failed with HTTP status {status}");
         }
         let value: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
             anyhow::anyhow!("POST lights search returned invalid JSON: {error}")
@@ -651,11 +947,15 @@ impl HueTransport for ReqwestHueTransport {
         let deadline = std::time::Instant::now() + HUE_BRIDGE_SEARCH_TIMEOUT;
         let mut saw_active = false;
         loop {
-            let response = self.client.get(&status_url).send()?;
+            let response = self
+                .client
+                .get(&status_url)
+                .send()
+                .map_err(|_| anyhow::anyhow!("Hue light-search status request failed"))?;
             let status = response.status();
             let body = response.text().unwrap_or_default();
             if !status.is_success() {
-                anyhow::bail!("GET lights/new failed with status {}: {}", status, body);
+                anyhow::bail!("GET lights/new failed with HTTP status {status}");
             }
             let value: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
                 anyhow::anyhow!("GET lights/new returned invalid JSON: {error}")
@@ -692,11 +992,15 @@ impl HueTransport for ReqwestHueTransport {
         let macs = zigbee_macs_for_device(&zigbee, v2_device_id)?;
 
         let lights_url = format!("{}/api/{}/lights", self.base_url(), username);
-        let response = self.client.get(&lights_url).send()?;
+        let response = self
+            .client
+            .get(&lights_url)
+            .send()
+            .map_err(|_| anyhow::anyhow!("Hue light inventory request failed"))?;
         let status = response.status();
         let body = response.text().unwrap_or_default();
         if !status.is_success() {
-            anyhow::bail!("GET lights failed with status {}: {}", status, body);
+            anyhow::bail!("GET lights failed with HTTP status {status}");
         }
         let value: serde_json::Value = serde_json::from_str(&body)
             .map_err(|error| anyhow::anyhow!("GET lights returned invalid JSON: {error}"))?;
@@ -704,25 +1008,23 @@ impl HueTransport for ReqwestHueTransport {
 
         for (index, legacy_id) in legacy_ids.iter().enumerate() {
             let delete_url = format!("{lights_url}/{legacy_id}");
-            let response = self.client.delete(&delete_url).send()?;
+            let response = self
+                .client
+                .delete(&delete_url)
+                .send()
+                .map_err(|_| anyhow::anyhow!("Hue light deletion request failed"))?;
             let status = response.status();
             let body = response.text().unwrap_or_default();
             if !status.is_success() {
-                anyhow::bail!(
-                    "DELETE light/{legacy_id} failed with status {}: {}",
-                    status,
-                    body
-                );
+                anyhow::bail!("Hue light deletion failed with HTTP status {status}");
             }
             let value: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
-                anyhow::anyhow!("DELETE light/{legacy_id} returned invalid JSON: {error}")
+                anyhow::anyhow!("Hue light deletion returned invalid JSON: {error}")
             })?;
             let expected_address = format!("/lights/{legacy_id}");
-            if let Err(error) = validate_hue_v1_delete_success(
-                &format!("DELETE light/{legacy_id}"),
-                &value,
-                &expected_address,
-            ) {
+            if let Err(error) =
+                validate_hue_v1_delete_success("Hue light deletion", &value, &expected_address)
+            {
                 if index > 0 && hue_v1_is_exact_missing_resource(&value, &expected_address) {
                     let v2_device_exists = self.device_exists(username, v2_device_id)?;
                     if can_tolerate_missing_v1_light(
@@ -734,7 +1036,7 @@ impl HueTransport for ReqwestHueTransport {
                         return Ok(());
                     }
                     anyhow::bail!(
-                        "Hue V1 light {legacy_id} disappeared during multi-light deletion, but V2 device {v2_device_id} is still present"
+                        "A Hue V1 light disappeared during multi-light deletion while its V2 device remained present"
                     );
                 }
                 return Err(error);
@@ -748,8 +1050,7 @@ impl HueTransport for ReqwestHueTransport {
             }
             if std::time::Instant::now() >= deadline {
                 anyhow::bail!(
-                    "Hue Bridge still reports V2 device {v2_device_id} after deleting V1 lights {}",
-                    legacy_ids.join(", ")
+                    "Hue Bridge still reports a V2 device after its V1 lights were deleted"
                 );
             }
             std::thread::sleep(HUE_BRIDGE_REMOVE_POLL_INTERVAL);
@@ -770,20 +1071,23 @@ impl HueTransport for ReqwestHueTransport {
             .put(&url)
             .header("hue-application-key", username)
             .json(&body)
-            .send()?;
+            .send()
+            .map_err(|_| anyhow::anyhow!("Hue scene recall request failed"))?;
 
         let status = resp.status();
         let response_body = resp.text().unwrap_or_default();
         if !status.is_success() {
             return Err(anyhow::anyhow!(
-                "PUT scene/{} recall failed with status {}: {}",
-                scene_id,
-                status,
-                response_body
+                "Hue scene recall failed with HTTP status {status}"
             ));
         }
 
-        validate_hue_v2_write_response(&format!("PUT scene/{scene_id} recall"), &response_body)
+        validate_hue_v2_resource_write_response(
+            "Hue scene recall",
+            &response_body,
+            scene_id,
+            "scene",
+        )
     }
 
     fn update_room_children(
@@ -802,19 +1106,50 @@ impl HueTransport for ReqwestHueTransport {
             .put(&url)
             .header("hue-application-key", username)
             .json(&serde_json::json!({"children": children}))
-            .send()?;
+            .send()
+            .map_err(|_| anyhow::anyhow!("Hue room membership update request failed"))?;
         let status = resp.status();
         let body = resp.text().unwrap_or_default();
         if !status.is_success() {
             return Err(anyhow::anyhow!(
-                "PUT room/{} failed with status {}: {}",
-                room_id,
-                status,
-                body
+                "Hue room membership update failed with HTTP status {status}"
             ));
         }
 
-        validate_hue_v2_write_response(&format!("PUT room/{room_id}"), &body)
+        validate_hue_v2_resource_write_response(
+            "Hue room membership update",
+            &body,
+            room_id,
+            "room",
+        )
+    }
+
+    fn create_room(
+        &self,
+        username: &str,
+        definition: &HueRoomDefinition,
+    ) -> Result<HueCreatedRoom> {
+        let created = self.create_resource(username, "room", &room_definition_body(definition))?;
+        Ok(HueCreatedRoom {
+            room_id: created.resource_id,
+        })
+    }
+
+    fn update_room(
+        &self,
+        username: &str,
+        room_id: &str,
+        definition: &HueRoomDefinition,
+    ) -> Result<()> {
+        self.update_resource(username, "room", room_id, &room_definition_body(definition))
+    }
+
+    fn rename_room(&self, username: &str, room_id: &str, name: &str) -> Result<()> {
+        self.update_resource(username, "room", room_id, &room_rename_body(name))
+    }
+
+    fn delete_room(&self, username: &str, room_id: &str) -> Result<()> {
+        self.delete_resource(username, "room", room_id)
     }
 }
 
@@ -848,25 +1183,100 @@ mod tests {
 
     #[test]
     fn hue_write_response_rejects_application_errors_on_success_status() {
-        validate_hue_v2_write_response(
+        validate_hue_v2_resource_write_response(
             "PUT scene/native-1 recall",
             r#"{"data":[{"rid":"native-1","rtype":"scene"}],"errors":[]}"#,
+            "native-1",
+            "scene",
         )
         .unwrap();
 
-        let error = validate_hue_v2_write_response(
+        let error = validate_hue_v2_resource_write_response(
             "PUT scene/native-1 recall",
             r#"{"data":[],"errors":[{"description":"scene unavailable"}]}"#,
+            "native-1",
+            "scene",
         )
         .unwrap_err();
-        assert!(error.to_string().contains("scene unavailable"));
+        assert!(error.to_string().contains("1 Hue application error"));
+        assert!(!error.to_string().contains("scene unavailable"));
     }
 
     #[test]
     fn hue_write_response_rejects_invalid_json() {
-        let error =
-            validate_hue_v2_write_response("PUT scene/native-1 recall", "not-json").unwrap_err();
+        let error = validate_hue_v2_resource_write_response(
+            "PUT scene/native-1 recall",
+            "not-json",
+            "native-1",
+            "scene",
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("invalid JSON"));
+    }
+
+    #[test]
+    fn generic_v2_write_receipt_must_match_exact_resource_identity() {
+        validate_hue_v2_resource_write_response(
+            "Hue resource update",
+            r#"{"data":[{"rid":"expected-id","rtype":"room"}],"errors":[]}"#,
+            "expected-id",
+            "room",
+        )
+        .unwrap();
+
+        for body in [
+            r#"{"data":[],"errors":[]}"#,
+            r#"{"data":[{"rid":"wrong-private-id","rtype":"room"}],"errors":[]}"#,
+            r#"{"data":[{"rid":"expected-id","rtype":"scene"}],"errors":[]}"#,
+            r#"{"data":[{"rid":"expected-id","rtype":"room"},{"rid":"extra","rtype":"room"}],"errors":[]}"#,
+        ] {
+            let error = validate_hue_v2_resource_write_response(
+                "Hue resource update",
+                body,
+                "expected-id",
+                "room",
+            )
+            .unwrap_err();
+            let message = error.to_string();
+            assert!(message.contains("expected Hue resource identity"));
+            assert!(!message.contains("expected-id"));
+            assert!(!message.contains("wrong-private-id"));
+        }
+    }
+
+    #[test]
+    fn generic_v1_write_receipts_require_exact_success_addresses() {
+        let update = serde_json::json!([{
+            "success": {"/rules/private-rule/status": "disabled"}
+        }]);
+        validate_hue_v1_update_success(
+            "Hue V1 update",
+            &update,
+            "rules/private-rule",
+            &serde_json::json!({"status": "disabled"}),
+        )
+        .unwrap();
+        let error = validate_hue_v1_update_success(
+            "Hue V1 update",
+            &serde_json::json!([{"success": {"/rules/other/status": "disabled"}}]),
+            "rules/private-rule",
+            &serde_json::json!({"status": "disabled"}),
+        )
+        .unwrap_err();
+        assert!(!error.to_string().contains("private-rule"));
+
+        validate_hue_v1_post_success(
+            "Hue V1 create",
+            &serde_json::json!([{"success": {"id": "new-private-id"}}]),
+            "rules",
+        )
+        .unwrap();
+        assert!(validate_hue_v1_post_success(
+            "Hue V1 create",
+            &serde_json::json!([{"success": {"unrelated": true}}]),
+            "rules",
+        )
+        .is_err());
     }
 
     #[test]
@@ -949,8 +1359,10 @@ mod tests {
         )
         .unwrap_err();
         let message = error.to_string();
-        assert!(message.contains("type 901 at /lights: internal error"));
-        assert!(message.contains("type 3 at /lights/7: missing resource"));
+        assert!(message.contains("type 901"));
+        assert!(message.contains("type 3"));
+        assert!(!message.contains("/lights/7"));
+        assert!(!message.contains("missing resource"));
 
         validate_hue_v1_delete_success(
             "DELETE light/7",
@@ -976,6 +1388,72 @@ mod tests {
             "/lights/7",
         )
         .is_err());
+    }
+
+    #[test]
+    fn hue_application_errors_do_not_echo_names_or_secrets() {
+        let secret = "customer-secret-application-key";
+        let room_name = "Tim's private bedroom";
+        let body = serde_json::json!({
+            "data": [],
+            "errors": [{
+                "description": format!("could not update {room_name} with {secret}"),
+                "address": "/clip/v2/resource/room/private-room-id"
+            }]
+        })
+        .to_string();
+        let error =
+            validate_hue_v2_resource_write_response("PUT room", &body, "private-room-id", "room")
+                .unwrap_err();
+        let message = error.to_string();
+        assert!(!message.contains(secret));
+        assert!(!message.contains(room_name));
+        assert!(!message.contains("private-room-id"));
+    }
+
+    #[test]
+    fn room_control_plane_bodies_and_created_identity_are_typed() {
+        let definition = HueRoomDefinition {
+            name: "Office".to_string(),
+            archetype: "office".to_string(),
+            device_ids: vec!["device-b".to_string(), "device-a".to_string()],
+        };
+        assert_eq!(
+            room_definition_body(&definition),
+            serde_json::json!({
+                "children": [
+                    {"rid": "device-b", "rtype": "device"},
+                    {"rid": "device-a", "rtype": "device"}
+                ],
+                "metadata": {"name": "Office", "archetype": "office"}
+            })
+        );
+        assert_eq!(
+            room_rename_body("Studio"),
+            serde_json::json!({
+                "metadata": {"name": "Studio"}
+            })
+        );
+        assert_eq!(
+            created_hue_v2_resource(
+                "POST room",
+                "room",
+                r#"{"data":[{"rid":"room-1","rtype":"room"}],"errors":[]}"#,
+            )
+            .unwrap(),
+            HueCreatedResource {
+                resource_id: "room-1".to_string(),
+                resource_type: "room".to_string(),
+            }
+        );
+        let wrong_type = created_hue_v2_resource(
+            "POST room",
+            "room",
+            r#"{"data":[{"rid":"private-id","rtype":"scene"}],"errors":[]}"#,
+        )
+        .unwrap_err();
+        assert!(!wrong_type.to_string().contains("private-id"));
+        assert!(normalized_hue_api_path("../../config").is_err());
     }
 
     #[test]

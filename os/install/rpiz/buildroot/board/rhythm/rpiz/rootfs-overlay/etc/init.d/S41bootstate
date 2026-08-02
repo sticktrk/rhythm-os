@@ -10,6 +10,10 @@ DATA_STATE_FILE="${RHYTHM_BOOTSTATE_DATA_FILE:-${DATA_STATE_DIR}/bootstate.env}"
 DATA_DIR="${RHYTHM_DATA_DIR:-/data}"
 ROLLBACK_REQUIRED_LATCH="${RHYTHM_BOOTSTATE_ROLLBACK_REQUIRED_LATCH:-/run/rhythm-rollback-required}"
 SERVER_BIN="${RHYTHM_SERVER_BIN:-/usr/bin/rhythm-server}"
+WIFI_INIT="${RHYTHM_BOOTSTATE_WIFI_INIT:-/etc/init.d/S42wifi}"
+NETWORK_READY_PROBE="${RHYTHM_BOOTSTATE_NETWORK_READY_PROBE:-}"
+NETWORK_WAIT_ATTEMPTS="${RHYTHM_BOOTSTATE_NETWORK_WAIT_ATTEMPTS:-15}"
+NETWORK_WAIT_SLEEP_SECS="${RHYTHM_BOOTSTATE_NETWORK_WAIT_SLEEP_SECS:-1}"
 CMDLINE_FILE="${RHYTHM_CMDLINE_FILE:-${BOOT_MOUNT}/cmdline.txt}"
 PROC_CMDLINE="${RHYTHM_PROC_CMDLINE:-/proc/cmdline}"
 HASH_HEADER_PREFIX="# RHYTHM_BOOTSTATE_HASH="
@@ -86,6 +90,81 @@ scrub_local_ble_rollback_state() {
         "$data_dir/pairing_metadata.json.tmp" \
         "$data_dir/server_metadata.json.tmp"
     sync_path "$data_dir"
+}
+
+rollback_network_ready() {
+    if [ -n "$NETWORK_READY_PROBE" ]; then
+        [ -x "$NETWORK_READY_PROBE" ] && "$NETWORK_READY_PROBE"
+        return
+    fi
+
+    ifconfig -a 2>/dev/null | awk '
+        $1 == "inet" {
+            address = $2
+            sub(/^addr:/, "", address)
+            if (address != "0.0.0.0" && address !~ /^127\./) {
+                found = 1
+            }
+        }
+        END { exit(found ? 0 : 1) }
+    '
+}
+
+wait_for_rollback_network() {
+    local attempt
+
+    case "$NETWORK_WAIT_ATTEMPTS" in
+        ""|*[!0-9]*)
+            printf 'S41bootstate: invalid rollback network wait attempt count: %s\n' "$NETWORK_WAIT_ATTEMPTS" >&2
+            return 1
+            ;;
+    esac
+    case "$NETWORK_WAIT_SLEEP_SECS" in
+        ""|*[!0-9]*)
+            printf 'S41bootstate: invalid rollback network wait interval: %s\n' "$NETWORK_WAIT_SLEEP_SECS" >&2
+            return 1
+            ;;
+    esac
+
+    attempt=1
+    while [ "$attempt" -le "$NETWORK_WAIT_ATTEMPTS" ]; do
+        if rollback_network_ready; then
+            return 0
+        fi
+        if [ "$attempt" -lt "$NETWORK_WAIT_ATTEMPTS" ]; then
+            sleep "$NETWORK_WAIT_SLEEP_SECS"
+        fi
+        attempt=$((attempt + 1))
+    done
+
+    printf 'S41bootstate: network did not become ready after %s checks\n' "$NETWORK_WAIT_ATTEMPTS" >&2
+    return 1
+}
+
+bring_up_rollback_network() {
+    if [ ! -x "$WIFI_INIT" ]; then
+        printf 'S41bootstate: Wi-Fi init is unavailable during Hue rollback preparation\n' >&2
+        return 1
+    fi
+    if ! "$WIFI_INIT" start; then
+        printf 'S41bootstate: Wi-Fi init failed during Hue rollback preparation\n' >&2
+        return 1
+    fi
+    wait_for_rollback_network
+}
+
+restore_hue_before_rollback() {
+    if ! bring_up_rollback_network; then
+        # The restore helper owns the durable manifest check. It must still run
+        # after a bounded network wait so an offline appliance with no managed
+        # Hue state can roll back, while a real pending restore fails closed.
+        printf 'S41bootstate: network readiness unavailable; running the Hue rollback check before changing slots\n' >&2
+    fi
+    if [ ! -x "$SERVER_BIN" ]; then
+        printf 'S41bootstate: cannot restore Hue controller state; server binary is unavailable\n' >&2
+        return 1
+    fi
+    "$SERVER_BIN" --data-dir "$DATA_DIR" --restore-hue-before-rollback
 }
 
 atomic_write_text() {
@@ -306,6 +385,7 @@ rollback_pending_boot() {
     # durably commit that compatibility boundary before changing boot target.
     # Any failure leaves the candidate slot armed so the next attempt retries
     # instead of handing sensitive state to the previous binary.
+    restore_hue_before_rollback
     scrub_local_ble_rollback_state
     rewrite_cmdline_slot "$rollback_to"
 

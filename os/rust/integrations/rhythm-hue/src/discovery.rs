@@ -3,16 +3,18 @@
 //! Implements `HubDiscovery` by querying the Hue bridge V2 API for rooms
 //! and typed devices (buttons + motion sensors).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::{debug, info, warn};
 
 use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_core::DeviceRegistry;
 use rhythm_os::canonical::identity::{DiscoveredIdentity, HardwareId};
-use rhythm_os::discovery::{DiscoveredDevice, DiscoveredMotionState, DiscoveredRoom, HubDiscovery};
+use rhythm_os::discovery::{
+    DiscoveredDevice, DiscoveredMotionState, DiscoveredRoom, HubDiscovery, ManagedSceneProjection,
+};
 use rhythm_os::registry::HubDeviceRegistry;
 use rhythm_os::scenes::{
     native_scene_id, LightSceneColor, LightSceneLayer, LightSceneOutput, LightScenePower,
@@ -20,6 +22,23 @@ use rhythm_os::scenes::{
 };
 
 use crate::transport::HueTransport;
+
+struct HueDiscoveryOwnershipSource {
+    storage: Arc<dyn rhythm_os::storage::Storage>,
+    bridge_id: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum HueDiscoveryMode {
+    /// Import the bridge's own rooms, automations, and scenes during the
+    /// pre-takeover discovery used to build the immutable baseline.
+    #[default]
+    BridgeNative,
+    /// Expose only rooms whose explicit IDs are in the ownership manifest.
+    /// Native Hue scenes and automations remain hidden while Rhythm owns the
+    /// bridge.
+    RhythmAuthoritative { managed_room_ids: BTreeSet<String> },
+}
 
 /// Hue V2 discovery using the bridge REST API.
 ///
@@ -34,20 +53,107 @@ pub struct HueDiscovery<H: HueTransport> {
     device_to_room_cache: Mutex<Option<HashMap<String, String>>>,
     /// Cached room_id → room_name mapping, populated by `discover_rooms()`.
     room_name_cache: Mutex<Option<HashMap<String, String>>>,
+    mode: Mutex<HueDiscoveryMode>,
+    ownership_source: Option<HueDiscoveryOwnershipSource>,
 }
 
 impl<H: HueTransport> HueDiscovery<H> {
     pub fn new(transport: Arc<H>, username: String) -> Self {
+        Self::new_with_mode(transport, username, HueDiscoveryMode::BridgeNative)
+    }
+
+    pub fn new_with_mode(transport: Arc<H>, username: String, mode: HueDiscoveryMode) -> Self {
         Self {
             transport,
             username,
             device_to_room_cache: Mutex::new(None),
             room_name_cache: Mutex::new(None),
+            mode: Mutex::new(mode),
+            ownership_source: None,
         }
     }
 
+    /// Build discovery whose authoritative room allowlist is reloaded from the
+    /// durable bridge-identity manifest on every synchronization. This prevents
+    /// newly created or moved managed rooms from being hidden by a stale cache.
+    pub fn new_with_ownership_storage(
+        transport: Arc<H>,
+        username: String,
+        storage: Arc<dyn rhythm_os::storage::Storage>,
+    ) -> Result<Self> {
+        let bridge_id = crate::ownership::connected_hue_bridge_id(transport.as_ref(), &username)?;
+        Ok(Self {
+            transport,
+            username,
+            device_to_room_cache: Mutex::new(None),
+            room_name_cache: Mutex::new(None),
+            mode: Mutex::new(HueDiscoveryMode::BridgeNative),
+            ownership_source: Some(HueDiscoveryOwnershipSource { storage, bridge_id }),
+        })
+    }
+
+    pub fn new_authoritative(
+        transport: Arc<H>,
+        username: String,
+        managed_room_ids: BTreeSet<String>,
+    ) -> Self {
+        Self::new_with_mode(
+            transport,
+            username,
+            HueDiscoveryMode::RhythmAuthoritative { managed_room_ids },
+        )
+    }
+
+    fn authoritative_room_ids(&self) -> Result<Option<BTreeSet<String>>> {
+        if let Some(source) = &self.ownership_source {
+            return Ok(crate::ownership::load_controller_ownership(
+                source.storage.as_ref(),
+                &source.bridge_id,
+            )?
+            .filter(|state| state.phase.is_managed())
+            .map(|state| state.managed_room_ids()));
+        }
+        let mode = self
+            .mode
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Failed to lock Hue discovery mode"))?;
+        Ok(match &*mode {
+            HueDiscoveryMode::BridgeNative => None,
+            HueDiscoveryMode::RhythmAuthoritative { managed_room_ids } => {
+                Some(managed_room_ids.clone())
+            }
+        })
+    }
+
+    fn is_authoritative(&self) -> Result<bool> {
+        Ok(self.authoritative_room_ids()?.is_some())
+    }
+
+    fn room_is_visible(managed_room_ids: Option<&BTreeSet<String>>, room_id: &str) -> bool {
+        managed_room_ids.is_none_or(|managed_room_ids| managed_room_ids.contains(room_id))
+    }
+
+    /// Switch discovery scope after takeover/release and invalidate room caches.
+    pub fn set_mode(&self, mode: HueDiscoveryMode) -> Result<()> {
+        *self
+            .mode
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Failed to lock Hue discovery mode"))? = mode;
+        *self
+            .device_to_room_cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Failed to lock device_to_room cache"))? = None;
+        *self
+            .room_name_cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Failed to lock room_name cache"))? = None;
+        Ok(())
+    }
+
     /// Build device_id → room_id mapping from the room JSON array.
-    fn build_device_to_room(rooms_data: &[serde_json::Value]) -> HashMap<String, String> {
+    fn build_device_to_room<'a>(
+        rooms_data: impl IntoIterator<Item = &'a serde_json::Value>,
+    ) -> HashMap<String, String> {
         let mut map = HashMap::new();
         for room_json in rooms_data {
             let room_id = match room_json.pointer("/id").and_then(|v| v.as_str()) {
@@ -305,6 +411,69 @@ impl<H: HueTransport> HueDiscovery<H> {
         map
     }
 
+    /// Refuse to publish an identity snapshot that cannot account for the
+    /// bridge topology used by room synchronization. Hue resource collection
+    /// responses are complete snapshots, so a room child missing from the
+    /// device response (or a light missing its durable Zigbee identity) is a
+    /// partial read rather than evidence that the device disappeared.
+    fn validate_identity_completeness(
+        device_data: &[serde_json::Value],
+        device_to_room: &HashMap<String, String>,
+        zigbee_mac_map: &HashMap<String, String>,
+        identities: &[DiscoveredIdentity],
+    ) -> Result<()> {
+        let device_ids = device_data
+            .iter()
+            .filter_map(|device| device.get("id").and_then(serde_json::Value::as_str))
+            .collect::<BTreeSet<_>>();
+
+        if device_to_room
+            .keys()
+            .any(|device_id| !device_ids.contains(device_id.as_str()))
+        {
+            anyhow::bail!(
+                "Hue identity discovery is incomplete: a room child is absent from the device response"
+            );
+        }
+
+        if zigbee_mac_map
+            .keys()
+            .any(|device_id| !device_ids.contains(device_id.as_str()))
+        {
+            anyhow::bail!(
+                "Hue identity discovery is incomplete: a Zigbee device is absent from the device response"
+            );
+        }
+
+        let discovered_light_ids = identities
+            .iter()
+            .filter(|identity| identity.device_type == DeviceType::Light)
+            .map(|identity| identity.native_id.as_str())
+            .collect::<BTreeSet<_>>();
+        for device in device_data {
+            if Self::infer_device_type(device.get("services").and_then(|value| value.as_array()))
+                != Some(DeviceType::Light)
+            {
+                continue;
+            }
+            let device_id = device
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Hue identity discovery is incomplete: a light has no device identity"
+                    )
+                })?;
+            if !discovered_light_ids.contains(device_id) {
+                anyhow::bail!(
+                    "Hue identity discovery is incomplete: a light is missing durable Zigbee identity"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     fn scene_output(action: &serde_json::Value) -> Option<LightSceneOutput> {
         let power = match action.pointer("/on/on").and_then(|value| value.as_bool()) {
             Some(false) => LightScenePower::Off,
@@ -464,7 +633,10 @@ impl<H: HueTransport> HueDiscovery<H> {
 impl<H: HueTransport> HueDiscovery<H> {
     /// Return cached device_id -> room_id mapping, fetching rooms on demand.
     fn cached_or_fetch_device_to_room(&self) -> Result<HashMap<String, String>> {
-        let device_to_room = {
+        let managed_room_ids = self.authoritative_room_ids()?;
+        let device_to_room = if self.ownership_source.is_some() {
+            None
+        } else {
             let cache = self
                 .device_to_room_cache
                 .lock()
@@ -484,7 +656,15 @@ impl<H: HueTransport> HueDiscovery<H> {
                     .get("data")
                     .and_then(|v| v.as_array())
                     .unwrap_or(&empty);
-                Ok(Self::build_device_to_room(rooms_data))
+                Ok(Self::build_device_to_room(rooms_data.iter().filter(
+                    |room| {
+                        room.get("id")
+                            .and_then(serde_json::Value::as_str)
+                            .is_some_and(|room_id| {
+                                Self::room_is_visible(managed_room_ids.as_ref(), room_id)
+                            })
+                    },
+                )))
             }
         }
     }
@@ -549,6 +729,7 @@ impl<H: HueTransport + 'static> HubDiscovery for HueDiscovery<H> {
     }
 
     fn discover_rooms(&self) -> Result<Vec<DiscoveredRoom>> {
+        let managed_room_ids = self.authoritative_room_ids()?;
         let resp = self.transport.get_resources(&self.username, "room")?;
         let data = resp
             .get("data")
@@ -564,6 +745,9 @@ impl<H: HueTransport + 'static> HubDiscovery for HueDiscovery<H> {
                 Some(id) => id.to_string(),
                 None => continue,
             };
+            if !Self::room_is_visible(managed_room_ids.as_ref(), &id) {
+                continue;
+            }
 
             let name = room_json
                 .pointer("/metadata/name")
@@ -660,6 +844,9 @@ impl<H: HueTransport + 'static> HubDiscovery for HueDiscovery<H> {
     }
 
     fn discover_scenes(&self, room_id: &str) -> Result<Vec<SceneDefinition>> {
+        if self.is_authoritative()? {
+            return Ok(Vec::new());
+        }
         let response = self.transport.get_resources(&self.username, "scene")?;
         let scenes = Self::scenes_for_room(&response, room_id);
         info!(
@@ -672,8 +859,66 @@ impl<H: HueTransport + 'static> HubDiscovery for HueDiscovery<H> {
     }
 
     fn recall_scene(&self, scene_id: &str, transition_ms: Option<u32>) -> Result<()> {
+        if self.is_authoritative()? {
+            anyhow::bail!("Native Hue scene recall is disabled while Rhythm owns the bridge");
+        }
         self.transport
             .recall_scene(&self.username, scene_id, transition_ms)
+    }
+
+    fn apply_managed_scene_projection(
+        &self,
+        projection: &ManagedSceneProjection,
+        transition_ms: Option<u32>,
+        ephemeral: bool,
+    ) -> Result<bool> {
+        let Some(source) = &self.ownership_source else {
+            return Ok(false);
+        };
+        let operation_lock = crate::ownership::controller_operation_lock(&source.bridge_id);
+        let _operation = operation_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Failed to lock Hue controller operations"))?;
+        let mut ownership = crate::ownership::load_controller_ownership(
+            source.storage.as_ref(),
+            &source.bridge_id,
+        )?
+        .filter(|ownership| ownership.phase == crate::ownership::HueOwnershipPhase::Active)
+        .ok_or_else(|| anyhow::anyhow!("Hue controller authority is not active"))?;
+        crate::managed_scenes::apply_managed_scene(
+            source.storage.as_ref(),
+            &mut ownership,
+            self.transport.as_ref(),
+            &self.username,
+            projection,
+            transition_ms,
+            ephemeral,
+        )?;
+        Ok(true)
+    }
+
+    fn delete_managed_scene_projection(&self, scene_id: &str) -> Result<bool> {
+        let Some(source) = &self.ownership_source else {
+            return Ok(false);
+        };
+        let operation_lock = crate::ownership::controller_operation_lock(&source.bridge_id);
+        let _operation = operation_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Failed to lock Hue controller operations"))?;
+        let mut ownership = crate::ownership::load_controller_ownership(
+            source.storage.as_ref(),
+            &source.bridge_id,
+        )?
+        .filter(|ownership| ownership.phase == crate::ownership::HueOwnershipPhase::Active)
+        .ok_or_else(|| anyhow::anyhow!("Hue controller authority is not active"))?;
+        crate::managed_scenes::delete_managed_scene(
+            source.storage.as_ref(),
+            &mut ownership,
+            self.transport.as_ref(),
+            &self.username,
+            scene_id,
+        )?;
+        Ok(true)
     }
 
     /// Discover all devices with full hardware identity information.
@@ -694,34 +939,34 @@ impl<H: HueTransport + 'static> HubDiscovery for HueDiscovery<H> {
         };
 
         // Fetch all devices
-        let dev_resp = self.transport.get_resources(&self.username, "device")?;
-        let empty = Vec::new();
+        let dev_resp = self
+            .transport
+            .get_resources(&self.username, "device")
+            .context("Failed to fetch Hue device identities")?;
         let dev_data = dev_resp
             .get("data")
             .and_then(|v| v.as_array())
-            .unwrap_or(&empty);
+            .ok_or_else(|| anyhow::anyhow!("No data array in Hue device identity response"))?;
 
         // Fetch zigbee_connectivity for MAC addresses
-        let zigbee_mac_map = match self
+        let zigbee_resp = self
             .transport
             .get_resources(&self.username, "zigbee_connectivity")
-        {
-            Ok(zigbee_resp) => {
-                let empty_z = Vec::new();
-                let zigbee_data = zigbee_resp
-                    .get("data")
-                    .and_then(|v| v.as_array())
-                    .unwrap_or(&empty_z);
-                Self::build_zigbee_mac_map(zigbee_data)
-            }
-            Err(e) => {
-                warn!(target: "hue_discovery", "Failed to fetch zigbee_connectivity: {}", e);
-                HashMap::new()
-            }
-        };
+            .context("Failed to fetch Hue Zigbee identities")?;
+        let zigbee_data = zigbee_resp
+            .get("data")
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| anyhow::anyhow!("No data array in Hue Zigbee identity response"))?;
+        let zigbee_mac_map = Self::build_zigbee_mac_map(zigbee_data);
 
         let identities =
             Self::extract_identities(dev_data, &device_to_room, &room_names, &zigbee_mac_map);
+        Self::validate_identity_completeness(
+            dev_data,
+            &device_to_room,
+            &zigbee_mac_map,
+            &identities,
+        )?;
         let light_count = identities
             .iter()
             .filter(|i| i.device_type == DeviceType::Light)
@@ -758,6 +1003,9 @@ impl<H: HueTransport + 'static> HubDiscovery for HueDiscovery<H> {
     }
 
     fn discover_configured_devices(&self) -> Result<Vec<(String, String)>> {
+        if self.is_authoritative()? {
+            return Ok(Vec::new());
+        }
         let resp = self
             .transport
             .get_resources(&self.username, "behavior_instance")?;
@@ -767,10 +1015,7 @@ impl<H: HueTransport + 'static> HubDiscovery for HueDiscovery<H> {
             .and_then(|v| v.as_array())
             .unwrap_or(&empty);
 
-        debug!(target: "hue_discovery",
-            "behavior_instance response: {} entries, raw: {}",
-            data.len(),
-            serde_json::to_string_pretty(&resp).unwrap_or_default());
+        debug!(target: "hue_discovery", "behavior_instance response: {} entries", data.len());
 
         let mut mappings = Vec::new();
         for bi in data {
@@ -920,11 +1165,17 @@ mod tests {
     #[derive(Default)]
     struct StaticHueTransport {
         resources: HashMap<String, serde_json::Value>,
+        failed_resources: BTreeSet<String>,
     }
 
     impl StaticHueTransport {
         fn with_resource(mut self, resource_type: &str, response: serde_json::Value) -> Self {
             self.resources.insert(resource_type.to_string(), response);
+            self
+        }
+
+        fn failing_resource(mut self, resource_type: &str) -> Self {
+            self.failed_resources.insert(resource_type.to_string());
             self
         }
     }
@@ -985,6 +1236,9 @@ mod tests {
             _username: &str,
             resource_type: &str,
         ) -> anyhow::Result<serde_json::Value> {
+            if self.failed_resources.contains(resource_type) {
+                anyhow::bail!("injected Hue resource failure");
+            }
             Ok(self
                 .resources
                 .get(resource_type)
@@ -1172,6 +1426,115 @@ mod tests {
                 ("behavior-direct".to_string(), "dev-button".to_string()),
                 ("behavior-dependee".to_string(), "dev-motion".to_string())
             ]
+        );
+    }
+
+    #[test]
+    fn identity_discovery_rejects_missing_or_non_array_device_data() {
+        for malformed_response in [
+            serde_json::json!({}),
+            serde_json::json!({"data": null}),
+            serde_json::json!({"data": {}}),
+        ] {
+            let transport = StaticHueTransport::default()
+                .with_resource("device", malformed_response)
+                .with_resource("zigbee_connectivity", serde_json::json!({"data": []}));
+            let discovery = HueDiscovery::new(Arc::new(transport), "test-user".to_string());
+
+            let error = discovery.discover_identities().unwrap_err();
+
+            assert!(
+                error
+                    .to_string()
+                    .contains("No data array in Hue device identity response"),
+                "unexpected error: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn identity_discovery_propagates_zigbee_connectivity_failure() {
+        let transport = StaticHueTransport::default()
+            .with_resource("device", serde_json::json!({"data": []}))
+            .failing_resource("zigbee_connectivity");
+        let discovery = HueDiscovery::new(Arc::new(transport), "test-user".to_string());
+
+        let error = discovery.discover_identities().unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("Failed to fetch Hue Zigbee identities"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn identity_discovery_accepts_complete_empty_snapshots() {
+        let transport = StaticHueTransport::default()
+            .with_resource("room", serde_json::json!({"data": []}))
+            .with_resource("device", serde_json::json!({"data": []}))
+            .with_resource("zigbee_connectivity", serde_json::json!({"data": []}));
+        let discovery = HueDiscovery::new(Arc::new(transport), "test-user".to_string());
+
+        let identities = discovery.discover_identities().unwrap();
+
+        assert!(identities.is_empty());
+    }
+
+    #[test]
+    fn identity_discovery_rejects_room_child_missing_from_device_snapshot() {
+        let transport = StaticHueTransport::default()
+            .with_resource(
+                "room",
+                serde_json::json!({"data": [{
+                    "id": "room-1",
+                    "children": [{"rtype": "device", "rid": "missing-device"}],
+                    "services": [{"rtype": "grouped_light", "rid": "grouped-1"}]
+                }]}),
+            )
+            .with_resource("device", serde_json::json!({"data": []}))
+            .with_resource("zigbee_connectivity", serde_json::json!({"data": []}));
+        let discovery = HueDiscovery::new(Arc::new(transport), "test-user".to_string());
+
+        let error = discovery.discover_identities().unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("a room child is absent from the device response"),
+            "unexpected error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn identity_discovery_rejects_light_without_durable_zigbee_identity() {
+        let transport = StaticHueTransport::default()
+            .with_resource(
+                "room",
+                serde_json::json!({"data": [{
+                    "id": "room-1",
+                    "children": [{"rtype": "device", "rid": "light-device"}],
+                    "services": [{"rtype": "grouped_light", "rid": "grouped-1"}]
+                }]}),
+            )
+            .with_resource(
+                "device",
+                serde_json::json!({"data": [{
+                    "id": "light-device",
+                    "services": [{"rtype": "light", "rid": "light-service"}]
+                }]}),
+            )
+            .with_resource("zigbee_connectivity", serde_json::json!({"data": []}));
+        let discovery = HueDiscovery::new(Arc::new(transport), "test-user".to_string());
+
+        let error = discovery.discover_identities().unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("a light is missing durable Zigbee identity"),
+            "unexpected error: {error:#}"
         );
     }
 
@@ -1410,6 +1773,79 @@ mod tests {
         assert_eq!(states[0].sensor_id, "motion-svc-1");
         assert_eq!(states[0].room_id, "room-1");
         assert!(states[0].is_active);
+    }
+
+    #[test]
+    fn authoritative_discovery_exposes_only_manifest_rooms_and_hides_native_control_plane() {
+        let transport = StaticHueTransport::default()
+            .with_resource(
+                "room",
+                serde_json::json!({"data": [
+                    {
+                        "id": "managed-room",
+                        "metadata": {"name": "Managed"},
+                        "children": [{"rtype": "device", "rid": "managed-button"}],
+                        "services": [{"rtype": "grouped_light", "rid": "managed-group"}]
+                    },
+                    {
+                        "id": "native-room",
+                        "metadata": {"name": "Native"},
+                        "children": [{"rtype": "device", "rid": "native-button"}],
+                        "services": [{"rtype": "grouped_light", "rid": "native-group"}]
+                    }
+                ]}),
+            )
+            .with_resource(
+                "device",
+                serde_json::json!({"data": [
+                    {
+                        "id": "managed-button",
+                        "services": [{"rtype": "button", "rid": "button-1"}]
+                    },
+                    {
+                        "id": "native-button",
+                        "services": [{"rtype": "button", "rid": "button-2"}]
+                    }
+                ]}),
+            )
+            .with_resource(
+                "scene",
+                serde_json::json!({"data": [{
+                    "id": "native-scene",
+                    "group": {"rtype": "room", "rid": "managed-room"},
+                    "metadata": {"name": "Native scene"},
+                    "actions": []
+                }]}),
+            )
+            .with_resource(
+                "behavior_instance",
+                serde_json::json!({"data": [{
+                    "id": "native-behavior",
+                    "configuration": {
+                        "device": {"rtype": "device", "rid": "managed-button"}
+                    }
+                }]}),
+            );
+        let discovery = HueDiscovery::new_authoritative(
+            Arc::new(transport),
+            "test-user".to_string(),
+            BTreeSet::from(["managed-room".to_string()]),
+        );
+
+        let rooms = discovery.discover_rooms().unwrap();
+        assert_eq!(rooms.len(), 1);
+        assert_eq!(rooms[0].id, "managed-room");
+        let devices = discovery.discover_devices().unwrap();
+        assert_eq!(devices.len(), 2);
+        assert!(devices
+            .iter()
+            .any(|device| { device.device_id == "native-button" && device.room_id.is_none() }));
+        assert!(discovery
+            .discover_scenes("managed-room")
+            .unwrap()
+            .is_empty());
+        assert!(discovery.discover_configured_devices().unwrap().is_empty());
+        assert!(discovery.recall_scene("native-scene", None).is_err());
     }
 
     #[test]

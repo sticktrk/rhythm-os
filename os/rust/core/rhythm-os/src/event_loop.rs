@@ -822,7 +822,69 @@ fn spawn_motion_dim_action(state: &SharedState, node_id: String, factor: f32) {
     }
 }
 
-fn spawn_reconnect_sync(state: &SharedState, hub_key: &crate::canonical::identity::HubKey) {
+fn authoritative_reconnect_sync(
+    state: &SharedState,
+    hub_key: &crate::canonical::identity::HubKey,
+    discover_devices: bool,
+    disconnect_generation: u64,
+) -> anyhow::Result<crate::room_sync::SyncReport> {
+    let report =
+        crate::room_sync::sync_from_hub_for_key_before_authority(state, hub_key, discover_devices)?;
+    {
+        let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        if !state.hub_disconnect_generation_matches(hub_key, disconnect_generation) {
+            state.mark_external_controller_initial_sync_pending(hub_key);
+            anyhow::bail!("Hub disconnected during authoritative reconnect discovery");
+        }
+        state.mark_external_controller_initial_sync_complete(hub_key);
+    }
+    let reconcile_authority = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .reconcile_external_controller_authority_fn
+        .clone()
+        .ok_or_else(|| {
+            anyhow::anyhow!("No external-controller authority callback is registered")
+        })?;
+    reconcile_authority(state, hub_key)?;
+    // Platform callbacks normally own this transition. Reassert it here so a
+    // successful custom callback cannot weaken the reconnect acknowledgement
+    // contract.
+    let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    if !state.hub_disconnect_generation_matches(hub_key, disconnect_generation) {
+        // Force the failure path through a complete bootstrap. An
+        // authority-only retry cannot prove that this dead event stream is the
+        // current connection observation.
+        state.mark_external_controller_initial_sync_pending(hub_key);
+        anyhow::bail!("Hub disconnected during authoritative reconnect read-back");
+    }
+    state.mark_external_controller_authority_ready(hub_key);
+    Ok(report)
+}
+
+fn recover_failed_authoritative_reconnect(
+    state: &SharedState,
+    hub_key: &crate::canonical::identity::HubKey,
+) {
+    let discovery_incomplete = state
+        .lock()
+        .map(|state| state.external_controller_initial_sync_is_pending(hub_key))
+        .unwrap_or(true);
+    if discovery_incomplete {
+        // An authority-only retry cannot safely reuse a desired graph whose
+        // reconnect discovery failed. Drop the active instance so the ordinary
+        // bootstrap loop performs a full connect + discovery + acquisition.
+        crate::hub::discard_active_hub_for_full_bootstrap_retry(state, hub_key);
+    }
+    crate::hub::fence_required_group_authority_uncertainty(state, hub_key);
+}
+
+fn spawn_reconnect_sync(
+    state: &SharedState,
+    hub_key: &crate::canonical::identity::HubKey,
+    authoritative: bool,
+    disconnect_generation: Option<u64>,
+) {
     let discover_devices = state
         .lock()
         .ok()
@@ -835,11 +897,22 @@ fn spawn_reconnect_sync(state: &SharedState, hub_key: &crate::canonical::identit
     let spawn_result = std::thread::Builder::new()
         .name(thread_name)
         .spawn(move || {
-            match crate::room_sync::sync_from_hub_for_key(
-                &sync_state,
-                &sync_hub_key,
-                discover_devices,
-            ) {
+            let sync_result = if authoritative {
+                authoritative_reconnect_sync(
+                    &sync_state,
+                    &sync_hub_key,
+                    discover_devices,
+                    disconnect_generation
+                        .expect("authoritative reconnect requires a disconnect generation"),
+                )
+            } else {
+                crate::room_sync::sync_from_hub_for_key(
+                    &sync_state,
+                    &sync_hub_key,
+                    discover_devices,
+                )
+            };
+            match sync_result {
                 Ok(report) => {
                     debug!(
                         target: "conn",
@@ -851,12 +924,19 @@ fn spawn_reconnect_sync(state: &SharedState, hub_key: &crate::canonical::identit
                         report.devices_synced
                     );
                     crate::room_sync::poll_initial_light_state(&sync_state);
+                    if authoritative {
+                        emit_hub_status(&sync_state, Some(&sync_hub_key), true);
+                        spawn_reconnect_motion_state_poll(&sync_state, &sync_hub_key);
+                    }
                 }
                 Err(e) => {
                     if let Ok(mut s) = sync_state.lock() {
                         s.clear_hub_reconnect_sync(&sync_hub_key);
                     }
                     warn!(target: "conn", "Hub {} resync failed: {}", sync_hub_key, e);
+                    if authoritative {
+                        recover_failed_authoritative_reconnect(&sync_state, &sync_hub_key);
+                    }
                 }
             }
         });
@@ -871,6 +951,9 @@ fn spawn_reconnect_sync(state: &SharedState, hub_key: &crate::canonical::identit
             hub_key,
             e
         );
+        if authoritative {
+            recover_failed_authoritative_reconnect(state, hub_key);
+        }
     }
 }
 
@@ -1140,24 +1223,46 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
     match event {
         HubEvent::Connected { .. } => {
             debug!(target: "conn", "Hub connected");
-            let (app_became_connected, first_connected_event, reconnect_after_gap) =
-                if let Some(ref key) = hub_key {
-                    if let Ok(mut s) = state.lock() {
-                        let was_connected = s.hub_is_connected(key);
-                        let pending_disconnect = s.clear_hub_pending_disconnect(key);
-                        let first_connected_event = s.note_hub_connected_event(key);
-                        s.set_hub_connected(key, true);
-                        (
-                            !was_connected,
-                            first_connected_event,
-                            !first_connected_event && (!was_connected || pending_disconnect),
-                        )
+            let (
+                app_became_connected,
+                first_connected_event,
+                reconnect_after_gap,
+                authoritative_reconnect,
+                authoritative_disconnect_generation,
+            ) = if let Some(ref key) = hub_key {
+                if let Ok(mut s) = state.lock() {
+                    let was_connected = s.hub_is_connected(key);
+                    let pending_disconnect = s.clear_hub_pending_disconnect(key);
+                    let first_connected_event = s.note_hub_connected_event(key);
+                    let authority_ready = s.external_controller_authority_is_ready(key);
+                    let reconnect_after_gap = authority_ready
+                        && !first_connected_event
+                        && (!was_connected || pending_disconnect);
+                    let authoritative_reconnect =
+                        reconnect_after_gap && s.topology.grouped_room_control_is_required(key);
+                    let authoritative_disconnect_generation =
+                        authoritative_reconnect.then(|| s.hub_disconnect_generation(key));
+                    if authoritative_reconnect {
+                        // Reconnect is a new external observation boundary.
+                        // Keep every grouped route closed until complete
+                        // discovery and authoritative read-back both finish.
+                        s.mark_external_controller_initial_sync_pending(key);
                     } else {
-                        (false, false, false)
+                        s.set_hub_connected(key, authority_ready);
                     }
+                    (
+                        authority_ready && !was_connected && !authoritative_reconnect,
+                        first_connected_event,
+                        reconnect_after_gap,
+                        authoritative_reconnect,
+                        authoritative_disconnect_generation,
+                    )
                 } else {
-                    (true, false, false)
-                };
+                    (false, false, false, false, None)
+                }
+            } else {
+                (true, false, false, false, None)
+            };
 
             if first_connected_event {
                 if let Some(ref key) = hub_key {
@@ -1169,8 +1274,14 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 }
             } else if reconnect_after_gap {
                 if let Some(ref key) = hub_key {
-                    if should_run_reconnect_resync(state, key) {
-                        spawn_reconnect_sync(state, key);
+                    if authoritative_reconnect {
+                        emit_hub_status(state, Some(key), false);
+                        // Required-group controllers bypass the ordinary Hue
+                        // reconnect cooldown: every new observation boundary
+                        // must be verified before group routing reopens.
+                        spawn_reconnect_sync(state, key, true, authoritative_disconnect_generation);
+                    } else if should_run_reconnect_resync(state, key) {
+                        spawn_reconnect_sync(state, key, false, None);
                     } else {
                         debug!(
                             target: "conn",
@@ -1180,7 +1291,9 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                         );
                         spawn_light_state_poll(state, key);
                     }
-                    spawn_reconnect_motion_state_poll(state, key);
+                    if !authoritative_reconnect {
+                        spawn_reconnect_motion_state_poll(state, key);
+                    }
                 }
             }
 
@@ -1942,6 +2055,10 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             if let Some(ref key) = hub_key {
                 let pending_deadline = {
                     let Ok(mut s) = state.lock() else { return };
+                    // Invalidate any reconnect verification that started from
+                    // an older connection observation, even when that worker
+                    // has already fenced the API-visible connection false.
+                    s.note_hub_disconnected_event(key);
                     if s.hub_is_connected(key) && s.hub_seen_connected_once(key) {
                         Some(s.note_hub_pending_disconnect(key, HUB_DISCONNECT_GRACE))
                     } else if s.hub_is_connected(key) {
@@ -4583,6 +4700,262 @@ mod tests {
         fn discover_devices(&self) -> anyhow::Result<Vec<DiscoveredDevice>> {
             Ok(vec![])
         }
+    }
+
+    struct EmptyAuthoritativeReconnectDiscovery;
+
+    impl HubDiscovery for EmptyAuthoritativeReconnectDiscovery {
+        fn discover_rooms(&self) -> anyhow::Result<Vec<DiscoveredRoom>> {
+            Ok(Vec::new())
+        }
+
+        fn discover_devices(&self) -> anyhow::Result<Vec<DiscoveredDevice>> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct FailingAuthoritativeReconnectDiscovery;
+
+    impl HubDiscovery for FailingAuthoritativeReconnectDiscovery {
+        fn discover_rooms(&self) -> anyhow::Result<Vec<DiscoveredRoom>> {
+            anyhow::bail!("simulated reconnect discovery failure")
+        }
+
+        fn discover_devices(&self) -> anyhow::Result<Vec<DiscoveredDevice>> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn authoritative_reconnect_state(discovery: Arc<dyn HubDiscovery>) -> (SharedState, HubKey) {
+        let state = make_state();
+        let hub_type = HubType::new(HubType::HUE);
+        let hub_key = HubKey::new(hub_type.clone(), "192.0.2.10");
+        let registry: Arc<Mutex<dyn HubRegistry>> =
+            Arc::new(Mutex::new(crate::registry::HubDeviceRegistry::new()));
+        {
+            let mut app = state.lock().unwrap();
+            app.platform.full_device_discovery = true;
+            app.topology
+                .set_grouped_room_control_required(&hub_key, true);
+            app.hubs.insert(
+                hub_key.clone(),
+                ActiveHub {
+                    hub_type,
+                    hub_key: hub_key.clone(),
+                    runtime: None,
+                    hub_data: Box::new(()),
+                    registry: Some(registry),
+                    discovery: Some(discovery),
+                    shutdown: Arc::new(AtomicBool::new(false)),
+                },
+            );
+            app.mark_external_controller_authority_ready(&hub_key);
+        }
+
+        // Establish the first connected observation. Only a later connection
+        // after a disconnect is an authoritative resync boundary.
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Connected {
+                hub_key: Some(hub_key.clone()),
+            },
+            &mut MotionTimerState::new(),
+        );
+        (state, hub_key)
+    }
+
+    fn reconnect_after_disconnect(state: &SharedState, hub_key: &HubKey) {
+        handle_hub_event(
+            state,
+            crate::hub::HubEvent::Disconnected {
+                hub_key: Some(hub_key.clone()),
+                reason: "SSE dropped".into(),
+            },
+            &mut MotionTimerState::new(),
+        );
+        handle_hub_event(
+            state,
+            crate::hub::HubEvent::Connected {
+                hub_key: Some(hub_key.clone()),
+            },
+            &mut MotionTimerState::new(),
+        );
+    }
+
+    #[test]
+    fn required_group_reconnect_stays_fenced_until_authority_readback_finishes() {
+        let (state, hub_key) =
+            authoritative_reconnect_state(Arc::new(EmptyAuthoritativeReconnectDiscovery));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        state
+            .lock()
+            .unwrap()
+            .reconcile_external_controller_authority_fn = Some(Arc::new({
+            let release_rx = release_rx.clone();
+            move |state, key| {
+                let app = state
+                    .try_lock()
+                    .map_err(|_| anyhow::anyhow!("authority callback inherited the state lock"))?;
+                assert!(app.external_controller_authority_pending.contains(key));
+                assert!(!app.external_controller_initial_sync_is_pending(key));
+                assert!(!app.hub_is_connected(key));
+                drop(app);
+                entered_tx.send(()).unwrap();
+                release_rx
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(2))
+                    .map_err(|_| anyhow::anyhow!("timed out releasing authority callback"))?;
+                Ok(())
+            }
+        }));
+        // Required-group verification must not be skipped by the ordinary
+        // 24-hour Hue reconnect cooldown.
+        state.lock().unwrap().note_hub_reconnect_sync(&hub_key);
+
+        reconnect_after_disconnect(&state, &hub_key);
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("verified authority callback should run after reconnect discovery");
+        {
+            let app = state.lock().unwrap();
+            assert!(app.external_controller_authority_pending.contains(&hub_key));
+            assert!(!app.external_controller_authority_is_ready(&hub_key));
+            assert!(!app.hub_is_connected(&hub_key));
+        }
+
+        release_tx.send(()).unwrap();
+        for _ in 0..100 {
+            if state
+                .lock()
+                .unwrap()
+                .external_controller_authority_is_ready(&hub_key)
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let app = state.lock().unwrap();
+        assert!(app.external_controller_authority_is_ready(&hub_key));
+        assert!(app.hub_is_connected(&hub_key));
+    }
+
+    #[test]
+    fn newer_disconnect_invalidates_authoritative_reconnect_worker() {
+        let (state, hub_key) =
+            authoritative_reconnect_state(Arc::new(EmptyAuthoritativeReconnectDiscovery));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let (retry_tx, retry_rx) = std::sync::mpsc::channel();
+        {
+            let mut app = state.lock().unwrap();
+            app.reconcile_external_controller_authority_fn = Some(Arc::new({
+                let release_rx = release_rx.clone();
+                move |_, _| {
+                    entered_tx.send(()).unwrap();
+                    release_rx
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(2))
+                        .map_err(|_| anyhow::anyhow!("timed out releasing authority callback"))?;
+                    Ok(())
+                }
+            }));
+            app.request_hub_bootstrap_fn = Some(Arc::new(move |_| {
+                retry_tx.send(()).unwrap();
+            }));
+        }
+
+        reconnect_after_disconnect(&state, &hub_key);
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("authoritative reconnect callback should start");
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Disconnected {
+                hub_key: Some(hub_key.clone()),
+                reason: "newer SSE disconnect".into(),
+            },
+            &mut MotionTimerState::new(),
+        );
+        release_tx.send(()).unwrap();
+        retry_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("stale reconnect should request a full bootstrap");
+
+        let app = state.lock().unwrap();
+        assert!(!app.hubs.contains_key(&hub_key));
+        assert!(app.external_controller_authority_pending.contains(&hub_key));
+        assert!(!app.external_controller_authority_is_ready(&hub_key));
+        assert!(!app.hub_is_connected(&hub_key));
+    }
+
+    #[test]
+    fn required_group_reconnect_reconcile_failure_stays_fenced_and_requests_retry() {
+        let (state, hub_key) =
+            authoritative_reconnect_state(Arc::new(EmptyAuthoritativeReconnectDiscovery));
+        let (retry_tx, retry_rx) = std::sync::mpsc::channel();
+        state
+            .lock()
+            .unwrap()
+            .reconcile_external_controller_authority_fn = Some(Arc::new(|_, _| {
+            anyhow::bail!("simulated reconnect authority failure")
+        }));
+        state.lock().unwrap().request_hub_bootstrap_fn = Some(Arc::new({
+            move |state| {
+                assert!(
+                    state.try_lock().is_ok(),
+                    "retry callback inherited state lock"
+                );
+                retry_tx.send(()).unwrap();
+            }
+        }));
+
+        reconnect_after_disconnect(&state, &hub_key);
+        retry_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("failed authority read-back should request recovery");
+
+        let app = state.lock().unwrap();
+        assert!(app.hubs.contains_key(&hub_key));
+        assert!(app.external_controller_authority_pending.contains(&hub_key));
+        assert!(!app.external_controller_initial_sync_is_pending(&hub_key));
+        assert!(!app.external_controller_authority_is_ready(&hub_key));
+        assert!(!app.hub_is_connected(&hub_key));
+    }
+
+    #[test]
+    fn required_group_reconnect_discovery_failure_restarts_full_bootstrap() {
+        let (state, hub_key) =
+            authoritative_reconnect_state(Arc::new(FailingAuthoritativeReconnectDiscovery));
+        let (retry_tx, retry_rx) = std::sync::mpsc::channel();
+        state
+            .lock()
+            .unwrap()
+            .reconcile_external_controller_authority_fn = Some(Arc::new(|_, _| Ok(())));
+        state.lock().unwrap().request_hub_bootstrap_fn = Some(Arc::new({
+            move |state| {
+                assert!(
+                    state.try_lock().is_ok(),
+                    "retry callback inherited state lock"
+                );
+                retry_tx.send(()).unwrap();
+            }
+        }));
+
+        reconnect_after_disconnect(&state, &hub_key);
+        retry_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("failed reconnect discovery should request full bootstrap");
+
+        let app = state.lock().unwrap();
+        assert!(!app.hubs.contains_key(&hub_key));
+        assert!(app.external_controller_authority_pending.contains(&hub_key));
+        assert!(!app.external_controller_authority_is_ready(&hub_key));
+        assert!(!app.hub_is_connected(&hub_key));
     }
 
     #[test]

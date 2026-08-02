@@ -51,7 +51,21 @@ where
             }
             let creds: HueCreds = serde_json::from_str(creds_json)
                 .map_err(|e| anyhow::anyhow!("Invalid Hue credentials: {}", e))?;
-            Ok(hue_credentials(address, &creds.username))
+            let mut credentials = hue_credentials(address, &creds.username);
+            let key =
+                rhythm_os::canonical::identity::HubKey::new(HubType::new(HubType::HUE), address);
+            let existing_bridge_id = state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Failed to lock state"))?
+                .hub_credentials
+                .get(&key)
+                .and_then(|existing| existing.get_str("bridge_id"))
+                .filter(|bridge_id| !bridge_id.trim().is_empty())
+                .map(str::to_string);
+            if let Some(bridge_id) = existing_bridge_id {
+                credentials.data["bridge_id"] = serde_json::Value::String(bridge_id);
+            }
+            Ok(credentials)
         },
         // already_configured
         |state, new_creds| {
@@ -59,12 +73,13 @@ where
                 Ok(s) => s,
                 Err(_) => return false,
             };
-            let existing = s
-                .hub_credentials
-                .values()
-                .find(|c| c.hub_type.as_ref().is_some_and(|t| t.as_str() == "hue"));
+            let Some(key) = new_creds.hub_key() else {
+                return false;
+            };
+            let existing = s.hub_credentials.get(&key);
             if let Some(existing) = existing {
-                if existing.address == new_creds.address
+                if s.hubs.contains_key(&key)
+                    && existing.address == new_creds.address
                     && hue_username(existing) == hue_username(new_creds)
                 {
                     info!(target: "sys", "Hue hub already configured with same credentials, skipping");
@@ -163,5 +178,34 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("Invalid Hue credentials:"));
+    }
+
+    #[test]
+    fn credential_rotation_preserves_same_key_physical_bridge_binding() {
+        let state = Arc::new(Mutex::new(rhythm_os::state::AppState::default()));
+        let key =
+            rhythm_os::canonical::identity::HubKey::new(HubType::new(HubType::HUE), "192.0.2.10");
+        let mut existing = hue_credentials("192.0.2.10", "old-user");
+        existing.data["bridge_id"] = serde_json::Value::String("bridge-stable".to_string());
+        state
+            .lock()
+            .unwrap()
+            .hub_credentials
+            .insert(key.clone(), existing);
+
+        configure_hue_hub(
+            "192.0.2.10",
+            r#"{"username":"rotated-user"}"#,
+            &state,
+            |state| {
+                let state = state.lock().unwrap();
+                let credentials = state.hub_credentials.get(&key).unwrap();
+                assert_eq!(hue_username(credentials), Some("rotated-user"));
+                assert_eq!(credentials.get_str("bridge_id"), Some("bridge-stable"));
+                drop(state);
+                Ok(active_hub("192.0.2.10"))
+            },
+        )
+        .unwrap();
     }
 }

@@ -60,6 +60,31 @@ fn effective_placement_for(
     }
 }
 
+/// Resolve the one endpoint that may control a room-bound light. A controller
+/// that requires grouped-room control outranks the user's ordinary preferred
+/// endpoint while the light is attached to a room. Multiple such controllers
+/// are ambiguous and must fail closed.
+fn room_bound_light_control_endpoint<'a>(
+    device: &'a crate::canonical::identity::CanonicalDevice,
+    grouped_room_control_required: &HashSet<String>,
+) -> Option<&'a crate::canonical::identity::IntegrationEndpoint> {
+    let mut authoritative = device
+        .active_endpoints()
+        .filter(|endpoint| grouped_room_control_required.contains(&endpoint.hub_key.to_string()))
+        .collect::<Vec<_>>();
+    authoritative.sort_by(|left, right| {
+        left.hub_key
+            .to_string()
+            .cmp(&right.hub_key.to_string())
+            .then_with(|| left.native_id.cmp(&right.native_id))
+    });
+    match authoritative.as_slice() {
+        [endpoint] => Some(*endpoint),
+        [] => device.preferred_endpoint(),
+        _ => None,
+    }
+}
+
 /// Generic node-to-node control relationships.
 ///
 /// This is the topology-level control graph used to resolve automation and
@@ -475,9 +500,10 @@ impl TopologyRoom {
         !self.devices.is_empty()
     }
 
-    fn preferred_light_endpoints_by_hub(
+    fn control_light_endpoints_by_hub(
         &self,
         canonical_registry: &crate::canonical::registry::CanonicalRegistry,
+        grouped_room_control_required: &HashSet<String>,
     ) -> HashMap<HubKey, HashMap<String, String>> {
         let mut by_hub: HashMap<HubKey, HashMap<String, String>> = HashMap::new();
         for room_device in &self.devices {
@@ -487,9 +513,14 @@ impl TopologyRoom {
             if device.device_type != DeviceType::Light {
                 continue;
             }
-            let Some(endpoint) = device.preferred_endpoint() else {
+            let Some(endpoint) =
+                room_bound_light_control_endpoint(device, grouped_room_control_required)
+            else {
                 continue;
             };
+            if endpoint.native_id.is_empty() {
+                continue;
+            }
             by_hub
                 .entry(endpoint.hub_key.clone())
                 .or_default()
@@ -510,12 +541,50 @@ impl TopologyRoom {
         })
     }
 
+    fn authoritative_grouped_dispatch_target_for_hub(
+        &self,
+        hub_key: &HubKey,
+        assigned_native_ids: &HashSet<String>,
+        rhythm_managed_bindings: &[RhythmManagedHubRoomBinding],
+    ) -> Option<HubDispatchTarget> {
+        let mut bindings = self
+            .hub_room_bindings
+            .iter()
+            .filter(|binding| binding.hub_key == *hub_key);
+        let binding = bindings.next()?;
+        if bindings.next().is_some()
+            || binding.control_id.is_empty()
+            || assigned_native_ids.is_empty()
+            || binding
+                .light_device_ids
+                .iter()
+                .cloned()
+                .collect::<HashSet<_>>()
+                != *assigned_native_ids
+            || !rhythm_managed_bindings.iter().any(|managed| {
+                managed.rhythm_room_id == self.id
+                    && managed.hub_key == *hub_key
+                    && managed.hub_room_id == binding.hub_room_id
+            })
+        {
+            return None;
+        }
+
+        Some(HubDispatchTarget::Group {
+            room_id: binding.hub_room_id.clone(),
+            control_id: binding.control_id.clone(),
+        })
+    }
+
     fn dispatch_plan(
         &self,
         canonical_registry: &crate::canonical::registry::CanonicalRegistry,
+        grouped_room_control_required: &HashSet<String>,
+        rhythm_managed_bindings: &[RhythmManagedHubRoomBinding],
     ) -> DispatchPlan {
         let mut plan = DispatchPlan::default();
-        let preferred_light_endpoints = self.preferred_light_endpoints_by_hub(canonical_registry);
+        let preferred_light_endpoints =
+            self.control_light_endpoints_by_hub(canonical_registry, grouped_room_control_required);
 
         if preferred_light_endpoints.is_empty() {
             let mut bindings = self.hub_room_bindings.clone();
@@ -526,6 +595,14 @@ impl TopologyRoom {
                     .then_with(|| left.hub_room_id.cmp(&right.hub_room_id))
             });
             for binding in bindings {
+                if grouped_room_control_required.contains(&binding.hub_key.to_string()) {
+                    // Required-group integrations may never gain a route from
+                    // discovery alone. With no assigned canonical lights
+                    // there is no exact desired membership to prove, so keep
+                    // the binding inert until authoritative reconciliation
+                    // publishes explicit ownership metadata.
+                    continue;
+                }
                 if binding.light_device_ids.is_empty() {
                     continue;
                 }
@@ -552,6 +629,36 @@ impl TopologyRoom {
         assigned_by_hub.sort_by(|left, right| left.0.to_string().cmp(&right.0.to_string()));
 
         for (hub_key, remaining_ids) in assigned_by_hub {
+            let grouped_control_required =
+                grouped_room_control_required.contains(&hub_key.to_string());
+            if grouped_control_required {
+                let assigned_native_ids = remaining_ids.keys().cloned().collect::<HashSet<_>>();
+                if let Some(target) = self.authoritative_grouped_dispatch_target_for_hub(
+                    &hub_key,
+                    &assigned_native_ids,
+                    rhythm_managed_bindings,
+                ) {
+                    plan.room_targets.push((hub_key.clone(), target.clone()));
+                    let HubDispatchTarget::Group {
+                        room_id: hub_room_id,
+                        ..
+                    } = &target
+                    else {
+                        unreachable!("authoritative grouped target must be a group")
+                    };
+                    plan.node_routes.push(TopologyLightNodeRoute {
+                        node: TopologyLightNode {
+                            id: group_light_node_id(&self.id, &hub_key, hub_room_id),
+                            source_node_id: self.id.clone(),
+                            emit_node_id: self.id.clone(),
+                        },
+                        hub_key,
+                        target,
+                    });
+                }
+                continue;
+            }
+
             let mut bindings: Vec<_> = self
                 .hub_room_bindings
                 .iter()
@@ -648,6 +755,16 @@ pub struct RoomBindingRecord {
     pub approved_at: u64,
 }
 
+/// Explicit persisted ownership marker for a hub room created or adopted by
+/// Rhythm. Kept separate from `HubRoomBinding` so older integrations can keep
+/// constructing discovered bindings without claiming ownership.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct RhythmManagedHubRoomBinding {
+    rhythm_room_id: String,
+    hub_key: HubKey,
+    hub_room_id: String,
+}
+
 /// Summary of topology repairs applied while loading older persisted state.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TopologyMigrationReport {
@@ -678,9 +795,18 @@ pub struct RoomTopologyStore {
     /// Approved cross-hub room bindings (survives re-sync).
     #[serde(default)]
     approved_bindings: Vec<RoomBindingRecord>,
+    /// Hub-native rooms that Rhythm may authoritatively update/delete.
+    /// Ownership is explicit and is never inferred from IDs or names.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    rhythm_managed_bindings: Vec<RhythmManagedHubRoomBinding>,
     /// Index: (hub_key display, hub_room_id) → Rhythm room ID.
     #[serde(skip)]
     hub_room_index: HashMap<(String, String), String>,
+    /// Connected hub instances whose integration requires attached lights to
+    /// use a native grouped-room target. Rehydrated from integration metadata
+    /// at runtime rather than persisted as user topology.
+    #[serde(skip)]
+    grouped_room_control_required: HashSet<String>,
 }
 
 impl RoomTopologyStore {
@@ -691,8 +817,112 @@ impl RoomTopologyStore {
             control_links: Vec::new(),
             input_bindings: Vec::new(),
             approved_bindings: Vec::new(),
+            rhythm_managed_bindings: Vec::new(),
             hub_room_index: HashMap::new(),
+            grouped_room_control_required: HashSet::new(),
         }
+    }
+
+    /// Declare whether attached lights on this hub may fall back to direct
+    /// device routing when their grouped-room binding is missing.
+    pub fn set_grouped_room_control_required(&mut self, hub_key: &HubKey, required: bool) {
+        let key = hub_key.to_string();
+        if required {
+            self.grouped_room_control_required.insert(key);
+        } else {
+            self.grouped_room_control_required.remove(&key);
+        }
+    }
+
+    pub fn grouped_room_control_is_required(&self, hub_key: &HubKey) -> bool {
+        self.grouped_room_control_required
+            .contains(&hub_key.to_string())
+    }
+
+    /// Return whether persisted topology or the live grouping policy still
+    /// names this address-scoped hub key.
+    pub fn references_hub_key(&self, hub_key: &HubKey) -> bool {
+        self.rooms.values().any(|room| {
+            room.hub_room_bindings
+                .iter()
+                .any(|binding| binding.hub_key == *hub_key)
+        }) || self
+            .approved_bindings
+            .iter()
+            .any(|binding| binding.hub_key == *hub_key)
+            || self
+                .rhythm_managed_bindings
+                .iter()
+                .any(|binding| binding.hub_key == *hub_key)
+            || self.grouped_room_control_is_required(hub_key)
+    }
+
+    /// Return every structured hub key retained by room topology.
+    pub fn referenced_hub_keys(&self) -> HashSet<HubKey> {
+        let mut keys = HashSet::new();
+        for room in self.rooms.values() {
+            keys.extend(
+                room.hub_room_bindings
+                    .iter()
+                    .map(|binding| binding.hub_key.clone()),
+            );
+        }
+        keys.extend(
+            self.approved_bindings
+                .iter()
+                .map(|binding| binding.hub_key.clone()),
+        );
+        keys.extend(
+            self.rhythm_managed_bindings
+                .iter()
+                .map(|binding| binding.hub_key.clone()),
+        );
+        keys
+    }
+
+    /// Rewrite an address-scoped hub key after an integration has proven both
+    /// addresses identify the same physical controller.
+    ///
+    /// Callers must reject a topology that already references both keys before
+    /// invoking this method. The rebuild refreshes every derived index and
+    /// preserves explicit Rhythm-managed room ownership.
+    pub fn remap_hub_key(&mut self, old_key: &HubKey, new_key: &HubKey) -> bool {
+        if old_key == new_key {
+            return false;
+        }
+        let mut changed = false;
+        for room in self.rooms.values_mut() {
+            for binding in &mut room.hub_room_bindings {
+                if binding.hub_key == *old_key {
+                    binding.hub_key = new_key.clone();
+                    changed = true;
+                }
+            }
+        }
+        for binding in &mut self.approved_bindings {
+            if binding.hub_key == *old_key {
+                binding.hub_key = new_key.clone();
+                changed = true;
+            }
+        }
+        for binding in &mut self.rhythm_managed_bindings {
+            if binding.hub_key == *old_key {
+                binding.hub_key = new_key.clone();
+                changed = true;
+            }
+        }
+        let old_policy = self
+            .grouped_room_control_required
+            .remove(&old_key.to_string());
+        if old_policy {
+            self.grouped_room_control_required
+                .insert(new_key.to_string());
+            changed = true;
+        }
+        if changed {
+            self.rebuild_indices();
+        }
+        changed
     }
 
     /// Rebuild indices from the room map. Call after deserialization.
@@ -706,6 +936,20 @@ impl RoomTopologyStore {
                 );
             }
         }
+        self.rhythm_managed_bindings.retain(|managed| {
+            self.rooms.get(&managed.rhythm_room_id).is_some_and(|room| {
+                room.hub_room_bindings.iter().any(|binding| {
+                    binding.hub_key == managed.hub_key && binding.hub_room_id == managed.hub_room_id
+                })
+            })
+        });
+        self.rhythm_managed_bindings.sort_by(|left, right| {
+            left.rhythm_room_id
+                .cmp(&right.rhythm_room_id)
+                .then_with(|| left.hub_key.to_string().cmp(&right.hub_key.to_string()))
+                .then_with(|| left.hub_room_id.cmp(&right.hub_room_id))
+        });
+        self.rhythm_managed_bindings.dedup();
         self.rebuild_room_device_projections();
     }
 
@@ -1316,6 +1560,9 @@ impl RoomTopologyStore {
         self.hub_room_index.retain(|(key, hub_room_id), _| {
             key != &hub_str || current_set_owned.contains(hub_room_id)
         });
+        self.rhythm_managed_bindings.retain(|managed| {
+            managed.hub_key != *hub_key || current_set_owned.contains(&managed.hub_room_id)
+        });
 
         affected
     }
@@ -1337,6 +1584,112 @@ impl RoomTopologyStore {
             rhythm_room_id.to_string(),
         );
         changed
+    }
+
+    /// Insert the one explicitly Rhythm-managed grouped binding for a room
+    /// and hub. This is the restart-reconciliation API for authoritative
+    /// integrations; ordinary discovery must use [`Self::upsert_room_binding`]
+    /// and never gains ownership implicitly.
+    pub fn upsert_managed_room_binding(
+        &mut self,
+        rhythm_room_id: &str,
+        mut binding: HubRoomBinding,
+    ) -> bool {
+        if binding.hub_room_id.is_empty()
+            || binding.control_id.is_empty()
+            || !self.rooms.contains_key(rhythm_room_id)
+        {
+            return false;
+        }
+
+        binding.light_device_ids.sort();
+        binding.light_device_ids.dedup();
+        let hub_key = binding.hub_key.clone();
+        let hub_room_id = binding.hub_room_id.clone();
+
+        for (room_id, room) in &mut self.rooms {
+            room.hub_room_bindings.retain(|existing| {
+                if room_id == rhythm_room_id {
+                    existing.hub_key != hub_key
+                } else {
+                    !(existing.hub_key == hub_key && existing.hub_room_id == hub_room_id)
+                }
+            });
+        }
+        let Some(room) = self.rooms.get_mut(rhythm_room_id) else {
+            return false;
+        };
+        room.upsert_hub_room_binding(binding);
+
+        self.rhythm_managed_bindings.retain(|managed| {
+            !(managed.hub_key == hub_key
+                && (managed.rhythm_room_id == rhythm_room_id || managed.hub_room_id == hub_room_id))
+        });
+        self.rhythm_managed_bindings
+            .push(RhythmManagedHubRoomBinding {
+                rhythm_room_id: rhythm_room_id.to_string(),
+                hub_key,
+                hub_room_id,
+            });
+        self.rebuild_indices();
+        true
+    }
+
+    /// Return whether this exact room binding carries explicit Rhythm
+    /// ownership metadata.
+    pub fn room_binding_is_managed(
+        &self,
+        rhythm_room_id: &str,
+        hub_key: &HubKey,
+        hub_room_id: &str,
+    ) -> bool {
+        self.rhythm_managed_bindings.iter().any(|managed| {
+            managed.rhythm_room_id == rhythm_room_id
+                && managed.hub_key == *hub_key
+                && managed.hub_room_id == hub_room_id
+        })
+    }
+
+    /// Resolve the exact, explicitly owned grouped binding used by an
+    /// authoritative controller for one Rhythm room. The returned membership
+    /// is validated against the controller endpoints Rhythm actually routes,
+    /// so scene projection and ordinary lighting share the same fail-closed
+    /// authority proof.
+    pub fn exact_managed_group_binding(
+        &self,
+        rhythm_room_id: &str,
+        hub_key: &HubKey,
+        canonical_registry: &crate::canonical::registry::CanonicalRegistry,
+    ) -> Option<HubRoomBinding> {
+        if !self.grouped_room_control_is_required(hub_key) {
+            return None;
+        }
+        let room = self.rooms.get(rhythm_room_id)?;
+        let assigned_native_ids = room
+            .control_light_endpoints_by_hub(canonical_registry, &self.grouped_room_control_required)
+            .remove(hub_key)?
+            .into_keys()
+            .collect::<HashSet<_>>();
+        let target = room.authoritative_grouped_dispatch_target_for_hub(
+            hub_key,
+            &assigned_native_ids,
+            &self.rhythm_managed_bindings,
+        )?;
+        let HubDispatchTarget::Group {
+            room_id,
+            control_id,
+        } = target
+        else {
+            return None;
+        };
+        room.hub_room_bindings
+            .iter()
+            .find(|binding| {
+                binding.hub_key == *hub_key
+                    && binding.hub_room_id == room_id
+                    && binding.control_id == control_id
+            })
+            .cloned()
     }
 
     /// Remove source room bindings for a hub that match an integration-specific predicate.
@@ -1396,6 +1749,8 @@ impl RoomTopologyStore {
 
         self.hub_room_index
             .remove(&(hub_key.to_string(), hub_room_id.to_string()));
+        self.rhythm_managed_bindings
+            .retain(|managed| managed.hub_key != *hub_key || managed.hub_room_id != hub_room_id);
 
         affected
     }
@@ -1789,6 +2144,64 @@ impl RoomTopologyStore {
         true
     }
 
+    /// Mirror a confirmed authoritative native-room assignment, including a
+    /// room that the integration created during the prepare phase.
+    ///
+    /// The returned binding is the complete membership receipt for one
+    /// Rhythm room and hub. It replaces any prior binding for that hub in the
+    /// target room and removes those exact members from other rooms on the
+    /// same hub, keeping grouped dispatch unambiguous.
+    pub fn apply_authoritative_hub_light_binding(
+        &mut self,
+        hub_key: &HubKey,
+        native_device_id: &str,
+        target_rhythm_room_id: Option<&str>,
+        target_binding: Option<HubRoomBinding>,
+        managed_by_rhythm: bool,
+    ) -> bool {
+        if !managed_by_rhythm {
+            return false;
+        }
+        let mut target_binding = match (target_rhythm_room_id, target_binding) {
+            (Some(room_id), Some(binding))
+                if self.rooms.contains_key(room_id)
+                    && binding.hub_key == *hub_key
+                    && !binding.hub_room_id.is_empty()
+                    && !binding.control_id.is_empty()
+                    && binding
+                        .light_device_ids
+                        .iter()
+                        .any(|device_id| device_id == native_device_id) =>
+            {
+                Some((room_id.to_string(), binding))
+            }
+            (None, None) => None,
+            _ => return false,
+        };
+
+        let exact_target_members: HashSet<String> = target_binding
+            .as_ref()
+            .map(|(_, binding)| binding.light_device_ids.iter().cloned().collect())
+            .unwrap_or_else(|| HashSet::from([native_device_id.to_string()]));
+
+        for room in self.rooms.values_mut() {
+            for binding in &mut room.hub_room_bindings {
+                if binding.hub_key == *hub_key {
+                    binding
+                        .light_device_ids
+                        .retain(|device_id| !exact_target_members.contains(device_id));
+                }
+            }
+        }
+
+        if let Some((room_id, binding)) = target_binding.take() {
+            return self.upsert_managed_room_binding(&room_id, binding);
+        }
+
+        self.rebuild_indices();
+        true
+    }
+
     // ---- Room management operations ----
 
     /// Create a new empty room.
@@ -1851,7 +2264,13 @@ impl RoomTopologyStore {
             }
         }
 
-        self.rebuild_room_device_projections();
+        for managed in &mut self.rhythm_managed_bindings {
+            if managed.rhythm_room_id == source_id {
+                managed.rhythm_room_id = target_id.to_string();
+            }
+        }
+
+        self.rebuild_indices();
         true
     }
 
@@ -1865,6 +2284,8 @@ impl RoomTopologyStore {
         }
 
         self.approved_bindings
+            .retain(|binding| binding.rhythm_room_id != room_id);
+        self.rhythm_managed_bindings
             .retain(|binding| binding.rhythm_room_id != room_id);
 
         let mut detached_device_ids = Vec::new();
@@ -2122,14 +2543,41 @@ impl RoomTopologyStore {
         canonical_registry: &crate::canonical::registry::CanonicalRegistry,
     ) -> Option<(HubKey, HubDispatchTarget)> {
         let parent_id = node.parent_id.as_deref()?;
-        let (hub_key, device_target) =
-            self.light_device_endpoint_route(node, canonical_registry)?;
-        let target = match self
-            .rooms
-            .get(parent_id)
-            .and_then(|room| room.grouped_dispatch_target_for_hub(&hub_key))
-        {
+        let device = canonical_registry.get(&node.canonical_device_id)?;
+        if device.device_type != DeviceType::Light {
+            return None;
+        }
+        let endpoint =
+            room_bound_light_control_endpoint(device, &self.grouped_room_control_required)?;
+        if endpoint.native_id.is_empty() {
+            return None;
+        }
+        let hub_key = endpoint.hub_key.clone();
+        let device_target = HubDispatchTarget::Devices {
+            native_ids: vec![endpoint.native_id.clone()],
+        };
+        let room = self.rooms.get(parent_id)?;
+        let grouped_target = if self.grouped_room_control_is_required(&hub_key) {
+            let assigned_native_ids = room
+                .control_light_endpoints_by_hub(
+                    canonical_registry,
+                    &self.grouped_room_control_required,
+                )
+                .remove(&hub_key)
+                .unwrap_or_default()
+                .into_keys()
+                .collect::<HashSet<_>>();
+            room.authoritative_grouped_dispatch_target_for_hub(
+                &hub_key,
+                &assigned_native_ids,
+                &self.rhythm_managed_bindings,
+            )
+        } else {
+            room.grouped_dispatch_target_for_hub(&hub_key)
+        };
+        let target = match grouped_target {
             Some(group_target) => group_target,
+            None if self.grouped_room_control_is_required(&hub_key) => return None,
             None => device_target,
         };
         Some((hub_key, target))
@@ -2181,7 +2629,11 @@ impl RoomTopologyStore {
         room_ids.sort();
         for room_id in room_ids {
             let room = self.rooms.get(&room_id).unwrap();
-            let plan = room.dispatch_plan(canonical_registry);
+            let plan = room.dispatch_plan(
+                canonical_registry,
+                &self.grouped_room_control_required,
+                &self.rhythm_managed_bindings,
+            );
             let targets: Vec<_> = plan
                 .room_targets
                 .into_iter()
@@ -2245,7 +2697,11 @@ impl RoomTopologyStore {
         for room_id in room_ids {
             let room = self.rooms.get(&room_id).unwrap();
             let mut room_nodes: Vec<_> = room
-                .dispatch_plan(canonical_registry)
+                .dispatch_plan(
+                    canonical_registry,
+                    &self.grouped_room_control_required,
+                    &self.rhythm_managed_bindings,
+                )
                 .node_routes
                 .into_iter()
                 .map(|route| route.node)
@@ -2766,6 +3222,15 @@ mod tests {
         assert!(store.attach_device_user_override(&room_id, "dev-1"));
         assert!(store.set_control_target("dev-1", NodeControlKind::Motion, Some(&room_id)));
         store.approve_binding(hue_key(), "hue-room-1".to_string(), room_id.clone(), 42);
+        assert!(store.upsert_managed_room_binding(
+            &room_id,
+            HubRoomBinding {
+                hub_key: ha_key(),
+                hub_room_id: "ha-room-1".to_string(),
+                control_id: "ha-control-1".to_string(),
+                light_device_ids: Vec::new(),
+            },
+        ));
 
         let detached = store.remove_room(&room_id).unwrap();
 
@@ -2773,6 +3238,7 @@ mod tests {
         assert!(store.get(&room_id).is_none());
         assert!(store.translate_room_id(&ha_key(), "ha-room-1").is_none());
         assert!(store.approved_bindings.is_empty());
+        assert!(store.rhythm_managed_bindings.is_empty());
         assert!(store.control_links().is_empty());
 
         let node = store.get_device_node("dev-1").unwrap();
@@ -2784,9 +3250,22 @@ mod tests {
     fn serialization_roundtrip() {
         let mut store = RoomTopologyStore::new();
         let hue = make_discovered("hue-room-1", "Kitchen", "gl-1");
-        store.sync_hub_room(&hue_key(), &hue);
+        let room_id = store
+            .sync_hub_room(&hue_key(), &hue)
+            .rhythm_room_id()
+            .to_string();
+        assert!(store.upsert_managed_room_binding(
+            &room_id,
+            HubRoomBinding {
+                hub_key: hue_key(),
+                hub_room_id: "hue-room-1".to_string(),
+                control_id: "gl-1".to_string(),
+                light_device_ids: Vec::new(),
+            },
+        ));
 
         let json = serde_json::to_string(&store).unwrap();
+        assert!(json.contains("rhythm_managed_bindings"));
         let mut restored: RoomTopologyStore = serde_json::from_str(&json).unwrap();
         restored.rebuild_indices();
 
@@ -2794,6 +3273,7 @@ mod tests {
         assert!(restored
             .find_by_hub_room(&hue_key(), "hue-room-1")
             .is_some());
+        assert!(restored.room_binding_is_managed(&room_id, &hue_key(), "hue-room-1"));
     }
 
     // ---- translate_or_create tests ----
@@ -3054,6 +3534,57 @@ mod tests {
     }
 
     #[test]
+    fn attached_multi_endpoint_light_uses_sole_required_group_controller() {
+        let mut store = RoomTopologyStore::new();
+        let room_id = store.create_room("Kitchen");
+        let hub_key = hue_key();
+
+        let mut registry = CanonicalRegistry::new();
+        let light_id = register_identity(
+            &mut registry,
+            &hub_key,
+            make_identity("hue-light-1", "", "", "Counter Light", DeviceType::Light),
+        );
+        registry.get_mut(&light_id).unwrap().upsert_endpoint(
+            ha_key(),
+            "light.counter".to_string(),
+            2000,
+            None,
+        );
+        registry.set_preferred_endpoint(&light_id, &ha_key(), "light.counter");
+
+        assert!(store.attach_device_user_override(&room_id, &light_id));
+        store.set_grouped_room_control_required(&hub_key, true);
+        assert!(store.upsert_managed_room_binding(
+            &room_id,
+            HubRoomBinding {
+                hub_key: hub_key.clone(),
+                hub_room_id: "hue-kitchen".to_string(),
+                control_id: "grouped-kitchen".to_string(),
+                light_device_ids: vec!["hue-light-1".to_string()],
+            },
+        ));
+
+        let expected = vec![(
+            hub_key.to_string(),
+            HubDispatchTarget::Group {
+                room_id: "hue-kitchen".to_string(),
+                control_id: "grouped-kitchen".to_string(),
+            },
+        )];
+        let routing = store.composite_routing(&registry);
+        assert_eq!(routing.get(&room_id), Some(&expected));
+        assert_eq!(routing.get(&light_id), Some(&expected));
+        assert!(routing
+            .get(&light_id)
+            .unwrap()
+            .iter()
+            .all(|(key, _)| key != &ha_key().to_string()));
+        assert!(store.attached_light_uses_parent_dispatch(&light_id, &registry));
+        assert!(!store.light_node_uses_device_dispatch(&light_id, &registry));
+    }
+
+    #[test]
     fn attached_light_nodes_fall_back_to_device_dispatch_without_group_target() {
         let mut store = RoomTopologyStore::new();
         let room_id = store.create_room("Office");
@@ -3108,6 +3639,124 @@ mod tests {
         assert_eq!(store.periodic_light_nodes(&registry), expected_nodes);
         assert!(!store.attached_light_uses_parent_dispatch(&light_one_id, &registry));
         assert!(store.light_node_uses_device_dispatch(&light_one_id, &registry));
+    }
+
+    #[test]
+    fn required_group_control_fails_closed_until_binding_is_managed_exact_and_unambiguous() {
+        let mut store = RoomTopologyStore::new();
+        let room_id = store.create_room("Office");
+        let hub_key = hue_key();
+
+        let mut registry = CanonicalRegistry::new();
+        let light_one_id = register_identity(
+            &mut registry,
+            &hub_key,
+            make_identity("hue-light-1", "", "", "Desk Lamp", DeviceType::Light),
+        );
+        let light_two_id = register_identity(
+            &mut registry,
+            &hub_key,
+            make_identity("hue-light-2", "", "", "Floor Lamp", DeviceType::Light),
+        );
+        assert!(store.attach_device_user_override(&room_id, &light_one_id));
+        assert!(store.attach_device_user_override(&room_id, &light_two_id));
+        store.set_grouped_room_control_required(&hub_key, true);
+
+        assert!(store.composite_routing(&registry).get(&room_id).is_none());
+        assert!(store.periodic_light_nodes(&registry).is_empty());
+
+        // An exact discovered binding is still not owned by Rhythm.
+        assert!(store.upsert_room_binding(
+            &room_id,
+            HubRoomBinding {
+                hub_key: hub_key.clone(),
+                hub_room_id: "hue-office".to_string(),
+                control_id: "grouped-office".to_string(),
+                light_device_ids: vec!["hue-light-1".to_string(), "hue-light-2".to_string()],
+            },
+        ));
+        assert!(store.composite_routing(&registry).get(&room_id).is_none());
+
+        assert!(store.upsert_managed_room_binding(
+            &room_id,
+            HubRoomBinding {
+                hub_key: hub_key.clone(),
+                hub_room_id: "hue-office".to_string(),
+                control_id: "grouped-office".to_string(),
+                light_device_ids: vec!["hue-light-2".to_string(), "hue-light-1".to_string()],
+            },
+        ));
+        assert_eq!(
+            store.composite_routing(&registry).get(&room_id),
+            Some(&vec![(
+                hub_key.to_string(),
+                HubDispatchTarget::Group {
+                    room_id: "hue-office".to_string(),
+                    control_id: "grouped-office".to_string(),
+                },
+            )])
+        );
+
+        // Stale membership fails closed.
+        store.get_mut(&room_id).unwrap().hub_room_bindings[0]
+            .light_device_ids
+            .pop();
+        assert!(store.composite_routing(&registry).get(&room_id).is_none());
+
+        // Even with exact membership, a second binding is ambiguous.
+        store.get_mut(&room_id).unwrap().hub_room_bindings[0]
+            .light_device_ids
+            .push("hue-light-2".to_string());
+        store
+            .get_mut(&room_id)
+            .unwrap()
+            .upsert_hub_room_binding(HubRoomBinding {
+                hub_key: hub_key.clone(),
+                hub_room_id: "hue-office-duplicate".to_string(),
+                control_id: "grouped-office-duplicate".to_string(),
+                light_device_ids: vec!["hue-light-1".to_string(), "hue-light-2".to_string()],
+            });
+        assert!(store.composite_routing(&registry).get(&room_id).is_none());
+        assert!(store.periodic_light_nodes(&registry).is_empty());
+
+        // Truly standalone Hue remains directly routable under the same hub
+        // policy because no room-group invariant applies.
+        assert!(store.assign_device(&light_one_id, None, DevicePlacement::UserOverride,));
+        let routing = store.composite_routing(&registry);
+        assert_eq!(
+            routing.get(&light_one_id),
+            Some(&vec![(
+                hub_key.to_string(),
+                HubDispatchTarget::Devices {
+                    native_ids: vec!["hue-light-1".to_string()],
+                },
+            )])
+        );
+    }
+
+    #[test]
+    fn required_group_discovery_binding_without_assigned_lights_stays_inert() {
+        let mut store = RoomTopologyStore::new();
+        let room_id = store.create_room("Observed only");
+        let hub_key = hue_key();
+        assert!(store.upsert_room_binding(
+            &room_id,
+            HubRoomBinding {
+                hub_key: hub_key.clone(),
+                hub_room_id: "foreign-hue-room".to_string(),
+                control_id: "foreign-grouped-light".to_string(),
+                light_device_ids: vec!["unassigned-native-light".to_string()],
+            },
+        ));
+        store.set_grouped_room_control_required(&hub_key, true);
+
+        assert!(store
+            .composite_routing(&CanonicalRegistry::new())
+            .get(&room_id)
+            .is_none());
+        assert!(store
+            .periodic_light_nodes(&CanonicalRegistry::new())
+            .is_empty());
     }
 
     #[test]

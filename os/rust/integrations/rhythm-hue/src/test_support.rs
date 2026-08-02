@@ -5,10 +5,10 @@
 //! is enabled.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::transport::HueTransport;
+use crate::transport::{HueCreatedResource, HueCreatedRoom, HueRoomDefinition, HueTransport};
 
 /// `HueTransport` impl for `Arc<SpyHueTransport>` — allows sharing the spy
 /// between the controller (which takes ownership of the transport) and the test
@@ -68,6 +68,53 @@ impl HueTransport for Arc<SpyHueTransport> {
     ) -> anyhow::Result<serde_json::Value> {
         (**self).get_resources(username, resource_type)
     }
+    fn create_resource(
+        &self,
+        username: &str,
+        resource_type: &str,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<HueCreatedResource> {
+        (**self).create_resource(username, resource_type, body)
+    }
+    fn update_resource(
+        &self,
+        username: &str,
+        resource_type: &str,
+        resource_id: &str,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        (**self).update_resource(username, resource_type, resource_id, body)
+    }
+    fn delete_resource(
+        &self,
+        username: &str,
+        resource_type: &str,
+        resource_id: &str,
+    ) -> anyhow::Result<()> {
+        (**self).delete_resource(username, resource_type, resource_id)
+    }
+    fn get_v1(&self, username: &str, path: &str) -> anyhow::Result<serde_json::Value> {
+        (**self).get_v1(username, path)
+    }
+    fn post_v1(
+        &self,
+        username: &str,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        (**self).post_v1(username, path, body)
+    }
+    fn put_v1(
+        &self,
+        username: &str,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        (**self).put_v1(username, path, body)
+    }
+    fn delete_v1(&self, username: &str, path: &str) -> anyhow::Result<serde_json::Value> {
+        (**self).delete_v1(username, path)
+    }
     fn recall_scene(
         &self,
         username: &str,
@@ -84,10 +131,31 @@ impl HueTransport for Arc<SpyHueTransport> {
     ) -> anyhow::Result<()> {
         (**self).update_room_children(username, room_id, device_ids)
     }
+    fn create_room(
+        &self,
+        username: &str,
+        definition: &HueRoomDefinition,
+    ) -> anyhow::Result<HueCreatedRoom> {
+        (**self).create_room(username, definition)
+    }
+    fn update_room(
+        &self,
+        username: &str,
+        room_id: &str,
+        definition: &HueRoomDefinition,
+    ) -> anyhow::Result<()> {
+        (**self).update_room(username, room_id, definition)
+    }
+    fn rename_room(&self, username: &str, room_id: &str, name: &str) -> anyhow::Result<()> {
+        (**self).rename_room(username, room_id, name)
+    }
+    fn delete_room(&self, username: &str, room_id: &str) -> anyhow::Result<()> {
+        (**self).delete_room(username, room_id)
+    }
 }
 
 /// A recorded call to a `SpyHueTransport`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum HueTransportCall {
     SetGroupedLight {
         grouped_light_id: String,
@@ -117,6 +185,33 @@ pub enum HueTransportCall {
     GetResources {
         resource_type: String,
     },
+    CreateResource {
+        resource_type: String,
+        body: serde_json::Value,
+    },
+    UpdateResource {
+        resource_type: String,
+        resource_id: String,
+        body: serde_json::Value,
+    },
+    DeleteResource {
+        resource_type: String,
+        resource_id: String,
+    },
+    GetV1 {
+        path: String,
+    },
+    PostV1 {
+        path: String,
+        body: serde_json::Value,
+    },
+    PutV1 {
+        path: String,
+        body: serde_json::Value,
+    },
+    DeleteV1 {
+        path: String,
+    },
     RecallScene {
         scene_id: String,
         transition_ms: Option<u32>,
@@ -124,6 +219,20 @@ pub enum HueTransportCall {
     UpdateRoomChildren {
         room_id: String,
         device_ids: Vec<String>,
+    },
+    CreateRoom {
+        definition: HueRoomDefinition,
+    },
+    UpdateRoom {
+        room_id: String,
+        definition: HueRoomDefinition,
+    },
+    RenameRoom {
+        room_id: String,
+        name: String,
+    },
+    DeleteRoom {
+        room_id: String,
     },
     TestConnection,
     WarmupTls,
@@ -138,7 +247,10 @@ pub struct SpyHueTransport {
     is_on: Arc<Mutex<bool>>,
     resources: Arc<Mutex<HashMap<String, serde_json::Value>>>,
     should_fail: Arc<AtomicBool>,
+    ignore_resource_mutations: Arc<AtomicBool>,
     fail_room_update: Arc<Mutex<Option<String>>>,
+    v1_write_response_override: Arc<Mutex<Option<serde_json::Value>>>,
+    next_resource_id: Arc<AtomicUsize>,
 }
 
 impl SpyHueTransport {
@@ -149,7 +261,10 @@ impl SpyHueTransport {
             is_on: Arc::new(Mutex::new(false)),
             resources: Arc::new(Mutex::new(HashMap::new())),
             should_fail: Arc::new(AtomicBool::new(false)),
+            ignore_resource_mutations: Arc::new(AtomicBool::new(false)),
             fail_room_update: Arc::new(Mutex::new(None)),
+            v1_write_response_override: Arc::new(Mutex::new(None)),
+            next_resource_id: Arc::new(AtomicUsize::new(1)),
         }
     }
 
@@ -163,9 +278,21 @@ impl SpyHueTransport {
         self.should_fail.store(fail, Ordering::Relaxed);
     }
 
+    /// Acknowledge resource mutations without changing subsequent reads.
+    /// This simulates application-level success whose effect is not durable.
+    pub fn set_ignore_resource_mutations(&self, ignore: bool) {
+        self.ignore_resource_mutations
+            .store(ignore, Ordering::Relaxed);
+    }
+
     /// Configure one room ID whose membership update should fail.
     pub fn set_fail_room_update(&self, room_id: Option<&str>) {
         *self.fail_room_update.lock().unwrap() = room_id.map(str::to_string);
+    }
+
+    /// Override the next and subsequent generic V1 write receipts.
+    pub fn set_v1_write_response_override(&self, response: Option<serde_json::Value>) {
+        *self.v1_write_response_override.lock().unwrap() = response;
     }
 
     /// Configure the response returned by `get_resources` for a resource path.
@@ -174,6 +301,11 @@ impl SpyHueTransport {
             .lock()
             .unwrap()
             .insert(resource_type.to_string(), response);
+    }
+
+    /// Configure a Hue V1 response under a path relative to `/api/{username}`.
+    pub fn set_v1_response(&self, path: &str, response: serde_json::Value) {
+        self.set_resource_response(&format!("v1:{}", path.trim_matches('/')), response);
     }
 
     /// Get all recorded transport calls.
@@ -223,6 +355,48 @@ impl Default for SpyHueTransport {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn merge_json(target: &mut serde_json::Value, update: &serde_json::Value) {
+    match (target, update) {
+        (serde_json::Value::Object(target), serde_json::Value::Object(update)) => {
+            for (key, value) in update {
+                merge_json(
+                    target.entry(key.clone()).or_insert(serde_json::Value::Null),
+                    value,
+                );
+            }
+        }
+        (target, update) => *target = update.clone(),
+    }
+}
+
+fn resource_data_mut<'a>(
+    resources: &'a mut HashMap<String, serde_json::Value>,
+    resource_type: &str,
+) -> anyhow::Result<&'a mut Vec<serde_json::Value>> {
+    resources
+        .entry(resource_type.to_string())
+        .or_insert_with(|| serde_json::json!({"data": [], "errors": []}))
+        .get_mut("data")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| anyhow::anyhow!("spy: resource response has no data array: {resource_type}"))
+}
+
+fn room_json(room_id: &str, definition: &HueRoomDefinition) -> serde_json::Value {
+    serde_json::json!({
+        "id": room_id,
+        "children": definition.device_ids.iter().map(|device_id| {
+            serde_json::json!({"rid": device_id, "rtype": "device"})
+        }).collect::<Vec<_>>(),
+        "metadata": {
+            "name": definition.name,
+            "archetype": definition.archetype,
+        },
+        "services": [
+            {"rid": format!("grouped-{room_id}"), "rtype": "grouped_light"}
+        ]
+    })
 }
 
 impl HueTransport for SpyHueTransport {
@@ -355,6 +529,193 @@ impl HueTransport for SpyHueTransport {
             .unwrap_or_else(|| serde_json::json!({"data": []})))
     }
 
+    fn create_resource(
+        &self,
+        _username: &str,
+        resource_type: &str,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<HueCreatedResource> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(HueTransportCall::CreateResource {
+                resource_type: resource_type.to_string(),
+                body: body.clone(),
+            });
+        if self.should_fail.load(Ordering::Relaxed) {
+            anyhow::bail!("spy: create_resource failed");
+        }
+        let sequence = self.next_resource_id.fetch_add(1, Ordering::Relaxed);
+        let resource_id = format!("rhythm-{resource_type}-{sequence}");
+        let mut resource = body.clone();
+        resource["id"] = serde_json::Value::String(resource_id.clone());
+        if resource_type == "room" {
+            resource["services"] = serde_json::json!([
+                {"rid": format!("grouped-{resource_id}"), "rtype": "grouped_light"}
+            ]);
+        }
+        resource_data_mut(&mut self.resources.lock().unwrap(), resource_type)?.push(resource);
+        Ok(HueCreatedResource {
+            resource_id,
+            resource_type: resource_type.to_string(),
+        })
+    }
+
+    fn update_resource(
+        &self,
+        _username: &str,
+        resource_type: &str,
+        resource_id: &str,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(HueTransportCall::UpdateResource {
+                resource_type: resource_type.to_string(),
+                resource_id: resource_id.to_string(),
+                body: body.clone(),
+            });
+        if self.should_fail.load(Ordering::Relaxed) {
+            anyhow::bail!("spy: update_resource failed");
+        }
+        if self.ignore_resource_mutations.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let mut resources = self.resources.lock().unwrap();
+        let resource = resource_data_mut(&mut resources, resource_type)?
+            .iter_mut()
+            .find(|resource| {
+                resource.get("id").and_then(serde_json::Value::as_str) == Some(resource_id)
+            })
+            .ok_or_else(|| anyhow::anyhow!("spy: resource not found"))?;
+        merge_json(resource, body);
+        Ok(())
+    }
+
+    fn delete_resource(
+        &self,
+        _username: &str,
+        resource_type: &str,
+        resource_id: &str,
+    ) -> anyhow::Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(HueTransportCall::DeleteResource {
+                resource_type: resource_type.to_string(),
+                resource_id: resource_id.to_string(),
+            });
+        if self.should_fail.load(Ordering::Relaxed) {
+            anyhow::bail!("spy: delete_resource failed");
+        }
+        if self.ignore_resource_mutations.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let mut resources = self.resources.lock().unwrap();
+        resource_data_mut(&mut resources, resource_type)?.retain(|resource| {
+            resource.get("id").and_then(serde_json::Value::as_str) != Some(resource_id)
+        });
+        Ok(())
+    }
+
+    fn get_v1(&self, _username: &str, path: &str) -> anyhow::Result<serde_json::Value> {
+        let path = path.trim_matches('/');
+        self.calls.lock().unwrap().push(HueTransportCall::GetV1 {
+            path: path.to_string(),
+        });
+        if self.should_fail.load(Ordering::Relaxed) {
+            anyhow::bail!("spy: get_v1 failed");
+        }
+        Ok(self
+            .resources
+            .lock()
+            .unwrap()
+            .get(&format!("v1:{path}"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({})))
+    }
+
+    fn post_v1(
+        &self,
+        _username: &str,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        let path = path.trim_matches('/');
+        self.calls.lock().unwrap().push(HueTransportCall::PostV1 {
+            path: path.to_string(),
+            body: body.clone(),
+        });
+        if self.should_fail.load(Ordering::Relaxed) {
+            anyhow::bail!("spy: post_v1 failed");
+        }
+        if let Some(response) = self.v1_write_response_override.lock().unwrap().clone() {
+            return Ok(response);
+        }
+        Ok(serde_json::json!([{"success": {format!("/{path}"): "created"}}]))
+    }
+
+    fn put_v1(
+        &self,
+        _username: &str,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        let path = path.trim_matches('/');
+        self.calls.lock().unwrap().push(HueTransportCall::PutV1 {
+            path: path.to_string(),
+            body: body.clone(),
+        });
+        if self.should_fail.load(Ordering::Relaxed) {
+            anyhow::bail!("spy: put_v1 failed");
+        }
+        if let Some((collection, id)) = path.split_once('/') {
+            if let Some(resource) = self
+                .resources
+                .lock()
+                .unwrap()
+                .get_mut(&format!("v1:{collection}"))
+                .and_then(serde_json::Value::as_object_mut)
+                .and_then(|resources| resources.get_mut(id))
+            {
+                merge_json(resource, body);
+            }
+        }
+        if let Some(response) = self.v1_write_response_override.lock().unwrap().clone() {
+            return Ok(response);
+        }
+        let success = body
+            .as_object()
+            .into_iter()
+            .flat_map(|body| body.iter())
+            .map(|(field, value)| (format!("/{path}/{field}"), value.clone()))
+            .collect::<serde_json::Map<_, _>>();
+        Ok(serde_json::json!([{"success": success}]))
+    }
+
+    fn delete_v1(&self, _username: &str, path: &str) -> anyhow::Result<serde_json::Value> {
+        let path = path.trim_matches('/');
+        self.calls.lock().unwrap().push(HueTransportCall::DeleteV1 {
+            path: path.to_string(),
+        });
+        if self.should_fail.load(Ordering::Relaxed) {
+            anyhow::bail!("spy: delete_v1 failed");
+        }
+        if let Some((collection, id)) = path.split_once('/') {
+            self.resources
+                .lock()
+                .unwrap()
+                .get_mut(&format!("v1:{collection}"))
+                .and_then(serde_json::Value::as_object_mut)
+                .map(|resources| resources.remove(id));
+        }
+        if let Some(response) = self.v1_write_response_override.lock().unwrap().clone() {
+            return Ok(response);
+        }
+        Ok(serde_json::json!([{"success": format!("/{path} deleted.")}]))
+    }
+
     fn recall_scene(
         &self,
         _username: &str,
@@ -392,6 +753,9 @@ impl HueTransport for SpyHueTransport {
         {
             anyhow::bail!("spy: update_room_children failed");
         }
+        if self.ignore_resource_mutations.load(Ordering::Relaxed) {
+            return Ok(());
+        }
 
         let mut resources = self.resources.lock().unwrap();
         let rooms = resources
@@ -405,13 +769,113 @@ impl HueTransport for SpyHueTransport {
                     .iter_mut()
                     .find(|room| room.get("id").and_then(|value| value.as_str()) == Some(room_id))
             })
-            .ok_or_else(|| anyhow::anyhow!("spy: room not found: {}", room_id))?;
+            .ok_or_else(|| anyhow::anyhow!("spy: room not found"))?;
         room["children"] = serde_json::Value::Array(
             device_ids
                 .iter()
                 .map(|device_id| serde_json::json!({"rid": device_id, "rtype": "device"}))
                 .collect(),
         );
+        Ok(())
+    }
+
+    fn create_room(
+        &self,
+        _username: &str,
+        definition: &HueRoomDefinition,
+    ) -> anyhow::Result<HueCreatedRoom> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(HueTransportCall::CreateRoom {
+                definition: definition.clone(),
+            });
+        if self.should_fail.load(Ordering::Relaxed) {
+            anyhow::bail!("spy: create_room failed");
+        }
+        let sequence = self.next_resource_id.fetch_add(1, Ordering::Relaxed);
+        let room_id = format!("rhythm-room-{sequence}");
+        if self.ignore_resource_mutations.load(Ordering::Relaxed) {
+            return Ok(HueCreatedRoom { room_id });
+        }
+        resource_data_mut(&mut self.resources.lock().unwrap(), "room")?
+            .push(room_json(&room_id, definition));
+        Ok(HueCreatedRoom { room_id })
+    }
+
+    fn update_room(
+        &self,
+        _username: &str,
+        room_id: &str,
+        definition: &HueRoomDefinition,
+    ) -> anyhow::Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(HueTransportCall::UpdateRoom {
+                room_id: room_id.to_string(),
+                definition: definition.clone(),
+            });
+        if self.should_fail.load(Ordering::Relaxed)
+            || self.fail_room_update.lock().unwrap().as_deref() == Some(room_id)
+        {
+            anyhow::bail!("spy: update_room failed");
+        }
+        if self.ignore_resource_mutations.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let mut resources = self.resources.lock().unwrap();
+        let room = resource_data_mut(&mut resources, "room")?
+            .iter_mut()
+            .find(|room| room.get("id").and_then(serde_json::Value::as_str) == Some(room_id))
+            .ok_or_else(|| anyhow::anyhow!("spy: room not found"))?;
+        let services = room.get("services").cloned();
+        *room = room_json(room_id, definition);
+        if let Some(services) = services {
+            room["services"] = services;
+        }
+        Ok(())
+    }
+
+    fn rename_room(&self, _username: &str, room_id: &str, name: &str) -> anyhow::Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(HueTransportCall::RenameRoom {
+                room_id: room_id.to_string(),
+                name: name.to_string(),
+            });
+        if self.should_fail.load(Ordering::Relaxed) {
+            anyhow::bail!("spy: rename_room failed");
+        }
+        if self.ignore_resource_mutations.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let mut resources = self.resources.lock().unwrap();
+        let room = resource_data_mut(&mut resources, "room")?
+            .iter_mut()
+            .find(|room| room.get("id").and_then(serde_json::Value::as_str) == Some(room_id))
+            .ok_or_else(|| anyhow::anyhow!("spy: room not found"))?;
+        room["metadata"]["name"] = serde_json::Value::String(name.to_string());
+        Ok(())
+    }
+
+    fn delete_room(&self, _username: &str, room_id: &str) -> anyhow::Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(HueTransportCall::DeleteRoom {
+                room_id: room_id.to_string(),
+            });
+        if self.should_fail.load(Ordering::Relaxed) {
+            anyhow::bail!("spy: delete_room failed");
+        }
+        if self.ignore_resource_mutations.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let mut resources = self.resources.lock().unwrap();
+        resource_data_mut(&mut resources, "room")?
+            .retain(|room| room.get("id").and_then(serde_json::Value::as_str) != Some(room_id));
         Ok(())
     }
 }

@@ -30,13 +30,7 @@ fn scenario_restart_roomless_assigned_device_bootstraps_runtime() {
         assert!(state
             .topology
             .attach_device_user_override(&room_id, &canonical_id));
-        let storage = state.storage.as_ref().unwrap();
-        storage
-            .save_canonical_registry(&serde_json::to_value(&state.canonical_registry).unwrap())
-            .unwrap();
-        storage
-            .save_topology(&serde_json::to_value(&state.topology).unwrap())
-            .unwrap();
+        rhythm_os::commands::save_authority_state(&state).unwrap();
         (canonical_id, room_id)
     };
 

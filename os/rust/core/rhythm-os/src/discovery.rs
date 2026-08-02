@@ -9,7 +9,25 @@ use anyhow::Result;
 use rhythm_core::runtime::hub_registry::DeviceType;
 
 use crate::canonical::identity::DiscoveredIdentity;
-use crate::scenes::SceneDefinition;
+use crate::scenes::{LightSceneOutput, SceneDefinition};
+
+/// One integration-native light action in a Rhythm-owned room scene.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ManagedSceneProjectionTarget {
+    /// Integration-native device identity, not a service or grouped-light ID.
+    pub native_device_id: String,
+    pub output: LightSceneOutput,
+}
+
+/// A room-scoped scene that an authoritative integration should materialize
+/// inside its hidden controller topology and then recall atomically.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ManagedSceneProjection {
+    pub rhythm_room_id: String,
+    pub hub_room_id: String,
+    pub scene_id: String,
+    pub targets: Vec<ManagedSceneProjectionTarget>,
+}
 
 /// A room discovered from the hub (Hue room, HA area, etc.).
 pub struct DiscoveredRoom {
@@ -107,6 +125,28 @@ pub trait HubDiscovery: Send + Sync {
     /// with [`HubDiscovery::discover_scenes`].
     fn recall_scene(&self, _scene_id: &str, _transition_ms: Option<u32>) -> Result<()> {
         anyhow::bail!("Native scene recall is not supported by this integration")
+    }
+
+    /// Materialize and recall a Rhythm-owned room scene through the native
+    /// controller. `ephemeral` projections are preview-only and must be
+    /// removed after recall rather than persisted in integration ownership.
+    ///
+    /// Returns `true` only when this authoritative integration handled the
+    /// projection. Required-group callers fail closed on `false`.
+    fn apply_managed_scene_projection(
+        &self,
+        _projection: &ManagedSceneProjection,
+        _transition_ms: Option<u32>,
+        _ephemeral: bool,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// Delete every native projection owned for one Rhythm scene ID.
+    /// Returns `true` when this authoritative integration handled the request,
+    /// including when no matching projection remained.
+    fn delete_managed_scene_projection(&self, _scene_id: &str) -> Result<bool> {
+        Ok(false)
     }
 
     /// Discover devices with native hub automation configured.

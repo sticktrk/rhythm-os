@@ -784,6 +784,8 @@ pub fn build_debug_bundle_with_app_log(
     let matter_controller_json =
         build_matter_controller_debug_json(&runtime, created_at, &mut diagnostics)
             .context("building Matter controller debug snapshot")?;
+    let hue_controller_json = build_hue_controller_debug_json(state, created_at, &mut diagnostics)
+        .context("building Hue controller debug snapshot")?;
     #[cfg(target_os = "linux")]
     let shared_ble_runtime_json = build_shared_ble_runtime_json(created_at)
         .context("building shared Bluetooth runtime snapshot")?;
@@ -872,6 +874,12 @@ pub fn build_debug_bundle_with_app_log(
         &mut generated_files,
         "matter_controller.json",
         matter_controller_json.as_bytes(),
+    )?;
+    append_generated_file(
+        &mut builder,
+        &mut generated_files,
+        "hue_controller.json",
+        hue_controller_json.as_bytes(),
     )?;
     #[cfg(target_os = "linux")]
     append_generated_file(
@@ -1656,6 +1664,39 @@ fn build_shared_ble_runtime_json(generated_at: DateTime<Utc>) -> Result<String> 
         "runtime": runtime,
     }))
     .context("serializing shared Bluetooth runtime snapshot")
+}
+
+fn build_hue_controller_debug_json(
+    state: &SharedState,
+    generated_at: DateTime<Utc>,
+    diagnostics: &mut BundleDiagnostics,
+) -> Result<String> {
+    let storage = state.lock().ok().and_then(|state| state.storage.clone());
+    let authority = match storage {
+        Some(storage) => {
+            match rhythm_hue::ownership::controller_authority_diagnostics(storage.as_ref()) {
+                Ok(authority) => serde_json::to_value(authority)?,
+                Err(_) => {
+                    diagnostics
+                        .add_warning("Hue controller authority diagnostics are unavailable.");
+                    serde_json::json!({
+                        "schema_version": 1,
+                        "status": "unavailable"
+                    })
+                }
+            }
+        }
+        None => serde_json::json!({
+            "schema_version": 1,
+            "status": "storage_unavailable"
+        }),
+    };
+    serde_json::to_string_pretty(&serde_json::json!({
+        "schema_version": 1,
+        "generated_at": generated_at.to_rfc3339(),
+        "authority": authority,
+    }))
+    .context("serializing Hue controller debug snapshot")
 }
 
 fn build_matter_controller_debug_json(
@@ -3325,11 +3366,12 @@ mod tests {
     use super::*;
     use chrono::TimeZone;
     use flate2::read::GzDecoder;
+    use rhythm_os::storage::Storage;
     use serde_json::Value;
     use std::collections::BTreeMap;
     use std::ffi::OsString;
     use std::io::Read;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -3601,6 +3643,76 @@ mod tests {
             .iter()
             .any(|warning| warning.contains("No data_dir configured")));
 
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn hue_controller_debug_reports_authority_counts_without_sensitive_identifiers() {
+        let root = unique_test_dir("hue-authority-debug");
+        let storage =
+            Arc::new(rhythm_os::storage::FileStorage::new(root.to_str().unwrap()).unwrap());
+        storage
+            .save_integration_state_file(
+                "hue/controller-ownership/by-bridge/bridge-secret.json",
+                r#"{
+                    "schema_version": 1,
+                    "phase": "active",
+                    "baseline": {
+                        "schema_version": 1,
+                        "capture_id": "capture-secret",
+                        "bridge_id": "bridge-secret",
+                        "v2_resources": {},
+                        "v1_resources": {}
+                    },
+                    "managed_rooms": {
+                        "room-secret": {
+                            "rhythm_room_id": "room-secret",
+                            "hue_room_id": "hue-room-secret",
+                            "grouped_light_id": "group-secret"
+                        }
+                    },
+                    "restored_resource_ids": {},
+                    "receipts": {
+                        "receipt-secret": {
+                            "operation_id": "receipt-secret",
+                            "api": "v2",
+                            "action": "delete",
+                            "resource_type": "room",
+                            "original_resource_id": "resource-secret",
+                            "status": "succeeded",
+                            "attempt": 1
+                        }
+                    }
+                }"#,
+            )
+            .unwrap();
+        let mut app_state = AppState::default();
+        app_state.storage = Some(storage);
+        let state = Arc::new(Mutex::new(app_state));
+        let generated_at = Utc
+            .with_ymd_and_hms(2026, 5, 20, 12, 0, 0)
+            .single()
+            .unwrap();
+        let mut diagnostics =
+            BundleDiagnostics::new(generated_at, root.display().to_string(), Vec::new());
+
+        let json = build_hue_controller_debug_json(&state, generated_at, &mut diagnostics).unwrap();
+        let value: Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["authority"]["manifest_count"], 1);
+        assert_eq!(value["authority"]["managed_room_count"], 1);
+        assert_eq!(value["authority"]["phases"]["active"], 1);
+        assert_eq!(value["authority"]["receipt_statuses"]["succeeded"], 1);
+        for sensitive in [
+            "bridge-secret",
+            "capture-secret",
+            "room-secret",
+            "hue-room-secret",
+            "group-secret",
+            "resource-secret",
+            "receipt-secret",
+        ] {
+            assert!(!json.contains(sensitive));
+        }
         let _ = fs::remove_dir_all(root);
     }
 

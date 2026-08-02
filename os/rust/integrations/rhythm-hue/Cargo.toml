@@ -28,6 +28,7 @@ anyhow = "1.0"
 async-trait = "0.1"
 log = "0.4"
 tracing = { workspace = true }
+sha2 = "0.10"
 
 reqwest = { workspace = true }
 reqwest-eventsource = { workspace = true }
