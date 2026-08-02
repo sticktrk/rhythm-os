@@ -938,7 +938,7 @@ impl HubLightController for MatterLightController {
 
         if indeterminate_count > 0 {
             return Err(LightControlError::ConnectionError(format!(
-                "Matter periodic on/off state is indeterminate because {indeterminate_count} endpoint(s) have no fresh subscription report"
+                "Matter periodic on/off state is indeterminate because {indeterminate_count} endpoint(s) have no subscription report in the current controller stream"
             )));
         }
 
@@ -1881,7 +1881,7 @@ mod tests {
     }
 
     #[test]
-    fn periodic_any_lights_on_uses_fresh_subscription_state_without_live_read() {
+    fn periodic_any_lights_on_uses_subscription_state_without_live_read() {
         let (controller, spy, _) = make_controller();
         controller.hub_data.record_on_off_observation(42, 1, true);
 
@@ -1897,7 +1897,7 @@ mod tests {
     }
 
     #[test]
-    fn periodic_any_lights_on_without_fresh_subscription_state_does_not_live_read() {
+    fn periodic_any_lights_on_without_subscription_state_does_not_live_read() {
         let (controller, spy, _) = make_controller();
 
         assert!(matches!(
@@ -1913,7 +1913,7 @@ mod tests {
     }
 
     #[test]
-    fn periodic_any_lights_on_rejects_stale_subscription_state_without_live_read() {
+    fn periodic_any_lights_on_keeps_unchanged_subscription_state_past_max_interval() {
         let (controller, spy, _) = make_controller();
         controller
             .hub_data
@@ -1928,15 +1928,12 @@ mod tests {
                 ),
             );
 
-        assert!(matches!(
-            block_on(controller.any_lights_on_for_periodic("kitchen")),
-            Err(LightControlError::ConnectionError(_))
-        ));
+        assert!(block_on(controller.any_lights_on_for_periodic("kitchen")).unwrap());
         assert!(
             !spy.operations()
                 .iter()
                 .any(|operation| matches!(operation, RecordedOperation::ReadOnOff { .. })),
-            "stale subscription state must fail quickly instead of falling back to a live read"
+            "unchanged subscribed state must remain authoritative without a live read"
         );
     }
 

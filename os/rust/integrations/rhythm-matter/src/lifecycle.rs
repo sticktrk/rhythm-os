@@ -102,6 +102,14 @@ fn cache_on_off_observation(
     }
 }
 
+fn invalidate_on_off_observations(
+    observations: &Mutex<HashMap<(u64, u16), (bool, std::time::Instant)>>,
+) {
+    if let Ok(mut observations) = observations.lock() {
+        observations.clear();
+    }
+}
+
 fn start_controller_event_stream(
     transport: Arc<dyn MatterTransport>,
     event_tx: std::sync::mpsc::Sender<HubEvent>,
@@ -163,6 +171,10 @@ fn start_controller_event_stream(
                         history_gap,
                         reason: reason.to_string(),
                     });
+                    // Values are authoritative only within one contiguous
+                    // controller event stream. Re-subscription produces a new
+                    // initial attribute report for every reachable endpoint.
+                    invalidate_on_off_observations(on_off_observations.as_ref());
                     subscribe_to_observed_state(transport.as_ref());
                 }
                 let mut last_sequence = cursor
@@ -1042,6 +1054,18 @@ mod tests {
                 .map(|(lights_on, _)| *lights_on),
             Some(true)
         );
+    }
+
+    #[test]
+    fn controller_stream_reset_invalidates_subscription_observations() {
+        let observations = Mutex::new(HashMap::from([(
+            (42, 2),
+            (true, std::time::Instant::now()),
+        )]));
+
+        invalidate_on_off_observations(&observations);
+
+        assert!(observations.lock().unwrap().is_empty());
     }
 
     #[test]
