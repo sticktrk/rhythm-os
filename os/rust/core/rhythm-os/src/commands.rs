@@ -41,7 +41,7 @@ use crate::bundle::{
     LEGACY_BACKUP_SCHEMA_VERSION, PROFILE_BUNDLE_SCHEMA_VERSION,
 };
 use crate::canonical::identity::HubKey;
-use crate::discovery::HubDiscovery;
+use crate::discovery::{HubDiscovery, ManagedSceneProjection, ManagedSceneProjectionTarget};
 use crate::factory_default_config::{
     factory_default_active_mode, factory_default_active_profile_config_for_mode,
     factory_default_idle_profile_config_for_mode, factory_default_light_profile_config_map,
@@ -2392,11 +2392,16 @@ fn persist_light_profiles_locked(s: &AppState) {
 }
 
 fn persist_scenes_locked(s: &AppState) {
-    if let Some(ref storage) = s.storage {
-        if let Err(e) = storage.save_scenes(&s.stored_scenes()) {
-            warn!(target: "cmd", "Failed to save scenes: {}", e);
-        }
+    if let Err(e) = save_scenes_locked(s) {
+        warn!(target: "cmd", "Failed to save scenes: {}", e);
     }
+}
+
+fn save_scenes_locked(s: &AppState) -> Result<()> {
+    if let Some(ref storage) = s.storage {
+        storage.save_scenes(&s.stored_scenes())?;
+    }
+    Ok(())
 }
 
 fn persist_settings_locked(s: &AppState) {
@@ -3904,6 +3909,19 @@ struct SceneApplicationPlan {
     unresolved_node_ids: Vec<String>,
 }
 
+#[derive(Clone)]
+struct RenderedSceneLight {
+    node_id: String,
+    output: LightSceneOutput,
+}
+
+struct ManagedSceneDispatch {
+    discovery: Arc<dyn HubDiscovery>,
+    projection: ManagedSceneProjection,
+    transition_ms: Option<u32>,
+    projected_states: Vec<(String, bool)>,
+}
+
 fn light_scene_target_scope_node_ids(
     s: &AppState,
     runtime: &Arc<dyn RuntimeHandle>,
@@ -4128,6 +4146,282 @@ fn build_scene_application_plan_locked(
     })
 }
 
+fn render_scene_lights_locked(
+    s: &AppState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    scene: &SceneDefinition,
+    target_id: &str,
+    transition_ms: Option<u32>,
+) -> Result<(BTreeSet<String>, Vec<RenderedSceneLight>)> {
+    let layer = scene
+        .light
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Scene '{}' has no light layer", scene.id))?;
+    let scope_node_ids = light_scene_target_scope_node_ids(s, runtime, target_id);
+    let mut outputs = BTreeMap::<String, LightSceneOutput>::new();
+    for entry in &layer.entries {
+        let node_id = entry.target.node_id();
+        if scope_node_ids.contains(node_id) {
+            outputs.insert(node_id.to_string(), entry.output.clone());
+        }
+    }
+
+    let implicit_node_ids = scope_node_ids
+        .iter()
+        .filter(|node_id| !outputs.contains_key(*node_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !layer.palette.is_empty() {
+        for (index, node_id) in implicit_node_ids.into_iter().enumerate() {
+            outputs.insert(node_id, layer.palette[index % layer.palette.len()].clone());
+        }
+    } else if let Some(default_output) = &layer.default_output {
+        for node_id in implicit_node_ids {
+            outputs.insert(node_id, default_output.clone());
+        }
+    }
+
+    let mut rendered = Vec::with_capacity(outputs.len());
+    for (node_id, mut output) in outputs {
+        if let Some(transition_ms) = transition_ms {
+            output.transition_ms = Some(transition_ms);
+        } else if output.transition_ms.is_none() {
+            output.transition_ms = layer.default_transition_ms;
+        }
+        output
+            .to_command(None)
+            .map_err(|error| anyhow::anyhow!("Invalid light scene output: {error}"))?;
+        rendered.push(RenderedSceneLight { node_id, output });
+    }
+    Ok((scope_node_ids, rendered))
+}
+
+fn authoritative_endpoint_for_scene_node(
+    s: &AppState,
+    node_id: &str,
+) -> Result<Option<(String, HubKey, String)>> {
+    let Some(node) = s.topology.get_device_node(node_id) else {
+        return Ok(None);
+    };
+    let Some(rhythm_room_id) = node.parent_id.clone() else {
+        // Truly roomless lights retain direct device control.
+        return Ok(None);
+    };
+    let Some(device) = s.canonical_registry.get(&node.canonical_device_id) else {
+        return Ok(None);
+    };
+    let mut endpoints = device
+        .active_endpoints()
+        .filter(|endpoint| {
+            s.topology
+                .grouped_room_control_is_required(&endpoint.hub_key)
+        })
+        .map(|endpoint| (endpoint.hub_key.clone(), endpoint.native_id.clone()))
+        .collect::<Vec<_>>();
+    endpoints.sort_by(|left, right| {
+        left.0
+            .to_string()
+            .cmp(&right.0.to_string())
+            .then_with(|| left.1.cmp(&right.1))
+    });
+    match endpoints.as_slice() {
+        [] => Ok(None),
+        [(hub_key, native_id)] => Ok(Some((rhythm_room_id, hub_key.clone(), native_id.clone()))),
+        _ => anyhow::bail!("A room light has multiple authoritative grouped controllers"),
+    }
+}
+
+fn managed_scene_dispatches_locked(
+    s: &AppState,
+    scene: &SceneDefinition,
+    scope_node_ids: &BTreeSet<String>,
+    rendered: &[RenderedSceneLight],
+) -> Result<Vec<ManagedSceneDispatch>> {
+    struct Builder {
+        hub_key: HubKey,
+        rhythm_room_id: String,
+        hub_room_id: String,
+        discovery: Arc<dyn HubDiscovery>,
+        targets: Vec<ManagedSceneProjectionTarget>,
+        projected_states: Vec<(String, bool)>,
+        transitions: BTreeSet<u32>,
+        has_no_transition: bool,
+    }
+
+    let rendered_by_node = rendered
+        .iter()
+        .map(|light| (light.node_id.as_str(), light))
+        .collect::<HashMap<_, _>>();
+    let mut builders = Vec::<Builder>::new();
+
+    // Visit the full scope, not only rendered entries. A durable scene update
+    // that stops targeting Hue must retire its previous native projection.
+    for node_id in scope_node_ids {
+        let Some((rhythm_room_id, hub_key, native_device_id)) =
+            authoritative_endpoint_for_scene_node(s, node_id)?
+        else {
+            continue;
+        };
+        if !s.external_controller_authority_is_ready(&hub_key) {
+            anyhow::bail!("An authoritative grouped controller is not ready");
+        }
+        let binding = s
+            .topology
+            .exact_managed_group_binding(&rhythm_room_id, &hub_key, &s.canonical_registry)
+            .ok_or_else(|| {
+                anyhow::anyhow!("An authoritative room binding is missing, stale, or ambiguous")
+            })?;
+        if !binding
+            .light_device_ids
+            .iter()
+            .any(|device_id| device_id == &native_device_id)
+        {
+            anyhow::bail!("An authoritative room binding has stale membership");
+        }
+        let discovery = s
+            .hubs
+            .get(&hub_key)
+            .and_then(|hub| hub.discovery.clone())
+            .ok_or_else(|| anyhow::anyhow!("An authoritative controller is unavailable"))?;
+        let builder_index = builders
+            .iter()
+            .position(|builder| {
+                builder.hub_key == hub_key && builder.rhythm_room_id == rhythm_room_id
+            })
+            .unwrap_or_else(|| {
+                builders.push(Builder {
+                    hub_key: hub_key.clone(),
+                    rhythm_room_id: rhythm_room_id.clone(),
+                    hub_room_id: binding.hub_room_id.clone(),
+                    discovery,
+                    targets: Vec::new(),
+                    projected_states: Vec::new(),
+                    transitions: BTreeSet::new(),
+                    has_no_transition: false,
+                });
+                builders.len() - 1
+            });
+        let builder = &mut builders[builder_index];
+        if builder.hub_room_id != binding.hub_room_id {
+            anyhow::bail!("An authoritative room has conflicting native bindings");
+        }
+        let Some(light) = rendered_by_node.get(node_id.as_str()) else {
+            continue;
+        };
+        match light.output.transition_ms {
+            Some(transition_ms) => {
+                builder.transitions.insert(transition_ms);
+            }
+            None => builder.has_no_transition = true,
+        }
+        builder.targets.push(ManagedSceneProjectionTarget {
+            native_device_id,
+            output: light.output.clone(),
+        });
+        builder
+            .projected_states
+            .push((node_id.clone(), light.output.power == LightScenePower::On));
+    }
+
+    let mut dispatches = Vec::with_capacity(builders.len());
+    for mut builder in builders {
+        if builder.transitions.len() > 1
+            || (builder.has_no_transition && !builder.transitions.is_empty())
+        {
+            anyhow::bail!(
+                "A managed room scene has per-light transitions that Hue cannot recall atomically"
+            );
+        }
+        builder
+            .targets
+            .sort_by(|left, right| left.native_device_id.cmp(&right.native_device_id));
+        builder
+            .projected_states
+            .sort_by(|left, right| left.0.cmp(&right.0));
+        dispatches.push(ManagedSceneDispatch {
+            discovery: builder.discovery,
+            projection: ManagedSceneProjection {
+                rhythm_room_id: builder.rhythm_room_id,
+                hub_room_id: builder.hub_room_id,
+                scene_id: scene.id.clone(),
+                targets: builder.targets,
+            },
+            transition_ms: builder.transitions.into_iter().next(),
+            projected_states: builder.projected_states,
+        });
+    }
+    dispatches.sort_by(|left, right| {
+        left.projection
+            .rhythm_room_id
+            .cmp(&right.projection.rhythm_room_id)
+            .then_with(|| {
+                left.projection
+                    .hub_room_id
+                    .cmp(&right.projection.hub_room_id)
+            })
+    });
+    Ok(dispatches)
+}
+
+fn companion_scene_plan_locked(
+    s: &AppState,
+    rendered: &[RenderedSceneLight],
+    managed: &[ManagedSceneDispatch],
+) -> Result<SceneApplicationPlan> {
+    let projected_node_ids = managed
+        .iter()
+        .flat_map(|dispatch| {
+            dispatch
+                .projected_states
+                .iter()
+                .map(|(node_id, _)| node_id.as_str())
+        })
+        .collect::<HashSet<_>>();
+    let mut commands = Vec::new();
+    let mut unresolved_node_ids = Vec::new();
+    for light in rendered {
+        if projected_node_ids.contains(light.node_id.as_str()) {
+            continue;
+        }
+        push_scene_light_command(
+            s,
+            None,
+            None,
+            &light.node_id,
+            &light.output,
+            &mut commands,
+            &mut unresolved_node_ids,
+        )?;
+    }
+    commands.sort_by(|left, right| left.public_node_id.cmp(&right.public_node_id));
+    unresolved_node_ids.sort();
+    unresolved_node_ids.dedup();
+    let mut affected_node_ids = managed
+        .iter()
+        .flat_map(|dispatch| {
+            dispatch
+                .projected_states
+                .iter()
+                .map(|(node_id, _)| node_id.clone())
+        })
+        .chain(
+            commands
+                .iter()
+                .map(|command| command.public_node_id.clone()),
+        )
+        .collect::<Vec<_>>();
+    affected_node_ids.sort();
+    affected_node_ids.dedup();
+    if affected_node_ids.is_empty() && managed.is_empty() {
+        anyhow::bail!("Scene has no routable light entries");
+    }
+    Ok(SceneApplicationPlan {
+        commands,
+        affected_node_ids,
+        unresolved_node_ids,
+    })
+}
+
 fn set_scene_committed_state(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
@@ -4219,24 +4513,66 @@ fn do_scene_apply_definition_inner(
     commit_state: bool,
     persist_state: bool,
     preview_id: Option<String>,
+    ephemeral_projection: bool,
 ) -> Result<SceneApplyResponse> {
     scene.normalize();
     let target_id = resolve_node_id(state, &request.target_id);
-    let (runtime, plan) = {
+    let transaction_lock = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.external_topology_transaction_lock.clone()
+    };
+    let transaction = transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Failed to lock external topology transaction"))?;
+    let (runtime, plan, managed_dispatches) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let runtime = s
             .hub_runtime()
             .ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
-        let plan = build_scene_application_plan_locked(
-            &s,
-            &runtime,
-            &scene,
-            &target_id,
-            request.transition_ms,
-        )?;
-        (runtime, plan)
+        let (scope_node_ids, rendered) =
+            render_scene_lights_locked(&s, &runtime, &scene, &target_id, request.transition_ms)?;
+        if scope_node_ids.is_empty() {
+            anyhow::bail!(
+                "Target '{}' has no light scene-addressable nodes",
+                target_id
+            );
+        }
+        let managed_dispatches =
+            managed_scene_dispatches_locked(&s, &scene, &scope_node_ids, &rendered)?;
+        let plan = if managed_dispatches.is_empty() {
+            build_scene_application_plan_locked(
+                &s,
+                &runtime,
+                &scene,
+                &target_id,
+                request.transition_ms,
+            )?
+        } else {
+            companion_scene_plan_locked(&s, &rendered, &managed_dispatches)?
+        };
+        (runtime, plan, managed_dispatches)
     };
 
+    for managed in &managed_dispatches {
+        let handled = managed.discovery.apply_managed_scene_projection(
+            &managed.projection,
+            managed.transition_ms,
+            ephemeral_projection,
+        )?;
+        if !handled {
+            anyhow::bail!("An authoritative controller does not support managed room scenes");
+        }
+        for (node_id, lights_on) in &managed.projected_states {
+            update_lights_on_cache_for_runtime_node(state, &runtime, node_id, *lights_on);
+            emit_node_state_event_after_apply(state, &runtime, node_id);
+        }
+    }
+    // Planning and native scene projection must observe one serialized
+    // topology snapshot. Ordinary dispatch is different: external
+    // controllers acquire this same lock around their own operation, so
+    // retaining the outer guard here would self-deadlock roomless Hue and the
+    // companion leg of mixed Hue rooms.
+    drop(transaction);
     dispatch_scene_plan(state, &runtime, &plan)?;
 
     if commit_state {
@@ -4286,6 +4622,7 @@ fn do_scene_apply_inner(
         commit_state,
         persist_state,
         preview_id,
+        false,
     )
 }
 
@@ -4379,8 +4716,18 @@ pub fn do_scene_upsert(state: &SharedState, mut scene: SceneDefinition) -> Resul
     validate_persisted_scene_id(&scene.id)?;
     let response_scene = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.scenes.insert(scene.id.clone(), scene.clone());
-        persist_scenes_locked(&s);
+        let previous = s.scenes.insert(scene.id.clone(), scene.clone());
+        if let Err(error) = save_scenes_locked(&s) {
+            match previous {
+                Some(previous) => {
+                    s.scenes.insert(scene.id.clone(), previous);
+                }
+                None => {
+                    s.scenes.remove(&scene.id);
+                }
+            }
+            return Err(error.context("Failed to durably save the scene"));
+        }
         scene
     };
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
@@ -4388,16 +4735,76 @@ pub fn do_scene_upsert(state: &SharedState, mut scene: SceneDefinition) -> Resul
 }
 
 pub fn do_scene_delete(state: &SharedState, scene_id: &str) -> Result<String> {
-    let runtime = {
-        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        if s.scenes.remove(scene_id).is_none() {
+    let transaction_lock = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.external_topology_transaction_lock.clone()
+    };
+    let transaction = transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Failed to lock external topology transaction"))?;
+    let discoveries = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        if !s.scenes.contains_key(scene_id) {
             return Err(anyhow::anyhow!("Scene '{}' not found", scene_id));
         }
+        let mut hubs = Vec::<HubKey>::new();
+        for binding in s
+            .topology
+            .rooms()
+            .flat_map(|room| room.hub_room_bindings.iter())
+        {
+            if !s
+                .topology
+                .grouped_room_control_is_required(&binding.hub_key)
+                || hubs.iter().any(|hub_key| hub_key == &binding.hub_key)
+            {
+                continue;
+            }
+            hubs.push(binding.hub_key.clone());
+        }
+        let mut discoveries = Vec::with_capacity(hubs.len());
+        for hub_key in hubs {
+            if !s.external_controller_authority_is_ready(&hub_key) {
+                anyhow::bail!("An authoritative grouped controller is not ready");
+            }
+            let discovery = s
+                .hubs
+                .get(&hub_key)
+                .and_then(|hub| hub.discovery.clone())
+                .ok_or_else(|| anyhow::anyhow!("An authoritative controller is unavailable"))?;
+            discoveries.push(discovery);
+        }
+        discoveries
+    };
+    for discovery in discoveries {
+        if !discovery.delete_managed_scene_projection(scene_id)? {
+            anyhow::bail!("An authoritative controller does not support managed room scenes");
+        }
+    }
+
+    let runtime = {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let removed = s
+            .scenes
+            .remove(scene_id)
+            .ok_or_else(|| anyhow::anyhow!("Scene '{}' not found", scene_id))?;
+        let previews_before = s.light_scene_previews.clone();
         s.light_scene_previews
             .retain(|_, preview| preview.scene_id != scene_id);
-        persist_scenes_locked(&s);
+        if let Err(error) = save_scenes_locked(&s) {
+            s.scenes.insert(scene_id.to_string(), removed);
+            s.light_scene_previews = previews_before;
+            return Err(error.context("Failed to durably delete the scene"));
+        }
         s.hub_runtime()
     };
+
+    // Managed-scene deletion and the matching local definition update must be
+    // serialized with topology changes. Runtime output is different: an
+    // external light controller acquires this same non-reentrant lock around
+    // its physical command, so release the outer transaction before restoring
+    // nodes that had the deleted mood scene selected.
+    drop(transaction);
 
     if let Some(runtime) = runtime {
         for snap in runtime.engine_all_node_snapshots() {
@@ -4430,7 +4837,6 @@ pub fn do_scene_delete(state: &SharedState, scene_id: &str) -> Result<String> {
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
     build_scenes(state)
 }
-
 pub fn do_scene_apply(
     state: &SharedState,
     scene_id: &str,
@@ -4721,6 +5127,7 @@ pub fn do_scene_draft_preview(
         false,
         false,
         Some(preview_id.clone()),
+        true,
     )?;
     record_scene_preview_session(
         state,
@@ -4746,12 +5153,7 @@ pub fn do_scene_preview_commit(state: &SharedState, preview_id: &str) -> Result<
     if let Some(mut draft_scene) = preview.draft_scene.clone() {
         draft_scene.normalize();
         validate_persisted_scene_id(&draft_scene.id)?;
-        {
-            let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-            s.scenes.insert(draft_scene.id.clone(), draft_scene.clone());
-            persist_scenes_locked(&s);
-        }
-        crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
+        do_scene_upsert(state, draft_scene)?;
     }
     do_scene_apply(
         state,
@@ -14903,6 +15305,7 @@ mod tests {
         periodic_light_state_queries: AtomicUsize,
         fail_light_state_queries: AtomicBool,
         fail_periodic_light_state_queries: AtomicBool,
+        scene_dispatch_transaction_lock: Mutex<Option<Arc<Mutex<()>>>>,
         current_hour: f32,
     }
 
@@ -14923,8 +15326,13 @@ mod tests {
                 periodic_light_state_queries: AtomicUsize::new(0),
                 fail_light_state_queries: AtomicBool::new(false),
                 fail_periodic_light_state_queries: AtomicBool::new(false),
+                scene_dispatch_transaction_lock: Mutex::new(None),
                 current_hour,
             }
+        }
+
+        fn require_scene_dispatch_transaction_lock(&self, lock: Arc<Mutex<()>>) {
+            *self.scene_dispatch_transaction_lock.lock().unwrap() = Some(lock);
         }
 
         fn fail_light_state_queries(&self) {
@@ -15160,6 +15568,17 @@ mod tests {
             Ok(())
         }
         fn turn_on_room(&self, room_id: &str) -> anyhow::Result<()> {
+            let transaction_lock = self.scene_dispatch_transaction_lock.lock().unwrap().clone();
+            let _transaction = transaction_lock
+                .as_ref()
+                .map(|lock| {
+                    lock.try_lock().map_err(|error| {
+                        anyhow::anyhow!(
+                            "scene dispatch could not acquire external topology transaction: {error}"
+                        )
+                    })
+                })
+                .transpose()?;
             self.set_target_lights(room_id, true);
             Ok(())
         }
@@ -15168,6 +15587,17 @@ mod tests {
             room_id: &str,
             command: rhythm_core::LightingCommand,
         ) -> anyhow::Result<()> {
+            let transaction_lock = self.scene_dispatch_transaction_lock.lock().unwrap().clone();
+            let _transaction = transaction_lock
+                .as_ref()
+                .map(|lock| {
+                    lock.try_lock().map_err(|error| {
+                        anyhow::anyhow!(
+                            "scene dispatch could not acquire external topology transaction: {error}"
+                        )
+                    })
+                })
+                .transpose()?;
             let room_state = self
                 .engine_room_snapshot(room_id)
                 .map(|snap| {
@@ -15191,6 +15621,17 @@ mod tests {
             Ok(())
         }
         fn lights_off_room(&self, room_id: &str, transition_ms: Option<u32>) -> anyhow::Result<()> {
+            let transaction_lock = self.scene_dispatch_transaction_lock.lock().unwrap().clone();
+            let _transaction = transaction_lock
+                .as_ref()
+                .map(|lock| {
+                    lock.try_lock().map_err(|error| {
+                        anyhow::anyhow!(
+                            "scene dispatch could not acquire external topology transaction: {error}"
+                        )
+                    })
+                })
+                .transpose()?;
             if let Some(snap) = self
                 .snapshots
                 .lock()
@@ -15504,6 +15945,182 @@ mod tests {
         scenes: Vec<SceneDefinition>,
         recalls: Arc<Mutex<Vec<(String, Option<u32>)>>>,
         discovery_error: Option<String>,
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct ManagedSceneCall {
+        projection: crate::discovery::ManagedSceneProjection,
+        transition_ms: Option<u32>,
+        ephemeral: bool,
+    }
+
+    struct RecordingManagedSceneDiscovery {
+        calls: Arc<Mutex<Vec<ManagedSceneCall>>>,
+        deletes: Arc<Mutex<Vec<String>>>,
+        fail_apply: Arc<AtomicBool>,
+        fail_delete: Arc<AtomicBool>,
+        transaction_lock: Arc<Mutex<()>>,
+        projection_was_serialized: Arc<AtomicBool>,
+    }
+
+    impl crate::discovery::HubDiscovery for RecordingManagedSceneDiscovery {
+        fn discover_rooms(&self) -> Result<Vec<crate::discovery::DiscoveredRoom>> {
+            Ok(Vec::new())
+        }
+
+        fn discover_devices(&self) -> Result<Vec<crate::discovery::DiscoveredDevice>> {
+            Ok(Vec::new())
+        }
+
+        fn apply_managed_scene_projection(
+            &self,
+            projection: &crate::discovery::ManagedSceneProjection,
+            transition_ms: Option<u32>,
+            ephemeral: bool,
+        ) -> Result<bool> {
+            if self.fail_apply.load(Ordering::SeqCst) {
+                anyhow::bail!("managed projection failed");
+            }
+            match self.transaction_lock.try_lock() {
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    self.projection_was_serialized.store(true, Ordering::SeqCst);
+                }
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    anyhow::bail!("external topology transaction lock poisoned");
+                }
+                Ok(_) => anyhow::bail!("managed projection was not topology-serialized"),
+            }
+            self.calls.lock().unwrap().push(ManagedSceneCall {
+                projection: projection.clone(),
+                transition_ms,
+                ephemeral,
+            });
+            Ok(true)
+        }
+
+        fn delete_managed_scene_projection(&self, scene_id: &str) -> Result<bool> {
+            if self.fail_delete.load(Ordering::SeqCst) {
+                anyhow::bail!("managed projection delete failed");
+            }
+            self.deletes.lock().unwrap().push(scene_id.to_string());
+            Ok(true)
+        }
+    }
+
+    struct ManagedSceneTestHarness {
+        state: SharedState,
+        runtime: Arc<MockRuntime>,
+        hue_device_id: String,
+        companion_device_id: Option<String>,
+        hub_key: HubKey,
+        calls: Arc<Mutex<Vec<ManagedSceneCall>>>,
+        deletes: Arc<Mutex<Vec<String>>>,
+        fail_apply: Arc<AtomicBool>,
+        fail_delete: Arc<AtomicBool>,
+        projection_was_serialized: Arc<AtomicBool>,
+    }
+
+    fn setup_managed_hue_scene_room(with_companion: bool) -> ManagedSceneTestHarness {
+        let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        let hub_key = HubKey::new(HubType::new(HubType::HUE), "bridge");
+        let hue_device_id = insert_canonical_device(
+            &state,
+            hub_key.clone(),
+            "hue-light-1",
+            "Hue Lamp",
+            "hue-room-1",
+            "Room 1",
+        );
+        let companion_device_id = with_companion.then(|| {
+            insert_canonical_device(
+                &state,
+                HubKey::new(HubType::new(HubType::MATTER), "local"),
+                "matter-light-1",
+                "Matter Lamp",
+                "",
+                "",
+            )
+        });
+
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let deletes = Arc::new(Mutex::new(Vec::new()));
+        let fail_apply = Arc::new(AtomicBool::new(false));
+        let fail_delete = Arc::new(AtomicBool::new(false));
+        let transaction_lock = state
+            .lock()
+            .unwrap()
+            .external_topology_transaction_lock
+            .clone();
+        let projection_was_serialized = Arc::new(AtomicBool::new(false));
+        let discovery = Arc::new(RecordingManagedSceneDiscovery {
+            calls: calls.clone(),
+            deletes: deletes.clone(),
+            fail_apply: fail_apply.clone(),
+            fail_delete: fail_delete.clone(),
+            transaction_lock,
+            projection_was_serialized: projection_was_serialized.clone(),
+        });
+
+        {
+            let mut s = state.lock().unwrap();
+            let room = crate::topology::TopologyRoom::new("room1", "Room 1");
+            s.topology.insert_room(room);
+            assert!(s
+                .topology
+                .attach_device_user_override("room1", &hue_device_id));
+            if let Some(companion_device_id) = &companion_device_id {
+                assert!(s
+                    .topology
+                    .attach_device_user_override("room1", companion_device_id));
+            }
+            s.topology.set_grouped_room_control_required(&hub_key, true);
+            assert!(s.topology.upsert_managed_room_binding(
+                "room1",
+                crate::topology::HubRoomBinding {
+                    hub_key: hub_key.clone(),
+                    hub_room_id: "hue-room-1".into(),
+                    control_id: "hue-group-1".into(),
+                    light_device_ids: vec!["hue-light-1".into()],
+                },
+            ));
+            s.hubs.insert(
+                hub_key.clone(),
+                ActiveHub {
+                    hub_type: hub_key.hub_type.clone(),
+                    hub_key: hub_key.clone(),
+                    runtime: None,
+                    hub_data: Box::new(()),
+                    registry: None,
+                    discovery: Some(discovery),
+                    shutdown: Default::default(),
+                },
+            );
+        }
+        runtime
+            .snapshots
+            .lock()
+            .unwrap()
+            .push(make_light_child_snapshot(&hue_device_id, "room1"));
+        if let Some(companion_device_id) = &companion_device_id {
+            runtime
+                .snapshots
+                .lock()
+                .unwrap()
+                .push(make_light_child_snapshot(companion_device_id, "room1"));
+        }
+
+        ManagedSceneTestHarness {
+            state,
+            runtime,
+            hue_device_id,
+            companion_device_id,
+            hub_key,
+            calls,
+            deletes,
+            fail_apply,
+            fail_delete,
+            projection_was_serialized,
+        }
     }
 
     impl crate::discovery::HubDiscovery for NativeSceneDiscovery {
@@ -17886,6 +18503,259 @@ mod tests {
     }
 
     #[test]
+    fn scene_apply_projects_attached_hue_targets_and_dispatches_mixed_companions_only() {
+        let harness = setup_managed_hue_scene_room(true);
+        harness.runtime.require_scene_dispatch_transaction_lock(
+            harness
+                .state
+                .lock()
+                .unwrap()
+                .external_topology_transaction_lock
+                .clone(),
+        );
+        let companion_device_id = harness.companion_device_id.clone().unwrap();
+        do_scene_upsert(
+            &harness.state,
+            scene_with_default_output("mixed-room", 64, 4100),
+        )
+        .unwrap();
+
+        let response: SceneApplyResponse = serde_json::from_str(
+            &do_scene_apply(
+                &harness.state,
+                "mixed-room",
+                SceneApplyRequest {
+                    target_id: "room1".into(),
+                    transition_ms: Some(275),
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let mut expected_nodes = vec![companion_device_id.clone(), harness.hue_device_id.clone()];
+        expected_nodes.sort();
+        assert_eq!(response.affected_node_ids, expected_nodes);
+        let calls = harness.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].projection.rhythm_room_id, "room1");
+        assert_eq!(calls[0].projection.hub_room_id, "hue-room-1");
+        assert_eq!(calls[0].projection.scene_id, "mixed-room");
+        assert_eq!(calls[0].transition_ms, Some(275));
+        assert!(!calls[0].ephemeral);
+        assert_eq!(calls[0].projection.targets.len(), 1);
+        assert_eq!(
+            calls[0].projection.targets[0].native_device_id,
+            "hue-light-1"
+        );
+        drop(calls);
+
+        let direct_calls = harness.runtime.applied_commands();
+        assert_eq!(direct_calls.len(), 1);
+        assert_eq!(direct_calls[0].0, companion_device_id);
+        assert_ne!(direct_calls[0].0, harness.hue_device_id);
+        assert!(harness.projection_was_serialized.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn stored_scene_releases_outer_transaction_before_roomless_hue_dispatch() {
+        let (state, runtime) = setup_state(Vec::new());
+        let hue_device_id = insert_canonical_device(
+            &state,
+            HubKey::new(HubType::new(HubType::HUE), "bridge"),
+            "roomless-hue-light",
+            "Standalone Hue Lamp",
+            "",
+            "",
+        );
+        {
+            let mut s = state.lock().unwrap();
+            s.topology.ensure_standalone_device(&hue_device_id);
+            runtime
+                .snapshots
+                .lock()
+                .unwrap()
+                .push(make_standalone_light_snapshot(&hue_device_id));
+            runtime.require_scene_dispatch_transaction_lock(
+                s.external_topology_transaction_lock.clone(),
+            );
+        }
+        do_scene_upsert(
+            &state,
+            scene_for_light("roomless-hue-scene", &hue_device_id),
+        )
+        .unwrap();
+
+        do_scene_apply(
+            &state,
+            "roomless-hue-scene",
+            SceneApplyRequest {
+                target_id: hue_device_id.clone(),
+                transition_ms: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(runtime.applied_commands().len(), 1);
+        assert_eq!(runtime.applied_commands()[0].0, hue_device_id);
+    }
+
+    #[test]
+    fn scene_apply_fails_before_companion_dispatch_when_projection_fails() {
+        let harness = setup_managed_hue_scene_room(true);
+        harness.fail_apply.store(true, Ordering::SeqCst);
+        do_scene_upsert(
+            &harness.state,
+            scene_with_default_output("failed-room", 55, 3300),
+        )
+        .unwrap();
+
+        let error = do_scene_apply(
+            &harness.state,
+            "failed-room",
+            SceneApplyRequest {
+                target_id: "room1".into(),
+                transition_ms: None,
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("managed projection failed"));
+        assert!(harness.runtime.applied_commands().is_empty());
+        let room = harness.runtime.engine_room_snapshot("room1").unwrap();
+        assert!(!room.mood_active);
+        assert!(room.profile_settings.mood_scene_id.is_none());
+    }
+
+    #[test]
+    fn scene_apply_retires_stale_projection_when_scene_omits_hue_output() {
+        let harness = setup_managed_hue_scene_room(true);
+        let companion_device_id = harness.companion_device_id.clone().unwrap();
+        do_scene_upsert(
+            &harness.state,
+            scene_with_default_output("changing-room", 45, 3600),
+        )
+        .unwrap();
+        do_scene_apply(
+            &harness.state,
+            "changing-room",
+            SceneApplyRequest {
+                target_id: "room1".into(),
+                transition_ms: None,
+            },
+        )
+        .unwrap();
+
+        do_scene_upsert(
+            &harness.state,
+            scene_for_light("changing-room", &companion_device_id),
+        )
+        .unwrap();
+        let response: SceneApplyResponse = serde_json::from_str(
+            &do_scene_apply(
+                &harness.state,
+                "changing-room",
+                SceneApplyRequest {
+                    target_id: "room1".into(),
+                    transition_ms: None,
+                },
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let calls = harness.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(calls[1].projection.targets.is_empty());
+        assert_eq!(response.affected_node_ids, vec![companion_device_id]);
+    }
+
+    #[test]
+    fn stored_scene_preview_is_durable_but_draft_preview_is_ephemeral() {
+        let harness = setup_managed_hue_scene_room(false);
+        let scene = scene_for_light("preview-room", &harness.hue_device_id);
+        do_scene_upsert(&harness.state, scene.clone()).unwrap();
+
+        do_scene_preview(
+            &harness.state,
+            "preview-room",
+            ScenePreviewRequest {
+                target_id: "room1".into(),
+                transition_ms: Some(100),
+                duration_ms: Some(5000),
+            },
+        )
+        .unwrap();
+        do_scene_draft_preview(
+            &harness.state,
+            SceneDraftPreviewRequest {
+                scene,
+                target_id: "room1".into(),
+                transition_ms: Some(125),
+                duration_ms: Some(5000),
+            },
+        )
+        .unwrap();
+
+        let calls = harness.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert!(!calls[0].ephemeral);
+        assert!(calls[1].ephemeral);
+    }
+
+    #[test]
+    fn scene_apply_blocks_while_controller_authority_is_pending() {
+        let harness = setup_managed_hue_scene_room(true);
+        harness
+            .state
+            .lock()
+            .unwrap()
+            .mark_external_controller_authority_pending(&harness.hub_key);
+        do_scene_upsert(
+            &harness.state,
+            scene_with_default_output("pending-room", 50, 4000),
+        )
+        .unwrap();
+
+        let error = do_scene_apply(
+            &harness.state,
+            "pending-room",
+            SceneApplyRequest {
+                target_id: "room1".into(),
+                transition_ms: None,
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("not ready"));
+        assert!(harness.calls.lock().unwrap().is_empty());
+        assert!(harness.runtime.applied_commands().is_empty());
+    }
+
+    #[test]
+    fn scene_delete_keeps_local_definition_when_external_delete_fails() {
+        let harness = setup_managed_hue_scene_room(false);
+        do_scene_upsert(
+            &harness.state,
+            scene_for_light("delete-room", &harness.hue_device_id),
+        )
+        .unwrap();
+        harness.fail_delete.store(true, Ordering::SeqCst);
+
+        let error = do_scene_delete(&harness.state, "delete-room").unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("managed projection delete failed"));
+        assert!(harness
+            .state
+            .lock()
+            .unwrap()
+            .scenes
+            .contains_key("delete-room"));
+        assert!(harness.deletes.lock().unwrap().is_empty());
+    }
+    #[test]
     fn scene_apply_can_turn_light_output_off() {
         let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
         state.lock().unwrap().composite_controller =
@@ -17971,6 +18841,13 @@ mod tests {
     #[test]
     fn scene_delete_clears_committed_mood_scene_state() {
         let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+        runtime.require_scene_dispatch_transaction_lock(
+            state
+                .lock()
+                .unwrap()
+                .external_topology_transaction_lock
+                .clone(),
+        );
         do_scene_upsert(&state, scene_for_light("icy-glow", &device_id)).unwrap();
         do_scene_apply(
             &state,

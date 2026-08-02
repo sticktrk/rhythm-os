@@ -15,6 +15,7 @@ pub mod events;
 pub mod hub_state;
 pub mod hue_lifecycle;
 pub mod managed_rooms;
+pub mod managed_scenes;
 pub mod ownership;
 pub mod provider;
 pub mod registry;

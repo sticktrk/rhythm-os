@@ -12,7 +12,9 @@ use log::{debug, info, warn};
 use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_core::DeviceRegistry;
 use rhythm_os::canonical::identity::{DiscoveredIdentity, HardwareId};
-use rhythm_os::discovery::{DiscoveredDevice, DiscoveredMotionState, DiscoveredRoom, HubDiscovery};
+use rhythm_os::discovery::{
+    DiscoveredDevice, DiscoveredMotionState, DiscoveredRoom, HubDiscovery, ManagedSceneProjection,
+};
 use rhythm_os::registry::HubDeviceRegistry;
 use rhythm_os::scenes::{
     native_scene_id, LightSceneColor, LightSceneLayer, LightSceneOutput, LightScenePower,
@@ -862,6 +864,61 @@ impl<H: HueTransport + 'static> HubDiscovery for HueDiscovery<H> {
         }
         self.transport
             .recall_scene(&self.username, scene_id, transition_ms)
+    }
+
+    fn apply_managed_scene_projection(
+        &self,
+        projection: &ManagedSceneProjection,
+        transition_ms: Option<u32>,
+        ephemeral: bool,
+    ) -> Result<bool> {
+        let Some(source) = &self.ownership_source else {
+            return Ok(false);
+        };
+        let operation_lock = crate::ownership::controller_operation_lock(&source.bridge_id);
+        let _operation = operation_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Failed to lock Hue controller operations"))?;
+        let mut ownership = crate::ownership::load_controller_ownership(
+            source.storage.as_ref(),
+            &source.bridge_id,
+        )?
+        .filter(|ownership| ownership.phase == crate::ownership::HueOwnershipPhase::Active)
+        .ok_or_else(|| anyhow::anyhow!("Hue controller authority is not active"))?;
+        crate::managed_scenes::apply_managed_scene(
+            source.storage.as_ref(),
+            &mut ownership,
+            self.transport.as_ref(),
+            &self.username,
+            projection,
+            transition_ms,
+            ephemeral,
+        )?;
+        Ok(true)
+    }
+
+    fn delete_managed_scene_projection(&self, scene_id: &str) -> Result<bool> {
+        let Some(source) = &self.ownership_source else {
+            return Ok(false);
+        };
+        let operation_lock = crate::ownership::controller_operation_lock(&source.bridge_id);
+        let _operation = operation_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Failed to lock Hue controller operations"))?;
+        let mut ownership = crate::ownership::load_controller_ownership(
+            source.storage.as_ref(),
+            &source.bridge_id,
+        )?
+        .filter(|ownership| ownership.phase == crate::ownership::HueOwnershipPhase::Active)
+        .ok_or_else(|| anyhow::anyhow!("Hue controller authority is not active"))?;
+        crate::managed_scenes::delete_managed_scene(
+            source.storage.as_ref(),
+            &mut ownership,
+            self.transport.as_ref(),
+            &self.username,
+            scene_id,
+        )?;
+        Ok(true)
     }
 
     /// Discover all devices with full hardware identity information.

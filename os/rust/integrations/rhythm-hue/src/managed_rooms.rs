@@ -393,6 +393,33 @@ fn execute_managed_room_operation<H: HueTransport + ?Sized>(
     username: &str,
     operation: HueManagedRoomOperation,
 ) -> Result<()> {
+    let scene_room_id = match &operation {
+        HueManagedRoomOperation::ReconcileMembership { hue_room_id, .. } => state
+            .managed_rooms()
+            .values()
+            .find(|room| room.hue_room_id == *hue_room_id)
+            .map(|room| room.rhythm_room_id.clone()),
+        HueManagedRoomOperation::Update { rhythm_room_id, .. }
+        | HueManagedRoomOperation::Delete { rhythm_room_id, .. }
+        | HueManagedRoomOperation::ForgetMissing { rhythm_room_id } => Some(rhythm_room_id.clone()),
+        HueManagedRoomOperation::Create { desired } => state
+            .managed_rooms()
+            .contains_key(&desired.rhythm_room_id)
+            .then(|| desired.rhythm_room_id.clone()),
+        HueManagedRoomOperation::AdoptRecovered { .. } | HueManagedRoomOperation::Rename { .. } => {
+            None
+        }
+    };
+    if let Some(rhythm_room_id) = scene_room_id {
+        crate::managed_scenes::delete_managed_scenes_for_room(
+            storage,
+            state,
+            transport,
+            username,
+            &rhythm_room_id,
+        )?;
+    }
+
     match operation {
         HueManagedRoomOperation::ReconcileMembership {
             hue_room_id,

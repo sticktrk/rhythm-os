@@ -90,6 +90,19 @@ pub struct HueManagedRoom {
     pub grouped_light_id: String,
 }
 
+/// Explicit ownership receipt for a Rhythm scene projected into one managed
+/// Hue room. Native resources are never adopted by display name alone.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HueManagedScene {
+    pub rhythm_room_id: String,
+    pub rhythm_scene_id: String,
+    pub hue_room_id: String,
+    pub hue_scene_id: String,
+    pub fingerprint: String,
+    #[serde(default)]
+    pub ephemeral: bool,
+}
+
 /// Immutable snapshot captured before Rhythm takes control of a bridge.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct HueBridgeOwnershipBaseline {
@@ -127,6 +140,8 @@ pub struct HueControllerOwnership {
     #[serde(default)]
     managed_rooms: BTreeMap<String, HueManagedRoom>,
     #[serde(default)]
+    managed_scenes: BTreeMap<String, HueManagedScene>,
+    #[serde(default)]
     restored_resource_ids: BTreeMap<String, String>,
     #[serde(default)]
     receipts: BTreeMap<String, HueOwnershipReceipt>,
@@ -139,6 +154,7 @@ impl HueControllerOwnership {
             phase: HueOwnershipPhase::Captured,
             baseline,
             managed_rooms: BTreeMap::new(),
+            managed_scenes: BTreeMap::new(),
             restored_resource_ids: BTreeMap::new(),
             receipts: BTreeMap::new(),
         }
@@ -157,6 +173,19 @@ impl HueControllerOwnership {
             .values()
             .map(|room| room.hue_room_id.clone())
             .collect()
+    }
+
+    pub fn managed_scenes(&self) -> &BTreeMap<String, HueManagedScene> {
+        &self.managed_scenes
+    }
+
+    pub fn managed_scene(
+        &self,
+        rhythm_room_id: &str,
+        rhythm_scene_id: &str,
+    ) -> Option<&HueManagedScene> {
+        self.managed_scenes
+            .get(&managed_scene_key(rhythm_room_id, rhythm_scene_id))
     }
 
     pub fn receipts(&self) -> impl Iterator<Item = &HueOwnershipReceipt> {
@@ -181,8 +210,53 @@ impl HueControllerOwnership {
         if !self.phase.is_managed() || self.phase == HueOwnershipPhase::Restoring {
             anyhow::bail!("Hue managed-room mappings can only change while Rhythm owns the bridge");
         }
+        if self
+            .managed_scenes
+            .values()
+            .any(|scene| scene.rhythm_room_id == rhythm_room_id)
+        {
+            anyhow::bail!("Managed Hue scenes must be removed before their room mapping");
+        }
         self.managed_rooms.remove(rhythm_room_id);
         Ok(())
+    }
+
+    pub fn record_managed_scene(&mut self, scene: HueManagedScene) -> Result<()> {
+        if self.phase != HueOwnershipPhase::Active {
+            anyhow::bail!("Hue managed-scene mappings can only change while authority is active");
+        }
+        let room = self
+            .managed_rooms
+            .get(&scene.rhythm_room_id)
+            .ok_or_else(|| anyhow::anyhow!("Managed Hue scene has no managed room"))?;
+        if room.hue_room_id != scene.hue_room_id {
+            anyhow::bail!("Managed Hue scene room identity is inconsistent");
+        }
+        if self.managed_scenes.values().any(|existing| {
+            existing.hue_scene_id == scene.hue_scene_id
+                && (existing.rhythm_room_id != scene.rhythm_room_id
+                    || existing.rhythm_scene_id != scene.rhythm_scene_id)
+        }) {
+            anyhow::bail!("A Hue scene is already owned by another Rhythm projection");
+        }
+        self.managed_scenes.insert(
+            managed_scene_key(&scene.rhythm_room_id, &scene.rhythm_scene_id),
+            scene,
+        );
+        Ok(())
+    }
+
+    pub fn remove_managed_scene(
+        &mut self,
+        rhythm_room_id: &str,
+        rhythm_scene_id: &str,
+    ) -> Result<Option<HueManagedScene>> {
+        if self.phase != HueOwnershipPhase::Active {
+            anyhow::bail!("Hue managed-scene mappings can only change while authority is active");
+        }
+        Ok(self
+            .managed_scenes
+            .remove(&managed_scene_key(rhythm_room_id, rhythm_scene_id)))
     }
 
     fn ensure_bridge_id(&self, bridge_id: &str) -> Result<()> {
@@ -237,8 +311,12 @@ impl HueControllerOwnership {
     }
 }
 
+fn managed_scene_key(rhythm_room_id: &str, rhythm_scene_id: &str) -> String {
+    format!("{}:{rhythm_room_id}{rhythm_scene_id}", rhythm_room_id.len())
+}
+
 /// Serialize every control-plane mutation for one physical bridge, including
-/// topology reconciliation and restore. The
+/// topology reconciliation, scene projection, and restore. The
 /// process-level map intentionally stores only stable bridge identities.
 pub fn controller_operation_lock(bridge_id: &str) -> Arc<Mutex<()>> {
     static LOCKS: OnceLock<Mutex<BTreeMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
@@ -488,6 +566,7 @@ fn next_clear_operation<H: HueTransport + ?Sized>(
     transport: &H,
     username: &str,
     managed_room_ids: &BTreeSet<String>,
+    managed_scene_ids: &BTreeSet<String>,
 ) -> Result<Option<ControlPlaneOperation>> {
     let behavior_payload = transport.get_resources(username, "behavior_instance")?;
     let mut behavior_ids = data_array("behavior_instance", &behavior_payload)?
@@ -536,7 +615,8 @@ fn next_clear_operation<H: HueTransport + ?Sized>(
             .iter()
             .filter_map(|resource| resource.get("id").and_then(Value::as_str))
             .filter(|resource_id| {
-                !(*resource_type == "room" && managed_room_ids.contains(*resource_id))
+                !((*resource_type == "room" && managed_room_ids.contains(*resource_id))
+                    || (*resource_type == "scene" && managed_scene_ids.contains(*resource_id)))
             })
             .map(str::to_string)
             .collect::<Vec<_>>();
@@ -696,7 +776,17 @@ pub fn reconcile_authoritative_control<H: HueTransport + ?Sized>(
     let mut previous_operation_id: Option<String> = None;
     loop {
         let managed_room_ids = state.managed_room_ids();
-        let operation = match next_clear_operation(transport, username, &managed_room_ids) {
+        let managed_scene_ids = state
+            .managed_scenes()
+            .values()
+            .map(|scene| scene.hue_scene_id.clone())
+            .collect::<BTreeSet<_>>();
+        let operation = match next_clear_operation(
+            transport,
+            username,
+            &managed_room_ids,
+            &managed_scene_ids,
+        ) {
             Ok(operation) => operation,
             Err(error) => {
                 state.phase = HueOwnershipPhase::ClearIncomplete;
@@ -1176,6 +1266,7 @@ fn clear_all_restorable_resources<H: HueTransport + ?Sized>(
             )?;
         }
     }
+    state.managed_scenes.clear();
     state.managed_rooms.clear();
     persist_controller_ownership(storage, state)
 }
