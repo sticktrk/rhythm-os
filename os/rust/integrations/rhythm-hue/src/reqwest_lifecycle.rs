@@ -135,7 +135,7 @@ pub fn create_hue_controller(
     use crate::controller::HueLightController;
     use crate::hub_state::HueHubData;
 
-    let (bridge_ip, username, _bridge_id, registry, sse_liveness) = {
+    let (bridge_ip, username, bridge_id, registry, sse_liveness) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
         let creds = s
@@ -163,7 +163,8 @@ pub fn create_hue_controller(
     let transport = ReqwestHueTransport::new(&bridge_ip)?;
     let controller = HueLightController::new(transport, username, registry)
         .with_capability_source(state.clone(), key.clone())
-        .with_sse_liveness(sse_liveness);
+        .with_sse_liveness(sse_liveness)
+        .with_controller_operation_lock(crate::ownership::controller_operation_lock(&bridge_id));
     Ok(std::sync::Arc::new(controller))
 }
 
@@ -1258,20 +1259,19 @@ impl ExternalLightHubIntegration for HueIntegration {
     ) -> Result<()> {
         let (storage, bridge_id) = {
             let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-            let storage = state
-                .storage
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("Hue release finalization requires storage"))?;
-            let credentials = state
-                .hub_credentials
-                .get(key)
-                .ok_or_else(|| anyhow::anyhow!("Hue release credentials are unavailable"))?;
-            let bridge_id = credentials
+            let Some(storage) = state.storage.clone() else {
+                return Ok(());
+            };
+            let Some(credentials) = state.hub_credentials.get(key) else {
+                return Ok(());
+            };
+            let Some(bridge_id) = credentials
                 .get_str("bridge_id")
                 .filter(|bridge_id| !bridge_id.trim().is_empty())
-                .ok_or_else(|| anyhow::anyhow!("Hue release identity is unavailable"))?
-                .to_string();
-            (storage, bridge_id)
+            else {
+                return Ok(());
+            };
+            (storage, bridge_id.to_string())
         };
         let Some(ownership) =
             crate::ownership::load_controller_ownership(storage.as_ref(), &bridge_id)?
@@ -2304,6 +2304,52 @@ mod tests {
         assert_eq!(context.username, "release-user");
 
         drop(context);
+        drop(state);
+        drop(storage);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn release_finalization_noops_without_an_exact_bridge_manifest() {
+        static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "rhythm-hue-optional-release-finalization-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let key = hue_key("192.0.2.10");
+        let state = shared_state();
+
+        INTEGRATION
+            .finalize_external_controller_release(&state, &key)
+            .unwrap();
+
+        let storage = Arc::new(FileStorage::new(path.to_str().unwrap()).unwrap());
+        state.lock().unwrap().storage = Some(storage.clone());
+        INTEGRATION
+            .finalize_external_controller_release(&state, &key)
+            .unwrap();
+
+        state
+            .lock()
+            .unwrap()
+            .hub_credentials
+            .insert(key.clone(), hue_credentials(&key.address, "release-user"));
+        INTEGRATION
+            .finalize_external_controller_release(&state, &key)
+            .unwrap();
+
+        state
+            .lock()
+            .unwrap()
+            .hub_credentials
+            .get_mut(&key)
+            .unwrap()
+            .data["bridge_id"] = serde_json::json!("bridge-without-manifest");
+        INTEGRATION
+            .finalize_external_controller_release(&state, &key)
+            .unwrap();
+
         drop(state);
         drop(storage);
         let _ = std::fs::remove_dir_all(path);
@@ -3577,20 +3623,29 @@ mod tests {
     }
 
     #[test]
-    fn create_hue_controller_builds_controller_for_active_hub() {
+    fn create_hue_controller_builds_controller_with_bridge_operation_lock() {
         let state = shared_state();
         let key = hue_key("192.0.2.10");
+        let bridge_id = "bridge-controller-operation-lock";
         {
             let mut guard = state.lock().unwrap();
             let mut credentials = hue_credentials("192.0.2.10", "user-123");
-            credentials.data["bridge_id"] = serde_json::json!("bridge-123");
+            credentials.data["bridge_id"] = serde_json::json!(bridge_id);
             guard.hub_credentials.insert(key.clone(), credentials);
             guard.hubs.insert(key.clone(), active_hue_hub(key.clone()));
         }
+        let operation_lock = crate::ownership::controller_operation_lock(bridge_id);
+        let owners_before_controller = Arc::strong_count(&operation_lock);
 
         let controller = create_hue_controller(&state, &key).unwrap();
 
         assert_eq!(Arc::strong_count(&controller), 1);
+        assert_eq!(
+            Arc::strong_count(&operation_lock),
+            owners_before_controller + 1
+        );
+        drop(controller);
+        assert_eq!(Arc::strong_count(&operation_lock), owners_before_controller);
     }
 
     #[test]

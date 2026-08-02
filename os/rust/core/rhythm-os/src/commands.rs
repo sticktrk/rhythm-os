@@ -11189,14 +11189,9 @@ fn prepare_external_controller_release(
     };
     // Callers hold the external-topology transaction across this restore and
     // the subsequent credential commit, finalization, and local teardown.
-    // Mark every affected controller pending before the first restore write;
-    // the marker deliberately remains set on failure so normal control cannot
-    // reopen a release epoch.
+    // Integrations that own external controller authority fence themselves in
+    // the callback. The command layer must not fence unrelated hub types.
     for key in keys {
-        state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("lock"))?
-            .mark_external_controller_authority_pending(key);
         callback(state, key, reason).with_context(|| {
             format!(
                 "{} controller state could not be restored before local teardown",
@@ -22162,6 +22157,28 @@ mod tests {
         );
         assert!(state.lock().unwrap().hub_credentials.is_empty());
         assert!(storage.inner.lock().unwrap().hub_credentials.is_empty());
+    }
+
+    #[test]
+    fn release_preparation_does_not_fence_non_authoritative_hubs() {
+        let (state, _runtime) = setup_state(Vec::new());
+        let key = state.lock().unwrap().hubs.keys().next().unwrap().clone();
+        {
+            let mut app = state.lock().unwrap();
+            app.set_hub_connected(&key, true);
+            app.release_external_controller_authority_fn = Some(Arc::new(|_, _, _| Ok(())));
+        }
+
+        prepare_external_controller_release(
+            &state,
+            std::slice::from_ref(&key),
+            crate::hub::ExternalControllerReleaseReason::UserDisconnect,
+        )
+        .unwrap();
+
+        let app = state.lock().unwrap();
+        assert!(app.hub_is_connected(&key));
+        assert!(!app.external_controller_authority_pending.contains(&key));
     }
 
     #[test]
