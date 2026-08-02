@@ -215,7 +215,7 @@ impl HubDispatchPolicy {
             "hue_ble" => Self {
                 max_in_flight: DEFAULT_MAX_IN_FLIGHT,
                 rate_limit: None,
-                split_device_targets: false,
+                split_device_targets: true,
                 dispatch_timeout: HUE_BLE_HUB_DISPATCH_TIMEOUT,
                 timeout_cooldown: DEFAULT_HUB_TIMEOUT_COOLDOWN,
                 timeout_scope: HubDispatchTimeoutScope::Target,
@@ -2039,7 +2039,7 @@ mod tests {
             HUE_BLE_HUB_DISPATCH_TIMEOUT
         );
         assert!(hue_ble.policy.rate_limit.is_none());
-        assert!(!hue_ble.policy.split_device_targets);
+        assert!(hue_ble.policy.split_device_targets);
         assert!(matter.policy.rate_limit.is_none());
         assert!(matter.policy.split_device_targets);
         assert_eq!(matter.policy.max_in_flight, MATTER_MAX_IN_FLIGHT);
@@ -2214,6 +2214,28 @@ mod tests {
         assert!(selective.wait_blocked_started_timeout(Duration::from_secs(5)));
         assert!(wait_until(Duration::from_secs(5), || {
             selective.turn_on_count_for("dev-2") == 1
+        }));
+        selective.release();
+    }
+
+    #[test]
+    fn unavailable_hue_ble_bulb_does_not_block_sibling_dispatch() {
+        let selective = Arc::new(SelectiveBlockingController::new("bulb-offline"));
+        let composite = Arc::new(CompositeController::new());
+        composite.register_controller("hue_ble@local", selective.clone());
+        composite.update_routing(route(&[(
+            "room1",
+            "hue_ble@local",
+            HubDispatchTarget::Devices {
+                native_ids: vec!["bulb-offline".to_string(), "bulb-ready".to_string()],
+            },
+        )]));
+
+        block_on(composite.turn_on("room1", LightingCommand::new(80, 4000))).unwrap();
+
+        assert!(selective.wait_blocked_started_timeout(Duration::from_secs(5)));
+        assert!(wait_until(Duration::from_secs(5), || {
+            selective.turn_on_count_for("bulb-ready") == 1
         }));
         selective.release();
     }
