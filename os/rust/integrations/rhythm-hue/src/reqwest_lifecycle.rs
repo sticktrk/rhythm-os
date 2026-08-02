@@ -1019,13 +1019,13 @@ fn desired_hue_topology_locked(
         let Some(room_id) = room_id else {
             continue;
         };
-        state
+        let room = state
             .topology
             .get(&room_id)
             .ok_or_else(|| anyhow::anyhow!("A Hue light references a missing Rhythm room"))?;
         let entry = rooms.entry(room_id.clone()).or_insert_with(|| {
             (
-                crate::managed_rooms::managed_room_projection_name(&room_id),
+                crate::managed_rooms::managed_room_projection_name(&room.name),
                 Vec::new(),
             )
         });
@@ -3070,6 +3070,25 @@ mod tests {
             | ResolveResult::Created { canonical_id } => canonical_id,
             ResolveResult::Queued { .. } => panic!("unexpected triage"),
         }
+    }
+
+    #[test]
+    fn desired_hue_topology_projects_the_canonical_room_name() {
+        let state = shared_state();
+        let key = hue_key("192.0.2.10");
+        let canonical_id = add_hue_light_endpoint(&state, &key, "hue-light-1");
+        let mut state = state.lock().unwrap();
+        let room_id = state.topology.create_room("Living Room");
+        assert!(state
+            .topology
+            .attach_device_user_override(&room_id, &canonical_id));
+
+        let desired = desired_hue_topology_locked(&state, &key, None).unwrap();
+
+        assert_eq!(desired.rooms.len(), 1);
+        assert_eq!(desired.rooms[0].rhythm_room_id, room_id);
+        assert_eq!(desired.rooms[0].name, "Rhythm · Living Room");
+        assert_eq!(desired.rooms[0].device_ids, vec!["hue-light-1"]);
     }
 
     fn install_address_migration_graph(state: &SharedState, old_key: &HubKey) -> (String, String) {
