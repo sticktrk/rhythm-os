@@ -12601,9 +12601,10 @@ pub fn do_canonical_assign_room(
                     rollback,
                 } => {
                     let valid_target = match assignment.target_rhythm_room_id.as_deref() {
-                        Some(_) => target_hub_room_id
-                            .as_ref()
-                            .is_some_and(|target| assignment.target_hub_room_ids.contains(target)),
+                        Some(_) => match target_hub_room_id.as_ref() {
+                            Some(target) => assignment.target_hub_room_ids.contains(target),
+                            None => assignment.target_hub_room_ids.is_empty(),
+                        },
                         None => target_hub_room_id.is_none(),
                     };
                     prepared_assignments.push(PreparedHubDeviceRoomAssignment {
@@ -25237,6 +25238,47 @@ mod tests {
             state.topology.get("office").unwrap().hub_room_bindings[0].light_device_ids,
             vec!["hub-device-1".to_string()]
         );
+    }
+
+    #[test]
+    fn canonical_native_room_move_accepts_rhythm_only_target() {
+        let (state, device_id, source_room_id, target_room_id, hub_key) = setup_native_room_move();
+        state
+            .lock()
+            .unwrap()
+            .topology
+            .get_mut(&target_room_id)
+            .unwrap()
+            .hub_room_bindings
+            .clear();
+        state.lock().unwrap().prepare_hub_device_room_assignment_fn =
+            Some(Arc::new(move |_, assignment| {
+                assert_eq!(assignment.hub_key, hub_key);
+                assert!(assignment.target_hub_room_ids.is_empty());
+                Ok(crate::hub::HubDeviceRoomAssignmentOutcome::Reassigned {
+                    target_hub_room_id: None,
+                    rollback: Box::new(|| Ok(())),
+                })
+            }));
+
+        do_canonical_assign_room(&state, &device_id, Some(&target_room_id)).unwrap();
+
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.topology.device_parent_room_id(&device_id),
+            Some(target_room_id.as_str())
+        );
+        assert_eq!(
+            state.canonical_registry.get(&device_id).unwrap().room_id,
+            Some(target_room_id)
+        );
+        assert!(state
+            .topology
+            .get(&source_room_id)
+            .unwrap()
+            .hub_room_bindings[0]
+            .light_device_ids
+            .is_empty());
     }
 
     #[test]
