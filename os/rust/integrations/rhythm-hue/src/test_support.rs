@@ -68,6 +68,9 @@ impl HueTransport for Arc<SpyHueTransport> {
     ) -> anyhow::Result<serde_json::Value> {
         (**self).get_resources(username, resource_type)
     }
+    fn get_all_resources(&self, username: &str) -> anyhow::Result<serde_json::Value> {
+        (**self).get_all_resources(username)
+    }
     fn create_resource(
         &self,
         username: &str,
@@ -527,6 +530,52 @@ impl HueTransport for SpyHueTransport {
             .get(resource_type)
             .cloned()
             .unwrap_or_else(|| serde_json::json!({"data": []})))
+    }
+
+    fn get_all_resources(&self, _username: &str) -> anyhow::Result<serde_json::Value> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(HueTransportCall::GetResources {
+                resource_type: "*".to_string(),
+            });
+        if self.should_fail.load(Ordering::Relaxed) {
+            anyhow::bail!("spy: get_all_resources failed");
+        }
+        let resources = self.resources.lock().unwrap();
+        let mut inventory = Vec::new();
+        for (resource_type, payload) in resources.iter() {
+            if resource_type.starts_with("v1:") {
+                continue;
+            }
+            for resource in payload
+                .get("data")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let mut resource = resource.clone();
+                if resource.get("type").is_none() {
+                    resource["type"] = serde_json::Value::String(resource_type.clone());
+                }
+                inventory.push(resource);
+            }
+        }
+        inventory.sort_by_cached_key(|resource| {
+            (
+                resource
+                    .get("type")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                resource
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            )
+        });
+        Ok(serde_json::json!({"data": inventory, "errors": []}))
     }
 
     fn create_resource(

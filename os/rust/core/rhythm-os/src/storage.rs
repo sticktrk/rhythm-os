@@ -64,6 +64,8 @@ enum HueOwnershipValidationPhase {
     Restoring,
     RestoreIncomplete,
     Restored,
+    ReleasePending,
+    SnapshotRetained,
 }
 
 #[allow(dead_code)]

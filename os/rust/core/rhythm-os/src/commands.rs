@@ -5735,9 +5735,8 @@ pub fn do_factory_reset(state: &SharedState) -> Result<String> {
         .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
     // Releasing an authoritative external controller is itself a safety
     // prerequisite for reset. The platform barrier may scrub peripheral
-    // trust or stage other irreversible local work, so a Hue restore failure
-    // must abort while credentials, recovery material, and local state are
-    // still intact.
+    // trust or stage other irreversible local work, so a Hue snapshot-retention
+    // failure must abort while credentials and local state are still intact.
     preflight_current_hue_recovery_state(state, HueRecoveryPreflightMode::ControllerRelease)
         .context("factory reset Hue recovery preflight failed")?;
     let release_keys = configured_or_active_hub_keys(state)?;
@@ -5746,7 +5745,7 @@ pub fn do_factory_reset(state: &SharedState) -> Result<String> {
         &release_keys,
         crate::hub::ExternalControllerReleaseReason::FactoryReset,
     )
-    .context("restoring external controller state before factory reset")?;
+    .context("releasing external controller authority before factory reset")?;
 
     if let Some(callback) = state
         .lock()
@@ -6265,7 +6264,14 @@ fn hue_ownership_manifest_phase(file: &BackupIntegrationFile, source: &str) -> R
 }
 
 fn hue_ownership_phase_blocks_backup(phase: &str) -> bool {
-    matches!(phase, "restoring" | "restore_incomplete" | "restored")
+    matches!(
+        phase,
+        "restoring" | "restore_incomplete" | "release_pending"
+    )
+}
+
+fn hue_ownership_phase_is_archival(phase: &str) -> bool {
+    matches!(phase, "snapshot_retained" | "restored")
 }
 
 fn reject_backup_unsafe_hue_ownership_phases(
@@ -6309,7 +6315,7 @@ fn preflight_current_hue_recovery_state(
     let Some(storage) = storage else {
         return Ok(Vec::new());
     };
-    let mut files = storage
+    let files = storage
         .load_integration_backup_files(true)
         .context("Failed to inspect persisted Hue controller recovery state")?;
     let bridge_ids = hue_ownership_manifest_bridge_ids(&files, "Persisted state")?;
@@ -6318,7 +6324,6 @@ fn preflight_current_hue_recovery_state(
             .validate_integration_backup_files(&files)
             .context("Persisted Hue controller recovery state is invalid")?;
     }
-    let mut finalized_paths = BTreeSet::new();
     for bridge_id in bridge_ids {
         let manifest = files
             .iter()
@@ -6354,36 +6359,26 @@ fn preflight_current_hue_recovery_state(
                         .is_some_and(|username| !username.trim().is_empty())
             })
             .count();
-        if matching_credentials.len() == 1 && matching_usable_credentials == 1 {
-            if mode == HueRecoveryPreflightMode::SecretBackupExport
-                && hue_ownership_phase_blocks_backup(&phase)
-            {
-                anyhow::bail!(
-                    "Persisted state contains Hue controller recovery state that cannot be transferred during controller release"
-                );
-            }
+        if mode == HueRecoveryPreflightMode::SecretBackupExport
+            && hue_ownership_phase_blocks_backup(&phase)
+        {
+            anyhow::bail!(
+                "Persisted state contains Hue controller recovery state that cannot be transferred during controller release"
+            );
+        }
+        if hue_ownership_phase_is_archival(&phase)
+            && (matching_credentials.is_empty()
+                || (matching_credentials.len() == 1 && matching_usable_credentials == 1))
+        {
             continue;
         }
-
-        // A crash may occur after credential deletion is durable but before
-        // the verified Restored manifest is finalized. With no matching
-        // credential left, that manifest is safe local-only completion
-        // evidence: delete it durably so the interrupted operation can retry.
-        // Never take this path while even a stale matching credential exists.
-        if matching_credentials.is_empty() {
-            if phase == "restored" {
-                storage
-                    .delete_integration_state_file(&manifest.path)
-                    .context("Failed to finalize interrupted Hue controller release")?;
-                finalized_paths.insert(manifest.path.clone());
-                continue;
-            }
+        if matching_credentials.len() == 1 && matching_usable_credentials == 1 {
+            continue;
         }
         anyhow::bail!(
             "Persisted Hue recovery state requires exactly one usable bridge-bound credential"
         );
     }
-    files.retain(|file| !finalized_paths.contains(&file.path));
     Ok(files)
 }
 
@@ -6411,6 +6406,25 @@ fn preflight_backup_integration_files(
     if hue_manifest_bridge_ids.is_empty() {
         return Ok(false);
     }
+    let active_hue_manifest_bridge_ids = installation
+        .integration_files
+        .iter()
+        .filter(|file| {
+            file.path.starts_with("hue/controller-ownership/by-bridge/")
+                && file.path.ends_with(".json")
+        })
+        .filter_map(|file| {
+            let phase = hue_ownership_manifest_phase(file, "Backup").ok()?;
+            if hue_ownership_phase_is_archival(&phase) {
+                return None;
+            }
+            serde_json::from_str::<serde_json::Value>(&file.content)
+                .ok()?
+                .pointer("/baseline/bridge_id")?
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect::<BTreeSet<_>>();
     let hue_credentials = installation
         .hub_credentials
         .iter()
@@ -6450,39 +6464,42 @@ fn preflight_backup_integration_files(
         .cloned()
         .collect::<BTreeSet<_>>();
     if unique_credential_bridge_ids.len() != usable_hue_credential_bridge_ids.len()
-        || unique_credential_bridge_ids != hue_manifest_bridge_ids
+        || !active_hue_manifest_bridge_ids.is_subset(&unique_credential_bridge_ids)
+        || !unique_credential_bridge_ids.is_subset(&hue_manifest_bridge_ids)
     {
         anyhow::bail!(
-            "Backup Hue recovery manifests and bridge-bound credentials do not match exactly"
+            "Backup Hue active recovery manifests and bridge-bound credentials do not match"
         );
     }
 
-    let get_provider = {
-        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        if !s
-            .hub_capabilities
-            .iter()
-            .any(|capability| capability.hub_type == crate::hub::HubType::HUE)
-        {
-            anyhow::bail!("Hue backup credential validator is unavailable");
+    if !hue_credentials.is_empty() {
+        let get_provider = {
+            let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            if !s
+                .hub_capabilities
+                .iter()
+                .any(|capability| capability.hub_type == crate::hub::HubType::HUE)
+            {
+                anyhow::bail!("Hue backup credential validator is unavailable");
+            }
+            s.get_hub_provider_fn
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Hue backup credential validator is unavailable"))?
+        };
+        let provider = get_provider(crate::hub::HubType::new(crate::hub::HubType::HUE));
+        for credential in hue_credentials {
+            provider
+                .validate_backup_credentials(
+                    &credential.address,
+                    credential
+                        .data
+                        .as_ref()
+                        .expect("Hue credential data was validated above"),
+                )
+                .context("Backup Hue credentials failed live bridge validation")?;
         }
-        s.get_hub_provider_fn
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("Hue backup credential validator is unavailable"))?
-    };
-    let provider = get_provider(crate::hub::HubType::new(crate::hub::HubType::HUE));
-    for credential in hue_credentials {
-        provider
-            .validate_backup_credentials(
-                &credential.address,
-                credential
-                    .data
-                    .as_ref()
-                    .expect("Hue credential data was validated above"),
-            )
-            .context("Backup Hue credentials failed live bridge validation")?;
     }
-    Ok(true)
+    Ok(!active_hue_manifest_bridge_ids.is_empty())
 }
 
 /// Commit every credential from a validated backup as disconnected state.
@@ -12126,14 +12143,14 @@ fn prepare_external_controller_release(
     let Some(callback) = callback else {
         return Ok(());
     };
-    // Callers hold the external-topology transaction across this restore and
+    // Callers hold the external-topology transaction across this release and
     // the subsequent credential commit, finalization, and local teardown.
     // Integrations that own external controller authority fence themselves in
     // the callback. The command layer must not fence unrelated hub types.
     for key in keys {
         callback(state, key, reason).with_context(|| {
             format!(
-                "{} controller state could not be restored before local teardown",
+                "{} controller authority could not be released before local teardown",
                 key.hub_type.as_str()
             )
         })?;
@@ -12175,10 +12192,10 @@ fn configured_or_active_hub_keys(state: &SharedState) -> Result<Vec<HubKey>> {
 }
 
 /// Durably remove the selected credentials before an external controller's
-/// verified-restored manifest can be finalized. In-memory credentials remain
-/// intact until local teardown commits, so a persistence failure is retryable.
-/// A crash before finalization sees the Restored manifest and is fail-closed;
-/// a crash after finalization sees no persisted credentials to auto-bootstrap.
+/// retained snapshot can be finalized. In-memory credentials remain intact
+/// until local teardown commits, so a persistence failure is retryable. A
+/// crash before finalization sees `release_pending` and is fail-closed; a crash
+/// after finalization sees an archival snapshot and no bootstrap credential.
 fn stage_hub_credential_deletion(
     state: &SharedState,
     removed_keys: Option<&[HubKey]>,
@@ -12267,9 +12284,9 @@ fn disconnect_hubs_after_external_controller_release(state: &SharedState) -> Res
     }
 
     // Finish every fallible local visibility update before crossing the
-    // credential/finalization boundary. Once the verified Restored manifest
-    // is deleted, no ordinary error may leave a live pending hub able to begin
-    // a new acquisition epoch.
+    // credential/finalization boundary. Once release becomes archival, no
+    // ordinary error may leave a live pending hub able to begin a new
+    // acquisition epoch.
     stage_hub_credential_deletion(state, None)?;
     finalize_external_controller_release(state, &release_keys)?;
 
@@ -22732,19 +22749,22 @@ mod tests {
     }
 
     #[test]
-    fn secret_backup_finalizes_only_credentialless_restored_hue_manifest() {
+    fn secret_backup_retains_credentialless_archival_hue_manifest() {
         let (state, _runtime) = setup_state(Vec::new());
         let storage = TestStorage::default();
-        let restored = hue_ownership_manifest_file_with_phase("bridge-1", "restored");
-        storage.inner.lock().unwrap().integration_files = vec![restored.clone()];
+        let retained = hue_ownership_manifest_file_with_phase("bridge-1", "snapshot_retained");
+        storage.inner.lock().unwrap().integration_files = vec![retained.clone()];
         state.lock().unwrap().storage = Some(Arc::new(storage.clone()));
 
         let backup = build_backup_bundle_dto(&state, true).unwrap();
 
-        assert!(backup.installation.integration_files.is_empty());
+        assert_eq!(
+            backup.installation.integration_files,
+            vec![retained.clone()]
+        );
         let inner = storage.inner.lock().unwrap();
-        assert_eq!(inner.deleted_integration_paths, vec![restored.path]);
-        assert!(inner.integration_files.is_empty());
+        assert!(inner.deleted_integration_paths.is_empty());
+        assert_eq!(inner.integration_files, vec![retained]);
         drop(inner);
 
         let active = hue_ownership_manifest_file("bridge-2");
@@ -22759,7 +22779,7 @@ mod tests {
 
     #[test]
     fn secret_backup_rejects_credentialed_hue_release_phases() {
-        for phase in ["restoring", "restore_incomplete", "restored"] {
+        for phase in ["restoring", "restore_incomplete", "release_pending"] {
             let (state, _runtime) = setup_state(Vec::new());
             let storage = TestStorage::default();
             let manifest = hue_ownership_manifest_file_with_phase("bridge-1", phase);
@@ -22845,7 +22865,7 @@ mod tests {
 
     #[test]
     fn backup_restore_rejects_hue_release_phases_before_current_release() {
-        for phase in ["restoring", "restore_incomplete", "restored"] {
+        for phase in ["restoring", "restore_incomplete", "release_pending"] {
             let (state, _runtime) = setup_state(Vec::new());
             let storage = TestStorage::default();
             let current_file = BackupIntegrationFile {
@@ -22879,6 +22899,21 @@ mod tests {
             assert_eq!(inner.restore_integration_files_calls, 0);
             assert_eq!(inner.integration_files, vec![current_file]);
         }
+    }
+
+    #[test]
+    fn backup_restore_accepts_credentialless_retained_hue_snapshot() {
+        let (state, _runtime) = setup_state(Vec::new());
+        let storage = TestStorage::default();
+        state.lock().unwrap().storage = Some(Arc::new(storage));
+        let mut bundle = hue_authority_backup_bundle(&state, "bridge-1");
+        bundle.installation.integration_files = vec![hue_ownership_manifest_file_with_phase(
+            "bridge-1",
+            "snapshot_retained",
+        )];
+        bundle.installation.hub_credentials.clear();
+
+        assert!(!preflight_backup_integration_files(&state, &bundle.installation).unwrap());
     }
 
     #[test]

@@ -735,6 +735,25 @@ impl HueTransport for ReqwestHueTransport {
         Ok(value)
     }
 
+    fn get_all_resources(&self, username: &str) -> Result<serde_json::Value> {
+        let url = format!("{}/clip/v2/resource", self.base_url());
+        let response = self
+            .client
+            .get(&url)
+            .header("hue-application-key", username)
+            .send()
+            .map_err(|_| anyhow::anyhow!("Hue V2 inventory read request failed"))?;
+        let status = response.status();
+        if !status.is_success() {
+            anyhow::bail!("Hue V2 inventory read failed with HTTP status {status}");
+        }
+        let value = response
+            .json()
+            .map_err(|_| anyhow::anyhow!("Hue V2 inventory read returned invalid JSON"))?;
+        validate_hue_v2_envelope("GET Hue V2 inventory", &value)?;
+        Ok(value)
+    }
+
     fn create_resource(
         &self,
         username: &str,

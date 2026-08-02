@@ -168,24 +168,11 @@ pub fn create_hue_controller(
     Ok(std::sync::Arc::new(controller))
 }
 
-fn finalize_restored_bridges_after_local_handoff<F>(
-    storage: &dyn Storage,
-    restored_bridge_ids: &BTreeSet<String>,
-    local_handoff: F,
-) -> Result<()>
-where
-    F: FnOnce() -> Result<()>,
-{
-    local_handoff()?;
-    for bridge_id in restored_bridge_ids {
-        crate::ownership::finalize_released_control(storage, bridge_id)?;
-    }
-    Ok(())
-}
-
-/// Restore every bridge still under Rhythm authority before an older binary
-/// replaces this process. A remaining ownership manifest is a hard rollback
-/// blocker because the previous binary cannot safely recover a cleared bridge.
+/// Refuse binary rollback while a bridge is still under Rhythm authority.
+///
+/// Automatic Hue restoration is intentionally disabled. A snapshot retained
+/// after credential removal is archival and may survive rollback, but this
+/// function never writes captured state back to a bridge.
 pub fn restore_authoritative_bridges_before_binary_rollback(
     data_dir: &std::path::Path,
 ) -> Result<()> {
@@ -193,17 +180,6 @@ pub fn restore_authoritative_bridges_before_binary_rollback(
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("Rhythm data directory is not UTF-8"))?;
     let storage = rhythm_os::storage::FileStorage::new(data_dir)?;
-    let ownership_manifest_count = || -> Result<usize> {
-        Ok(storage
-            .load_integration_backup_files(true)?
-            .into_iter()
-            .filter(|file| {
-                file.path.starts_with("hue/controller-ownership/by-bridge/")
-                    && file.path.ends_with(".json")
-            })
-            .count())
-    };
-
     let ownership_manifest_files = storage
         .load_integration_backup_files(true)?
         .into_iter()
@@ -212,7 +188,6 @@ pub fn restore_authoritative_bridges_before_binary_rollback(
                 && file.path.ends_with(".json")
         })
         .collect::<Vec<_>>();
-    let initial_manifest_count = ownership_manifest_files.len();
     let all_credentials = storage
         .load_all_hub_credentials()?
         .into_iter()
@@ -223,88 +198,28 @@ pub fn restore_authoritative_bridges_before_binary_rollback(
                 .is_some_and(|hub_type| hub_type.as_str() == HubType::HUE)
         })
         .collect::<Vec<_>>();
-    let hue_hub_keys = all_credentials
+    let blocking_manifest_count = ownership_manifest_files
         .iter()
-        .filter_map(HubCredentials::hub_key)
-        .collect::<Vec<_>>();
-    let mut restored_bridge_ids = BTreeSet::new();
-
-    // Credential deletion is durably committed before a verified Restored
-    // manifest is finalized. If a crash lands in that window, the manifest is
-    // safe local completion evidence and must not strand a failed candidate
-    // on the new binary merely because no credential remains to re-verify it.
-    for file in &ownership_manifest_files {
-        let Ok(candidate) =
-            serde_json::from_str::<crate::ownership::HueControllerOwnership>(&file.content)
-        else {
-            continue;
-        };
-        let bridge_id = candidate.baseline().bridge_id();
-        let has_matching_credential = all_credentials
-            .iter()
-            .any(|credentials| credentials.get_str("bridge_id") == Some(bridge_id));
-        if !has_matching_credential
-            && candidate.phase == crate::ownership::HueOwnershipPhase::Restored
-        {
-            restored_bridge_ids.insert(bridge_id.to_string());
-        }
-    }
-
-    for credentials in all_credentials
-        .into_iter()
-        .filter(HubCredentials::can_restore_external_controller)
-    {
-        let Some(username) = crate::provider::hue_username(&credentials) else {
-            continue;
-        };
-        let Ok(transport) = ReqwestHueTransport::new(&credentials.address) else {
-            continue;
-        };
-        let Ok(bridge_id) = crate::ownership::connected_hue_bridge_id(&transport, username) else {
-            continue;
-        };
-        let operation_lock = crate::ownership::controller_operation_lock(&bridge_id);
-        let Ok(_operation) = operation_lock.lock() else {
-            continue;
-        };
-        let key = HubKey::new(HubType::new(HubType::HUE), &credentials.address);
-        let ownership = match crate::ownership::release_authoritative_control(
-            &storage, &key, &transport, username,
-        ) {
-            Ok(ownership) => ownership,
-            Err(_) => continue,
-        };
-        if let Some(ownership) = ownership {
-            if ownership.phase == crate::ownership::HueOwnershipPhase::Restored {
-                restored_bridge_ids.insert(ownership.baseline().bridge_id().to_string());
+        .filter(|file| {
+            let Ok(candidate) =
+                serde_json::from_str::<crate::ownership::HueControllerOwnership>(&file.content)
+            else {
+                return true;
+            };
+            match candidate.phase {
+                crate::ownership::HueOwnershipPhase::SnapshotRetained => {
+                    all_credentials.iter().any(|credentials| {
+                        credentials.get_str("bridge_id") == Some(candidate.baseline().bridge_id())
+                    })
+                }
+                crate::ownership::HueOwnershipPhase::Restored => false,
+                _ => true,
             }
-        }
-    }
-
-    if restored_bridge_ids.len() != initial_manifest_count {
+        })
+        .count();
+    if blocking_manifest_count != 0 {
         anyhow::bail!(
-            "Binary rollback is blocked: {} Hue controller recovery manifest(s) could not be restored",
-            initial_manifest_count.saturating_sub(restored_bridge_ids.len())
-        );
-    }
-
-    // Replacement Hue room/group IDs cannot be made stable across restore.
-    // Commit matching legacy authority mirrors without those stale routes and
-    // retire the combined snapshot before deleting the recovery manifests.
-    // If this local durability step fails, every restored manifest remains a
-    // retryable fence and the older binary is never started.
-    finalize_restored_bridges_after_local_handoff(&storage, &restored_bridge_ids, || {
-        rhythm_os::storage::prepare_authority_state_for_binary_rollback(
-            std::path::Path::new(data_dir),
-            &hue_hub_keys,
-        )
-    })?;
-
-    let remaining_manifest_count = ownership_manifest_count()?;
-    if remaining_manifest_count != 0 {
-        anyhow::bail!(
-            "Binary rollback is blocked: {} restored Hue controller recovery manifest(s) could not be finalized",
-            remaining_manifest_count
+            "Binary rollback is blocked: {blocking_manifest_count} Hue bridge snapshot(s) still have active controller authority"
         );
     }
     Ok(())
@@ -1008,6 +923,7 @@ fn ensure_hue_start_phase_is_not_release_fenced(
             crate::ownership::HueOwnershipPhase::Restoring
                 | crate::ownership::HueOwnershipPhase::RestoreIncomplete
                 | crate::ownership::HueOwnershipPhase::Restored
+                | crate::ownership::HueOwnershipPhase::ReleasePending
         )
     ) {
         anyhow::bail!(
@@ -1424,13 +1340,11 @@ impl ExternalLightHubIntegration for HueIntegration {
         else {
             return Ok(());
         };
-        if ownership.phase != crate::ownership::HueOwnershipPhase::Restored {
-            anyhow::bail!("Hue controller release did not reach verified restored state");
+        if ownership.phase != crate::ownership::HueOwnershipPhase::ReleasePending {
+            anyhow::bail!("Hue controller release did not retain its captured snapshot");
         }
-        // Keep the verified Restored manifest as a durable fence until the
-        // command layer commits credential removal. If that write fails or
-        // the process crashes, stale credentials cannot reacquire and clear
-        // the bridge on the next boot.
+        // The retained snapshot is the release result. The command layer may
+        // now remove credentials without any restoration write to the bridge.
         Ok(())
     }
 
@@ -1455,14 +1369,11 @@ impl ExternalLightHubIntegration for HueIntegration {
             };
             (storage, bridge_id.to_string())
         };
-        let Some(ownership) =
+        let Some(_ownership) =
             crate::ownership::load_controller_ownership(storage.as_ref(), &bridge_id)?
         else {
             return Ok(());
         };
-        if ownership.phase != crate::ownership::HueOwnershipPhase::Restored {
-            anyhow::bail!("Hue controller release is not verified for finalization");
-        }
         crate::ownership::finalize_released_control(storage.as_ref(), &bridge_id)
     }
 
@@ -2456,6 +2367,7 @@ mod tests {
             HueOwnershipPhase::Restoring,
             HueOwnershipPhase::RestoreIncomplete,
             HueOwnershipPhase::Restored,
+            HueOwnershipPhase::ReleasePending,
         ] {
             let error = ensure_hue_start_phase_is_not_release_fenced(Some(phase)).unwrap_err();
             assert_eq!(
@@ -2469,6 +2381,7 @@ mod tests {
             HueOwnershipPhase::Clearing,
             HueOwnershipPhase::ClearIncomplete,
             HueOwnershipPhase::Active,
+            HueOwnershipPhase::SnapshotRetained,
         ] {
             ensure_hue_start_phase_is_not_release_fenced(Some(phase)).unwrap();
         }
@@ -2643,66 +2556,7 @@ mod tests {
     }
 
     #[test]
-    fn restored_manifest_is_finalized_only_after_local_rollback_handoff() {
-        static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
-        let path = std::env::temp_dir().join(format!(
-            "rhythm-hue-rollback-handoff-{}-{}",
-            std::process::id(),
-            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
-        ));
-        let storage = FileStorage::new(path.to_str().unwrap()).unwrap();
-        let manifest = serde_json::json!({
-            "schema_version": crate::ownership::HUE_CONTROLLER_OWNERSHIP_SCHEMA_VERSION,
-            "phase": "restored",
-            "baseline": {
-                "schema_version": crate::ownership::HUE_CONTROLLER_OWNERSHIP_SCHEMA_VERSION,
-                "capture_id": "capture-rollback",
-                "bridge_id": "bridge-rollback",
-                "v2_resources": {},
-                "v1_resources": {}
-            },
-            "managed_rooms": {},
-            "managed_scenes": {},
-            "restored_resource_ids": {
-                "room:old-room": "replacement-room",
-                "scene:old-scene": "replacement-scene"
-            },
-            "receipts": {}
-        });
-        storage
-            .save_integration_state_file(
-                &crate::ownership::hue_controller_ownership_path("bridge-rollback").unwrap(),
-                &serde_json::to_string(&manifest).unwrap(),
-            )
-            .unwrap();
-        let bridge_ids = BTreeSet::from(["bridge-rollback".to_string()]);
-
-        let error = finalize_restored_bridges_after_local_handoff(&storage, &bridge_ids, || {
-            anyhow::bail!("local authority handoff failed")
-        })
-        .unwrap_err();
-        assert!(error.to_string().contains("local authority handoff failed"));
-        assert_eq!(
-            crate::ownership::load_controller_ownership(&storage, "bridge-rollback")
-                .unwrap()
-                .unwrap()
-                .phase,
-            crate::ownership::HueOwnershipPhase::Restored
-        );
-
-        finalize_restored_bridges_after_local_handoff(&storage, &bridge_ids, || Ok(())).unwrap();
-        assert!(
-            crate::ownership::load_controller_ownership(&storage, "bridge-rollback")
-                .unwrap()
-                .is_none()
-        );
-
-        drop(storage);
-        let _ = std::fs::remove_dir_all(path);
-    }
-
-    #[test]
-    fn binary_rollback_finalizes_credentialless_restored_manifest_after_restart() {
+    fn binary_rollback_preserves_credentialless_retained_snapshot() {
         static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
             "rhythm-hue-credentialless-rollback-{}-{}",
@@ -2712,7 +2566,7 @@ mod tests {
         let storage = FileStorage::new(path.to_str().unwrap()).unwrap();
         let manifest = serde_json::json!({
             "schema_version": crate::ownership::HUE_CONTROLLER_OWNERSHIP_SCHEMA_VERSION,
-            "phase": "restored",
+            "phase": "snapshot_retained",
             "baseline": {
                 "schema_version": crate::ownership::HUE_CONTROLLER_OWNERSHIP_SCHEMA_VERSION,
                 "capture_id": "capture-credentialless-rollback",
@@ -2736,12 +2590,56 @@ mod tests {
 
         restore_authoritative_bridges_before_binary_rollback(&path).unwrap();
 
-        assert!(crate::ownership::load_controller_ownership(
-            &storage,
-            "bridge-credentialless-rollback"
-        )
-        .unwrap()
-        .is_none());
+        let retained =
+            crate::ownership::load_controller_ownership(&storage, "bridge-credentialless-rollback")
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            retained.phase,
+            crate::ownership::HueOwnershipPhase::SnapshotRetained
+        );
+        drop(storage);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn binary_rollback_blocks_active_snapshot_without_restoring_bridge() {
+        static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "rhythm-hue-active-rollback-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let storage = FileStorage::new(path.to_str().unwrap()).unwrap();
+        let manifest = serde_json::json!({
+            "schema_version": crate::ownership::HUE_CONTROLLER_OWNERSHIP_SCHEMA_VERSION,
+            "phase": "active",
+            "baseline": {
+                "schema_version": crate::ownership::HUE_CONTROLLER_OWNERSHIP_SCHEMA_VERSION,
+                "capture_id": "capture-active-rollback",
+                "bridge_id": "bridge-active-rollback",
+                "v2_resources": {},
+                "v1_resources": {}
+            },
+            "managed_rooms": {},
+            "managed_scenes": {},
+            "receipts": {}
+        });
+        storage
+            .save_integration_state_file(
+                &crate::ownership::hue_controller_ownership_path("bridge-active-rollback").unwrap(),
+                &serde_json::to_string(&manifest).unwrap(),
+            )
+            .unwrap();
+
+        let error = restore_authoritative_bridges_before_binary_rollback(&path).unwrap_err();
+
+        assert!(error.to_string().contains("active controller authority"));
+        assert!(
+            crate::ownership::load_controller_ownership(&storage, "bridge-active-rollback")
+                .unwrap()
+                .is_some()
+        );
         drop(storage);
         let _ = std::fs::remove_dir_all(path);
     }
