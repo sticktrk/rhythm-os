@@ -251,6 +251,7 @@ pub struct SpyHueTransport {
     resources: Arc<Mutex<HashMap<String, serde_json::Value>>>,
     should_fail: Arc<AtomicBool>,
     ignore_resource_mutations: Arc<AtomicBool>,
+    fail_resource_update: Arc<Mutex<Option<(String, String)>>>,
     fail_room_update: Arc<Mutex<Option<String>>>,
     v1_write_response_override: Arc<Mutex<Option<serde_json::Value>>>,
     next_resource_id: Arc<AtomicUsize>,
@@ -265,6 +266,7 @@ impl SpyHueTransport {
             resources: Arc::new(Mutex::new(HashMap::new())),
             should_fail: Arc::new(AtomicBool::new(false)),
             ignore_resource_mutations: Arc::new(AtomicBool::new(false)),
+            fail_resource_update: Arc::new(Mutex::new(None)),
             fail_room_update: Arc::new(Mutex::new(None)),
             v1_write_response_override: Arc::new(Mutex::new(None)),
             next_resource_id: Arc::new(AtomicUsize::new(1)),
@@ -286,6 +288,12 @@ impl SpyHueTransport {
     pub fn set_ignore_resource_mutations(&self, ignore: bool) {
         self.ignore_resource_mutations
             .store(ignore, Ordering::Relaxed);
+    }
+
+    /// Configure one generic V2 resource update that should fail.
+    pub fn set_fail_resource_update(&self, resource_type: &str, resource_id: &str) {
+        *self.fail_resource_update.lock().unwrap() =
+            Some((resource_type.to_string(), resource_id.to_string()));
     }
 
     /// Configure one room ID whose membership update should fail.
@@ -627,6 +635,17 @@ impl HueTransport for SpyHueTransport {
             });
         if self.should_fail.load(Ordering::Relaxed) {
             anyhow::bail!("spy: update_resource failed");
+        }
+        if self
+            .fail_resource_update
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|(failed_type, failed_id)| {
+                failed_type == resource_type && failed_id == resource_id
+            })
+        {
+            anyhow::bail!("spy: targeted update_resource failed");
         }
         if self.ignore_resource_mutations.load(Ordering::Relaxed) {
             return Ok(());
