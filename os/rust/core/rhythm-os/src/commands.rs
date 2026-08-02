@@ -3922,6 +3922,11 @@ struct ManagedSceneDispatch {
     projected_states: Vec<(String, bool)>,
 }
 
+enum SceneApplySource {
+    Stored(String),
+    Definition(SceneDefinition),
+}
+
 fn light_scene_target_scope_node_ids(
     s: &AppState,
     runtime: &Arc<dyn RuntimeHandle>,
@@ -4412,9 +4417,6 @@ fn companion_scene_plan_locked(
         .collect::<Vec<_>>();
     affected_node_ids.sort();
     affected_node_ids.dedup();
-    if affected_node_ids.is_empty() && managed.is_empty() {
-        anyhow::bail!("Scene has no routable light entries");
-    }
     Ok(SceneApplicationPlan {
         commands,
         affected_node_ids,
@@ -4508,13 +4510,30 @@ fn dispatch_scene_plan(
 
 fn do_scene_apply_definition_inner(
     state: &SharedState,
-    mut scene: SceneDefinition,
+    source: SceneApplySource,
     request: SceneApplyRequest,
     commit_state: bool,
     persist_state: bool,
     preview_id: Option<String>,
     ephemeral_projection: bool,
 ) -> Result<SceneApplyResponse> {
+    let scene_transaction_lock = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.scene_lifecycle_transaction_lock.clone()
+    };
+    let _scene_transaction = scene_transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Failed to lock scene lifecycle transaction"))?;
+    let mut scene = match source {
+        SceneApplySource::Stored(scene_id) => {
+            let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            s.scenes
+                .get(&scene_id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Scene '{}' not found", scene_id))?
+        }
+        SceneApplySource::Definition(scene) => scene,
+    };
     scene.normalize();
     let target_id = resolve_node_id(state, &request.target_id);
     let transaction_lock = {
@@ -4567,11 +4586,19 @@ fn do_scene_apply_definition_inner(
             emit_node_state_event_after_apply(state, &runtime, node_id);
         }
     }
+    if plan.affected_node_ids.is_empty() {
+        anyhow::bail!(
+            "Scene '{}' has no routable light entries for target '{}'",
+            scene.id,
+            target_id
+        );
+    }
     // Planning and native scene projection must observe one serialized
     // topology snapshot. Ordinary dispatch is different: external
     // controllers acquire this same lock around their own operation, so
     // retaining the outer guard here would self-deadlock roomless Hue and the
-    // companion leg of mixed Hue rooms.
+    // companion leg of mixed Hue rooms. The scene lifecycle guard remains held
+    // through dispatch and committed state so upsert/delete cannot interleave.
     drop(transaction);
     dispatch_scene_plan(state, &runtime, &plan)?;
 
@@ -4608,16 +4635,9 @@ fn do_scene_apply_inner(
     persist_state: bool,
     preview_id: Option<String>,
 ) -> Result<SceneApplyResponse> {
-    let scene = {
-        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.scenes
-            .get(scene_id)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("Scene '{}' not found", scene_id))?
-    };
     do_scene_apply_definition_inner(
         state,
-        scene,
+        SceneApplySource::Stored(scene_id.to_string()),
         request,
         commit_state,
         persist_state,
@@ -4714,6 +4734,13 @@ fn validate_persisted_scene_id(scene_id: &str) -> Result<()> {
 pub fn do_scene_upsert(state: &SharedState, mut scene: SceneDefinition) -> Result<String> {
     scene.normalize();
     validate_persisted_scene_id(&scene.id)?;
+    let scene_transaction_lock = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.scene_lifecycle_transaction_lock.clone()
+    };
+    let _scene_transaction = scene_transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Failed to lock scene lifecycle transaction"))?;
     let response_scene = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let previous = s.scenes.insert(scene.id.clone(), scene.clone());
@@ -4735,6 +4762,13 @@ pub fn do_scene_upsert(state: &SharedState, mut scene: SceneDefinition) -> Resul
 }
 
 pub fn do_scene_delete(state: &SharedState, scene_id: &str) -> Result<String> {
+    let scene_transaction_lock = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.scene_lifecycle_transaction_lock.clone()
+    };
+    let _scene_transaction = scene_transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Failed to lock scene lifecycle transaction"))?;
     let transaction_lock = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.external_topology_transaction_lock.clone()
@@ -5122,7 +5156,7 @@ pub fn do_scene_draft_preview(
     };
     let response = do_scene_apply_definition_inner(
         state,
-        scene.clone(),
+        SceneApplySource::Definition(scene.clone()),
         apply_request,
         false,
         false,
@@ -15306,6 +15340,8 @@ mod tests {
         fail_light_state_queries: AtomicBool,
         fail_periodic_light_state_queries: AtomicBool,
         scene_dispatch_transaction_lock: Mutex<Option<Arc<Mutex<()>>>>,
+        pause_after_scene_dispatch: AtomicBool,
+        scene_dispatch_paused: AtomicBool,
         current_hour: f32,
     }
 
@@ -15327,12 +15363,36 @@ mod tests {
                 fail_light_state_queries: AtomicBool::new(false),
                 fail_periodic_light_state_queries: AtomicBool::new(false),
                 scene_dispatch_transaction_lock: Mutex::new(None),
+                pause_after_scene_dispatch: AtomicBool::new(false),
+                scene_dispatch_paused: AtomicBool::new(false),
                 current_hour,
             }
         }
 
         fn require_scene_dispatch_transaction_lock(&self, lock: Arc<Mutex<()>>) {
             *self.scene_dispatch_transaction_lock.lock().unwrap() = Some(lock);
+        }
+
+        fn pause_after_scene_dispatch(&self) {
+            self.scene_dispatch_paused.store(false, Ordering::SeqCst);
+            self.pause_after_scene_dispatch
+                .store(true, Ordering::SeqCst);
+        }
+
+        fn wait_for_scene_dispatch_pause(&self) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(2);
+            while !self.scene_dispatch_paused.load(Ordering::SeqCst) {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "scene dispatch did not reach the post-dispatch pause"
+                );
+                std::thread::yield_now();
+            }
+        }
+
+        fn resume_scene_dispatch(&self) {
+            self.pause_after_scene_dispatch
+                .store(false, Ordering::SeqCst);
         }
 
         fn fail_light_state_queries(&self) {
@@ -15588,7 +15648,7 @@ mod tests {
             command: rhythm_core::LightingCommand,
         ) -> anyhow::Result<()> {
             let transaction_lock = self.scene_dispatch_transaction_lock.lock().unwrap().clone();
-            let _transaction = transaction_lock
+            let transaction = transaction_lock
                 .as_ref()
                 .map(|lock| {
                     lock.try_lock().map_err(|error| {
@@ -15618,6 +15678,14 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((room_id.to_string(), room_state));
+            drop(transaction);
+            if self.pause_after_scene_dispatch.load(Ordering::SeqCst) {
+                self.scene_dispatch_paused.store(true, Ordering::SeqCst);
+                while self.pause_after_scene_dispatch.load(Ordering::SeqCst) {
+                    std::thread::yield_now();
+                }
+                self.scene_dispatch_paused.store(false, Ordering::SeqCst);
+            }
             Ok(())
         }
         fn lights_off_room(&self, room_id: &str, transition_ms: Option<u32>) -> anyhow::Result<()> {
@@ -18668,6 +18736,97 @@ mod tests {
         assert_eq!(calls.len(), 2);
         assert!(calls[1].projection.targets.is_empty());
         assert_eq!(response.affected_node_ids, vec![companion_device_id]);
+    }
+
+    #[test]
+    fn managed_scene_with_no_output_remains_unroutable() {
+        let harness = setup_managed_hue_scene_room(false);
+        do_scene_upsert(&harness.state, empty_light_scene("empty-managed-room")).unwrap();
+
+        let error = do_scene_apply(
+            &harness.state,
+            "empty-managed-room",
+            SceneApplyRequest {
+                target_id: "room1".into(),
+                transition_ms: None,
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("no routable light entries"));
+        let calls = harness.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].projection.targets.is_empty());
+        drop(calls);
+        let room = harness.runtime.engine_room_snapshot("room1").unwrap();
+        assert!(!room.mood_active);
+        assert!(room.profile_settings.mood_scene_id.is_none());
+    }
+
+    #[test]
+    fn scene_delete_waits_for_mixed_scene_apply_to_commit() {
+        let harness = setup_managed_hue_scene_room(true);
+        harness.runtime.require_scene_dispatch_transaction_lock(
+            harness
+                .state
+                .lock()
+                .unwrap()
+                .external_topology_transaction_lock
+                .clone(),
+        );
+        do_scene_upsert(
+            &harness.state,
+            scene_with_default_output("serialized-room", 61, 3900),
+        )
+        .unwrap();
+        harness.runtime.pause_after_scene_dispatch();
+
+        let apply_state = harness.state.clone();
+        let apply = std::thread::spawn(move || {
+            do_scene_apply(
+                &apply_state,
+                "serialized-room",
+                SceneApplyRequest {
+                    target_id: "room1".into(),
+                    transition_ms: None,
+                },
+            )
+        });
+        harness.runtime.wait_for_scene_dispatch_pause();
+
+        let delete_state = harness.state.clone();
+        let (delete_finished_tx, delete_finished_rx) = std::sync::mpsc::channel();
+        let delete = std::thread::spawn(move || {
+            let result = do_scene_delete(&delete_state, "serialized-room");
+            delete_finished_tx.send(result.is_ok()).unwrap();
+            result
+        });
+        let delete_was_blocked = matches!(
+            delete_finished_rx.recv_timeout(Duration::from_millis(100)),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+        );
+
+        harness.runtime.resume_scene_dispatch();
+        assert!(delete_was_blocked);
+        apply.join().unwrap().unwrap();
+        assert!(delete_finished_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap());
+        delete.join().unwrap().unwrap();
+
+        assert!(!harness
+            .state
+            .lock()
+            .unwrap()
+            .scenes
+            .contains_key("serialized-room"));
+        assert_eq!(
+            harness.deletes.lock().unwrap().as_slice(),
+            &["serialized-room".to_string()]
+        );
+        let room = harness.runtime.engine_room_snapshot("room1").unwrap();
+        assert!(!room.mood_active);
+        assert!(room.profile_settings.mood_scene_id.is_none());
     }
 
     #[test]

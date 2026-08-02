@@ -397,6 +397,10 @@ pub struct AppState {
     pub scenes: BTreeMap<String, crate::scenes::SceneDefinition>,
     /// Ephemeral light scene previews keyed by preview ID.
     pub light_scene_previews: HashMap<String, crate::scenes::LightScenePreviewSession>,
+    /// Serializes stored-scene definition changes with projection, dispatch,
+    /// and committed runtime state. This lock remains held while the external
+    /// topology lock is temporarily released for ordinary light dispatch.
+    pub scene_lifecycle_transaction_lock: Arc<Mutex<()>>,
     /// The currently active global mode.
     pub active_mode: RhythmMode,
     /// Cause of the most recent active mode change.
@@ -926,6 +930,7 @@ impl Default for AppState {
             mode_transition_configs: factory_default_mode_transition_configs(),
             scenes: default_scene_map(),
             light_scene_previews: HashMap::new(),
+            scene_lifecycle_transaction_lock: Arc::new(Mutex::new(())),
             active_mode: factory_default_active_mode(),
             last_active_mode_cause: ModeChangeCause::Manual,
             last_active_mode_transition_id: None,
