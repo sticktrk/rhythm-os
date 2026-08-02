@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::{debug, info, warn};
 use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_core::HubRegistry;
@@ -30,6 +30,18 @@ pub struct SyncReport {
     pub rooms_updated: usize,
     pub rooms_removed: usize,
     pub devices_synced: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SyncFailurePolicy {
+    BestEffort,
+    FailClosedBeforeAuthority,
+}
+
+impl SyncFailurePolicy {
+    fn fail_closed(self) -> bool {
+        self == Self::FailClosedBeforeAuthority
+    }
 }
 
 struct HubSyncGuard {
@@ -168,11 +180,55 @@ pub fn sync_from_hub_for_key(
     hub_key: &HubKey,
     discover_devices: bool,
 ) -> Result<SyncReport> {
+    let transaction_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .external_topology_transaction_lock
+        .clone();
+    let _transaction = transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
     let Some(_guard) = try_acquire_hub_sync_guard(state, hub_key)? else {
         debug!(target: "room_sync", "Skipping sync for {}: already in progress", hub_key);
         return Ok(SyncReport::default());
     };
-    sync_from_hub_for_key_acquired(state, hub_key, discover_devices)
+    sync_from_hub_for_key_acquired(
+        state,
+        hub_key,
+        discover_devices,
+        SyncFailurePolicy::BestEffort,
+    )
+}
+
+/// Build the complete desired graph required before taking authority over an
+/// external grouped-room controller. Unlike ordinary refresh syncs, discovery
+/// and apply failures are fatal so takeover cannot clear a bridge from a
+/// partial view of its lights and rooms.
+pub fn sync_from_hub_for_key_before_authority(
+    state: &SharedState,
+    hub_key: &HubKey,
+    discover_devices: bool,
+) -> Result<SyncReport> {
+    if !discover_devices {
+        anyhow::bail!(
+            "Complete device discovery is required before taking external controller authority"
+        );
+    }
+    let transaction_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .external_topology_transaction_lock
+        .clone();
+    let _transaction = transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
+    let _guard = acquire_hub_sync_guard_with_timeout(state, hub_key, Duration::from_secs(30))?;
+    sync_from_hub_for_key_acquired(
+        state,
+        hub_key,
+        discover_devices,
+        SyncFailurePolicy::FailClosedBeforeAuthority,
+    )
 }
 
 /// Run a fresh sync after waiting for any same-hub sync to finish.
@@ -186,15 +242,36 @@ pub fn sync_from_hub_for_key_wait(
     discover_devices: bool,
     timeout: Duration,
 ) -> Result<SyncReport> {
+    let transaction_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .external_topology_transaction_lock
+        .clone();
+    let _transaction = transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
     let _guard = acquire_hub_sync_guard_with_timeout(state, hub_key, timeout)?;
-    sync_from_hub_for_key_acquired(state, hub_key, discover_devices)
+    sync_from_hub_for_key_acquired(
+        state,
+        hub_key,
+        discover_devices,
+        SyncFailurePolicy::BestEffort,
+    )
 }
 
 fn sync_from_hub_for_key_acquired(
     state: &SharedState,
     hub_key: &HubKey,
     discover_devices: bool,
+    failure_policy: SyncFailurePolicy,
 ) -> Result<SyncReport> {
+    if state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .authority_state_recovery_required
+    {
+        anyhow::bail!("Authoritative topology state requires recovery");
+    }
     let discovery = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.hubs
@@ -203,7 +280,13 @@ fn sync_from_hub_for_key_acquired(
     }
     .ok_or_else(|| anyhow::anyhow!("No hub discovery for {}", hub_key))?;
 
-    let report = sync_with_discovery(state, hub_key, discovery.as_ref(), discover_devices)?;
+    let report = sync_with_discovery(
+        state,
+        hub_key,
+        discovery.as_ref(),
+        discover_devices,
+        failure_policy,
+    )?;
     commands::reconcile_runtime_from_state(state)?;
     Ok(report)
 }
@@ -222,6 +305,7 @@ fn sync_with_discovery(
     hub_key: &HubKey,
     discovery: &dyn HubDiscovery,
     discover_devices: bool,
+    failure_policy: SyncFailurePolicy,
 ) -> Result<SyncReport> {
     // ========================================================================
     // Phase 1: Discover rooms
@@ -277,6 +361,11 @@ fn sync_with_discovery(
                 }
             }
             Err(e) => {
+                if failure_policy.fail_closed() {
+                    return Err(e).with_context(|| {
+                        format!("Failed to apply discovered room on {}", hub_key)
+                    });
+                }
                 warn!(target: "room_sync", "Failed to set room '{}': {}", room.name, e);
             }
         }
@@ -302,6 +391,12 @@ fn sync_with_discovery(
         for room_id in stale_ids {
             info!(target: "room_sync", "Removing stale source room '{}'", room_id);
             let Some(registry) = registry.as_ref() else {
+                if failure_policy.fail_closed() {
+                    anyhow::bail!(
+                        "No hub registry available for stale-room removal on {}",
+                        hub_key
+                    );
+                }
                 warn!(target: "room_sync", "No hub registry available for stale room '{}'", room_id);
                 continue;
             };
@@ -311,6 +406,9 @@ fn sync_with_discovery(
                     report.rooms_removed += 1;
                 }
                 Err(_) => {
+                    if failure_policy.fail_closed() {
+                        anyhow::bail!("Failed to apply stale-room removal on {}", hub_key);
+                    }
                     warn!(target: "room_sync", "Failed to lock hub registry for stale room '{}'", room_id);
                 }
             }
@@ -328,7 +426,7 @@ fn sync_with_discovery(
                 .topology
                 .remove_stale_bindings(hub_key, &discovered_room_ids);
             if !removed_bindings.is_empty() {
-                commands::persist_topology(&s);
+                commands::save_topology(&s)?;
             }
             removed_bindings
         };
@@ -361,6 +459,10 @@ fn sync_with_discovery(
         let discovered_devices = match discovery.discover_devices() {
             Ok(d) => d,
             Err(e) => {
+                if failure_policy.fail_closed() {
+                    return Err(e)
+                        .with_context(|| format!("Device discovery failed for {}", hub_key));
+                }
                 warn!(target: "room_sync", "Device discovery failed: {}", e);
                 Vec::new()
             }
@@ -380,6 +482,11 @@ fn sync_with_discovery(
                 hub_key,
                 false,
             ) {
+                if failure_policy.fail_closed() {
+                    return Err(e).with_context(|| {
+                        format!("Failed to apply discovered device on {}", hub_key)
+                    });
+                }
                 warn!(target: "room_sync", "Failed to set device '{}': {}", device.device_id, e);
             }
             report.devices_synced += 1;
@@ -398,6 +505,10 @@ fn sync_with_discovery(
         let (identities, identities_fresh) = match discovery.discover_identities() {
             Ok(ids) => (ids, true),
             Err(e) => {
+                if failure_policy.fail_closed() {
+                    return Err(e)
+                        .with_context(|| format!("Identity discovery failed for {}", hub_key));
+                }
                 warn!(target: "room_sync", "Identity discovery failed: {}", e);
                 (Vec::new(), false)
             }
@@ -548,28 +659,42 @@ fn sync_with_discovery(
                         &canonical_registry,
                     );
                     let rhythm_room_id = action.rhythm_room_id().to_string();
-                    let canonical_room_assignments: Vec<(String, String)> = canonical_device_ids
-                        .iter()
-                        .map(|canonical_id| {
-                            let assigned_room_id = s
-                                .topology
-                                .device_parent_room_id(canonical_id)
-                                .map(str::to_string)
-                                .or_else(|| {
-                                    s.canonical_registry
-                                        .get(canonical_id)
-                                        .and_then(|device| device.room_id.clone())
-                                })
-                                .unwrap_or_else(|| rhythm_room_id.clone());
-                            (canonical_id.clone(), assigned_room_id)
-                        })
-                        .collect();
+                    let canonical_room_assignments: Vec<(String, Option<String>)> =
+                        canonical_device_ids
+                            .iter()
+                            .map(|canonical_id| {
+                                let explicitly_standalone = s
+                                    .topology
+                                    .get_device_node(canonical_id)
+                                    .is_some_and(|node| {
+                                        node.parent_id.is_none()
+                                            && node.placement
+                                                == crate::topology::DevicePlacement::UserOverride
+                                    });
+                                let assigned_room_id = if explicitly_standalone {
+                                    None
+                                } else {
+                                    s.topology
+                                        .device_parent_room_id(canonical_id)
+                                        .map(str::to_string)
+                                        .or_else(|| {
+                                            s.canonical_registry
+                                                .get(canonical_id)
+                                                .and_then(|device| device.room_id.clone())
+                                        })
+                                        .or_else(|| Some(rhythm_room_id.clone()))
+                                };
+                                (canonical_id.clone(), assigned_room_id)
+                            })
+                            .collect();
 
                     for (canonical_id, assigned_room_id) in &canonical_room_assignments {
                         s.canonical_registry
-                            .assign_room(canonical_id, Some(assigned_room_id));
+                            .assign_room(canonical_id, assigned_room_id.as_deref());
                         if new_light_canonical_ids.contains(canonical_id) {
-                            sleep_default_nodes_to_seed.push(assigned_room_id.clone());
+                            if let Some(assigned_room_id) = assigned_room_id {
+                                sleep_default_nodes_to_seed.push(assigned_room_id.clone());
+                            }
                         }
                     }
 
@@ -620,8 +745,7 @@ fn sync_with_discovery(
                 }
 
                 // Persist canonical registry and topology
-                commands::persist_canonical(&s);
-                commands::persist_topology(&s);
+                commands::save_authority_state(&s)?;
             }
 
             sleep_default_nodes_to_seed.sort();
@@ -753,7 +877,7 @@ fn sync_with_discovery(
                 }
 
                 if !mappings.is_empty() || !stale_ids.is_empty() {
-                    commands::persist_canonical(&s);
+                    commands::save_canonical(&s)?;
                 }
             }
             Err(e) => {
@@ -862,6 +986,11 @@ fn sync_with_discovery(
             if discovered_types.contains(device_type) && !discovered_device_ids.contains(device_id)
             {
                 if let Err(e) = commands::do_device_remove(state, device_id, hub_key) {
+                    if failure_policy.fail_closed() {
+                        return Err(e).with_context(|| {
+                            format!("Failed to apply stale-device removal on {}", hub_key)
+                        });
+                    }
                     warn!(target: "room_sync", "Failed to remove stale device '{}': {}", device_id, e);
                 }
             }
@@ -1149,6 +1278,32 @@ mod tests {
     }
 
     #[test]
+    fn authority_recovery_fence_blocks_discovery_before_state_replacement() {
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        state.lock().unwrap().authority_state_recovery_required = true;
+        let hub_key = HubKey::new(HubType::new(HubType::HUE), "bridge-recovery");
+
+        let error = sync_from_hub_for_key(&state, &hub_key, true).unwrap_err();
+
+        assert!(error.to_string().contains("requires recovery"));
+        assert!(!state
+            .lock()
+            .unwrap()
+            .hub_sync_in_progress
+            .contains(&hub_key));
+    }
+
+    #[test]
+    fn authority_takeover_never_skips_device_identity_discovery() {
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        let hub_key = HubKey::new(HubType::new(HubType::HUE), "bridge-partial");
+
+        let error = sync_from_hub_for_key_before_authority(&state, &hub_key, false).unwrap_err();
+
+        assert!(error.to_string().contains("Complete device discovery"));
+    }
+
+    #[test]
     fn required_sync_times_out_instead_of_reporting_busy_noop_as_success() {
         let state: SharedState = Arc::new(Mutex::new(AppState::default()));
         let hub_key = HubKey::new(HubType::new(HubType::HUE), "bridge-busy");
@@ -1202,7 +1357,14 @@ mod tests {
             }],
         };
 
-        sync_with_discovery(&state, &hub_key, &discovery, true).unwrap();
+        sync_with_discovery(
+            &state,
+            &hub_key,
+            &discovery,
+            true,
+            SyncFailurePolicy::BestEffort,
+        )
+        .unwrap();
 
         let canonical_id = {
             let s = state.lock().unwrap();
@@ -1220,7 +1382,14 @@ mod tests {
             "assignment should route the motion sensor before the next sync"
         );
 
-        sync_with_discovery(&state, &hub_key, &discovery, true).unwrap();
+        sync_with_discovery(
+            &state,
+            &hub_key,
+            &discovery,
+            true,
+            SyncFailurePolicy::BestEffort,
+        )
+        .unwrap();
 
         assert!(
             registry_devices_for_room_contains(&state, &hub_key, &room_id, "motion-svc-1"),
@@ -1261,7 +1430,14 @@ mod tests {
             devices: vec![],
         };
 
-        let report = sync_with_discovery(&state, &hub_key, &discovery, true).unwrap();
+        let report = sync_with_discovery(
+            &state,
+            &hub_key,
+            &discovery,
+            true,
+            SyncFailurePolicy::BestEffort,
+        )
+        .unwrap();
 
         assert_eq!(report.rooms_removed, 0);
         assert!(
@@ -1448,7 +1624,14 @@ mod tests {
             ],
         };
 
-        sync_with_discovery(&state, &hub_key, &discovery, true).unwrap();
+        sync_with_discovery(
+            &state,
+            &hub_key,
+            &discovery,
+            true,
+            SyncFailurePolicy::BestEffort,
+        )
+        .unwrap();
 
         let s = state.lock().unwrap();
         let room = s
@@ -1484,6 +1667,73 @@ mod tests {
         );
     }
 
+    #[test]
+    fn light_unassigned_by_user_stays_canonically_standalone_after_rediscovery() {
+        let (hub_key, state) = install_test_hub();
+        let discovery = IdentityDiscovery {
+            rooms: vec![DiscoveredRoom {
+                id: "office-hue-id".to_string(),
+                name: "Office".to_string(),
+                grouped_light_id: "office-gl".to_string(),
+                device_ids: vec!["hue-light-1".to_string()],
+            }],
+            identities: vec![make_identity(
+                "hue-light-1",
+                "office-hue-id",
+                "Office",
+                "Desk bulb",
+                DeviceType::Light,
+            )],
+        };
+
+        sync_with_discovery(
+            &state,
+            &hub_key,
+            &discovery,
+            true,
+            SyncFailurePolicy::BestEffort,
+        )
+        .unwrap();
+        let canonical_id = state
+            .lock()
+            .unwrap()
+            .canonical_registry
+            .find_by_native_id(&hub_key, "hue-light-1")
+            .unwrap()
+            .id
+            .clone();
+
+        commands::do_canonical_assign_room(&state, &canonical_id, None).unwrap();
+        // Simulate Hue out-of-band drift: discovery still reports the bulb in
+        // the managed Office room. Rhythm's explicit standalone placement must
+        // remain authoritative at both topology and canonical layers.
+        sync_with_discovery(
+            &state,
+            &hub_key,
+            &discovery,
+            true,
+            SyncFailurePolicy::BestEffort,
+        )
+        .unwrap();
+
+        let state = state.lock().unwrap();
+        let node = state.topology.get_device_node(&canonical_id).unwrap();
+        assert_eq!(node.parent_id, None);
+        assert_eq!(
+            node.placement,
+            crate::topology::DevicePlacement::UserOverride
+        );
+        assert_eq!(
+            state
+                .canonical_registry
+                .get(&canonical_id)
+                .unwrap()
+                .room_id,
+            None,
+            "canonical fallback must not turn an explicit standalone bulb back into an assigned bulb"
+        );
+    }
+
     /// Issue #43 reproducer: unassigning a motion sensor (parent=None) marks
     /// it Standalone, but the next sync re-attaches it to the hub-default
     /// room as HubDefault — so the user's "remove from room" action silently
@@ -1508,7 +1758,14 @@ mod tests {
             )],
         };
 
-        sync_with_discovery(&state, &hub_key, &discovery, true).unwrap();
+        sync_with_discovery(
+            &state,
+            &hub_key,
+            &discovery,
+            true,
+            SyncFailurePolicy::BestEffort,
+        )
+        .unwrap();
 
         let canonical_id = state
             .lock()
@@ -1538,7 +1795,14 @@ mod tests {
         }
 
         // Next hub sync. Hue still reports the sensor in Balcony.
-        sync_with_discovery(&state, &hub_key, &discovery, true).unwrap();
+        sync_with_discovery(
+            &state,
+            &hub_key,
+            &discovery,
+            true,
+            SyncFailurePolicy::BestEffort,
+        )
+        .unwrap();
 
         let s = state.lock().unwrap();
         let node = s
@@ -1579,7 +1843,14 @@ mod tests {
         };
 
         // Initial sync: motion sensor lands in Balcony as hub-default.
-        sync_with_discovery(&state, &hub_key, &discovery, true).unwrap();
+        sync_with_discovery(
+            &state,
+            &hub_key,
+            &discovery,
+            true,
+            SyncFailurePolicy::BestEffort,
+        )
+        .unwrap();
 
         let canonical_id = state
             .lock()
@@ -1638,7 +1909,14 @@ mod tests {
 
         // Hue still reports the sensor in Balcony. The next sync must not
         // reset the user's chosen Rhythm room.
-        sync_with_discovery(&state, &hub_key, &discovery, true).unwrap();
+        sync_with_discovery(
+            &state,
+            &hub_key,
+            &discovery,
+            true,
+            SyncFailurePolicy::BestEffort,
+        )
+        .unwrap();
 
         let s = state.lock().unwrap();
         let node = s

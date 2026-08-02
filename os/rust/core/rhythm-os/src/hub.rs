@@ -485,6 +485,10 @@ pub struct HubDeviceRoomAssignment {
     pub hub_key: HubKey,
     pub native_device_id: String,
     pub device_type: DeviceType,
+    /// Whether this endpoint is the canonical route Rhythm will use for
+    /// control. A duplicate non-preferred endpoint must not force a second
+    /// grouped dispatch path for the same physical light.
+    pub preferred_for_control: bool,
     pub target_rhythm_room_id: Option<String>,
     pub target_hub_room_ids: Vec<String>,
 }
@@ -492,11 +496,35 @@ pub struct HubDeviceRoomAssignment {
 /// Roll back an integration-native room assignment after a later step fails.
 pub type HubDeviceRoomAssignmentRollback = Box<dyn FnOnce() -> Result<()> + Send>;
 
+/// Why Rhythm is relinquishing authority over an external controller.
+///
+/// Integrations may use the reason for durable receipts, but every variant is
+/// a release boundary: credentials and recovery material can be removed after
+/// the callback succeeds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExternalControllerReleaseReason {
+    UserDisconnect,
+}
+
 /// Whether an integration changed its authoritative native room membership.
 pub enum HubDeviceRoomAssignmentOutcome {
     Unchanged,
     Reassigned {
         target_hub_room_id: Option<String>,
+        rollback: HubDeviceRoomAssignmentRollback,
+    },
+    /// The integration confirmed the native move and returned the complete
+    /// grouped-room binding that Rhythm must persist for the target room.
+    ///
+    /// `target_binding` is `None` only for a standalone/unassigned light. For
+    /// an attached light it contains the hub-native room ID, grouped control
+    /// ID, and the exact native light membership after the move. This variant
+    /// also allows an integration to create the native room during prepare.
+    ReassignedWithBinding {
+        target_binding: Option<crate::topology::HubRoomBinding>,
+        /// Explicit ownership receipt. Authoritative bindings are never
+        /// inferred from a native room name or identifier.
+        managed_by_rhythm: bool,
         rollback: HubDeviceRoomAssignmentRollback,
     },
 }
@@ -570,6 +598,52 @@ pub trait ExternalLightHubIntegration: Send + Sync {
     /// Called after topology/canonical reconciliation and before composite
     /// routing is rebuilt. Default is a no-op.
     fn sync_topology_groups(&self, _state: &SharedState, _key: &HubKey) -> Result<()> {
+        Ok(())
+    }
+
+    /// Whether every light attached to a Rhythm room must route through a
+    /// hub-native grouped room binding.
+    ///
+    /// Integrations that return `true` must use
+    /// [`HubDeviceRoomAssignmentOutcome::ReassignedWithBinding`] for light
+    /// moves. Standalone lights remain directly addressable.
+    fn requires_grouped_room_control(&self) -> bool {
+        false
+    }
+
+    /// Acquire or resume authoritative control after the integration's first
+    /// discovery sync established Rhythm's desired state.
+    ///
+    /// A successful return is required before the hub can be treated as ready.
+    /// Implementations must durably capture recovery state before their first
+    /// destructive external mutation.
+    fn reconcile_external_controller_authority(
+        &self,
+        _state: &SharedState,
+        _key: &HubKey,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Restore externally owned state before Rhythm discards credentials or
+    /// crosses another destructive local lifecycle boundary.
+    fn release_external_controller_authority(
+        &self,
+        _state: &SharedState,
+        _key: &HubKey,
+        _reason: ExternalControllerReleaseReason,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Finalize local recovery state after credential removal is durable.
+    /// This must not perform controller I/O or require credentials from disk;
+    /// commands call it while the old in-memory credential is still present.
+    fn finalize_external_controller_release(
+        &self,
+        _state: &SharedState,
+        _key: &HubKey,
+    ) -> Result<()> {
         Ok(())
     }
 
@@ -735,6 +809,7 @@ struct StoredHubBootstrapCandidate<'a> {
 struct StoredHubBootstrapScan<'a> {
     connectable_credential_count: usize,
     due_supported: Vec<StoredHubBootstrapCandidate<'a>>,
+    due_authority: Vec<StoredHubBootstrapCandidate<'a>>,
     scheduled_supported_count: usize,
     manual_retry_required_count: usize,
     next_retry_after: Option<Duration>,
@@ -781,8 +856,8 @@ impl Drop for HubBootstrapWorkerGuard {
 }
 
 /// Spawn a background worker that connects hubs from stored credentials and
-/// keeps retrying failed startup connects until each supported configured hub
-/// leaves an active hub object behind in state.
+/// keeps retrying failed startup connects and authority acquisition until each
+/// supported configured hub is safe for normal routing.
 pub fn spawn_stored_hub_bootstrap(
     state: SharedState,
     integrations: &'static [&'static dyn ExternalLightHubIntegration],
@@ -862,7 +937,7 @@ fn bootstrap_stored_hubs_once<'a>(
         return BootstrapLoopDecision::Done;
     }
 
-    if scan.due_supported.is_empty() {
+    if scan.due_supported.is_empty() && scan.due_authority.is_empty() {
         if scan.scheduled_supported_count > 0 {
             return BootstrapLoopDecision::Sleep(
                 scan.next_retry_after
@@ -928,9 +1003,6 @@ fn bootstrap_stored_hubs_once<'a>(
                 };
 
                 if registered {
-                    if let Ok(mut s) = state.lock() {
-                        s.clear_hub_startup_retry(&candidate.key);
-                    }
                     newly_connected.push(candidate);
                 } else {
                     let error = format!(
@@ -961,7 +1033,11 @@ fn bootstrap_stored_hubs_once<'a>(
         }
     }
 
-    finish_bootstrapped_hubs(state, &newly_connected);
+    finish_bootstrapped_hubs(state, &newly_connected, clock);
+
+    for candidate in scan.due_authority {
+        retry_active_hub_authority(state, &candidate, clock);
+    }
 
     match scan_stored_hub_bootstrap_candidates(state, integrations, clock.now_instant()) {
         Ok(next_scan) => bootstrap_loop_decision_after_scan(&next_scan),
@@ -982,16 +1058,26 @@ fn bootstrap_loop_decision_after_scan(scan: &StoredHubBootstrapScan<'_>) -> Boot
     // delay. In that case the second scan reports the failed hub as due now.
     // Continue immediately instead of ending the only bootstrap worker with a
     // stale `scheduled` retry that can never run.
-    if !scan.due_supported.is_empty() {
+    if !scan.due_supported.is_empty() || !scan.due_authority.is_empty() {
         return BootstrapLoopDecision::Sleep(Duration::ZERO);
     }
 
     BootstrapLoopDecision::Done
 }
 
+fn controller_authority_is_enabled(
+    state: &crate::state::AppState,
+    key: &HubKey,
+    integration: &dyn ExternalLightHubIntegration,
+) -> bool {
+    integration.requires_grouped_room_control()
+        && state.external_controller_authority_is_enabled_for(key)
+}
+
 fn finish_bootstrapped_hubs<'a>(
     state: &SharedState,
     newly_connected: &[StoredHubBootstrapCandidate<'a>],
+    clock: &mut impl BootstrapClock,
 ) {
     if newly_connected.is_empty() {
         return;
@@ -1014,23 +1100,184 @@ fn finish_bootstrapped_hubs<'a>(
         );
     }
 
+    let mut authority_ready = Vec::new();
     for candidate in newly_connected {
-        if let Err(error) =
-            crate::room_sync::sync_from_hub_for_key(state, &candidate.key, discover_devices)
-        {
-            warn!(
-                target: "sys",
-                "Startup sync failed for hub {}: {}",
-                candidate.key,
-                error
-            );
+        let requires_authority = state
+            .lock()
+            .map(|state| {
+                controller_authority_is_enabled(&state, &candidate.key, candidate.integration)
+            })
+            .unwrap_or(false);
+        if requires_authority {
+            if let Ok(mut state) = state.lock() {
+                state.mark_external_controller_initial_sync_pending(&candidate.key);
+            }
         }
+        let sync_result = if requires_authority {
+            crate::room_sync::sync_from_hub_for_key_before_authority(
+                state,
+                &candidate.key,
+                discover_devices,
+            )
+        } else {
+            crate::room_sync::sync_from_hub_for_key(state, &candidate.key, discover_devices)
+        };
+        if let Err(error) = sync_result {
+            discard_active_hub_for_full_bootstrap_retry(state, &candidate.key);
+            let error_text = error.to_string();
+            let retry_status = note_stored_hub_bootstrap_failure(
+                state,
+                &candidate.key,
+                &error_text,
+                clock.now_instant(),
+                clock.now_epoch_ms(),
+            );
+            log_sync_bootstrap_failure(&candidate.key, &error_text, &retry_status);
+            continue;
+        }
+        if requires_authority {
+            if let Ok(mut state) = state.lock() {
+                state.mark_external_controller_initial_sync_complete(&candidate.key);
+            }
+        }
+        if requires_authority {
+            if let Err(error) = reconcile_bootstrap_external_authority(state, candidate) {
+                let error_text = error.to_string();
+                let retry_status = note_stored_hub_bootstrap_failure(
+                    state,
+                    &candidate.key,
+                    &error_text,
+                    clock.now_instant(),
+                    clock.now_epoch_ms(),
+                );
+                log_authority_bootstrap_failure(&candidate.key, &error_text, &retry_status);
+                continue;
+            }
+        }
+        if let Ok(mut state) = state.lock() {
+            state.clear_hub_startup_retry(&candidate.key);
+        }
+        authority_ready.push(candidate);
     }
 
     crate::room_sync::poll_initial_light_state(state);
 
-    for candidate in newly_connected {
+    for candidate in authority_ready {
         candidate.integration.post_connect(state, &candidate.key);
+    }
+}
+
+pub(crate) fn discard_active_hub_for_full_bootstrap_retry(state: &SharedState, hub_key: &HubKey) {
+    let (old_hub, composite) = match state.lock() {
+        Ok(mut state) => {
+            let requires_group_authority = state.topology.grouped_room_control_is_required(hub_key);
+            let old_hub = state.hubs.remove(hub_key);
+            if let Some(hub) = old_hub.as_ref() {
+                hub.shutdown.store(true, Ordering::SeqCst);
+            }
+            state.clear_hub_connected(hub_key);
+            // Clearing the live instance must not create a dispatch window
+            // before the bootstrap worker reacquires grouped-room authority.
+            // Initial-sync pending is intentionally cleared so that worker
+            // performs a full discovery, while the authority fence remains.
+            if requires_group_authority {
+                state.mark_external_controller_authority_pending(hub_key);
+            }
+            (old_hub, state.composite_controller.clone())
+        }
+        Err(_) => return,
+    };
+
+    if let Some(composite) = composite {
+        composite.remove_controller(&hub_key.to_string());
+        crate::commands::rebuild_composite_routing(state);
+    }
+
+    if let Some(old_hub) = old_hub {
+        std::thread::Builder::new()
+            .name("hub-drop".to_string())
+            .spawn(move || drop(old_hub))
+            .ok();
+    }
+}
+
+fn reconcile_bootstrap_external_authority(
+    state: &SharedState,
+    candidate: &StoredHubBootstrapCandidate<'_>,
+) -> Result<()> {
+    let transaction_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .external_topology_transaction_lock
+        .clone();
+    let _transaction = transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
+    {
+        let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        if !state.hubs.contains_key(&candidate.key) {
+            anyhow::bail!("Hub {} is no longer active", candidate.key);
+        }
+        if !state
+            .hub_credentials
+            .get(&candidate.key)
+            .is_some_and(HubCredentials::can_connect)
+        {
+            anyhow::bail!(
+                "Hub {} no longer has connectable credentials",
+                candidate.key
+            );
+        }
+        if state.authority_state_recovery_required {
+            anyhow::bail!("Authoritative topology state requires recovery");
+        }
+        if !controller_authority_is_enabled(&state, &candidate.key, candidate.integration) {
+            return Ok(());
+        }
+        if state.external_controller_initial_sync_is_pending(&candidate.key) {
+            anyhow::bail!("Initial authoritative topology sync is incomplete");
+        }
+        state.mark_external_controller_authority_pending(&candidate.key);
+    }
+
+    candidate
+        .integration
+        .reconcile_external_controller_authority(state, &candidate.key)?;
+    state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .mark_external_controller_authority_ready(&candidate.key);
+    Ok(())
+}
+
+fn retry_active_hub_authority(
+    state: &SharedState,
+    candidate: &StoredHubBootstrapCandidate<'_>,
+    clock: &mut impl BootstrapClock,
+) {
+    info!(
+        target: "sys",
+        "Retrying external-controller authority reconciliation for {}",
+        candidate.key
+    );
+    match reconcile_bootstrap_external_authority(state, candidate) {
+        Ok(()) => {
+            if let Ok(mut state) = state.lock() {
+                state.clear_hub_startup_retry(&candidate.key);
+            }
+            candidate.integration.post_connect(state, &candidate.key);
+        }
+        Err(error) => {
+            let error_text = error.to_string();
+            let retry_status = note_stored_hub_bootstrap_failure(
+                state,
+                &candidate.key,
+                &error_text,
+                clock.now_instant(),
+                clock.now_epoch_ms(),
+            );
+            log_authority_bootstrap_failure(&candidate.key, &error_text, &retry_status);
+        }
     }
 }
 
@@ -1049,10 +1296,14 @@ fn scan_stored_hub_bootstrap_candidates<'a>(
         .map(|(key, _)| key.clone())
         .collect();
     let active_keys: HashSet<_> = s.hubs.keys().cloned().collect();
-    s.hub_startup_retry
-        .retain(|key, _| connectable_keys.contains(key) && !active_keys.contains(key));
+    let authority_pending = s.external_controller_authority_pending.clone();
+    s.hub_startup_retry.retain(|key, _| {
+        connectable_keys.contains(key)
+            && (!active_keys.contains(key) || authority_pending.contains(key))
+    });
 
     let mut due_supported = Vec::new();
+    let mut due_authority = Vec::new();
     let mut scheduled_supported_count = 0usize;
     let mut manual_retry_required_count = 0usize;
     let mut next_retry_after = None;
@@ -1065,15 +1316,20 @@ fn scan_stored_hub_bootstrap_candidates<'a>(
 
         connectable_credential_count += 1;
 
-        if s.hubs.contains_key(key) {
-            continue;
-        }
-
         let Some(hub_type) = creds.hub_type.as_ref() else {
             continue;
         };
 
         if let Some(integration) = find_integration(integrations, hub_type.as_str()) {
+            let active = s.hubs.contains_key(key);
+            let retrying_authority = active
+                && s.external_controller_authority_pending.contains(key)
+                && !s.external_controller_initial_sync_is_pending(key)
+                && controller_authority_is_enabled(&s, key, integration);
+            if active && !retrying_authority {
+                continue;
+            }
+
             let retry = s.hub_startup_retry(key);
             if retry.is_some_and(|retry| retry.manual_retry_required) {
                 manual_retry_required_count += 1;
@@ -1093,10 +1349,15 @@ fn scan_stored_hub_bootstrap_candidates<'a>(
                 }
             }
 
-            due_supported.push(StoredHubBootstrapCandidate {
+            let candidate = StoredHubBootstrapCandidate {
                 key: key.clone(),
                 integration,
-            });
+            };
+            if retrying_authority {
+                due_authority.push(candidate);
+            } else {
+                due_supported.push(candidate);
+            }
         } else {
             unsupported_missing.push((key.clone(), hub_type.as_str().to_string()));
         }
@@ -1105,6 +1366,7 @@ fn scan_stored_hub_bootstrap_candidates<'a>(
     Ok(StoredHubBootstrapScan {
         connectable_credential_count,
         due_supported,
+        due_authority,
         scheduled_supported_count,
         manual_retry_required_count,
         next_retry_after,
@@ -1129,6 +1391,46 @@ fn log_bootstrap_failure(hub_key: &HubKey, error: &str, outcome: &BootstrapFailu
         BootstrapFailureOutcome::ManualRetryRequired => warn!(
             target: "sys",
             "Failed to connect stored hub {}: {} (automatic retry window exhausted; waiting for app retry)",
+            hub_key,
+            error
+        ),
+    }
+}
+
+fn log_authority_bootstrap_failure(
+    hub_key: &HubKey,
+    error: &str,
+    outcome: &BootstrapFailureOutcome,
+) {
+    match outcome {
+        BootstrapFailureOutcome::RetryScheduled { next_delay } => warn!(
+            target: "sys",
+            "External-controller authority reconciliation failed for {}: {} (retrying in {}s)",
+            hub_key,
+            error,
+            next_delay.as_secs()
+        ),
+        BootstrapFailureOutcome::ManualRetryRequired => warn!(
+            target: "sys",
+            "External-controller authority reconciliation failed for {}: {} (automatic retry window exhausted; waiting for app retry)",
+            hub_key,
+            error
+        ),
+    }
+}
+
+fn log_sync_bootstrap_failure(hub_key: &HubKey, error: &str, outcome: &BootstrapFailureOutcome) {
+    match outcome {
+        BootstrapFailureOutcome::RetryScheduled { next_delay } => warn!(
+            target: "sys",
+            "Startup discovery sync failed for {}: {} (retrying full bootstrap in {}s)",
+            hub_key,
+            error,
+            next_delay.as_secs()
+        ),
+        BootstrapFailureOutcome::ManualRetryRequired => warn!(
+            target: "sys",
+            "Startup discovery sync failed for {}: {} (automatic retry window exhausted; waiting for app retry)",
             hub_key,
             error
         ),
@@ -1212,6 +1514,44 @@ fn bootstrap_retry_delay_for_attempt(attempt_count: u32) -> Duration {
     Duration::from_secs(seconds)
 }
 
+/// Fail closed after an integration-native grouped topology mutation becomes
+/// uncertain and request the ordinary authority reconciliation loop.
+///
+/// The real bootstrap callback spawns a worker which may immediately lock
+/// [`SharedState`], so it must be invoked only after the application-state
+/// guard is released. Callers may still hold the external-topology transaction;
+/// the worker will wait for that transaction before reconciling.
+pub fn fence_required_group_authority_uncertainty(state: &SharedState, key: &HubKey) -> bool {
+    let request_bootstrap = {
+        let Ok(mut state) = state.lock() else {
+            warn!(
+                target: "sys",
+                "Unable to fence uncertain grouped-controller authority: state lock poisoned"
+            );
+            return false;
+        };
+        if !state.topology.grouped_room_control_is_required(key) {
+            return false;
+        }
+        state.clear_hub_startup_retry(key);
+        state.mark_external_controller_authority_pending(key);
+        state.request_hub_bootstrap_fn.clone()
+    };
+
+    crate::state::emit_server_event(
+        state,
+        crate::server_event::ServerEvent::HubStatus {
+            hub_type: Some(key.hub_type.as_str().to_string()),
+            address: Some(key.address.clone()),
+            connected: false,
+        },
+    );
+    if let Some(request_bootstrap) = request_bootstrap {
+        request_bootstrap(state);
+    }
+    true
+}
+
 /// Callback set returned by [`integration_callbacks`].
 #[allow(clippy::type_complexity)]
 pub struct IntegrationCallbacks {
@@ -1223,6 +1563,19 @@ pub struct IntegrationCallbacks {
     pub register_controller_fn: Arc<dyn Fn(&SharedState, &HubKey) -> Result<()> + Send + Sync>,
     /// Synchronize integration-managed topology groups.
     pub sync_topology_groups_fn: Arc<dyn Fn(&SharedState) -> Result<()> + Send + Sync>,
+    /// Synchronously acknowledge topology mutations for integrations that
+    /// require grouped room control before Rhythm commits them.
+    pub sync_required_topology_groups_fn: Arc<dyn Fn(&SharedState) -> Result<()> + Send + Sync>,
+    /// Acquire/resume external-controller authority for one connected hub.
+    pub reconcile_external_controller_authority_fn:
+        Arc<dyn Fn(&SharedState, &HubKey) -> Result<()> + Send + Sync>,
+    /// Release external-controller authority before local teardown.
+    pub release_external_controller_authority_fn: Arc<
+        dyn Fn(&SharedState, &HubKey, ExternalControllerReleaseReason) -> Result<()> + Send + Sync,
+    >,
+    /// Finalize verified release state after durable local credential removal.
+    pub finalize_external_controller_release_fn:
+        Arc<dyn Fn(&SharedState, &HubKey) -> Result<()> + Send + Sync>,
     /// Give each integration a pre-commit device room assignment hook.
     pub prepare_hub_device_room_assignment_fn: Arc<
         dyn Fn(&SharedState, &HubDeviceRoomAssignment) -> Result<HubDeviceRoomAssignmentOutcome>
@@ -1267,6 +1620,35 @@ pub struct IntegrationCallbacks {
 ///
 /// Platform crates call this once at startup and store the results in
 /// [`AppState`]. Eliminates per-binary match arms for hub dispatch.
+fn mark_required_group_control_for_active_hubs(
+    state: &SharedState,
+    integrations: &'static [&'static dyn ExternalLightHubIntegration],
+) -> Result<()> {
+    let policies = {
+        let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        state
+            .hubs
+            .keys()
+            .filter_map(|key| {
+                find_integration(integrations, key.hub_type.as_str()).map(|integration| {
+                    (
+                        key.clone(),
+                        controller_authority_is_enabled(&state, key, integration),
+                    )
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    for (key, required) in policies {
+        state
+            .topology
+            .set_grouped_room_control_required(&key, required);
+    }
+    Ok(())
+}
+
 pub fn integration_callbacks(
     integrations: &'static [&'static dyn ExternalLightHubIntegration],
 ) -> IntegrationCallbacks {
@@ -1278,6 +1660,7 @@ pub fn integration_callbacks(
     hub_capabilities.dedup_by(|left, right| left.hub_type == right.hub_type);
 
     let ensure_runtime_fn = Arc::new(move |state: &SharedState| -> Result<()> {
+        mark_required_group_control_for_active_hubs(state, integrations)?;
         crate::lifecycle::ensure_composite_runtime(state, integrations)
     });
 
@@ -1293,6 +1676,24 @@ pub fn integration_callbacks(
     });
 
     let register_controller_fn = Arc::new(move |state: &SharedState, key: &HubKey| -> Result<()> {
+        let hub_type_str = key.hub_type.as_str();
+        let integration = find_integration(integrations, hub_type_str)
+            .ok_or_else(|| anyhow::anyhow!("No integration for hub type '{}'", hub_type_str))?;
+        {
+            let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            let requires_grouped_room_control =
+                controller_authority_is_enabled(&state, key, integration);
+            state
+                .topology
+                .set_grouped_room_control_required(key, requires_grouped_room_control);
+            // Fence before the controller is inserted into composite routing.
+            // Initial discovery and authority acquisition happen immediately
+            // after registration, but no periodic/user command may slip into
+            // the interval between those steps.
+            if requires_grouped_room_control {
+                state.mark_external_controller_initial_sync_pending(key);
+            }
+        }
         let composite = {
             let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
             s.composite_controller.clone()
@@ -1302,9 +1703,6 @@ pub fn integration_callbacks(
             // picked up when ensure_composite_runtime runs on first room arrival.
             return Ok(());
         };
-        let hub_type_str = key.hub_type.as_str();
-        let integration = find_integration(integrations, hub_type_str)
-            .ok_or_else(|| anyhow::anyhow!("No integration for hub type '{}'", hub_type_str))?;
         let controller = integration.create_controller(state, key)?;
         let key_str = key.to_string();
         log::info!(target: "sys", "Dynamically registered {} controller with composite", key_str);
@@ -1313,28 +1711,181 @@ pub fn integration_callbacks(
     });
 
     let sync_topology_groups_fn = Arc::new(move |state: &SharedState| -> Result<()> {
+        let transaction_lock = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .external_topology_transaction_lock
+            .clone();
+        let _transaction = transaction_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
+        if state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .authority_state_recovery_required
+        {
+            anyhow::bail!("Authoritative topology state requires recovery");
+        }
         let active_hubs = {
             let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
             s.hubs
                 .keys()
                 .filter_map(|key| {
+                    find_integration(integrations, key.hub_type.as_str()).map(|integration| {
+                        (
+                            key.clone(),
+                            integration,
+                            controller_authority_is_enabled(&s, key, integration),
+                        )
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+
+        for (key, integration, requires_grouped_room_control) in active_hubs {
+            state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("lock"))?
+                .topology
+                .set_grouped_room_control_required(&key, requires_grouped_room_control);
+            if integration.requires_grouped_room_control() && !requires_grouped_room_control {
+                continue;
+            }
+            if let Err(error) = integration.sync_topology_groups(state, &key) {
+                if requires_grouped_room_control {
+                    fence_required_group_authority_uncertainty(state, &key);
+                }
+                return Err(error);
+            }
+        }
+
+        Ok(())
+    });
+
+    let sync_required_topology_groups_fn = Arc::new(move |state: &SharedState| -> Result<()> {
+        if state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .authority_state_recovery_required
+        {
+            anyhow::bail!("Authoritative topology state requires recovery");
+        }
+        let active_hubs = {
+            let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            state
+                .hubs
+                .keys()
+                .filter_map(|key| {
                     find_integration(integrations, key.hub_type.as_str())
+                        .filter(|integration| {
+                            controller_authority_is_enabled(&state, key, *integration)
+                        })
                         .map(|integration| (key.clone(), integration))
                 })
                 .collect::<Vec<_>>()
         };
 
         for (key, integration) in active_hubs {
-            integration.sync_topology_groups(state, &key)?;
+            state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("lock"))?
+                .topology
+                .set_grouped_room_control_required(&key, true);
+            if let Err(error) = integration.sync_topology_groups(state, &key) {
+                fence_required_group_authority_uncertainty(state, &key);
+                return Err(error);
+            }
         }
-
         Ok(())
     });
+
+    let reconcile_external_controller_authority_fn =
+        Arc::new(move |state: &SharedState, key: &HubKey| -> Result<()> {
+            let transaction_lock = state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("lock"))?
+                .external_topology_transaction_lock
+                .clone();
+            let _transaction = transaction_lock
+                .lock()
+                .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
+            if state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("lock"))?
+                .authority_state_recovery_required
+            {
+                anyhow::bail!("Authoritative topology state requires recovery");
+            }
+            let integration =
+                find_integration(integrations, key.hub_type.as_str()).ok_or_else(|| {
+                    anyhow::anyhow!("No integration for hub type '{}'", key.hub_type.as_str())
+                })?;
+            let requires_grouped_room_control = {
+                let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+                controller_authority_is_enabled(&state, key, integration)
+            };
+            if integration.requires_grouped_room_control() && !requires_grouped_room_control {
+                return Ok(());
+            }
+            if requires_grouped_room_control {
+                state
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("lock"))?
+                    .mark_external_controller_authority_pending(key);
+            }
+            integration.reconcile_external_controller_authority(state, key)?;
+            if requires_grouped_room_control {
+                state
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("lock"))?
+                    .mark_external_controller_authority_ready(key);
+            }
+            Ok(())
+        });
+
+    let release_external_controller_authority_fn = Arc::new(
+        move |state: &SharedState,
+              key: &HubKey,
+              reason: ExternalControllerReleaseReason|
+              -> Result<()> {
+            // The command lifecycle owns the external-topology transaction
+            // across restore, credential commit, finalization, and local
+            // teardown. Reacquiring the non-reentrant lock here would
+            // deadlock every real release callback.
+            let integration =
+                find_integration(integrations, key.hub_type.as_str()).ok_or_else(|| {
+                    anyhow::anyhow!("No integration for hub type '{}'", key.hub_type.as_str())
+                })?;
+            if integration.requires_grouped_room_control() {
+                state
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("lock"))?
+                    .mark_external_controller_authority_pending(key);
+            }
+            integration.release_external_controller_authority(state, key, reason)
+        },
+    );
+
+    let finalize_external_controller_release_fn =
+        Arc::new(move |state: &SharedState, key: &HubKey| -> Result<()> {
+            let integration =
+                find_integration(integrations, key.hub_type.as_str()).ok_or_else(|| {
+                    anyhow::anyhow!("No integration for hub type '{}'", key.hub_type.as_str())
+                })?;
+            integration.finalize_external_controller_release(state, key)
+        });
 
     let prepare_hub_device_room_assignment_fn = Arc::new(
         move |state: &SharedState,
               assignment: &HubDeviceRoomAssignment|
               -> Result<HubDeviceRoomAssignmentOutcome> {
+            if state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("lock"))?
+                .authority_state_recovery_required
+            {
+                anyhow::bail!("Authoritative topology state requires recovery");
+            }
             let integration = find_integration(integrations, assignment.hub_key.hub_type.as_str())
                 .ok_or_else(|| {
                     anyhow::anyhow!(
@@ -1342,6 +1893,18 @@ pub fn integration_callbacks(
                         assignment.hub_key.hub_type.as_str()
                     )
                 })?;
+            let requires_grouped_room_control = {
+                let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+                let required =
+                    controller_authority_is_enabled(&state, &assignment.hub_key, integration);
+                state
+                    .topology
+                    .set_grouped_room_control_required(&assignment.hub_key, required);
+                required
+            };
+            if integration.requires_grouped_room_control() && !requires_grouped_room_control {
+                return Ok(HubDeviceRoomAssignmentOutcome::Unchanged);
+            }
             integration.prepare_device_room_assignment(state, assignment)
         },
     );
@@ -1410,6 +1973,10 @@ pub fn integration_callbacks(
         get_hub_provider_fn,
         register_controller_fn,
         sync_topology_groups_fn,
+        sync_required_topology_groups_fn,
+        reconcile_external_controller_authority_fn,
+        release_external_controller_authority_fn,
+        finalize_external_controller_release_fn,
         prepare_hub_device_room_assignment_fn,
         start_pairing_fn,
         reconcile_pairing_results_fn,
@@ -1489,6 +2056,12 @@ mod tests {
         hub_type: &'static str,
         ensure_count: AtomicU32,
         post_connect_count: AtomicU32,
+        sync_count: AtomicU32,
+        authority_count: AtomicU32,
+        release_count: AtomicU32,
+        prepare_count: AtomicU32,
+        requires_grouped_room_control: bool,
+        topology_sync_fails: bool,
     }
 
     impl MockIntegration {
@@ -1497,6 +2070,40 @@ mod tests {
                 hub_type,
                 ensure_count: AtomicU32::new(0),
                 post_connect_count: AtomicU32::new(0),
+                sync_count: AtomicU32::new(0),
+                authority_count: AtomicU32::new(0),
+                release_count: AtomicU32::new(0),
+                prepare_count: AtomicU32::new(0),
+                requires_grouped_room_control: false,
+                topology_sync_fails: false,
+            }
+        }
+
+        const fn new_group_required(hub_type: &'static str) -> Self {
+            Self {
+                hub_type,
+                ensure_count: AtomicU32::new(0),
+                post_connect_count: AtomicU32::new(0),
+                sync_count: AtomicU32::new(0),
+                authority_count: AtomicU32::new(0),
+                release_count: AtomicU32::new(0),
+                prepare_count: AtomicU32::new(0),
+                requires_grouped_room_control: true,
+                topology_sync_fails: false,
+            }
+        }
+
+        const fn new_group_required_with_sync_failure(hub_type: &'static str) -> Self {
+            Self {
+                hub_type,
+                ensure_count: AtomicU32::new(0),
+                post_connect_count: AtomicU32::new(0),
+                sync_count: AtomicU32::new(0),
+                authority_count: AtomicU32::new(0),
+                release_count: AtomicU32::new(0),
+                prepare_count: AtomicU32::new(0),
+                requires_grouped_room_control: true,
+                topology_sync_fails: true,
             }
         }
 
@@ -1507,6 +2114,22 @@ mod tests {
 
         fn post_connect_calls(&self) -> u32 {
             self.post_connect_count.load(Ordering::Relaxed)
+        }
+
+        fn sync_calls(&self) -> u32 {
+            self.sync_count.load(Ordering::Relaxed)
+        }
+
+        fn authority_calls(&self) -> u32 {
+            self.authority_count.load(Ordering::Relaxed)
+        }
+
+        fn release_calls(&self) -> u32 {
+            self.release_count.load(Ordering::Relaxed)
+        }
+
+        fn prepare_calls(&self) -> u32 {
+            self.prepare_count.load(Ordering::Relaxed)
         }
     }
 
@@ -1558,18 +2181,76 @@ mod tests {
         fn post_connect(&self, _state: &SharedState, _key: &HubKey) {
             self.post_connect_count.fetch_add(1, Ordering::Relaxed);
         }
+
+        fn sync_topology_groups(&self, _state: &SharedState, _key: &HubKey) -> Result<()> {
+            self.sync_count.fetch_add(1, Ordering::Relaxed);
+            if self.topology_sync_fails {
+                anyhow::bail!("simulated grouped topology uncertainty");
+            }
+            Ok(())
+        }
+
+        fn requires_grouped_room_control(&self) -> bool {
+            self.requires_grouped_room_control
+        }
+
+        fn reconcile_external_controller_authority(
+            &self,
+            _state: &SharedState,
+            _key: &HubKey,
+        ) -> Result<()> {
+            self.authority_count.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn release_external_controller_authority(
+            &self,
+            _state: &SharedState,
+            _key: &HubKey,
+            _reason: ExternalControllerReleaseReason,
+        ) -> Result<()> {
+            self.release_count.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn prepare_device_room_assignment(
+            &self,
+            _state: &SharedState,
+            _assignment: &HubDeviceRoomAssignment,
+        ) -> Result<HubDeviceRoomAssignmentOutcome> {
+            self.prepare_count.fetch_add(1, Ordering::Relaxed);
+            Ok(HubDeviceRoomAssignmentOutcome::Unchanged)
+        }
     }
 
     static MOCK_HUE: MockIntegration = MockIntegration::new("hue");
     static MOCK_HA: MockIntegration = MockIntegration::new("homeassistant");
+    static MOCK_GROUP_REQUIRED: MockIntegration =
+        MockIntegration::new_group_required("group_required");
+    static MOCK_ROLLOUT_GATE: MockIntegration = MockIntegration::new_group_required("rollout_gate");
+    static MOCK_GROUP_REQUIRED_SYNC_FAILURE: MockIntegration =
+        MockIntegration::new_group_required_with_sync_failure("group_required_sync_failure");
+    static FAILING_GROUP_INTEGRATIONS: &[&dyn ExternalLightHubIntegration] =
+        &[&MOCK_GROUP_REQUIRED_SYNC_FAILURE];
 
     static TEST_INTEGRATIONS: &[&dyn ExternalLightHubIntegration] = &[&MOCK_HUE, &MOCK_HA];
+    static GROUP_POLICY_TEST_INTEGRATIONS: &[&dyn ExternalLightHubIntegration] =
+        &[&MOCK_GROUP_REQUIRED, &MOCK_HA];
+    static ROLLOUT_GATE_TEST_INTEGRATIONS: &[&dyn ExternalLightHubIntegration] =
+        &[&MOCK_ROLLOUT_GATE];
 
     fn string_error<T>(result: Result<T>) -> String {
         match result {
             Ok(_) => panic!("expected error"),
             Err(error) => error.to_string(),
         }
+    }
+
+    fn enable_authority_rollout(state: &SharedState, hub_type: &str) {
+        state
+            .lock()
+            .unwrap()
+            .set_external_controller_authority_enabled(HubType::new(hub_type), true);
     }
 
     struct EmptyDiscovery;
@@ -1580,6 +2261,48 @@ mod tests {
         }
 
         fn discover_devices(&self) -> Result<Vec<DiscoveredDevice>> {
+            Ok(Vec::new())
+        }
+    }
+
+    struct CountingBootstrapDiscovery {
+        room_discovery_calls: Arc<AtomicU32>,
+        failures_before_success: Arc<AtomicU32>,
+        device_failures_before_success: Arc<AtomicU32>,
+        identity_failures_before_success: Arc<AtomicU32>,
+    }
+
+    impl HubDiscovery for CountingBootstrapDiscovery {
+        fn discover_rooms(&self) -> Result<Vec<DiscoveredRoom>> {
+            self.room_discovery_calls.fetch_add(1, Ordering::Relaxed);
+            if self.failures_before_success.load(Ordering::Relaxed) > 0 {
+                self.failures_before_success.fetch_sub(1, Ordering::Relaxed);
+                anyhow::bail!("temporary startup sync failure");
+            }
+            Ok(Vec::new())
+        }
+
+        fn discover_devices(&self) -> Result<Vec<DiscoveredDevice>> {
+            if self.device_failures_before_success.load(Ordering::Relaxed) > 0 {
+                self.device_failures_before_success
+                    .fetch_sub(1, Ordering::Relaxed);
+                anyhow::bail!("temporary device discovery failure");
+            }
+            Ok(Vec::new())
+        }
+
+        fn discover_identities(
+            &self,
+        ) -> Result<Vec<crate::canonical::identity::DiscoveredIdentity>> {
+            if self
+                .identity_failures_before_success
+                .load(Ordering::Relaxed)
+                > 0
+            {
+                self.identity_failures_before_success
+                    .fetch_sub(1, Ordering::Relaxed);
+                anyhow::bail!("temporary identity discovery failure");
+            }
             Ok(Vec::new())
         }
     }
@@ -1698,21 +2421,91 @@ mod tests {
 
     struct BootstrapTestIntegration {
         failures_before_success: AtomicU32,
+        authority_failures_before_success: AtomicU32,
         connect_attempts: AtomicU32,
+        authority_attempts: AtomicU32,
         post_connect_count: AtomicU32,
+        room_discovery_calls: Arc<AtomicU32>,
+        room_discovery_failures_before_success: Arc<AtomicU32>,
+        device_discovery_failures_before_success: Arc<AtomicU32>,
+        identity_discovery_failures_before_success: Arc<AtomicU32>,
+        requires_grouped_room_control: bool,
     }
 
     impl BootstrapTestIntegration {
         fn new(failures_before_success: u32) -> Self {
             Self {
                 failures_before_success: AtomicU32::new(failures_before_success),
+                authority_failures_before_success: AtomicU32::new(0),
                 connect_attempts: AtomicU32::new(0),
+                authority_attempts: AtomicU32::new(0),
                 post_connect_count: AtomicU32::new(0),
+                room_discovery_calls: Arc::new(AtomicU32::new(0)),
+                room_discovery_failures_before_success: Arc::new(AtomicU32::new(0)),
+                device_discovery_failures_before_success: Arc::new(AtomicU32::new(0)),
+                identity_discovery_failures_before_success: Arc::new(AtomicU32::new(0)),
+                requires_grouped_room_control: false,
             }
+        }
+
+        fn with_authority_failures(authority_failures_before_success: u32) -> Self {
+            Self {
+                failures_before_success: AtomicU32::new(0),
+                authority_failures_before_success: AtomicU32::new(
+                    authority_failures_before_success,
+                ),
+                connect_attempts: AtomicU32::new(0),
+                authority_attempts: AtomicU32::new(0),
+                post_connect_count: AtomicU32::new(0),
+                room_discovery_calls: Arc::new(AtomicU32::new(0)),
+                room_discovery_failures_before_success: Arc::new(AtomicU32::new(0)),
+                device_discovery_failures_before_success: Arc::new(AtomicU32::new(0)),
+                identity_discovery_failures_before_success: Arc::new(AtomicU32::new(0)),
+                requires_grouped_room_control: true,
+            }
+        }
+
+        fn with_sync_failures(room_discovery_failures_before_success: u32) -> Self {
+            Self {
+                failures_before_success: AtomicU32::new(0),
+                authority_failures_before_success: AtomicU32::new(0),
+                connect_attempts: AtomicU32::new(0),
+                authority_attempts: AtomicU32::new(0),
+                post_connect_count: AtomicU32::new(0),
+                room_discovery_calls: Arc::new(AtomicU32::new(0)),
+                room_discovery_failures_before_success: Arc::new(AtomicU32::new(
+                    room_discovery_failures_before_success,
+                )),
+                device_discovery_failures_before_success: Arc::new(AtomicU32::new(0)),
+                identity_discovery_failures_before_success: Arc::new(AtomicU32::new(0)),
+                requires_grouped_room_control: true,
+            }
+        }
+
+        fn with_device_sync_failures(device_discovery_failures_before_success: u32) -> Self {
+            let mut integration = Self::with_sync_failures(0);
+            integration.device_discovery_failures_before_success =
+                Arc::new(AtomicU32::new(device_discovery_failures_before_success));
+            integration
+        }
+
+        fn with_identity_sync_failures(identity_discovery_failures_before_success: u32) -> Self {
+            let mut integration = Self::with_sync_failures(0);
+            integration.identity_discovery_failures_before_success =
+                Arc::new(AtomicU32::new(identity_discovery_failures_before_success));
+            integration
         }
 
         fn connect_attempts(&self) -> u32 {
             self.connect_attempts.load(Ordering::Relaxed)
+        }
+
+        fn authority_attempts(&self) -> u32 {
+            self.authority_attempts.load(Ordering::Relaxed)
+        }
+
+        fn room_discovery_calls(&self) -> u32 {
+            self.room_discovery_calls.load(Ordering::Relaxed)
         }
 
         fn post_connect_calls(&self) -> u32 {
@@ -1751,7 +2544,18 @@ mod tests {
                     runtime: None,
                     hub_data: Box::new(()),
                     registry: None,
-                    discovery: Some(Arc::new(EmptyDiscovery)),
+                    discovery: Some(Arc::new(CountingBootstrapDiscovery {
+                        room_discovery_calls: self.room_discovery_calls.clone(),
+                        failures_before_success: self
+                            .room_discovery_failures_before_success
+                            .clone(),
+                        device_failures_before_success: self
+                            .device_discovery_failures_before_success
+                            .clone(),
+                        identity_failures_before_success: self
+                            .identity_discovery_failures_before_success
+                            .clone(),
+                    })),
                     shutdown: Arc::new(AtomicBool::new(false)),
                 },
             );
@@ -1765,6 +2569,28 @@ mod tests {
 
         fn post_connect(&self, _state: &SharedState, _key: &HubKey) {
             self.post_connect_count.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn requires_grouped_room_control(&self) -> bool {
+            self.requires_grouped_room_control
+        }
+
+        fn reconcile_external_controller_authority(
+            &self,
+            _state: &SharedState,
+            _key: &HubKey,
+        ) -> Result<()> {
+            self.authority_attempts.fetch_add(1, Ordering::Relaxed);
+            if self
+                .authority_failures_before_success
+                .load(Ordering::Relaxed)
+                > 0
+            {
+                self.authority_failures_before_success
+                    .fetch_sub(1, Ordering::Relaxed);
+                anyhow::bail!("temporary authority failure");
+            }
+            Ok(())
         }
     }
 
@@ -1811,11 +2637,226 @@ mod tests {
     }
 
     #[test]
+    fn external_controller_authority_rollout_defaults_off_and_is_per_hub_type() {
+        let mut state = crate::state::AppState::default();
+        let hue = HubType::new("hue");
+        let other = HubType::new("group_required");
+
+        assert!(!state.external_controller_authority_is_enabled(&hue));
+        assert!(!state.external_controller_authority_is_enabled(&other));
+
+        state.set_external_controller_authority_enabled(hue.clone(), true);
+        assert!(state.external_controller_authority_is_enabled(&hue));
+        assert!(!state.external_controller_authority_is_enabled(&other));
+
+        state.set_external_controller_authority_enabled(hue.clone(), false);
+        assert!(!state.external_controller_authority_is_enabled(&hue));
+    }
+
+    #[test]
+    fn disabled_authority_skips_acquisition_but_keeps_release_and_recovery_fence() {
+        let callbacks = integration_callbacks(ROLLOUT_GATE_TEST_INTEGRATIONS);
+        let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
+        let key = HubKey::new(HubType::new("rollout_gate"), "bridge");
+        let authority_before = MOCK_ROLLOUT_GATE.authority_calls();
+        let release_before = MOCK_ROLLOUT_GATE.release_calls();
+        let prepare_before = MOCK_ROLLOUT_GATE.prepare_calls();
+        let sync_before = MOCK_ROLLOUT_GATE.sync_calls();
+
+        {
+            let mut app = state.lock().unwrap();
+            app.hubs.insert(
+                key.clone(),
+                ActiveHub {
+                    hub_type: key.hub_type.clone(),
+                    hub_key: key.clone(),
+                    runtime: None,
+                    hub_data: Box::new(()),
+                    registry: None,
+                    discovery: None,
+                    shutdown: Arc::new(AtomicBool::new(false)),
+                },
+            );
+            // Simulate recovery evidence left by an earlier enabled build.
+            app.mark_external_controller_authority_pending(&key);
+        }
+
+        (callbacks.reconcile_external_controller_authority_fn)(&state, &key).unwrap();
+        (callbacks.sync_required_topology_groups_fn)(&state).unwrap();
+        let assignment = HubDeviceRoomAssignment {
+            hub_key: key.clone(),
+            native_device_id: "light".to_string(),
+            device_type: DeviceType::Light,
+            preferred_for_control: true,
+            target_rhythm_room_id: Some("room".to_string()),
+            target_hub_room_ids: Vec::new(),
+        };
+        assert!(matches!(
+            (callbacks.prepare_hub_device_room_assignment_fn)(&state, &assignment).unwrap(),
+            HubDeviceRoomAssignmentOutcome::Unchanged
+        ));
+
+        assert_eq!(MOCK_ROLLOUT_GATE.authority_calls(), authority_before);
+        assert_eq!(MOCK_ROLLOUT_GATE.prepare_calls(), prepare_before);
+        assert_eq!(MOCK_ROLLOUT_GATE.sync_calls(), sync_before);
+        assert!(state
+            .lock()
+            .unwrap()
+            .external_controller_authority_pending
+            .contains(&key));
+
+        (callbacks.release_external_controller_authority_fn)(
+            &state,
+            &key,
+            ExternalControllerReleaseReason::UserDisconnect,
+        )
+        .unwrap();
+        assert_eq!(MOCK_ROLLOUT_GATE.release_calls(), release_before + 1);
+        assert!(state
+            .lock()
+            .unwrap()
+            .external_controller_authority_pending
+            .contains(&key));
+    }
+
+    #[test]
     #[should_panic(expected = "No integration registered for hub type: unknown")]
     fn provider_callback_panics_for_unknown_hub_type() {
         let callbacks = integration_callbacks(TEST_INTEGRATIONS);
 
         let _ = (callbacks.get_hub_provider_fn)(HubType::new("unknown"));
+    }
+
+    #[test]
+    fn corrupt_authority_snapshot_fences_external_topology_callbacks() {
+        let callbacks = integration_callbacks(GROUP_POLICY_TEST_INTEGRATIONS);
+        let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
+        state.lock().unwrap().authority_state_recovery_required = true;
+        let key = HubKey::new(HubType::new("group_required"), "bridge");
+
+        assert!(
+            string_error((callbacks.reconcile_external_controller_authority_fn)(
+                &state, &key
+            ))
+            .contains("requires recovery")
+        );
+        assert!(
+            string_error((callbacks.sync_required_topology_groups_fn)(&state))
+                .contains("requires recovery")
+        );
+        assert!(
+            string_error((callbacks.prepare_hub_device_room_assignment_fn)(
+                &state,
+                &HubDeviceRoomAssignment {
+                    hub_key: key,
+                    native_device_id: "native-light".to_string(),
+                    device_type: DeviceType::Light,
+                    preferred_for_control: true,
+                    target_rhythm_room_id: Some("room".to_string()),
+                    target_hub_room_ids: Vec::new(),
+                },
+            ))
+            .contains("requires recovery")
+        );
+    }
+
+    #[test]
+    fn required_group_sync_targets_only_declaring_integrations_and_installs_policy() {
+        let callbacks = integration_callbacks(GROUP_POLICY_TEST_INTEGRATIONS);
+        let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
+        let required_key = HubKey::new(HubType::new("group_required"), "bridge");
+        let ordinary_key = HubKey::new(HubType::new("homeassistant"), "server");
+        enable_authority_rollout(&state, "group_required");
+        {
+            let mut state = state.lock().unwrap();
+            for key in [&required_key, &ordinary_key] {
+                state.hubs.insert(
+                    key.clone(),
+                    ActiveHub {
+                        hub_type: key.hub_type.clone(),
+                        hub_key: key.clone(),
+                        runtime: None,
+                        hub_data: Box::new(()),
+                        registry: None,
+                        discovery: None,
+                        shutdown: Arc::new(AtomicBool::new(false)),
+                    },
+                );
+            }
+        }
+        let required_before = MOCK_GROUP_REQUIRED.sync_calls();
+        let ordinary_before = MOCK_HA.sync_calls();
+
+        (callbacks.sync_required_topology_groups_fn)(&state).unwrap();
+
+        assert_eq!(MOCK_GROUP_REQUIRED.sync_calls(), required_before + 1);
+        assert_eq!(MOCK_HA.sync_calls(), ordinary_before);
+        let state = state.lock().unwrap();
+        assert!(state
+            .topology
+            .grouped_room_control_is_required(&required_key));
+        assert!(!state
+            .topology
+            .grouped_room_control_is_required(&ordinary_key));
+    }
+
+    #[test]
+    fn required_group_sync_failure_fences_exact_hub_and_requests_recovery_unlocked() {
+        let callbacks = integration_callbacks(FAILING_GROUP_INTEGRATIONS);
+        let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
+        let key = HubKey::new(HubType::new("group_required_sync_failure"), "bridge");
+        enable_authority_rollout(&state, "group_required_sync_failure");
+        let recovery_requests = Arc::new(AtomicU32::new(0));
+        {
+            let recovery_requests = recovery_requests.clone();
+            let mut app = state.lock().unwrap();
+            app.hubs.insert(
+                key.clone(),
+                ActiveHub {
+                    hub_type: key.hub_type.clone(),
+                    hub_key: key.clone(),
+                    runtime: None,
+                    hub_data: Box::new(()),
+                    registry: None,
+                    discovery: None,
+                    shutdown: Arc::new(AtomicBool::new(false)),
+                },
+            );
+            app.set_hub_connected(&key, true);
+            app.request_hub_bootstrap_fn = Some(Arc::new(move |state| {
+                assert!(
+                    state.try_lock().is_ok(),
+                    "recovery callback ran while AppState remained locked"
+                );
+                recovery_requests.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+
+        let error = (callbacks.sync_topology_groups_fn)(&state).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("simulated grouped topology uncertainty"));
+        assert_eq!(recovery_requests.load(Ordering::SeqCst), 1);
+        let app = state.lock().unwrap();
+        assert!(app.external_controller_authority_pending.contains(&key));
+        assert!(!app.external_controller_authority_is_ready(&key));
+        assert!(!app.hub_is_connected(&key));
+    }
+
+    #[test]
+    fn required_group_registration_installs_policy_before_composite_exists() {
+        let callbacks = integration_callbacks(GROUP_POLICY_TEST_INTEGRATIONS);
+        let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
+        let key = HubKey::new(HubType::new("group_required"), "fresh-bridge");
+        enable_authority_rollout(&state, "group_required");
+
+        assert!((callbacks.register_controller_fn)(&state, &key).is_ok());
+        let state = state.lock().unwrap();
+        assert!(state.composite_controller.is_none());
+        assert!(state.topology.grouped_room_control_is_required(&key));
+        assert!(state.external_controller_initial_sync_is_pending(&key));
+        assert!(!state.external_controller_authority_is_ready(&key));
     }
 
     #[test]
@@ -2039,6 +3080,141 @@ mod tests {
     }
 
     #[test]
+    fn stored_hub_bootstrap_retries_authority_on_existing_active_hub() {
+        let integration = BootstrapTestIntegration::with_authority_failures(1);
+        let integrations: &[&dyn ExternalLightHubIntegration] = &[&integration];
+        let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
+        let key = HubKey::new(HubType::new("hue"), "192.168.1.5");
+        enable_authority_rollout(&state, "hue");
+
+        state.lock().unwrap().hub_credentials.insert(
+            key.clone(),
+            HubCredentials::new("hue", "192.168.1.5", serde_json::json!({"username": "abc"})),
+        );
+
+        let mut clock = MockBootstrapClock::new();
+        bootstrap_stored_hubs_until_settled(&state, integrations, &mut clock);
+
+        let state = state.lock().unwrap();
+        assert!(state.hubs.contains_key(&key));
+        assert!(state.external_controller_authority_is_ready(&key));
+        assert!(state.hub_is_connected(&key));
+        assert!(state.hub_startup_retry(&key).is_none());
+        assert_eq!(integration.connect_attempts(), 1);
+        assert_eq!(integration.room_discovery_calls(), 1);
+        assert_eq!(integration.authority_attempts(), 2);
+        assert_eq!(integration.post_connect_calls(), 1);
+        assert_eq!(clock.sleeps, vec![Duration::from_secs(1); 5]);
+    }
+
+    #[test]
+    fn failed_active_hub_authority_retry_retains_backoff_without_reconnect() {
+        let integration = BootstrapTestIntegration::with_authority_failures(2);
+        let integrations: &[&dyn ExternalLightHubIntegration] = &[&integration];
+        let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
+        let key = HubKey::new(HubType::new("hue"), "192.168.1.5");
+        enable_authority_rollout(&state, "hue");
+        state.lock().unwrap().hub_credentials.insert(
+            key.clone(),
+            HubCredentials::new("hue", "192.168.1.5", serde_json::json!({"username": "abc"})),
+        );
+
+        let mut clock = MockBootstrapClock::new();
+        assert!(matches!(
+            bootstrap_stored_hubs_once(&state, integrations, &mut clock),
+            BootstrapLoopDecision::Sleep(duration) if duration == Duration::from_secs(1)
+        ));
+        clock.sleep(Duration::from_secs(5));
+        assert!(matches!(
+            bootstrap_stored_hubs_once(&state, integrations, &mut clock),
+            BootstrapLoopDecision::Sleep(duration) if duration == Duration::from_secs(1)
+        ));
+
+        let state = state.lock().unwrap();
+        let retry = state.hub_startup_retry(&key).unwrap();
+        assert_eq!(retry.attempt_count, 2);
+        assert_eq!(
+            retry.next_retry_at,
+            Some(clock.now_instant() + Duration::from_secs(10))
+        );
+        assert!(state.external_controller_authority_pending.contains(&key));
+        assert!(!state.hub_is_connected(&key));
+        assert_eq!(integration.connect_attempts(), 1);
+        assert_eq!(integration.room_discovery_calls(), 1);
+        assert_eq!(integration.authority_attempts(), 2);
+        assert_eq!(integration.post_connect_calls(), 0);
+    }
+
+    #[test]
+    fn startup_sync_failure_retries_full_bootstrap_before_authority() {
+        let integration = BootstrapTestIntegration::with_sync_failures(2);
+        let integrations: &[&dyn ExternalLightHubIntegration] = &[&integration];
+        let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
+        let key = HubKey::new(HubType::new("hue"), "192.168.1.5");
+        enable_authority_rollout(&state, "hue");
+        state.lock().unwrap().hub_credentials.insert(
+            key.clone(),
+            HubCredentials::new("hue", "192.168.1.5", serde_json::json!({"username": "abc"})),
+        );
+
+        let mut clock = MockBootstrapClock::new();
+        bootstrap_stored_hubs_until_settled(&state, integrations, &mut clock);
+
+        let state = state.lock().unwrap();
+        assert!(state.hubs.contains_key(&key));
+        assert!(state.external_controller_authority_is_ready(&key));
+        assert_eq!(integration.connect_attempts(), 3);
+        assert_eq!(integration.room_discovery_calls(), 3);
+        assert_eq!(integration.authority_attempts(), 1);
+        assert_eq!(integration.post_connect_calls(), 1);
+        assert_eq!(clock.sleeps, vec![Duration::from_secs(1); 15]);
+    }
+
+    #[test]
+    fn initial_device_discovery_failure_performs_no_authority_writes() {
+        let integration = BootstrapTestIntegration::with_device_sync_failures(1);
+        let integrations: &[&dyn ExternalLightHubIntegration] = &[&integration];
+        let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
+        let key = HubKey::new(HubType::new("hue"), "192.168.1.5");
+        enable_authority_rollout(&state, "hue");
+        state.lock().unwrap().hub_credentials.insert(
+            key.clone(),
+            HubCredentials::new("hue", "192.168.1.5", serde_json::json!({"username": "abc"})),
+        );
+
+        let mut clock = MockBootstrapClock::new();
+        let _ = bootstrap_stored_hubs_once(&state, integrations, &mut clock);
+
+        let state = state.lock().unwrap();
+        assert_eq!(integration.connect_attempts(), 1);
+        assert_eq!(integration.authority_attempts(), 0);
+        assert!(!state.hubs.contains_key(&key));
+        assert!(!state.hub_is_connected(&key));
+    }
+
+    #[test]
+    fn initial_identity_discovery_failure_performs_no_authority_writes() {
+        let integration = BootstrapTestIntegration::with_identity_sync_failures(1);
+        let integrations: &[&dyn ExternalLightHubIntegration] = &[&integration];
+        let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
+        let key = HubKey::new(HubType::new("hue"), "192.168.1.5");
+        enable_authority_rollout(&state, "hue");
+        state.lock().unwrap().hub_credentials.insert(
+            key.clone(),
+            HubCredentials::new("hue", "192.168.1.5", serde_json::json!({"username": "abc"})),
+        );
+
+        let mut clock = MockBootstrapClock::new();
+        let _ = bootstrap_stored_hubs_once(&state, integrations, &mut clock);
+
+        let state = state.lock().unwrap();
+        assert_eq!(integration.connect_attempts(), 1);
+        assert_eq!(integration.authority_attempts(), 0);
+        assert!(!state.hubs.contains_key(&key));
+        assert!(!state.hub_is_connected(&key));
+    }
+
+    #[test]
     fn stored_hub_bootstrap_continues_when_retry_is_already_due_after_sync() {
         let integration = BootstrapTestIntegration::new(0);
         let candidate = StoredHubBootstrapCandidate {
@@ -2048,6 +3224,30 @@ mod tests {
         let scan = StoredHubBootstrapScan {
             connectable_credential_count: 1,
             due_supported: vec![candidate],
+            due_authority: Vec::new(),
+            scheduled_supported_count: 0,
+            manual_retry_required_count: 0,
+            next_retry_after: None,
+            unsupported_missing: Vec::new(),
+        };
+
+        assert!(matches!(
+            bootstrap_loop_decision_after_scan(&scan),
+            BootstrapLoopDecision::Sleep(duration) if duration.is_zero()
+        ));
+    }
+
+    #[test]
+    fn stored_hub_bootstrap_continues_when_authority_retry_becomes_due_during_work() {
+        let integration = BootstrapTestIntegration::with_authority_failures(0);
+        let candidate = StoredHubBootstrapCandidate {
+            key: HubKey::new(HubType::new("hue"), "192.168.1.5"),
+            integration: &integration,
+        };
+        let scan = StoredHubBootstrapScan {
+            connectable_credential_count: 1,
+            due_supported: Vec::new(),
+            due_authority: vec![candidate],
             scheduled_supported_count: 0,
             manual_retry_required_count: 0,
             next_retry_after: None,

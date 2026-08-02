@@ -135,9 +135,11 @@ pub fn ensure_hue_runtime<H: crate::transport::HueTransport + 'static>(
         (hub_key, user, registry, sse_liveness)
     };
 
+    let bridge_id = crate::ownership::connected_hue_bridge_id(&transport, &username)?;
     let controller = HueLightController::new(transport, username, registry.clone())
         .with_capability_source(state.clone(), hub_key.clone())
-        .with_sse_liveness(sse_liveness);
+        .with_sse_liveness(sse_liveness)
+        .with_controller_operation_lock(crate::ownership::controller_operation_lock(&bridge_id));
 
     rhythm_os::lifecycle::ensure_hub_runtime(
         state,

@@ -23,7 +23,7 @@ use crate::factory_default_config::{
     factory_default_light_profile_config_map, factory_default_mode_config_map,
     factory_default_mode_transition_configs, factory_default_power_save, factory_default_scene_map,
 };
-use crate::hub::{ActiveHub, HubCredentials, HubEvent};
+use crate::hub::{ActiveHub, HubCredentials, HubEvent, HubType};
 use crate::light_runtime::{LightRuntimeKind, LightRuntimeRegistry, SharedLightRuntime};
 use crate::remote_access::RemoteAccessController;
 use crate::storage::{
@@ -425,11 +425,27 @@ pub struct AppState {
     /// Brief transport gaps stay visible as connected until the pending
     /// disconnect grace period expires.
     pub hub_connection_status: HashMap<HubKey, bool>,
+    /// Controllers whose transport may be live but whose external authority
+    /// acquisition or release has not reached a safe terminal state.
+    pub external_controller_authority_pending: HashSet<HubKey>,
+    /// Hub types admitted to acquire and actively reconcile external-controller
+    /// authority. Empty by default so landing the authority machinery cannot
+    /// destructively take over a controller before its platform rollout is
+    /// explicitly enabled.
+    pub external_controller_authority_enabled_hub_types: HashSet<HubType>,
+    /// Authoritative controllers whose first complete topology discovery has
+    /// not succeeded yet. Manual retries must never skip directly to bridge
+    /// takeover while this marker is present.
+    pub external_controller_initial_sync_pending: HashSet<HubKey>,
     /// Hubs that have emitted at least one `Connected` event since configuration.
     ///
     /// Initial startup connect is covered by explicit bootstrap sync, so only
     /// later disconnect→connect transitions should trigger reconnect handling.
     pub hub_seen_connected_once: HashSet<HubKey>,
+    /// Monotonic per-hub disconnect observation generation. Authoritative
+    /// reconnect workers capture this value and may only reopen routing while
+    /// it remains unchanged.
+    pub hub_disconnect_generation: HashMap<HubKey, u64>,
     /// Per-hub room syncs currently running in background threads.
     ///
     /// Used to avoid racing the initial bootstrap sync against reconnect-
@@ -470,6 +486,16 @@ pub struct AppState {
     pub topology_group_sync_in_progress: bool,
     /// Topology-group sync request waiting for the worker to process it.
     pub topology_group_sync_pending: bool,
+    /// External controller writes are fenced while authority persistence needs
+    /// explicit recovery. The combined-file rollout supplies the production
+    /// loader for this flag in the later layer.
+    pub authority_state_recovery_required: bool,
+    /// Serializes topology changes whose commit depends on synchronous writes
+    /// to an external grouped-room controller. The ordinary AppState mutex is
+    /// intentionally released during bridge I/O, so this lock prevents a
+    /// failed operation from restoring a snapshot over another successful
+    /// room edit.
+    pub external_topology_transaction_lock: Arc<Mutex<()>>,
 
     // ---- Room state (all keyed by topology room IDs) ----
     /// Typed observed-power cache for API, poll, and SSE projections.
@@ -649,6 +675,47 @@ pub struct AppState {
     #[allow(clippy::type_complexity)]
     pub sync_topology_groups_fn:
         Option<Arc<dyn Fn(&SharedState) -> anyhow::Result<()> + Send + Sync>>,
+
+    /// Synchronous topology-group acknowledgement for integrations that
+    /// require native grouped control before a room mutation is committed.
+    #[allow(clippy::type_complexity)]
+    pub sync_required_topology_groups_fn:
+        Option<Arc<dyn Fn(&SharedState) -> anyhow::Result<()> + Send + Sync>>,
+
+    /// Acquire or resume external-controller authority after initial sync.
+    #[allow(clippy::type_complexity)]
+    pub reconcile_external_controller_authority_fn: Option<
+        Arc<
+            dyn Fn(&SharedState, &crate::canonical::identity::HubKey) -> anyhow::Result<()>
+                + Send
+                + Sync,
+        >,
+    >,
+
+    /// Restore external-controller state before credentials/local recovery
+    /// material are removed.
+    #[allow(clippy::type_complexity)]
+    pub release_external_controller_authority_fn: Option<
+        Arc<
+            dyn Fn(
+                    &SharedState,
+                    &crate::canonical::identity::HubKey,
+                    crate::hub::ExternalControllerReleaseReason,
+                ) -> anyhow::Result<()>
+                + Send
+                + Sync,
+        >,
+    >,
+
+    /// Delete a verified restored external-controller recovery manifest only
+    /// after local credential removal has crossed its durability boundary.
+    pub finalize_external_controller_release_fn: Option<
+        Arc<
+            dyn Fn(&SharedState, &crate::canonical::identity::HubKey) -> anyhow::Result<()>
+                + Send
+                + Sync,
+        >,
+    >,
 
     /// Give the owning integration a pre-commit device-room assignment hook.
     #[allow(clippy::type_complexity)]
@@ -870,7 +937,11 @@ impl Default for AppState {
             timezone_name: None,
             hubs: HashMap::new(),
             hub_connection_status: HashMap::new(),
+            external_controller_authority_pending: HashSet::new(),
+            external_controller_authority_enabled_hub_types: HashSet::new(),
+            external_controller_initial_sync_pending: HashSet::new(),
             hub_seen_connected_once: HashSet::new(),
+            hub_disconnect_generation: HashMap::new(),
             hub_sync_in_progress: HashSet::new(),
             hub_reconnect_sync_at: HashMap::new(),
             hub_pending_disconnect_at: HashMap::new(),
@@ -883,6 +954,8 @@ impl Default for AppState {
             topology: RoomTopologyStore::new(),
             topology_group_sync_in_progress: false,
             topology_group_sync_pending: false,
+            authority_state_recovery_required: false,
+            external_topology_transaction_lock: Arc::new(Mutex::new(())),
             room_observed_power: HashMap::new(),
             motion_snapshots: HashMap::new(),
             motion_timer_restores: HashMap::new(),
@@ -934,6 +1007,10 @@ impl Default for AppState {
             ensure_runtime_fn: None,
             register_controller_fn: None,
             sync_topology_groups_fn: None,
+            sync_required_topology_groups_fn: None,
+            reconcile_external_controller_authority_fn: None,
+            release_external_controller_authority_fn: None,
+            finalize_external_controller_release_fn: None,
             prepare_hub_device_room_assignment_fn: None,
             get_hub_provider_fn: None,
             start_pairing_fn: None,
@@ -1231,9 +1308,76 @@ impl AppState {
         self.hub_connection_status.insert(key.clone(), connected);
     }
 
+    /// Enable or disable new authority acquisition for one integration type.
+    ///
+    /// This rollout gate intentionally does not erase pending/recovery state.
+    /// Release and finalization callbacks remain available when a type is
+    /// disabled so an ownership epoch created by an earlier build can still be
+    /// relinquished safely.
+    pub fn set_external_controller_authority_enabled(&mut self, hub_type: HubType, enabled: bool) {
+        if enabled {
+            self.external_controller_authority_enabled_hub_types
+                .insert(hub_type);
+        } else {
+            self.external_controller_authority_enabled_hub_types
+                .remove(&hub_type);
+        }
+    }
+
+    pub fn external_controller_authority_is_enabled(&self, hub_type: &HubType) -> bool {
+        self.external_controller_authority_enabled_hub_types
+            .contains(hub_type)
+    }
+
+    pub fn external_controller_authority_is_enabled_for(&self, key: &HubKey) -> bool {
+        self.external_controller_authority_is_enabled(&key.hub_type)
+    }
+
+    /// Freeze controller writes until acquisition or release is verified.
+    pub fn mark_external_controller_authority_pending(&mut self, key: &HubKey) {
+        self.external_controller_authority_pending
+            .insert(key.clone());
+        self.set_hub_connected(key, false);
+    }
+
+    /// Fence an authoritative controller before its first complete discovery.
+    /// This is separate from authority acquisition so a manual retry cannot
+    /// mistake an incomplete desired graph for an authority-only failure.
+    pub fn mark_external_controller_initial_sync_pending(&mut self, key: &HubKey) {
+        self.external_controller_initial_sync_pending
+            .insert(key.clone());
+        self.mark_external_controller_authority_pending(key);
+    }
+
+    /// Record that initial discovery produced a complete desired graph. The
+    /// authority fence remains until takeover itself is verified.
+    pub fn mark_external_controller_initial_sync_complete(&mut self, key: &HubKey) {
+        self.external_controller_initial_sync_pending.remove(key);
+    }
+
+    pub fn external_controller_initial_sync_is_pending(&self, key: &HubKey) -> bool {
+        self.external_controller_initial_sync_pending.contains(key)
+    }
+
+    /// Mark an authoritative controller safe for normal routing.
+    pub fn mark_external_controller_authority_ready(&mut self, key: &HubKey) {
+        self.external_controller_initial_sync_pending.remove(key);
+        self.external_controller_authority_pending.remove(key);
+        self.set_hub_connected(key, true);
+    }
+
+    /// Whether writes may be dispatched to this controller.
+    pub fn external_controller_authority_is_ready(&self, key: &HubKey) -> bool {
+        !self.authority_state_recovery_required
+            && !self.external_controller_initial_sync_pending.contains(key)
+            && !self.external_controller_authority_pending.contains(key)
+    }
+
     /// Forget the live connection state for a hub.
     pub fn clear_hub_connected(&mut self, key: &HubKey) {
         self.hub_connection_status.remove(key);
+        self.external_controller_initial_sync_pending.remove(key);
+        self.external_controller_authority_pending.remove(key);
         self.hub_seen_connected_once.remove(key);
         self.hub_reconnect_sync_at.remove(key);
         self.hub_pending_disconnect_at.remove(key);
@@ -1250,6 +1394,28 @@ impl AppState {
     /// Whether a hub has emitted at least one connected event.
     pub fn hub_seen_connected_once(&self, key: &HubKey) -> bool {
         self.hub_seen_connected_once.contains(key)
+    }
+
+    /// Advance the observation generation for every disconnect event, even
+    /// while the hub is already write-fenced.
+    pub fn note_hub_disconnected_event(&mut self, key: &HubKey) -> u64 {
+        let generation = self
+            .hub_disconnect_generation
+            .entry(key.clone())
+            .or_default();
+        *generation = generation.wrapping_add(1);
+        *generation
+    }
+
+    pub fn hub_disconnect_generation(&self, key: &HubKey) -> u64 {
+        self.hub_disconnect_generation
+            .get(key)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    pub fn hub_disconnect_generation_matches(&self, key: &HubKey, generation: u64) -> bool {
+        self.hub_disconnect_generation(key) == generation
     }
 
     /// Whether a reconnect-triggered full sync ran recently for this hub.

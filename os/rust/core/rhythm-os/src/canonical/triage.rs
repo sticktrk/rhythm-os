@@ -310,6 +310,35 @@ impl TriageQueue {
         self.entries.is_empty()
     }
 
+    /// Return whether any durable triage evidence still names this hub key.
+    pub fn references_hub_key(&self, hub_key: &HubKey) -> bool {
+        self.entries.iter().any(|entry| entry.hub_key == *hub_key)
+    }
+
+    /// Return every address-scoped hub key retained by triage evidence.
+    pub fn referenced_hub_keys(&self) -> Vec<HubKey> {
+        self.entries
+            .iter()
+            .map(|entry| entry.hub_key.clone())
+            .collect()
+    }
+
+    /// Rewrite address-scoped hub identity after the integration has proven
+    /// that both keys refer to the same physical controller.
+    pub fn remap_hub_key(&mut self, old_key: &HubKey, new_key: &HubKey) -> bool {
+        if old_key == new_key {
+            return false;
+        }
+        let mut changed = false;
+        for entry in &mut self.entries {
+            if entry.hub_key == *old_key {
+                entry.hub_key = new_key.clone();
+                changed = true;
+            }
+        }
+        changed
+    }
+
     /// Get all pending entries of a specific kind.
     pub fn pending_by_kind(&self, kind: TriageKind) -> Vec<&TriageEntry> {
         self.entries

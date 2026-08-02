@@ -593,6 +593,74 @@ impl CanonicalRegistry {
         self.devices.values().filter(|d| !d.is_removed())
     }
 
+    /// Return whether any canonical endpoint, merge receipt, or triage record
+    /// still names this address-scoped hub key.
+    pub fn references_hub_key(&self, hub_key: &HubKey) -> bool {
+        self.devices.values().any(|device| {
+            device
+                .endpoints
+                .iter()
+                .any(|endpoint| endpoint.hub_key == *hub_key)
+                || device
+                    .merge_history
+                    .iter()
+                    .any(|record| record.source_hub == *hub_key)
+        }) || self.triage.references_hub_key(hub_key)
+    }
+
+    /// Return every address-scoped hub key retained by canonical identity.
+    pub fn referenced_hub_keys(&self) -> HashSet<HubKey> {
+        let mut keys = HashSet::new();
+        for device in self.devices.values() {
+            keys.extend(
+                device
+                    .endpoints
+                    .iter()
+                    .map(|endpoint| endpoint.hub_key.clone()),
+            );
+            keys.extend(
+                device
+                    .merge_history
+                    .iter()
+                    .map(|record| record.source_hub.clone()),
+            );
+        }
+        keys.extend(self.triage.referenced_hub_keys());
+        keys
+    }
+
+    /// Rewrite an address-scoped hub key after an integration has proven both
+    /// addresses identify the same physical controller.
+    ///
+    /// Callers must reject a graph that already references both keys before
+    /// invoking this method; silently merging two endpoint domains would weaken
+    /// canonical identity guarantees.
+    pub fn remap_hub_key(&mut self, old_key: &HubKey, new_key: &HubKey) -> bool {
+        if old_key == new_key {
+            return false;
+        }
+        let mut changed = false;
+        for device in self.devices.values_mut() {
+            for endpoint in &mut device.endpoints {
+                if endpoint.hub_key == *old_key {
+                    endpoint.hub_key = new_key.clone();
+                    changed = true;
+                }
+            }
+            for record in &mut device.merge_history {
+                if record.source_hub == *old_key {
+                    record.source_hub = new_key.clone();
+                    changed = true;
+                }
+            }
+        }
+        changed |= self.triage.remap_hub_key(old_key, new_key);
+        if changed {
+            self.rebuild_indices();
+        }
+        changed
+    }
+
     /// Get all devices including soft-deleted (for admin/debug).
     pub fn all_devices_including_removed(&self) -> impl Iterator<Item = &CanonicalDevice> {
         self.devices.values()

@@ -695,6 +695,7 @@ mod tests {
             hub_key: ha_key("ha.local:8123"),
             native_device_id: "light.desk".to_string(),
             device_type: rhythm_core::runtime::hub_registry::DeviceType::Light,
+            preferred_for_control: true,
             target_rhythm_room_id: Some("office".to_string()),
             target_hub_room_ids,
         };

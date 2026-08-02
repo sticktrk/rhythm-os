@@ -92,6 +92,9 @@ pub trait Storage: Send + Sync {
     fn save_all_hub_credentials(&self, creds: &[HubCredentials]) -> Result<()>;
     fn load_hub_registry_for(&self, key: &HubKey) -> Result<Option<Value>>;
     fn save_hub_registry_for(&self, key: &HubKey, data: &Value) -> Result<()>;
+    fn clear_hub_registry_for(&self, _key: &HubKey) -> Result<()> {
+        Ok(())
+    }
     fn clear_hub_registries(&self) -> Result<()> {
         Ok(())
     }
@@ -115,6 +118,25 @@ pub trait Storage: Send + Sync {
         &self,
         _files: &[crate::bundle::BackupIntegrationFile],
     ) -> Result<()> {
+        Ok(())
+    }
+
+    /// Load one integration-owned secret state file.
+    ///
+    /// This deliberately stays separate from backup enumeration: controller
+    /// ownership must be durable for normal takeover/release even before the
+    /// backup lifecycle opts Hue state into portable bundles.
+    fn load_integration_state_file(&self, _path: &str) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// Durably replace one integration-owned secret state file.
+    fn save_integration_state_file(&self, _path: &str, _content: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// Durably remove one integration-owned secret state file.
+    fn delete_integration_state_file(&self, _path: &str) -> Result<()> {
         Ok(())
     }
 
@@ -616,6 +638,31 @@ impl FileStorage {
         self.dir.join(name)
     }
 
+    fn sync_directory_chain(&self, start: &std::path::Path, required: bool) -> Result<()> {
+        if !start.starts_with(&self.dir) {
+            anyhow::bail!("storage directory sync escaped the data root");
+        }
+        let stop = self.dir.parent().unwrap_or(&self.dir);
+        let mut current = Some(start);
+        while let Some(directory) = current {
+            let result = std::fs::File::open(directory)
+                .with_context(|| format!("Failed to open data dir {}", directory.display()))
+                .and_then(|dir| {
+                    dir.sync_all().with_context(|| {
+                        format!("Failed to fsync data dir {}", directory.display())
+                    })
+                });
+            if required {
+                result?;
+            }
+            if directory == stop {
+                break;
+            }
+            current = directory.parent();
+        }
+        Ok(())
+    }
+
     /// Durable atomic write: write to `.tmp`, fsync the data, atomically rename
     /// into place, then fsync the parent directory so the rename survives a
     /// power loss. Removes any stale `.tmp` left behind by a crashed prior
@@ -655,6 +702,11 @@ impl FileStorage {
 
         let path = self.file_path(name);
         let tmp = self.file_path(&format!("{}.tmp", name));
+        let parent = path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("storage path has no parent"))?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
 
         // A prior crashed write can leave a stale `.tmp`. Remove it so File::create
         // below doesn't silently inherit partial contents on platforms that
@@ -690,14 +742,7 @@ impl FileStorage {
             });
         }
 
-        if require_parent_sync {
-            let dir = std::fs::File::open(&self.dir)
-                .with_context(|| format!("Failed to open data dir {}", self.dir.display()))?;
-            dir.sync_all()
-                .with_context(|| format!("Failed to fsync data dir {}", self.dir.display()))?;
-        } else if let Ok(dir) = std::fs::File::open(&self.dir) {
-            let _ = dir.sync_all();
-        }
+        self.sync_directory_chain(parent, require_parent_sync)?;
 
         Ok(())
     }
@@ -724,10 +769,13 @@ impl FileStorage {
         let path = self.file_path(name);
         match std::fs::remove_file(&path) {
             Ok(()) => {
-                let dir = std::fs::File::open(&self.dir)
-                    .with_context(|| format!("opening data dir {}", self.dir.display()))?;
+                let parent = path
+                    .parent()
+                    .ok_or_else(|| anyhow::anyhow!("storage path has no parent"))?;
+                let dir = std::fs::File::open(parent)
+                    .with_context(|| format!("opening data dir {}", parent.display()))?;
                 dir.sync_all()
-                    .with_context(|| format!("fsyncing data dir {}", self.dir.display()))
+                    .with_context(|| format!("fsyncing data dir {}", parent.display()))
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => {
@@ -906,6 +954,25 @@ fn validate_integration_backup_path(path: &str) -> Result<std::path::PathBuf> {
                 .iter()
                 .any(|supported| first == std::ffi::OsStr::new(supported)) => {}
         _ => anyhow::bail!("unsupported integration backup path: {}", path),
+    }
+    Ok(std::path::PathBuf::from(normalized))
+}
+
+fn validate_integration_state_path(path: &str) -> Result<std::path::PathBuf> {
+    if path.trim().is_empty() {
+        anyhow::bail!("integration state path must not be empty");
+    }
+    let relative = std::path::Path::new(path);
+    if relative.is_absolute() {
+        anyhow::bail!("integration state path must be relative: {}", path);
+    }
+
+    let normalized = normalized_relative_path(relative)?;
+    let mut components = std::path::Path::new(&normalized).components();
+    match components.next() {
+        Some(std::path::Component::Normal(first))
+            if first == std::ffi::OsStr::new("matter") || first == std::ffi::OsStr::new("hue") => {}
+        _ => anyhow::bail!("unsupported integration state path: {}", path),
     }
     Ok(std::path::PathBuf::from(normalized))
 }
@@ -1216,6 +1283,11 @@ impl Storage for FileStorage {
         self.write_atomic(&filename, json.as_bytes())
     }
 
+    fn clear_hub_registry_for(&self, key: &HubKey) -> Result<()> {
+        let filename = format!("hub_registry_{}.json", sanitize_hub_key(key));
+        self.remove_if_exists_durable(&filename)
+    }
+
     fn clear_hub_registries(&self) -> Result<()> {
         self.clear_hub_registry_files()
     }
@@ -1253,6 +1325,33 @@ impl Storage for FileStorage {
         }
 
         Ok(())
+    }
+
+    fn load_integration_state_file(&self, path: &str) -> Result<Option<String>> {
+        let relative_path = validate_integration_state_path(path)?;
+        let absolute_path = self.dir.join(relative_path);
+        match std::fs::read_to_string(&absolute_path) {
+            Ok(content) => Ok(Some(content)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(anyhow::anyhow!(error))
+                .with_context(|| format!("reading {}", absolute_path.display())),
+        }
+    }
+
+    fn save_integration_state_file(&self, path: &str, content: &str) -> Result<()> {
+        let relative_path = validate_integration_state_path(path)?;
+        let relative_path = relative_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("integration state path is not UTF-8"))?;
+        self.write_atomic_secret_durable(relative_path, content.as_bytes())
+    }
+
+    fn delete_integration_state_file(&self, path: &str) -> Result<()> {
+        let relative_path = validate_integration_state_path(path)?;
+        let relative_path = relative_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("integration state path is not UTF-8"))?;
+        self.remove_if_exists_durable(relative_path)
     }
 
     fn load_canonical_registry(&self) -> Result<Option<serde_json::Value>> {

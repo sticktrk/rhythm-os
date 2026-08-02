@@ -292,13 +292,12 @@ impl HubDeviceRegistry {
                 .insert(device_id.clone(), room_id.to_string());
         }
 
-        // Keep area_lights in sync so any_lights_on() can query per-room entities
-        if !device_ids.is_empty() {
-            self.area_lights.insert(
-                room_id.to_string(),
-                device_ids.iter().map(|d| d.to_string()).collect(),
-            );
-        }
+        // Keep area_lights exact, including clearing stale entities when the
+        // room is re-upserted with no lights.
+        self.area_lights.insert(
+            room_id.to_string(),
+            device_ids.iter().map(|d| d.to_string()).collect(),
+        );
 
         info!(
             "Registry: upserted room '{}' ({}) gl={} devices={}",
@@ -884,6 +883,16 @@ mod tests {
         assert_eq!(entities.len(), 2);
         assert!(entities.contains(&"light1".to_string()));
         assert!(entities.contains(&"light2".to_string()));
+    }
+
+    #[test]
+    fn upsert_room_with_no_lights_clears_stale_area_lights() {
+        let mut reg = HubDeviceRegistry::new();
+        reg.upsert_room("r1", "Room", "gl1", &["light1".to_string()]);
+
+        reg.upsert_room("r1", "Room", "gl1", &[]);
+
+        assert!(reg.get_light_entities("r1").is_empty());
     }
 
     #[test]

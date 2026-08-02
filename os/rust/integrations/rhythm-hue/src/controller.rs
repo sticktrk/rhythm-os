@@ -39,6 +39,8 @@ pub struct HueLightController<H: HueTransport> {
     capability_state: Option<SharedState>,
     capability_hub_key: Option<HubKey>,
     sse_liveness: Option<Arc<HueSseLiveness>>,
+    external_topology_transaction_lock: Option<Arc<Mutex<()>>>,
+    controller_operation_lock: Option<Arc<Mutex<()>>>,
 }
 
 impl<H: HueTransport> HueLightController<H> {
@@ -58,12 +60,18 @@ impl<H: HueTransport> HueLightController<H> {
             capability_state: None,
             capability_hub_key: None,
             sse_liveness: None,
+            external_topology_transaction_lock: None,
+            controller_operation_lock: None,
         }
     }
 
     /// Attach shared state so room capabilities can be derived from the
     /// canonical registry at command time.
     pub fn with_capability_source(mut self, state: SharedState, hub_key: HubKey) -> Self {
+        self.external_topology_transaction_lock = state
+            .lock()
+            .ok()
+            .map(|state| state.external_topology_transaction_lock.clone());
         self.capability_state = Some(state);
         self.capability_hub_key = Some(hub_key);
         self
@@ -74,6 +82,80 @@ impl<H: HueTransport> HueLightController<H> {
     pub fn with_sse_liveness(mut self, sse_liveness: Arc<HueSseLiveness>) -> Self {
         self.sse_liveness = Some(sse_liveness);
         self
+    }
+
+    /// Serialize ordinary light writes with Hue room/scene ownership changes.
+    pub fn with_controller_operation_lock(mut self, lock: Arc<Mutex<()>>) -> Self {
+        self.controller_operation_lock = Some(lock);
+        self
+    }
+
+    fn lock_controller_operations(
+        &self,
+    ) -> LightControlResult<Option<std::sync::MutexGuard<'_, ()>>> {
+        self.controller_operation_lock
+            .as_ref()
+            .map(|lock| {
+                lock.lock().map_err(|_| {
+                    LightControlError::CommandFailed(
+                        "Hue controller operations are temporarily unavailable".to_string(),
+                    )
+                })
+            })
+            .transpose()
+    }
+
+    fn lock_topology_transaction(
+        &self,
+    ) -> LightControlResult<Option<std::sync::MutexGuard<'_, ()>>> {
+        self.external_topology_transaction_lock
+            .as_ref()
+            .map(|lock| {
+                lock.lock().map_err(|_| {
+                    LightControlError::CommandFailed(
+                        "Hue topology is temporarily unavailable".to_string(),
+                    )
+                })
+            })
+            .transpose()
+    }
+
+    fn ensure_authority_ready(&self) -> LightControlResult<()> {
+        let Some(state) = self.capability_state.as_ref() else {
+            return Ok(());
+        };
+        let Some(key) = self.capability_hub_key.as_ref() else {
+            return Ok(());
+        };
+        let ready = state
+            .lock()
+            .map_err(|_| {
+                LightControlError::CommandFailed(
+                    "Hue authority state is temporarily unavailable".to_string(),
+                )
+            })?
+            .external_controller_authority_is_ready(key);
+        if !ready {
+            return Err(LightControlError::CommandFailed(
+                "Hue controller authority is not ready".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn lock_authoritative_operation(
+        &self,
+    ) -> LightControlResult<(
+        Option<std::sync::MutexGuard<'_, ()>>,
+        Option<std::sync::MutexGuard<'_, ()>>,
+    )> {
+        // The topology transaction is the authority hand-off barrier. Recheck
+        // readiness only after crossing it so a command queued behind release
+        // cannot write to a bridge Rhythm has just restored to the user.
+        let topology = self.lock_topology_transaction()?;
+        self.ensure_authority_ready()?;
+        let operation = self.lock_controller_operations()?;
+        Ok((topology, operation))
     }
 
     fn tracked_light_write(
@@ -318,6 +400,14 @@ impl<H: HueTransport> HueLightController<H> {
         let registry = self.registry.lock().ok()?;
         let room_id = registry.find_room_for_exact_light_entities(native_ids)?;
         let grouped_light_id = registry.get_grouped_light_id(&room_id)?;
+        // Core keeps a one-device synthetic registry room for generic
+        // standalone-light addressing. Its room and control IDs are both the
+        // Hue device resource ID, not a Hue grouped_light resource. Treat that
+        // exact scaffold as direct control so we resolve and write the bulb's
+        // light service instead of sending an invalid grouped-light request.
+        if native_ids.len() == 1 && room_id == native_ids[0] && grouped_light_id == native_ids[0] {
+            return None;
+        }
         Some((room_id, grouped_light_id))
     }
 
@@ -582,6 +672,7 @@ impl<H: HueTransport + 'static> HubLightController for HueLightController<H> {
         target: &HubDispatchTarget,
         command: LightingCommand,
     ) -> LightControlResult<()> {
+        let (_topology, _operation) = self.lock_authoritative_operation()?;
         match target {
             HubDispatchTarget::Group {
                 room_id,
@@ -598,6 +689,7 @@ impl<H: HueTransport + 'static> HubLightController for HueLightController<H> {
         target: &HubDispatchTarget,
         transition_ms: Option<u32>,
     ) -> LightControlResult<()> {
+        let (_topology, _operation) = self.lock_authoritative_operation()?;
         match target {
             HubDispatchTarget::Group {
                 room_id,
@@ -614,10 +706,14 @@ impl<H: HueTransport + 'static> HubLightController for HueLightController<H> {
     }
 
     async fn is_connected(&self) -> bool {
+        if self.ensure_authority_ready().is_err() {
+            return false;
+        }
         self.client.test_connection(&self.username).unwrap_or(false)
     }
 
     async fn any_lights_on_target(&self, target: &HubDispatchTarget) -> LightControlResult<bool> {
+        let (_topology, _operation) = self.lock_authoritative_operation()?;
         match target {
             HubDispatchTarget::Group {
                 room_id,
@@ -628,6 +724,7 @@ impl<H: HueTransport + 'static> HubLightController for HueLightController<H> {
     }
 
     async fn flash_target(&self, target: &HubDispatchTarget) -> LightControlResult<()> {
+        let (_topology, _operation) = self.lock_authoritative_operation()?;
         // Use the Hue V2 native identify action on each light
         // resource. This is the canonical mechanism Hue exposes for physical
         // identification — unlike the default on/off flash, it works for any
@@ -674,12 +771,14 @@ impl<H: HueTransport + 'static> HubLightController for HueLightController<H> {
 #[async_trait]
 impl<H: HueTransport + 'static> LightController for HueLightController<H> {
     async fn turn_on(&self, room_id: &str, command: LightingCommand) -> LightControlResult<()> {
+        let (_topology, _operation) = self.lock_authoritative_operation()?;
         let grouped_light_id =
             rhythm_os::controller_helpers::resolve_room_target(&self.registry, room_id)?;
         self.send_group_turn_on(room_id, &grouped_light_id, command)
     }
 
     async fn turn_off(&self, room_id: &str, transition_ms: Option<u32>) -> LightControlResult<()> {
+        let (_topology, _operation) = self.lock_authoritative_operation()?;
         let grouped_light_id =
             rhythm_os::controller_helpers::resolve_room_target(&self.registry, room_id)?;
         self.send_group_turn_off(room_id, &grouped_light_id, transition_ms)
@@ -690,10 +789,14 @@ impl<H: HueTransport + 'static> LightController for HueLightController<H> {
     }
 
     async fn is_connected(&self) -> bool {
+        if self.ensure_authority_ready().is_err() {
+            return false;
+        }
         self.client.test_connection(&self.username).unwrap_or(false)
     }
 
     async fn any_lights_on(&self, room_id: &str) -> LightControlResult<bool> {
+        let (_topology, _operation) = self.lock_authoritative_operation()?;
         let grouped_light_id =
             rhythm_os::controller_helpers::resolve_room_target(&self.registry, room_id)?;
         self.group_any_lights_on(room_id, &grouped_light_id)
@@ -710,6 +813,9 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
     use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+    use rhythm_os::hub::HubType;
+    use rhythm_os::state::AppState;
 
     use crate::test_support::{HueTransportCall, SpyHueTransport};
 
@@ -747,6 +853,43 @@ mod tests {
             .upsert_room("room1", "Living Room", "gl1", &[]);
         let controller = HueLightController::new(spy, "testuser".to_string(), registry.clone());
         (controller, registry)
+    }
+
+    #[test]
+    fn topology_barrier_precedes_authority_recheck() {
+        let state = Arc::new(Mutex::new(AppState::default()));
+        let key = HubKey::new(HubType::new(HubType::HUE), "192.0.2.1");
+        state
+            .lock()
+            .unwrap()
+            .mark_external_controller_authority_pending(&key);
+
+        let (controller, _) = make_spy_controller();
+        let controller = controller.with_capability_source(state.clone(), key);
+        let topology_lock = state
+            .lock()
+            .unwrap()
+            .external_topology_transaction_lock
+            .clone();
+        let poison = std::thread::spawn(move || {
+            let _guard = topology_lock.lock().unwrap();
+            panic!("poison topology barrier for lock-order assertion");
+        });
+        assert!(poison.join().is_err());
+
+        let error = block_on(controller.turn_on_target(
+            &HubDispatchTarget::Group {
+                room_id: "room1".to_string(),
+                control_id: "gl1".to_string(),
+            },
+            LightingCommand::new(80, 4000),
+        ))
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("Hue topology is temporarily unavailable"));
+        assert_eq!(controller.client.set_grouped_light_count(), 0);
     }
 
     #[test]
@@ -1003,6 +1146,33 @@ mod tests {
             }
             other => panic!("Expected SetLight, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn standalone_device_ignores_synthetic_registry_group_and_uses_direct_light() {
+        let (controller, registry) = make_spy_controller();
+        registry.lock().unwrap().upsert_room(
+            "standalone-device",
+            "Standalone lamp",
+            "standalone-device",
+            &["standalone-device".to_string()],
+        );
+
+        block_on(controller.turn_on_target(
+            &HubDispatchTarget::Devices {
+                native_ids: vec!["standalone-device".to_string()],
+            },
+            LightingCommand::with_transition(65, 3500, 250),
+        ))
+        .unwrap();
+
+        assert_eq!(controller.client.set_grouped_light_count(), 0);
+        let calls = controller.client.set_light_calls();
+        assert_eq!(calls.len(), 1);
+        assert!(matches!(
+            &calls[0],
+            HueTransportCall::SetLight { light_id, .. } if light_id == "standalone-device"
+        ));
     }
 
     #[test]

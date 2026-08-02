@@ -1006,6 +1006,32 @@ where
     // Derive the hub key for this credential set
     let hub_key = creds.hub_key();
 
+    // Credentials are recovery material for authoritative controllers. Commit
+    // them durably before any connection callback can capture/clear external
+    // state, and compensate the in-memory update if persistence fails.
+    {
+        let mut s = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Failed to lock state"))?;
+        if let Some(ref key) = hub_key {
+            let previous = s.hub_credentials.insert(key.clone(), creds);
+            if let Some(ref storage) = s.storage {
+                let all_creds: Vec<_> = s.hub_credentials.values().cloned().collect();
+                if let Err(error) = storage.save_all_hub_credentials(&all_creds) {
+                    match previous {
+                        Some(previous) => {
+                            s.hub_credentials.insert(key.clone(), previous);
+                        }
+                        None => {
+                            s.hub_credentials.remove(key);
+                        }
+                    }
+                    return Err(error.context("Failed to durably save hub credentials"));
+                }
+            }
+        }
+    }
+
     // Signal old hub threads to stop (only the matching hub)
     // Take it out of the map but defer drop to a background thread
     // (reqwest::blocking::Client panics if dropped on a tokio worker).
@@ -1025,22 +1051,6 @@ where
                 .name("hub-drop".to_string())
                 .spawn(move || drop(old_hub))
                 .ok();
-        }
-    }
-
-    // Save credentials to state and storage (additive)
-    {
-        let mut s = state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Failed to lock state"))?;
-        if let Some(ref key) = hub_key {
-            s.hub_credentials.insert(key.clone(), creds);
-        }
-        if let Some(ref storage) = s.storage {
-            let all_creds: Vec<_> = s.hub_credentials.values().cloned().collect();
-            if let Err(e) = storage.save_all_hub_credentials(&all_creds) {
-                warn!(target: "sys", "Failed to save credentials: {}", e);
-            }
         }
     }
 

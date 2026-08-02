@@ -10039,52 +10039,135 @@ pub fn do_device_hard_remove(
 ) -> Result<()> {
     info!(target: "cmd", "device_hard_remove: {}", device_id);
 
-    let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let transaction_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .external_topology_transaction_lock
+        .clone();
+    let _transaction = transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
 
-    let canonical_id = if s.canonical_registry.get(device_id).is_some() {
-        Some(device_id.to_string())
-    } else if let Some(hub_key) = hub_key {
-        s.canonical_registry
-            .find_by_native_id(hub_key, device_id)
-            .map(|d| d.id.clone())
-    } else {
-        s.hubs.keys().find_map(|key| {
+    let (canonical_id, canonical_device, assignments, prepare_assignment) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let canonical_id = if s.canonical_registry.get(device_id).is_some() {
+            Some(device_id.to_string())
+        } else if let Some(hub_key) = hub_key {
             s.canonical_registry
-                .find_by_native_id(key, device_id)
-                .map(|d| d.id.clone())
-        })
+                .find_by_native_id(hub_key, device_id)
+                .map(|device| device.id.clone())
+        } else {
+            s.hubs.keys().find_map(|key| {
+                s.canonical_registry
+                    .find_by_native_id(key, device_id)
+                    .map(|device| device.id.clone())
+            })
+        };
+        let canonical_device = canonical_id
+            .as_ref()
+            .and_then(|id| s.canonical_registry.get(id).cloned());
+        let assignments = canonical_device
+            .as_ref()
+            .map(|device| build_hub_device_room_assignments(&s, device, None))
+            .unwrap_or_default();
+        (
+            canonical_id,
+            canonical_device,
+            assignments,
+            s.prepare_hub_device_room_assignment_fn.clone(),
+        )
     };
+    let prepared_assignments =
+        prepare_hub_device_room_assignments(state, &assignments, prepare_assignment.as_deref())?;
 
-    let canonical_device = canonical_id
-        .as_ref()
-        .and_then(|id| s.canonical_registry.get(id).cloned());
+    let mut s = match state.lock() {
+        Ok(state) => state,
+        Err(_) => {
+            return Err(rollback_prepared_hub_device_room_assignments(
+                state,
+                prepared_assignments,
+                anyhow::anyhow!("lock"),
+            ));
+        }
+    };
+    if let Some(canonical_id) = canonical_id.as_deref() {
+        let unchanged = s
+            .canonical_registry
+            .get(canonical_id)
+            .is_some_and(|device| {
+                build_hub_device_room_assignments(&s, device, None) == assignments
+            });
+        if !unchanged {
+            drop(s);
+            return Err(rollback_prepared_hub_device_room_assignments(
+                state,
+                prepared_assignments,
+                anyhow::anyhow!("Device topology changed while native removal was in progress"),
+            ));
+        }
+    }
+
+    let topology_before = s.topology.clone();
+    let canonical_before = s.canonical_registry.clone();
+    if !mirror_prepared_hub_device_room_assignments(&mut s.topology, &prepared_assignments) {
+        drop(s);
+        return Err(rollback_prepared_hub_device_room_assignments(
+            state,
+            prepared_assignments,
+            anyhow::anyhow!(
+                "Native standalone assignment succeeded but could not be mirrored before removal"
+            ),
+        ));
+    }
 
     let mut registry_removals: HashSet<(HubKey, String)> = HashSet::new();
-    let mut topology_changed = false;
-
-    if let Some(device) = canonical_device {
+    if let Some(device) = canonical_device.as_ref() {
         // `remove_device_everywhere` reports affected parent rooms. A
         // roomless/standalone node has no parent to report even though the
         // node itself is removed, so include its prior existence in the
         // persistence decision. Input bindings are separate topology records
         // and must not outlive their physical source device.
-        let had_topology_node = s.topology.get_device_node(&device.id).is_some();
-        topology_changed |= !s.topology.remove_device_everywhere(&device.id).is_empty();
-        topology_changed |= had_topology_node;
-        topology_changed |= s.topology.remove_input_bindings_for_source(&device.id) > 0;
+        s.topology.remove_device_everywhere(&device.id);
+        s.topology.remove_input_bindings_for_source(&device.id);
         for endpoint in &device.endpoints {
-            topology_changed |= !s
-                .topology
-                .remove_hub_room_binding_everywhere(&endpoint.hub_key, &endpoint.native_id)
-                .is_empty();
+            // A device ID is not a hub-room ID. Remove only this light's
+            // membership from the room binding while preserving the group for
+            // any remaining room lights.
+            s.topology.reassign_hub_light_device(
+                &endpoint.hub_key,
+                &endpoint.native_id,
+                None,
+                None,
+            );
+            // Some non-group integrations model an individually routed light
+            // as a device-scoped room binding whose room ID is the native
+            // device ID. Remove that exact legacy binding as well; real Hue
+            // room/group bindings have independent IDs and remain intact for
+            // the room's other bulbs.
+            s.topology
+                .remove_hub_room_binding_everywhere(&endpoint.hub_key, &endpoint.native_id);
             registry_removals.insert((endpoint.hub_key.clone(), endpoint.native_id.clone()));
         }
         s.canonical_registry.remove_device(&device.id);
-        persist_canonical(&s);
-    }
-
-    if topology_changed {
-        persist_topology(&s);
+        if let Err(error) = save_authority_state(&s) {
+            s.topology = topology_before;
+            s.canonical_registry = canonical_before;
+            let recovery_error = save_authority_state(&s).err();
+            drop(s);
+            let error = match recovery_error {
+                None => error.context("Failed to durably remove canonical device"),
+                Some(recovery_error) => anyhow::anyhow!(
+                    "Failed to durably remove canonical device: {:#}; restoring prior persistence failed: {:#}",
+                    error,
+                    recovery_error
+                ),
+            };
+            return Err(rollback_prepared_hub_device_room_assignments(
+                state,
+                prepared_assignments,
+                error,
+            ));
+        }
     }
 
     if registry_removals.is_empty() {
@@ -10124,6 +10207,9 @@ pub fn do_device_hard_remove(
     }
 
     drop(s);
+    // The verified native standalone assignment is now backed by the durable
+    // canonical deletion, so its rollback closures must not run.
+    drop(prepared_assignments);
 
     if let Some((configs, runtimes)) = mode_config_propagation {
         propagate_mode_configs_to_runtimes(runtimes, configs);
@@ -10155,7 +10241,15 @@ pub fn do_device_endpoint_remove(
     device_id: &str,
     hub_key: &HubKey,
 ) -> Result<()> {
-    let (canonical_id, native_id, endpoint_count) = {
+    let transaction_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .external_topology_transaction_lock
+        .clone();
+    let transaction = transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
+    let (canonical_id, native_id, endpoint_count, assignments, prepare_assignment) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let device = if let Some(device) = s.canonical_registry.get(device_id) {
             device
@@ -10177,14 +10271,39 @@ pub fn do_device_endpoint_remove(
             .ok_or_else(|| {
                 anyhow::anyhow!("Device '{}' has no endpoint on {}", device_id, hub_key)
             })?;
-        (device.id.clone(), native_id, device.endpoints.len())
+        let assignments = build_hub_device_room_assignments(&s, device, None)
+            .into_iter()
+            .filter(|assignment| {
+                assignment.hub_key == *hub_key && assignment.native_device_id == native_id
+            })
+            .collect::<Vec<_>>();
+        (
+            device.id.clone(),
+            native_id,
+            device.endpoints.len(),
+            assignments,
+            s.prepare_hub_device_room_assignment_fn.clone(),
+        )
     };
 
     if endpoint_count <= 1 {
+        drop(transaction);
         return do_device_hard_remove(state, &canonical_id, Some(hub_key));
     }
 
-    let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let prepared_assignments =
+        prepare_hub_device_room_assignments(state, &assignments, prepare_assignment.as_deref())?;
+
+    let mut s = match state.lock() {
+        Ok(state) => state,
+        Err(_) => {
+            return Err(rollback_prepared_hub_device_room_assignments(
+                state,
+                prepared_assignments,
+                anyhow::anyhow!("lock"),
+            ));
+        }
+    };
     info!(
         target: "cmd",
         "device_endpoint_remove: canonical={} endpoint={}/{}",
@@ -10192,16 +10311,71 @@ pub fn do_device_endpoint_remove(
         hub_key,
         native_id
     );
-    let topology_changed = !s
-        .topology
-        .remove_hub_room_binding_everywhere(hub_key, &native_id)
-        .is_empty();
-    s.canonical_registry
+    let endpoint_unchanged =
+        s.canonical_registry
+            .get(&canonical_id)
+            .is_some_and(|device| {
+                device.endpoints.len() == endpoint_count
+                    && device.endpoints.iter().any(|endpoint| {
+                        endpoint.hub_key == *hub_key && endpoint.native_id == native_id
+                    })
+            });
+    if !endpoint_unchanged {
+        drop(s);
+        return Err(rollback_prepared_hub_device_room_assignments(
+            state,
+            prepared_assignments,
+            anyhow::anyhow!("Device endpoint changed while native removal was in progress"),
+        ));
+    }
+
+    let topology_before = s.topology.clone();
+    let canonical_before = s.canonical_registry.clone();
+    if !mirror_prepared_hub_device_room_assignments(&mut s.topology, &prepared_assignments) {
+        drop(s);
+        return Err(rollback_prepared_hub_device_room_assignments(
+            state,
+            prepared_assignments,
+            anyhow::anyhow!(
+                "Native standalone assignment succeeded but could not be mirrored before endpoint removal"
+            ),
+        ));
+    }
+    s.topology
+        .reassign_hub_light_device(hub_key, &native_id, None, None);
+    s.topology
+        .remove_hub_room_binding_everywhere(hub_key, &native_id);
+    if s.canonical_registry
         .remove_endpoint(hub_key, &native_id)
-        .ok_or_else(|| anyhow::anyhow!("Endpoint disappeared during removal"))?;
-    persist_canonical(&s);
-    if topology_changed {
-        persist_topology(&s);
+        .is_none()
+    {
+        s.topology = topology_before;
+        s.canonical_registry = canonical_before;
+        drop(s);
+        return Err(rollback_prepared_hub_device_room_assignments(
+            state,
+            prepared_assignments,
+            anyhow::anyhow!("Endpoint disappeared during removal"),
+        ));
+    }
+    if let Err(error) = save_authority_state(&s) {
+        s.topology = topology_before;
+        s.canonical_registry = canonical_before;
+        let recovery_error = save_authority_state(&s).err();
+        drop(s);
+        let error = match recovery_error {
+            None => error.context("Failed to durably remove canonical endpoint"),
+            Some(recovery_error) => anyhow::anyhow!(
+                "Failed to durably remove canonical endpoint: {:#}; restoring prior persistence failed: {:#}",
+                error,
+                recovery_error
+            ),
+        };
+        return Err(rollback_prepared_hub_device_room_assignments(
+            state,
+            prepared_assignments,
+            error,
+        ));
     }
     if let Some(hub) = s.hubs.get(hub_key) {
         if let Some(registry) = &hub.registry {
@@ -10212,6 +10386,7 @@ pub fn do_device_endpoint_remove(
         }
     }
     drop(s);
+    drop(prepared_assignments);
 
     persist_registry(state);
     reconcile_runtime_from_state(state)?;
@@ -10813,6 +10988,15 @@ pub fn do_hub_credentials(
     // Register the new hub's controller with the composite (if runtime already exists).
     register_hub_with_composite(state, &hub_key);
 
+    let requires_authoritative_sync = {
+        let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let required = state.topology.grouped_room_control_is_required(&hub_key);
+        if required {
+            state.mark_external_controller_initial_sync_pending(&hub_key);
+        }
+        required
+    };
+
     // Auto-sync rooms from the newly configured hub.
     // Uses platform config to decide whether to also discover devices/sensors
     // (desktop: full sync, constrained blocking path: rooms only — devices
@@ -10823,23 +11007,61 @@ pub fn do_hub_credentials(
     };
     // Auto-sync + poll must run on a dedicated thread — reqwest::blocking::Client
     // panics if used inside a tokio runtime context (spawn_blocking from HTTP handler).
-    {
+    let sync_result: Result<()> = (|| {
         let sync_state = state.clone();
         let sync_hub_key = hub_key.clone();
-        let _ = std::thread::Builder::new()
+        let worker = std::thread::Builder::new()
             .name("hub-sync".to_string())
-            .spawn(move || {
-                if let Err(e) = crate::room_sync::sync_from_hub_for_key(
-                    &sync_state,
-                    &sync_hub_key,
-                    discover_devices,
-                ) {
-                    warn!(target: "cmd", "Auto-sync after hub configure failed: {}", e);
+            .spawn(move || -> Result<()> {
+                if requires_authoritative_sync {
+                    crate::room_sync::sync_from_hub_for_key_before_authority(
+                        &sync_state,
+                        &sync_hub_key,
+                        discover_devices,
+                    )?;
+                } else {
+                    crate::room_sync::sync_from_hub_for_key(
+                        &sync_state,
+                        &sync_hub_key,
+                        discover_devices,
+                    )?;
                 }
-                crate::room_sync::poll_initial_light_state(&sync_state);
+                Ok(())
             })
-            .and_then(|h| h.join().map_err(|_| std::io::Error::other("panicked")));
+            .map_err(|error| anyhow::anyhow!("Failed to start hub sync worker: {error}"))?;
+        worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("Hub sync worker panicked"))?
+    })();
+    if let Err(error) = sync_result {
+        if requires_authoritative_sync {
+            crate::hub::discard_active_hub_for_full_bootstrap_retry(state, &hub_key);
+        }
+        return Err(error).context("Hub configured but initial topology sync failed");
     }
+
+    if requires_authoritative_sync {
+        state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .mark_external_controller_initial_sync_complete(&hub_key);
+    }
+
+    let authority_result = {
+        let authority_state = state.clone();
+        let authority_hub_key = hub_key.clone();
+        std::thread::Builder::new()
+            .name("hub-authority".to_string())
+            .spawn(move || -> Result<()> {
+                reconcile_external_controller_authority(&authority_state, &authority_hub_key)?;
+                crate::room_sync::poll_initial_light_state(&authority_state);
+                Ok(())
+            })
+            .map_err(|error| anyhow::anyhow!("Failed to start hub authority worker: {error}"))?
+            .join()
+            .map_err(|_| anyhow::anyhow!("Hub authority worker panicked"))?
+    };
+    authority_result.context("Hub configured but authoritative reconciliation failed")?;
 
     {
         let hub_connected = state
@@ -10868,7 +11090,7 @@ pub fn do_retry_hub_connect(state: &SharedState, hub_type_str: &str, address: &s
         .ok_or_else(|| anyhow::anyhow!("Unknown hub type: {}", hub_type_str))?;
     let hub_key = HubKey::new(hub_type, address);
 
-    let request_bootstrap = {
+    let (request_bootstrap, reconcile_pending) = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
         let creds = s
@@ -10892,31 +11114,207 @@ pub fn do_retry_hub_connect(state: &SharedState, hub_type_str: &str, address: &s
             ));
         }
         if s.hubs.contains_key(&hub_key) {
-            return Ok(());
+            if s.external_controller_initial_sync_is_pending(&hub_key) {
+                anyhow::bail!(
+                    "Initial authoritative topology sync is still pending for {}",
+                    hub_key
+                );
+            }
+            if s.external_controller_authority_is_ready(&hub_key) {
+                return Ok(());
+            }
+            (None, true)
+        } else {
+            s.clear_hub_startup_retry(&hub_key);
+            (
+                Some(
+                    s.request_hub_bootstrap_fn
+                        .clone()
+                        .ok_or_else(|| anyhow::anyhow!("No hub bootstrap callback registered"))?,
+                ),
+                false,
+            )
         }
-
-        s.clear_hub_startup_retry(&hub_key);
-        s.request_hub_bootstrap_fn
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("No hub bootstrap callback registered"))?
     };
 
-    request_bootstrap(state);
+    let connected = if reconcile_pending {
+        reconcile_external_controller_authority(state, &hub_key)?;
+        state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .hub_is_connected(&hub_key)
+    } else if let Some(request_bootstrap) = request_bootstrap {
+        request_bootstrap(state);
+        false
+    } else {
+        false
+    };
     crate::state::emit_server_event(
         state,
         crate::server_event::ServerEvent::HubStatus {
             hub_type: Some(hub_type_str.to_string()),
             address: Some(address.to_string()),
-            connected: false,
+            connected,
         },
     );
     Ok(())
 }
 
-/// Disconnect all hubs — clear credentials, runtime, and rooms.
+fn reconcile_external_controller_authority(state: &SharedState, key: &HubKey) -> Result<()> {
+    let callback = {
+        let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        if state.external_controller_initial_sync_is_pending(key) {
+            anyhow::bail!("Initial authoritative topology sync is incomplete");
+        }
+        state.reconcile_external_controller_authority_fn.clone()
+    };
+    match callback {
+        Some(callback) => callback(state, key),
+        None => Ok(()),
+    }
+}
+
+fn prepare_external_controller_release(
+    state: &SharedState,
+    keys: &[HubKey],
+    reason: crate::hub::ExternalControllerReleaseReason,
+) -> Result<()> {
+    let callback = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .release_external_controller_authority_fn
+        .clone();
+    let Some(callback) = callback else {
+        return Ok(());
+    };
+    // Callers hold the external-topology transaction across this restore and
+    // the subsequent credential commit, finalization, and local teardown.
+    // Mark every affected controller pending before the first restore write;
+    // the marker deliberately remains set on failure so normal control cannot
+    // reopen a release epoch.
+    for key in keys {
+        state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .mark_external_controller_authority_pending(key);
+        callback(state, key, reason).with_context(|| {
+            format!(
+                "{} controller state could not be restored before local teardown",
+                key.hub_type.as_str()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn finalize_external_controller_release(state: &SharedState, keys: &[HubKey]) -> Result<()> {
+    let callback = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .finalize_external_controller_release_fn
+        .clone();
+    let Some(callback) = callback else {
+        return Ok(());
+    };
+    for key in keys {
+        callback(state, key).with_context(|| {
+            format!(
+                "{} controller recovery state could not be finalized after credential removal",
+                key.hub_type.as_str()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn configured_or_active_hub_keys(state: &SharedState) -> Result<Vec<HubKey>> {
+    let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let mut keys = state
+        .hub_credentials
+        .keys()
+        .chain(state.hubs.keys())
+        .cloned()
+        .collect::<Vec<_>>();
+    keys.sort_by(|left, right| left.to_string().cmp(&right.to_string()));
+    keys.dedup();
+    Ok(keys)
+}
+
+/// Durably remove the selected credentials before an external controller's
+/// verified-restored manifest can be finalized. In-memory credentials remain
+/// intact until local teardown commits, so a persistence failure is retryable.
+/// A crash before finalization sees the Restored manifest and is fail-closed;
+/// a crash after finalization sees no persisted credentials to auto-bootstrap.
+fn stage_hub_credential_deletion(
+    state: &SharedState,
+    removed_keys: Option<&[HubKey]>,
+) -> Result<()> {
+    let (storage, remaining) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let remaining = s
+            .hub_credentials
+            .iter()
+            .filter(|(key, _)| {
+                removed_keys.is_some_and(|keys| !keys.iter().any(|removed| removed == *key))
+            })
+            .map(|(_, credentials)| credentials.clone())
+            .collect::<Vec<_>>();
+        (s.storage.clone(), remaining)
+    };
+    let Some(storage) = storage else {
+        return Ok(());
+    };
+    storage
+        .save_all_hub_credentials(&remaining)
+        .context("Failed to durably delete hub credentials")?;
+    Ok(())
+}
+
+/// Disconnect all hubs after integrations have restored any controller state
+/// they replaced while authoritative.
 pub fn do_hub_disconnect(state: &SharedState) -> Result<()> {
+    do_hub_disconnect_with_reason(
+        state,
+        crate::hub::ExternalControllerReleaseReason::UserDisconnect,
+    )
+}
+
+fn do_hub_disconnect_with_reason(
+    state: &SharedState,
+    reason: crate::hub::ExternalControllerReleaseReason,
+) -> Result<()> {
+    let transaction_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .external_topology_transaction_lock
+        .clone();
+    let _transaction = transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
+    disconnect_hubs_with_reason_under_transaction(state, reason)
+}
+
+/// Disconnect all hubs while the caller holds the external-topology
+/// transaction.
+fn disconnect_hubs_with_reason_under_transaction(
+    state: &SharedState,
+    reason: crate::hub::ExternalControllerReleaseReason,
+) -> Result<()> {
     info!(target: "cmd", "hub_disconnect: clearing all hubs, credentials, and rooms");
 
+    let release_keys = configured_or_active_hub_keys(state)?;
+    prepare_external_controller_release(state, &release_keys, reason)?;
+
+    disconnect_hubs_after_external_controller_release(state)
+}
+
+/// Tear down local hub state after every authoritative external controller
+/// has already completed its release gate.
+///
+/// Ordinary disconnect performs release immediately before entering this
+/// local teardown.
+fn disconnect_hubs_after_external_controller_release(state: &SharedState) -> Result<()> {
+    let release_keys = configured_or_active_hub_keys(state)?;
     let hub_keys: Vec<HubKey> = state
         .lock()
         .map_err(|_| anyhow::anyhow!("lock"))?
@@ -10928,6 +11326,13 @@ pub fn do_hub_disconnect(state: &SharedState) -> Result<()> {
     for hub_key in &hub_keys {
         let _ = reconcile_hub_endpoint_visibility(state, hub_key, &discovered_native_ids)?;
     }
+
+    // Finish every fallible local visibility update before crossing the
+    // credential/finalization boundary. Once the verified Restored manifest
+    // is deleted, no ordinary error may leave a live pending hub able to begin
+    // a new acquisition epoch.
+    stage_hub_credential_deletion(state, None)?;
+    finalize_external_controller_release(state, &release_keys)?;
 
     // Capture hub keys before clearing for SSE notifications
     let old_hubs;
@@ -10953,9 +11358,6 @@ pub fn do_hub_disconnect(state: &SharedState) -> Result<()> {
         s.hub_startup_retry.clear();
 
         s.hub_credentials.clear();
-        if let Some(ref storage) = s.storage {
-            let _ = storage.save_all_hub_credentials(&[]);
-        }
 
         s.room_observed_power.clear();
         s.motion_snapshots.clear();
@@ -11032,13 +11434,30 @@ pub fn do_hub_disconnect(state: &SharedState) -> Result<()> {
 pub fn do_hub_disconnect_one(state: &SharedState, hub_type_str: &str, address: &str) -> Result<()> {
     use crate::canonical::identity::HubKey;
 
+    let transaction_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .external_topology_transaction_lock
+        .clone();
+    let _transaction = transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
+
     info!(target: "cmd", "hub_disconnect_one: type={}, address={}", hub_type_str, address);
 
     let hub_type = crate::hub::HubType::parse(hub_type_str)
         .ok_or_else(|| anyhow::anyhow!("Unknown hub type: {}", hub_type_str))?;
     let key = HubKey::new(hub_type, address);
+    prepare_external_controller_release(
+        state,
+        std::slice::from_ref(&key),
+        crate::hub::ExternalControllerReleaseReason::UserDisconnect,
+    )?;
     let discovered_native_ids = HashSet::new();
     let _ = reconcile_hub_endpoint_visibility(state, &key, &discovered_native_ids)?;
+    stage_hub_credential_deletion(state, Some(std::slice::from_ref(&key)))
+        .with_context(|| format!("preparing to disconnect {key}"))?;
+    finalize_external_controller_release(state, std::slice::from_ref(&key))?;
 
     let old_hub;
     let topology_changed;
@@ -11055,11 +11474,6 @@ pub fn do_hub_disconnect_one(state: &SharedState, hub_type_str: &str, address: &
         s.clear_hub_connected(&key);
         s.clear_hub_startup_retry(&key);
         s.hub_credentials.remove(&key);
-
-        if let Some(ref storage) = s.storage {
-            let all: Vec<_> = s.hub_credentials.values().cloned().collect();
-            let _ = storage.save_all_hub_credentials(&all);
-        }
 
         if topology_changed {
             persist_topology(&s);
@@ -11863,6 +12277,23 @@ pub fn reconcile_runtime_from_state(state: &SharedState) -> Result<()> {
     Ok(())
 }
 
+fn fence_all_active_required_group_authority_uncertainty(state: &SharedState) {
+    let hub_keys = state
+        .lock()
+        .map(|state| {
+            state
+                .hubs
+                .keys()
+                .filter(|key| state.topology.grouped_room_control_is_required(key))
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for hub_key in hub_keys {
+        crate::hub::fence_required_group_authority_uncertainty(state, &hub_key);
+    }
+}
+
 fn run_topology_group_sync_for_integrations(state: &SharedState) {
     let callback = state
         .lock()
@@ -11886,7 +12317,12 @@ fn run_topology_group_sync_for_integrations(state: &SharedState) {
             rebuild_composite_routing(state);
         }
         Err(error) => {
+            // Integration callbacks fence the exact required-group key before
+            // returning an uncertain native reconciliation failure. Fence all
+            // active required-group keys here as a platform/custom-callback
+            // backstop so no alternate wiring can weaken that contract.
             warn!(target: "cmd", "Topology group sync failed: {}", error);
+            fence_all_active_required_group_authority_uncertainty(state);
         }
     }
 }
@@ -11944,6 +12380,12 @@ fn schedule_topology_group_sync_for_integrations(state: &SharedState) {
             state.topology_group_sync_in_progress = false;
         }
         warn!(target: "cmd", "Failed to start topology group sync worker: {}", error);
+        // The caller has already committed the local topology mutation.  If
+        // the acknowledgement worker cannot even start, required native
+        // groups are now uncertain in exactly the same way as a failed sync.
+        // Fence grouped authority until the normal bootstrap/reconcile path
+        // proves the bridge matches the committed Rhythm topology.
+        fence_all_active_required_group_authority_uncertainty(state);
     }
 }
 
@@ -12302,6 +12744,14 @@ pub fn build_canonical_device(state: &SharedState, id: &str) -> Result<String> {
 
 /// Rename a canonical device and refresh runtime/topology views.
 pub fn do_canonical_rename_device(state: &SharedState, device_id: &str, name: &str) -> Result<()> {
+    let transaction_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .external_topology_transaction_lock
+        .clone();
+    let _transaction = transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
     let trimmed = name.trim();
     if trimmed.is_empty() {
         return Err(anyhow::anyhow!("Device name cannot be empty"));
@@ -12474,6 +12924,7 @@ fn build_hub_device_room_assignments(
     device: &crate::canonical::identity::CanonicalDevice,
     room_id: Option<&str>,
 ) -> Vec<crate::hub::HubDeviceRoomAssignment> {
+    let preferred_endpoint = device.preferred_endpoint();
     device
         .active_endpoints()
         .map(|endpoint| {
@@ -12494,6 +12945,10 @@ fn build_hub_device_room_assignments(
                 hub_key: endpoint.hub_key.clone(),
                 native_device_id: endpoint.native_id.clone(),
                 device_type: device.device_type.clone(),
+                preferred_for_control: preferred_endpoint.is_some_and(|preferred| {
+                    preferred.hub_key == endpoint.hub_key
+                        && preferred.native_id == endpoint.native_id
+                }),
                 target_rhythm_room_id: room_id.map(str::to_string),
                 target_hub_room_ids,
             }
@@ -12503,42 +12958,232 @@ fn build_hub_device_room_assignments(
 
 struct PreparedHubDeviceRoomAssignment {
     assignment: crate::hub::HubDeviceRoomAssignment,
-    target_hub_room_id: Option<Option<String>>,
+    target: Option<PreparedHubDeviceRoomTarget>,
     rollback: Option<crate::hub::HubDeviceRoomAssignmentRollback>,
 }
 
+enum PreparedHubDeviceRoomTarget {
+    Existing(Option<String>),
+    Authoritative {
+        target_binding: Option<crate::topology::HubRoomBinding>,
+        managed_by_rhythm: bool,
+    },
+}
+
 fn rollback_prepared_hub_device_room_assignments(
+    state: &SharedState,
     prepared: Vec<PreparedHubDeviceRoomAssignment>,
     primary_error: anyhow::Error,
 ) -> anyhow::Error {
-    let mut rollback_failures = Vec::new();
+    let mut rollback_failure_count = 0usize;
+    let mut uncertain_hub_keys = HashSet::new();
     for prepared in prepared.into_iter().rev() {
         let Some(rollback) = prepared.rollback else {
             continue;
         };
-        if let Err(error) = rollback() {
+        if rollback().is_err() {
             log::error!(
                 target: "hub_room_assignment",
-                "Failed to roll back native room assignment for {} on {}: {:#}",
-                prepared.assignment.native_device_id,
-                prepared.assignment.hub_key,
-                error
+                "A native room-assignment rollback failed; recovery state was retained"
             );
-            rollback_failures.push(format!(
-                "{} on {}: {error:#}",
-                prepared.assignment.native_device_id, prepared.assignment.hub_key
-            ));
+            rollback_failure_count += 1;
+            uncertain_hub_keys.insert(prepared.assignment.hub_key);
         }
     }
 
-    if rollback_failures.is_empty() {
+    for hub_key in uncertain_hub_keys {
+        crate::hub::fence_required_group_authority_uncertainty(state, &hub_key);
+    }
+
+    if rollback_failure_count == 0 {
         primary_error
     } else {
         anyhow::anyhow!(
-            "{primary_error:#}; native rollback also failed: {}",
-            rollback_failures.join("; ")
+            "{primary_error:#}; {} native rollback operation(s) also failed",
+            rollback_failure_count
         )
     }
+}
+
+fn prepare_hub_device_room_assignments<F>(
+    state: &SharedState,
+    assignments: &[crate::hub::HubDeviceRoomAssignment],
+    prepare: Option<&F>,
+) -> Result<Vec<PreparedHubDeviceRoomAssignment>>
+where
+    F: Fn(
+            &SharedState,
+            &crate::hub::HubDeviceRoomAssignment,
+        ) -> Result<crate::hub::HubDeviceRoomAssignmentOutcome>
+        + ?Sized,
+{
+    let mut prepared_assignments = Vec::new();
+    for assignment in assignments {
+        let grouped_control_required = match state.lock() {
+            Ok(state) => state
+                .topology
+                .grouped_room_control_is_required(&assignment.hub_key),
+            Err(_) => {
+                return Err(rollback_prepared_hub_device_room_assignments(
+                    state,
+                    prepared_assignments,
+                    anyhow::anyhow!("lock"),
+                ));
+            }
+        };
+        let Some(prepare) = prepare else {
+            if grouped_control_required && matches!(assignment.device_type, DeviceType::Light) {
+                return Err(rollback_prepared_hub_device_room_assignments(
+                    state,
+                    prepared_assignments,
+                    anyhow::anyhow!(
+                        "Integration requires grouped room control but no authoritative assignment callback is installed"
+                    ),
+                ));
+            }
+            continue;
+        };
+
+        let outcome = match prepare(state, assignment) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                return Err(rollback_prepared_hub_device_room_assignments(
+                    state,
+                    prepared_assignments,
+                    error,
+                ));
+            }
+        };
+        match outcome {
+            crate::hub::HubDeviceRoomAssignmentOutcome::Unchanged => {
+                prepared_assignments.push(PreparedHubDeviceRoomAssignment {
+                    assignment: assignment.clone(),
+                    target: None,
+                    rollback: None,
+                });
+            }
+            crate::hub::HubDeviceRoomAssignmentOutcome::Reassigned {
+                target_hub_room_id,
+                rollback,
+            } => {
+                let valid_target = match assignment.target_rhythm_room_id.as_deref() {
+                    Some(_) => match target_hub_room_id.as_ref() {
+                        Some(target) => assignment.target_hub_room_ids.contains(target),
+                        None => assignment.target_hub_room_ids.is_empty(),
+                    },
+                    None => target_hub_room_id.is_none(),
+                };
+                prepared_assignments.push(PreparedHubDeviceRoomAssignment {
+                    assignment: assignment.clone(),
+                    target: Some(PreparedHubDeviceRoomTarget::Existing(target_hub_room_id)),
+                    rollback: Some(rollback),
+                });
+                if !valid_target {
+                    return Err(rollback_prepared_hub_device_room_assignments(
+                        state,
+                        prepared_assignments,
+                        anyhow::anyhow!(
+                            "Integration returned a native room outside the requested Rhythm target"
+                        ),
+                    ));
+                }
+            }
+            crate::hub::HubDeviceRoomAssignmentOutcome::ReassignedWithBinding {
+                target_binding,
+                managed_by_rhythm,
+                rollback,
+            } => {
+                let valid_target = match (
+                    assignment.target_rhythm_room_id.as_deref(),
+                    target_binding.as_ref(),
+                ) {
+                    (Some(_), Some(binding)) => {
+                        binding.hub_key == assignment.hub_key
+                            && !binding.hub_room_id.is_empty()
+                            && !binding.control_id.is_empty()
+                            && binding
+                                .light_device_ids
+                                .iter()
+                                .any(|device_id| device_id == &assignment.native_device_id)
+                    }
+                    (None, None) => true,
+                    _ => false,
+                };
+                let valid_target = valid_target && managed_by_rhythm;
+                prepared_assignments.push(PreparedHubDeviceRoomAssignment {
+                    assignment: assignment.clone(),
+                    target: Some(PreparedHubDeviceRoomTarget::Authoritative {
+                        target_binding,
+                        managed_by_rhythm,
+                    }),
+                    rollback: Some(rollback),
+                });
+                if !valid_target {
+                    return Err(rollback_prepared_hub_device_room_assignments(
+                        state,
+                        prepared_assignments,
+                        anyhow::anyhow!(
+                            "Integration returned an invalid authoritative native room binding"
+                        ),
+                    ));
+                }
+            }
+        }
+
+        if grouped_control_required
+            && matches!(assignment.device_type, DeviceType::Light)
+            && !matches!(
+                prepared_assignments
+                    .last()
+                    .and_then(|prepared| prepared.target.as_ref()),
+                Some(PreparedHubDeviceRoomTarget::Authoritative { .. })
+            )
+        {
+            return Err(rollback_prepared_hub_device_room_assignments(
+                state,
+                prepared_assignments,
+                anyhow::anyhow!(
+                    "Integration requires grouped room control but did not return an authoritative binding"
+                ),
+            ));
+        }
+    }
+    Ok(prepared_assignments)
+}
+
+fn mirror_prepared_hub_device_room_assignments(
+    topology: &mut crate::topology::RoomTopologyStore,
+    prepared_assignments: &[PreparedHubDeviceRoomAssignment],
+) -> bool {
+    for prepared in prepared_assignments {
+        if !matches!(prepared.assignment.device_type, DeviceType::Light) {
+            continue;
+        }
+        let mirror_succeeded = match &prepared.target {
+            None => true,
+            Some(PreparedHubDeviceRoomTarget::Existing(target_hub_room_id)) => topology
+                .reassign_hub_light_device(
+                    &prepared.assignment.hub_key,
+                    &prepared.assignment.native_device_id,
+                    prepared.assignment.target_rhythm_room_id.as_deref(),
+                    target_hub_room_id.as_deref(),
+                ),
+            Some(PreparedHubDeviceRoomTarget::Authoritative {
+                target_binding,
+                managed_by_rhythm,
+            }) => topology.apply_authoritative_hub_light_binding(
+                &prepared.assignment.hub_key,
+                &prepared.assignment.native_device_id,
+                prepared.assignment.target_rhythm_room_id.as_deref(),
+                target_binding.clone(),
+                *managed_by_rhythm,
+            ),
+        };
+        if !mirror_succeeded {
+            return false;
+        }
+    }
+    true
 }
 
 /// Assign a canonical device to a Rhythm room (or unassign with None).
@@ -12550,6 +13195,14 @@ pub fn do_canonical_assign_room(
     device_id: &str,
     room_id: Option<&str>,
 ) -> Result<()> {
+    let transaction_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .external_topology_transaction_lock
+        .clone();
+    let _transaction = transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
     let (assignments, source_room_id, prepare_hub_device_room_assignment_fn) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let device = s
@@ -12576,59 +13229,17 @@ pub fn do_canonical_assign_room(
         )
     };
 
-    let mut prepared_assignments = Vec::new();
-    if let Some(prepare) = prepare_hub_device_room_assignment_fn {
-        for assignment in &assignments {
-            let outcome = match prepare(state, assignment) {
-                Ok(outcome) => outcome,
-                Err(error) => {
-                    return Err(rollback_prepared_hub_device_room_assignments(
-                        prepared_assignments,
-                        error,
-                    ));
-                }
-            };
-            match outcome {
-                crate::hub::HubDeviceRoomAssignmentOutcome::Unchanged => {
-                    prepared_assignments.push(PreparedHubDeviceRoomAssignment {
-                        assignment: assignment.clone(),
-                        target_hub_room_id: None,
-                        rollback: None,
-                    });
-                }
-                crate::hub::HubDeviceRoomAssignmentOutcome::Reassigned {
-                    target_hub_room_id,
-                    rollback,
-                } => {
-                    let valid_target = match assignment.target_rhythm_room_id.as_deref() {
-                        Some(_) => match target_hub_room_id.as_ref() {
-                            Some(target) => assignment.target_hub_room_ids.contains(target),
-                            None => assignment.target_hub_room_ids.is_empty(),
-                        },
-                        None => target_hub_room_id.is_none(),
-                    };
-                    prepared_assignments.push(PreparedHubDeviceRoomAssignment {
-                        assignment: assignment.clone(),
-                        target_hub_room_id: Some(target_hub_room_id),
-                        rollback: Some(rollback),
-                    });
-                    if !valid_target {
-                        return Err(rollback_prepared_hub_device_room_assignments(
-                            prepared_assignments,
-                            anyhow::anyhow!(
-                                "Integration returned a native room outside the requested Rhythm target"
-                            ),
-                        ));
-                    }
-                }
-            }
-        }
-    }
+    let prepared_assignments = prepare_hub_device_room_assignments(
+        state,
+        &assignments,
+        prepare_hub_device_room_assignment_fn.as_deref(),
+    )?;
 
     let mut s = match state.lock() {
         Ok(state) => state,
         Err(_) => {
             return Err(rollback_prepared_hub_device_room_assignments(
+                state,
                 prepared_assignments,
                 anyhow::anyhow!("lock"),
             ));
@@ -12647,6 +13258,7 @@ pub fn do_canonical_assign_room(
     if !state_is_unchanged {
         drop(s);
         return Err(rollback_prepared_hub_device_room_assignments(
+            state,
             prepared_assignments,
             anyhow::anyhow!(
                 "Device or room topology changed while native room assignment was in progress"
@@ -12694,6 +13306,7 @@ pub fn do_canonical_assign_room(
         if s.topology.get(target_room_id).is_none() {
             drop(s);
             return Err(rollback_prepared_hub_device_room_assignments(
+                state,
                 prepared_assignments,
                 anyhow::anyhow!("Room not found: {}", target_room_id),
             ));
@@ -12702,30 +13315,14 @@ pub fn do_canonical_assign_room(
 
     let topology_before_assignment = s.topology.clone();
     let canonical_before_assignment = s.canonical_registry.clone();
-    let mut topology_mirror_failed = false;
-    for prepared in &prepared_assignments {
-        if !matches!(prepared.assignment.device_type, DeviceType::Light) {
-            continue;
-        }
-        if let Some(target_hub_room_id) = &prepared.target_hub_room_id {
-            if !s.topology.reassign_hub_light_device(
-                &prepared.assignment.hub_key,
-                &prepared.assignment.native_device_id,
-                prepared.assignment.target_rhythm_room_id.as_deref(),
-                target_hub_room_id.as_deref(),
-            ) {
-                topology_mirror_failed = true;
-                break;
-            }
-        }
-    }
-    if topology_mirror_failed {
+    if !mirror_prepared_hub_device_room_assignments(&mut s.topology, &prepared_assignments) {
         s.topology = topology_before_assignment;
         drop(s);
         return Err(rollback_prepared_hub_device_room_assignments(
+            state,
             prepared_assignments,
             anyhow::anyhow!(
-                "Native room reassignment succeeded but the matching target-room binding was not found"
+                "Native room reassignment succeeded but its target-room binding could not be mirrored"
             ),
         ));
     }
@@ -12734,6 +13331,7 @@ pub fn do_canonical_assign_room(
         s.topology = topology_before_assignment;
         drop(s);
         return Err(rollback_prepared_hub_device_room_assignments(
+            state,
             prepared_assignments,
             anyhow::anyhow!("Device not found: {}", device_id),
         ));
@@ -12755,6 +13353,7 @@ pub fn do_canonical_assign_room(
                 s.canonical_registry = canonical_before_assignment;
                 drop(s);
                 return Err(rollback_prepared_hub_device_room_assignments(
+                    state,
                     prepared_assignments,
                     anyhow::anyhow!("Failed to assign device to target room"),
                 ));
@@ -12815,8 +13414,25 @@ pub fn do_canonical_assign_room(
             .effective_control_target(device_id, &NodeControlKind::Motion)
     });
 
-    persist_canonical(&s);
-    persist_topology(&s);
+    if let Err(error) = save_authority_state(&s) {
+        s.topology = topology_before_assignment;
+        s.canonical_registry = canonical_before_assignment;
+        let recovery_error = save_authority_state(&s).err();
+        drop(s);
+        let error = match recovery_error {
+            None => error.context("Failed to durably commit device room assignment"),
+            Some(recovery_error) => anyhow::anyhow!(
+                "Failed to durably commit device room assignment: {:#}; restoring the prior persisted topology also failed: {:#}",
+                error,
+                recovery_error
+            ),
+        };
+        return Err(rollback_prepared_hub_device_room_assignments(
+            state,
+            prepared_assignments,
+            error,
+        ));
+    }
     drop(s);
 
     if let (Some(old), Some(new)) = (old_motion_target, new_motion_target) {
@@ -12855,6 +13471,14 @@ pub fn do_canonical_set_preferred(
     hub_address: &str,
     native_id: &str,
 ) -> Result<()> {
+    let transaction_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .external_topology_transaction_lock
+        .clone();
+    let _transaction = transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
     use crate::canonical::identity::HubKey;
     use crate::hub::HubType;
 
@@ -12881,6 +13505,50 @@ pub fn build_triage_queue(state: &SharedState) -> Result<String> {
     serde_json::to_string(&pending).map_err(|e| anyhow::anyhow!(e))
 }
 
+fn commit_triage_authority_mutation(
+    state: &SharedState,
+    topology_before: crate::topology::RoomTopologyStore,
+    canonical_before: crate::canonical::registry::CanonicalRegistry,
+    operation: &str,
+) -> Result<()> {
+    if let Err(error) = sync_required_topology_groups(state) {
+        {
+            let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            state.topology = topology_before;
+            state.canonical_registry = canonical_before;
+        }
+        return Err(required_topology_group_sync_error(state, operation, error));
+    }
+
+    if let Err(error) = {
+        let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        save_authority_state(&state)
+    } {
+        let recovery_error = {
+            let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            state.topology = topology_before;
+            state.canonical_registry = canonical_before;
+            save_authority_state(&state).err()
+        };
+        let error = match recovery_error {
+            None => error.context(format!("Failed to durably commit triage {operation}")),
+            Some(recovery_error) => anyhow::anyhow!(
+                "Failed to durably commit triage {operation}: {:#}; restoring prior persistence failed: {:#}",
+                error,
+                recovery_error
+            ),
+        };
+        let rollback_operation = format!("{operation} persistence");
+        return Err(required_topology_group_sync_error(
+            state,
+            &rollback_operation,
+            error,
+        ));
+    }
+
+    Ok(())
+}
+
 /// Confirm a triage device merge.
 ///
 /// Merges the discovered device's endpoint into the chosen canonical device
@@ -12888,6 +13556,14 @@ pub fn build_triage_queue(state: &SharedState) -> Result<String> {
 pub fn do_triage_merge(state: &SharedState, entry_id: &str, canonical_id: &str) -> Result<()> {
     use crate::canonical::triage::TriageKind;
 
+    let transaction_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .external_topology_transaction_lock
+        .clone();
+    let _transaction = transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let entry = match s.canonical_registry.triage().get(entry_id) {
         Some(entry) => entry.clone(),
@@ -12913,6 +13589,8 @@ pub fn do_triage_merge(state: &SharedState, entry_id: &str, canonical_id: &str) 
         .find_by_native_id(&hub_key, &native_id)
         .filter(|d| d.id != canonical_id)
         .map(|d| d.id.clone());
+    let topology_before = s.topology.clone();
+    let canonical_before = s.canonical_registry.clone();
 
     if s.canonical_registry
         .complete_merge(entry_id, canonical_id, &hub_key, now)
@@ -12942,9 +13620,8 @@ pub fn do_triage_merge(state: &SharedState, entry_id: &str, canonical_id: &str) 
         } else {
             s.topology.ensure_standalone_device(canonical_id);
         }
-        persist_canonical(&s);
-        persist_topology(&s);
         drop(s);
+        commit_triage_authority_mutation(state, topology_before, canonical_before, "device merge")?;
         reconcile_runtime_from_state(state)?;
         {
             emit_triage_changed(state);
@@ -12963,6 +13640,14 @@ pub fn do_triage_merge(state: &SharedState, entry_id: &str, canonical_id: &str) 
 pub fn do_triage_new_device(state: &SharedState, entry_id: &str) -> Result<String> {
     use crate::canonical::triage::TriageKind;
 
+    let transaction_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .external_topology_transaction_lock
+        .clone();
+    let _transaction = transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let entry = match s.canonical_registry.triage().get(entry_id) {
         Some(entry) => entry.clone(),
@@ -12976,6 +13661,8 @@ pub fn do_triage_new_device(state: &SharedState, entry_id: &str) -> Result<Strin
         TriageKind::DeviceMerge => {
             let hub_key = entry.hub_key.clone();
             let hub_room_id = entry.discovered.room_id.clone();
+            let topology_before = s.topology.clone();
+            let canonical_before = s.canonical_registry.clone();
             match s
                 .canonical_registry
                 .complete_new_device(entry_id, &hub_key, now)
@@ -12999,9 +13686,13 @@ pub fn do_triage_new_device(state: &SharedState, entry_id: &str) -> Result<Strin
                     } else {
                         s.topology.ensure_standalone_device(&canonical_id);
                     }
-                    persist_canonical(&s);
-                    persist_topology(&s);
                     drop(s);
+                    commit_triage_authority_mutation(
+                        state,
+                        topology_before,
+                        canonical_before,
+                        "new device",
+                    )?;
                     reconcile_runtime_from_state(state)?;
                     {
                         emit_triage_changed(state);
@@ -13133,6 +13824,14 @@ pub fn do_triage_bind_room_to(
 ) -> Result<()> {
     use crate::canonical::triage::TriageKind;
 
+    let transaction_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .external_topology_transaction_lock
+        .clone();
+    let _transaction = transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
     let resolved_target_override = target_override.map(|id| resolve_node_id(state, id));
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let now = std::time::SystemTime::now()
@@ -13183,6 +13882,8 @@ pub fn do_triage_bind_room_to(
                 .collect()
         })
         .unwrap_or_default();
+    let topology_before = s.topology.clone();
+    let canonical_before = s.canonical_registry.clone();
 
     // Merge the silo room into the target room
     if !s.topology.merge_rooms(&target_id, &source_id) {
@@ -13213,9 +13914,8 @@ pub fn do_triage_bind_room_to(
         now,
     );
 
-    persist_canonical(&s);
-    persist_topology(&s);
     drop(s);
+    commit_triage_authority_mutation(state, topology_before, canonical_before, "room binding")?;
     reconcile_runtime_from_state(state)?;
 
     // Emit SSE events
@@ -13272,6 +13972,40 @@ pub fn emit_triage_changed(state: &SharedState) {
 // ============================================================================
 // Topology commands
 // ============================================================================
+
+fn sync_required_topology_groups(state: &SharedState) -> Result<()> {
+    let callback = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .sync_required_topology_groups_fn
+        .clone();
+    match callback {
+        Some(callback) => callback(state),
+        None => Ok(()),
+    }
+}
+
+fn required_topology_group_sync_error(
+    state: &SharedState,
+    operation: &str,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    match sync_required_topology_groups(state) {
+        Ok(()) => error.context(format!(
+            "Required native room {} acknowledgement failed",
+            operation
+        )),
+        Err(rollback_error) => {
+            fence_all_active_required_group_authority_uncertainty(state);
+            anyhow::anyhow!(
+                "Required native room {} acknowledgement failed: {:#}; compensating native sync failed: {:#}",
+                operation,
+                error,
+                rollback_error
+            )
+        }
+    }
+}
 
 /// Build JSON for all topology rooms.
 pub fn build_topology_rooms(state: &SharedState) -> Result<String> {
@@ -13371,6 +14105,14 @@ pub fn do_topology_set_control_targets(
     kind: NodeControlKind,
     target_ids: &[&str],
 ) -> Result<()> {
+    let transaction_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .external_topology_transaction_lock
+        .clone();
+    let _transaction = transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
     let resolved_source_id = resolve_node_id(state, source_id);
     let mut resolved_target_ids: Vec<String> = target_ids
         .iter()
@@ -13424,6 +14166,14 @@ pub fn do_topology_set_control_targets(
 
 /// Create a new empty Rhythm room.
 pub fn do_topology_create_room(state: &SharedState, name: &str) -> Result<String> {
+    let transaction_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .external_topology_transaction_lock
+        .clone();
+    let _transaction = transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let id = s.topology.create_room(name);
     persist_topology(&s);
@@ -13432,10 +14182,75 @@ pub fn do_topology_create_room(state: &SharedState, name: &str) -> Result<String
     Ok(format!(r#"{{"id":"{}","name":"{}"}}"#, id, name))
 }
 
+/// Rename a Rhythm room and reconcile integration-managed native groups.
+pub fn do_topology_rename_room(state: &SharedState, room_id: &str, name: &str) -> Result<()> {
+    let transaction_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .external_topology_transaction_lock
+        .clone();
+    let _transaction = transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
+    let topology_before = {
+        let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let topology_before = state.topology.clone();
+        if !state.topology.rename_room(room_id, name) {
+            return Err(anyhow::anyhow!("Room not found: {}", room_id));
+        }
+        topology_before
+    };
+
+    if let Err(error) = sync_required_topology_groups(state) {
+        {
+            let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            state.topology = topology_before;
+        }
+        return Err(required_topology_group_sync_error(state, "rename", error));
+    }
+
+    if let Err(error) = {
+        let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        save_topology(&state)
+    } {
+        let recovery_error = {
+            let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            state.topology = topology_before;
+            save_topology(&state).err()
+        };
+        let error = match recovery_error {
+            None => error.context("Failed to durably commit Rhythm room rename"),
+            Some(recovery_error) => anyhow::anyhow!(
+                "Failed to durably commit Rhythm room rename: {:#}; restoring prior persistence failed: {:#}",
+                error,
+                recovery_error
+            ),
+        };
+        return Err(required_topology_group_sync_error(
+            state,
+            "rename persistence",
+            error,
+        ));
+    }
+    reconcile_runtime_from_state(state)?;
+    crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
+    Ok(())
+}
+
 /// Delete a topology room and unassign any attached devices.
 pub fn do_topology_delete_room(state: &SharedState, room_id: &str) -> Result<()> {
-    let detached_devices = {
+    let transaction_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .external_topology_transaction_lock
+        .clone();
+    let _transaction = transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
+    let (topology_before, canonical_before, detached_devices) = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let topology_before = s.topology.clone();
+        let canonical_before = s.canonical_registry.clone();
         let detached_device_ids = s
             .topology
             .remove_room(room_id)
@@ -13449,28 +14264,62 @@ pub fn do_topology_delete_room(state: &SharedState, room_id: &str) -> Result<()>
             let active_endpoints: Vec<_> = device.active_endpoints().cloned().collect();
 
             s.canonical_registry.assign_room(&device_id, None);
-            detached_devices.push(device.id.clone());
+            detached_devices.push((device, active_endpoints));
+        }
+        (topology_before, canonical_before, detached_devices)
+    };
 
+    if let Err(error) = sync_required_topology_groups(state) {
+        {
+            let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            state.topology = topology_before;
+            state.canonical_registry = canonical_before;
+        }
+        return Err(required_topology_group_sync_error(state, "delete", error));
+    }
+
+    if let Err(error) = {
+        let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        save_authority_state(&state)
+    } {
+        let recovery_error = {
+            let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            state.topology = topology_before;
+            state.canonical_registry = canonical_before;
+            save_authority_state(&state).err()
+        };
+        let error = match recovery_error {
+            None => error.context("Failed to durably commit Rhythm room delete"),
+            Some(recovery_error) => anyhow::anyhow!(
+                "Failed to durably commit Rhythm room delete: {:#}; restoring prior persistence failed: {:#}",
+                error,
+                recovery_error
+            ),
+        };
+        return Err(required_topology_group_sync_error(
+            state,
+            "delete persistence",
+            error,
+        ));
+    }
+
+    {
+        let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        for (device, active_endpoints) in &detached_devices {
             ensure_synthetic_device_registry_rooms(
-                &mut s,
+                &mut state,
                 &device.device_type,
                 &device.name,
-                &active_endpoints,
+                active_endpoints,
             );
         }
-
-        s.room_observed_power.remove(room_id);
-        s.motion_snapshots.remove(room_id);
-        s.room_mode_transitions.remove(room_id);
-        s.pending_motion_clear.retain(|pending| pending != room_id);
-
-        persist_topology(&s);
-        if !detached_devices.is_empty() {
-            persist_canonical(&s);
-        }
-
-        detached_devices
-    };
+        state.room_observed_power.remove(room_id);
+        state.motion_snapshots.remove(room_id);
+        state.room_mode_transitions.remove(room_id);
+        state
+            .pending_motion_clear
+            .retain(|pending| pending != room_id);
+    }
 
     if !detached_devices.is_empty() {
         persist_registry(state);
@@ -13493,6 +14342,14 @@ pub fn do_topology_merge_rooms(
     target_id: &str,
     source_id: &str,
 ) -> Result<()> {
+    let transaction_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .external_topology_transaction_lock
+        .clone();
+    let _transaction = transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     if s.topology.get(target_id).is_none() {
         return Err(anyhow::anyhow!("Target room not found"));
@@ -13507,13 +14364,47 @@ pub fn do_topology_merge_rooms(
                 .collect()
         })
         .unwrap_or_default();
+    let topology_before = s.topology.clone();
+    let canonical_before = s.canonical_registry.clone();
     if s.topology.merge_rooms(target_id, source_id) {
         for device_id in &source_device_ids {
             s.canonical_registry.assign_room(device_id, Some(target_id));
         }
-        persist_canonical(&s);
-        persist_topology(&s);
         drop(s);
+
+        if let Err(error) = sync_required_topology_groups(state) {
+            {
+                let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+                state.topology = topology_before;
+                state.canonical_registry = canonical_before;
+            }
+            return Err(required_topology_group_sync_error(state, "merge", error));
+        }
+
+        if let Err(error) = {
+            let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            save_authority_state(&state)
+        } {
+            let recovery_error = {
+                let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+                state.topology = topology_before;
+                state.canonical_registry = canonical_before;
+                save_authority_state(&state).err()
+            };
+            let error = match recovery_error {
+                None => error.context("Failed to durably commit Rhythm room merge"),
+                Some(recovery_error) => anyhow::anyhow!(
+                    "Failed to durably commit Rhythm room merge: {:#}; restoring prior persistence failed: {:#}",
+                    error,
+                    recovery_error
+                ),
+            };
+            return Err(required_topology_group_sync_error(
+                state,
+                "merge persistence",
+                error,
+            ));
+        }
         reconcile_runtime_from_state(state)?;
 
         {
@@ -13548,31 +14439,47 @@ pub fn do_topology_move_device(
 // Canonical + Topology persistence helpers
 // ============================================================================
 
-/// Persist the canonical registry to storage.
+/// Durably write the legacy canonical-registry and topology files.
+///
+/// The crash-atomic combined authority snapshot is introduced by the rollout
+/// layer; the controller layer deliberately retains the established files.
+pub fn save_authority_state(s: &AppState) -> Result<()> {
+    save_canonical(s)?;
+    save_topology(s)
+}
+
+/// Durably persist the canonical registry.
+pub(crate) fn save_canonical(s: &AppState) -> Result<()> {
+    let Some(storage) = s.storage.as_ref() else {
+        return Ok(());
+    };
+    let value = serde_json::to_value(&s.canonical_registry)
+        .context("Failed to serialize canonical registry")?;
+    storage
+        .save_canonical_registry(&value)
+        .context("Failed to save canonical registry")
+}
+
 pub(crate) fn persist_canonical(s: &AppState) {
-    if let Some(ref storage) = s.storage {
-        match serde_json::to_value(&s.canonical_registry) {
-            Ok(value) => {
-                if let Err(e) = storage.save_canonical_registry(&value) {
-                    warn!(target: "cmd", "Failed to save canonical registry: {}", e);
-                }
-            }
-            Err(e) => warn!(target: "cmd", "Failed to serialize canonical registry: {}", e),
-        }
+    if let Err(error) = save_canonical(s) {
+        warn!(target: "cmd", "Failed to persist canonical registry: {}", error);
     }
 }
 
-/// Persist the topology store to storage.
+/// Durably persist the topology store.
+pub(crate) fn save_topology(s: &AppState) -> Result<()> {
+    let Some(storage) = s.storage.as_ref() else {
+        return Ok(());
+    };
+    let value = serde_json::to_value(&s.topology).context("Failed to serialize topology store")?;
+    storage
+        .save_topology(&value)
+        .context("Failed to save topology store")
+}
+
 pub(crate) fn persist_topology(s: &AppState) {
-    if let Some(ref storage) = s.storage {
-        match serde_json::to_value(&s.topology) {
-            Ok(value) => {
-                if let Err(e) = storage.save_topology(&value) {
-                    warn!(target: "cmd", "Failed to save topology: {}", e);
-                }
-            }
-            Err(e) => warn!(target: "cmd", "Failed to serialize topology: {}", e),
-        }
+    if let Err(error) = save_topology(s) {
+        warn!(target: "cmd", "Failed to persist topology: {}", error);
     }
 }
 
@@ -13908,7 +14815,7 @@ mod tests {
         factory_default_mode_transition_configs, factory_default_power_save,
         factory_default_profile_bundle,
     };
-    use crate::hub::{ActiveHub, HubCredentials, HubProvider, HubType};
+    use crate::hub::{ActiveHub, HubCredentials, HubIntegrationCapability, HubProvider, HubType};
     use crate::state::{AppState, MotionSnapshot, ObservedPowerSource, ObservedPowerState};
     use crate::storage::{Storage, StoredLightProfiles, StoredSettings};
     use crate::topology::InputBindingPreset;
@@ -16304,6 +17211,54 @@ mod tests {
         }
     }
 
+    fn add_device_merge_triage_entry(
+        state: &SharedState,
+        entry_id: &str,
+        hub_key: HubKey,
+        native_id: &str,
+        room_id: &str,
+        room_name: &str,
+        candidate_id: Option<&str>,
+    ) {
+        let candidate_matches = candidate_id
+            .map(|canonical_id| {
+                vec![crate::canonical::triage::CandidateMatch {
+                    canonical_id: canonical_id.to_string(),
+                    name: "Desk Lamp".to_string(),
+                    score: 8,
+                    reasons: vec![
+                        crate::canonical::triage::MatchReason::ExactName,
+                        crate::canonical::triage::MatchReason::SameDeviceType,
+                    ],
+                }]
+            })
+            .unwrap_or_default();
+        state.lock().unwrap().canonical_registry.triage_mut().add(
+            crate::canonical::triage::TriageEntry {
+                id: entry_id.to_string(),
+                kind: crate::canonical::triage::TriageKind::DeviceMerge,
+                discovered: crate::canonical::triage::TriageDiscoveredDevice {
+                    native_id: native_id.to_string(),
+                    name: "Desk Lamp".to_string(),
+                    device_type: DeviceType::Light,
+                    room_id: room_id.to_string(),
+                    room_name: room_name.to_string(),
+                    manufacturer: None,
+                    model: None,
+                },
+                hub_key,
+                candidate_matches,
+                room_binding: None,
+                confidence: 80,
+                status: crate::canonical::triage::TriageStatus::Pending,
+                resolved_by: None,
+                created_at: 1000,
+                resolved_at: None,
+                canonical_id: None,
+            },
+        );
+    }
+
     fn insert_known_canonical_light(
         state: &SharedState,
         hub_key: HubKey,
@@ -18473,6 +19428,9 @@ mod tests {
         topology: Option<Value>,
         commissioning_wifi: Option<crate::provisioning::WifiCredentials>,
         integration_files: Vec<BackupIntegrationFile>,
+        fail_save_hub_credentials: bool,
+        hub_credential_save_calls: usize,
+        lifecycle_events: Vec<String>,
         fail_factory_reset_clear: bool,
     }
 
@@ -18533,7 +19491,13 @@ mod tests {
         }
 
         fn save_all_hub_credentials(&self, creds: &[HubCredentials]) -> Result<()> {
-            self.inner.lock().unwrap().hub_credentials = creds.to_vec();
+            let mut inner = self.inner.lock().unwrap();
+            inner.hub_credential_save_calls += 1;
+            inner.lifecycle_events.push("credentials".into());
+            if inner.fail_save_hub_credentials {
+                anyhow::bail!("injected credential persistence failure");
+            }
+            inner.hub_credentials = creds.to_vec();
             Ok(())
         }
 
@@ -18682,8 +19646,64 @@ mod tests {
 
     static MOCK_BACKUP_HUB_PROVIDER: MockBackupHubProvider = MockBackupHubProvider;
 
+    fn install_persisted_mock_credential(state: &SharedState, storage: &TestStorage) -> HubKey {
+        let key = state.lock().unwrap().hubs.keys().next().unwrap().clone();
+        let credential = HubCredentials::new(
+            key.hub_type.as_str(),
+            &key.address,
+            serde_json::json!({"token": "persisted-secret"}),
+        );
+        storage.inner.lock().unwrap().hub_credentials = vec![credential.clone()];
+        let mut app = state.lock().unwrap();
+        app.storage = Some(Arc::new(storage.clone()));
+        app.hub_credentials.insert(key.clone(), credential);
+        key
+    }
+
     fn install_mock_hub_provider(state: &SharedState) {
         state.lock().unwrap().get_hub_provider_fn = Some(Arc::new(|_| &MOCK_BACKUP_HUB_PROVIDER));
+    }
+
+    #[test]
+    fn in_place_authority_retry_emits_the_recovered_connected_status() {
+        let (state, _runtime) = setup_state(Vec::new());
+        let key = state.lock().unwrap().hubs.keys().next().unwrap().clone();
+        let mut events = install_event_recorder(&state);
+        {
+            let mut app = state.lock().unwrap();
+            app.hub_capabilities
+                .push(HubIntegrationCapability::new(key.hub_type.as_str()));
+            app.hub_credentials.insert(
+                key.clone(),
+                HubCredentials::new(
+                    key.hub_type.as_str(),
+                    &key.address,
+                    serde_json::json!({"token": "persisted-secret"}),
+                ),
+            );
+            app.mark_external_controller_authority_pending(&key);
+            app.reconcile_external_controller_authority_fn = Some(Arc::new(|state, key| {
+                state
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("lock"))?
+                    .mark_external_controller_authority_ready(key);
+                Ok(())
+            }));
+        }
+
+        do_retry_hub_connect(&state, key.hub_type.as_str(), &key.address).unwrap();
+
+        assert!(drain_server_events(&mut events).iter().any(|event| {
+            matches!(
+                event,
+                crate::server_event::ServerEvent::HubStatus {
+                    hub_type: Some(hub_type),
+                    address: Some(address),
+                    connected: true,
+                } if hub_type == key.hub_type.as_str() && address == &key.address
+            )
+        }));
+        assert!(state.lock().unwrap().hub_is_connected(&key));
     }
 
     fn make_focus_profile() -> LightProfileConfig {
@@ -21103,6 +22123,184 @@ mod tests {
             expected.profile.mode_transitions
         );
         assert_eq!(reset_scenes, expected_scenes);
+    }
+
+    #[test]
+    fn full_disconnect_orders_restore_credential_commit_and_finalization() {
+        let (state, _runtime) = setup_state(Vec::new());
+        let storage = TestStorage::default();
+        install_persisted_mock_credential(&state, &storage);
+        {
+            let mut s = state.lock().unwrap();
+            let release_storage = storage.clone();
+            s.release_external_controller_authority_fn = Some(Arc::new(move |_, _, _| {
+                release_storage
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .lifecycle_events
+                    .push("release".into());
+                Ok(())
+            }));
+            let finalize_storage = storage.clone();
+            s.finalize_external_controller_release_fn = Some(Arc::new(move |_, _| {
+                finalize_storage
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .lifecycle_events
+                    .push("finalize".into());
+                Ok(())
+            }));
+        }
+
+        do_hub_disconnect(&state).unwrap();
+
+        assert_eq!(
+            storage.inner.lock().unwrap().lifecycle_events,
+            vec!["release", "credentials", "finalize"]
+        );
+        assert!(state.lock().unwrap().hub_credentials.is_empty());
+        assert!(storage.inner.lock().unwrap().hub_credentials.is_empty());
+    }
+
+    #[test]
+    fn full_disconnect_credential_persistence_failure_keeps_retryable_state() {
+        let (state, _runtime) = setup_state(Vec::new());
+        let storage = TestStorage::default();
+        let key = install_persisted_mock_credential(&state, &storage);
+        storage.inner.lock().unwrap().fail_save_hub_credentials = true;
+        {
+            let mut s = state.lock().unwrap();
+            let release_storage = storage.clone();
+            s.release_external_controller_authority_fn = Some(Arc::new(move |_, _, _| {
+                release_storage
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .lifecycle_events
+                    .push("release".into());
+                Ok(())
+            }));
+            let finalize_storage = storage.clone();
+            s.finalize_external_controller_release_fn = Some(Arc::new(move |_, _| {
+                finalize_storage
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .lifecycle_events
+                    .push("finalize".into());
+                Ok(())
+            }));
+        }
+
+        let error = do_hub_disconnect(&state).unwrap_err();
+
+        assert!(format!("{error:#}").contains("credential persistence failure"));
+        assert_eq!(
+            storage.inner.lock().unwrap().lifecycle_events,
+            vec!["release", "credentials"]
+        );
+        let s = state.lock().unwrap();
+        assert!(s.hub_credentials.contains_key(&key));
+        assert!(s.hubs.contains_key(&key));
+        drop(s);
+        assert_eq!(storage.inner.lock().unwrap().hub_credentials.len(), 1);
+    }
+
+    #[test]
+    fn single_disconnect_credential_persistence_failure_keeps_retryable_state() {
+        let (state, _runtime) = setup_state(Vec::new());
+        let storage = TestStorage::default();
+        let key = install_persisted_mock_credential(&state, &storage);
+        storage.inner.lock().unwrap().fail_save_hub_credentials = true;
+        {
+            let mut s = state.lock().unwrap();
+            let release_storage = storage.clone();
+            s.release_external_controller_authority_fn = Some(Arc::new(move |_, _, _| {
+                release_storage
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .lifecycle_events
+                    .push("release".into());
+                Ok(())
+            }));
+            let finalize_storage = storage.clone();
+            s.finalize_external_controller_release_fn = Some(Arc::new(move |_, _| {
+                finalize_storage
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .lifecycle_events
+                    .push("finalize".into());
+                Ok(())
+            }));
+        }
+
+        let error = do_hub_disconnect_one(&state, key.hub_type.as_str(), &key.address).unwrap_err();
+
+        assert!(format!("{error:#}").contains("credential persistence failure"));
+        assert_eq!(
+            storage.inner.lock().unwrap().lifecycle_events,
+            vec!["release", "credentials"]
+        );
+        let s = state.lock().unwrap();
+        assert!(s.hub_credentials.contains_key(&key));
+        assert!(s.hubs.contains_key(&key));
+        drop(s);
+        assert_eq!(storage.inner.lock().unwrap().hub_credentials.len(), 1);
+    }
+
+    #[test]
+    fn disconnect_finalization_failure_keeps_memory_and_recovery_after_disk_commit() {
+        let (state, _runtime) = setup_state(Vec::new());
+        let storage = TestStorage::default();
+        let key = install_persisted_mock_credential(&state, &storage);
+        let recovery_marker = BackupIntegrationFile {
+            path: "matter/fabric-identity.json".into(),
+            content: r#"{"recovery":"pending-finalization"}"#.into(),
+            secret: true,
+        };
+        storage.inner.lock().unwrap().integration_files = vec![recovery_marker.clone()];
+        {
+            let mut s = state.lock().unwrap();
+            let release_storage = storage.clone();
+            s.release_external_controller_authority_fn = Some(Arc::new(move |_, _, _| {
+                release_storage
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .lifecycle_events
+                    .push("release".into());
+                Ok(())
+            }));
+            let finalize_storage = storage.clone();
+            s.finalize_external_controller_release_fn = Some(Arc::new(move |_, _| {
+                finalize_storage
+                    .inner
+                    .lock()
+                    .unwrap()
+                    .lifecycle_events
+                    .push("finalize".into());
+                anyhow::bail!("injected finalization failure")
+            }));
+        }
+
+        let error = do_hub_disconnect(&state).unwrap_err();
+
+        assert!(format!("{error:#}").contains("finalization failure"));
+        assert_eq!(
+            storage.inner.lock().unwrap().lifecycle_events,
+            vec!["release", "credentials", "finalize"]
+        );
+        let s = state.lock().unwrap();
+        assert!(s.hub_credentials.contains_key(&key));
+        assert!(s.hubs.contains_key(&key));
+        drop(s);
+        let inner = storage.inner.lock().unwrap();
+        assert!(inner.hub_credentials.is_empty());
+        assert_eq!(inner.integration_files, vec![recovery_marker]);
     }
 
     #[test]
@@ -25092,6 +26290,147 @@ mod tests {
     }
 
     #[test]
+    fn required_group_hard_remove_confirms_native_standalone_before_local_delete() {
+        let (state, device_id, source_room_id, _target_room_id, hub_key) = setup_native_room_move();
+        state
+            .lock()
+            .unwrap()
+            .topology
+            .set_grouped_room_control_required(&hub_key, true);
+        let prepared = Arc::new(AtomicBool::new(false));
+        let prepared_for_callback = prepared.clone();
+        let expected_device_id = device_id.clone();
+        state.lock().unwrap().prepare_hub_device_room_assignment_fn =
+            Some(Arc::new(move |state, assignment| {
+                assert_eq!(assignment.target_rhythm_room_id, None);
+                assert!(state
+                    .lock()
+                    .unwrap()
+                    .canonical_registry
+                    .get(&expected_device_id)
+                    .is_some());
+                prepared_for_callback.store(true, Ordering::SeqCst);
+                Ok(
+                    crate::hub::HubDeviceRoomAssignmentOutcome::ReassignedWithBinding {
+                        target_binding: None,
+                        managed_by_rhythm: true,
+                        rollback: Box::new(|| Ok(())),
+                    },
+                )
+            }));
+
+        do_device_hard_remove(&state, &device_id, None).unwrap();
+
+        assert!(prepared.load(Ordering::SeqCst));
+        let state = state.lock().unwrap();
+        assert!(state.canonical_registry.get(&device_id).is_none());
+        assert!(state.topology.get_device_node(&device_id).is_none());
+        assert!(state
+            .topology
+            .get(&source_room_id)
+            .unwrap()
+            .hub_room_bindings[0]
+            .light_device_ids
+            .is_empty());
+    }
+
+    #[test]
+    fn required_group_hard_remove_native_failure_preserves_local_device_and_topology() {
+        let (state, device_id, source_room_id, _target_room_id, hub_key) = setup_native_room_move();
+        {
+            let mut state = state.lock().unwrap();
+            state
+                .topology
+                .set_grouped_room_control_required(&hub_key, true);
+            state.prepare_hub_device_room_assignment_fn = Some(Arc::new(|_, assignment| {
+                assert_eq!(assignment.target_rhythm_room_id, None);
+                Err(anyhow::anyhow!("Native standalone transition failed"))
+            }));
+        }
+
+        let error = do_device_hard_remove(&state, &device_id, None).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("Native standalone transition failed"));
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.canonical_registry.get(&device_id).unwrap().room_id,
+            Some(source_room_id.clone())
+        );
+        assert_eq!(
+            state.topology.device_parent_room_id(&device_id),
+            Some(source_room_id.as_str())
+        );
+        assert_eq!(
+            state
+                .topology
+                .get(&source_room_id)
+                .unwrap()
+                .hub_room_bindings[0]
+                .light_device_ids,
+            vec!["hub-device-1".to_string()]
+        );
+    }
+
+    #[test]
+    fn required_group_endpoint_remove_confirms_native_standalone_before_forgetting_endpoint() {
+        let (state, device_id, source_room_id, _target_room_id, hub_key) = setup_native_room_move();
+        let secondary_hub = HubKey::new(HubType::new("matter"), "local");
+        {
+            let mut state = state.lock().unwrap();
+            state
+                .canonical_registry
+                .get_mut(&device_id)
+                .unwrap()
+                .upsert_endpoint(
+                    secondary_hub.clone(),
+                    "matter-device-1".to_string(),
+                    2,
+                    Some("Nook".to_string()),
+                );
+            state
+                .topology
+                .set_grouped_room_control_required(&hub_key, true);
+        }
+        let prepared = Arc::new(AtomicBool::new(false));
+        let prepared_for_callback = prepared.clone();
+        let expected_hub_key = hub_key.clone();
+        state.lock().unwrap().prepare_hub_device_room_assignment_fn =
+            Some(Arc::new(move |_, assignment| {
+                assert_eq!(assignment.hub_key, expected_hub_key);
+                assert_eq!(assignment.target_rhythm_room_id, None);
+                prepared_for_callback.store(true, Ordering::SeqCst);
+                Ok(
+                    crate::hub::HubDeviceRoomAssignmentOutcome::ReassignedWithBinding {
+                        target_binding: None,
+                        managed_by_rhythm: true,
+                        rollback: Box::new(|| Ok(())),
+                    },
+                )
+            }));
+
+        do_device_endpoint_remove(&state, &device_id, &hub_key).unwrap();
+
+        assert!(prepared.load(Ordering::SeqCst));
+        let state = state.lock().unwrap();
+        let device = state.canonical_registry.get(&device_id).unwrap();
+        assert!(device
+            .active_endpoints()
+            .all(|endpoint| endpoint.hub_key != hub_key));
+        assert!(device
+            .active_endpoints()
+            .any(|endpoint| endpoint.hub_key == secondary_hub));
+        assert!(state
+            .topology
+            .get(&source_room_id)
+            .unwrap()
+            .hub_room_bindings[0]
+            .light_device_ids
+            .is_empty());
+    }
+
+    #[test]
     fn canonical_native_room_move_failure_leaves_local_topology_unchanged() {
         let (state, device_id, source_room_id, target_room_id, _hub_key) = setup_native_room_move();
         state.lock().unwrap().prepare_hub_device_room_assignment_fn = Some(Arc::new(|_, _| {
@@ -25282,6 +26621,170 @@ mod tests {
     }
 
     #[test]
+    fn canonical_native_room_move_persists_new_authoritative_group_binding() {
+        let (state, device_id, source_room_id, target_room_id, hub_key) = setup_native_room_move();
+        state
+            .lock()
+            .unwrap()
+            .topology
+            .get_mut(&target_room_id)
+            .unwrap()
+            .hub_room_bindings
+            .clear();
+        state
+            .lock()
+            .unwrap()
+            .topology
+            .set_grouped_room_control_required(&hub_key, true);
+
+        let hub_key_for_callback = hub_key.clone();
+        state.lock().unwrap().prepare_hub_device_room_assignment_fn =
+            Some(Arc::new(move |_, assignment| {
+                assert!(assignment.target_hub_room_ids.is_empty());
+                Ok(
+                    crate::hub::HubDeviceRoomAssignmentOutcome::ReassignedWithBinding {
+                        target_binding: Some(crate::topology::HubRoomBinding {
+                            hub_key: hub_key_for_callback.clone(),
+                            hub_room_id: "rhythm-created-office".to_string(),
+                            control_id: "grouped-created-office".to_string(),
+                            light_device_ids: vec![
+                                "hub-device-2".to_string(),
+                                assignment.native_device_id.clone(),
+                            ],
+                        }),
+                        managed_by_rhythm: true,
+                        rollback: Box::new(|| Ok(())),
+                    },
+                )
+            }));
+
+        do_canonical_assign_room(&state, &device_id, Some(&target_room_id)).unwrap();
+
+        let state = state.lock().unwrap();
+        let target = state.topology.get(&target_room_id).unwrap();
+        assert_eq!(target.hub_room_bindings.len(), 1);
+        assert_eq!(
+            target.hub_room_bindings[0],
+            crate::topology::HubRoomBinding {
+                hub_key,
+                hub_room_id: "rhythm-created-office".to_string(),
+                control_id: "grouped-created-office".to_string(),
+                light_device_ids: vec!["hub-device-1".to_string(), "hub-device-2".to_string(),],
+            }
+        );
+        assert!(!state
+            .topology
+            .get(&source_room_id)
+            .unwrap()
+            .hub_room_bindings[0]
+            .light_device_ids
+            .contains(&"hub-device-1".to_string()));
+    }
+
+    #[test]
+    fn grouped_control_integration_rejects_attached_light_without_binding_receipt() {
+        let (state, device_id, source_room_id, target_room_id, hub_key) = setup_native_room_move();
+        state
+            .lock()
+            .unwrap()
+            .topology
+            .set_grouped_room_control_required(&hub_key, true);
+
+        let rollback_called = Arc::new(AtomicUsize::new(0));
+        let rollback_called_for_callback = rollback_called.clone();
+        state.lock().unwrap().prepare_hub_device_room_assignment_fn =
+            Some(Arc::new(move |_, assignment| {
+                let target = assignment.target_hub_room_ids.first().cloned();
+                let rollback_called = rollback_called_for_callback.clone();
+                Ok(crate::hub::HubDeviceRoomAssignmentOutcome::Reassigned {
+                    target_hub_room_id: target,
+                    rollback: Box::new(move || {
+                        rollback_called.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    }),
+                })
+            }));
+
+        let error =
+            do_canonical_assign_room(&state, &device_id, Some(&target_room_id)).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("did not return an authoritative binding"));
+        assert_eq!(rollback_called.load(Ordering::SeqCst), 1);
+        let state = state.lock().unwrap();
+        assert_eq!(
+            state.topology.device_parent_room_id(&device_id),
+            Some(source_room_id.as_str())
+        );
+    }
+
+    #[test]
+    fn failed_native_assignment_rollback_fences_required_group_and_requests_recovery() {
+        let (state, device_id, source_room_id, target_room_id, hub_key) = setup_native_room_move();
+        let recovery_requests = Arc::new(AtomicUsize::new(0));
+        {
+            let recovery_requests = recovery_requests.clone();
+            let mut app = state.lock().unwrap();
+            app.hubs.insert(
+                hub_key.clone(),
+                crate::hub::ActiveHub {
+                    hub_type: hub_key.hub_type.clone(),
+                    hub_key: hub_key.clone(),
+                    runtime: None,
+                    hub_data: Box::new(()),
+                    registry: None,
+                    discovery: None,
+                    shutdown: Arc::new(AtomicBool::new(false)),
+                },
+            );
+            app.topology
+                .set_grouped_room_control_required(&hub_key, true);
+            app.set_hub_connected(&hub_key, true);
+            app.request_hub_bootstrap_fn = Some(Arc::new(move |state| {
+                assert!(
+                    state.try_lock().is_ok(),
+                    "recovery callback ran while AppState remained locked"
+                );
+                recovery_requests.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+        state.lock().unwrap().prepare_hub_device_room_assignment_fn =
+            Some(Arc::new(move |_, assignment| {
+                Ok(
+                    crate::hub::HubDeviceRoomAssignmentOutcome::ReassignedWithBinding {
+                        target_binding: Some(crate::topology::HubRoomBinding {
+                            hub_key: assignment.hub_key.clone(),
+                            hub_room_id: "managed-office".to_string(),
+                            control_id: "grouped-managed-office".to_string(),
+                            light_device_ids: vec![assignment.native_device_id.clone()],
+                        }),
+                        // Force core validation to reject the receipt after the
+                        // integration has already changed native membership.
+                        managed_by_rhythm: false,
+                        rollback: Box::new(|| {
+                            anyhow::bail!("simulated native compensation failure")
+                        }),
+                    },
+                )
+            }));
+
+        let error =
+            do_canonical_assign_room(&state, &device_id, Some(&target_room_id)).unwrap_err();
+
+        assert!(error.to_string().contains("rollback operation"));
+        assert_eq!(recovery_requests.load(Ordering::SeqCst), 1);
+        let app = state.lock().unwrap();
+        assert_eq!(
+            app.topology.device_parent_room_id(&device_id),
+            Some(source_room_id.as_str())
+        );
+        assert!(app.external_controller_authority_pending.contains(&hub_key));
+        assert!(!app.external_controller_authority_is_ready(&hub_key));
+        assert!(!app.hub_is_connected(&hub_key));
+    }
+
+    #[test]
     fn flash_canonical_light_dispatches_to_preferred_endpoint() {
         let (state, _runtime) = setup_state(vec![]);
         let hub_key = HubKey::new(HubType::new("matter"), "local");
@@ -25299,6 +26802,144 @@ mod tests {
             controller.calls(),
             vec![("RecordingFlash".to_string(), "matter-100".to_string())]
         );
+    }
+
+    #[test]
+    fn triage_merge_does_not_return_before_required_group_acknowledgement() {
+        let (state, _runtime, primary_hub_key) = setup_state_with_deferred_runtime();
+        let canonical_id =
+            insert_canonical_device(&state, primary_hub_key, "matter-100", "Desk Lamp", "", "");
+        let secondary_hub_key = HubKey::new(HubType::new("hue"), "bridge");
+        add_device_merge_triage_entry(
+            &state,
+            "merge-waits-for-sync",
+            secondary_hub_key.clone(),
+            "hue-100",
+            "",
+            "",
+            Some(&canonical_id),
+        );
+
+        let (sync_started_tx, sync_started_rx) = std::sync::mpsc::channel();
+        let (release_sync_tx, release_sync_rx) = std::sync::mpsc::channel();
+        let release_sync_rx = Arc::new(Mutex::new(release_sync_rx));
+        let canonical_id_for_sync = canonical_id.clone();
+        let secondary_hub_key_for_sync = secondary_hub_key.clone();
+        state.lock().unwrap().sync_required_topology_groups_fn = Some(Arc::new(move |state| {
+            {
+                let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+                assert_eq!(
+                    state
+                        .canonical_registry
+                        .triage()
+                        .get("merge-waits-for-sync")
+                        .unwrap()
+                        .status,
+                    crate::canonical::triage::TriageStatus::Confirmed
+                );
+                assert_eq!(
+                    state
+                        .canonical_registry
+                        .find_by_native_id(&secondary_hub_key_for_sync, "hue-100")
+                        .unwrap()
+                        .id,
+                    canonical_id_for_sync
+                );
+            }
+            sync_started_tx
+                .send(())
+                .map_err(|error| anyhow::anyhow!(error))?;
+            release_sync_rx
+                .lock()
+                .map_err(|_| anyhow::anyhow!("release lock"))?
+                .recv()
+                .map_err(|error| anyhow::anyhow!(error))?;
+            Ok(())
+        }));
+
+        let state_for_command = state.clone();
+        let canonical_id_for_command = canonical_id.clone();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let command = std::thread::spawn(move || {
+            let result = do_triage_merge(
+                &state_for_command,
+                "merge-waits-for-sync",
+                &canonical_id_for_command,
+            );
+            result_tx.send(result).unwrap();
+        });
+
+        sync_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("required native sync should start");
+        assert!(matches!(
+            result_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        release_sync_tx.send(()).unwrap();
+        result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("triage merge should finish after acknowledgement")
+            .unwrap();
+        command.join().unwrap();
+    }
+
+    #[test]
+    fn triage_new_device_required_group_failure_restores_exact_authority_state() {
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+        add_device_merge_triage_entry(
+            &state,
+            "new-device-sync-failure",
+            hub_key,
+            "matter-new-100",
+            "",
+            "",
+            None,
+        );
+        let (canonical_before, topology_before) = {
+            let state = state.lock().unwrap();
+            (
+                serde_json::to_value(&state.canonical_registry).unwrap(),
+                serde_json::to_value(&state.topology).unwrap(),
+            )
+        };
+
+        let sync_attempts = Arc::new(AtomicUsize::new(0));
+        let sync_attempts_for_callback = sync_attempts.clone();
+        let canonical_before_for_callback = canonical_before.clone();
+        let topology_before_for_callback = topology_before.clone();
+        state.lock().unwrap().sync_required_topology_groups_fn = Some(Arc::new(move |state| {
+            let attempt = sync_attempts_for_callback.fetch_add(1, Ordering::SeqCst);
+            let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            let canonical = serde_json::to_value(&state.canonical_registry)?;
+            let topology = serde_json::to_value(&state.topology)?;
+            if attempt == 0 {
+                assert_ne!(canonical, canonical_before_for_callback);
+                assert_ne!(topology, topology_before_for_callback);
+                Err(anyhow::anyhow!("bridge rejected new device topology"))
+            } else {
+                assert_eq!(canonical, canonical_before_for_callback);
+                assert_eq!(topology, topology_before_for_callback);
+                Ok(())
+            }
+        }));
+
+        let error = do_triage_new_device(&state, "new-device-sync-failure").unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("new device acknowledgement failed"));
+        assert_eq!(sync_attempts.load(Ordering::SeqCst), 2);
+        let state = state.lock().unwrap();
+        assert_eq!(
+            serde_json::to_value(&state.canonical_registry).unwrap(),
+            canonical_before
+        );
+        assert_eq!(
+            serde_json::to_value(&state.topology).unwrap(),
+            topology_before
+        );
+        assert!(state.hub_runtime().is_none());
     }
 
     #[test]
@@ -26345,6 +27986,232 @@ mod tests {
     }
 
     #[test]
+    fn topology_rename_waits_for_required_group_ack_and_rolls_back_on_failure() {
+        let (state, runtime, _hub_key) = setup_state_with_deferred_runtime();
+        let created: serde_json::Value =
+            serde_json::from_str(&do_topology_create_room(&state, "Office").unwrap()).unwrap();
+        let room_id = created["id"].as_str().unwrap().to_string();
+
+        let room_id_for_callback = room_id.clone();
+        let sync_attempts = Arc::new(AtomicUsize::new(0));
+        let sync_attempts_for_callback = sync_attempts.clone();
+        state.lock().unwrap().sync_required_topology_groups_fn = Some(Arc::new(move |state| {
+            let attempt = sync_attempts_for_callback.fetch_add(1, Ordering::SeqCst);
+            let name = state
+                .lock()
+                .unwrap()
+                .topology
+                .get(&room_id_for_callback)
+                .unwrap()
+                .name
+                .clone();
+            if attempt == 0 {
+                assert_eq!(name, "Library");
+                Err(anyhow::anyhow!("bridge rename rejected"))
+            } else {
+                assert_eq!(name, "Office");
+                Ok(())
+            }
+        }));
+
+        let error = do_topology_rename_room(&state, &room_id, "Library").unwrap_err();
+        assert!(error.to_string().contains("rename acknowledgement failed"));
+        assert_eq!(
+            state.lock().unwrap().topology.get(&room_id).unwrap().name,
+            "Office"
+        );
+        assert_eq!(
+            runtime.engine_room_snapshot(&room_id).unwrap().name,
+            "Office"
+        );
+        assert_eq!(sync_attempts.load(Ordering::SeqCst), 2);
+
+        state.lock().unwrap().sync_required_topology_groups_fn = Some(Arc::new(|_| Ok(())));
+        do_topology_rename_room(&state, &room_id, "Library").unwrap();
+        assert_eq!(
+            runtime.engine_room_snapshot(&room_id).unwrap().name,
+            "Library"
+        );
+    }
+
+    #[test]
+    fn failed_required_group_compensation_fences_control_and_requests_recovery() {
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+        let created: serde_json::Value =
+            serde_json::from_str(&do_topology_create_room(&state, "Office").unwrap()).unwrap();
+        let room_id = created["id"].as_str().unwrap().to_string();
+        let sync_attempts = Arc::new(AtomicUsize::new(0));
+        let recovery_requests = Arc::new(AtomicUsize::new(0));
+        {
+            let sync_attempts = sync_attempts.clone();
+            let recovery_requests = recovery_requests.clone();
+            let mut app = state.lock().unwrap();
+            app.topology
+                .set_grouped_room_control_required(&hub_key, true);
+            app.set_hub_connected(&hub_key, true);
+            app.sync_required_topology_groups_fn = Some(Arc::new(move |_| {
+                sync_attempts.fetch_add(1, Ordering::SeqCst);
+                anyhow::bail!("simulated required-group write uncertainty")
+            }));
+            app.request_hub_bootstrap_fn = Some(Arc::new(move |state| {
+                assert!(
+                    state.try_lock().is_ok(),
+                    "recovery callback ran while AppState remained locked"
+                );
+                recovery_requests.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+
+        let error = do_topology_rename_room(&state, &room_id, "Library").unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("compensating native sync failed"));
+        assert_eq!(sync_attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(recovery_requests.load(Ordering::SeqCst), 1);
+        let app = state.lock().unwrap();
+        assert_eq!(app.topology.get(&room_id).unwrap().name, "Office");
+        assert!(app.external_controller_authority_pending.contains(&hub_key));
+        assert!(!app.external_controller_authority_is_ready(&hub_key));
+        assert!(!app.hub_is_connected(&hub_key));
+    }
+
+    #[test]
+    fn topology_delete_rolls_back_topology_and_canonical_when_required_group_ack_fails() {
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+        let created: serde_json::Value =
+            serde_json::from_str(&do_topology_create_room(&state, "Office").unwrap()).unwrap();
+        let room_id = created["id"].as_str().unwrap().to_string();
+        let device_id = insert_canonical_device(&state, hub_key, "matter-100", "Desk Lamp", "", "");
+        {
+            let mut state = state.lock().unwrap();
+            state
+                .canonical_registry
+                .assign_room(&device_id, Some(&room_id));
+            assert!(state
+                .topology
+                .attach_device_user_override(&room_id, &device_id));
+        }
+
+        let room_id_for_callback = room_id.clone();
+        let device_id_for_callback = device_id.clone();
+        let sync_attempts = Arc::new(AtomicUsize::new(0));
+        let sync_attempts_for_callback = sync_attempts.clone();
+        state.lock().unwrap().sync_required_topology_groups_fn = Some(Arc::new(move |state| {
+            let state = state.lock().unwrap();
+            let attempt = sync_attempts_for_callback.fetch_add(1, Ordering::SeqCst);
+            if attempt == 0 {
+                assert!(state.topology.get(&room_id_for_callback).is_none());
+                assert_eq!(
+                    state
+                        .canonical_registry
+                        .get(&device_id_for_callback)
+                        .unwrap()
+                        .room_id,
+                    None
+                );
+                Err(anyhow::anyhow!("bridge delete rejected"))
+            } else {
+                assert!(state.topology.get(&room_id_for_callback).is_some());
+                assert_eq!(
+                    state
+                        .canonical_registry
+                        .get(&device_id_for_callback)
+                        .unwrap()
+                        .room_id
+                        .as_deref(),
+                    Some(room_id_for_callback.as_str())
+                );
+                Ok(())
+            }
+        }));
+
+        let error = do_topology_delete_room(&state, &room_id).unwrap_err();
+        assert!(error.to_string().contains("delete acknowledgement failed"));
+        let state = state.lock().unwrap();
+        assert!(state.topology.get(&room_id).is_some());
+        assert_eq!(
+            state.topology.device_parent_room_id(&device_id),
+            Some(room_id.as_str())
+        );
+        assert_eq!(
+            state
+                .canonical_registry
+                .get(&device_id)
+                .unwrap()
+                .room_id
+                .as_deref(),
+            Some(room_id.as_str())
+        );
+        assert_eq!(sync_attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn topology_merge_rolls_back_topology_and_canonical_when_required_group_ack_fails() {
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+        let target: serde_json::Value =
+            serde_json::from_str(&do_topology_create_room(&state, "Office").unwrap()).unwrap();
+        let source: serde_json::Value =
+            serde_json::from_str(&do_topology_create_room(&state, "Den").unwrap()).unwrap();
+        let target_id = target["id"].as_str().unwrap().to_string();
+        let source_id = source["id"].as_str().unwrap().to_string();
+        let device_id = insert_canonical_device(&state, hub_key, "matter-100", "Desk Lamp", "", "");
+        {
+            let mut state = state.lock().unwrap();
+            state
+                .canonical_registry
+                .assign_room(&device_id, Some(&source_id));
+            assert!(state
+                .topology
+                .attach_device_user_override(&source_id, &device_id));
+        }
+
+        let source_for_callback = source_id.clone();
+        let target_for_callback = target_id.clone();
+        let device_for_callback = device_id.clone();
+        let sync_attempts = Arc::new(AtomicUsize::new(0));
+        let sync_attempts_for_callback = sync_attempts.clone();
+        state.lock().unwrap().sync_required_topology_groups_fn = Some(Arc::new(move |state| {
+            let state = state.lock().unwrap();
+            let attempt = sync_attempts_for_callback.fetch_add(1, Ordering::SeqCst);
+            if attempt == 0 {
+                assert!(state.topology.get(&source_for_callback).is_none());
+                assert_eq!(
+                    state.topology.device_parent_room_id(&device_for_callback),
+                    Some(target_for_callback.as_str())
+                );
+                Err(anyhow::anyhow!("bridge merge rejected"))
+            } else {
+                assert!(state.topology.get(&source_for_callback).is_some());
+                assert_eq!(
+                    state.topology.device_parent_room_id(&device_for_callback),
+                    Some(source_for_callback.as_str())
+                );
+                Ok(())
+            }
+        }));
+
+        let error = do_topology_merge_rooms(&state, &target_id, &source_id).unwrap_err();
+        assert!(error.to_string().contains("merge acknowledgement failed"));
+        let state = state.lock().unwrap();
+        assert!(state.topology.get(&source_id).is_some());
+        assert_eq!(
+            state.topology.device_parent_room_id(&device_id),
+            Some(source_id.as_str())
+        );
+        assert_eq!(
+            state
+                .canonical_registry
+                .get(&device_id)
+                .unwrap()
+                .room_id
+                .as_deref(),
+            Some(source_id.as_str())
+        );
+        assert_eq!(sync_attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
     fn topology_delete_room_unassigns_devices_and_cleans_state() {
         let (state, runtime, hub_key) = setup_state_with_deferred_runtime();
 
@@ -26664,6 +28531,37 @@ mod tests {
             "recovered topology group sync should rebuild routing to groupcast target, got {:?}",
             calls[0]
         );
+    }
+
+    #[test]
+    fn async_required_group_sync_failure_fences_control_and_requests_recovery() {
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+        let recovery_requests = Arc::new(AtomicUsize::new(0));
+        {
+            let recovery_requests = recovery_requests.clone();
+            let mut app = state.lock().unwrap();
+            app.topology
+                .set_grouped_room_control_required(&hub_key, true);
+            app.set_hub_connected(&hub_key, true);
+            app.sync_topology_groups_fn = Some(Arc::new(|_| {
+                anyhow::bail!("simulated asynchronous native topology uncertainty")
+            }));
+            app.request_hub_bootstrap_fn = Some(Arc::new(move |state| {
+                assert!(
+                    state.try_lock().is_ok(),
+                    "recovery callback ran while AppState remained locked"
+                );
+                recovery_requests.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+
+        run_topology_group_sync_for_integrations(&state);
+
+        assert_eq!(recovery_requests.load(Ordering::SeqCst), 1);
+        let app = state.lock().unwrap();
+        assert!(app.external_controller_authority_pending.contains(&hub_key));
+        assert!(!app.external_controller_authority_is_ready(&hub_key));
+        assert!(!app.hub_is_connected(&hub_key));
     }
 
     #[test]

@@ -3879,15 +3879,12 @@ pub fn handle_put_topology_rename(state: &SharedState, room_id: &str, body: &Val
         Some(n) => n,
         None => return ApiResponse::bad_request("Missing name"),
     };
-    let mut s = match state.lock() {
-        Ok(s) => s,
-        Err(_) => return ApiResponse::server_error(anyhow::anyhow!("lock")),
-    };
-    if s.topology.rename_room(room_id, name) {
-        commands::persist_topology(&s);
-        ApiResponse::no_content()
-    } else {
-        ApiResponse::bad_request("Room not found")
+    match commands::do_topology_rename_room(state, room_id, name) {
+        Ok(()) => ApiResponse::no_content(),
+        Err(error) if error.to_string().contains("Room not found") => {
+            ApiResponse::bad_request("Room not found")
+        }
+        Err(error) => ApiResponse::server_error(error),
     }
 }
 
@@ -6164,6 +6161,17 @@ mod tests {
     #[test]
     fn hub_credentials_response_reports_configured_hub_connection_status() {
         struct TestHubProvider;
+        struct EmptyDiscovery;
+
+        impl crate::discovery::HubDiscovery for EmptyDiscovery {
+            fn discover_rooms(&self) -> anyhow::Result<Vec<crate::discovery::DiscoveredRoom>> {
+                Ok(Vec::new())
+            }
+
+            fn discover_devices(&self) -> anyhow::Result<Vec<crate::discovery::DiscoveredDevice>> {
+                Ok(Vec::new())
+            }
+        }
 
         impl crate::hub::HubProvider for TestHubProvider {
             fn hub_type(&self) -> HubType {
@@ -6191,7 +6199,7 @@ mod tests {
                         runtime: None,
                         hub_data: Box::new(()),
                         registry: None,
-                        discovery: None,
+                        discovery: Some(Arc::new(EmptyDiscovery)),
                         shutdown: Arc::new(AtomicBool::new(false)),
                     },
                 );
