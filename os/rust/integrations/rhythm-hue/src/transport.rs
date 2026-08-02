@@ -120,6 +120,16 @@ pub trait HueTransport: Send + Sync {
         resource_type: &str,
     ) -> anyhow::Result<serde_json::Value>;
 
+    /// Fetch the complete Hue V2 resource inventory in one bridge snapshot.
+    ///
+    /// Authority acquisition uses this endpoint as its durable pre-mutation
+    /// record. The default keeps older test and platform transports source
+    /// compatible; production transports should target `/clip/v2/resource`
+    /// directly so unknown and newly-added Hue resource types are retained.
+    fn get_all_resources(&self, username: &str) -> anyhow::Result<serde_json::Value> {
+        self.get_resources(username, "")
+    }
+
     /// Create one Hue V2 resource and return the bridge-confirmed identity.
     ///
     /// This control-plane primitive exists for ownership capture/clear/restore;
