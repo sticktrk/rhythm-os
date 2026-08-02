@@ -11,14 +11,9 @@ use rhythm_os::hub::HubEvent;
 use crate::cloud_profiles::CloudMatterProfileCatalog;
 use crate::controller::MatterDeviceRegistry;
 use crate::transport::MatterTransport;
-use crate::transport::{
-    CommissionedDevice, MatterDeviceInfo, DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS,
-};
+use crate::transport::{CommissionedDevice, MatterDeviceInfo};
 
 const DECOMMISSION_SUPPRESSION_WINDOW: Duration = Duration::from_secs(120);
-const OBSERVED_ON_OFF_FRESHNESS: Duration =
-    Duration::from_secs(DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS as u64 * 2);
-
 /// Matter-specific state stored in `ActiveHub::hub_data`.
 pub struct MatterHubData {
     /// Shared transport for all controller, commissioning, and probe paths.
@@ -143,13 +138,20 @@ impl MatterHubData {
         self.record_node_proof_of_life(node_id);
     }
 
-    /// Return a fresh authoritative On/Off observation for periodic work.
+    /// Return the authoritative On/Off value from the current controller
+    /// stream for periodic work.
+    ///
+    /// Matter may send an empty ReportData at the negotiated maximum interval
+    /// when the subscribed value has not changed. The CHIP stack uses that
+    /// report to refresh subscription liveness, but it does not invoke the
+    /// attribute callback. Consequently, elapsed wall time cannot make the
+    /// last reported value stale. Lifecycle code clears these observations
+    /// when controller stream continuity is lost.
     pub fn observed_on_off(&self, node_id: u64, endpoint: u16) -> Option<bool> {
         self.on_off_observations
             .lock()
             .ok()
             .and_then(|observations| observations.get(&(node_id, endpoint)).copied())
-            .filter(|(_, observed_at)| observed_at.elapsed() <= OBSERVED_ON_OFF_FRESHNESS)
             .map(|(lights_on, _)| lights_on)
     }
 
