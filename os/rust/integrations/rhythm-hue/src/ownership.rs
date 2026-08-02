@@ -30,7 +30,10 @@ const REQUIRED_V2_BASELINE_RESOURCES: &[&str] = &[
     "smart_scene",
 ];
 const REQUIRED_V1_BASELINE_RESOURCES: &[&str] = &["rules", "schedules"];
-const CLEAR_DELETE_ORDER: &[&str] = &["smart_scene", "scene", "zone", "room"];
+// Smart scenes remain Hue-owned. Rhythm neither clears nor restores them, so
+// their presence must not block authority acquisition for ordinary rooms and
+// scenes.
+const CLEAR_DELETE_ORDER: &[&str] = &["scene", "zone", "room"];
 const RESTORE_CREATE_ORDER: &[&str] = &["room", "zone", "scene"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -974,13 +977,6 @@ fn resource_semantically_matches(
 }
 
 fn ensure_baseline_restorable_for_takeover(baseline: &HueBridgeOwnershipBaseline) -> Result<()> {
-    let smart_scenes = baseline_items(baseline, "smart_scene")?;
-    if !smart_scenes.is_empty() {
-        anyhow::bail!(
-            "Hue takeover is blocked because smart_scene restore is not supported; no bridge state was changed"
-        );
-    }
-
     let mut restorable_groups = BTreeSet::new();
     for resource_type in ["room", "zone"] {
         for resource in baseline_items(baseline, resource_type)? {
@@ -1016,7 +1012,7 @@ fn ensure_baseline_restorable_for_takeover(baseline: &HueBridgeOwnershipBaseline
                         .get("rtype")
                         .and_then(Value::as_str)
                         .is_some_and(|resource_type| {
-                            matches!(resource_type, "room" | "zone" | "scene" | "smart_scene")
+                            matches!(resource_type, "room" | "zone" | "scene")
                         })
                         && object.get("rid").and_then(Value::as_str).is_some();
                 direct_reference || object.values().any(contains_recreated_v2_reference)
@@ -1256,36 +1252,6 @@ fn restore_automation_statuses<H: HueTransport + ?Sized>(
     Ok(())
 }
 
-fn mark_unsupported_smart_scenes(
-    storage: &dyn Storage,
-    _key: &HubKey,
-    state: &mut HueControllerOwnership,
-) -> Result<bool> {
-    let mut unsupported = false;
-    for item in baseline_items(&state.baseline, "smart_scene")?.to_vec() {
-        let original_id = item
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or("<missing-id>")
-            .to_string();
-        let operation = ControlPlaneOperation {
-            operation_id: format!("restore:v2:smart_scene:{original_id}"),
-            api: "v2",
-            action: "create",
-            resource_type: "smart_scene",
-            resource_id: original_id,
-            body: None,
-        };
-        state.set_receipt(&operation, HueOwnershipReceiptStatus::Unsupported, None);
-        unsupported = true;
-    }
-    if unsupported {
-        state.phase = HueOwnershipPhase::RestoreIncomplete;
-        persist_controller_ownership(storage, state)?;
-    }
-    Ok(unsupported)
-}
-
 fn clear_all_restorable_resources<H: HueTransport + ?Sized>(
     storage: &dyn Storage,
     key: &HubKey,
@@ -1436,8 +1402,7 @@ pub fn release_authoritative_control<H: HueTransport + ?Sized>(
     state.ensure_bridge_id(&connected_id)?;
     if state.phase == HueOwnershipPhase::Captured {
         // Capture is the pre-mutation durability barrier. A manifest that never
-        // advanced past it has nothing to undo (including a preflight-blocked
-        // smart-scene baseline).
+        // advanced past it has nothing to undo.
         state.phase = HueOwnershipPhase::Restored;
         persist_controller_ownership(storage, &state)?;
         return Ok(Some(state));
@@ -1472,11 +1437,6 @@ pub fn release_authoritative_control<H: HueTransport + ?Sized>(
         state.phase = HueOwnershipPhase::RestoreIncomplete;
         persist_controller_ownership(storage, &state)?;
         return Err(error.context("Failed to restore Hue automation statuses"));
-    }
-    if mark_unsupported_smart_scenes(storage, key, &mut state)? {
-        anyhow::bail!(
-            "Hue smart_scene recreation is not supported; the ownership manifest was retained for recovery"
-        );
     }
     if let Err(error) = verify_restored(&state, transport, username) {
         state.phase = HueOwnershipPhase::RestoreIncomplete;
@@ -1931,38 +1891,40 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_smart_scene_blocks_takeover_before_any_bridge_mutation() {
+    fn smart_scenes_are_ignored_during_takeover_and_restore() {
         let temp = TempStorage::new("smart-scene");
         let spy = SpyHueTransport::new();
-        seed_bridge(
-            &spy,
-            json!([{"id": "smart-1", "metadata": {"name": "Wake"}}]),
+        let smart_scenes = json!([{
+            "id": "smart-1",
+            "metadata": {"name": "Wake"},
+            "group": {"rid": "old-room", "rtype": "room"}
+        }]);
+        seed_bridge(&spy, smart_scenes.clone());
+        spy.set_resource_response(
+            "behavior_instance",
+            json!({"data": [{
+                "id": "behavior-1",
+                "enabled": true,
+                "configuration": {"rid": "smart-1", "rtype": "smart_scene"}
+            }], "errors": []}),
         );
-        let error = acquire_authoritative_control(&temp.storage, &key(), &spy, "user")
-            .expect_err("smart scene must block takeover before clear");
-        assert!(error.to_string().contains("smart_scene"));
-        let state = load_controller_ownership(&temp.storage, "bridge-1")
-            .unwrap()
-            .unwrap();
-        assert_eq!(state.phase, HueOwnershipPhase::Captured);
-        assert!(state.receipts().next().is_none());
-        assert!(!spy.calls().iter().any(|call| matches!(
-            call,
-            HueTransportCall::UpdateResource { .. }
-                | HueTransportCall::DeleteResource { .. }
-                | HueTransportCall::PutV1 { .. }
-        )));
-        spy.reset();
+        let active = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
+        assert_eq!(active.phase, HueOwnershipPhase::Active);
         let released = release_authoritative_control(&temp.storage, &key(), &spy, "user")
             .unwrap()
             .unwrap();
         assert_eq!(released.phase, HueOwnershipPhase::Restored);
         assert!(!spy.calls().iter().any(|call| matches!(
             call,
-            HueTransportCall::UpdateResource { .. }
-                | HueTransportCall::DeleteResource { .. }
-                | HueTransportCall::PutV1 { .. }
+            HueTransportCall::CreateResource { resource_type, .. }
+                | HueTransportCall::UpdateResource { resource_type, .. }
+                | HueTransportCall::DeleteResource { resource_type, .. }
+                if resource_type == "smart_scene"
         )));
+        assert_eq!(
+            spy.get_resources("user", "smart_scene").unwrap()["data"],
+            smart_scenes
+        );
         finalize_released_control(&temp.storage, "bridge-1").unwrap();
     }
 
