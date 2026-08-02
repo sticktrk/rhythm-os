@@ -22,6 +22,10 @@ required-features = ["test-support"]
 name = "scenario_authority_capture"
 required-features = ["test-support"]
 
+[[test]]
+name = "scenario_native_scenes"
+required-features = ["test-support"]
+
 [dependencies]
 rhythm-core = { path = "../../core/rhythm-core" }
 rhythm-devices = { path = "../../core/rhythm-devices" }

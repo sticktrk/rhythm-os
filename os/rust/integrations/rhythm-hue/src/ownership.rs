@@ -760,11 +760,23 @@ fn next_clear_operation<H: HueTransport + ?Sized>(
         let payload = transport.get_resources(username, resource_type)?;
         let mut ids = data_array(resource_type, &payload)?
             .iter()
-            .filter_map(|resource| resource.get("id").and_then(Value::as_str))
-            .filter(|resource_id| {
-                !((*resource_type == "room" && managed_room_ids.contains(*resource_id))
-                    || (*resource_type == "scene" && managed_scene_ids.contains(*resource_id)))
+            .filter(|resource| {
+                let Some(resource_id) = resource.get("id").and_then(Value::as_str) else {
+                    return false;
+                };
+                let is_managed_room =
+                    *resource_type == "room" && managed_room_ids.contains(resource_id);
+                let is_managed_scene =
+                    *resource_type == "scene" && managed_scene_ids.contains(resource_id);
+                let is_native_managed_room_scene = *resource_type == "scene"
+                    && resource.pointer("/group/rtype").and_then(Value::as_str) == Some("room")
+                    && resource
+                        .pointer("/group/rid")
+                        .and_then(Value::as_str)
+                        .is_some_and(|room_id| managed_room_ids.contains(room_id));
+                !(is_managed_room || is_managed_scene || is_native_managed_room_scene)
             })
+            .filter_map(|resource| resource.get("id").and_then(Value::as_str))
             .map(str::to_string)
             .collect::<Vec<_>>();
         ids.sort();
@@ -1411,6 +1423,98 @@ mod tests {
             retained.baseline.v2_resource("smart_scene").unwrap()["data"][0]["id"],
             "smart-1"
         );
+    }
+
+    #[test]
+    fn authoritative_reconcile_preserves_regular_scenes_in_managed_rooms_only() {
+        let temp = TempStorage::new("native-managed-scenes");
+        let spy = SpyHueTransport::new();
+        seed_bridge(&spy, json!([]));
+        let mut active =
+            acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
+        active
+            .record_managed_room(HueManagedRoom {
+                rhythm_room_id: "rhythm-room".to_string(),
+                hue_room_id: "managed-room".to_string(),
+                grouped_light_id: "managed-group".to_string(),
+            })
+            .unwrap();
+        active
+            .record_managed_scene(HueManagedScene {
+                rhythm_room_id: "rhythm-room".to_string(),
+                rhythm_scene_id: "rhythm-scene".to_string(),
+                hue_room_id: "managed-room".to_string(),
+                hue_scene_id: "managed-projection".to_string(),
+                fingerprint: "fingerprint".to_string(),
+                ephemeral: false,
+            })
+            .unwrap();
+        persist_controller_ownership(&temp.storage, &active).unwrap();
+        spy.set_resource_response(
+            "room",
+            json!({"data": [{"id": "managed-room"}], "errors": []}),
+        );
+        spy.set_resource_response(
+            "scene",
+            json!({"data": [
+                {
+                    "id": "native-managed",
+                    "group": {"rtype": "room", "rid": "managed-room"}
+                },
+                {
+                    "id": "managed-projection",
+                    "group": {"rtype": "room", "rid": "managed-room"}
+                },
+                {
+                    "id": "native-outside",
+                    "group": {"rtype": "room", "rid": "outside-room"}
+                }
+            ], "errors": []}),
+        );
+        spy.set_resource_response(
+            "smart_scene",
+            json!({"data": [{
+                "id": "smart-managed",
+                "group": {"rtype": "room", "rid": "managed-room"}
+            }], "errors": []}),
+        );
+        spy.reset();
+
+        reconcile_authoritative_control(&temp.storage, &key(), &spy, "user", active).unwrap();
+
+        let scene_resources = spy.get_resources("user", "scene").unwrap();
+        let scene_ids = scene_resources["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|scene| scene.get("id").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            scene_ids,
+            BTreeSet::from([
+                "managed-projection".to_string(),
+                "native-managed".to_string(),
+            ])
+        );
+        assert!(spy.get_resources("user", "smart_scene").unwrap()["data"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(spy.calls().iter().any(|call| matches!(
+            call,
+            HueTransportCall::DeleteResource {
+                resource_type,
+                resource_id,
+            } if resource_type == "scene" && resource_id == "native-outside"
+        )));
+        assert!(!spy.calls().iter().any(|call| matches!(
+            call,
+            HueTransportCall::DeleteResource {
+                resource_type,
+                resource_id,
+            } if resource_type == "scene" && resource_id == "native-managed"
+        )));
     }
 
     #[test]

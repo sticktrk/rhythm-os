@@ -393,6 +393,37 @@ fn execute_managed_room_operation<H: HueTransport + ?Sized>(
     username: &str,
     operation: HueManagedRoomOperation,
 ) -> Result<()> {
+    if let HueManagedRoomOperation::Delete { hue_room_id, .. } = &operation {
+        let scenes = transport.get_resources(username, "scene")?;
+        let scenes = scenes
+            .get("data")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| anyhow::anyhow!("Hue scene response has no data array"))?;
+        let managed_scene_ids = state
+            .managed_scenes()
+            .values()
+            .map(|scene| scene.hue_scene_id.as_str())
+            .collect::<BTreeSet<_>>();
+        let has_native_scene = scenes.iter().any(|scene| {
+            scene
+                .pointer("/group/rtype")
+                .and_then(serde_json::Value::as_str)
+                == Some("room")
+                && scene
+                    .pointer("/group/rid")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(hue_room_id.as_str())
+                && !scene
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|scene_id| managed_scene_ids.contains(scene_id))
+        });
+        if has_native_scene {
+            anyhow::bail!(
+                "Hue-authored scenes must be removed or moved before Rhythm can delete their managed room"
+            );
+        }
+    }
     let scene_room_id = match &operation {
         HueManagedRoomOperation::ReconcileMembership { hue_room_id, .. } => state
             .managed_rooms()
@@ -636,6 +667,60 @@ mod tests {
         assert!(remove_index < create_index);
         assert_eq!(state.managed_rooms().len(), 1);
         assert!(state.managed_rooms().contains_key("rhythm-b"));
+    }
+
+    #[test]
+    fn refuses_to_delete_managed_room_with_hue_authored_scene() {
+        let temp = TempStorage::new("native-scene-delete-fence");
+        let spy = SpyHueTransport::new();
+        let mut state = active_state(&spy, &temp.storage);
+        let controlled = BTreeSet::from(["bulb".to_string()]);
+        reconcile_managed_rooms(
+            &temp.storage,
+            &key(),
+            &mut state,
+            &spy,
+            "user",
+            &[DesiredHueRoom::new(
+                "rhythm-room",
+                "Nook",
+                vec!["bulb".to_string()],
+            )],
+            &controlled,
+        )
+        .unwrap();
+        let managed_room_id = state.managed_rooms()["rhythm-room"].hue_room_id.clone();
+        spy.set_resource_response(
+            "scene",
+            json!({"data": [{
+                "id": "hue-native-scene",
+                "group": {"rtype": "room", "rid": managed_room_id}
+            }], "errors": []}),
+        );
+        spy.reset();
+
+        let error = reconcile_managed_rooms(
+            &temp.storage,
+            &key(),
+            &mut state,
+            &spy,
+            "user",
+            &[],
+            &controlled,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("Hue-authored scenes"));
+        assert!(state.managed_rooms().contains_key("rhythm-room"));
+        assert!(!spy
+            .calls()
+            .iter()
+            .any(|call| matches!(call, HueTransportCall::DeleteRoom { .. })));
+        assert!(!spy.calls().iter().any(|call| matches!(
+            call,
+            HueTransportCall::DeleteResource { resource_type, .. }
+                if resource_type == "scene"
+        )));
     }
 
     #[test]
