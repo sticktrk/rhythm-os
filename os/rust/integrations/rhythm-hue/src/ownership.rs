@@ -15,6 +15,7 @@ use rhythm_os::canonical::identity::HubKey;
 use rhythm_os::storage::Storage;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use tracing::warn;
 
 use crate::transport::HueTransport;
 
@@ -714,12 +715,16 @@ fn next_clear_operation<H: HueTransport + ?Sized>(
     username: &str,
     managed_room_ids: &BTreeSet<String>,
     managed_scene_ids: &BTreeSet<String>,
+    skipped_operation_ids: &BTreeSet<String>,
 ) -> Result<Option<ControlPlaneOperation>> {
     let behavior_payload = transport.get_resources(username, "behavior_instance")?;
     let mut behavior_ids = data_array("behavior_instance", &behavior_payload)?
         .iter()
         .filter(|resource| resource.get("enabled").and_then(Value::as_bool) == Some(true))
         .filter_map(|resource| resource.get("id").and_then(Value::as_str))
+        .filter(|resource_id| {
+            !skipped_operation_ids.contains(&format!("clear:v2:behavior_instance:{resource_id}"))
+        })
         .map(str::to_string)
         .collect::<Vec<_>>();
     behavior_ids.sort();
@@ -741,6 +746,9 @@ fn next_clear_operation<H: HueTransport + ?Sized>(
             .filter(|(_, resource)| {
                 resource.get("status").and_then(Value::as_str) != Some("disabled")
             })
+            .filter(|(resource_id, _)| {
+                !skipped_operation_ids.contains(&format!("clear:v1:{resource_type}:{resource_id}"))
+            })
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
         ids.sort();
@@ -761,6 +769,9 @@ fn next_clear_operation<H: HueTransport + ?Sized>(
         let mut ids = data_array(resource_type, &payload)?
             .iter()
             .filter_map(|resource| resource.get("id").and_then(Value::as_str))
+            .filter(|resource_id| {
+                !skipped_operation_ids.contains(&format!("clear:v2:{resource_type}:{resource_id}"))
+            })
             .filter(|resource_id| {
                 !((*resource_type == "room" && managed_room_ids.contains(*resource_id))
                     || (*resource_type == "scene" && managed_scene_ids.contains(*resource_id)))
@@ -860,8 +871,7 @@ fn run_journaled_operation<H: HueTransport + ?Sized>(
     transport: &H,
     username: &str,
     operation: &ControlPlaneOperation,
-    failure_phase: HueOwnershipPhase,
-) -> Result<Option<String>> {
+) -> Result<bool> {
     state.set_receipt(operation, HueOwnershipReceiptStatus::Pending, None);
     persist_controller_ownership(storage, state)?;
     match execute_operation(transport, username, operation) {
@@ -872,18 +882,24 @@ fn run_journaled_operation<H: HueTransport + ?Sized>(
                 replacement_id.clone(),
             );
             persist_controller_ownership(storage, state)?;
-            Ok(replacement_id)
+            Ok(true)
         }
         Err(error) => {
-            state.phase = failure_phase;
-            state.set_receipt(operation, HueOwnershipReceiptStatus::Failed, None);
+            state.set_receipt(operation, HueOwnershipReceiptStatus::Unsupported, None);
             if let Err(persist_error) = persist_controller_ownership(storage, state) {
                 let _ = persist_error;
-                return Err(error).context(
-                    "Hue operation failed and its recovery receipt could not be persisted",
-                );
+                return Err(error)
+                    .context("Hue operation was skipped but its receipt could not be persisted");
             }
-            Err(error)
+            warn!(
+                target: "hue_authority",
+                api = operation.api,
+                action = operation.action,
+                resource_type = operation.resource_type,
+                error = %error,
+                "Skipping unsupported Hue control-plane mutation and continuing authority reconciliation"
+            );
+            Ok(false)
         }
     }
 }
@@ -907,9 +923,23 @@ pub fn reconcile_authoritative_control<H: HueTransport + ?Sized>(
         anyhow::bail!("Hue bridge release has started; takeover cannot be resumed");
     }
     state.ensure_bridge_id(&connected_hue_bridge_id(transport, username)?)?;
+    // Older builds stopped authority reconciliation after a single remote
+    // mutation failure. Treat those durable failure receipts as already
+    // skipped so an upgrade can resume the rest of the control-plane pass.
+    for receipt in state.receipts.values_mut() {
+        if receipt.status == HueOwnershipReceiptStatus::Failed {
+            receipt.status = HueOwnershipReceiptStatus::Unsupported;
+        }
+    }
     state.phase = HueOwnershipPhase::Clearing;
     persist_controller_ownership(storage, &state)?;
 
+    let mut skipped_operation_ids = state
+        .receipts
+        .values()
+        .filter(|receipt| receipt.status == HueOwnershipReceiptStatus::Unsupported)
+        .map(|receipt| receipt.operation_id.clone())
+        .collect::<BTreeSet<_>>();
     let mut previous_operation_id: Option<String> = None;
     loop {
         let managed_room_ids = state.managed_room_ids();
@@ -923,6 +953,7 @@ pub fn reconcile_authoritative_control<H: HueTransport + ?Sized>(
             username,
             &managed_room_ids,
             &managed_scene_ids,
+            &skipped_operation_ids,
         ) {
             Ok(operation) => operation,
             Err(error) => {
@@ -935,20 +966,24 @@ pub fn reconcile_authoritative_control<H: HueTransport + ?Sized>(
             break;
         };
         if previous_operation_id.as_deref() == Some(operation.operation_id.as_str()) {
-            state.phase = HueOwnershipPhase::ClearIncomplete;
+            state.set_receipt(&operation, HueOwnershipReceiptStatus::Unsupported, None);
             persist_controller_ownership(storage, &state)?;
-            anyhow::bail!("A Hue control-plane mutation failed read-back verification");
+            warn!(
+                target: "hue_authority",
+                api = operation.api,
+                action = operation.action,
+                resource_type = operation.resource_type,
+                "Skipping Hue control-plane mutation whose acknowledged effect was not observed"
+            );
+            skipped_operation_ids.insert(operation.operation_id.clone());
+            previous_operation_id = None;
+            continue;
         }
         previous_operation_id = Some(operation.operation_id.clone());
-        run_journaled_operation(
-            storage,
-            key,
-            &mut state,
-            transport,
-            username,
-            &operation,
-            HueOwnershipPhase::ClearIncomplete,
-        )?;
+        if !run_journaled_operation(storage, key, &mut state, transport, username, &operation)? {
+            skipped_operation_ids.insert(operation.operation_id.clone());
+            previous_operation_id = None;
+        }
     }
 
     state.phase = HueOwnershipPhase::Active;
@@ -1252,20 +1287,23 @@ mod tests {
     }
 
     #[test]
-    fn takeover_fails_boundedly_when_a_confirmed_clear_is_not_observed() {
+    fn takeover_skips_a_confirmed_clear_that_is_not_observed() {
         let temp = TempStorage::new("clear-readback");
         let spy = SpyHueTransport::new();
         seed_bridge(&spy, json!([]));
         spy.set_ignore_resource_mutations(true);
 
-        let error = acquire_authoritative_control(&temp.storage, &key(), &spy, "user")
-            .expect_err("an unobserved write must not loop or become active");
+        let state = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
 
-        assert!(error.to_string().contains("read-back verification"));
+        assert_eq!(state.phase, HueOwnershipPhase::Active);
         let persisted = load_controller_ownership(&temp.storage, "bridge-1")
             .unwrap()
             .unwrap();
-        assert_eq!(persisted.phase, HueOwnershipPhase::ClearIncomplete);
+        assert_eq!(persisted.phase, HueOwnershipPhase::Active);
+        assert!(persisted.receipts().any(|receipt| {
+            receipt.resource_type == "behavior_instance"
+                && receipt.status == HueOwnershipReceiptStatus::Unsupported
+        }));
         assert_eq!(
             spy.calls()
                 .iter()
@@ -1279,6 +1317,81 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn takeover_skips_one_rejected_mutation_and_continues_clearing() {
+        let temp = TempStorage::new("skip-rejected-mutation");
+        let spy = SpyHueTransport::new();
+        seed_bridge(&spy, json!([]));
+        spy.set_fail_resource_update("behavior_instance", "behavior-1");
+
+        let state = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
+
+        assert_eq!(state.phase, HueOwnershipPhase::Active);
+        assert!(state.receipts().any(|receipt| {
+            receipt.resource_type == "behavior_instance"
+                && receipt.status == HueOwnershipReceiptStatus::Unsupported
+        }));
+        assert!(spy.calls().iter().any(|call| matches!(
+            call,
+            HueTransportCall::DeleteResource { resource_type, resource_id }
+                if resource_type == "room" && resource_id == "old-room"
+        )));
+        assert_eq!(
+            spy.calls()
+                .iter()
+                .filter(|call| matches!(
+                    call,
+                    HueTransportCall::UpdateResource { resource_type, .. }
+                        if resource_type == "behavior_instance"
+                ))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn takeover_resumes_past_a_failure_persisted_by_an_older_build() {
+        let temp = TempStorage::new("resume-old-failure");
+        let spy = SpyHueTransport::new();
+        seed_bridge(&spy, json!([]));
+        let mut interrupted = HueControllerOwnership::captured(
+            capture_baseline(&spy, "user", "old-build-capture".to_string()).unwrap(),
+        );
+        interrupted.phase = HueOwnershipPhase::ClearIncomplete;
+        interrupted.set_receipt(
+            &ControlPlaneOperation {
+                operation_id: "clear:v2:behavior_instance:behavior-1".to_string(),
+                api: "v2",
+                action: "disable",
+                resource_type: "behavior_instance",
+                resource_id: "behavior-1".to_string(),
+                body: Some(json!({"enabled": false})),
+            },
+            HueOwnershipReceiptStatus::Failed,
+            None,
+        );
+        persist_controller_ownership(&temp.storage, &interrupted).unwrap();
+        spy.reset();
+
+        let active = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
+
+        assert_eq!(active.phase, HueOwnershipPhase::Active);
+        assert!(active.receipts().any(|receipt| {
+            receipt.resource_type == "behavior_instance"
+                && receipt.status == HueOwnershipReceiptStatus::Unsupported
+        }));
+        assert!(!spy.calls().iter().any(|call| matches!(
+            call,
+            HueTransportCall::UpdateResource { resource_type, .. }
+                if resource_type == "behavior_instance"
+        )));
+        assert!(spy.calls().iter().any(|call| matches!(
+            call,
+            HueTransportCall::DeleteResource { resource_type, resource_id }
+                if resource_type == "room" && resource_id == "old-room"
+        )));
     }
 
     #[test]
@@ -1327,7 +1440,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_v1_receipt_is_journaled_as_failed_not_succeeded() {
+    fn malformed_v1_receipt_is_skipped_and_journaled_as_unsupported() {
         let temp = TempStorage::new("v1-receipt");
         let spy = SpyHueTransport::new();
         seed_bridge(&spy, json!([]));
@@ -1336,19 +1449,23 @@ mod tests {
             "success": {format!("/rules/{private_id}/status"): "disabled"}
         }])));
 
-        let error = acquire_authoritative_control(&temp.storage, &key(), &spy, "user")
-            .expect_err("a mismatched success address must stop takeover");
-        assert!(!error.to_string().contains(private_id));
+        let active = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
+        assert_eq!(active.phase, HueOwnershipPhase::Active);
         let state = load_controller_ownership(&temp.storage, "bridge-1")
             .unwrap()
             .unwrap();
-        assert_eq!(state.phase, HueOwnershipPhase::ClearIncomplete);
+        assert_eq!(state.phase, HueOwnershipPhase::Active);
         let v1_receipts = state
             .receipts()
             .filter(|receipt| receipt.api == "v1")
             .collect::<Vec<_>>();
-        assert_eq!(v1_receipts.len(), 1);
-        assert_eq!(v1_receipts[0].status, HueOwnershipReceiptStatus::Failed);
+        assert_eq!(v1_receipts.len(), 2);
+        assert!(v1_receipts
+            .iter()
+            .all(|receipt| receipt.status == HueOwnershipReceiptStatus::Unsupported));
+        assert!(v1_receipts
+            .iter()
+            .all(|receipt| !receipt.operation_id.contains(private_id)));
     }
 
     #[test]
