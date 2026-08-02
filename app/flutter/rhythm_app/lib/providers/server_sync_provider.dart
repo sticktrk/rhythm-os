@@ -1007,6 +1007,47 @@ class ServerSyncProvider extends ChangeNotifier {
         overrides.values.any((profileOverride) => !profileOverride.isEmpty);
   }
 
+  /// Visual light-profile customization shown by compact room/node cues.
+  ///
+  /// Motion timeout and fade settings intentionally do not light this cue:
+  /// those behaviors have their own room settings, while this badge explains
+  /// why the visible brightness/color curve differs from the home profile.
+  ({
+    bool brightnessRange,
+    bool colorTemperatureRange,
+    bool otherVisual,
+  }) lightProfileOverrideSummaryForNode(String nodeId) {
+    final overrides = nodeById(nodeId)?.profileSettings?.profileOverrides;
+    if (overrides == null || overrides.isEmpty) {
+      return (
+        brightnessRange: false,
+        colorTemperatureRange: false,
+        otherVisual: false,
+      );
+    }
+
+    var brightnessRange = false;
+    var colorTemperatureRange = false;
+    var otherVisual = false;
+    for (final profileOverride in overrides.values) {
+      brightnessRange = brightnessRange ||
+          profileOverride.minBrightness != null ||
+          profileOverride.maxBrightness != null;
+      colorTemperatureRange = colorTemperatureRange ||
+          profileOverride.minColorTemp != null ||
+          profileOverride.maxColorTemp != null;
+      otherVisual = otherVisual ||
+          profileOverride.curve != null ||
+          profileOverride.maxDimSteps != null ||
+          profileOverride.rhythmIntervalSetting != null;
+    }
+    return (
+      brightnessRange: brightnessRange,
+      colorTemperatureRange: colorTemperatureRange,
+      otherVisual: otherVisual,
+    );
+  }
+
   bool motionActivationPendingForNode(String nodeId) =>
       _motionActivationPending.contains(nodeId);
 
@@ -2392,6 +2433,25 @@ class ServerSyncProvider extends ChangeNotifier {
     _lastPollTime = now;
     _beginRoomReadinessRefresh();
     await _connection.reconnect(authoritative: true);
+  }
+
+  /// Reconcile room membership after a successful topology mutation.
+  ///
+  /// Unlike pull-to-refresh, this must not be throttled: dismissing a move
+  /// surface while the source/destination rooms still reflect the old hello
+  /// leaves the main room UI observably stale. The zero-duration yield lets
+  /// the async hello stream update this provider before topology is refreshed.
+  Future<bool> refreshAfterTopologyMutation() async {
+    if (HueServiceLocator.isDemoMode) {
+      await _refreshDemoState();
+      return true;
+    }
+    _beginRoomReadinessRefresh();
+    await _connection.reconnect(authoritative: true);
+    if (!_connection.connected) return false;
+    await Future<void>.delayed(Duration.zero);
+    await _refreshTopologyNodes();
+    return true;
   }
 
   /// Trigger an immediate lightweight poll (rooms/state only).

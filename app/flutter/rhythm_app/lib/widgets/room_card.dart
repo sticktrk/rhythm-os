@@ -16,6 +16,7 @@ import '../services/analytics_service.dart';
 import '../utils/app_color_temperature.dart';
 import 'device_detail_sheet.dart';
 import 'first_run_explainer.dart';
+import 'low_glow_switch.dart';
 import 'mood_sheet.dart';
 import 'room_settings_sheet.dart';
 import 'solar_orbit.dart'; // For CelestialColors
@@ -766,6 +767,15 @@ class _RoomCardState extends State<RoomCard> {
           final range = capabilities.colorTemperature;
           return range != null && range.maxKelvin > range.minKelvin;
         });
+        final profileOverride = context.select<
+                ServerSyncProvider,
+                ({
+                  bool brightnessRange,
+                  bool colorTemperatureRange,
+                  bool otherVisual,
+                })>(
+            (provider) =>
+                provider.lightProfileOverrideSummaryForNode(widget.roomId));
 
         // External reset bumps the generation counter — drop local overrides
         if (resetGen != _lastResetGen) {
@@ -1094,6 +1104,20 @@ class _RoomCardState extends State<RoomCard> {
                                         ),
                                       ),
                                     ),
+                                    if (profileOverride.brightnessRange ||
+                                        profileOverride.colorTemperatureRange ||
+                                        profileOverride.otherVisual) ...[
+                                      const SizedBox(width: 7),
+                                      LightProfileOverrideBadge(
+                                        nodeId: widget.roomId,
+                                        brightnessRange:
+                                            profileOverride.brightnessRange,
+                                        colorTemperatureRange: profileOverride
+                                            .colorTemperatureRange,
+                                        otherVisual:
+                                            profileOverride.otherVisual,
+                                      ),
+                                    ],
                                     const SizedBox(width: 8),
                                     SizedBox(
                                       key: ValueKey(

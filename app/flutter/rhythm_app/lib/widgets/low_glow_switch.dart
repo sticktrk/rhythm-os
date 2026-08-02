@@ -183,3 +183,80 @@ class LightingOverrideRow extends StatelessWidget {
     );
   }
 }
+
+/// Compact cue for a node whose visible light curve differs from home.
+class LightProfileOverrideBadge extends StatelessWidget {
+  const LightProfileOverrideBadge({
+    super.key,
+    required this.nodeId,
+    required this.brightnessRange,
+    required this.colorTemperatureRange,
+    required this.otherVisual,
+  });
+
+  final String nodeId;
+  final bool brightnessRange;
+  final bool colorTemperatureRange;
+  final bool otherVisual;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!brightnessRange && !colorTemperatureRange && !otherVisual) {
+      return const SizedBox.shrink();
+    }
+
+    final labels = <String>[
+      if (brightnessRange) 'BRI',
+      if (colorTemperatureRange) 'CCT',
+      if (otherVisual) 'PROFILE',
+    ];
+    final descriptions = <String>[
+      if (brightnessRange) 'brightness range',
+      if (colorTemperatureRange) 'color temperature range',
+      if (otherVisual) 'other light profile settings',
+    ];
+    final semanticsLabel =
+        'Custom light profile: ${descriptions.join(' and ')}';
+
+    return Tooltip(
+      message: semanticsLabel,
+      child: Semantics(
+        key: ValueKey('light-profile-override-badge-$nodeId'),
+        container: true,
+        label: semanticsLabel,
+        excludeSemantics: true,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+          decoration: BoxDecoration(
+            color: const Color(0xE61C1813),
+            borderRadius: BorderRadius.circular(99),
+            border: Border.all(
+              color: const Color(0xFFFFB74D).withValues(alpha: 0.7),
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.tune_rounded,
+                size: 10,
+                color: Color(0xFFFFCC80),
+              ),
+              const SizedBox(width: 3),
+              Text(
+                labels.join(' · '),
+                style: const TextStyle(
+                  color: Color(0xFFFFCC80),
+                  fontSize: 8.5,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.55,
+                  height: 1,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}

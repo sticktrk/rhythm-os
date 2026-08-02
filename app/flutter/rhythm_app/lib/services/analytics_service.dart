@@ -613,6 +613,34 @@ class AnalyticsService {
     });
   }
 
+  /// Track the terminal result of a user-requested physical bulb identify.
+  Future<void> logBulbIdentifyCompleted({
+    required String source,
+    required String outcome,
+  }) async {
+    await logEvent('bulb_identify_completed', {
+      'source': source,
+      'outcome': outcome,
+    });
+  }
+
+  /// Track the terminal app-observed result of assigning a device parent.
+  Future<void> logDeviceRoomMoveCompleted({
+    required String journeyId,
+    required String source,
+    required String destination,
+    required String outcome,
+    String? failureStage,
+  }) async {
+    await logEvent('device_room_move_completed', {
+      'journey_id': journeyId,
+      'source': source,
+      'destination': destination,
+      'outcome': outcome,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
   // ===========================================================================
   // Hub Recovery Events
   // ===========================================================================

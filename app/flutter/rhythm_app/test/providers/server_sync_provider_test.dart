@@ -120,6 +120,10 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   String? lastAssignedDeviceId;
   String? lastAssignedParentId;
   bool assignDeviceParentResult = true;
+  Completer<bool>? assignDeviceParentCompleter;
+  int flashCanonicalDeviceCalls = 0;
+  bool flashCanonicalDeviceResult = true;
+  Completer<bool>? flashCanonicalDeviceCompleter;
   List<Map<String, dynamic>>? triageEntries = const [];
   int resolveTriageNewCalls = 0;
   String? lastResolvedTriageEntryId;
@@ -532,7 +536,39 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     assignDeviceParentCalls++;
     lastAssignedDeviceId = deviceId;
     lastAssignedParentId = parentId;
-    return assignDeviceParentResult;
+    final pending = assignDeviceParentCompleter;
+    final result =
+        pending == null ? assignDeviceParentResult : await pending.future;
+    if (result) {
+      topologyNodes = [
+        for (final node in topologyNodes)
+          if (node.id == deviceId)
+            RhythmTopologyNode(
+              id: node.id,
+              name: node.name,
+              kind: node.kind,
+              parentId: parentId,
+              placement: node.placement,
+              controls: node.controls,
+              hubRoomBindings: node.hubRoomBindings,
+              manufacturer: node.manufacturer,
+              model: node.model,
+              userCustomized: node.userCustomized,
+              bootstrapName: node.bootstrapName,
+            )
+          else
+            node,
+      ];
+    }
+    return result;
+  }
+
+  @override
+  Future<bool> flashCanonicalDevice(String id) async {
+    flashCanonicalDeviceCalls++;
+    final pending = flashCanonicalDeviceCompleter;
+    if (pending != null) return pending.future;
+    return flashCanonicalDeviceResult;
   }
 
   @override
@@ -760,6 +796,17 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
       StreamController<RhythmLightBreaker>.broadcast();
   final _connectionStateController =
       StreamController<RhythmConnectionState>.broadcast();
+  RhythmHello? helloOnReconnect;
+
+  @override
+  Future<void> reconnect({bool authoritative = false}) async {
+    await super.reconnect(authoritative: authoritative);
+    final hello = helloOnReconnect;
+    if (hello != null) {
+      emitHello(hello);
+      await Future<void>.delayed(Duration.zero);
+    }
+  }
 
   @override
   Stream<RhythmHello> get helloEvents => _helloController.stream;
@@ -4958,6 +5005,14 @@ void main() {
     expect(find.text('Low glow'), findsOneWidget);
     expect(find.text('LIGHTS'), findsOneWidget);
     expect(find.text('Ceiling Light'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('light-profile-override-badge-room-1')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey('light-profile-override-badge-light-1')),
+      findsNothing,
+    );
     expect(find.text('Delete Room'), findsNothing);
     expect(find.text('Entry Motion'), findsNothing);
     expect(find.text('Wall Button'), findsNothing);
@@ -5275,6 +5330,309 @@ void main() {
         isFalse,
       );
     });
+  });
+
+  testWidgets(
+      'room bulb row shows custom ranges and long press identifies once',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final identifyCompleter = Completer<bool>();
+    final api = _FakeRhythmServerApi()
+      ..flashCanonicalDeviceCompleter = identifyCompleter
+      ..topologyNodes = [
+        RhythmTopologyNode.fromJson({
+          'id': 'room-1',
+          'name': 'Kitchen',
+          'kind': 'room',
+        }),
+        RhythmTopologyNode.fromJson({
+          'id': 'light-1',
+          'name': 'Desk Lamp',
+          'kind': 'light_device',
+          'parent_id': 'room-1',
+        }),
+      ];
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 900));
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': [RhythmFeature.roomLightProfileOverrides],
+          'hubs': const <dynamic>[],
+        },
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+            'devices': [
+              {'id': 'light-1', 'type': 'light', 'name': 'Desk Lamp'},
+            ],
+          },
+          {
+            'id': 'light-1',
+            'name': 'Desk Lamp',
+            'kind': 'light_device',
+            'parent_id': 'room-1',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+            'profile_settings': {
+              'profile_overrides': {
+                'rhythm': {
+                  'min_brightness': 12,
+                  'max_color_temp': 4800,
+                },
+              },
+            },
+          },
+        ],
+        'location': const <String, dynamic>{},
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await _pumpRoomSettingsSheet(
+      tester,
+      roomProvider: roomProvider,
+      provider: provider,
+      room: const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.matter,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+
+    final row = find.byKey(const ValueKey('room-device-row-light-1'));
+    expect(row, findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('light-profile-override-badge-light-1')),
+      findsOneWidget,
+    );
+    expect(find.text('BRI · CCT'), findsOneWidget);
+    expect(
+      tester.getSemantics(row).hint,
+      'Tap for settings. Touch and hold to identify.',
+    );
+
+    await tester.longPress(find.text('Desk Lamp'));
+    await tester.pump();
+    expect(api.flashCanonicalDeviceCalls, 1);
+    expect(
+      find.byKey(const ValueKey('room-device-identify-progress')),
+      findsOneWidget,
+    );
+
+    await tester.longPress(find.text('Desk Lamp'));
+    await tester.pump();
+    expect(api.flashCanonicalDeviceCalls, 1);
+
+    identifyCompleter.complete(false);
+    await tester.pumpAndSettle();
+    expect(find.text('Could not identify Desk Lamp'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('room-device-identify-progress')),
+      findsNothing,
+    );
+  });
+
+  testWidgets(
+      'move identifies, shows pending UI, and refreshes room membership',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final assignmentCompleter = Completer<bool>();
+    final api = _FakeRhythmServerApi()
+      ..assignDeviceParentCompleter = assignmentCompleter
+      ..topologyNodes = [
+        RhythmTopologyNode.fromJson({
+          'id': 'room-1',
+          'name': 'Kitchen',
+          'kind': 'room',
+        }),
+        RhythmTopologyNode.fromJson({
+          'id': 'room-2',
+          'name': 'Dining',
+          'kind': 'room',
+        }),
+        RhythmTopologyNode.fromJson({
+          'id': 'light-1',
+          'name': 'Desk Lamp',
+          'kind': 'light_device',
+          'parent_id': 'room-1',
+        }),
+      ];
+    api.canonicalDevices['light-1'] = {
+      'id': 'light-1',
+      'name': 'Desk Lamp',
+      'endpoints': [
+        {
+          'hub_key': {'hub_type': 'hue', 'address': 'bridge'},
+          'native_id': 'hue-light-1',
+          'preferred': true,
+        },
+      ],
+    };
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 1000));
+
+    Map<String, dynamic> roomNode(
+      String id,
+      String name,
+      List<Map<String, dynamic>> devices,
+    ) =>
+        {
+          'id': id,
+          'name': name,
+          'kind': 'room',
+          'state': 'active',
+          'rhythm_enabled': true,
+          'disabled': false,
+          'time_offset': 0.0,
+          'brightness_offset': 0.0,
+          'lights_on': true,
+          'devices': devices,
+        };
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': [
+          roomNode('room-1', 'Kitchen', [
+            {'id': 'light-1', 'type': 'light', 'name': 'Desk Lamp'},
+          ]),
+          roomNode('room-2', 'Dining', const []),
+        ],
+        'location': const <String, dynamic>{},
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    connection.helloOnReconnect = RhythmHello.fromJson({
+      'nodes': [
+        roomNode('room-1', 'Kitchen', const []),
+        roomNode('room-2', 'Dining', [
+          {'id': 'light-1', 'type': 'light', 'name': 'Desk Lamp'},
+        ]),
+      ],
+      'location': const <String, dynamic>{},
+    });
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: Builder(
+          builder: (context) => TextButton(
+            onPressed: () => DeviceDetailSheet.show(
+              context,
+              const RhythmDevice(
+                id: 'light-1',
+                type: RhythmDeviceType.light,
+                name: 'Desk Lamp',
+              ),
+              'room-1',
+            ),
+            child: const Text('Open device'),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Open device'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Move to Room...'));
+    await tester.pumpAndSettle();
+
+    expect(api.flashCanonicalDeviceCalls, 1);
+    expect(find.text('Move to Room'), findsOneWidget);
+    await tester.tap(find.text('Dining'));
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(api.assignDeviceParentCalls, 1);
+    expect(api.lastAssignedParentId, 'room-2');
+    expect(find.text('Updating room…'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('device-room-move-progress')),
+      findsOneWidget,
+    );
+    expect(
+      tester
+          .widget<ElevatedButton>(
+            find.widgetWithText(ElevatedButton, 'DONE'),
+          )
+          .onPressed,
+      isNull,
+    );
+
+    await tester.binding.handlePopRoute();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.byType(DeviceDetailSheet), findsOneWidget);
+
+    api.topologyNodes = [
+      RhythmTopologyNode.fromJson({
+        'id': 'room-1',
+        'name': 'Kitchen',
+        'kind': 'room',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'room-2',
+        'name': 'Dining',
+        'kind': 'room',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'light-1',
+        'name': 'Desk Lamp',
+        'kind': 'light_device',
+        'parent_id': 'room-2',
+      }),
+    ];
+    assignmentCompleter.complete(true);
+    await tester.pumpAndSettle();
+
+    expect(connection.reconnectCalls, 1);
+    expect(connection.lastReconnectAuthoritative, isTrue);
+    expect(find.byType(DeviceDetailSheet), findsNothing);
+    expect(provider.devicesForRoom('room-1'), isEmpty);
+    expect(
+      provider.devicesForRoom('room-2').map((device) => device.id),
+      contains('light-1'),
+    );
   });
 
   testWidgets('Unassigned activates a new matter bulb as standalone',

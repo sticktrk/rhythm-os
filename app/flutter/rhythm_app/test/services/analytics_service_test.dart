@@ -73,6 +73,17 @@ void main() {
       outcome: 'failed',
       failureStage: 'request',
     );
+    await analytics.logBulbIdentifyCompleted(
+      source: 'room_sheet_long_press',
+      outcome: 'succeeded',
+    );
+    await analytics.logDeviceRoomMoveCompleted(
+      journeyId: 'device-room-move-123',
+      source: 'device_detail',
+      destination: 'room',
+      outcome: 'partial',
+      failureStage: 'authoritative_refresh',
+    );
 
     expect(
       backend.events.map((event) => event.name),
@@ -85,6 +96,8 @@ void main() {
         'room_light_settings_opened',
         'room_light_settings_save_completed',
         'room_light_settings_reset_completed',
+        'bulb_identify_completed',
+        'device_room_move_completed',
       ],
     );
     expect(
@@ -114,6 +127,17 @@ void main() {
     expect(
       backend.events[7].properties,
       containsPair('failure_stage', 'request'),
+    );
+    expect(
+      backend.events[8].properties,
+      {
+        'source': 'room_sheet_long_press',
+        'outcome': 'succeeded',
+      },
+    );
+    expect(
+      backend.events[9].properties,
+      containsPair('failure_stage', 'authoritative_refresh'),
     );
 
     final serialized = backend.events
