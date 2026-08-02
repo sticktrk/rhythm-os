@@ -1295,12 +1295,8 @@ fn register_canonical_identity(state: &SharedState, device: &HueBleDevice) -> Re
         .ok_or_else(|| anyhow::anyhow!("Canonical Hue BLE endpoint disappeared"))?;
     endpoint.capabilities = Some(endpoint_capabilities);
 
-    if let Some(storage) = state.storage.as_ref() {
-        let serialized = serde_json::to_value(&state.canonical_registry)?;
-        storage
-            .save_canonical_registry(&serialized)
-            .context("persisting Hue BLE endpoint capabilities")?;
-    }
+    rhythm_os::commands::save_authority_state(&state)
+        .context("persisting Hue BLE endpoint capabilities")?;
     Ok(())
 }
 

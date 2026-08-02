@@ -52,6 +52,10 @@ struct Args {
     /// Log level (trace, debug, info, warn, error).
     #[arg(long, default_value = "info")]
     log_level: String,
+
+    /// Internal bootloader hook: restore Hue and prepare authority state for rollback.
+    #[arg(long, hide = true)]
+    restore_hue_before_rollback: bool,
 }
 
 fn env_value_is_truthy(value: &str) -> bool {
@@ -116,6 +120,12 @@ fn main() -> Result<()> {
 
     std::fs::create_dir_all(&args.data_dir)?;
     std::env::set_var("RHYTHM_DATA_DIR", &args.data_dir);
+    if args.restore_hue_before_rollback {
+        rhythm_hue::reqwest_lifecycle::restore_authoritative_bridges_before_binary_rollback(
+            std::path::Path::new(&args.data_dir),
+        )?;
+        return Ok(());
+    }
     if let Err(error) = rhythm_server::boot_diagnostics::record_startup(
         std::path::Path::new(&args.data_dir),
         &platform_type,
@@ -128,6 +138,9 @@ fn main() -> Result<()> {
     // switch. Count this start attempt and restore the previous binaries if a
     // crash-looping build exhausts its probation; BusyBox init respawns us.
     match rhythm_server::self_update::startup_update_health_check_with_pre_rollback(|| {
+        rhythm_hue::reqwest_lifecycle::restore_authoritative_bridges_before_binary_rollback(
+            std::path::Path::new(&args.data_dir),
+        )?;
         rhythm_os::storage::scrub_local_ble_rollback_state(std::path::Path::new(&args.data_dir))
     }) {
         rhythm_server::self_update::StartupUpdateDisposition::NoPendingUpdate => {}
@@ -202,12 +215,23 @@ fn main() -> Result<()> {
         rhythm_os_runtime_modules::install_default_light_runtime_modules(&mut s)?;
 
         rhythm_os::storage::load_persisted_state(&mut s);
+        s.set_external_controller_authority_enabled(
+            rhythm_os::hub::HubType::new(rhythm_os::hub::HubType::HUE),
+            true,
+        );
 
         let callbacks = rhythm_os::hub::integration_callbacks(hub::INTEGRATIONS);
         s.ensure_runtime_fn = Some(callbacks.ensure_runtime_fn);
         s.get_hub_provider_fn = Some(callbacks.get_hub_provider_fn);
         s.register_controller_fn = Some(callbacks.register_controller_fn);
         s.sync_topology_groups_fn = Some(callbacks.sync_topology_groups_fn);
+        s.sync_required_topology_groups_fn = Some(callbacks.sync_required_topology_groups_fn);
+        s.reconcile_external_controller_authority_fn =
+            Some(callbacks.reconcile_external_controller_authority_fn);
+        s.release_external_controller_authority_fn =
+            Some(callbacks.release_external_controller_authority_fn);
+        s.finalize_external_controller_release_fn =
+            Some(callbacks.finalize_external_controller_release_fn);
         s.prepare_hub_device_room_assignment_fn =
             Some(callbacks.prepare_hub_device_room_assignment_fn);
         s.start_pairing_fn = Some(callbacks.start_pairing_fn);
@@ -1037,13 +1061,14 @@ mod tests {
         extract_serial_suffix, final_hue_handoff_or_schedule_recovery,
         final_shared_ble_quiesce_or_schedule_recovery, install_factory_reset_hook,
         periodic_startup_action, run_bootstate_script_action, save_commissioning_wifi_credentials,
-        spawn_appliance_background_workers_with, startup_wifi_restore_action, BootSuccessHealth,
-        PeriodicStartupAction, StartupWifiRestoreAction,
+        spawn_appliance_background_workers_with, startup_wifi_restore_action, Args,
+        BootSuccessHealth, PeriodicStartupAction, StartupWifiRestoreAction,
         RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION_ENV, RHYTHM_MATTER_PAA_TRUST_STORE_PATH_ENV,
         STARTUP_WIFI_RESTORE_TIMEOUT,
     };
     use crate::time_sync::clock_is_sane_at;
     use chrono::{TimeZone, Utc};
+    use clap::Parser;
     use rhythm_os::canonical::identity::HubKey;
     use rhythm_os::hub::{ActiveHub, HubCredentials, HubType};
     use rhythm_os::provisioning::WifiCredentials;
@@ -1056,6 +1081,20 @@ mod tests {
     use std::time::{Duration, Instant};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn appliance_cli_accepts_hidden_hue_rollback_restore_hook() {
+        let args = Args::try_parse_from([
+            "rhythm-server",
+            "--data-dir",
+            "/data",
+            "--restore-hue-before-rollback",
+        ])
+        .expect("packaged appliance CLI should accept the bootloader rollback hook");
+
+        assert!(args.restore_hue_before_rollback);
+        assert_eq!(args.data_dir, "/data");
+    }
 
     struct EnvRestore {
         values: Vec<(&'static str, Option<OsString>)>,

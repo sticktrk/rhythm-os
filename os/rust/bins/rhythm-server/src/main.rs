@@ -31,6 +31,10 @@ struct Args {
     /// Log level (trace, debug, info, warn, error).
     #[arg(long, default_value = "info")]
     log_level: String,
+
+    /// Internal bootloader hook: restore Hue and prepare authority state for rollback.
+    #[arg(long, hide = true)]
+    restore_hue_before_rollback: bool,
 }
 
 fn main() -> Result<()> {
@@ -50,6 +54,12 @@ fn main() -> Result<()> {
     let data_dir = shellexpand(&args.data_dir);
     std::fs::create_dir_all(&data_dir)?;
     std::env::set_var("RHYTHM_DATA_DIR", &data_dir);
+    if args.restore_hue_before_rollback {
+        rhythm_hue::reqwest_lifecycle::restore_authoritative_bridges_before_binary_rollback(
+            std::path::Path::new(&data_dir),
+        )?;
+        return Ok(());
+    }
     if let Err(error) = rhythm_server::boot_diagnostics::record_startup(
         std::path::Path::new(&data_dir),
         &platform_type,
@@ -60,7 +70,11 @@ fn main() -> Result<()> {
     // If a self-update was just installed, count this start attempt and roll
     // back to the previous binaries once a crash-looping build exhausts its
     // probation. Must run before anything that could crash the process.
-    match rhythm_server::self_update::startup_update_health_check() {
+    match rhythm_server::self_update::startup_update_health_check_with_pre_rollback(|| {
+        rhythm_hue::reqwest_lifecycle::restore_authoritative_bridges_before_binary_rollback(
+            std::path::Path::new(&data_dir),
+        )
+    }) {
         rhythm_server::self_update::StartupUpdateDisposition::NoPendingUpdate => {}
         rhythm_server::self_update::StartupUpdateDisposition::PendingVerification { attempt } => {
             info!(
@@ -126,6 +140,10 @@ fn main() -> Result<()> {
 
         // Load persisted state
         rhythm_os::storage::load_persisted_state(&mut s);
+        s.set_external_controller_authority_enabled(
+            rhythm_os::hub::HubType::new(rhythm_os::hub::HubType::HUE),
+            true,
+        );
 
         // Set integration-driven callbacks from the static registry
         let callbacks = rhythm_os::hub::integration_callbacks(hub::INTEGRATIONS);
@@ -133,6 +151,13 @@ fn main() -> Result<()> {
         s.get_hub_provider_fn = Some(callbacks.get_hub_provider_fn);
         s.register_controller_fn = Some(callbacks.register_controller_fn);
         s.sync_topology_groups_fn = Some(callbacks.sync_topology_groups_fn);
+        s.sync_required_topology_groups_fn = Some(callbacks.sync_required_topology_groups_fn);
+        s.reconcile_external_controller_authority_fn =
+            Some(callbacks.reconcile_external_controller_authority_fn);
+        s.release_external_controller_authority_fn =
+            Some(callbacks.release_external_controller_authority_fn);
+        s.finalize_external_controller_release_fn =
+            Some(callbacks.finalize_external_controller_release_fn);
         s.prepare_hub_device_room_assignment_fn =
             Some(callbacks.prepare_hub_device_room_assignment_fn);
         s.start_pairing_fn = Some(callbacks.start_pairing_fn);

@@ -23,6 +23,119 @@ use crate::scenes::{is_native_scene_id, StoredScenes};
 
 const MAX_PAIRING_HISTORY_BYTES: u64 = 1024 * 1024;
 
+/// Schema for the crash-atomic canonical-registry + topology authority state.
+pub const STORED_AUTHORITY_STATE_SCHEMA_VERSION: u32 = 1;
+
+/// One commit record for the two structures that jointly define Rhythm's
+/// authoritative device placement and external-controller room projection.
+///
+/// The individual legacy files remain mirrored for downgrade compatibility,
+/// but current runtimes load this snapshot first so a crash can never expose
+/// one half of a room mutation without the other.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StoredAuthorityState {
+    pub schema_version: u32,
+    pub canonical_registry: Value,
+    pub topology: Value,
+}
+
+impl StoredAuthorityState {
+    pub fn new(canonical_registry: Value, topology: Value) -> Self {
+        Self {
+            schema_version: STORED_AUTHORITY_STATE_SCHEMA_VERSION,
+            canonical_registry,
+            topology,
+        }
+    }
+}
+
+// This mirrors the serialized boundary owned by rhythm-hue without making the
+// core storage crate depend on an integration crate. Deserializing the complete
+// shape keeps destructive backup preflight aligned with the payload that Hue
+// will consume after the current controller has been released.
+#[allow(dead_code)]
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum HueOwnershipValidationPhase {
+    Captured,
+    Clearing,
+    ClearIncomplete,
+    Active,
+    Restoring,
+    RestoreIncomplete,
+    Restored,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum HueOwnershipReceiptValidationStatus {
+    Pending,
+    Succeeded,
+    Failed,
+    Unsupported,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct HueOwnershipReceiptValidation {
+    operation_id: String,
+    api: String,
+    action: String,
+    resource_type: String,
+    original_resource_id: String,
+    #[serde(default)]
+    replacement_resource_id: Option<String>,
+    status: HueOwnershipReceiptValidationStatus,
+    attempt: u32,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct HueManagedRoomValidation {
+    rhythm_room_id: String,
+    hue_room_id: String,
+    grouped_light_id: String,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct HueManagedSceneValidation {
+    rhythm_room_id: String,
+    rhythm_scene_id: String,
+    hue_room_id: String,
+    hue_scene_id: String,
+    fingerprint: String,
+    #[serde(default)]
+    ephemeral: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct HueOwnershipBaselineValidation {
+    schema_version: u32,
+    capture_id: String,
+    bridge_id: String,
+    v2_resources: BTreeMap<String, Value>,
+    v1_resources: BTreeMap<String, Value>,
+}
+
+#[allow(dead_code)]
+#[derive(Deserialize)]
+struct HueOwnershipManifestValidation {
+    schema_version: u32,
+    phase: HueOwnershipValidationPhase,
+    baseline: HueOwnershipBaselineValidation,
+    #[serde(default)]
+    managed_rooms: BTreeMap<String, HueManagedRoomValidation>,
+    #[serde(default)]
+    managed_scenes: BTreeMap<String, HueManagedSceneValidation>,
+    #[serde(default)]
+    restored_resource_ids: BTreeMap<String, String>,
+    #[serde(default)]
+    receipts: BTreeMap<String, HueOwnershipReceiptValidation>,
+}
+
 /// Namespaced durable state for plan-based light runtimes.
 ///
 /// Shape: runtime id -> node id -> app-defined key -> JSON value.
@@ -121,16 +234,31 @@ pub trait Storage: Send + Sync {
         Ok(())
     }
 
+    /// Validate integration backup paths and payload shape without changing
+    /// current installation state. Destructive restore workflows call this
+    /// before releasing external controllers or deleting credentials.
+    fn validate_integration_backup_files(
+        &self,
+        _files: &[crate::bundle::BackupIntegrationFile],
+    ) -> Result<()> {
+        Ok(())
+    }
+
     /// Load one integration-owned secret state file.
     ///
-    /// This deliberately stays separate from backup enumeration: controller
-    /// ownership must be durable for normal takeover/release even before the
-    /// backup lifecycle opts Hue state into portable bundles.
+    /// Paths are relative to the data directory and must belong to a
+    /// registered integration backup directory (for example
+    /// `hue/controller-ownership.json`). Implementations must reject path
+    /// traversal. The default is intentionally empty for in-memory and test
+    /// storage implementations that do not persist integration state.
     fn load_integration_state_file(&self, _path: &str) -> Result<Option<String>> {
         Ok(None)
     }
 
     /// Durably replace one integration-owned secret state file.
+    ///
+    /// A successful return is the durability boundary integrations may rely
+    /// on before mutating an external controller.
     fn save_integration_state_file(&self, _path: &str, _content: &str) -> Result<()> {
         Ok(())
     }
@@ -138,6 +266,42 @@ pub trait Storage: Send + Sync {
     /// Durably remove one integration-owned secret state file.
     fn delete_integration_state_file(&self, _path: &str) -> Result<()> {
         Ok(())
+    }
+
+    /// Load the independently-written authority files used before the
+    /// combined commit record existed.
+    ///
+    /// Production file storage overrides this so an existing malformed file
+    /// remains distinguishable from a genuinely absent half during migration.
+    fn load_legacy_authority_state(&self) -> Result<(Option<Value>, Option<Value>)> {
+        Ok((self.load_canonical_registry()?, self.load_topology()?))
+    }
+
+    /// Load the coupled authority-state commit record.
+    ///
+    /// The compatibility default synthesizes a snapshot only when both legacy
+    /// halves exist. File-backed production storage overrides this with the
+    /// single crash-atomic commit file.
+    fn load_authority_state(&self) -> Result<Option<StoredAuthorityState>> {
+        let (Some(canonical_registry), Some(topology)) =
+            (self.load_canonical_registry()?, self.load_topology()?)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(StoredAuthorityState::new(
+            canonical_registry,
+            topology,
+        )))
+    }
+
+    /// Durably commit canonical registry and topology as one authority state.
+    ///
+    /// Non-file test/platform implementations retain compatibility through
+    /// their legacy methods. Production `FileStorage` overrides this with one
+    /// atomic source-of-truth file plus legacy mirrors.
+    fn save_authority_state(&self, state: &StoredAuthorityState) -> Result<()> {
+        self.save_canonical_registry(&state.canonical_registry)?;
+        self.save_topology(&state.topology)
     }
 
     /// Load the canonical device registry. Default: returns None (not persisted).
@@ -529,13 +693,14 @@ pub struct FileStorage {
 
 /// Integration state that is portable only together with its secret runtime
 /// credentials and can therefore participate in full-secret backups.
-const BACKUP_INTEGRATION_SUBDIRS: &[&str] = &["matter"];
+const BACKUP_INTEGRATION_SUBDIRS: &[&str] = &["matter", "hue"];
 /// Local integration state that must be removed by a full factory reset.
 ///
 /// Appliance-local BLE metadata is deliberately not portable and is erased
 /// together with the other integration state during factory reset.
 const FACTORY_RESET_INTEGRATION_SUBDIRS: &[&str] = &[
     "matter",
+    "hue",
     "hue_ble",
     "local_ble",
     // Securely erase state written by prerelease builds of the superseded
@@ -560,6 +725,19 @@ const LOCAL_BLE_ROLLBACK_FILES: &[&str] = &[
 /// older binary. The stable public `server_metadata.json` is deliberately not
 /// touched, so the server installation identity survives a rollback.
 pub fn scrub_local_ble_rollback_state(data_dir: &std::path::Path) -> Result<()> {
+    validate_rollback_data_dir(data_dir, "local BLE rollback scrub")?;
+
+    for name in LOCAL_BLE_ROLLBACK_DIRS {
+        remove_rollback_path(&data_dir.join(name))?;
+    }
+    for name in LOCAL_BLE_ROLLBACK_FILES {
+        remove_rollback_path(&data_dir.join(name))?;
+    }
+
+    sync_rollback_data_dir(data_dir)
+}
+
+fn validate_rollback_data_dir(data_dir: &std::path::Path, operation: &str) -> Result<()> {
     use std::path::Component;
 
     if !data_dir.is_absolute()
@@ -569,7 +747,8 @@ pub fn scrub_local_ble_rollback_state(data_dir: &std::path::Path) -> Result<()> 
             .any(|component| matches!(component, Component::ParentDir))
     {
         anyhow::bail!(
-            "local BLE rollback scrub requires a safe absolute data directory, got {}",
+            "{} requires a safe absolute data directory, got {}",
+            operation,
             data_dir.display()
         );
     }
@@ -578,23 +757,100 @@ pub fn scrub_local_ble_rollback_state(data_dir: &std::path::Path) -> Result<()> 
         .with_context(|| format!("inspecting rollback data dir {}", data_dir.display()))?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() {
         anyhow::bail!(
-            "local BLE rollback data path must be a real directory: {}",
+            "{} data path must be a real directory: {}",
+            operation,
             data_dir.display()
         );
     }
 
-    for name in LOCAL_BLE_ROLLBACK_DIRS {
-        remove_rollback_path(&data_dir.join(name))?;
-    }
-    for name in LOCAL_BLE_ROLLBACK_FILES {
-        remove_rollback_path(&data_dir.join(name))?;
-    }
+    Ok(())
+}
 
+fn sync_rollback_data_dir(data_dir: &std::path::Path) -> Result<()> {
     let directory = std::fs::File::open(data_dir)
         .with_context(|| format!("opening rollback data dir {}", data_dir.display()))?;
     directory
         .sync_all()
         .with_context(|| format!("fsyncing rollback data dir {}", data_dir.display()))
+}
+
+/// Prepare current authority state for a binary that only understands the
+/// legacy registry and topology files.
+///
+/// Hue restore necessarily allocates replacement room, zone, and scene IDs.
+/// Retire every Hue-native room route and registry cache before removing the
+/// combined commit record so an older binary can only rediscover those
+/// replacement resources. The combined file is removed last: before that
+/// durable boundary current binaries continue to trust the complete snapshot;
+/// afterwards older binaries see a matching pair of sanitized legacy files.
+pub fn prepare_authority_state_for_binary_rollback(
+    data_dir: &std::path::Path,
+    configured_hue_hub_keys: &[HubKey],
+) -> Result<()> {
+    validate_rollback_data_dir(data_dir, "authority rollback handoff")?;
+    let data_dir_str = data_dir
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Rhythm data directory is not UTF-8"))?;
+    let storage = FileStorage::new(data_dir_str)?;
+
+    let mut hue_hub_keys = std::collections::BTreeMap::<String, HubKey>::new();
+    for key in configured_hue_hub_keys
+        .iter()
+        .filter(|key| key.hub_type.as_str() == crate::hub::HubType::HUE)
+    {
+        hue_hub_keys.insert(key.to_string(), key.clone());
+    }
+
+    let Some(stored) = storage.load_authority_state()? else {
+        // A retry after the commit-point removal must not reconstruct mirrors
+        // from defaults or overwrite changes made by the older binary.
+        for key in hue_hub_keys.values() {
+            storage.clear_hub_registry_for(key)?;
+        }
+        return sync_rollback_data_dir(data_dir);
+    };
+
+    let (canonical_registry, mut topology) = decode_authority_state(stored)
+        .context("Refusing binary rollback because authority state is invalid")?;
+    for key in
+        topology
+            .referenced_hub_keys()
+            .into_iter()
+            .chain(canonical_registry.devices().flat_map(|device| {
+                device
+                    .endpoints
+                    .iter()
+                    .map(|endpoint| endpoint.hub_key.clone())
+            }))
+    {
+        if key.hub_type.as_str() == crate::hub::HubType::HUE {
+            hue_hub_keys.insert(key.to_string(), key);
+        }
+    }
+
+    for key in hue_hub_keys.values() {
+        topology.remove_room_bindings_for_hub_where(key, |_| true);
+        topology.set_grouped_room_control_required(key, false);
+    }
+    topology.rebuild_indices();
+
+    let canonical_registry = serde_json::to_value(canonical_registry)
+        .context("Failed to serialize rollback canonical registry")?;
+    let topology =
+        serde_json::to_value(topology).context("Failed to serialize rollback topology")?;
+    let canonical_mirror = serde_json::to_string_pretty(&canonical_registry)?;
+    let topology_mirror = serde_json::to_string_pretty(&topology)?;
+
+    storage.write_atomic_durable("canonical_registry.json", canonical_mirror.as_bytes())?;
+    storage.write_atomic_durable("topology.json", topology_mirror.as_bytes())?;
+    for key in hue_hub_keys.values() {
+        storage.clear_hub_registry_for(key)?;
+    }
+
+    // This is the downgrade commit point. Never remove it before both mirrors
+    // and every stale Hue discovery cache are durably retired.
+    storage.remove_if_exists_durable("authority_state.json")?;
+    Ok(())
 }
 
 fn remove_rollback_path(path: &std::path::Path) -> Result<()> {
@@ -867,7 +1123,7 @@ impl FileStorage {
         Ok(())
     }
 
-    fn write_file_atomic_path(path: &std::path::Path, data: &[u8]) -> Result<()> {
+    fn write_file_atomic_path(&self, path: &std::path::Path, data: &[u8]) -> Result<()> {
         use std::io::Write;
 
         let parent = path
@@ -882,7 +1138,15 @@ impl FileStorage {
         let tmp = path.with_file_name(format!("{filename}.tmp"));
 
         {
-            let mut file = std::fs::File::create(&tmp)
+            let mut options = std::fs::OpenOptions::new();
+            options.create(true).truncate(true).write(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options
+                .open(&tmp)
                 .with_context(|| format!("creating {}", tmp.display()))?;
             file.write_all(data)
                 .with_context(|| format!("writing {}", tmp.display()))?;
@@ -895,9 +1159,7 @@ impl FileStorage {
             return Err(anyhow::anyhow!(e))
                 .with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()));
         }
-        if let Ok(dir) = std::fs::File::open(parent) {
-            let _ = dir.sync_all();
-        }
+        self.sync_directory_chain(parent, true)?;
         Ok(())
     }
 }
@@ -954,25 +1216,6 @@ fn validate_integration_backup_path(path: &str) -> Result<std::path::PathBuf> {
                 .iter()
                 .any(|supported| first == std::ffi::OsStr::new(supported)) => {}
         _ => anyhow::bail!("unsupported integration backup path: {}", path),
-    }
-    Ok(std::path::PathBuf::from(normalized))
-}
-
-fn validate_integration_state_path(path: &str) -> Result<std::path::PathBuf> {
-    if path.trim().is_empty() {
-        anyhow::bail!("integration state path must not be empty");
-    }
-    let relative = std::path::Path::new(path);
-    if relative.is_absolute() {
-        anyhow::bail!("integration state path must be relative: {}", path);
-    }
-
-    let normalized = normalized_relative_path(relative)?;
-    let mut components = std::path::Path::new(&normalized).components();
-    match components.next() {
-        Some(std::path::Component::Normal(first))
-            if first == std::ffi::OsStr::new("matter") || first == std::ffi::OsStr::new("hue") => {}
-        _ => anyhow::bail!("unsupported integration state path: {}", path),
     }
     Ok(std::path::PathBuf::from(normalized))
 }
@@ -1249,7 +1492,7 @@ impl Storage for FileStorage {
 
     fn save_all_hub_credentials(&self, creds: &[HubCredentials]) -> Result<()> {
         let data = serde_json::to_string_pretty(creds)?;
-        self.write_atomic("hub_credentials.json", data.as_bytes())
+        self.write_atomic_secret_durable("hub_credentials.json", data.as_bytes())
     }
 
     fn load_hub_registry_for(&self, key: &HubKey) -> Result<Option<Value>> {
@@ -1321,14 +1564,104 @@ impl Storage for FileStorage {
 
         for (relative_path, file) in files {
             let absolute_path = self.dir.join(relative_path);
-            Self::write_file_atomic_path(&absolute_path, file.content.as_bytes())?;
+            self.write_file_atomic_path(&absolute_path, file.content.as_bytes())?;
         }
 
         Ok(())
     }
 
+    fn validate_integration_backup_files(
+        &self,
+        files: &[crate::bundle::BackupIntegrationFile],
+    ) -> Result<()> {
+        let mut normalized_paths = std::collections::HashSet::new();
+        let mut hue_bridge_ids = std::collections::HashSet::new();
+        for file in files {
+            let path = validate_integration_backup_path(&file.path)?;
+            let normalized_path = normalized_relative_path(&path)?;
+            if file.path != normalized_path {
+                anyhow::bail!("integration backup path is not canonical");
+            }
+            if !normalized_paths.insert(path.clone()) {
+                anyhow::bail!("duplicate integration backup path");
+            }
+            if path.extension() == Some(std::ffi::OsStr::new("json")) {
+                let value: serde_json::Value = serde_json::from_str(&file.content)
+                    .map_err(|_| anyhow::anyhow!("integration backup contains invalid JSON"))?;
+                if normalized_path.starts_with("hue/controller-ownership/by-bridge/") {
+                    let manifest = serde_json::from_value::<HueOwnershipManifestValidation>(value)
+                        .map_err(|_| {
+                            anyhow::anyhow!("invalid Hue controller ownership manifest")
+                        })?;
+                    let bridge_id = (!manifest.baseline.bridge_id.trim().is_empty())
+                        .then_some(manifest.baseline.bridge_id.as_str())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("invalid Hue controller ownership manifest")
+                        })?;
+                    let safe_bridge_id = bridge_id
+                        .chars()
+                        .map(|character| {
+                            if character.is_ascii_alphanumeric()
+                                || matches!(character, '.' | '_' | '-')
+                            {
+                                character
+                            } else {
+                                '_'
+                            }
+                        })
+                        .collect::<String>();
+                    let expected_path =
+                        format!("hue/controller-ownership/by-bridge/{safe_bridge_id}.json");
+                    let valid_schema =
+                        manifest.schema_version == 1 && manifest.baseline.schema_version == 1;
+                    let valid_capture = !manifest.baseline.capture_id.trim().is_empty();
+                    let valid_v2 = {
+                        let resources = &manifest.baseline.v2_resources;
+                        [
+                            "bridge",
+                            "device",
+                            "light",
+                            "behavior_instance",
+                            "room",
+                            "zone",
+                            "scene",
+                            "smart_scene",
+                        ]
+                        .iter()
+                        .all(|resource_type| {
+                            resources
+                                .get(*resource_type)
+                                .and_then(|resource| resource.get("data"))
+                                .and_then(serde_json::Value::as_array)
+                                .is_some()
+                        })
+                    };
+                    let valid_v1 = {
+                        let resources = &manifest.baseline.v1_resources;
+                        ["rules", "schedules"].iter().all(|resource_type| {
+                            resources
+                                .get(*resource_type)
+                                .and_then(serde_json::Value::as_object)
+                                .is_some()
+                        })
+                    };
+                    if !(valid_schema
+                        && valid_capture
+                        && valid_v2
+                        && valid_v1
+                        && normalized_path == expected_path
+                        && hue_bridge_ids.insert(bridge_id.to_string()))
+                    {
+                        anyhow::bail!("invalid Hue controller ownership manifest");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn load_integration_state_file(&self, path: &str) -> Result<Option<String>> {
-        let relative_path = validate_integration_state_path(path)?;
+        let relative_path = validate_integration_backup_path(path)?;
         let absolute_path = self.dir.join(relative_path);
         match std::fs::read_to_string(&absolute_path) {
             Ok(content) => Ok(Some(content)),
@@ -1339,7 +1672,7 @@ impl Storage for FileStorage {
     }
 
     fn save_integration_state_file(&self, path: &str, content: &str) -> Result<()> {
-        let relative_path = validate_integration_state_path(path)?;
+        let relative_path = validate_integration_backup_path(path)?;
         let relative_path = relative_path
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("integration state path is not UTF-8"))?;
@@ -1347,11 +1680,86 @@ impl Storage for FileStorage {
     }
 
     fn delete_integration_state_file(&self, path: &str) -> Result<()> {
-        let relative_path = validate_integration_state_path(path)?;
+        let relative_path = validate_integration_backup_path(path)?;
         let relative_path = relative_path
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("integration state path is not UTF-8"))?;
         self.remove_if_exists_durable(relative_path)
+    }
+
+    fn load_legacy_authority_state(&self) -> Result<(Option<Value>, Option<Value>)> {
+        let load_strict = |name: &str| -> Result<Option<Value>> {
+            let path = self.file_path(name);
+            match self.read_json::<Value>(name) {
+                Ok(value) => Ok(Some(value)),
+                Err(error) if path.exists() => Err(error).with_context(|| {
+                    format!("legacy authority file is unreadable at {}", path.display())
+                }),
+                Err(_) => Ok(None),
+            }
+        };
+        Ok((
+            load_strict("canonical_registry.json")?,
+            load_strict("topology.json")?,
+        ))
+    }
+
+    fn load_authority_state(&self) -> Result<Option<StoredAuthorityState>> {
+        let path = self.file_path("authority_state.json");
+        if !path.exists() {
+            debug!(
+                target: "sys",
+                "No persisted authority state at {}",
+                path.display()
+            );
+            return Ok(None);
+        }
+
+        let state = self
+            .read_json::<StoredAuthorityState>("authority_state.json")
+            .context("Failed to load authority state")?;
+        if state.schema_version != STORED_AUTHORITY_STATE_SCHEMA_VERSION {
+            anyhow::bail!(
+                "Unsupported authority-state schema version {} (expected {})",
+                state.schema_version,
+                STORED_AUTHORITY_STATE_SCHEMA_VERSION
+            );
+        }
+        Ok(Some(state))
+    }
+
+    fn save_authority_state(&self, state: &StoredAuthorityState) -> Result<()> {
+        if state.schema_version != STORED_AUTHORITY_STATE_SCHEMA_VERSION {
+            anyhow::bail!(
+                "Refusing to save authority-state schema version {} (expected {})",
+                state.schema_version,
+                STORED_AUTHORITY_STATE_SCHEMA_VERSION
+            );
+        }
+
+        // This single file is the commit point. Once it is durable, a current
+        // runtime will always recover the matching registry and topology even
+        // if power is lost while refreshing the downgrade-compatible mirrors.
+        let snapshot = serde_json::to_string_pretty(state)?;
+        self.write_atomic_durable("authority_state.json", snapshot.as_bytes())?;
+
+        for (name, value) in [
+            ("canonical_registry.json", &state.canonical_registry),
+            ("topology.json", &state.topology),
+        ] {
+            let mirror = serde_json::to_string_pretty(value)?;
+            if let Err(error) = self.write_atomic_durable(name, mirror.as_bytes()) {
+                // The authoritative commit is already durable. Returning an
+                // error would make callers roll memory back behind that commit.
+                warn!(
+                    target: "sys",
+                    "Authority state committed, but failed to refresh legacy mirror {}: {}",
+                    name,
+                    error
+                );
+            }
+        }
+        Ok(())
     }
 
     fn load_canonical_registry(&self) -> Result<Option<serde_json::Value>> {
@@ -1646,6 +2054,11 @@ impl Storage for FileStorage {
         ] {
             self.remove_if_exists(name)?;
         }
+        // Delete the combined source of truth only after both legacy mirrors.
+        // Its durable removal is the authority-state reset commit point: a
+        // crash before it retains the prior complete snapshot, while a crash
+        // after it cannot revive state from either compatibility half.
+        self.remove_if_exists_durable("authority_state.json")?;
         self.clear_pairing_metadata()?;
         // Preserve the server's stable public installation ID while rotating
         // the confidential pairing HMAC domain across a factory reset.
@@ -1697,6 +2110,37 @@ fn sanitize_hub_key(key: &HubKey) -> String {
 // ---------------------------------------------------------------------------
 // load_persisted_state — shared startup helper
 // ---------------------------------------------------------------------------
+
+fn decode_authority_state(
+    stored: StoredAuthorityState,
+) -> Result<(
+    crate::canonical::registry::CanonicalRegistry,
+    crate::topology::RoomTopologyStore,
+)> {
+    if stored.schema_version != STORED_AUTHORITY_STATE_SCHEMA_VERSION {
+        anyhow::bail!(
+            "Unsupported authority-state schema version {} (expected {})",
+            stored.schema_version,
+            STORED_AUTHORITY_STATE_SCHEMA_VERSION
+        );
+    }
+
+    // Decode both halves before returning either. A malformed snapshot must
+    // never partially replace the live authority state.
+    let mut canonical_registry: crate::canonical::registry::CanonicalRegistry =
+        serde_json::from_value(stored.canonical_registry)
+            .context("Failed to parse authority-state canonical registry")?;
+    let mut topology: crate::topology::RoomTopologyStore = serde_json::from_value(stored.topology)
+        .context("Failed to parse authority-state topology")?;
+    canonical_registry.rebuild_indices();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    canonical_registry.backfill_unassigned_triage(now);
+    topology.rebuild_indices();
+    Ok((canonical_registry, topology))
+}
 
 /// Load all persisted state from storage into AppState.
 ///
@@ -1949,38 +2393,126 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
         }
     }
 
-    if let Some(storage) = s.storage.as_ref() {
-        if let Ok(Some(value)) = storage.load_canonical_registry() {
-            match serde_json::from_value::<crate::canonical::registry::CanonicalRegistry>(value) {
-                Ok(mut registry) => {
-                    registry.rebuild_indices();
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    registry.backfill_unassigned_triage(now);
-                    let count = registry.device_count();
-                    s.canonical_registry = registry;
-                    info!(target: "sys", "Loaded canonical registry: {} devices", count);
+    let authority_storage = s.storage.as_ref().cloned();
+    let mut loaded_authority_snapshot = false;
+    let mut loaded_legacy_authority = false;
+    s.authority_state_recovery_required = false;
+    if let Some(storage) = authority_storage.as_ref() {
+        let mut authority_snapshot_absent = false;
+        match storage.load_authority_state() {
+            Ok(Some(stored)) => match decode_authority_state(stored) {
+                Ok((canonical_registry, topology)) => {
+                    let device_count = canonical_registry.device_count();
+                    let room_count = topology.room_count();
+                    s.canonical_registry = canonical_registry;
+                    s.topology = topology;
+                    loaded_authority_snapshot = true;
+                    info!(
+                        target: "sys",
+                        "Loaded authoritative registry + topology snapshot: {} devices, {} rooms",
+                        device_count,
+                        room_count
+                    );
                 }
-                Err(e) => {
-                    warn!(target: "sys", "Failed to parse canonical registry (will start fresh): {}", e);
+                Err(error) => {
+                    s.authority_state_recovery_required = true;
+                    warn!(
+                        target: "sys",
+                        "Failed to decode authoritative registry + topology snapshot; refusing legacy mirror recovery: {}",
+                        error
+                    );
                 }
+            },
+            Ok(None) => authority_snapshot_absent = true,
+            Err(error) => {
+                s.authority_state_recovery_required = true;
+                warn!(
+                    target: "sys",
+                    "Failed to load authoritative registry + topology snapshot; refusing legacy mirror recovery: {}",
+                    error
+                );
             }
         }
-    }
 
-    if let Some(storage) = s.storage.as_ref() {
-        if let Ok(Some(value)) = storage.load_topology() {
-            match serde_json::from_value::<crate::topology::RoomTopologyStore>(value) {
-                Ok(mut topology) => {
-                    topology.rebuild_indices();
-                    let count = topology.room_count();
-                    s.topology = topology;
-                    info!(target: "sys", "Loaded topology: {} rooms", count);
+        if !loaded_authority_snapshot && authority_snapshot_absent {
+            // Legacy releases wrote these files independently, so a valid
+            // installation may legitimately contain only one half. Pair a
+            // present legacy half with the empty value for the missing domain,
+            // then validate and commit both together. Once the combined commit
+            // file has existed, any load/decode failure above is authoritative
+            // evidence of corruption and must never be "repaired" from
+            // independently refreshed, potentially mixed-generation mirrors.
+            let legacy_values = match storage.load_legacy_authority_state() {
+                Ok((Some(canonical_registry), Some(topology))) => {
+                    Some((canonical_registry, topology))
                 }
-                Err(e) => {
-                    warn!(target: "sys", "Failed to parse topology (will start fresh): {}", e);
+                Ok((None, None)) => None,
+                Ok((Some(canonical_registry), None)) => {
+                    match serde_json::to_value(crate::topology::RoomTopologyStore::new()) {
+                        Ok(topology) => Some((canonical_registry, topology)),
+                        Err(error) => {
+                            s.authority_state_recovery_required = true;
+                            warn!(
+                                target: "sys",
+                                "Failed to construct empty legacy topology for migration: {}",
+                                error
+                            );
+                            None
+                        }
+                    }
+                }
+                Ok((None, Some(topology))) => {
+                    match serde_json::to_value(crate::canonical::registry::CanonicalRegistry::new())
+                    {
+                        Ok(canonical_registry) => Some((canonical_registry, topology)),
+                        Err(error) => {
+                            s.authority_state_recovery_required = true;
+                            warn!(
+                                target: "sys",
+                                "Failed to construct empty legacy canonical registry for migration: {}",
+                                error
+                            );
+                            None
+                        }
+                    }
+                }
+                Err(error) => {
+                    s.authority_state_recovery_required = true;
+                    warn!(
+                        target: "sys",
+                        "Failed to load legacy authority state; refusing partial authority recovery: {}",
+                        error
+                    );
+                    None
+                }
+            };
+
+            if let Some((canonical_registry, topology)) = legacy_values {
+                match decode_authority_state(StoredAuthorityState::new(
+                    canonical_registry,
+                    topology,
+                )) {
+                    Ok((canonical_registry, topology)) => {
+                        let device_count = canonical_registry.device_count();
+                        let room_count = topology.room_count();
+                        s.canonical_registry = canonical_registry;
+                        s.topology = topology;
+                        loaded_legacy_authority = true;
+                        info!(
+                            target: "sys",
+                            "Loaded complete legacy authority state: {} devices, {} rooms",
+                            device_count,
+                            room_count
+                        );
+                    }
+                    Err(error) => {
+                        s.authority_state_recovery_required = true;
+                        warn!(
+                            target: "sys",
+                            "Failed to decode complete legacy authority state; refusing partial authority recovery: {}",
+                            error
+                        );
+                    }
                 }
             }
         }
@@ -1996,30 +2528,49 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
             topology_migration.filtered_light_device_ids,
             topology_migration.moved_light_devices
         );
+    }
 
-        if let Some(storage) = s.storage.as_ref() {
-            match serde_json::to_value(&s.canonical_registry) {
-                Ok(value) => {
-                    if let Err(e) = storage.save_canonical_registry(&value) {
-                        warn!(target: "sys", "Failed to persist migrated canonical registry: {}", e);
-                    }
-                }
-                Err(e) => warn!(
-                    target: "sys",
-                    "Failed to serialize migrated canonical registry: {}",
-                    e
-                ),
-            }
-
-            match serde_json::to_value(&s.topology) {
-                Ok(value) => {
-                    if let Err(e) = storage.save_topology(&value) {
-                        warn!(target: "sys", "Failed to persist migrated topology: {}", e);
-                    }
-                }
-                Err(e) => warn!(target: "sys", "Failed to serialize migrated topology: {}", e),
+    // A successful legacy load is migrated only after both files have been
+    // considered and any legacy light-room bindings have moved. Likewise, a
+    // migration of a valid combined snapshot is committed as one new record.
+    // If every source was absent/invalid, leave the evidence untouched rather
+    // than replacing it with defaults.
+    let should_persist_authority_migration =
+        loaded_legacy_authority || (loaded_authority_snapshot && topology_migration.changed());
+    if should_persist_authority_migration {
+        if let Some(storage) = authority_storage.as_ref() {
+            let migration_commit = (|| -> Result<()> {
+                let canonical_registry = serde_json::to_value(&s.canonical_registry)
+                    .context("Failed to serialize migrated canonical registry")?;
+                let topology = serde_json::to_value(&s.topology)
+                    .context("Failed to serialize migrated topology")?;
+                storage
+                    .save_authority_state(&StoredAuthorityState::new(canonical_registry, topology))
+                    .context("Failed to persist migrated authority state")
+            })();
+            if let Err(error) = migration_commit {
+                // The in-memory graph now reflects a migration that has no
+                // crash-atomic durable counterpart. Keep all external
+                // authority operations fenced until an explicit recovery path
+                // successfully replaces the combined snapshot.
+                s.authority_state_recovery_required = true;
+                warn!(target: "sys", "{}", error);
             }
         }
+    }
+
+    if s.hub_credentials
+        .values()
+        .any(|credentials| credentials.backup_restore_pending)
+    {
+        // The imported Hue ownership manifest may already be durable, but the
+        // rest of its backup graph was not committed. Preserve the staged
+        // credentials for release/retry while preventing automatic takeover.
+        s.authority_state_recovery_required = true;
+        warn!(
+            target: "sys",
+            "Interrupted Hue backup restore requires retry or factory reset before controller startup"
+        );
     }
 
     info!(target: "sys", "Persisted state loaded");
@@ -2199,6 +2750,8 @@ mod tests {
         saved_canonical_registry: Arc<Mutex<Vec<Value>>>,
         topology: Option<Value>,
         saved_topology: Arc<Mutex<Vec<Value>>>,
+        authority_state_absent: bool,
+        fail_save_authority_state: bool,
     }
 
     impl Storage for TestStorage {
@@ -2259,6 +2812,29 @@ mod tests {
 
         fn load_canonical_registry(&self) -> Result<Option<Value>> {
             Ok(self.canonical_registry.clone())
+        }
+
+        fn load_authority_state(&self) -> Result<Option<StoredAuthorityState>> {
+            if self.authority_state_absent {
+                return Ok(None);
+            }
+            let (Some(canonical_registry), Some(topology)) =
+                (self.canonical_registry.clone(), self.topology.clone())
+            else {
+                return Ok(None);
+            };
+            Ok(Some(StoredAuthorityState::new(
+                canonical_registry,
+                topology,
+            )))
+        }
+
+        fn save_authority_state(&self, state: &StoredAuthorityState) -> Result<()> {
+            if self.fail_save_authority_state {
+                anyhow::bail!("injected authority-state commit failure");
+            }
+            self.save_canonical_registry(&state.canonical_registry)?;
+            self.save_topology(&state.topology)
         }
 
         fn save_canonical_registry(&self, _data: &Value) -> Result<()> {
@@ -2403,6 +2979,13 @@ mod tests {
             .unwrap()
             .is_empty());
         storage.restore_integration_backup_files(&[]).unwrap();
+        assert!(storage.load_authority_state().unwrap().is_none());
+        storage
+            .save_authority_state(&StoredAuthorityState::new(
+                serde_json::json!({}),
+                serde_json::json!({}),
+            ))
+            .unwrap();
         assert!(storage.load_canonical_registry().unwrap().is_none());
         storage
             .save_canonical_registry(&serde_json::json!({}))
@@ -2797,6 +3380,9 @@ mod tests {
 
         let storage = TestStorage {
             canonical_registry: Some(serde_json::to_value(&registry).unwrap()),
+            topology: Some(
+                serde_json::to_value(crate::topology::RoomTopologyStore::new()).unwrap(),
+            ),
             ..Default::default()
         };
 
@@ -2806,6 +3392,7 @@ mod tests {
         };
         load_persisted_state(&mut app);
 
+        assert!(!app.authority_state_recovery_required);
         assert!(app.canonical_registry.get(&canonical_id).is_some());
         assert_eq!(
             app.canonical_registry.triage().pending_unassigned_count(),
@@ -2820,6 +3407,31 @@ mod tests {
             pending[0].canonical_id.as_deref(),
             Some(canonical_id.as_str())
         );
+    }
+
+    #[test]
+    fn failed_legacy_authority_migration_commit_keeps_controller_writes_fenced() {
+        let hub_key = HubKey::new(crate::hub::HubType::new("hue"), "bridge");
+        let mut topology = crate::topology::RoomTopologyStore::new();
+        topology.set_grouped_room_control_required(&hub_key, true);
+        let storage = TestStorage {
+            canonical_registry: Some(
+                serde_json::to_value(crate::canonical::registry::CanonicalRegistry::new()).unwrap(),
+            ),
+            topology: Some(serde_json::to_value(topology).unwrap()),
+            authority_state_absent: true,
+            fail_save_authority_state: true,
+            ..Default::default()
+        };
+        let mut app = crate::state::AppState {
+            storage: Some(Arc::new(storage)),
+            ..Default::default()
+        };
+
+        load_persisted_state(&mut app);
+
+        assert!(app.authority_state_recovery_required);
+        assert!(!app.external_controller_authority_is_ready(&hub_key));
     }
 
     #[test]
@@ -3040,6 +3652,66 @@ mod tests {
 
         fn cleanup(path: &std::path::Path) {
             let _ = std::fs::remove_dir_all(path);
+        }
+
+        fn valid_hue_ownership_backup_file() -> crate::bundle::BackupIntegrationFile {
+            crate::bundle::BackupIntegrationFile {
+                path: "hue/controller-ownership/by-bridge/bridge-1.json".to_string(),
+                content: serde_json::json!({
+                    "schema_version": 1,
+                    "phase": "active",
+                    "baseline": {
+                        "schema_version": 1,
+                        "capture_id": "capture-1",
+                        "bridge_id": "bridge-1",
+                        "v2_resources": {
+                            "bridge": {"data": []},
+                            "device": {"data": []},
+                            "light": {"data": []},
+                            "behavior_instance": {"data": []},
+                            "room": {"data": []},
+                            "zone": {"data": []},
+                            "scene": {"data": []},
+                            "smart_scene": {"data": []}
+                        },
+                        "v1_resources": {
+                            "rules": {},
+                            "schedules": {}
+                        }
+                    },
+                    "managed_rooms": {
+                        "rhythm-room": {
+                            "rhythm_room_id": "rhythm-room",
+                            "hue_room_id": "hue-room",
+                            "grouped_light_id": "grouped-light"
+                        }
+                    },
+                    "managed_scenes": {
+                        "rhythm-room:rhythm-scene": {
+                            "rhythm_room_id": "rhythm-room",
+                            "rhythm_scene_id": "rhythm-scene",
+                            "hue_room_id": "hue-room",
+                            "hue_scene_id": "hue-scene",
+                            "fingerprint": "fingerprint",
+                            "ephemeral": false
+                        }
+                    },
+                    "restored_resource_ids": {"room:old": "new"},
+                    "receipts": {
+                        "operation-1": {
+                            "operation_id": "operation-1",
+                            "api": "v2",
+                            "action": "delete",
+                            "resource_type": "room",
+                            "original_resource_id": "old",
+                            "status": "succeeded",
+                            "attempt": 1
+                        }
+                    }
+                })
+                .to_string(),
+                secret: true,
+            }
         }
 
         struct PairingDirectorySyncFailureStorage {
@@ -3594,6 +4266,341 @@ mod tests {
         }
 
         #[test]
+        fn authority_state_save_load_roundtrip_and_refreshes_legacy_mirrors() {
+            let (storage, path) = temp_storage();
+            let state = StoredAuthorityState::new(
+                serde_json::json!({"devices": {"combined-device": {"name": "Combined"}}}),
+                serde_json::json!({"rooms": {"combined-room": {"name": "Combined"}}}),
+            );
+
+            storage.save_authority_state(&state).unwrap();
+
+            assert_eq!(storage.load_authority_state().unwrap(), Some(state.clone()));
+            assert_eq!(
+                storage.load_canonical_registry().unwrap(),
+                Some(state.canonical_registry)
+            );
+            assert_eq!(storage.load_topology().unwrap(), Some(state.topology));
+            assert!(path.join("authority_state.json").exists());
+            cleanup(&path);
+        }
+
+        #[test]
+        fn pending_backup_restore_credentials_fence_startup_after_restart() {
+            let (storage, path) = temp_storage();
+            let mut credentials = HubCredentials::new(
+                crate::hub::HubType::HUE,
+                "bridge.local",
+                serde_json::json!({
+                    "username": "recovery-user",
+                    "bridge_id": "bridge-1"
+                }),
+            );
+            credentials.backup_restore_pending = true;
+            storage
+                .save_all_hub_credentials(std::slice::from_ref(&credentials))
+                .unwrap();
+
+            let storage = Arc::new(storage);
+            let mut app = crate::state::AppState {
+                storage: Some(storage),
+                ..Default::default()
+            };
+            load_persisted_state(&mut app);
+
+            let loaded = app
+                .hub_credentials
+                .values()
+                .next()
+                .expect("pending recovery credentials should load");
+            assert!(loaded.backup_restore_pending);
+            assert!(loaded.can_restore_external_controller());
+            assert!(!loaded.can_connect());
+            assert!(app.authority_state_recovery_required);
+            cleanup(&path);
+        }
+
+        #[test]
+        fn load_persisted_state_prefers_combined_authority_over_divergent_legacy_files() {
+            let (storage, path) = temp_storage();
+            let mut combined_topology = crate::topology::RoomTopologyStore::new();
+            combined_topology.create_room("Combined Room");
+            storage
+                .save_authority_state(&StoredAuthorityState::new(
+                    serde_json::to_value(crate::canonical::registry::CanonicalRegistry::new())
+                        .unwrap(),
+                    serde_json::to_value(&combined_topology).unwrap(),
+                ))
+                .unwrap();
+
+            let mut legacy_topology = crate::topology::RoomTopologyStore::new();
+            legacy_topology.create_room("Stale Legacy Room");
+            std::fs::write(
+                path.join("topology.json"),
+                serde_json::to_vec_pretty(&legacy_topology).unwrap(),
+            )
+            .unwrap();
+
+            let storage = Arc::new(storage);
+            let mut app = crate::state::AppState {
+                storage: Some(storage),
+                ..Default::default()
+            };
+            load_persisted_state(&mut app);
+
+            let names = app
+                .topology
+                .rooms()
+                .map(|room| room.name.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(names, vec!["Combined Room"]);
+            cleanup(&path);
+        }
+
+        #[test]
+        fn load_persisted_state_migrates_legacy_authority_files_to_combined_snapshot() {
+            let (storage, path) = temp_storage();
+            let registry = crate::canonical::registry::CanonicalRegistry::new();
+            let mut topology = crate::topology::RoomTopologyStore::new();
+            topology.create_room("Legacy Room");
+            storage
+                .save_canonical_registry(&serde_json::to_value(&registry).unwrap())
+                .unwrap();
+            storage
+                .save_topology(&serde_json::to_value(&topology).unwrap())
+                .unwrap();
+
+            let storage = Arc::new(storage);
+            let mut app = crate::state::AppState {
+                storage: Some(storage.clone()),
+                ..Default::default()
+            };
+            load_persisted_state(&mut app);
+
+            let combined = storage.load_authority_state().unwrap().unwrap();
+            let combined_topology: crate::topology::RoomTopologyStore =
+                serde_json::from_value(combined.topology).unwrap();
+            assert_eq!(
+                combined_topology
+                    .rooms()
+                    .map(|room| room.name.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["Legacy Room"]
+            );
+            cleanup(&path);
+        }
+
+        #[test]
+        fn load_persisted_state_fails_closed_when_combined_snapshot_is_corrupt() {
+            let (storage, path) = temp_storage();
+            let registry = crate::canonical::registry::CanonicalRegistry::new();
+            let mut topology = crate::topology::RoomTopologyStore::new();
+            topology.create_room("Stale Legacy Room");
+            storage
+                .save_canonical_registry(&serde_json::to_value(&registry).unwrap())
+                .unwrap();
+            storage
+                .save_topology(&serde_json::to_value(&topology).unwrap())
+                .unwrap();
+            std::fs::write(path.join("authority_state.json"), b"{").unwrap();
+
+            let storage = Arc::new(storage);
+            let mut app = crate::state::AppState {
+                storage: Some(storage.clone()),
+                ..Default::default()
+            };
+            load_persisted_state(&mut app);
+
+            assert_eq!(app.topology.room_count(), 0);
+            assert!(app.authority_state_recovery_required);
+            assert_eq!(
+                std::fs::read(path.join("authority_state.json")).unwrap(),
+                b"{"
+            );
+            assert!(path.join("canonical_registry.json").exists());
+            assert!(path.join("topology.json").exists());
+            cleanup(&path);
+        }
+
+        #[test]
+        fn load_persisted_state_fails_closed_when_combined_snapshot_cannot_decode() {
+            let (storage, path) = temp_storage();
+            let registry = crate::canonical::registry::CanonicalRegistry::new();
+            let mut legacy_topology = crate::topology::RoomTopologyStore::new();
+            legacy_topology.create_room("Stale Legacy Room");
+            storage
+                .save_canonical_registry(&serde_json::to_value(&registry).unwrap())
+                .unwrap();
+            storage
+                .save_topology(&serde_json::to_value(&legacy_topology).unwrap())
+                .unwrap();
+
+            let invalid_combined = StoredAuthorityState::new(
+                serde_json::json!({"not": "a canonical registry"}),
+                serde_json::to_value(crate::topology::RoomTopologyStore::new()).unwrap(),
+            );
+            let invalid_combined_bytes = serde_json::to_vec_pretty(&invalid_combined).unwrap();
+            std::fs::write(path.join("authority_state.json"), &invalid_combined_bytes).unwrap();
+
+            let storage = Arc::new(storage);
+            let mut app = crate::state::AppState {
+                storage: Some(storage),
+                ..Default::default()
+            };
+            load_persisted_state(&mut app);
+
+            assert_eq!(app.canonical_registry.device_count(), 0);
+            assert_eq!(app.topology.room_count(), 0);
+            assert!(app.authority_state_recovery_required);
+            assert_eq!(
+                std::fs::read(path.join("authority_state.json")).unwrap(),
+                invalid_combined_bytes
+            );
+            cleanup(&path);
+        }
+
+        #[test]
+        fn load_persisted_state_migrates_canonical_only_legacy_authority() {
+            let (storage, path) = temp_storage();
+            let mut registry = crate::canonical::registry::CanonicalRegistry::new();
+            let hub_key = HubKey::new(crate::hub::HubType::new("hue"), "192.0.2.10");
+            let identity = crate::canonical::identity::DiscoveredIdentity {
+                native_id: "legacy-light".to_string(),
+                room_id: None,
+                room_name: None,
+                name: "Legacy Light".to_string(),
+                device_type: rhythm_core::runtime::hub_registry::DeviceType::Light,
+                hardware_ids: vec![crate::canonical::identity::HardwareId::mac(
+                    "00:17:88:01:02:03:04:05",
+                )],
+                manufacturer: Some("Signify".to_string()),
+                model: Some("LCT001".to_string()),
+            };
+            let canonical_id = match registry.resolve(&identity, &hub_key, 1000) {
+                crate::canonical::registry::ResolveResult::Created { canonical_id } => canonical_id,
+                other => panic!("unexpected resolve result: {other:?}"),
+            };
+            storage
+                .save_canonical_registry(&serde_json::to_value(&registry).unwrap())
+                .unwrap();
+
+            let storage = Arc::new(storage);
+            let mut app = crate::state::AppState {
+                storage: Some(storage),
+                ..Default::default()
+            };
+            load_persisted_state(&mut app);
+
+            assert_eq!(app.canonical_registry.device_count(), 1);
+            assert!(app.canonical_registry.get(&canonical_id).is_some());
+            assert_eq!(app.topology.room_count(), 0);
+            assert!(!app.authority_state_recovery_required);
+            assert!(path.join("authority_state.json").exists());
+            assert!(path.join("canonical_registry.json").exists());
+            assert!(path.join("topology.json").exists());
+            cleanup(&path);
+        }
+
+        #[test]
+        fn load_persisted_state_migrates_topology_only_legacy_authority() {
+            let (storage, path) = temp_storage();
+            let mut topology = crate::topology::RoomTopologyStore::new();
+            topology.create_room("Unpaired Legacy Room");
+            storage
+                .save_topology(&serde_json::to_value(&topology).unwrap())
+                .unwrap();
+
+            let storage = Arc::new(storage);
+            let mut app = crate::state::AppState {
+                storage: Some(storage),
+                ..Default::default()
+            };
+            load_persisted_state(&mut app);
+
+            assert_eq!(app.canonical_registry.device_count(), 0);
+            assert_eq!(app.topology.room_count(), 1);
+            assert!(!app.authority_state_recovery_required);
+            assert!(path.join("authority_state.json").exists());
+            assert!(path.join("canonical_registry.json").exists());
+            assert!(path.join("topology.json").exists());
+            cleanup(&path);
+        }
+
+        #[test]
+        fn load_persisted_state_does_not_migrate_malformed_legacy_pair() {
+            let (storage, path) = temp_storage();
+            let registry = crate::canonical::registry::CanonicalRegistry::new();
+            storage
+                .save_canonical_registry(&serde_json::to_value(&registry).unwrap())
+                .unwrap();
+            std::fs::write(path.join("topology.json"), b"{").unwrap();
+
+            let storage = Arc::new(storage);
+            let mut app = crate::state::AppState {
+                storage: Some(storage),
+                ..Default::default()
+            };
+            load_persisted_state(&mut app);
+
+            assert_eq!(app.canonical_registry.device_count(), 0);
+            assert_eq!(app.topology.room_count(), 0);
+            assert!(app.authority_state_recovery_required);
+            assert!(!path.join("authority_state.json").exists());
+            assert_eq!(std::fs::read(path.join("topology.json")).unwrap(), b"{");
+            cleanup(&path);
+        }
+
+        #[test]
+        fn load_persisted_state_does_not_migrate_malformed_canonical_legacy_state() {
+            let (storage, path) = temp_storage();
+            let mut topology = crate::topology::RoomTopologyStore::new();
+            topology.create_room("Legacy Room");
+            std::fs::write(path.join("canonical_registry.json"), b"{").unwrap();
+            storage
+                .save_topology(&serde_json::to_value(&topology).unwrap())
+                .unwrap();
+
+            let storage = Arc::new(storage);
+            let mut app = crate::state::AppState {
+                storage: Some(storage),
+                ..Default::default()
+            };
+            load_persisted_state(&mut app);
+
+            assert_eq!(app.canonical_registry.device_count(), 0);
+            assert_eq!(app.topology.room_count(), 0);
+            assert!(app.authority_state_recovery_required);
+            assert!(!path.join("authority_state.json").exists());
+            assert_eq!(
+                std::fs::read(path.join("canonical_registry.json")).unwrap(),
+                b"{"
+            );
+            cleanup(&path);
+        }
+
+        #[test]
+        fn load_persisted_state_preserves_invalid_combined_snapshot_without_legacy_recovery() {
+            let (storage, path) = temp_storage();
+            std::fs::write(path.join("authority_state.json"), b"{").unwrap();
+            let storage = Arc::new(storage);
+            let mut app = crate::state::AppState {
+                storage: Some(storage),
+                ..Default::default()
+            };
+
+            load_persisted_state(&mut app);
+
+            assert!(app.authority_state_recovery_required);
+            assert_eq!(
+                std::fs::read(path.join("authority_state.json")).unwrap(),
+                b"{"
+            );
+            assert!(!path.join("canonical_registry.json").exists());
+            assert!(!path.join("topology.json").exists());
+            cleanup(&path);
+        }
+
+        #[test]
         fn motion_timers_save_load_roundtrip() {
             let (storage, path) = temp_storage();
             let timers = StoredMotionTimers {
@@ -3964,6 +4971,172 @@ mod tests {
         }
 
         #[test]
+        fn authority_rollback_handoff_retires_hue_routes_before_legacy_migration() {
+            let (storage, path) = temp_storage();
+            let hue_key = HubKey::new(crate::hub::HubType::new("hue"), "192.0.2.10");
+            let ha_key = HubKey::new(
+                crate::hub::HubType::new("home_assistant"),
+                "http://ha.local",
+            );
+
+            let mut registry = crate::canonical::registry::CanonicalRegistry::new();
+            let identity = crate::canonical::identity::DiscoveredIdentity {
+                native_id: "hue-light-1".to_string(),
+                room_id: None,
+                room_name: None,
+                name: "Counter Light".to_string(),
+                device_type: rhythm_core::runtime::hub_registry::DeviceType::Light,
+                hardware_ids: vec![crate::canonical::identity::HardwareId::mac(
+                    "00:17:88:01:02:03:04:06",
+                )],
+                manufacturer: Some("Signify".to_string()),
+                model: Some("LCT001".to_string()),
+            };
+            let canonical_id = match registry.resolve(&identity, &hue_key, 1000) {
+                crate::canonical::registry::ResolveResult::Created { canonical_id } => canonical_id,
+                other => panic!("unexpected resolve result: {other:?}"),
+            };
+            registry.get_mut(&canonical_id).unwrap().upsert_endpoint(
+                ha_key.clone(),
+                "light.counter".to_string(),
+                1001,
+                None,
+            );
+
+            let mut topology = crate::topology::RoomTopologyStore::new();
+            let room_id = topology.create_room("Kitchen");
+            assert!(topology.attach_device_user_override(&room_id, &canonical_id));
+            topology.set_grouped_room_control_required(&hue_key, true);
+            assert!(topology.upsert_managed_room_binding(
+                &room_id,
+                crate::topology::HubRoomBinding {
+                    hub_key: hue_key.clone(),
+                    hub_room_id: "obsolete-hue-room".to_string(),
+                    control_id: "obsolete-grouped-light".to_string(),
+                    light_device_ids: vec!["hue-light-1".to_string()],
+                },
+            ));
+            assert!(topology.upsert_room_binding(
+                &room_id,
+                crate::topology::HubRoomBinding {
+                    hub_key: ha_key.clone(),
+                    hub_room_id: "kitchen-area".to_string(),
+                    control_id: "kitchen-area".to_string(),
+                    light_device_ids: vec!["light.counter".to_string()],
+                },
+            ));
+            storage
+                .save_authority_state(&StoredAuthorityState::new(
+                    serde_json::to_value(&registry).unwrap(),
+                    serde_json::to_value(&topology).unwrap(),
+                ))
+                .unwrap();
+
+            // Prove the handoff refreshes divergent legacy mirrors from the
+            // combined source of truth instead of preserving a mixed generation.
+            let mut stale_topology = crate::topology::RoomTopologyStore::new();
+            stale_topology.create_room("Stale Mirror");
+            storage
+                .save_topology(&serde_json::to_value(stale_topology).unwrap())
+                .unwrap();
+            storage
+                .save_hub_registry_for(
+                    &hue_key,
+                    &serde_json::json!({"rooms": [{"id": "obsolete-hue-room"}]}),
+                )
+                .unwrap();
+
+            prepare_authority_state_for_binary_rollback(&path, std::slice::from_ref(&hue_key))
+                .unwrap();
+            prepare_authority_state_for_binary_rollback(&path, std::slice::from_ref(&hue_key))
+                .unwrap();
+
+            assert!(storage.load_authority_state().unwrap().is_none());
+            assert!(storage.load_hub_registry_for(&hue_key).unwrap().is_none());
+            let legacy_registry: crate::canonical::registry::CanonicalRegistry =
+                serde_json::from_value(storage.load_canonical_registry().unwrap().unwrap())
+                    .unwrap();
+            assert!(legacy_registry.get(&canonical_id).is_some());
+            let mut legacy_topology: crate::topology::RoomTopologyStore =
+                serde_json::from_value(storage.load_topology().unwrap().unwrap()).unwrap();
+            legacy_topology.rebuild_indices();
+            assert!(!legacy_topology.grouped_room_control_is_required(&hue_key));
+            assert!(!legacy_topology.references_hub_key(&hue_key));
+            let room = legacy_topology.get(&room_id).unwrap();
+            assert!(room
+                .hub_room_bindings
+                .iter()
+                .any(|binding| binding.hub_key == ha_key));
+            assert!(room
+                .hub_room_bindings
+                .iter()
+                .all(|binding| binding.hub_key != hue_key));
+
+            // Emulate the older binary changing a legacy mirror, then prove a
+            // later current binary consumes that change instead of reviving the
+            // retired combined generation.
+            legacy_topology.get_mut(&room_id).unwrap().name = "Downgraded Kitchen".to_string();
+            storage
+                .save_topology(&serde_json::to_value(&legacy_topology).unwrap())
+                .unwrap();
+            let storage = Arc::new(storage);
+            let mut app = crate::state::AppState {
+                storage: Some(storage.clone()),
+                ..Default::default()
+            };
+            load_persisted_state(&mut app);
+            assert_eq!(
+                app.topology.get(&room_id).unwrap().name,
+                "Downgraded Kitchen"
+            );
+            assert!(storage.load_authority_state().unwrap().is_some());
+            cleanup(&path);
+        }
+
+        #[test]
+        fn authority_rollback_handoff_preserves_corrupt_combined_evidence() {
+            let (storage, path) = temp_storage();
+            let hue_key = HubKey::new(crate::hub::HubType::new("hue"), "192.0.2.10");
+            storage
+                .save_authority_state(&StoredAuthorityState::new(
+                    serde_json::to_value(crate::canonical::registry::CanonicalRegistry::new())
+                        .unwrap(),
+                    serde_json::to_value(crate::topology::RoomTopologyStore::new()).unwrap(),
+                ))
+                .unwrap();
+            storage
+                .save_hub_registry_for(&hue_key, &serde_json::json!({"keep": true}))
+                .unwrap();
+            std::fs::write(path.join("authority_state.json"), b"{").unwrap();
+            let canonical_before = std::fs::read(path.join("canonical_registry.json")).unwrap();
+            let topology_before = std::fs::read(path.join("topology.json")).unwrap();
+
+            assert!(prepare_authority_state_for_binary_rollback(
+                &path,
+                std::slice::from_ref(&hue_key)
+            )
+            .is_err());
+
+            assert_eq!(
+                std::fs::read(path.join("authority_state.json")).unwrap(),
+                b"{"
+            );
+            assert_eq!(
+                std::fs::read(path.join("canonical_registry.json")).unwrap(),
+                canonical_before
+            );
+            assert_eq!(
+                std::fs::read(path.join("topology.json")).unwrap(),
+                topology_before
+            );
+            assert_eq!(
+                storage.load_hub_registry_for(&hue_key).unwrap(),
+                Some(serde_json::json!({"keep": true}))
+            );
+            cleanup(&path);
+        }
+
+        #[test]
         fn future_server_metadata_is_preserved_and_uses_separate_pairing_key() {
             let (storage, path) = temp_storage();
             storage
@@ -4168,12 +5341,10 @@ mod tests {
                 )
                 .unwrap();
             storage
-                .save_canonical_registry(
-                    &serde_json::json!({"devices": {}, "triage": {"entries": []}}),
-                )
-                .unwrap();
-            storage
-                .save_topology(&serde_json::json!({"rooms": {}}))
+                .save_authority_state(&StoredAuthorityState::new(
+                    serde_json::json!({"devices": {}, "triage": {"entries": []}}),
+                    serde_json::json!({"rooms": {}}),
+                ))
                 .unwrap();
             storage
                 .save_commissioning_wifi_credentials(&crate::provisioning::WifiCredentials {
@@ -4240,6 +5411,7 @@ mod tests {
             std::fs::write(path.join("cloudflared").join("hostname"), "host").unwrap();
             std::fs::create_dir_all(path.join("matter").join("captures")).unwrap();
             std::fs::create_dir_all(path.join("matter").join("chip")).unwrap();
+            std::fs::create_dir_all(path.join("hue")).unwrap();
             std::fs::create_dir_all(path.join("hue_ble")).unwrap();
             std::fs::create_dir_all(path.join("local_ble")).unwrap();
             std::fs::create_dir_all(path.join("aidot_ble")).unwrap();
@@ -4255,6 +5427,7 @@ mod tests {
                 "{}",
             )
             .unwrap();
+            std::fs::write(path.join("hue").join("controller-ownership-v1.json"), "{}").unwrap();
             std::fs::write(path.join("hue_ble").join("devices.json"), "{}").unwrap();
             std::fs::write(path.join("local_ble").join("devices.json"), "{}").unwrap();
             std::fs::write(path.join("aidot_ble").join("devices.json"), "{}").unwrap();
@@ -4273,6 +5446,7 @@ mod tests {
                 "pairing_history.json",
                 "pairing_metadata.json",
                 "hub_credentials.json",
+                "authority_state.json",
                 "canonical_registry.json",
                 "topology.json",
                 "commissioning_wifi.json",
@@ -4291,6 +5465,10 @@ mod tests {
             assert!(
                 !path.join("matter").exists(),
                 "integration runtime state should be removed"
+            );
+            assert!(
+                !path.join("hue").exists(),
+                "Hue controller recovery state should be removed after release"
             );
             assert!(
                 !path.join("hue_ble").exists(),
@@ -4335,6 +5513,12 @@ mod tests {
             std::fs::create_dir_all(path.join("matter").join("chip")).unwrap();
             std::fs::create_dir_all(path.join("matter").join("captures")).unwrap();
             std::fs::write(path.join("matter").join("fabric-identity.json"), "fabric").unwrap();
+            std::fs::create_dir_all(path.join("hue")).unwrap();
+            std::fs::write(
+                path.join("hue").join("controller-ownership-v1.json"),
+                "hue-baseline",
+            )
+            .unwrap();
             std::fs::write(
                 path.join("matter")
                     .join("chip")
@@ -4369,6 +5553,7 @@ mod tests {
                     .map(|file| (file.path.as_str(), file.content.as_str(), file.secret))
                     .collect::<Vec<_>>(),
                 vec![
+                    ("hue/controller-ownership-v1.json", "hue-baseline", true),
                     ("matter/chip/controller-storage.json", "controller", true),
                     ("matter/chip/devices.json", "devices", true),
                     ("matter/fabric-identity.json", "fabric", true),
@@ -4383,10 +5568,43 @@ mod tests {
         }
 
         #[test]
-        fn restore_integration_backup_files_replaces_matter_state() {
+        fn integration_state_file_round_trips_durably_and_rejects_escape() {
+            let (storage, path) = temp_storage();
+            let state_path = "hue/controller-ownership-v1.json";
+
+            assert_eq!(
+                storage.load_integration_state_file(state_path).unwrap(),
+                None
+            );
+            storage
+                .save_integration_state_file(state_path, r#"{"phase":"captured"}"#)
+                .unwrap();
+            assert_eq!(
+                storage.load_integration_state_file(state_path).unwrap(),
+                Some(r#"{"phase":"captured"}"#.to_string())
+            );
+            assert!(storage
+                .save_integration_state_file("hue/../credentials.json", "escape")
+                .is_err());
+            assert!(storage
+                .load_integration_state_file("unsupported/state.json")
+                .is_err());
+
+            storage.delete_integration_state_file(state_path).unwrap();
+            assert_eq!(
+                storage.load_integration_state_file(state_path).unwrap(),
+                None
+            );
+            cleanup(&path);
+        }
+
+        #[test]
+        fn restore_integration_backup_files_replaces_portable_integration_state() {
             let (storage, path) = temp_storage();
             std::fs::create_dir_all(path.join("matter").join("chip")).unwrap();
             std::fs::write(path.join("matter").join("stale.json"), "stale").unwrap();
+            std::fs::create_dir_all(path.join("hue")).unwrap();
+            std::fs::write(path.join("hue").join("stale.json"), "stale-hue").unwrap();
 
             storage
                 .restore_integration_backup_files(&[
@@ -4400,10 +5618,16 @@ mod tests {
                         content: "controller".to_string(),
                         secret: true,
                     },
+                    crate::bundle::BackupIntegrationFile {
+                        path: "hue/controller-ownership-v1.json".to_string(),
+                        content: "hue-baseline".to_string(),
+                        secret: true,
+                    },
                 ])
                 .unwrap();
 
             assert!(!path.join("matter").join("stale.json").exists());
+            assert!(!path.join("hue").join("stale.json").exists());
             assert_eq!(
                 std::fs::read_to_string(path.join("matter").join("fabric-identity.json")).unwrap(),
                 "fabric"
@@ -4417,9 +5641,28 @@ mod tests {
                 .unwrap(),
                 "controller"
             );
+            assert_eq!(
+                std::fs::read_to_string(path.join("hue").join("controller-ownership-v1.json"))
+                    .unwrap(),
+                "hue-baseline"
+            );
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(
+                    std::fs::metadata(path.join("hue").join("controller-ownership-v1.json"))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
+            }
 
             storage.restore_integration_backup_files(&[]).unwrap();
             assert!(!path.join("matter").exists());
+            assert!(!path.join("hue").exists());
 
             cleanup(&path);
         }
@@ -4445,9 +5688,53 @@ mod tests {
         }
 
         #[test]
+        fn hue_integration_backup_validation_rejects_malformed_nested_state() {
+            let (storage, path) = temp_storage();
+            let valid = valid_hue_ownership_backup_file();
+            storage
+                .validate_integration_backup_files(std::slice::from_ref(&valid))
+                .unwrap();
+
+            for (field, invalid_value) in [
+                ("managed_scenes", serde_json::json!([])),
+                (
+                    "receipts",
+                    serde_json::json!({
+                        "operation-1": {
+                            "operation_id": "operation-1",
+                            "api": "v2",
+                            "action": "delete",
+                            "resource_type": "room",
+                            "original_resource_id": "old",
+                            "status": "not-a-status",
+                            "attempt": 1
+                        }
+                    }),
+                ),
+            ] {
+                let mut content: serde_json::Value = serde_json::from_str(&valid.content).unwrap();
+                content[field] = invalid_value;
+                let invalid = crate::bundle::BackupIntegrationFile {
+                    content: content.to_string(),
+                    ..valid.clone()
+                };
+                let error = storage
+                    .validate_integration_backup_files(&[invalid])
+                    .unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("invalid Hue controller ownership manifest"),
+                    "unexpected validation error for {field}: {error:#}"
+                );
+            }
+            cleanup(&path);
+        }
+
+        #[test]
         fn restore_integration_backup_files_rejects_empty_absolute_and_unsupported_paths() {
             let (storage, path) = temp_storage();
-            for candidate in ["", "/matter/fabric.json", "hue/fabric.json"] {
+            for candidate in ["", "/matter/fabric.json", "hue_ble/fabric.json"] {
                 let error = storage
                     .restore_integration_backup_files(&[crate::bundle::BackupIntegrationFile {
                         path: candidate.to_string(),

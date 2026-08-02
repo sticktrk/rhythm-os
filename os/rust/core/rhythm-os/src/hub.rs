@@ -371,6 +371,12 @@ pub struct HubCredentials {
     /// until fresh credentials are provided again.
     #[serde(default)]
     pub secrets_redacted: bool,
+    /// A full backup restore durably stages Hue recovery credentials before
+    /// publishing the matching ownership manifest. While this marker is set,
+    /// the credentials may restore/finalize that controller epoch but must not
+    /// auto-connect and acquire authority from a partially imported graph.
+    #[serde(default)]
+    pub backup_restore_pending: bool,
 }
 
 impl HubCredentials {
@@ -381,6 +387,12 @@ impl HubCredentials {
 
     /// Check whether these credentials are usable for a live hub connection.
     pub fn can_connect(&self) -> bool {
+        self.can_restore_external_controller() && !self.backup_restore_pending
+    }
+
+    /// Check whether these credentials retain enough secret material to
+    /// restore an external controller during a fail-closed lifecycle retry.
+    pub fn can_restore_external_controller(&self) -> bool {
         self.is_configured() && !self.secrets_redacted
     }
 
@@ -391,6 +403,7 @@ impl HubCredentials {
             address: address.to_string(),
             data,
             secrets_redacted: false,
+            backup_restore_pending: false,
         }
     }
 
@@ -401,6 +414,7 @@ impl HubCredentials {
             address: address.to_string(),
             data: serde_json::Value::Null,
             secrets_redacted: true,
+            backup_restore_pending: false,
         }
     }
 
@@ -471,6 +485,18 @@ impl Drop for ActiveHub {
 pub trait HubProvider: Send + Sync {
     fn hub_type(&self) -> HubType;
 
+    /// Validate secret-bearing backup credentials against their physical
+    /// controller before the current installation crosses a destructive
+    /// restore boundary. The default fails closed; commands invoke this only
+    /// when a backup carries external-controller recovery material.
+    fn validate_backup_credentials(
+        &self,
+        _address: &str,
+        _credentials: &serde_json::Value,
+    ) -> Result<()> {
+        anyhow::bail!("Hub provider does not support backup credential validation")
+    }
+
     /// Store credentials and initialize the hub runtime.
     fn configure(&self, address: &str, credentials_json: &str, state: &SharedState) -> Result<()>;
 }
@@ -504,6 +530,9 @@ pub type HubDeviceRoomAssignmentRollback = Box<dyn FnOnce() -> Result<()> + Send
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalControllerReleaseReason {
     UserDisconnect,
+    FactoryReset,
+    BackupRestore,
+    BinaryRollback,
 }
 
 /// Whether an integration changed its authoritative native room membership.

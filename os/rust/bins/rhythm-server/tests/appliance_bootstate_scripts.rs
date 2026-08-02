@@ -125,6 +125,27 @@ fn run_bootstate(root: &Path, action: &str) -> Output {
 }
 
 fn run_bootstate_with_data_dir(root: &Path, action: &str, data_dir: PathBuf) -> Output {
+    let wifi_init = root.join("wifi-init");
+    let network_ready_probe = root.join("network-ready-probe");
+    let network_ready_file = root.join("network-ready");
+    if !wifi_init.exists() {
+        write_executable(
+            &wifi_init,
+            r#"#!/bin/sh
+[ "${1:-}" = "start" ] || exit 0
+: > "$RHYTHM_TEST_NETWORK_READY_FILE"
+"#,
+        );
+    }
+    if !network_ready_probe.exists() {
+        write_executable(
+            &network_ready_probe,
+            r#"#!/bin/sh
+[ -e "$RHYTHM_TEST_NETWORK_READY_FILE" ]
+"#,
+        );
+    }
+
     Command::new("sh")
         .arg(bootstate_script())
         .arg(action)
@@ -136,6 +157,11 @@ fn run_bootstate_with_data_dir(root: &Path, action: &str, data_dir: PathBuf) -> 
         )
         .env("RHYTHM_DATA_DIR", data_dir)
         .env("RHYTHM_SERVER_BIN", root.join("rhythm-server"))
+        .env("RHYTHM_BOOTSTATE_WIFI_INIT", wifi_init)
+        .env("RHYTHM_BOOTSTATE_NETWORK_READY_PROBE", network_ready_probe)
+        .env("RHYTHM_BOOTSTATE_NETWORK_WAIT_ATTEMPTS", "3")
+        .env("RHYTHM_BOOTSTATE_NETWORK_WAIT_SLEEP_SECS", "0")
+        .env("RHYTHM_TEST_NETWORK_READY_FILE", network_ready_file)
         .env("RHYTHM_CMDLINE_FILE", root.join("boot/cmdline.txt"))
         .env("RHYTHM_PROC_CMDLINE", root.join("proc_cmdline"))
         .env("RHYTHM_BOOTSTATE_REBOOT_DRY_RUN", "1")
@@ -425,6 +451,178 @@ fn bootstate_scrub_failure_does_not_switch_slots_or_clear_pending_state() {
     assert_eq!(bootstate_value(&body, "RHYTHM_BOOT_STATUS"), Some("idle"));
     assert!(!root.join("data/local_ble").exists());
     assert!(rollback_required_latch(&root).exists());
+}
+
+#[test]
+fn bootstate_hue_restore_failure_does_not_switch_slots() {
+    let root = unique_dir("fail-closed-hue-restore");
+    let server = root.join("rhythm-server");
+    write_executable(
+        &server,
+        r#"#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+    echo "rhythm-server 0.4.2"
+    exit 0
+fi
+for argument in "$@"; do
+    if [ "$argument" = "--restore-hue-before-rollback" ]; then
+        exit 9
+    fi
+done
+exit 0
+"#,
+    );
+    fs::write(
+        root.join("boot/cmdline.txt"),
+        "console=tty1 root=/dev/mmcblk0p3 rootwait rw\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("proc_cmdline"),
+        "console=tty1 root=/dev/mmcblk0p3 rootwait rw\n",
+    )
+    .unwrap();
+    write_bootstate(&root, &pending_bootstate_body("booting"));
+
+    let output = run_bootstate(&root, "fail");
+    assert!(!output.status.success());
+    assert_pending_rollback_required(&root);
+    let cmdline = fs::read_to_string(root.join("boot/cmdline.txt")).unwrap();
+    assert!(cmdline.contains("root=/dev/mmcblk0p3"));
+    assert!(!cmdline.contains("root=/dev/mmcblk0p2"));
+}
+
+#[test]
+fn bootstate_brings_network_up_and_waits_before_hue_restore() {
+    let root = unique_dir("hue-restore-network-order");
+    let events = root.join("rollback-events");
+    let first_probe = root.join("first-network-probe");
+    write_executable(
+        &root.join("wifi-init"),
+        &format!(
+            r#"#!/bin/sh
+[ "${{1:-}}" = "start" ] || exit 1
+printf 'wifi-start\n' >> '{}'
+"#,
+            events.display()
+        ),
+    );
+    write_executable(
+        &root.join("network-ready-probe"),
+        &format!(
+            r#"#!/bin/sh
+if [ ! -e '{}' ]; then
+    : > '{}'
+    printf 'network-wait\n' >> '{}'
+    exit 1
+fi
+printf 'network-ready\n' >> '{}'
+"#,
+            first_probe.display(),
+            first_probe.display(),
+            events.display(),
+            events.display()
+        ),
+    );
+    write_executable(
+        &root.join("rhythm-server"),
+        &format!(
+            r#"#!/bin/sh
+if [ "${{1:-}}" = "--version" ]; then
+    echo "rhythm-server 0.4.2"
+    exit 0
+fi
+for argument in "$@"; do
+    if [ "$argument" = "--restore-hue-before-rollback" ]; then
+        printf 'hue-restore\n' >> '{}'
+        exit 0
+    fi
+done
+exit 1
+"#,
+            events.display()
+        ),
+    );
+    fs::write(
+        root.join("boot/cmdline.txt"),
+        "console=tty1 root=/dev/mmcblk0p3 rootwait rw\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("proc_cmdline"),
+        "console=tty1 root=/dev/mmcblk0p3 rootwait rw\n",
+    )
+    .unwrap();
+    write_bootstate(&root, &pending_bootstate_body("booting"));
+
+    assert_success(run_bootstate(&root, "fail"));
+    assert_eq!(
+        fs::read_to_string(events).unwrap(),
+        "wifi-start\nnetwork-wait\nnetwork-ready\nhue-restore\n"
+    );
+    let cmdline = fs::read_to_string(root.join("boot/cmdline.txt")).unwrap();
+    assert!(cmdline.contains("root=/dev/mmcblk0p2"));
+}
+
+#[test]
+fn bootstate_network_timeout_attempts_hue_restore_after_bound_and_stays_fail_closed() {
+    let root = unique_dir("hue-restore-network-timeout");
+    let rollback_events = root.join("rollback-events");
+    write_executable(
+        &root.join("wifi-init"),
+        r#"#!/bin/sh
+[ "${1:-}" = "start" ]
+"#,
+    );
+    write_executable(
+        &root.join("network-ready-probe"),
+        &format!(
+            r#"#!/bin/sh
+printf 'probe\n' >> '{}'
+exit 1
+"#,
+            rollback_events.display()
+        ),
+    );
+    write_executable(
+        &root.join("rhythm-server"),
+        &format!(
+            r#"#!/bin/sh
+if [ "${{1:-}}" = "--version" ]; then
+    echo "rhythm-server 0.4.2"
+    exit 0
+fi
+for argument in "$@"; do
+    if [ "$argument" = "--restore-hue-before-rollback" ]; then
+        printf 'hue-restore\n' >> '{}'
+        exit 9
+    fi
+done
+exit 1
+"#,
+            rollback_events.display()
+        ),
+    );
+    fs::write(
+        root.join("boot/cmdline.txt"),
+        "console=tty1 root=/dev/mmcblk0p3 rootwait rw\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("proc_cmdline"),
+        "console=tty1 root=/dev/mmcblk0p3 rootwait rw\n",
+    )
+    .unwrap();
+    write_bootstate(&root, &pending_bootstate_body("booting"));
+
+    let output = run_bootstate(&root, "fail");
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("network did not become ready"));
+    assert_eq!(
+        fs::read_to_string(rollback_events).unwrap(),
+        "probe\nprobe\nprobe\nhue-restore\n"
+    );
+    assert_pending_rollback_required(&root);
 }
 
 #[test]

@@ -553,9 +553,7 @@ fn register_canonical_identity(state: &SharedState, device: &LocalBleDevice) -> 
         .find_by_native_id(&key, &device.id)
         .map(|device| device.id.clone())
         .ok_or_else(|| anyhow::anyhow!("canonical local Bluetooth endpoint was not registered"))?;
-    if let Some(storage) = state.storage.as_ref() {
-        storage.save_canonical_registry(&serde_json::to_value(&state.canonical_registry)?)?;
-    }
+    rhythm_os::commands::save_authority_state(&state)?;
     Ok(canonical_id)
 }
 

@@ -490,9 +490,9 @@ pub struct AppState {
     pub topology_group_sync_in_progress: bool,
     /// Topology-group sync request waiting for the worker to process it.
     pub topology_group_sync_pending: bool,
-    /// External controller writes are fenced while authority persistence needs
-    /// explicit recovery. The combined-file rollout supplies the production
-    /// loader for this flag in the later layer.
+    /// An existing combined canonical-registry + topology commit could not be
+    /// loaded. External authoritative writes and replacement persistence stay
+    /// fenced until explicit recovery replaces or removes that evidence.
     pub authority_state_recovery_required: bool,
     /// Serializes topology changes whose commit depends on synchronous writes
     /// to an external grouped-room controller. The ordinary AppState mutex is

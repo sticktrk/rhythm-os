@@ -10,7 +10,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use log::warn;
 
 use crate::hub_state::HueHubData;
@@ -168,6 +168,148 @@ pub fn create_hue_controller(
     Ok(std::sync::Arc::new(controller))
 }
 
+fn finalize_restored_bridges_after_local_handoff<F>(
+    storage: &dyn Storage,
+    restored_bridge_ids: &BTreeSet<String>,
+    local_handoff: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    local_handoff()?;
+    for bridge_id in restored_bridge_ids {
+        crate::ownership::finalize_released_control(storage, bridge_id)?;
+    }
+    Ok(())
+}
+
+/// Restore every bridge still under Rhythm authority before an older binary
+/// replaces this process. A remaining ownership manifest is a hard rollback
+/// blocker because the previous binary cannot safely recover a cleared bridge.
+pub fn restore_authoritative_bridges_before_binary_rollback(
+    data_dir: &std::path::Path,
+) -> Result<()> {
+    let data_dir = data_dir
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Rhythm data directory is not UTF-8"))?;
+    let storage = rhythm_os::storage::FileStorage::new(data_dir)?;
+    let ownership_manifest_count = || -> Result<usize> {
+        Ok(storage
+            .load_integration_backup_files(true)?
+            .into_iter()
+            .filter(|file| {
+                file.path.starts_with("hue/controller-ownership/by-bridge/")
+                    && file.path.ends_with(".json")
+            })
+            .count())
+    };
+
+    let ownership_manifest_files = storage
+        .load_integration_backup_files(true)?
+        .into_iter()
+        .filter(|file| {
+            file.path.starts_with("hue/controller-ownership/by-bridge/")
+                && file.path.ends_with(".json")
+        })
+        .collect::<Vec<_>>();
+    let initial_manifest_count = ownership_manifest_files.len();
+    let all_credentials = storage
+        .load_all_hub_credentials()?
+        .into_iter()
+        .filter(|credentials| {
+            credentials
+                .hub_type
+                .as_ref()
+                .is_some_and(|hub_type| hub_type.as_str() == HubType::HUE)
+        })
+        .collect::<Vec<_>>();
+    let hue_hub_keys = all_credentials
+        .iter()
+        .filter_map(HubCredentials::hub_key)
+        .collect::<Vec<_>>();
+    let mut restored_bridge_ids = BTreeSet::new();
+
+    // Credential deletion is durably committed before a verified Restored
+    // manifest is finalized. If a crash lands in that window, the manifest is
+    // safe local completion evidence and must not strand a failed candidate
+    // on the new binary merely because no credential remains to re-verify it.
+    for file in &ownership_manifest_files {
+        let Ok(candidate) =
+            serde_json::from_str::<crate::ownership::HueControllerOwnership>(&file.content)
+        else {
+            continue;
+        };
+        let bridge_id = candidate.baseline().bridge_id();
+        let has_matching_credential = all_credentials
+            .iter()
+            .any(|credentials| credentials.get_str("bridge_id") == Some(bridge_id));
+        if !has_matching_credential
+            && candidate.phase == crate::ownership::HueOwnershipPhase::Restored
+        {
+            restored_bridge_ids.insert(bridge_id.to_string());
+        }
+    }
+
+    for credentials in all_credentials
+        .into_iter()
+        .filter(HubCredentials::can_restore_external_controller)
+    {
+        let Some(username) = crate::provider::hue_username(&credentials) else {
+            continue;
+        };
+        let Ok(transport) = ReqwestHueTransport::new(&credentials.address) else {
+            continue;
+        };
+        let Ok(bridge_id) = crate::ownership::connected_hue_bridge_id(&transport, username) else {
+            continue;
+        };
+        let operation_lock = crate::ownership::controller_operation_lock(&bridge_id);
+        let Ok(_operation) = operation_lock.lock() else {
+            continue;
+        };
+        let key = HubKey::new(HubType::new(HubType::HUE), &credentials.address);
+        let ownership = match crate::ownership::release_authoritative_control(
+            &storage, &key, &transport, username,
+        ) {
+            Ok(ownership) => ownership,
+            Err(_) => continue,
+        };
+        if let Some(ownership) = ownership {
+            if ownership.phase == crate::ownership::HueOwnershipPhase::Restored {
+                restored_bridge_ids.insert(ownership.baseline().bridge_id().to_string());
+            }
+        }
+    }
+
+    if restored_bridge_ids.len() != initial_manifest_count {
+        anyhow::bail!(
+            "Binary rollback is blocked: {} Hue controller recovery manifest(s) could not be restored",
+            initial_manifest_count.saturating_sub(restored_bridge_ids.len())
+        );
+    }
+
+    // Replacement Hue room/group IDs cannot be made stable across restore.
+    // Commit matching legacy authority mirrors without those stale routes and
+    // retire the combined snapshot before deleting the recovery manifests.
+    // If this local durability step fails, every restored manifest remains a
+    // retryable fence and the older binary is never started.
+    finalize_restored_bridges_after_local_handoff(&storage, &restored_bridge_ids, || {
+        rhythm_os::storage::prepare_authority_state_for_binary_rollback(
+            std::path::Path::new(data_dir),
+            &hue_hub_keys,
+        )
+    })?;
+
+    let remaining_manifest_count = ownership_manifest_count()?;
+    if remaining_manifest_count != 0 {
+        anyhow::bail!(
+            "Binary rollback is blocked: {} restored Hue controller recovery manifest(s) could not be finalized",
+            remaining_manifest_count
+        );
+    }
+    Ok(())
+}
+
 // ============================================================================
 // Hub provider
 // ============================================================================
@@ -180,6 +322,28 @@ pub fn get_hub_provider() -> &'static dyn HubProvider {
 
 /// Hub provider for Hue bridges using reqwest transport.
 pub struct ReqwestHueHubProvider;
+
+fn validate_hue_backup_credentials<H: HueTransport + ?Sized>(
+    transport: &H,
+    credentials: &serde_json::Value,
+) -> Result<()> {
+    let username = credentials
+        .get("username")
+        .and_then(serde_json::Value::as_str)
+        .filter(|username| !username.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Backup Hue recovery credentials are incomplete"))?;
+    let expected_bridge_id = credentials
+        .get("bridge_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|bridge_id| !bridge_id.trim().is_empty())
+        .ok_or_else(|| anyhow::anyhow!("Backup Hue recovery identity is missing"))?;
+    let connected_bridge_id = crate::ownership::connected_hue_bridge_id(transport, username)
+        .context("Backup Hue bridge could not be authenticated before restore")?;
+    if connected_bridge_id != expected_bridge_id {
+        anyhow::bail!("Backup Hue credentials identify a different physical bridge");
+    }
+    Ok(())
+}
 
 #[derive(serde::Deserialize)]
 struct SubmittedHueCredentials {
@@ -202,6 +366,15 @@ fn preflight_authenticated_hue_configuration(
     connected_bridge_id: &str,
 ) -> Result<Option<HubKey>> {
     let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    if state
+        .hub_credentials
+        .values()
+        .any(|credentials| credentials.backup_restore_pending)
+    {
+        anyhow::bail!(
+            "Hue backup restore is incomplete; retry backup restore or factory reset before configuration"
+        );
+    }
     let pending_migration_old_key = state
         .hub_credentials
         .get(key)
@@ -650,6 +823,15 @@ where
 impl HubProvider for ReqwestHueHubProvider {
     fn hub_type(&self) -> HubType {
         HubType::new(HubType::HUE)
+    }
+
+    fn validate_backup_credentials(
+        &self,
+        address: &str,
+        credentials: &serde_json::Value,
+    ) -> Result<()> {
+        let transport = ReqwestHueTransport::new(address)?;
+        validate_hue_backup_credentials(&transport, credentials)
     }
 
     fn configure(&self, address: &str, credentials_json: &str, state: &SharedState) -> Result<()> {
@@ -2062,10 +2244,115 @@ mod tests {
     };
     use rhythm_os::hub::HubCredentials;
     use rhythm_os::state::AppState;
-    use rhythm_os::storage::FileStorage;
+    use rhythm_os::storage::{
+        FileStorage, StoredAuthorityState, StoredLightProfiles, StoredLocation, StoredSettings,
+    };
 
     use crate::provider::hue_credentials;
     use crate::test_support::SpyHueTransport;
+
+    struct ToggleAuthorityStorage {
+        inner: FileStorage,
+        fail_authority_save: AtomicBool,
+    }
+
+    impl ToggleAuthorityStorage {
+        fn new(path: &std::path::Path) -> Self {
+            Self {
+                inner: FileStorage::new(path.to_str().unwrap()).unwrap(),
+                fail_authority_save: AtomicBool::new(false),
+            }
+        }
+
+        fn set_fail_authority_save(&self, fail: bool) {
+            self.fail_authority_save.store(fail, Ordering::SeqCst);
+        }
+    }
+
+    impl Storage for ToggleAuthorityStorage {
+        fn load_rooms(&self) -> Result<rhythm_core::room::RoomManager> {
+            self.inner.load_rooms()
+        }
+
+        fn save_rooms(&self, rooms: &rhythm_core::room::RoomManager) -> Result<()> {
+            self.inner.save_rooms(rooms)
+        }
+
+        fn load_light_profiles(&self) -> Result<StoredLightProfiles> {
+            self.inner.load_light_profiles()
+        }
+
+        fn save_light_profiles(&self, config: &StoredLightProfiles) -> Result<()> {
+            self.inner.save_light_profiles(config)
+        }
+
+        fn load_location(&self) -> Result<StoredLocation> {
+            self.inner.load_location()
+        }
+
+        fn save_location(&self, location: &StoredLocation) -> Result<()> {
+            self.inner.save_location(location)
+        }
+
+        fn load_settings(&self) -> Result<StoredSettings> {
+            self.inner.load_settings()
+        }
+
+        fn save_settings(&self, settings: &StoredSettings) -> Result<()> {
+            self.inner.save_settings(settings)
+        }
+
+        fn load_all_hub_credentials(&self) -> Result<Vec<HubCredentials>> {
+            self.inner.load_all_hub_credentials()
+        }
+
+        fn save_all_hub_credentials(&self, credentials: &[HubCredentials]) -> Result<()> {
+            self.inner.save_all_hub_credentials(credentials)
+        }
+
+        fn load_hub_registry_for(&self, key: &HubKey) -> Result<Option<serde_json::Value>> {
+            self.inner.load_hub_registry_for(key)
+        }
+
+        fn save_hub_registry_for(&self, key: &HubKey, data: &serde_json::Value) -> Result<()> {
+            self.inner.save_hub_registry_for(key, data)
+        }
+
+        fn load_authority_state(&self) -> Result<Option<StoredAuthorityState>> {
+            self.inner.load_authority_state()
+        }
+
+        fn save_authority_state(&self, authority: &StoredAuthorityState) -> Result<()> {
+            if self.fail_authority_save.load(Ordering::SeqCst) {
+                anyhow::bail!("injected authority-state commit failure");
+            }
+            self.inner.save_authority_state(authority)
+        }
+    }
+
+    #[test]
+    fn backup_credentials_are_bound_to_the_live_physical_bridge() {
+        let transport = SpyHueTransport::new();
+        transport.set_resource_response(
+            "bridge",
+            serde_json::json!({"data": [{"id": "bridge-1"}], "errors": []}),
+        );
+
+        validate_hue_backup_credentials(
+            &transport,
+            &serde_json::json!({"username": "user-1", "bridge_id": "bridge-1"}),
+        )
+        .unwrap();
+
+        let error = validate_hue_backup_credentials(
+            &transport,
+            &serde_json::json!({"username": "user-1", "bridge_id": "bridge-2"}),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("different physical bridge"));
+        assert!(!error.to_string().contains("bridge-1"));
+        assert!(!error.to_string().contains("bridge-2"));
+    }
 
     #[test]
     fn same_key_credential_rotation_requires_the_authenticated_bridge_identity() {
@@ -2351,6 +2638,110 @@ mod tests {
             .unwrap();
 
         drop(state);
+        drop(storage);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn restored_manifest_is_finalized_only_after_local_rollback_handoff() {
+        static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "rhythm-hue-rollback-handoff-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let storage = FileStorage::new(path.to_str().unwrap()).unwrap();
+        let manifest = serde_json::json!({
+            "schema_version": crate::ownership::HUE_CONTROLLER_OWNERSHIP_SCHEMA_VERSION,
+            "phase": "restored",
+            "baseline": {
+                "schema_version": crate::ownership::HUE_CONTROLLER_OWNERSHIP_SCHEMA_VERSION,
+                "capture_id": "capture-rollback",
+                "bridge_id": "bridge-rollback",
+                "v2_resources": {},
+                "v1_resources": {}
+            },
+            "managed_rooms": {},
+            "managed_scenes": {},
+            "restored_resource_ids": {
+                "room:old-room": "replacement-room",
+                "scene:old-scene": "replacement-scene"
+            },
+            "receipts": {}
+        });
+        storage
+            .save_integration_state_file(
+                &crate::ownership::hue_controller_ownership_path("bridge-rollback").unwrap(),
+                &serde_json::to_string(&manifest).unwrap(),
+            )
+            .unwrap();
+        let bridge_ids = BTreeSet::from(["bridge-rollback".to_string()]);
+
+        let error = finalize_restored_bridges_after_local_handoff(&storage, &bridge_ids, || {
+            anyhow::bail!("local authority handoff failed")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("local authority handoff failed"));
+        assert_eq!(
+            crate::ownership::load_controller_ownership(&storage, "bridge-rollback")
+                .unwrap()
+                .unwrap()
+                .phase,
+            crate::ownership::HueOwnershipPhase::Restored
+        );
+
+        finalize_restored_bridges_after_local_handoff(&storage, &bridge_ids, || Ok(())).unwrap();
+        assert!(
+            crate::ownership::load_controller_ownership(&storage, "bridge-rollback")
+                .unwrap()
+                .is_none()
+        );
+
+        drop(storage);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn binary_rollback_finalizes_credentialless_restored_manifest_after_restart() {
+        static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "rhythm-hue-credentialless-rollback-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let storage = FileStorage::new(path.to_str().unwrap()).unwrap();
+        let manifest = serde_json::json!({
+            "schema_version": crate::ownership::HUE_CONTROLLER_OWNERSHIP_SCHEMA_VERSION,
+            "phase": "restored",
+            "baseline": {
+                "schema_version": crate::ownership::HUE_CONTROLLER_OWNERSHIP_SCHEMA_VERSION,
+                "capture_id": "capture-credentialless-rollback",
+                "bridge_id": "bridge-credentialless-rollback",
+                "v2_resources": {},
+                "v1_resources": {}
+            },
+            "managed_rooms": {},
+            "managed_scenes": {},
+            "restored_resource_ids": {},
+            "receipts": {}
+        });
+        storage
+            .save_integration_state_file(
+                &crate::ownership::hue_controller_ownership_path("bridge-credentialless-rollback")
+                    .unwrap(),
+                &serde_json::to_string(&manifest).unwrap(),
+            )
+            .unwrap();
+        assert!(storage.load_all_hub_credentials().unwrap().is_empty());
+
+        restore_authoritative_bridges_before_binary_rollback(&path).unwrap();
+
+        assert!(crate::ownership::load_controller_ownership(
+            &storage,
+            "bridge-credentialless-rollback"
+        )
+        .unwrap()
+        .is_none());
         drop(storage);
         let _ = std::fs::remove_dir_all(path);
     }
@@ -2949,11 +3340,8 @@ mod tests {
             durable_credentials[0].get_str(HUE_ADDRESS_MIGRATION_FROM_FIELD),
             None
         );
-        let durable_authority_json = format!(
-            "{}{}",
-            storage.load_canonical_registry().unwrap().unwrap(),
-            storage.load_topology().unwrap().unwrap()
-        );
+        let durable_authority = storage.load_authority_state().unwrap().unwrap();
+        let durable_authority_json = serde_json::to_string(&durable_authority).unwrap();
         assert!(durable_authority_json.contains(&new_key.address));
         assert!(!durable_authority_json.contains(&old_key.address));
         assert_eq!(
@@ -2962,6 +3350,109 @@ mod tests {
                 .unwrap(),
             Some(ownership_json)
         );
+
+        drop(state);
+        drop(storage);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn authority_commit_failure_rolls_back_graph_and_configure_resumes_marker() {
+        static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "rhythm-hue-address-migration-rollback-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let storage = Arc::new(ToggleAuthorityStorage::new(&path));
+        let state = shared_state();
+        let old_key = hue_key("192.0.2.20");
+        let new_key = hue_key("192.0.2.21");
+        let mut old_credentials = hue_credentials(&old_key.address, "old-user");
+        old_credentials.data["bridge_id"] = serde_json::json!("bridge-resume");
+        storage
+            .save_all_hub_credentials(&[old_credentials.clone()])
+            .unwrap();
+        let old_hub = active_hue_hub(old_key.clone());
+        let old_shutdown = old_hub.shutdown.clone();
+        {
+            let mut state = state.lock().unwrap();
+            state.storage = Some(storage.clone());
+            state
+                .hub_credentials
+                .insert(old_key.clone(), old_credentials);
+            state.hubs.insert(old_key.clone(), old_hub);
+        }
+        let (_, room_id) = install_address_migration_graph(&state, &old_key);
+        storage.set_fail_authority_save(true);
+
+        let error = configure_authenticated_hue_hub(
+            &new_key.address,
+            r#"{"username":"new-user"}"#,
+            "new-user",
+            "bridge-resume",
+            &state,
+            |_| panic!("connection must wait for the authority-state commit"),
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("Failed to durably migrate Hue topology"));
+        assert!(old_shutdown.load(Ordering::SeqCst));
+        {
+            let state = state.lock().unwrap();
+            assert!(state.canonical_registry.references_hub_key(&old_key));
+            assert!(!state.canonical_registry.references_hub_key(&new_key));
+            assert!(state.topology.references_hub_key(&old_key));
+            assert!(!state.topology.references_hub_key(&new_key));
+            assert!(state.hubs.is_empty());
+            assert_eq!(state.hub_credentials.len(), 1);
+            assert_eq!(
+                state.hub_credentials.get(&new_key).and_then(|credentials| {
+                    credentials.get_str(HUE_ADDRESS_MIGRATION_FROM_FIELD)
+                }),
+                Some(old_key.address.as_str())
+            );
+        }
+        let staged = storage.load_all_hub_credentials().unwrap();
+        assert_eq!(staged.len(), 1);
+        assert_eq!(staged[0].hub_key(), Some(new_key.clone()));
+        assert_eq!(
+            staged[0].get_str(HUE_ADDRESS_MIGRATION_FROM_FIELD),
+            Some(old_key.address.as_str())
+        );
+
+        storage.set_fail_authority_save(false);
+        configure_authenticated_hue_hub(
+            &new_key.address,
+            r#"{"username":"new-user"}"#,
+            "new-user",
+            "bridge-resume",
+            &state,
+            |_| {
+                let (sender, receiver) = std::sync::mpsc::channel();
+                drop(sender);
+                Ok((active_hue_hub(new_key.clone()), receiver))
+            },
+        )
+        .unwrap();
+        {
+            let state = state.lock().unwrap();
+            assert!(!state.canonical_registry.references_hub_key(&old_key));
+            assert!(state.canonical_registry.references_hub_key(&new_key));
+            assert!(!state.topology.references_hub_key(&old_key));
+            assert!(state.topology.references_hub_key(&new_key));
+            assert!(state
+                .topology
+                .room_binding_is_managed(&room_id, &new_key, "hue-office"));
+            assert!(state.hubs.contains_key(&new_key));
+            assert_eq!(
+                state.hub_credentials.get(&new_key).and_then(|credentials| {
+                    credentials.get_str(HUE_ADDRESS_MIGRATION_FROM_FIELD)
+                }),
+                None
+            );
+        }
 
         drop(state);
         drop(storage);

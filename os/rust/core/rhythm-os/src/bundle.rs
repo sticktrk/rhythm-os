@@ -20,10 +20,12 @@ use crate::topology::RoomTopologyStore;
 
 pub const PROFILE_BUNDLE_SCHEMA_VERSION: u32 = 1;
 pub const LEGACY_BACKUP_SCHEMA_VERSION: u32 = 1;
-/// Backup v2 adds explicit per-room motion admission state. Exporting a new
-/// schema makes older appliances reject the backup instead of accepting it and
-/// silently dropping that preference during a downgrade restore.
-pub const BACKUP_BUNDLE_SCHEMA_VERSION: u32 = 2;
+/// Backup v2 added explicit per-room motion admission state.
+pub const MOTION_ADMISSION_BACKUP_SCHEMA_VERSION: u32 = 2;
+/// Backup v3 additionally carries the immutable Hue controller takeover
+/// record in secret integration files. Older appliances must reject it: they
+/// cannot safely release a bridge or preserve its recovery baseline.
+pub const BACKUP_BUNDLE_SCHEMA_VERSION: u32 = 3;
 
 fn default_profile_schema_version() -> u32 {
     PROFILE_BUNDLE_SCHEMA_VERSION

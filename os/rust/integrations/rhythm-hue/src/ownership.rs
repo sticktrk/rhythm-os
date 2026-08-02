@@ -147,6 +147,68 @@ pub struct HueControllerOwnership {
     receipts: BTreeMap<String, HueOwnershipReceipt>,
 }
 
+/// Privacy-bounded ownership summary suitable for support bundles. It never
+/// includes bridge/resource identities, room names, addresses, credentials,
+/// baseline bodies, or manifest paths.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct HueControllerAuthorityDiagnostics {
+    pub schema_version: u32,
+    pub manifest_count: usize,
+    pub baseline_count: usize,
+    pub corrupt_manifest_count: usize,
+    pub managed_room_count: usize,
+    pub managed_scene_count: usize,
+    pub phases: BTreeMap<String, usize>,
+    pub receipt_statuses: BTreeMap<String, usize>,
+}
+
+pub fn controller_authority_diagnostics(
+    storage: &dyn Storage,
+) -> Result<HueControllerAuthorityDiagnostics> {
+    let files = storage
+        .load_integration_backup_files(true)
+        .map_err(|_| anyhow::anyhow!("Failed to inspect Hue ownership diagnostics"))?;
+    let mut diagnostics = HueControllerAuthorityDiagnostics {
+        schema_version: 1,
+        ..HueControllerAuthorityDiagnostics::default()
+    };
+    for file in files.into_iter().filter(|file| {
+        file.path.starts_with("hue/controller-ownership/by-bridge/") && file.path.ends_with(".json")
+    }) {
+        diagnostics.manifest_count += 1;
+        let Ok(ownership) = serde_json::from_str::<HueControllerOwnership>(&file.content) else {
+            diagnostics.corrupt_manifest_count += 1;
+            continue;
+        };
+        diagnostics.baseline_count += 1;
+        diagnostics.managed_room_count += ownership.managed_rooms.len();
+        diagnostics.managed_scene_count += ownership.managed_scenes.len();
+        let phase = match ownership.phase {
+            HueOwnershipPhase::Captured => "captured",
+            HueOwnershipPhase::Clearing => "clearing",
+            HueOwnershipPhase::ClearIncomplete => "clear_incomplete",
+            HueOwnershipPhase::Active => "active",
+            HueOwnershipPhase::Restoring => "restoring",
+            HueOwnershipPhase::RestoreIncomplete => "restore_incomplete",
+            HueOwnershipPhase::Restored => "restored",
+        };
+        *diagnostics.phases.entry(phase.to_string()).or_default() += 1;
+        for receipt in ownership.receipts.values() {
+            let status = match receipt.status {
+                HueOwnershipReceiptStatus::Pending => "pending",
+                HueOwnershipReceiptStatus::Succeeded => "succeeded",
+                HueOwnershipReceiptStatus::Failed => "failed",
+                HueOwnershipReceiptStatus::Unsupported => "unsupported",
+            };
+            *diagnostics
+                .receipt_statuses
+                .entry(status.to_string())
+                .or_default() += 1;
+        }
+    }
+    Ok(diagnostics)
+}
+
 impl HueControllerOwnership {
     fn captured(baseline: HueBridgeOwnershipBaseline) -> Self {
         Self {
@@ -316,7 +378,7 @@ fn managed_scene_key(rhythm_room_id: &str, rhythm_scene_id: &str) -> String {
 }
 
 /// Serialize every control-plane mutation for one physical bridge, including
-/// topology reconciliation, scene projection, and restore. The
+/// topology reconciliation, scene projection, restore, and rollback. The
 /// process-level map intentionally stores only stable bridge identities.
 pub fn controller_operation_lock(bridge_id: &str) -> Arc<Mutex<()>> {
     static LOCKS: OnceLock<Mutex<BTreeMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
