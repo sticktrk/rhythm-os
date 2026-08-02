@@ -379,10 +379,6 @@ fn group_light_node_id(room_id: &str, hub_key: &HubKey, hub_room_id: &str) -> St
     )
 }
 
-fn hub_supports_attached_device_dispatch(hub_key: &HubKey) -> bool {
-    hub_key.hub_type.as_str() != crate::hub::HubType::HUE
-}
-
 impl TopologyRoom {
     /// Create a new empty room.
     pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
@@ -582,10 +578,6 @@ impl TopologyRoom {
                         target,
                     });
                 }
-                continue;
-            }
-
-            if !remaining_ids.is_empty() && !hub_supports_attached_device_dispatch(&hub_key) {
                 continue;
             }
 
@@ -1747,7 +1739,18 @@ impl RoomTopologyStore {
                 if !valid {
                     return false;
                 }
-                Some((room_id.to_string(), hub_room_id.to_string()))
+                Some((room_id.to_string(), Some(hub_room_id.to_string())))
+            }
+            (Some(room_id), None) => {
+                let valid = self.rooms.get(room_id).is_some_and(|room| {
+                    room.hub_room_bindings
+                        .iter()
+                        .all(|binding| binding.hub_key != *hub_key)
+                });
+                if !valid {
+                    return false;
+                }
+                Some((room_id.to_string(), None))
             }
             (None, None) => None,
             _ => return false,
@@ -1764,7 +1767,7 @@ impl RoomTopologyStore {
             }
         }
 
-        if let Some((room_id, hub_room_id)) = target {
+        if let Some((room_id, Some(hub_room_id))) = target {
             let Some(binding) = self.rooms.get_mut(&room_id).and_then(|room| {
                 room.hub_room_bindings.iter_mut().find(|binding| {
                     binding.hub_key == *hub_key && binding.hub_room_id == hub_room_id
@@ -2127,8 +2130,7 @@ impl RoomTopologyStore {
             .and_then(|room| room.grouped_dispatch_target_for_hub(&hub_key))
         {
             Some(group_target) => group_target,
-            None if hub_supports_attached_device_dispatch(&hub_key) => device_target,
-            None => return None,
+            None => device_target,
         };
         Some((hub_key, target))
     }
@@ -3183,7 +3185,7 @@ mod tests {
     }
 
     #[test]
-    fn attached_hue_light_without_group_dispatch_is_not_individual_routable() {
+    fn attached_hue_light_without_group_dispatch_uses_individual_routing() {
         let mut store = RoomTopologyStore::new();
         let room_id = store.create_room("Office");
 
@@ -3203,11 +3205,34 @@ mod tests {
         assert!(store.attach_device_user_override(&room_id, &light_id));
 
         let routing = store.composite_routing(&registry);
-        assert!(!routing.contains_key(&room_id));
-        assert!(!routing.contains_key(&light_id));
-        assert!(store.periodic_light_nodes(&registry).is_empty());
+        assert_eq!(
+            routing.get(&room_id),
+            Some(&vec![(
+                hue_key().to_string(),
+                HubDispatchTarget::Devices {
+                    native_ids: vec!["hue-light-1".to_string()],
+                },
+            )])
+        );
+        assert_eq!(
+            routing.get(&light_id),
+            Some(&vec![(
+                hue_key().to_string(),
+                HubDispatchTarget::Devices {
+                    native_ids: vec!["hue-light-1".to_string()],
+                },
+            )])
+        );
+        assert_eq!(
+            store.periodic_light_nodes(&registry),
+            vec![TopologyLightNode {
+                id: light_id.clone(),
+                source_node_id: room_id.clone(),
+                emit_node_id: room_id,
+            }]
+        );
         assert!(!store.attached_light_uses_parent_dispatch(&light_id, &registry));
-        assert!(!store.light_node_uses_device_dispatch(&light_id, &registry));
+        assert!(store.light_node_uses_device_dispatch(&light_id, &registry));
     }
 
     #[test]

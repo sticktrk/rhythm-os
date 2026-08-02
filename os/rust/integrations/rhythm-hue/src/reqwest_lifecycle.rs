@@ -406,24 +406,7 @@ impl ExternalLightHubIntegration for HueIntegration {
             return Ok(HubDeviceRoomAssignmentOutcome::Unchanged);
         }
 
-        let target_hub_room_id = match assignment.target_rhythm_room_id.as_deref() {
-            Some(target_room_id) => match assignment.target_hub_room_ids.as_slice() {
-                [target_hub_room_id] => Some(target_hub_room_id.as_str()),
-                [] => {
-                    return Err(anyhow::anyhow!(
-                        "Cannot move Hue light to Rhythm room '{}': that room is not backed by this Hue bridge",
-                        target_room_id
-                    ));
-                }
-                _ => {
-                    return Err(anyhow::anyhow!(
-                        "Cannot move Hue light to Rhythm room '{}': it maps to multiple rooms on this Hue bridge",
-                        target_room_id
-                    ));
-                }
-            },
-            None => None,
-        };
+        let target_hub_room_id = target_hub_room_id_for_assignment(assignment)?;
 
         let (bridge_ip, username) = {
             let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -446,6 +429,22 @@ impl ExternalLightHubIntegration for HueIntegration {
             rollback: Box::new(move || rollback.rollback(&transport, &username)),
         })
     }
+}
+
+fn target_hub_room_id_for_assignment(assignment: &HubDeviceRoomAssignment) -> Result<Option<&str>> {
+    Ok(match assignment.target_rhythm_room_id.as_deref() {
+        Some(target_room_id) => match assignment.target_hub_room_ids.as_slice() {
+            [target_hub_room_id] => Some(target_hub_room_id.as_str()),
+            [] => None,
+            _ => {
+                return Err(anyhow::anyhow!(
+                    "Cannot move Hue light to Rhythm room '{}': it maps to multiple rooms on this Hue bridge",
+                    target_room_id
+                ));
+            }
+        },
+        None => None,
+    })
 }
 
 fn bridge_pairing_target(
@@ -1211,8 +1210,7 @@ mod tests {
     }
 
     #[test]
-    fn hue_light_move_requires_exactly_one_native_target_room() {
-        let state = shared_state();
+    fn hue_light_move_accepts_no_native_target_or_exactly_one() {
         let assignment = |target_hub_room_ids: Vec<String>| HubDeviceRoomAssignment {
             hub_key: hue_key("192.0.2.10"),
             native_device_id: "light-device".to_string(),
@@ -1221,15 +1219,19 @@ mod tests {
             target_hub_room_ids,
         };
 
-        let missing = string_error(
-            INTEGRATION.prepare_device_room_assignment(&state, &assignment(Vec::new())),
+        assert_eq!(
+            target_hub_room_id_for_assignment(&assignment(Vec::new())).unwrap(),
+            None
         );
-        assert!(missing.contains("not backed by this Hue bridge"));
+        assert_eq!(
+            target_hub_room_id_for_assignment(&assignment(vec!["hue-office".to_string()])).unwrap(),
+            Some("hue-office")
+        );
 
-        let ambiguous = string_error(INTEGRATION.prepare_device_room_assignment(
-            &state,
-            &assignment(vec!["hue-office-a".to_string(), "hue-office-b".to_string()]),
-        ));
+        let ambiguous = string_error(target_hub_room_id_for_assignment(&assignment(vec![
+            "hue-office-a".to_string(),
+            "hue-office-b".to_string(),
+        ])));
         assert!(ambiguous.contains("maps to multiple rooms"));
     }
 
