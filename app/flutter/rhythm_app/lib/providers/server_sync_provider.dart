@@ -881,6 +881,23 @@ class ServerSyncProvider extends ChangeNotifier {
   String? canonicalLocalBleProfileId(String localProfileId) =>
       _localBleProfileRoutes[localProfileId];
 
+  RhythmDeviceType? localBleDeviceTypeForProfile(String localProfileId) {
+    final canonicalProfileId = canonicalLocalBleProfileId(localProfileId);
+    if (canonicalProfileId == null) return null;
+    final profile = localBleCapabilities?.deviceProfiles
+        .where((candidate) => candidate.id == canonicalProfileId)
+        .firstOrNull;
+    final deviceType = profile?.deviceType.trim();
+    if (deviceType == null || deviceType.isEmpty) return null;
+    return switch (deviceType) {
+      'light' => RhythmDeviceType.light,
+      'button' => RhythmDeviceType.button,
+      'motion' => RhythmDeviceType.motion,
+      'contact' => RhythmDeviceType.contact,
+      _ => null,
+    };
+  }
+
   bool canAddLocalBleProfile(String profileId) =>
       supportedLocalBleProfileIds.contains(profileId);
 
@@ -915,6 +932,21 @@ class ServerSyncProvider extends ChangeNotifier {
       canAddHueBridgeDeviceBySerial ||
       canAddHueBleDevice ||
       canAddLocalBleDevice;
+
+  /// Whether at least one advertised scan/pair route can produce [deviceType].
+  /// Current Matter and Hue onboarding routes are light-only. Local-BLE
+  /// profiles advertise an exact type before the app accepts their QR grammar.
+  bool canScanToAddDeviceType(RhythmDeviceType deviceType) {
+    if (deviceType == RhythmDeviceType.light &&
+        (canAddMatterDevice ||
+            canAddHueBridgeDeviceBySerial ||
+            canAddHueBleDevice)) {
+      return true;
+    }
+    return supportedLocalBleProfileIds.any(
+      (profileId) => localBleDeviceTypeForProfile(profileId) == deviceType,
+    );
+  }
 
   /// Whether no hubs are configured on the server.
   bool get hasNoHubConfigured =>

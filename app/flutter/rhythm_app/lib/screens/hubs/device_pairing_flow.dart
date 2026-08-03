@@ -15,6 +15,18 @@ import 'matter_pairing_flow.dart';
 
 enum DevicePairingTarget { any, hueBle, hueBridge }
 
+class DevicePairingRoomAssignment {
+  const DevicePairingRoomAssignment({
+    required this.roomId,
+    required this.roomName,
+    required this.expectedDeviceType,
+  });
+
+  final String roomId;
+  final String roomName;
+  final RhythmDeviceType expectedDeviceType;
+}
+
 class HueBridgePairingTarget {
   const HueBridgePairingTarget({
     required this.address,
@@ -83,11 +95,14 @@ Future<void> startDevicePairingFlow(
   DevicePairingTarget target = DevicePairingTarget.any,
   String analyticsSource = 'unknown',
   String? hubAddress,
+  DevicePairingRoomAssignment? roomAssignment,
 }) async {
   final syncProvider = context.read<ServerSyncProvider>();
+  final allowsLightPairing = roomAssignment == null ||
+      roomAssignment.expectedDeviceType == RhythmDeviceType.light;
 
   if (target == DevicePairingTarget.hueBle) {
-    if (!syncProvider.canAddHueBleDevice) {
+    if (!allowsLightPairing || !syncProvider.canAddHueBleDevice) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
@@ -100,12 +115,14 @@ Future<void> startDevicePairingFlow(
     await _startHueBlePairing(
       context,
       analyticsSource: analyticsSource,
+      roomAssignment: roomAssignment,
     );
     return;
   }
 
   final hueBridgeOnly = target == DevicePairingTarget.hueBridge;
-  if (hueBridgeOnly && !syncProvider.canAddHueBridgeDeviceBySerial) {
+  if (hueBridgeOnly &&
+      (!allowsLightPairing || !syncProvider.canAddHueBridgeDeviceBySerial)) {
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
         content: Text(
@@ -115,10 +132,17 @@ Future<void> startDevicePairingFlow(
     );
     return;
   }
-  if (!hueBridgeOnly && !syncProvider.canScanToAddDevice) return;
+  if (!hueBridgeOnly &&
+      !(roomAssignment == null
+          ? syncProvider.canScanToAddDevice
+          : syncProvider.canScanToAddDeviceType(
+              roomAssignment.expectedDeviceType,
+            ))) {
+    return;
+  }
   final journeyId = 'device-pair-${const Uuid().v4()}';
 
-  if (!hueBridgeOnly && syncProvider.canAddHueBleDevice) {
+  if (!hueBridgeOnly && allowsLightPairing && syncProvider.canAddHueBleDevice) {
     final canUseSetupCode = syncProvider.canAddMatterDevice ||
         syncProvider.canAddHueBridgeDeviceBySerial ||
         syncProvider.canAddLocalBleDevice;
@@ -126,6 +150,7 @@ Future<void> startDevicePairingFlow(
       await _startHueBlePairing(
         context,
         analyticsSource: analyticsSource,
+        roomAssignment: roomAssignment,
       );
       return;
     }
@@ -135,13 +160,14 @@ Future<void> startDevicePairingFlow(
       await _startHueBlePairing(
         context,
         analyticsSource: analyticsSource,
+        roomAssignment: roomAssignment,
       );
       return;
     }
   }
 
   final hueBridgeSerialSearchAvailable =
-      syncProvider.canAddHueBridgeDeviceBySerial;
+      allowsLightPairing && syncProvider.canAddHueBridgeDeviceBySerial;
 
   while (true) {
     if (!context.mounted) return;
@@ -182,6 +208,9 @@ Future<void> startDevicePairingFlow(
           analyticsSource: analyticsSource,
           initialIntakeResult: intake,
           journeyId: journeyId,
+          targetRoomId: roomAssignment?.roomId,
+          targetRoomName: roomAssignment?.roomName,
+          expectedDeviceType: roomAssignment?.expectedDeviceType,
         );
         return;
 
@@ -202,6 +231,7 @@ Future<void> startDevicePairingFlow(
           intake: intake,
           analyticsSource: analyticsSource,
           hubAddress: hubAddress,
+          roomAssignment: roomAssignment,
         );
         return;
 
@@ -219,10 +249,27 @@ Future<void> startDevicePairingFlow(
           );
           continue;
         }
+        final expectedDeviceType = roomAssignment?.expectedDeviceType;
+        final scannedDeviceType =
+            syncProvider.localBleDeviceTypeForProfile(profileId);
+        if (expectedDeviceType != null &&
+            scannedDeviceType != null &&
+            scannedDeviceType != expectedDeviceType) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'That code is for a ${_pairingDeviceTypeLabel(scannedDeviceType)}, '
+                'not a ${_pairingDeviceTypeLabel(expectedDeviceType)}.',
+              ),
+            ),
+          );
+          continue;
+        }
         await _startLocalBlePairing(
           context,
           intake: intake,
           analyticsSource: analyticsSource,
+          roomAssignment: roomAssignment,
         );
         return;
 
@@ -359,6 +406,7 @@ Future<void> _startLocalBlePairing(
   BuildContext context, {
   required DevicePairingScannerResult intake,
   required String analyticsSource,
+  DevicePairingRoomAssignment? roomAssignment,
 }) async {
   final setup = intake.localBleSetup;
   if (setup == null) return;
@@ -383,6 +431,7 @@ Future<void> _startLocalBlePairing(
     context,
     result,
     analyticsSource: analyticsSource,
+    roomAssignment: roomAssignment,
   );
 }
 
@@ -392,6 +441,7 @@ Future<void> continueRecoveredLocalBlePairingFlow(
   BuildContext context,
   RhythmPairedDevice result, {
   String analyticsSource = 'pairing_recovery',
+  DevicePairingRoomAssignment? roomAssignment,
 }) async {
   final syncProvider = context.read<ServerSyncProvider>();
 
@@ -433,6 +483,7 @@ Future<void> continueRecoveredLocalBlePairingFlow(
     sourceLabel: 'Bluetooth device',
     analyticsSource: analyticsSource,
     expectedCount: 1,
+    roomAssignment: roomAssignment,
   );
 }
 
@@ -441,6 +492,7 @@ Future<void> _startHueBridgePairing(
   required DevicePairingScannerResult intake,
   required String analyticsSource,
   String? hubAddress,
+  DevicePairingRoomAssignment? roomAssignment,
 }) async {
   final serial = intake.payload;
   if (serial == null) return;
@@ -497,6 +549,7 @@ Future<void> _startHueBridgePairing(
         syncProvider.hueBridgeCapabilities?.supportsRoomlessDevices ?? false,
     sourceLabel: 'Hue Bridge',
     analyticsSource: analyticsSource,
+    roomAssignment: roomAssignment,
   );
 }
 
@@ -600,6 +653,7 @@ Future<String?> showHueBridgePairingTargetChooser(
 Future<void> _startHueBlePairing(
   BuildContext context, {
   required String analyticsSource,
+  DevicePairingRoomAssignment? roomAssignment,
 }) async {
   final syncProvider = context.read<ServerSyncProvider>();
   final result = await HueBleDeviceAddScreen.show(
@@ -649,6 +703,7 @@ Future<void> _startHueBlePairing(
     sourceLabel: 'Hue Bluetooth',
     analyticsSource: analyticsSource,
     expectedCount: addedCount,
+    roomAssignment: roomAssignment,
   );
 }
 
@@ -750,7 +805,41 @@ Future<void> _offerRoomAssignments(
   required String sourceLabel,
   required String analyticsSource,
   int? expectedCount,
+  DevicePairingRoomAssignment? roomAssignment,
 }) async {
+  if (roomAssignment != null) {
+    final matching = resolved.where(
+      (pairedDevice) =>
+          pairedDevice.device.type == roomAssignment.expectedDeviceType,
+    );
+    if (matching.isEmpty) {
+      final actualType = resolved.firstOrNull?.device.type;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            actualType == null
+                ? 'The scanned device could not be assigned to ${roomAssignment.roomName}.'
+                : 'The scanned ${_pairingDeviceTypeLabel(actualType)} was added, '
+                    'but it is not a ${_pairingDeviceTypeLabel(roomAssignment.expectedDeviceType)}.',
+          ),
+        ),
+      );
+      return;
+    }
+    for (final pairedDevice in matching) {
+      if (!context.mounted) return;
+      await assignCanonicalDeviceToRoom(
+        context,
+        device: pairedDevice.device,
+        currentParentNodeId: pairedDevice.parentNodeId,
+        targetRoomId: roomAssignment.roomId,
+        targetRoomName: roomAssignment.roomName,
+        analyticsSource: analyticsSource,
+      );
+    }
+    return;
+  }
+
   final pairedCount = expectedCount ?? resolved.length;
   if (pairedCount > 1) {
     final assignNow = await showDialog<bool>(
@@ -792,6 +881,13 @@ Future<void> _offerRoomAssignments(
   }
 }
 
+String _pairingDeviceTypeLabel(RhythmDeviceType type) => switch (type) {
+      RhythmDeviceType.motion => 'motion sensor',
+      RhythmDeviceType.button => 'button',
+      RhythmDeviceType.contact => 'contact sensor',
+      RhythmDeviceType.light => 'light',
+    };
+
 String _pairingWarningSuffix(List<String> warnings) {
   if (warnings.isEmpty) return '';
   final detail = warnings.first.trim();
@@ -822,5 +918,8 @@ String resolvePairedDeviceParentNodeId(
 }) {
   final canonicalRoomId = canonicalDevice['room_id']?.toString().trim() ?? '';
   if (canonicalRoomId.isNotEmpty) return canonicalRoomId;
+  final canonicalParentId =
+      canonicalDevice['parent_id']?.toString().trim() ?? '';
+  if (canonicalParentId.isNotEmpty) return canonicalParentId;
   return topologyParentId ?? '';
 }

@@ -19,6 +19,9 @@ Future<void> startMatterPairingFlow(
   String analyticsSource = 'unknown',
   DevicePairingScannerResult? initialIntakeResult,
   String? journeyId,
+  String? targetRoomId,
+  String? targetRoomName,
+  RhythmDeviceType? expectedDeviceType,
 }) async {
   final homeProvider = context.read<HomeProvider>();
   final syncProvider = context.read<ServerSyncProvider>();
@@ -111,6 +114,31 @@ Future<void> startMatterPairingFlow(
     return;
   }
 
+  if (targetRoomId != null && targetRoomName != null) {
+    if (expectedDeviceType != null &&
+        pairedDevice.device.type != expectedDeviceType) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '${pairingResult.name} was added as a '
+            '${_matterDeviceTypeLabel(pairedDevice.device.type)}, but it is '
+            'not a ${_matterDeviceTypeLabel(expectedDeviceType)}.',
+          ),
+        ),
+      );
+      return;
+    }
+    await assignCanonicalDeviceToRoom(
+      context,
+      device: pairedDevice.device,
+      currentParentNodeId: pairedDevice.parentNodeId,
+      targetRoomId: targetRoomId,
+      targetRoomName: targetRoomName,
+      analyticsSource: analyticsSource,
+    );
+    return;
+  }
+
   await showDeviceNodeAssignmentFlow(
     context,
     device: pairedDevice.device,
@@ -119,6 +147,13 @@ Future<void> startMatterPairingFlow(
     analyticsSource: analyticsSource,
   );
 }
+
+String _matterDeviceTypeLabel(RhythmDeviceType type) => switch (type) {
+      RhythmDeviceType.motion => 'motion sensor',
+      RhythmDeviceType.button => 'button',
+      RhythmDeviceType.contact => 'contact sensor',
+      RhythmDeviceType.light => 'light',
+    };
 
 Future<({RhythmDevice device, String parentNodeId})?>
     _resolvePairedMatterDevice(
@@ -155,8 +190,11 @@ Future<({RhythmDevice device, String parentNodeId})?>
                 device['manufacturer'] as String? ?? pairingResult.manufacturer,
             model: device['model'] as String? ?? pairingResult.model,
           ),
-          parentNodeId:
-              syncProvider.topologyNodeById(canonicalId)?.parentId ?? '',
+          parentNodeId: _canonicalParentNodeId(
+            device,
+            topologyParentId:
+                syncProvider.topologyNodeById(canonicalId)?.parentId,
+          ),
         );
       }
     }
@@ -167,6 +205,17 @@ Future<({RhythmDevice device, String parentNodeId})?>
   }
 
   return null;
+}
+
+String _canonicalParentNodeId(
+  Map<String, dynamic> canonicalDevice, {
+  String? topologyParentId,
+}) {
+  final roomId = canonicalDevice['room_id']?.toString().trim() ?? '';
+  if (roomId.isNotEmpty) return roomId;
+  final parentId = canonicalDevice['parent_id']?.toString().trim() ?? '';
+  if (parentId.isNotEmpty) return parentId;
+  return topologyParentId ?? '';
 }
 
 Future<MatterAddMethod?> _resolveMatterAddMethod(
