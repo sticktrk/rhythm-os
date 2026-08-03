@@ -1889,9 +1889,7 @@ printf '%s\n' "$1" > "$dir/marker"
         let reused_pid = std::process::id();
         std::fs::write(
             root.join(STATUS_FILE),
-            format!(
-                "state=running\nsupervisor_pid={reused_pid}\nchild_pid={reused_pid}\n"
-            ),
+            format!("state=running\nsupervisor_pid={reused_pid}\nchild_pid={reused_pid}\n"),
         )
         .unwrap();
 
