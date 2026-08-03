@@ -14,6 +14,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RoomModeState,
         RhythmNodeProfileSettings,
         RhythmTimerSetting;
+import '../screens/hubs/device_pairing_flow.dart';
 import '../screens/settings/light_screen.dart';
 import '../utils/app_color_temperature.dart';
 import 'device_detail_sheet.dart';
@@ -435,10 +436,24 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
       key: const ValueKey('motion'),
       padding: const EdgeInsets.symmetric(horizontal: 20),
       children: [
-        if (motionSensors.isNotEmpty)
+        if (room.kind.isRoom)
+          _buildSettingsGroup('', [
+            _buildAddDeviceAction(
+              key: const ValueKey('room-settings-add-motion'),
+              label: 'Add Motion Sensor',
+              icon: Icons.add_circle_outline_rounded,
+              color: const Color(0xFF81C784),
+              analyticsSource: 'room_settings_motion',
+              unavailableAction: 'add a motion sensor',
+            ),
+          ]),
+        if (motionSensors.isNotEmpty) ...[
+          if (room.kind.isRoom) const SizedBox(height: 16),
           _buildDeviceGroup('Motion Sensors', motionSensors),
+        ],
         if (hasMotionBehavior) ...[
-          if (motionSensors.isNotEmpty) const SizedBox(height: 16),
+          if (room.kind.isRoom || motionSensors.isNotEmpty)
+            const SizedBox(height: 16),
           _buildSettingsGroup('Day Profile', [
             _buildMotionTimeoutRow(
               context,
@@ -456,7 +471,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
           ]),
         ],
         if (contactSensors.isNotEmpty) ...[
-          if (motionSensors.isNotEmpty || hasMotionBehavior)
+          if (room.kind.isRoom || motionSensors.isNotEmpty || hasMotionBehavior)
             const SizedBox(height: 16),
           _buildDeviceGroup('Contact Sensors', contactSensors),
         ],
@@ -475,8 +490,93 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
       key: const ValueKey('buttons'),
       padding: const EdgeInsets.symmetric(horizontal: 20),
       children: [
-        if (buttons.isNotEmpty) _buildDeviceGroup('Buttons', buttons),
+        if (room.kind.isRoom)
+          _buildSettingsGroup('', [
+            _buildAddDeviceAction(
+              key: const ValueKey('room-settings-add-button'),
+              label: 'Add Button',
+              icon: Icons.add_circle_outline_rounded,
+              color: const Color(0xFF64B5F6),
+              analyticsSource: 'room_settings_buttons',
+              unavailableAction: 'add a button',
+            ),
+          ]),
+        if (buttons.isNotEmpty) ...[
+          if (room.kind.isRoom) const SizedBox(height: 16),
+          _buildDeviceGroup('Buttons', buttons),
+        ],
       ],
+    );
+  }
+
+  Widget _buildAddDeviceAction({
+    required Key key,
+    required String label,
+    required IconData icon,
+    required Color color,
+    required String analyticsSource,
+    required String unavailableAction,
+  }) {
+    Future<void> addDevice() async {
+      HapticFeedback.lightImpact();
+      final syncProvider = context.read<ServerSyncProvider>();
+      if (!syncProvider.canScanToAddDevice) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Connect or update your Rhythm Box to $unavailableAction.',
+            ),
+          ),
+        );
+        return;
+      }
+
+      await startDevicePairingFlow(
+        context,
+        analyticsSource: analyticsSource,
+      );
+    }
+
+    return Semantics(
+      key: key,
+      container: true,
+      button: true,
+      label: label,
+      hint: 'Opens device pairing',
+      onTap: addDevice,
+      excludeSemantics: true,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: addDevice,
+          excludeFromSemantics: true,
+          borderRadius: BorderRadius.circular(14),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+            child: Row(
+              children: [
+                Icon(icon, color: color, size: 20),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    label,
+                    style: TextStyle(
+                      color: color,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+                Icon(
+                  Icons.chevron_right_rounded,
+                  color: color.withValues(alpha: 0.6),
+                  size: 20,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 
