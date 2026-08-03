@@ -98,6 +98,13 @@ pub trait HueBleTransport: Send + Sync {
         deadline: Instant,
     ) -> Result<Vec<(String, Result<()>)>>;
 
+    /// Reconcile daemon-owned links before startup prewarming. Concrete
+    /// transports with persistent controller connections should release links
+    /// inherited from an earlier process so the new pool starts authoritative.
+    fn initialize_connection_pool(&self, _devices: &[HueBleDevice]) -> Result<()> {
+        Ok(())
+    }
+
     /// Best-effort startup preparation for a paired bulb.
     ///
     /// Implementations may connect and cache read-only GATT metadata, but must
