@@ -279,6 +279,24 @@ where
         }
     }
 
+    /// Plan a non-deduplicated render of a routed node's current effective
+    /// settings. This is used when a manual room action fans out across a mix
+    /// of grouped routes and independently addressable child lights.
+    pub fn plan_forced_node_refresh(
+        &self,
+        tick: &TickContext,
+        source_node_id: &str,
+    ) -> RuntimeResult<RhythmPeriodicPlanOutcome> {
+        {
+            let mut engine = self
+                .engine()
+                .write()
+                .map_err(|e| RuntimeError::Internal(format!("Failed to lock engine: {}", e)))?;
+            engine.invalidate_periodic_cache_for_room(source_node_id);
+        }
+        self.plan_periodic_node_tick(tick, source_node_id, Some(true))
+    }
+
     /// Apply Rhythm-specific bookkeeping after a neutral plan dispatch succeeds.
     pub fn record_rhythm_dispatches(&self, records: &[RhythmDispatchRecord]) -> RuntimeResult<()> {
         if records.is_empty() {

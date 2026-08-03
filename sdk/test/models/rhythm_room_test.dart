@@ -154,6 +154,7 @@ void main() {
     test('parses and bounds the LCA013 color-temperature envelope', () {
       final capabilities = RhythmLightCapabilities.maybeFromJson({
         'color_temperature': {'min_kelvin': 1000, 'max_kelvin': 20000},
+        'individual_profile_overrides': true,
       });
 
       final range = capabilities?.colorTemperature;
@@ -163,6 +164,7 @@ void main() {
       expect(range?.supports(1000), isTrue);
       expect(range?.supports(20001), isFalse);
       expect(range?.clamp(25000), 20000);
+      expect(capabilities?.individualProfileOverrides, isTrue);
     });
 
     test('does not expose a malformed color-temperature range', () {

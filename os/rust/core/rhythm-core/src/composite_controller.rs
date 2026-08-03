@@ -1221,6 +1221,24 @@ impl CompositeController {
         self.controllers.read().map(|c| c.len()).unwrap_or(0)
     }
 
+    /// Whether a routing node currently has at least one registered hub
+    /// controller. Route-aware fan-out uses this to preserve the composite's
+    /// existing behavior of skipping disconnected integrations.
+    pub fn has_active_route(&self, node_id: &str) -> bool {
+        let targets = self
+            .routing
+            .read()
+            .ok()
+            .and_then(|routing| routing.get(node_id).cloned())
+            .unwrap_or_default();
+        let Ok(controllers) = self.controllers.read() else {
+            return false;
+        };
+        targets
+            .iter()
+            .any(|(hub_key, _)| controllers.contains_key(hub_key))
+    }
+
     /// Metadata for registered hub command queues.
     pub fn hub_dispatch_metadata(&self) -> Vec<HubDispatchMetadata> {
         let mut metadata: Vec<_> = self

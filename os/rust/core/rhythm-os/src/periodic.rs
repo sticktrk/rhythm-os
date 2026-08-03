@@ -182,9 +182,9 @@ pub(crate) fn periodic_dispatch_nodes_from_state(
             .topology
             .periodic_light_nodes(&state.canonical_registry)
         {
-            if eligible_lookup.contains(&node.source_node_id) {
+            if eligible_lookup.contains(&node.emit_node_id) {
                 derived_by_room
-                    .entry(node.source_node_id.clone())
+                    .entry(node.emit_node_id.clone())
                     .or_default()
                     .push(node);
             }
@@ -197,7 +197,7 @@ pub(crate) fn periodic_dispatch_nodes_from_state(
                     nodes.sort_by(|left, right| left.id.cmp(&right.id));
                     dispatch_nodes.extend(nodes.into_iter().map(|node| PeriodicDispatchNode {
                         node_id: node.id,
-                        settings_node_id: room_id.clone(),
+                        settings_node_id: node.source_node_id,
                         emit_node_id: node.emit_node_id,
                     }));
                 }
@@ -2749,8 +2749,8 @@ mod tests {
         assert_eq!(
             periodic_dispatch_nodes_from_state(&state, &snapshots),
             vec![PeriodicDispatchNode {
-                node_id: light_id,
-                settings_node_id: room_id.clone(),
+                node_id: light_id.clone(),
+                settings_node_id: light_id,
                 emit_node_id: room_id,
             }]
         );

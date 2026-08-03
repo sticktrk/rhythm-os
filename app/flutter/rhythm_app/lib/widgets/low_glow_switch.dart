@@ -102,26 +102,32 @@ class LightingOverrideRow extends StatelessWidget {
     required this.customized,
     required this.onPressed,
     this.settingsKeyPrefix = 'node-lighting',
+    this.unsupportedStatus,
+    this.unsupportedSemanticsValue,
+    this.unsupportedIcon,
   });
 
   final String nodeId;
   final bool supported;
   final bool customized;
-  final VoidCallback onPressed;
+  final VoidCallback? onPressed;
   final String settingsKeyPrefix;
+  final String? unsupportedStatus;
+  final String? unsupportedSemanticsValue;
+  final IconData? unsupportedIcon;
 
   @override
   Widget build(BuildContext context) {
-    final status = customized
-        ? 'Custom'
-        : supported
-            ? 'Auto'
-            : 'Update required';
-    final semanticsValue = customized
-        ? 'Custom light settings'
-        : supported
-            ? 'Using automatic settings'
-            : 'Appliance update required';
+    final status = !supported
+        ? unsupportedStatus ?? 'Update required'
+        : customized
+            ? 'Custom'
+            : 'Auto';
+    final semanticsValue = !supported
+        ? unsupportedSemanticsValue ?? 'Appliance update required'
+        : customized
+            ? 'Custom light settings'
+            : 'Using automatic settings';
     final accent =
         customized ? const Color(0xFFF9A825) : CelestialColors.textSecondary;
 
@@ -132,16 +138,18 @@ class LightingOverrideRow extends StatelessWidget {
       excludeSemantics: true,
       label: 'Lighting',
       value: semanticsValue,
-      onTap: onPressed,
+      onTap: supported ? onPressed : null,
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: onPressed,
+        onTap: supported ? onPressed : null,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
           child: Row(
             children: [
               Icon(
-                supported ? Icons.tune_rounded : Icons.system_update_rounded,
+                supported
+                    ? Icons.tune_rounded
+                    : unsupportedIcon ?? Icons.system_update_rounded,
                 color: CelestialColors.sunWarm.withValues(alpha: 0.8),
                 size: 20,
               ),

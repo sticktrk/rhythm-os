@@ -376,6 +376,15 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
         context.select<ServerSyncProvider, bool>(
           (sync) => sync.lightProfileOverridesSupportedForNode(device.id),
         );
+    final individualProfileRoute = isLightNode
+        ? context.select<ServerSyncProvider, bool?>(
+            (sync) => sync
+                .nodeById(device.id)
+                ?.lightCapabilities
+                ?.individualProfileOverrides,
+          )
+        : null;
+    final groupedLightSettings = isLightNode && individualProfileRoute == false;
     final hasLightOverrides = isLightNode &&
         context.select<ServerSyncProvider, bool>(
           (sync) => sync.hasNodeLightProfileOverrides(device.id),
@@ -478,6 +487,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                         isLightNode,
                         lightSettingsSupported,
                         hasLightOverrides,
+                        groupedLightSettings,
                       ),
                     _DeviceTab.network => _buildNetworkTab(
                         context,
@@ -598,6 +608,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     bool isLightNode,
     bool lightSettingsSupported,
     bool hasLightOverrides,
+    bool groupedLightSettings,
   ) {
     final standbyEnabled = context.select<ServerSyncProvider, bool>(
       (sync) => sync.standbyEnabledForNode(device.id),
@@ -613,9 +624,16 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
               supported: lightSettingsSupported,
               customized: hasLightOverrides,
               settingsKeyPrefix: 'device-settings-light',
+              unsupportedStatus: groupedLightSettings ? 'Room only' : null,
+              unsupportedSemanticsValue:
+                  groupedLightSettings ? 'Controlled by room' : null,
+              unsupportedIcon:
+                  groupedLightSettings ? Icons.home_rounded : null,
               onPressed: lightSettingsSupported
                   ? () => _openBulbLightSettings(device)
-                  : _showBulbLightSettingsUnavailable,
+                  : groupedLightSettings
+                      ? null
+                      : _showBulbLightSettingsUnavailable,
             ),
             LowGlowSettingRow(
               value: standbyEnabled,
