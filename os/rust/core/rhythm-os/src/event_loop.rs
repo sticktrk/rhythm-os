@@ -4977,12 +4977,12 @@ mod tests {
             vec![
                 DiscoveredMotionState {
                     sensor_id: "motion-native-1".into(),
-                    room_id: "mud_room_native".into(),
+                    room_id: None,
                     is_active: true,
                 },
                 DiscoveredMotionState {
                     sensor_id: "motion-native-2".into(),
-                    room_id: "mud_room_native".into(),
+                    room_id: Some("mud_room_native".into()),
                     is_active: false,
                 },
             ],

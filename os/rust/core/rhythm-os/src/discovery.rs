@@ -58,8 +58,9 @@ pub struct DiscoveredDevice {
 pub struct DiscoveredMotionState {
     /// Sensor entity/resource ID.
     pub sensor_id: String,
-    /// Room this sensor belongs to.
-    pub room_id: String,
+    /// Hub-native room this sensor belongs to. Roomless sensors remain
+    /// first-class inputs and resolve their target through canonical topology.
+    pub room_id: Option<String>,
     /// Whether the sensor is currently detecting motion.
     pub is_active: bool,
 }
