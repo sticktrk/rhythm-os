@@ -878,14 +878,14 @@ impl RemoteAccessController for InitScriptRemoteAccessController {
             .filter(|value| !value.is_empty())
             .cloned()
             .or_else(|| Some(self.metrics_addr.clone()));
-        let supervisor_pid = supervisor
-            .get("supervisor_pid")
-            .and_then(|value| parse_pid(value))
-            .or_else(|| read_pid_file(&self.pidfile));
-        let child_pid = supervisor
-            .get("child_pid")
-            .and_then(|value| parse_pid(value))
-            .or_else(|| read_pid_file(&self.child_pidfile));
+        // The status file lives on persistent storage and therefore describes
+        // the previous boot until the init script starts again. Pidfiles are
+        // boot-scoped; only they may prove that a process is currently live.
+        // Trusting a persisted PID here can match an unrelated process after
+        // reboot and strand a configured tunnel because the watchdog believes
+        // the stale supervisor is still running.
+        let supervisor_pid = read_pid_file(&self.pidfile);
+        let child_pid = read_pid_file(&self.child_pidfile);
         let service_running =
             supervisor_pid.is_some_and(pid_running) || child_pid.is_some_and(pid_running);
         let metrics = if service_running {
@@ -1873,6 +1873,40 @@ printf '%s\n' "$1" > "$dir/marker"
             }
         };
         assert_eq!(marker_contents.trim(), "restart");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_script_status_ignores_persisted_pids_without_boot_pidfiles() {
+        let root = temp_root("init-script-stale-pids");
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("cloudflared-service");
+        write_executable(&script, "#!/bin/sh\nexit 0\n");
+        let missing_supervisor_pidfile = root.join("run/supervisor.pid");
+        let missing_child_pidfile = root.join("run/child.pid");
+        let reused_pid = std::process::id();
+        std::fs::write(
+            root.join(STATUS_FILE),
+            format!(
+                "state=running\nsupervisor_pid={reused_pid}\nchild_pid={reused_pid}\n"
+            ),
+        )
+        .unwrap();
+
+        let controller = InitScriptRemoteAccessController::new(
+            "/bin/true",
+            &script,
+            &missing_supervisor_pidfile,
+            &missing_child_pidfile,
+        );
+        let status = controller.status(&root);
+
+        assert_eq!(status.supervisor_state.as_deref(), Some("running"));
+        assert!(status.supervisor_pid.is_none());
+        assert!(status.child_pid.is_none());
+        assert!(!status.service_running);
 
         let _ = std::fs::remove_dir_all(root);
     }
