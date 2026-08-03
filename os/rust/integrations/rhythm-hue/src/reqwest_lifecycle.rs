@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use log::warn;
+use log::{info, warn};
 
 use crate::hub_state::HueHubData;
 use crate::registry::{HueDeviceRegistry, HueRegistrySnapshot};
@@ -1055,6 +1055,149 @@ fn desired_hue_topology(
     desired_hue_topology_locked(&state, key, assignment_override)
 }
 
+fn hue_parent_devices_by_native_id(
+    device_resources: &serde_json::Value,
+) -> Result<BTreeMap<String, String>> {
+    let devices = device_resources
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("Hue device response has no data array"))?;
+    let mut parent_by_native_id = BTreeMap::new();
+
+    for device in devices {
+        let parent_device_id = device
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| anyhow::anyhow!("Hue device response contains a device without an ID"))?
+            .to_string();
+        parent_by_native_id.insert(parent_device_id.clone(), parent_device_id.clone());
+        for service in device
+            .get("services")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(service_id) = service.get("rid").and_then(serde_json::Value::as_str) {
+                parent_by_native_id.insert(service_id.to_string(), parent_device_id.clone());
+            }
+        }
+    }
+
+    Ok(parent_by_native_id)
+}
+
+/// Extend the light-only grouped-room projection with the physical Hue parent
+/// devices for canonical buttons and sensors. Hue rooms own parent device IDs,
+/// while motion canonical endpoints use service IDs, so the live device graph
+/// is required to preserve their membership across authority room recreation.
+fn desired_hue_membership_topology<H: HueTransport + ?Sized>(
+    state: &SharedState,
+    key: &HubKey,
+    transport: &H,
+    username: &str,
+    desired: &HueDesiredTopology,
+) -> Result<HueDesiredTopology> {
+    let device_resources = transport
+        .get_resources(username, "device")
+        .context("Failed to fetch Hue input-device ownership")?;
+    let parent_by_native_id = hue_parent_devices_by_native_id(&device_resources)?;
+    let room_indexes = desired
+        .rooms
+        .iter()
+        .enumerate()
+        .map(|(index, room)| (room.rhythm_room_id.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    let mut input_parent_assignments = BTreeMap::<String, Option<String>>::new();
+
+    {
+        let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        for device in state.canonical_registry.devices() {
+            if device.device_type == rhythm_core::runtime::hub_registry::DeviceType::Light {
+                continue;
+            }
+            let Some(endpoint) = device
+                .active_endpoints()
+                .find(|endpoint| endpoint.hub_key == *key)
+            else {
+                continue;
+            };
+            let parent_device_id = parent_by_native_id
+                .get(&endpoint.native_id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Hue input endpoint '{}' has no owning device in the live device graph",
+                        endpoint.native_id
+                    )
+                })?
+                .clone();
+            let explicitly_standalone =
+                state
+                    .topology
+                    .get_device_node(&device.id)
+                    .is_some_and(|node| {
+                        node.parent_id.is_none()
+                            && node.placement == rhythm_os::topology::DevicePlacement::UserOverride
+                    });
+            let assigned_room_id = if explicitly_standalone {
+                None
+            } else {
+                state
+                    .topology
+                    .device_parent_room_id(&device.id)
+                    .map(str::to_string)
+                    .or_else(|| device.room_id.clone())
+            };
+
+            if let Some(previous) =
+                input_parent_assignments.insert(parent_device_id.clone(), assigned_room_id.clone())
+            {
+                if previous != assigned_room_id {
+                    anyhow::bail!(
+                        "Hue input parent device '{}' resolves to conflicting Rhythm rooms",
+                        parent_device_id
+                    );
+                }
+            }
+        }
+    }
+
+    let input_parent_count = input_parent_assignments.len();
+    let assigned_input_parent_count = input_parent_assignments
+        .values()
+        .filter(|room_id| {
+            room_id
+                .as_ref()
+                .is_some_and(|room_id| room_indexes.contains_key(room_id))
+        })
+        .count();
+    let mut membership = desired.clone();
+    for (parent_device_id, assigned_room_id) in input_parent_assignments {
+        membership
+            .controlled_device_ids
+            .insert(parent_device_id.clone());
+        let Some(room_index) = assigned_room_id
+            .as_ref()
+            .and_then(|room_id| room_indexes.get(room_id))
+        else {
+            continue;
+        };
+        membership.rooms[*room_index]
+            .device_ids
+            .push(parent_device_id);
+    }
+    for room in &mut membership.rooms {
+        room.device_ids.sort();
+        room.device_ids.dedup();
+    }
+    info!(
+        target: "hue_authority",
+        "Projected {} of {} canonical Hue input parent devices into managed rooms",
+        assigned_input_parent_count,
+        input_parent_count,
+    );
+    Ok(membership)
+}
+
 fn exact_managed_room_bindings<H: HueTransport + ?Sized>(
     key: &HubKey,
     transport: &H,
@@ -1121,14 +1264,16 @@ fn compensate_managed_topology<H: HueTransport + ?Sized>(
     ownership: &mut crate::ownership::HueControllerOwnership,
     previous: &HueDesiredTopology,
 ) -> Result<()> {
+    let membership =
+        desired_hue_membership_topology(state, key, transport, &context.username, previous)?;
     crate::managed_rooms::reconcile_managed_rooms(
         context.storage.as_ref(),
         key,
         ownership,
         transport,
         &context.username,
-        &previous.rooms,
-        &previous.controlled_device_ids,
+        &membership.rooms,
+        &membership.controlled_device_ids,
     )?;
     let bindings =
         exact_managed_room_bindings(key, transport, &context.username, ownership, previous)?;
@@ -1194,22 +1339,24 @@ fn publish_managed_room_bindings(
     Ok(())
 }
 
-fn reconcile_managed_topology(
+fn reconcile_managed_topology<H: HueTransport + ?Sized>(
     state: &SharedState,
     key: &HubKey,
     context: &HueAuthorityContext,
-    transport: &ReqwestHueTransport,
+    transport: &H,
     desired: &HueDesiredTopology,
     mut ownership: crate::ownership::HueControllerOwnership,
 ) -> Result<crate::ownership::HueControllerOwnership> {
+    let membership =
+        desired_hue_membership_topology(state, key, transport, &context.username, desired)?;
     crate::managed_rooms::reconcile_managed_rooms(
         context.storage.as_ref(),
         key,
         &mut ownership,
         transport,
         &context.username,
-        &desired.rooms,
-        &desired.controlled_device_ids,
+        &membership.rooms,
+        &membership.controlled_device_ids,
     )?;
     let bindings =
         exact_managed_room_bindings(key, transport, &context.username, &ownership, desired)?;
@@ -3049,7 +3196,12 @@ mod tests {
         assert_eq!(username, "user-123");
     }
 
-    fn add_hue_light_endpoint(state: &SharedState, key: &HubKey, native_id: &str) -> String {
+    fn add_hue_endpoint(
+        state: &SharedState,
+        key: &HubKey,
+        native_id: &str,
+        device_type: rhythm_core::runtime::hub_registry::DeviceType,
+    ) -> String {
         use rhythm_os::canonical::identity::{DiscoveredIdentity, HardwareId};
         use rhythm_os::canonical::registry::ResolveResult;
 
@@ -3058,8 +3210,8 @@ mod tests {
             native_id: native_id.to_string(),
             room_id: None,
             room_name: None,
-            name: "Test Hue lamp".to_string(),
-            device_type: rhythm_core::runtime::hub_registry::DeviceType::Light,
+            name: format!("Test Hue {native_id}"),
+            device_type,
             hardware_ids: vec![HardwareId::serial(&format!("serial-{native_id}"))],
             manufacturer: Some("Signify".to_string()),
             model: Some("LCA009".to_string()),
@@ -3070,6 +3222,15 @@ mod tests {
             | ResolveResult::Created { canonical_id } => canonical_id,
             ResolveResult::Queued { .. } => panic!("unexpected triage"),
         }
+    }
+
+    fn add_hue_light_endpoint(state: &SharedState, key: &HubKey, native_id: &str) -> String {
+        add_hue_endpoint(
+            state,
+            key,
+            native_id,
+            rhythm_core::runtime::hub_registry::DeviceType::Light,
+        )
     }
 
     #[test]
@@ -3089,6 +3250,107 @@ mod tests {
         assert_eq!(desired.rooms[0].rhythm_room_id, room_id);
         assert_eq!(desired.rooms[0].name, "Rhythm · Living Room");
         assert_eq!(desired.rooms[0].device_ids, vec!["hue-light-1"]);
+    }
+
+    #[test]
+    fn desired_hue_membership_pairs_button_and_motion_parent_devices() {
+        use rhythm_core::runtime::hub_registry::DeviceType;
+
+        let state = shared_state();
+        let key = hue_key("192.0.2.10");
+        let light_id = add_hue_light_endpoint(&state, &key, "hue-light-device");
+        let button_id = add_hue_endpoint(&state, &key, "hue-button-device", DeviceType::Button);
+        let motion_id = add_hue_endpoint(&state, &key, "hue-motion-service", DeviceType::Motion);
+        let room_id = {
+            let mut state = state.lock().unwrap();
+            let room_id = state.topology.create_room("Mud Room");
+            assert!(state
+                .topology
+                .attach_device_user_override(&room_id, &light_id));
+            assert!(state
+                .topology
+                .attach_device_user_override(&room_id, &button_id));
+            assert!(state
+                .topology
+                .attach_device_hub_default(&room_id, &motion_id));
+            assert!(state
+                .canonical_registry
+                .assign_room(&motion_id, Some(&room_id)));
+            // Reproduce the persisted split in DBG-0844025B. Projection must
+            // fall back to the canonical assignment and repair the bridge.
+            state.topology.ensure_standalone_device(&motion_id);
+            room_id
+        };
+        let desired = {
+            let state = state.lock().unwrap();
+            desired_hue_topology_locked(&state, &key, None).unwrap()
+        };
+        assert_eq!(desired.rooms[0].device_ids, vec!["hue-light-device"]);
+
+        let transport = SpyHueTransport::new();
+        transport.set_resource_response(
+            "device",
+            serde_json::json!({
+                "data": [
+                    {
+                        "id": "hue-light-device",
+                        "services": [{"rid": "hue-light-service", "rtype": "light"}]
+                    },
+                    {
+                        "id": "hue-button-device",
+                        "services": [{"rid": "hue-button-service", "rtype": "button"}]
+                    },
+                    {
+                        "id": "hue-motion-device",
+                        "services": [{"rid": "hue-motion-service", "rtype": "motion"}]
+                    }
+                ],
+                "errors": []
+            }),
+        );
+
+        let membership =
+            desired_hue_membership_topology(&state, &key, &transport, "user", &desired).unwrap();
+        assert_eq!(membership.rooms[0].rhythm_room_id, room_id);
+        assert_eq!(
+            membership.rooms[0].device_ids,
+            vec![
+                "hue-button-device".to_string(),
+                "hue-light-device".to_string(),
+                "hue-motion-device".to_string(),
+            ]
+        );
+        assert_eq!(
+            membership.controlled_device_ids,
+            BTreeSet::from([
+                "hue-button-device".to_string(),
+                "hue-light-device".to_string(),
+                "hue-motion-device".to_string(),
+            ])
+        );
+
+        {
+            let mut state = state.lock().unwrap();
+            assert!(state.topology.assign_device(
+                &button_id,
+                None,
+                rhythm_os::topology::DevicePlacement::UserOverride,
+            ));
+            assert!(state.canonical_registry.assign_room(&button_id, None));
+        }
+        let membership =
+            desired_hue_membership_topology(&state, &key, &transport, "user", &desired).unwrap();
+        assert_eq!(
+            membership.rooms[0].device_ids,
+            vec![
+                "hue-light-device".to_string(),
+                "hue-motion-device".to_string(),
+            ],
+            "an explicit user-unassign must remove the input from managed Hue rooms"
+        );
+        assert!(membership
+            .controlled_device_ids
+            .contains("hue-button-device"));
     }
 
     fn install_address_migration_graph(state: &SharedState, old_key: &HubKey) -> (String, String) {

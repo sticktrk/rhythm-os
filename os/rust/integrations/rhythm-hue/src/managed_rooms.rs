@@ -52,7 +52,8 @@ pub struct DesiredHueRoom {
     pub rhythm_room_id: String,
     pub name: String,
     pub archetype: String,
-    /// Hue V2 device IDs for light devices assigned to this Rhythm room.
+    /// Hue V2 parent device IDs whose room membership Rhythm manages.
+    /// The caller separately retains the light-only list used for group routing.
     pub device_ids: Vec<String>,
 }
 
@@ -82,8 +83,8 @@ pub struct ObservedHueRoom {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HueManagedRoomOperation {
-    /// Remove controlled bulbs from the wrong Hue room or add them to their
-    /// mapped target while retaining non-light child devices.
+    /// Remove controlled devices from the wrong Hue room or add them to their
+    /// mapped target while retaining untracked child devices.
     ReconcileMembership {
         hue_room_id: String,
         device_ids: Vec<String>,
@@ -538,8 +539,8 @@ fn execute_managed_room_operation<H: HueTransport + ?Sized>(
     .context("Hue managed-room operation failed")
 }
 
-/// Reconcile all controlled Hue bulbs. A controlled bulb omitted from every
-/// desired room is explicitly standalone and is removed from all Hue rooms.
+/// Reconcile all controlled Hue parent devices. A controlled device omitted
+/// from every desired room is explicitly standalone and removed from all rooms.
 pub fn reconcile_managed_rooms<H: HueTransport + ?Sized>(
     storage: &dyn Storage,
     key: &HubKey,
