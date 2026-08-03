@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show Tristate;
 
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:dio/dio.dart';
@@ -15,6 +16,7 @@ import 'package:rhythm_app/services/account_cloud_sync_service.dart';
 import 'package:rhythm_app/services/demo_server_api.dart';
 import 'package:rhythm_app/services/hue/hue_service_locator.dart';
 import 'package:rhythm_app/services/remote_access_service.dart';
+import 'package:rhythm_app/screens/settings/light_screen.dart';
 import 'package:rhythm_app/widgets/device_detail_sheet.dart';
 import 'package:rhythm_app/widgets/hub_picker_screen.dart';
 import 'package:rhythm_app/widgets/room_settings_sheet.dart';
@@ -1557,6 +1559,9 @@ void main() {
               'disabled': false,
               'time_offset': 0.0,
               'brightness_offset': 0.0,
+              'light_capabilities': {
+                'individual_profile_overrides': true,
+              },
             },
           ],
         }),
@@ -1583,6 +1588,64 @@ void main() {
       expect(api.nodeProfileOverrideCalls.single.profileOverrides, {
         'rhythm': {'max_brightness': 64},
       });
+    });
+
+    testWidgets('group-routed light capability rejects individual overrides',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi();
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'capabilities': {
+            'api_schema_version': 2,
+            'features': [RhythmFeature.roomLightProfileOverrides],
+            'hubs': const <dynamic>[],
+          },
+          'nodes': [
+            {
+              'id': 'hue-light-1',
+              'name': 'Grouped Hue Lamp',
+              'kind': 'light_device',
+              'parent_id': 'room-1',
+              'state': 'active',
+              'rhythm_enabled': true,
+              'disabled': false,
+              'time_offset': 0.0,
+              'brightness_offset': 0.0,
+              'light_capabilities': {
+                'individual_profile_overrides': false,
+              },
+            },
+          ],
+        }),
+      );
+      await tester.pump();
+
+      expect(
+        provider.lightProfileOverridesSupportedForNode('hue-light-1'),
+        isFalse,
+      );
+      expect(
+        await provider.setNodeLightProfileOverride(
+          'hue-light-1',
+          profileId: 'rhythm',
+          profileOverride:
+              const RhythmLightProfileNodeOverride(maxBrightness: 31),
+          correlationId: 'grouped-hue-light-settings',
+        ),
+        isFalse,
+      );
+      expect(api.nodeProfileOverrideCalls, isEmpty);
     });
 
     testWidgets(
@@ -6916,6 +6979,9 @@ void main() {
             'standby_enabled': false,
             'time_offset': 0.0,
             'brightness_offset': 0.0,
+            'light_capabilities': {
+              'individual_profile_overrides': true,
+            },
             'profile_settings': {
               'profile_overrides': {
                 'rhythm': {'max_brightness': 64},
@@ -6965,6 +7031,103 @@ void main() {
 
     expect(find.text('Light settings · Bulb override'), findsOneWidget);
     expect(find.text('Custom light settings'), findsOneWidget);
+  });
+
+  testWidgets('group-routed Hue bulb disables individual Lighting settings',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.binding.setSurfaceSize(const Size(390, 1000));
+    api.canonicalDevices['hue-light-1'] = {
+      'id': 'hue-light-1',
+      'name': 'Grouped Hue Lamp',
+      'endpoints': const <Map<String, dynamic>>[],
+    };
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': [RhythmFeature.roomLightProfileOverrides],
+          'hubs': const <dynamic>[],
+        },
+        'nodes': [
+          {
+            'id': 'hue-light-1',
+            'name': 'Grouped Hue Lamp',
+            'kind': 'light_device',
+            'parent_id': 'room-1',
+            'hub_types': ['hue'],
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'standby_enabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'light_capabilities': {
+              'individual_profile_overrides': false,
+            },
+          },
+        ],
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const DeviceDetailSheet(
+          device: RhythmDevice(
+            id: 'hue-light-1',
+            type: RhythmDeviceType.light,
+            name: 'Grouped Hue Lamp',
+          ),
+          roomId: 'room-1',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final lighting = find.byKey(
+      const ValueKey('device-settings-light-settings-hue-light-1'),
+    );
+    expect(lighting, findsOneWidget);
+    expect(
+      tester
+          .widget<Text>(
+            find.byKey(
+              const ValueKey(
+                'device-settings-light-status-hue-light-1',
+              ),
+            ),
+          )
+          .data,
+      'Room only',
+    );
+    final semantics = tester.getSemantics(lighting);
+    expect(semantics.label, 'Lighting');
+    expect(semantics.value, 'Controlled by room');
+    expect(
+      semantics.getSemanticsData().flagsCollection.isEnabled,
+      Tristate.isFalse,
+    );
+
+    await tester.tap(lighting);
+    await tester.pumpAndSettle();
+    expect(find.byType(LightScreen), findsNothing);
+    expect(find.textContaining('Update the Rhythm appliance'), findsNothing);
   });
 
   testWidgets('motion controls lightly select and save multiple rooms',

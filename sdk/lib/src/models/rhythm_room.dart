@@ -609,8 +609,12 @@ class RhythmColorTemperatureCapabilities {
 /// Extensible, normalized light-control capabilities for a node.
 class RhythmLightCapabilities {
   final RhythmColorTemperatureCapabilities? colorTemperature;
+  final bool? individualProfileOverrides;
 
-  const RhythmLightCapabilities({this.colorTemperature});
+  const RhythmLightCapabilities({
+    this.colorTemperature,
+    this.individualProfileOverrides,
+  });
 
   bool get supportsColorTemperature => colorTemperature != null;
 
@@ -618,10 +622,11 @@ class RhythmLightCapabilities {
   bool operator ==(Object other) =>
       identical(this, other) ||
       other is RhythmLightCapabilities &&
-          colorTemperature == other.colorTemperature;
+          colorTemperature == other.colorTemperature &&
+          individualProfileOverrides == other.individualProfileOverrides;
 
   @override
-  int get hashCode => colorTemperature.hashCode;
+  int get hashCode => Object.hash(colorTemperature, individualProfileOverrides);
 
   static RhythmLightCapabilities? maybeFromJson(Object? value) {
     final json = jsonMap(value);
@@ -630,6 +635,8 @@ class RhythmLightCapabilities {
       colorTemperature: RhythmColorTemperatureCapabilities.maybeFromJson(
         json['color_temperature'],
       ),
+      individualProfileOverrides:
+          json['individual_profile_overrides'] as bool?,
     );
   }
 }

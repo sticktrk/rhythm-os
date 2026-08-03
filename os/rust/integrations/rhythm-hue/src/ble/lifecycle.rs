@@ -1321,7 +1321,10 @@ fn normalized_endpoint_capabilities(device: &HueBleDevice) -> Result<serde_json:
         None
     };
     Ok(serde_json::json!({
-        "light_capabilities": LightCapabilitiesDto { color_temperature }
+        "light_capabilities": LightCapabilitiesDto {
+            color_temperature,
+            individual_profile_overrides: None,
+        }
     }))
 }
 

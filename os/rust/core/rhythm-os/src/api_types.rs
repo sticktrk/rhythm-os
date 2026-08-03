@@ -488,13 +488,18 @@ pub struct LightColorTemperatureCapabilitiesDto {
 
 /// Extensible, normalized light-control capabilities for a node.
 ///
-/// The whole object is omitted when the server cannot prove a safe capability
-/// surface. Room capabilities describe the intersection supported by every
-/// member light, not the union.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// Room color capabilities describe the intersection supported by every
+/// member light, not the union. The object can still contain route-level
+/// capabilities when the hardware color envelope is unknown.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LightCapabilitiesDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub color_temperature: Option<LightColorTemperatureCapabilitiesDto>,
+    /// Whether a light-device node has a true per-device dispatch route.
+    /// Rooms always support room-scoped overrides. Attached lights controlled
+    /// through an owning hub group explicitly report false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub individual_profile_overrides: Option<bool>,
 }
 
 /// Public node state for any addressable topology/runtime node.
@@ -774,6 +779,7 @@ mod tests {
                     min_kelvin: 2_000,
                     max_kelvin: 6_500,
                 }),
+                individual_profile_overrides: Some(true),
             }),
             state: rhythm_core::RoomModeState::Active,
             rhythm_enabled: true,
@@ -837,6 +843,10 @@ mod tests {
             json["light_capabilities"]["color_temperature"]["max_kelvin"],
             6_500
         );
+        assert_eq!(
+            json["light_capabilities"]["individual_profile_overrides"],
+            true
+        );
         assert!(json.get("room_profile").is_none());
     }
 
@@ -855,6 +865,7 @@ mod tests {
         let mut node = sample_node_state();
         node.light_capabilities = Some(LightCapabilitiesDto {
             color_temperature: None,
+            individual_profile_overrides: None,
         });
 
         let json: Value = serde_json::to_value(node).unwrap();

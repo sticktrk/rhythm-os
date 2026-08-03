@@ -60,6 +60,18 @@ pub trait RuntimeHandle: Send + Sync {
         })
     }
 
+    /// Plan an immediate refresh for a routed node without periodic de-dupe.
+    ///
+    /// Room-level manual actions use this for direct child routes so each
+    /// child renders its own effective inherited profile settings.
+    fn plan_forced_node_refresh(
+        &self,
+        tick: &TickContext,
+        source_node_id: &str,
+    ) -> Result<RhythmPeriodicPlanOutcome> {
+        self.plan_periodic_node_tick(tick, source_node_id, Some(true))
+    }
+
     /// Record runtime-specific turn-on bookkeeping after a neutral dispatch.
     fn record_rhythm_dispatches(
         &self,
@@ -492,6 +504,18 @@ where
             tick,
             source_node_id,
             lights_on,
+        )?)
+    }
+
+    fn plan_forced_node_refresh(
+        &self,
+        tick: &TickContext,
+        source_node_id: &str,
+    ) -> Result<RhythmPeriodicPlanOutcome> {
+        Ok(RhythmRuntime::plan_forced_node_refresh(
+            self,
+            tick,
+            source_node_id,
         )?)
     }
 

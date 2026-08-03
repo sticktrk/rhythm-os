@@ -18,7 +18,8 @@ use rhythm_core::{
     ButtonAction, HubDispatchTarget, InputEvent, LightNodeKind, LightProfileConfig,
     LightProfileNodeOverride, LightProfileRegistry, LightingCommand, ModeChangeCause, ModeConfig,
     ModeTransitionConfig, ModeTransitionTrigger, RestoredNodeState, RestoredRoomState, Rgb,
-    RhythmMode, RoomModeState, RoomProfileSettings, RuntimeHandle, TimerSetting, XyColor,
+    RhythmInputPlanOutcome, RhythmMode, RoomModeState, RoomProfileSettings, RuntimeHandle,
+    TimerSetting, XyColor,
 };
 use rhythm_runtime_api::{RuntimeEvent, TickContext};
 use serde_json::Value;
@@ -1134,6 +1135,26 @@ impl RoomProfileSettingsPatch {
             || self.fade_ms.is_some()
             || self.profile_overrides.is_some()
     }
+
+    fn requests_nonempty_lighting_output_settings(&self) -> bool {
+        if self.clear_all {
+            return false;
+        }
+        self.profile_id.as_ref().is_some_and(Option::is_some)
+            || self.mood_enabled.as_ref().is_some_and(Option::is_some)
+            || self.mood_profile_id.as_ref().is_some_and(Option::is_some)
+            || self.mood_scene_id.as_ref().is_some_and(Option::is_some)
+            || self.fade_ms.as_ref().is_some_and(Option::is_some)
+            || self.profile_overrides.as_ref().is_some_and(|overrides| {
+                overrides.as_ref().is_some_and(|overrides| {
+                    overrides.values().any(|profile_override| {
+                        profile_override
+                            .as_ref()
+                            .is_some_and(|profile_override| !profile_override.is_empty())
+                    })
+                })
+            })
+    }
 }
 
 fn collect_room_hub_types<'a>(
@@ -1740,6 +1761,7 @@ fn known_light_capabilities_for_device(
     if !capabilities.supports_color_temp() {
         return Some(LightCapabilitiesDto {
             color_temperature: None,
+            individual_profile_overrides: None,
         });
     }
 
@@ -1750,6 +1772,7 @@ fn known_light_capabilities_for_device(
             min_kelvin,
             max_kelvin,
         }),
+        individual_profile_overrides: None,
     })
 }
 
@@ -1801,11 +1824,13 @@ fn live_endpoint_light_capabilities(
     if !saw_normalized || !all_support_color_temperature {
         return saw_normalized.then_some(LightCapabilitiesDto {
             color_temperature: None,
+            individual_profile_overrides: None,
         });
     }
     let range = intersection?;
     Some(LightCapabilitiesDto {
         color_temperature: (range.min_kelvin <= range.max_kelvin).then_some(range),
+        individual_profile_overrides: None,
     })
 }
 
@@ -1814,11 +1839,16 @@ fn light_capabilities_for_node(
     node_id: &str,
     kind: LightNodeKind,
 ) -> Option<LightCapabilitiesDto> {
-    let color_temperature = match kind {
+    let (color_temperature, individual_profile_overrides) = match kind {
         LightNodeKind::LightDevice => {
             let node = s.topology.get_device_node(node_id)?;
             let device = s.canonical_registry.get(&node.canonical_device_id)?;
-            return known_light_capabilities_for_device(device);
+            (
+                known_light_capabilities_for_device(device)
+                    .and_then(|capabilities| capabilities.color_temperature),
+                s.topology
+                    .light_node_uses_device_dispatch(node_id, &s.canonical_registry),
+            )
         }
         LightNodeKind::Room => {
             let room = s.topology.get(node_id)?;
@@ -1832,8 +1862,9 @@ fn light_capabilities_for_node(
                     continue;
                 }
                 saw_light = true;
-                let member_capabilities = known_light_capabilities_for_device(device)?;
-                if let Some(member_range) = member_capabilities.color_temperature {
+                if let Some(member_range) = known_light_capabilities_for_device(device)
+                    .and_then(|capabilities| capabilities.color_temperature)
+                {
                     if all_support_color_temperature {
                         intersection = Some(match intersection {
                             Some(current) => LightColorTemperatureCapabilitiesDto {
@@ -1849,24 +1880,19 @@ fn light_capabilities_for_node(
                 }
             }
 
-            if !saw_light || !all_support_color_temperature {
-                return saw_light.then_some(LightCapabilitiesDto {
-                    color_temperature: None,
-                });
-            }
-            let range = intersection?;
-            if range.min_kelvin > range.max_kelvin {
-                return Some(LightCapabilitiesDto {
-                    color_temperature: None,
-                });
-            }
-            range
+            let color_temperature = if saw_light && all_support_color_temperature {
+                intersection.filter(|range| range.min_kelvin <= range.max_kelvin)
+            } else {
+                None
+            };
+            (color_temperature, true)
         }
         _ => return None,
     };
 
     Some(LightCapabilitiesDto {
-        color_temperature: Some(color_temperature),
+        color_temperature,
+        individual_profile_overrides: Some(individual_profile_overrides),
     })
 }
 
@@ -10188,6 +10214,22 @@ pub fn do_node_action(
 ) -> Result<String> {
     let action = parse_node_action(action_str)?;
 
+    // The neutral plan/apply path below must retain the same per-node
+    // transaction boundary as RuntimeHandle::handle_event. Without this gate,
+    // concurrent actions can mutate the engine in one order and dispatch I/O
+    // in another. Share the preference-write gate so settings changes cannot
+    // interleave with an action for the same node either.
+    let node_action_lock = {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.node_preference_write_locks
+            .entry(node_id.to_string())
+            .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
+            .clone()
+    };
+    let _node_action_guard = node_action_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("node action lock"))?;
+
     info!(target: "cmd", "node_action: {} -> {:?}", node_id, action);
 
     let runtime = {
@@ -10212,7 +10254,30 @@ pub fn do_node_action(
     };
 
     let event = InputEvent::new(node_id, action);
-    let turned_on = runtime.handle_event(&event)?;
+    let outcome = match runtime.plan_input_event(&event, None)? {
+        RhythmInputPlanOutcome::RequiresLightCheck => {
+            let lights_on = runtime.any_lights_on(node_id)?;
+            runtime.plan_input_event(&event, Some(lights_on))?
+        }
+        outcome => outcome,
+    };
+    let RhythmInputPlanOutcome::Plan {
+        plan,
+        turned_on,
+        dispatch_records,
+    } = outcome
+    else {
+        return Err(anyhow::anyhow!(
+            "node action still required a light-state check after retry"
+        ));
+    };
+    crate::light_runtime::apply_runtime_plan_to_handle(
+        state,
+        crate::light_runtime::RHYTHM_ADAPTIVE_RUNTIME_ID,
+        runtime.as_ref(),
+        &plan,
+    )?;
+    runtime.record_rhythm_dispatches(&dispatch_records)?;
     sync_active_mode_from_runtime(state, &runtime);
     clear_room_mode_transition(state, node_id);
 
@@ -12584,6 +12649,23 @@ pub fn do_node_preferences_set(
         room_profile.is_some_and(|patch| patch.touches_profile_settings());
     let lighting_output_settings_touched =
         room_profile.is_some_and(|patch| patch.touches_lighting_output_settings());
+    let requests_nonempty_lighting_output_settings =
+        room_profile.is_some_and(|patch| patch.requests_nonempty_lighting_output_settings());
+    if snap.kind == LightNodeKind::LightDevice
+        && snap.parent_id.is_some()
+        && requests_nonempty_lighting_output_settings
+    {
+        let uses_parent_group_route = {
+            let app = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            app.topology
+                .attached_light_uses_parent_dispatch(node_id, &app.canonical_registry)
+        };
+        if uses_parent_group_route {
+            return Err(anyhow::anyhow!(
+                "Individual light preferences are unavailable because this light is controlled by its room"
+            ));
+        }
+    }
     let motion_activation_enabled_before = snap.profile_settings.motion_activation_enabled();
     let motion_timeout_before = if profile_settings_touched {
         Some(resolved_motion_timeout_for_node_settings(
@@ -21708,6 +21790,41 @@ mod tests {
     }
 
     #[test]
+    fn room_actions_share_the_node_preference_transaction_gate() {
+        let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        let gate = {
+            let mut app = state.lock().unwrap();
+            app.node_preference_write_locks
+                .entry("room1".to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let guard = gate.lock().unwrap();
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let action_state = state.clone();
+        let worker = std::thread::spawn(move || {
+            let result = do_node_action(&action_state, "room1", "on", false);
+            completed_tx.send(result).unwrap();
+        });
+
+        assert!(completed_rx
+            .recv_timeout(Duration::from_millis(200))
+            .is_err());
+        assert!(runtime.events().is_empty());
+
+        drop(guard);
+        completed_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("action should complete after the transaction gate is released")
+            .unwrap();
+        worker.join().unwrap();
+        assert_eq!(
+            runtime.events(),
+            vec![("room1".to_string(), ButtonAction::OnPress)]
+        );
+    }
+
+    #[test]
     fn room_action_updates_parent_lights_on_for_attached_light() {
         let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
 
@@ -25225,7 +25342,9 @@ mod tests {
         ]);
 
         let wide = build_node_state(&state, &wide_id).unwrap();
-        let wide_range = wide.light_capabilities.unwrap().color_temperature.unwrap();
+        let wide_capabilities = wide.light_capabilities.unwrap();
+        assert_eq!(wide_capabilities.individual_profile_overrides, Some(true));
+        let wide_range = wide_capabilities.color_temperature.unwrap();
         assert_eq!(wide_range.min_kelvin, 1_000);
         assert_eq!(wide_range.max_kelvin, 20_000);
 
@@ -25244,9 +25363,35 @@ mod tests {
         assert_eq!(event_range.max_kelvin, 20_000);
 
         let room = build_node_state(&state, "room1").unwrap();
-        let room_range = room.light_capabilities.unwrap().color_temperature.unwrap();
+        let room_capabilities = room.light_capabilities.unwrap();
+        assert_eq!(room_capabilities.individual_profile_overrides, Some(true));
+        let room_range = room_capabilities.color_temperature.unwrap();
         assert_eq!(room_range.min_kelvin, 2_000);
         assert_eq!(room_range.max_kelvin, 6_500);
+    }
+
+    #[test]
+    fn grouped_hue_light_capability_disables_individual_profile_overrides() {
+        let (state, _runtime, grouped_light_id) = setup_attached_hue_light_with_group_dispatch();
+        let grouped = build_node_state(&state, &grouped_light_id).unwrap();
+        assert_eq!(
+            grouped
+                .light_capabilities
+                .expect("light capability contract")
+                .individual_profile_overrides,
+            Some(false)
+        );
+
+        let (state, _runtime, direct_light_id) =
+            setup_attached_matter_light_without_group_dispatch();
+        let direct = build_node_state(&state, &direct_light_id).unwrap();
+        assert_eq!(
+            direct
+                .light_capabilities
+                .expect("light capability contract")
+                .individual_profile_overrides,
+            Some(true)
+        );
     }
 
     #[test]
@@ -25370,20 +25515,30 @@ mod tests {
             .expect("all members are known")
             .color_temperature
             .is_none());
-        assert!(build_node_state(&state, "unknown-room")
+        let unknown_room_capabilities = build_node_state(&state, "unknown-room")
             .unwrap()
             .light_capabilities
-            .is_none());
+            .expect("room route capability is known");
+        assert!(unknown_room_capabilities.color_temperature.is_none());
+        assert_eq!(
+            unknown_room_capabilities.individual_profile_overrides,
+            Some(true)
+        );
         assert!(build_node_state(&state, &dimmable_id)
             .unwrap()
             .light_capabilities
             .expect("LWA003 is a known non-CT model")
             .color_temperature
             .is_none());
-        assert!(build_node_state(&state, &unknown_id)
+        let unknown_light_capabilities = build_node_state(&state, &unknown_id)
             .unwrap()
             .light_capabilities
-            .is_none());
+            .expect("device route capability is known");
+        assert!(unknown_light_capabilities.color_temperature.is_none());
+        assert_eq!(
+            unknown_light_capabilities.individual_profile_overrides,
+            Some(true)
+        );
     }
 
     #[test]
@@ -26848,6 +27003,74 @@ mod tests {
                 .get(rhythm_core::RHYTHM_PROFILE_ID)
                 .and_then(|profile_override| profile_override.motion_timeout_secs.as_ref()),
             Some(&TimerSetting::Fixed { value: 120 })
+        );
+    }
+
+    #[test]
+    fn grouped_hue_light_rejects_individual_visual_profile_preferences() {
+        let (state, runtime, light_id) = setup_attached_hue_light_with_group_dispatch();
+        let patch = profile_overrides_patch(vec![(
+            rhythm_core::RHYTHM_PROFILE_ID,
+            Some(LightProfileNodeOverride {
+                max_brightness: Some(31),
+                ..Default::default()
+            }),
+        )]);
+
+        let error = do_node_preferences_set(
+            &state,
+            &light_id,
+            None,
+            None,
+            None,
+            None,
+            Some(&patch),
+            false,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("controlled by its room"));
+        assert!(runtime.restore_calls().is_empty());
+        assert!(runtime
+            .engine_node_snapshot(&light_id)
+            .unwrap()
+            .profile_settings
+            .profile_overrides
+            .is_empty());
+    }
+
+    #[test]
+    fn direct_light_accepts_individual_visual_profile_preferences() {
+        let (state, runtime, light_id) = setup_attached_matter_light_without_group_dispatch();
+        let patch = profile_overrides_patch(vec![(
+            rhythm_core::RHYTHM_PROFILE_ID,
+            Some(LightProfileNodeOverride {
+                max_brightness: Some(31),
+                ..Default::default()
+            }),
+        )]);
+
+        do_node_preferences_set(
+            &state,
+            &light_id,
+            None,
+            None,
+            None,
+            None,
+            Some(&patch),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            runtime
+                .engine_node_snapshot(&light_id)
+                .unwrap()
+                .profile_settings
+                .profile_overrides
+                .get(rhythm_core::RHYTHM_PROFILE_ID)
+                .and_then(|profile_override| profile_override.max_brightness),
+            Some(31)
         );
     }
 

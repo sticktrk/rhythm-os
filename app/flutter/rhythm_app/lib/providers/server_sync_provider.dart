@@ -995,10 +995,17 @@ class ServerSyncProvider extends ChangeNotifier {
 
   bool lightProfileOverridesSupportedForNode(String nodeId) {
     if (HueServiceLocator.isDemoMode) return true;
-    return _capabilities?.supportsFeature(
+    final featureSupported = _capabilities?.supportsFeature(
           RhythmFeature.roomLightProfileOverrides,
         ) ==
         true;
+    if (!featureSupported) return false;
+    final node = nodeById(nodeId);
+    if (node?.kind == RhythmNodeKind.lightDevice) {
+      // Older servers cannot prove safe per-device routing, so fail closed.
+      return node?.lightCapabilities?.individualProfileOverrides == true;
+    }
+    return true;
   }
 
   bool hasNodeLightProfileOverrides(String nodeId) {
@@ -4751,6 +4758,8 @@ class ServerSyncProvider extends ChangeNotifier {
             right.lightCapabilities?.colorTemperature?.minKelvin ||
         left.lightCapabilities?.colorTemperature?.maxKelvin !=
             right.lightCapabilities?.colorTemperature?.maxKelvin ||
+        left.lightCapabilities?.individualProfileOverrides !=
+            right.lightCapabilities?.individualProfileOverrides ||
         left.profileSettings?.toJson().toString() !=
             right.profileSettings?.toJson().toString() ||
         left.moodEnabled != right.moodEnabled ||

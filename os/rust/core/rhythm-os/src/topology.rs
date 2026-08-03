@@ -373,7 +373,10 @@ pub struct TopologyRoom {
 pub struct TopologyLightNode {
     /// Stable internal routing/scheduler identifier.
     pub id: String,
-    /// Owning settings node ID whose state this target inherits.
+    /// Settings node ID whose effective state this target renders.
+    ///
+    /// Group routes inherit the owning room. Direct device routes use the
+    /// device node so per-light profile overrides survive room fan-out.
     pub source_node_id: String,
     /// Public node ID whose state updates should be emitted after the tick.
     pub emit_node_id: String,
@@ -709,7 +712,7 @@ impl TopologyRoom {
                     plan.node_routes.push(TopologyLightNodeRoute {
                         node: TopologyLightNode {
                             id: device_id.clone(),
-                            source_node_id: self.id.clone(),
+                            source_node_id: device_id.clone(),
                             emit_node_id: self.id.clone(),
                         },
                         hub_key: hub_key.clone(),
@@ -3436,7 +3439,7 @@ mod tests {
             nodes,
             vec![TopologyLightNode {
                 id: light_id.clone(),
-                source_node_id: room_id.clone(),
+                source_node_id: light_id.clone(),
                 emit_node_id: room_id.clone(),
             }]
         );
@@ -3626,12 +3629,12 @@ mod tests {
         let mut expected_nodes = vec![
             TopologyLightNode {
                 id: light_one_id.clone(),
-                source_node_id: room_id.clone(),
+                source_node_id: light_one_id.clone(),
                 emit_node_id: room_id.clone(),
             },
             TopologyLightNode {
                 id: light_two_id.clone(),
-                source_node_id: room_id.clone(),
+                source_node_id: light_two_id.clone(),
                 emit_node_id: room_id.clone(),
             },
         ];
@@ -3876,7 +3879,7 @@ mod tests {
             store.periodic_light_nodes(&registry),
             vec![TopologyLightNode {
                 id: light_id.clone(),
-                source_node_id: room_id.clone(),
+                source_node_id: light_id.clone(),
                 emit_node_id: room_id,
             }]
         );
