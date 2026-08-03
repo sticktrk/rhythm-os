@@ -5,7 +5,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use anyhow::{Context, Result};
 use rhythm_os::canonical::identity::HubKey;
 use rhythm_os::storage::Storage;
-use sha2::{Digest, Sha256};
 
 use crate::ownership::{
     persist_controller_ownership, HueControllerOwnership, HueManagedRoom, HueOwnershipPhase,
@@ -13,17 +12,39 @@ use crate::ownership::{
 use crate::transport::{HueRoomDefinition, HueTransport};
 
 pub const DEFAULT_MANAGED_HUE_ROOM_ARCHETYPE: &str = "living_room";
+const MAX_MANAGED_HUE_ROOM_NAME_BYTES: usize = 32;
+const MANAGED_HUE_ROOM_NAME_PREFIX: &str = "Rhythm · ";
 
-/// Return a bounded, non-user-authored native name for one hidden room.
-/// Explicit ownership remains in the manifest; this marker only keeps the
-/// controller topology recognizable without copying a household room name.
-pub fn managed_room_projection_name(rhythm_room_id: &str) -> String {
-    let digest = Sha256::digest(rhythm_room_id.as_bytes());
-    let suffix = digest[..8]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("Rhythm {suffix}")
+/// Return a bounded, human-readable native name for one managed Hue room.
+///
+/// Explicit ownership remains in the per-bridge manifest. This name is only
+/// presentation metadata for Hue surfaces and must never be used as identity.
+pub fn managed_room_projection_name(room_name: &str) -> String {
+    let normalized = room_name.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = if normalized.is_empty() {
+        "Room"
+    } else {
+        normalized.as_str()
+    };
+    let available = MAX_MANAGED_HUE_ROOM_NAME_BYTES - MANAGED_HUE_ROOM_NAME_PREFIX.len();
+    if normalized.len() <= available {
+        return format!("{MANAGED_HUE_ROOM_NAME_PREFIX}{normalized}");
+    }
+
+    const ELLIPSIS: &str = "…";
+    let content_bytes = available - ELLIPSIS.len();
+    let mut truncated = String::new();
+    for character in normalized.chars() {
+        if truncated.len() + character.len_utf8() > content_bytes {
+            break;
+        }
+        truncated.push(character);
+    }
+
+    format!(
+        "{MANAGED_HUE_ROOM_NAME_PREFIX}{}{ELLIPSIS}",
+        truncated.trim_end()
+    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -584,13 +605,93 @@ mod tests {
     }
 
     #[test]
-    fn hidden_room_name_is_stable_bounded_and_does_not_copy_user_text() {
-        let first = managed_room_projection_name("rhythm-room-1");
-        assert_eq!(first, managed_room_projection_name("rhythm-room-1"));
-        assert_ne!(first, managed_room_projection_name("rhythm-room-2"));
-        assert!(first.starts_with("Rhythm "));
-        assert_eq!(first.len(), 23);
-        assert!(!managed_room_projection_name("Bedroom").contains("Bedroom"));
+    fn managed_room_projection_name_is_human_readable_and_bounded() {
+        assert_eq!(
+            managed_room_projection_name("  Living   Room  "),
+            "Rhythm · Living Room"
+        );
+        assert_eq!(managed_room_projection_name("  \t "), "Rhythm · Room");
+
+        let long_ascii = managed_room_projection_name(
+            "A very long downstairs family room with several reading lights",
+        );
+        assert!(long_ascii.starts_with("Rhythm · A very long"));
+        assert!(long_ascii.ends_with('…'));
+        assert!(long_ascii.len() <= MAX_MANAGED_HUE_ROOM_NAME_BYTES);
+
+        let multibyte = managed_room_projection_name("リビングルームと読書コーナー");
+        assert!(multibyte.starts_with("Rhythm · リビング"));
+        assert!(multibyte.ends_with('…'));
+        assert!(multibyte.len() <= MAX_MANAGED_HUE_ROOM_NAME_BYTES);
+        assert!(multibyte.is_char_boundary(multibyte.len()));
+    }
+
+    #[test]
+    fn existing_hash_named_room_is_renamed_in_place() {
+        let temp = TempStorage::new("readable-rename");
+        let spy = SpyHueTransport::new();
+        let mut state = active_state(&spy, &temp.storage);
+        let controlled = BTreeSet::from(["bulb".to_string()]);
+
+        reconcile_managed_rooms(
+            &temp.storage,
+            &key(),
+            &mut state,
+            &spy,
+            "user",
+            &[DesiredHueRoom::new(
+                "rhythm-a",
+                "Rhythm 0123456789abcdef",
+                vec!["bulb".to_string()],
+            )],
+            &controlled,
+        )
+        .unwrap();
+        let hue_room_id = state.managed_rooms()["rhythm-a"].hue_room_id.clone();
+        let grouped_light_id = state.managed_rooms()["rhythm-a"].grouped_light_id.clone();
+        spy.reset();
+
+        reconcile_managed_rooms(
+            &temp.storage,
+            &key(),
+            &mut state,
+            &spy,
+            "user",
+            &[DesiredHueRoom::new(
+                "rhythm-a",
+                "Rhythm · Living Room",
+                vec!["bulb".to_string()],
+            )],
+            &controlled,
+        )
+        .unwrap();
+
+        assert_eq!(state.managed_rooms()["rhythm-a"].hue_room_id, hue_room_id);
+        assert_eq!(
+            state.managed_rooms()["rhythm-a"].grouped_light_id,
+            grouped_light_id
+        );
+        let mutations = spy
+            .calls()
+            .into_iter()
+            .filter(|call| {
+                matches!(
+                    call,
+                    HueTransportCall::CreateRoom { .. }
+                        | HueTransportCall::UpdateRoom { .. }
+                        | HueTransportCall::RenameRoom { .. }
+                        | HueTransportCall::DeleteRoom { .. }
+                        | HueTransportCall::UpdateRoomChildren { .. }
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            mutations,
+            vec![HueTransportCall::RenameRoom {
+                room_id: hue_room_id,
+                name: "Rhythm · Living Room".to_string(),
+            }]
+        );
     }
 
     fn active_state(spy: &SpyHueTransport, storage: &FileStorage) -> HueControllerOwnership {
