@@ -311,6 +311,7 @@ fn sync_with_discovery(
     // Phase 1: Discover rooms
     // ========================================================================
     let discovered_rooms = discovery.discover_rooms()?;
+    let source_room_names_authoritative = discovery.room_names_are_authoritative();
     info!(target: "room_sync", "Discovered {} rooms from hub", discovered_rooms.len());
 
     // ========================================================================
@@ -648,6 +649,7 @@ fn sync_with_discovery(
                     let topo_room = DiscoveredTopologyRoom {
                         hub_room_id: room.id.clone(),
                         name: room.name.clone(),
+                        source_name_authoritative: source_room_names_authoritative,
                         control_id: room.grouped_light_id.clone(),
                         light_device_ids: light_device_ids.clone(),
                         canonical_device_ids: canonical_device_ids.clone(),

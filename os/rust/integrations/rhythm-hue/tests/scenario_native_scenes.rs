@@ -1,14 +1,10 @@
-//! Scenario coverage for Hue-authored scenes inside Rhythm-managed rooms.
+//! Scenario coverage for Hue-authored topology and scenes under Rhythm authority.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use rhythm_hue::discovery::HueDiscovery;
-use rhythm_hue::managed_rooms::{reconcile_managed_rooms, DesiredHueRoom};
-use rhythm_hue::ownership::{
-    acquire_authoritative_control, persist_controller_ownership, reconcile_authoritative_control,
-    HueManagedScene,
-};
+use rhythm_hue::ownership::{acquire_authoritative_control, reconcile_authoritative_control};
 use rhythm_hue::test_support::{HueTransportCall, SpyHueTransport};
 use rhythm_hue::transport::HueTransport;
 use rhythm_os::canonical::identity::HubKey;
@@ -43,16 +39,113 @@ fn key() -> HubKey {
     HubKey::new(HubType::new(HubType::HUE), "192.0.2.10")
 }
 
-fn seed_empty_bridge(bridge: &SpyHueTransport) {
+fn seed_bridge(bridge: &SpyHueTransport) {
     for (resource_type, data) in [
         ("bridge", serde_json::json!([{"id": "bridge-scenes"}])),
-        ("device", serde_json::json!([{"id": "bulb"}])),
-        ("light", serde_json::json!([])),
-        ("behavior_instance", serde_json::json!([])),
-        ("room", serde_json::json!([])),
-        ("zone", serde_json::json!([])),
-        ("scene", serde_json::json!([])),
-        ("smart_scene", serde_json::json!([])),
+        (
+            "device",
+            serde_json::json!([{
+                "id": "bulb",
+                "metadata": {"name": "Bedside lamp"},
+                "product_data": {"manufacturer_name": "Signify", "model_id": "LCA009"},
+                "services": [{"rid": "bulb-light", "rtype": "light"}]
+            }]),
+        ),
+        (
+            "light",
+            serde_json::json!([{
+                "id": "bulb-light",
+                "owner": {"rid": "bulb", "rtype": "device"}
+            }]),
+        ),
+        (
+            "behavior_instance",
+            serde_json::json!([{
+                "id": "motion-automation",
+                "script_id": "automation-script-1",
+                "enabled": true
+            }]),
+        ),
+        (
+            "behavior_script",
+            serde_json::json!([{
+                "id": "automation-script-1",
+                "metadata": {"name": "Motion automation", "category": "automation"}
+            }]),
+        ),
+        (
+            "room",
+            serde_json::json!([
+                {
+                    "id": "bedroom",
+                    "metadata": {"name": "Bedroom", "archetype": "bedroom"},
+                    "children": [{"rid": "bulb", "rtype": "device"}],
+                    "services": [{"rid": "bedroom-group", "rtype": "grouped_light"}]
+                },
+                {
+                    "id": "outside-room",
+                    "metadata": {"name": "Outside", "archetype": "garden"},
+                    "children": [],
+                    "services": [{"rid": "outside-group", "rtype": "grouped_light"}]
+                }
+            ]),
+        ),
+        (
+            "zone",
+            serde_json::json!([{
+                "id": "upstairs",
+                "metadata": {"name": "Upstairs"},
+                "children": [{"rid": "bulb", "rtype": "device"}]
+            }]),
+        ),
+        (
+            "scene",
+            serde_json::json!([
+                {
+                    "id": "hue-palette",
+                    "group": {"rtype": "room", "rid": "bedroom"},
+                    "metadata": {"name": "Arctic aurora"},
+                    "palette": {
+                        "color": [{
+                            "color": {"xy": {"x": 0.21, "y": 0.24}},
+                            "dimming": {"brightness": 63}
+                        }]
+                    },
+                    "actions": []
+                },
+                {
+                    "id": "hue-basic",
+                    "group": {"rtype": "room", "rid": "bedroom"},
+                    "metadata": {"name": "Warm basic"},
+                    "actions": [{
+                        "action": {
+                            "on": {"on": true},
+                            "dimming": {"brightness": 55},
+                            "color_temperature": {"mirek": 300}
+                        }
+                    }]
+                },
+                {
+                    "id": "outside-scene",
+                    "group": {"rtype": "room", "rid": "outside-room"},
+                    "metadata": {"name": "Outside"},
+                    "actions": [{
+                        "action": {
+                            "on": {"on": true},
+                            "color_temperature": {"mirek": 250}
+                        }
+                    }]
+                }
+            ]),
+        ),
+        (
+            "smart_scene",
+            serde_json::json!([{
+                "id": "smart-scene",
+                "metadata": {"name": "Natural light"},
+                "group": {"rtype": "room", "rid": "bedroom"}
+            }]),
+        ),
     ] {
         bridge.set_resource_response(
             resource_type,
@@ -64,99 +157,21 @@ fn seed_empty_bridge(bridge: &SpyHueTransport) {
 }
 
 #[test]
-fn hue_palette_and_basic_scenes_survive_sync_and_recall_under_authority() {
+fn hue_rooms_zones_and_scenes_survive_authority_reconcile_and_recall() {
     let temp = TempStorage::new();
     let bridge = Arc::new(SpyHueTransport::new());
-    seed_empty_bridge(&bridge);
-    let mut active =
+    seed_bridge(&bridge);
+    let original_rooms = bridge.get_resources("user", "room").unwrap();
+    let original_zones = bridge.get_resources("user", "zone").unwrap();
+    let original_scenes = bridge.get_resources("user", "scene").unwrap();
+    let original_smart_scenes = bridge.get_resources("user", "smart_scene").unwrap();
+    bridge.reset();
+
+    let active =
         acquire_authoritative_control(temp.storage.as_ref(), &key(), bridge.as_ref(), "user")
             .unwrap();
-    reconcile_managed_rooms(
-        temp.storage.as_ref(),
-        &key(),
-        &mut active,
-        bridge.as_ref(),
-        "user",
-        &[DesiredHueRoom::new(
-            "rhythm-room",
-            "Rhythm room",
-            vec!["bulb".to_string()],
-        )],
-        &BTreeSet::from(["bulb".to_string()]),
-    )
-    .unwrap();
-    let managed_room_id = active.managed_rooms()["rhythm-room"].hue_room_id.clone();
-    active
-        .record_managed_scene(HueManagedScene {
-            rhythm_room_id: "rhythm-room".to_string(),
-            rhythm_scene_id: "rhythm-projection".to_string(),
-            hue_room_id: managed_room_id.clone(),
-            hue_scene_id: "managed-projection".to_string(),
-            fingerprint: "fingerprint".to_string(),
-            ephemeral: false,
-        })
-        .unwrap();
-    persist_controller_ownership(temp.storage.as_ref(), &active).unwrap();
-    bridge.set_resource_response(
-        "scene",
-        serde_json::json!({"data": [
-            {
-                "id": "hue-palette",
-                "group": {"rtype": "room", "rid": managed_room_id},
-                "metadata": {"name": "Arctic aurora"},
-                "palette": {
-                    "color": [{
-                        "color": {"xy": {"x": 0.21, "y": 0.24}},
-                        "dimming": {"brightness": 63}
-                    }]
-                },
-                "actions": []
-            },
-            {
-                "id": "hue-basic",
-                "group": {"rtype": "room", "rid": managed_room_id},
-                "metadata": {"name": "Warm basic"},
-                "actions": [{
-                    "action": {
-                        "on": {"on": true},
-                        "dimming": {"brightness": 55},
-                        "color_temperature": {"mirek": 300}
-                    }
-                }]
-            },
-            {
-                "id": "managed-projection",
-                "group": {"rtype": "room", "rid": managed_room_id},
-                "metadata": {"name": "Rhythm projection"},
-                "actions": [{
-                    "action": {
-                        "on": {"on": true},
-                        "color_temperature": {"mirek": 250}
-                    }
-                }]
-            },
-            {
-                "id": "outside-scene",
-                "group": {"rtype": "room", "rid": "outside-room"},
-                "metadata": {"name": "Outside"},
-                "actions": [{
-                    "action": {
-                        "on": {"on": true},
-                        "color_temperature": {"mirek": 250}
-                    }
-                }]
-            }
-        ], "errors": []}),
-    );
-    bridge.set_resource_response(
-        "smart_scene",
-        serde_json::json!({"data": [{
-            "id": "smart-scene",
-            "group": {"rtype": "room", "rid": managed_room_id}
-        }], "errors": []}),
-    );
-
-    let active = reconcile_authoritative_control(
+    bridge.reset();
+    reconcile_authoritative_control(
         temp.storage.as_ref(),
         &key(),
         bridge.as_ref(),
@@ -164,12 +179,24 @@ fn hue_palette_and_basic_scenes_survive_sync_and_recall_under_authority() {
         active,
     )
     .unwrap();
-    assert!(active
-        .managed_scenes()
-        .values()
-        .any(|scene| { scene.hue_scene_id == "managed-projection" }));
-    let remaining_scenes = bridge.get_resources("user", "scene").unwrap();
-    let remaining_scene_ids = remaining_scenes["data"]
+
+    assert_eq!(
+        bridge.get_resources("user", "room").unwrap(),
+        original_rooms
+    );
+    assert_eq!(
+        bridge.get_resources("user", "zone").unwrap(),
+        original_zones
+    );
+    assert_eq!(
+        bridge.get_resources("user", "scene").unwrap(),
+        original_scenes
+    );
+    assert_eq!(
+        bridge.get_resources("user", "smart_scene").unwrap(),
+        original_smart_scenes
+    );
+    let scene_ids = bridge.get_resources("user", "scene").unwrap()["data"]
         .as_array()
         .unwrap()
         .iter()
@@ -177,25 +204,34 @@ fn hue_palette_and_basic_scenes_survive_sync_and_recall_under_authority() {
         .map(str::to_string)
         .collect::<BTreeSet<_>>();
     assert_eq!(
-        remaining_scene_ids,
+        scene_ids,
         BTreeSet::from([
             "hue-basic".to_string(),
             "hue-palette".to_string(),
-            "managed-projection".to_string(),
+            "outside-scene".to_string(),
         ])
     );
-    assert!(bridge.get_resources("user", "smart_scene").unwrap()["data"]
-        .as_array()
-        .unwrap()
-        .is_empty());
+    assert!(!bridge.calls().iter().any(|call| matches!(
+        call,
+        HueTransportCall::CreateResource { .. }
+            | HueTransportCall::UpdateResource { .. }
+            | HueTransportCall::DeleteResource { .. }
+            | HueTransportCall::PostV1 { .. }
+            | HueTransportCall::PutV1 { .. }
+            | HueTransportCall::DeleteV1 { .. }
+            | HueTransportCall::UpdateRoomChildren { .. }
+            | HueTransportCall::CreateRoom { .. }
+            | HueTransportCall::UpdateRoom { .. }
+            | HueTransportCall::RenameRoom { .. }
+            | HueTransportCall::DeleteRoom { .. }
+    )));
 
-    let discovery = HueDiscovery::new_with_ownership_storage(
-        bridge.clone(),
-        "user".to_string(),
-        temp.storage.clone(),
-    )
-    .unwrap();
-    let scenes = discovery.discover_scenes(&managed_room_id).unwrap();
+    let discovery = HueDiscovery::new(bridge.clone(), "user".to_string());
+    let rooms = discovery.discover_rooms().unwrap();
+    assert_eq!(rooms.len(), 2);
+    assert!(rooms.iter().any(|room| room.id == "bedroom"));
+    assert!(rooms.iter().any(|room| room.id == "outside-room"));
+    let scenes = discovery.discover_scenes("bedroom").unwrap();
     assert_eq!(scenes.len(), 2);
     assert!(scenes.iter().any(|scene| {
         scene.id == "native-hue-hue-palette"
@@ -204,9 +240,6 @@ fn hue_palette_and_basic_scenes_survive_sync_and_recall_under_authority() {
     assert!(scenes
         .iter()
         .any(|scene| scene.id == "native-hue-hue-basic"));
-    assert!(!scenes
-        .iter()
-        .any(|scene| scene.id == "native-hue-managed-projection"));
 
     bridge.reset();
     discovery.recall_scene("hue-palette", Some(700)).unwrap();

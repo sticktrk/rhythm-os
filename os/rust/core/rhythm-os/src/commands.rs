@@ -6611,6 +6611,7 @@ fn stage_pending_hue_backup_credentials(
 
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     s.hub_credentials.clear();
+    s.external_controller_authority_required.clear();
     s.authority_state_recovery_required = true;
     for credential in pending {
         let Some(key) = credential.hub_key() else {
@@ -6618,6 +6619,7 @@ fn stage_pending_hue_backup_credentials(
         };
         s.clear_hub_connected(&key);
         s.clear_hub_startup_retry(&key);
+        s.set_external_controller_authority_required(&key, true);
         s.mark_external_controller_authority_pending(&key);
         s.hub_credentials.insert(key, credential);
     }
@@ -6645,6 +6647,7 @@ fn stage_backup_hub_credentials(
 
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     s.hub_credentials.clear();
+    s.external_controller_authority_required.clear();
     for credential in restored {
         let Some(key) = credential.hub_key() else {
             continue;
@@ -6653,6 +6656,7 @@ fn stage_backup_hub_credentials(
         s.clear_hub_startup_retry(&key);
         let requires_authority = s.topology.grouped_room_control_is_required(&key)
             || (require_hue_authority && key.hub_type.as_str() == crate::hub::HubType::HUE);
+        s.set_external_controller_authority_required(&key, requires_authority);
         if requires_authority && credential.can_connect() {
             s.mark_external_controller_authority_pending(&key);
         }
@@ -12011,7 +12015,7 @@ pub fn do_hub_credentials(
 
     let requires_authoritative_sync = {
         let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        let required = state.topology.grouped_room_control_is_required(&hub_key);
+        let required = state.external_controller_authority_is_required(&hub_key);
         if required {
             state.mark_external_controller_initial_sync_pending(&hub_key);
         }
@@ -12374,6 +12378,7 @@ fn disconnect_hubs_after_external_controller_release(state: &SharedState) -> Res
             topology_changed |= !s.topology.remove_stale_bindings(key, &[]).is_empty();
         }
         s.hub_connection_status.clear();
+        s.external_controller_authority_required.clear();
         s.hub_seen_connected_once.clear();
         s.hub_pending_disconnect_at.clear();
         s.hub_startup_retry.clear();
@@ -12495,6 +12500,7 @@ pub fn do_hub_disconnect_one(state: &SharedState, hub_type_str: &str, address: &
         }
         topology_changed = !s.topology.remove_stale_bindings(&key, &[]).is_empty();
         s.clear_hub_connected(&key);
+        s.set_external_controller_authority_required(&key, false);
         s.clear_hub_startup_retry(&key);
         s.hub_credentials.remove(&key);
 
@@ -21543,11 +21549,9 @@ mod tests {
                 .push(HubIntegrationCapability::new(HubType::HUE));
             app.get_hub_provider_fn = Some(Arc::new(|_| &IDENTITY_FAILING_HUE_PROVIDER));
             app.register_controller_fn = Some(Arc::new(|state, key| {
-                state
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("lock"))?
-                    .topology
-                    .set_grouped_room_control_required(key, true);
+                let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+                state.set_external_controller_authority_required(key, true);
+                state.topology.set_grouped_room_control_required(key, false);
                 Ok(())
             }));
             let recorded_authority_attempts = authority_attempts.clone();

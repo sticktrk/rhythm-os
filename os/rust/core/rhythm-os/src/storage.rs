@@ -3488,6 +3488,7 @@ mod tests {
             &DiscoveredTopologyRoom {
                 hub_room_id: "hue-stairwell".to_string(),
                 name: "Stairwell".to_string(),
+                source_name_authoritative: true,
                 control_id: "stairwell-grouped-light".to_string(),
                 light_device_ids: vec![
                     "stairwell-light-1".to_string(),
@@ -3504,6 +3505,7 @@ mod tests {
             &DiscoveredTopologyRoom {
                 hub_room_id: "hue-drop-zone".to_string(),
                 name: "Drop Zone".to_string(),
+                source_name_authoritative: true,
                 control_id: "drop-zone-grouped-light".to_string(),
                 light_device_ids: vec!["drop-zone-light-1".to_string()],
                 canonical_device_ids: vec![drop_zone_light_id.clone()],

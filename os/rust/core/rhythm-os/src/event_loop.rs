@@ -876,7 +876,7 @@ fn recover_failed_authoritative_reconnect(
         // bootstrap loop performs a full connect + discovery + acquisition.
         crate::hub::discard_active_hub_for_full_bootstrap_retry(state, hub_key);
     }
-    crate::hub::fence_required_group_authority_uncertainty(state, hub_key);
+    crate::hub::fence_external_controller_authority_uncertainty(state, hub_key);
 }
 
 fn spawn_reconnect_sync(
@@ -1239,7 +1239,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                         && !first_connected_event
                         && (!was_connected || pending_disconnect);
                     let authoritative_reconnect =
-                        reconnect_after_gap && s.topology.grouped_room_control_is_required(key);
+                        reconnect_after_gap && s.external_controller_authority_is_required(key);
                     let authoritative_disconnect_generation =
                         authoritative_reconnect.then(|| s.hub_disconnect_generation(key));
                     if authoritative_reconnect {
@@ -1276,9 +1276,9 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 if let Some(ref key) = hub_key {
                     if authoritative_reconnect {
                         emit_hub_status(state, Some(key), false);
-                        // Required-group controllers bypass the ordinary Hue
+                        // Authoritative controllers bypass the ordinary Hue
                         // reconnect cooldown: every new observation boundary
-                        // must be verified before group routing reopens.
+                        // must be verified before controller routing reopens.
                         spawn_reconnect_sync(state, key, true, authoritative_disconnect_generation);
                     } else if should_run_reconnect_resync(state, key) {
                         spawn_reconnect_sync(state, key, false, None);
@@ -4735,8 +4735,9 @@ mod tests {
         {
             let mut app = state.lock().unwrap();
             app.platform.full_device_discovery = true;
+            app.set_external_controller_authority_required(&hub_key, true);
             app.topology
-                .set_grouped_room_control_required(&hub_key, true);
+                .set_grouped_room_control_required(&hub_key, false);
             app.hubs.insert(
                 hub_key.clone(),
                 ActiveHub {
@@ -4783,7 +4784,7 @@ mod tests {
     }
 
     #[test]
-    fn required_group_reconnect_stays_fenced_until_authority_readback_finishes() {
+    fn authority_only_reconnect_stays_fenced_until_readback_finishes() {
         let (state, hub_key) =
             authoritative_reconnect_state(Arc::new(EmptyAuthoritativeReconnectDiscovery));
         let (entered_tx, entered_rx) = std::sync::mpsc::channel();
@@ -4811,7 +4812,7 @@ mod tests {
                 Ok(())
             }
         }));
-        // Required-group verification must not be skipped by the ordinary
+        // Authority verification must not be skipped by the ordinary
         // 24-hour Hue reconnect cooldown.
         state.lock().unwrap().note_hub_reconnect_sync(&hub_key);
 

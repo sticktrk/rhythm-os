@@ -752,6 +752,10 @@ impl<H: HueTransport> HueDiscovery<H> {
 }
 
 impl<H: HueTransport + 'static> HubDiscovery for HueDiscovery<H> {
+    fn room_names_are_authoritative(&self) -> bool {
+        false
+    }
+
     fn release_resources(&self) {
         self.transport.release_connection();
     }
