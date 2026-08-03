@@ -379,15 +379,20 @@ Future<void> _startLocalBlePairing(
   );
   if (!context.mounted || result == null) return;
 
-  await continueRecoveredLocalBlePairingFlow(context, result);
+  await continueRecoveredLocalBlePairingFlow(
+    context,
+    result,
+    analyticsSource: analyticsSource,
+  );
 }
 
 /// Continues the normal post-pairing sync and room-assignment flow for a
 /// device recovered from the durable app-shell pairing pointer.
 Future<void> continueRecoveredLocalBlePairingFlow(
   BuildContext context,
-  RhythmPairedDevice result,
-) async {
+  RhythmPairedDevice result, {
+  String analyticsSource = 'pairing_recovery',
+}) async {
   final syncProvider = context.read<ServerSyncProvider>();
 
   try {
@@ -426,6 +431,7 @@ Future<void> continueRecoveredLocalBlePairingFlow(
     resolved,
     allowNoRoom: syncProvider.supportsLocalBleRoomlessDevices,
     sourceLabel: 'Bluetooth device',
+    analyticsSource: analyticsSource,
     expectedCount: 1,
   );
 }
@@ -490,6 +496,7 @@ Future<void> _startHueBridgePairing(
     allowNoRoom:
         syncProvider.hueBridgeCapabilities?.supportsRoomlessDevices ?? false,
     sourceLabel: 'Hue Bridge',
+    analyticsSource: analyticsSource,
   );
 }
 
@@ -640,6 +647,7 @@ Future<void> _startHueBlePairing(
     resolved,
     allowNoRoom: syncProvider.supportsHueBleRoomlessDevices,
     sourceLabel: 'Hue Bluetooth',
+    analyticsSource: analyticsSource,
     expectedCount: addedCount,
   );
 }
@@ -740,6 +748,7 @@ Future<void> _offerRoomAssignments(
   List<_ResolvedPairedDevice> resolved, {
   required bool allowNoRoom,
   required String sourceLabel,
+  required String analyticsSource,
   int? expectedCount,
 }) async {
   final pairedCount = expectedCount ?? resolved.length;
@@ -778,6 +787,7 @@ Future<void> _offerRoomAssignments(
       device: pairedDevice.device,
       currentParentNodeId: pairedDevice.parentNodeId,
       allowNoRoom: allowNoRoom,
+      analyticsSource: analyticsSource,
     );
   }
 }

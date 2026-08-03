@@ -1,21 +1,52 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDevice, RhythmDeviceType;
+import 'package:uuid/uuid.dart';
 import '../providers/server_sync_provider.dart';
 import '../screens/hubs/matter_bulb_tester_screen.dart';
 import '../screens/settings/light_screen.dart';
+import '../services/analytics_service.dart';
 import '../services/matter_removal_flow.dart';
 import 'low_glow_switch.dart';
 import 'room_picker_sheet.dart';
 import 'segmented_tab_bar.dart';
 import 'solar_orbit.dart'; // For CelestialColors
 
+const _deviceRoomMoveUuid = Uuid();
+
+/// Request the server's existing physical Identify behavior for one bulb.
+///
+/// Callers own their local haptic/visual feedback. Analytics is deliberately
+/// identifier-free and cannot change the product result.
+Future<bool> identifyCanonicalBulb(
+  BuildContext context, {
+  required RhythmDevice device,
+  required String source,
+}) async {
+  if (device.type != RhythmDeviceType.light) return false;
+  final success = await context
+      .read<ServerSyncProvider>()
+      .api
+      .flashCanonicalDevice(device.id);
+  unawaited(
+    AnalyticsService().logBulbIdentifyCompleted(
+      source: source,
+      outcome: success ? 'succeeded' : 'failed',
+    ),
+  );
+  return success;
+}
+
 Future<bool> showDeviceNodeAssignmentFlow(
   BuildContext context, {
   required RhythmDevice device,
   required String currentParentNodeId,
   bool allowNoRoom = false,
+  VoidCallback? onAssignmentStarted,
+  String analyticsSource = 'device_detail',
 }) async {
   final syncProvider = context.read<ServerSyncProvider>();
   final normalizedCurrentParentNodeId =
@@ -105,13 +136,18 @@ Future<bool> showDeviceNodeAssignmentFlow(
     return true;
   }
 
+  onAssignmentStarted?.call();
+  final journeyId = 'device-room-move-${_deviceRoomMoveUuid.v4()}';
+  final destination = selectedIsUnassigned ? 'unassigned' : 'room';
   var success = true;
+  var failureStage = 'assignment_request';
   if (assignmentChanged) {
     success = await syncProvider.api
         .assignDeviceParent(device.id, targetParentNodeId);
   }
 
   if (success && activatesStandalone) {
+    failureStage = 'standalone_activation';
     success = await _resolveUnassignedDeviceAsStandalone(
       syncProvider,
       device.id,
@@ -121,6 +157,15 @@ Future<bool> showDeviceNodeAssignmentFlow(
   if (!context.mounted) return false;
 
   if (!success) {
+    unawaited(
+      AnalyticsService().logDeviceRoomMoveCompleted(
+        journeyId: journeyId,
+        source: analyticsSource,
+        destination: destination,
+        outcome: 'failed',
+        failureStage: failureStage,
+      ),
+    );
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
@@ -135,8 +180,38 @@ Future<bool> showDeviceNodeAssignmentFlow(
     return false;
   }
 
-  await syncProvider.connection.reconnect();
-  if (!context.mounted) return true;
+  final refreshed = await syncProvider.refreshAfterTopologyMutation();
+  if (!context.mounted) return refreshed;
+
+  if (!refreshed) {
+    unawaited(
+      AnalyticsService().logDeviceRoomMoveCompleted(
+        journeyId: journeyId,
+        source: analyticsSource,
+        destination: destination,
+        outcome: 'partial',
+        failureStage: 'authoritative_refresh',
+      ),
+    );
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          '${device.displayName} was updated, but rooms could not refresh. '
+          'Pull to refresh and confirm its room.',
+        ),
+      ),
+    );
+    return false;
+  }
+
+  unawaited(
+    AnalyticsService().logDeviceRoomMoveCompleted(
+      journeyId: journeyId,
+      source: analyticsSource,
+      destination: destination,
+      outcome: 'succeeded',
+    ),
+  );
 
   ScaffoldMessenger.of(context).showSnackBar(
     SnackBar(
@@ -319,6 +394,7 @@ class DeviceDetailSheet extends StatefulWidget {
 class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   Map<String, dynamic>? _canonicalData;
   bool _loading = true;
+  bool _moving = false;
   _DeviceEndpoint? _removingEndpoint;
   _DeviceTab _selectedTab = _DeviceTab.settings;
 
@@ -382,7 +458,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
         );
 
     return PopScope(
-      canPop: _removingEndpoint == null,
+      canPop: _removingEndpoint == null && !_moving,
       child: Padding(
         padding: EdgeInsets.only(top: topPad + 100),
         child: Container(
@@ -504,7 +580,9 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                   height: 50,
                   child: ElevatedButton(
                     onPressed: _removingEndpoint == null
-                        ? () => Navigator.of(context).pop()
+                        ? _moving
+                            ? null
+                            : () => Navigator.of(context).pop()
                         : null,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: CelestialColors.sunWarm,
@@ -673,10 +751,11 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
             const SizedBox(height: 12),
             _FlashButton(
               deviceLabel: _deviceDisplayName,
-              onFlash: () => context
-                  .read<ServerSyncProvider>()
-                  .api
-                  .flashCanonicalDevice(device.id),
+              onFlash: () => identifyCanonicalBulb(
+                context,
+                device: device,
+                source: 'network_button',
+              ),
             ),
           ],
           for (final endpoint in removableEndpoints) ...[
@@ -877,40 +956,58 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
             : 'Move to Room...'
         : 'Assign to Room...';
 
-    return GestureDetector(
-      onTap: () => _showMoveDialog(context),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-        decoration: BoxDecoration(
-          color: CelestialColors.backgroundDark.withValues(alpha: 0.5),
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(
-            color: CelestialColors.orbitRing.withValues(alpha: 0.3),
-          ),
-        ),
-        child: Row(
-          children: [
-            Icon(
-              Icons.swap_horiz,
-              color: CelestialColors.sunWarm.withValues(alpha: 0.8),
-              size: 20,
+    return Semantics(
+      key: ValueKey('device-room-move-button-${widget.device.id}'),
+      button: true,
+      enabled: !_moving,
+      label: _moving ? 'Updating room' : label,
+      child: GestureDetector(
+        onTap: _moving ? null : () => _showMoveDialog(context),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          decoration: BoxDecoration(
+            color: CelestialColors.backgroundDark.withValues(alpha: 0.5),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: CelestialColors.orbitRing.withValues(alpha: 0.3),
             ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Text(
-                label,
-                style: const TextStyle(
-                  color: CelestialColors.textPrimary,
-                  fontSize: 15,
+          ),
+          child: Row(
+            children: [
+              if (_moving)
+                const SizedBox(
+                  key: ValueKey('device-room-move-progress'),
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: CelestialColors.sunWarm,
+                  ),
+                )
+              else
+                Icon(
+                  Icons.swap_horiz,
+                  color: CelestialColors.sunWarm.withValues(alpha: 0.8),
+                  size: 20,
+                ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  _moving ? 'Updating room…' : label,
+                  style: const TextStyle(
+                    color: CelestialColors.textPrimary,
+                    fontSize: 15,
+                  ),
                 ),
               ),
-            ),
-            const Icon(
-              Icons.chevron_right,
-              color: CelestialColors.textSecondary,
-              size: 20,
-            ),
-          ],
+              if (!_moving)
+                const Icon(
+                  Icons.chevron_right,
+                  color: CelestialColors.textSecondary,
+                  size: 20,
+                ),
+            ],
+          ),
         ),
       ),
     );
@@ -1475,16 +1572,39 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   }
 
   Future<void> _showMoveDialog(BuildContext context) async {
+    if (_moving) return;
     final syncProvider = context.read<ServerSyncProvider>();
-    final success = await showDeviceNodeAssignmentFlow(
-      context,
-      device: widget.device,
-      currentParentNodeId: widget.roomId,
-      allowNoRoom: _canLeaveUnassigned(syncProvider),
-    );
+    if (widget.device.type == RhythmDeviceType.light) {
+      HapticFeedback.mediumImpact();
+      unawaited(
+        identifyCanonicalBulb(
+          context,
+          device: widget.device,
+          source: 'move_to_room',
+        ),
+      );
+    }
 
-    if (success && context.mounted) {
-      Navigator.of(context).pop();
+    var dismissing = false;
+    try {
+      final success = await showDeviceNodeAssignmentFlow(
+        context,
+        device: widget.device,
+        currentParentNodeId: widget.roomId,
+        allowNoRoom: _canLeaveUnassigned(syncProvider),
+        onAssignmentStarted: () {
+          if (mounted) setState(() => _moving = true);
+        },
+      );
+
+      if (success && context.mounted) {
+        dismissing = true;
+        Navigator.of(context).pop();
+      }
+    } finally {
+      if (!dismissing && mounted && _moving) {
+        setState(() => _moving = false);
+      }
     }
   }
 

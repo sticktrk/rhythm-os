@@ -848,11 +848,38 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
 }
 
 /// A device row in the matching room settings device section.
-class _DeviceRow extends StatelessWidget {
+class _DeviceRow extends StatefulWidget {
   final RhythmDevice device;
   final String roomId;
 
   const _DeviceRow({required this.device, required this.roomId});
+
+  @override
+  State<_DeviceRow> createState() => _DeviceRowState();
+}
+
+class _DeviceRowState extends State<_DeviceRow> {
+  bool _identifying = false;
+
+  RhythmDevice get device => widget.device;
+
+  Future<void> _identify() async {
+    if (_identifying || device.type != RhythmDeviceType.light) return;
+    setState(() => _identifying = true);
+    HapticFeedback.mediumImpact();
+    final success = await identifyCanonicalBulb(
+      context,
+      device: device,
+      source: 'room_sheet_long_press',
+    );
+    if (!mounted) return;
+    if (!success) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not identify ${device.displayName}')),
+      );
+    }
+    setState(() => _identifying = false);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -863,54 +890,110 @@ class _DeviceRow extends StatelessWidget {
       RhythmDeviceType.motion => 'Motion',
       RhythmDeviceType.contact => 'Contact',
     };
+    final profileOverride = context.select<
+            ServerSyncProvider,
+            ({
+              bool brightnessRange,
+              bool colorTemperatureRange,
+              bool otherVisual,
+            })>(
+        (provider) => provider.lightProfileOverrideSummaryForNode(device.id));
+    final isLight = device.type == RhythmDeviceType.light;
+    final customProfileParts = <String>[
+      if (profileOverride.brightnessRange) 'brightness range',
+      if (profileOverride.colorTemperatureRange) 'color temperature range',
+      if (profileOverride.otherVisual) 'other light profile settings',
+    ];
+    final customProfileLabel = customProfileParts.isEmpty
+        ? ''
+        : ', custom light profile: ${customProfileParts.join(' and ')}';
 
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTap: () => DeviceDetailSheet.show(context, device, roomId),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-        child: Row(
-          children: [
-            Icon(icon, color: iconColor, size: 20),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    device.displayName,
-                    style: const TextStyle(
-                      color: CelestialColors.textPrimary,
-                      fontSize: 14,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  if (device.productInfo != null)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 2),
-                      child: Text(
-                        device.productInfo!,
-                        style: TextStyle(
-                          color: CelestialColors.textSecondary
-                              .withValues(alpha: 0.6),
-                          fontSize: 11,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+    return Semantics(
+      key: ValueKey('room-device-row-${device.id}'),
+      button: true,
+      label: '${device.displayName}, $typeLabel$customProfileLabel',
+      hint: isLight
+          ? 'Tap for settings. Touch and hold to identify.'
+          : 'Tap for settings.',
+      onTap: () => DeviceDetailSheet.show(context, device, widget.roomId),
+      onLongPress: isLight && !_identifying ? _identify : null,
+      excludeSemantics: true,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => DeviceDetailSheet.show(context, device, widget.roomId),
+        onLongPress: isLight && !_identifying ? _identify : null,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          child: Row(
+            children: [
+              Icon(
+                _identifying ? Icons.lightbulb_rounded : icon,
+                color: iconColor,
+                size: 20,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      device.displayName,
+                      style: const TextStyle(
+                        color: CelestialColors.textPrimary,
+                        fontSize: 14,
                       ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
-                ],
+                    if (device.productInfo != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 2),
+                        child: Text(
+                          device.productInfo!,
+                          style: TextStyle(
+                            color: CelestialColors.textSecondary
+                                .withValues(alpha: 0.6),
+                            fontSize: 11,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                  ],
+                ),
               ),
-            ),
-            Text(
-              typeLabel,
-              style: const TextStyle(
-                color: CelestialColors.textSecondary,
-                fontSize: 12,
-              ),
-            ),
-          ],
+              if (profileOverride.brightnessRange ||
+                  profileOverride.colorTemperatureRange ||
+                  profileOverride.otherVisual) ...[
+                const SizedBox(width: 8),
+                LightProfileOverrideBadge(
+                  nodeId: device.id,
+                  brightnessRange: profileOverride.brightnessRange,
+                  colorTemperatureRange: profileOverride.colorTemperatureRange,
+                  otherVisual: profileOverride.otherVisual,
+                ),
+              ],
+              const SizedBox(width: 8),
+              if (_identifying)
+                const SizedBox(
+                  key: ValueKey('room-device-identify-progress'),
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 1.8,
+                    color: Color(0xFFFFB74D),
+                  ),
+                )
+              else
+                Text(
+                  typeLabel,
+                  style: const TextStyle(
+                    color: CelestialColors.textSecondary,
+                    fontSize: 12,
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
     );

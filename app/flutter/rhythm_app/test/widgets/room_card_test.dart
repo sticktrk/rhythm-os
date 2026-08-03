@@ -410,7 +410,7 @@ void main() {
     FirstRunExplainer.seenWriter = (_) async {};
   });
 
-  testWidgets('room page owns customized Light settings affordance',
+  testWidgets('room card cues customized brightness and color ranges',
       (tester) async {
     await tester.binding.setSurfaceSize(const Size(390, 844));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -464,6 +464,8 @@ void main() {
                 'rhythm': {
                   'min_brightness': 8,
                   'max_brightness': 72,
+                  'min_color_temp': 2400,
+                  'max_color_temp': 5100,
                 },
               },
             },
@@ -493,9 +495,14 @@ void main() {
       ),
     );
 
+    final cue = find.byKey(
+      const ValueKey('light-profile-override-badge-room-1'),
+    );
+    expect(cue, findsOneWidget);
+    expect(find.text('BRI · CCT'), findsOneWidget);
     expect(
-      find.byKey(const ValueKey('room-card-light-settings-room-1')),
-      findsNothing,
+      tester.getSemantics(cue).label,
+      'Custom light profile: brightness range and color temperature range',
     );
     expect(find.text('Light settings'), findsNothing);
     expect(serverSync.hasNodeLightProfileOverrides('room-1'), isTrue);
