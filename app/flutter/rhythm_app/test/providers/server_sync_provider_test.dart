@@ -5157,6 +5157,20 @@ void main() {
     expect(
       find.descendant(
         of: motionContent,
+        matching: find.byKey(const ValueKey('room-settings-add-motion')),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: motionContent,
+        matching: find.byKey(const ValueKey('room-settings-add-button')),
+      ),
+      findsNothing,
+    );
+    expect(
+      find.descendant(
+        of: motionContent,
         matching: find.text('MOTION SENSORS'),
       ),
       findsOneWidget,
@@ -5192,6 +5206,20 @@ void main() {
     await _selectRoomSettingsTab(tester, 'Buttons');
 
     final buttonsContent = find.byKey(const ValueKey('buttons'));
+    expect(
+      find.descendant(
+        of: buttonsContent,
+        matching: find.byKey(const ValueKey('room-settings-add-button')),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: buttonsContent,
+        matching: find.byKey(const ValueKey('room-settings-add-motion')),
+      ),
+      findsNothing,
+    );
     expect(
       find.descendant(of: buttonsContent, matching: find.text('BUTTONS')),
       findsOneWidget,
@@ -5241,6 +5269,206 @@ void main() {
       'Dining Room',
     );
     semantics.dispose();
+  });
+
+  testWidgets(
+      'room tabs open device pairing from empty motion and button actions',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.binding.setSurfaceSize(const Size(390, 1200));
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'capabilities': {
+          'hubs': [
+            {
+              'type': 'local_ble',
+              'configurable': false,
+              'device_onboarding_methods': ['local_ble_qr'],
+              'device_profiles': [
+                {
+                  'id': RhythmDeviceProfileId.oreinOc02001Button,
+                  'device_type': 'button',
+                  'display_name': 'Button',
+                  'input_only': true,
+                  'onboarding_methods': ['local_ble_qr'],
+                },
+              ],
+              'supports_roomless_devices': true,
+            },
+          ],
+        },
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'hub_types': ['local_ble'],
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': false,
+            'devices': const <dynamic>[],
+          },
+        ],
+        'location': const <String, dynamic>{},
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+    expect(provider.canScanToAddDevice, isTrue);
+
+    await _pumpRoomSettingsSheet(
+      tester,
+      roomProvider: roomProvider,
+      provider: provider,
+      room: const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.bridge,
+        deviceIds: [],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: false,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+
+    bool pairingIntakeIsVisible() =>
+        find.byTooltip('Back to Add & Review').evaluate().isNotEmpty ||
+        find
+            .byKey(const ValueKey('device-pairing-code-input'))
+            .evaluate()
+            .isNotEmpty;
+
+    await _selectRoomSettingsTab(tester, 'Motion');
+    final addMotion = find.byKey(const ValueKey('room-settings-add-motion'));
+    expect(addMotion, findsOneWidget);
+    expect(find.text('Add Motion Sensor'), findsOneWidget);
+
+    await tester.tap(addMotion);
+    await tester.pumpAndSettle();
+
+    expect(pairingIntakeIsVisible(), isTrue);
+
+    tester.state<NavigatorState>(find.byType(Navigator)).pop();
+    await tester.pumpAndSettle();
+    await _selectRoomSettingsTab(tester, 'Buttons');
+
+    final addButton = find.byKey(const ValueKey('room-settings-add-button'));
+    expect(addButton, findsOneWidget);
+    expect(find.text('Add Button'), findsOneWidget);
+
+    await tester.tap(addButton);
+    await tester.pumpAndSettle();
+
+    expect(pairingIntakeIsVisible(), isTrue);
+  });
+
+  testWidgets(
+      'room add actions explain unavailable pairing and stay off device cards',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.binding.setSurfaceSize(const Size(390, 1200));
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'capabilities': {'hubs': const <dynamic>[]},
+        'nodes': const <dynamic>[],
+        'location': const <String, dynamic>{},
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    const room = RoomDto(
+      id: 'room-1',
+      name: 'Kitchen',
+      source: RoomSourceDto.unknown,
+      deviceIds: [],
+      rhythmEnabled: true,
+      disabled: false,
+      lightsOn: false,
+      timeOffsetMinutes: 0,
+      brightnessOffset: 0,
+    );
+    await _pumpRoomSettingsSheet(
+      tester,
+      roomProvider: roomProvider,
+      provider: provider,
+      room: room,
+    );
+
+    await _selectRoomSettingsTab(tester, 'Buttons');
+    await tester.tap(
+      find.byKey(const ValueKey('room-settings-add-button')),
+    );
+    await tester.pump();
+
+    expect(
+      find.text('Connect or update your Rhythm Box to add a button.'),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('device-pairing-code-input')),
+      findsNothing,
+    );
+
+    await _pumpRoomSettingsSheet(
+      tester,
+      roomProvider: roomProvider,
+      provider: provider,
+      room: const RoomDto(
+        id: 'light-1',
+        name: 'Desk Lamp',
+        source: RoomSourceDto.matter,
+        deviceIds: [],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: false,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+        kind: RoomNodeKind.lightDevice,
+      ),
+    );
+
+    await _selectRoomSettingsTab(tester, 'Motion');
+    expect(
+      find.byKey(const ValueKey('room-settings-add-motion')),
+      findsNothing,
+    );
+    await _selectRoomSettingsTab(tester, 'Buttons');
+    expect(
+      find.byKey(const ValueKey('room-settings-add-button')),
+      findsNothing,
+    );
   });
 
   testWidgets(
