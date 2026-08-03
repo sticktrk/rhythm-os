@@ -1,4 +1,4 @@
-//! Durable Hue bridge inventory capture and authoritative takeover.
+//! Durable Hue bridge inventory capture and automation suppression.
 //!
 //! Rhythm treats a paired Hue bridge as a Zigbee control plane. Before the
 //! first mutation this module captures a complete Hue V2 inventory plus the V1
@@ -15,7 +15,6 @@ use rhythm_os::canonical::identity::HubKey;
 use rhythm_os::storage::Storage;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tracing::warn;
 
 use crate::transport::HueTransport;
 
@@ -32,7 +31,6 @@ const REQUIRED_V2_BASELINE_RESOURCES: &[&str] = &[
     "smart_scene",
 ];
 const REQUIRED_V1_BASELINE_RESOURCES: &[&str] = &["rules", "schedules"];
-const CLEAR_DELETE_ORDER: &[&str] = &["smart_scene", "scene", "zone", "room"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -681,8 +679,9 @@ fn upgrade_uncleared_baseline<H: HueTransport + ?Sized>(
     Ok(replacement)
 }
 
-/// Capture and durably persist the immutable bridge inventory, then clear the
-/// competing Hue control plane. Incomplete acquisition manifests are resumed.
+/// Capture and durably persist the immutable bridge inventory, then suppress
+/// Hue automations that can compete with Rhythm light control. Incomplete
+/// acquisition manifests are resumed.
 /// Untouched subset captures from older builds are upgraded before any write.
 pub fn acquire_authoritative_control<H: HueTransport + ?Sized>(
     storage: &dyn Storage,
@@ -710,23 +709,117 @@ pub fn acquire_authoritative_control<H: HueTransport + ?Sized>(
     reconcile_authoritative_control(storage, key, transport, username, state)
 }
 
+fn references_lighting_target(value: &Value, source_device_id: Option<&str>) -> bool {
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .any(|value| references_lighting_target(value, source_device_id)),
+        Value::Object(object) => {
+            let resource_target = object
+                .get("rid")
+                .and_then(Value::as_str)
+                .filter(|rid| !rid.trim().is_empty())
+                .zip(object.get("rtype").and_then(Value::as_str))
+                .is_some_and(|(rid, resource_type)| match resource_type {
+                    "bridge_home" | "grouped_light" | "light" | "room" | "scene"
+                    | "service_group" | "smart_scene" | "zone" => true,
+                    "device" => source_device_id != Some(rid),
+                    _ => false,
+                });
+            resource_target
+                || object
+                    .values()
+                    .any(|value| references_lighting_target(value, source_device_id))
+        }
+        _ => false,
+    }
+}
+
+fn accessory_behavior_targets_lighting(behavior: &Value, resource_id: &str) -> Result<bool> {
+    let configuration = behavior
+        .get("configuration")
+        .filter(|value| value.is_object())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Enabled Hue accessory behavior instance {resource_id} has no object configuration"
+            )
+        })?;
+    let dependees = behavior
+        .get("dependees")
+        .filter(|value| value.is_array())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Enabled Hue accessory behavior instance {resource_id} has no dependee array"
+            )
+        })?;
+    let source_device_id = configuration
+        .pointer("/device/rid")
+        .and_then(Value::as_str)
+        .filter(|rid| !rid.trim().is_empty());
+    Ok(references_lighting_target(configuration, source_device_id)
+        || references_lighting_target(dependees, source_device_id))
+}
+
 fn next_clear_operation<H: HueTransport + ?Sized>(
     transport: &H,
     username: &str,
-    managed_room_ids: &BTreeSet<String>,
-    managed_scene_ids: &BTreeSet<String>,
-    skipped_operation_ids: &BTreeSet<String>,
 ) -> Result<Option<ControlPlaneOperation>> {
     let behavior_payload = transport.get_resources(username, "behavior_instance")?;
-    let mut behavior_ids = data_array("behavior_instance", &behavior_payload)?
-        .iter()
-        .filter(|resource| resource.get("enabled").and_then(Value::as_bool) == Some(true))
-        .filter_map(|resource| resource.get("id").and_then(Value::as_str))
-        .filter(|resource_id| {
-            !skipped_operation_ids.contains(&format!("clear:v2:behavior_instance:{resource_id}"))
-        })
-        .map(str::to_string)
-        .collect::<Vec<_>>();
+    let script_payload = transport.get_resources(username, "behavior_script")?;
+    let behaviors = data_array("behavior_instance", &behavior_payload)?;
+    let scripts = data_array("behavior_script", &script_payload)?;
+    let mut behavior_ids = Vec::new();
+    // Validate the complete live enabled set before selecting the first write.
+    // This prevents a malformed or future Hue behavior from being discovered
+    // only after Rhythm has partially suppressed otherwise-known automations.
+    for behavior in behaviors {
+        let enabled = behavior
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| anyhow::anyhow!("Hue behavior instance has no boolean enabled state"))?;
+        if !enabled {
+            continue;
+        }
+        let resource_id = behavior
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Enabled Hue behavior instance has no ID"))?;
+        let script_id = behavior
+            .get("script_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| anyhow::anyhow!("Enabled Hue behavior instance has no script ID"))?;
+        let matching_scripts = scripts
+            .iter()
+            .filter(|script| script.get("id").and_then(Value::as_str) == Some(script_id))
+            .collect::<Vec<_>>();
+        let [script] = matching_scripts.as_slice() else {
+            anyhow::bail!(
+                "Enabled Hue behavior instance {resource_id} did not resolve to exactly one script"
+            );
+        };
+        let category = script
+            .pointer("/metadata/category")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                anyhow::anyhow!("Hue behavior script {script_id} has no string metadata category")
+            })?;
+        match category {
+            "automation" => behavior_ids.push(resource_id.to_string()),
+            // Accessory scripts include both source-only device plumbing and
+            // button/sensor programs that target lights or groups. Suppress
+            // only the latter so Rhythm does not disable inert input metadata
+            // that some bridge versions reject as immutable.
+            "accessory" if accessory_behavior_targets_lighting(behavior, resource_id)? => {
+                behavior_ids.push(resource_id.to_string());
+            }
+            // Entertainment playback and source-only/internal behavior
+            // instances are not unattended lighting automations.
+            "accessory" | "entertainment" | "other" => {}
+            _ => anyhow::bail!("Hue behavior script {script_id} has unknown category '{category}'"),
+        }
+    }
     behavior_ids.sort();
     if let Some(resource_id) = behavior_ids.into_iter().next() {
         return Ok(Some(ControlPlaneOperation {
@@ -746,9 +839,6 @@ fn next_clear_operation<H: HueTransport + ?Sized>(
             .filter(|(_, resource)| {
                 resource.get("status").and_then(Value::as_str) != Some("disabled")
             })
-            .filter(|(resource_id, _)| {
-                !skipped_operation_ids.contains(&format!("clear:v1:{resource_type}:{resource_id}"))
-            })
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
         ids.sort();
@@ -764,43 +854,6 @@ fn next_clear_operation<H: HueTransport + ?Sized>(
         }
     }
 
-    for resource_type in CLEAR_DELETE_ORDER {
-        let payload = transport.get_resources(username, resource_type)?;
-        let mut ids = data_array(resource_type, &payload)?
-            .iter()
-            .filter(|resource| {
-                let Some(resource_id) = resource.get("id").and_then(Value::as_str) else {
-                    return false;
-                };
-                let is_skipped = skipped_operation_ids
-                    .contains(&format!("clear:v2:{resource_type}:{resource_id}"));
-                let is_managed_room =
-                    *resource_type == "room" && managed_room_ids.contains(resource_id);
-                let is_managed_scene =
-                    *resource_type == "scene" && managed_scene_ids.contains(resource_id);
-                let is_native_managed_room_scene = *resource_type == "scene"
-                    && resource.pointer("/group/rtype").and_then(Value::as_str) == Some("room")
-                    && resource
-                        .pointer("/group/rid")
-                        .and_then(Value::as_str)
-                        .is_some_and(|room_id| managed_room_ids.contains(room_id));
-                !(is_skipped || is_managed_room || is_managed_scene || is_native_managed_room_scene)
-            })
-            .filter_map(|resource| resource.get("id").and_then(Value::as_str))
-            .map(str::to_string)
-            .collect::<Vec<_>>();
-        ids.sort();
-        if let Some(resource_id) = ids.into_iter().next() {
-            return Ok(Some(ControlPlaneOperation {
-                operation_id: format!("clear:v2:{resource_type}:{resource_id}"),
-                api: "v2",
-                action: "delete",
-                resource_type,
-                resource_id,
-                body: None,
-            }));
-        }
-    }
     Ok(None)
 }
 
@@ -851,10 +904,6 @@ fn execute_operation<H: HueTransport + ?Sized>(
             )?;
             Ok(None)
         }
-        ("v2", "delete") => {
-            transport.delete_resource(username, operation.resource_type, &operation.resource_id)?;
-            Ok(None)
-        }
         ("v1", "disable") => {
             let receipt = transport.put_v1(
                 username,
@@ -875,6 +924,60 @@ fn execute_operation<H: HueTransport + ?Sized>(
     }
 }
 
+fn verify_operation<H: HueTransport + ?Sized>(
+    transport: &H,
+    username: &str,
+    operation: &ControlPlaneOperation,
+) -> Result<()> {
+    match (operation.api, operation.action) {
+        ("v2", "disable") => {
+            let payload = transport.get_resources(username, operation.resource_type)?;
+            let resource = data_array(operation.resource_type, &payload)?
+                .iter()
+                .find(|resource| {
+                    resource.get("id").and_then(Value::as_str)
+                        == Some(operation.resource_id.as_str())
+                });
+            match resource {
+                None => Ok(()),
+                Some(resource)
+                    if resource.get("enabled").and_then(Value::as_bool) == Some(false) =>
+                {
+                    Ok(())
+                }
+                Some(_) => anyhow::bail!(
+                    "Hue V2 {} {} was not disabled by read-back",
+                    operation.resource_type,
+                    operation.resource_id
+                ),
+            }
+        }
+        ("v1", "disable") => {
+            let payload = transport.get_v1(username, operation.resource_type)?;
+            let resource =
+                object_resource(operation.resource_type, &payload)?.get(&operation.resource_id);
+            match resource {
+                None => Ok(()),
+                Some(resource)
+                    if resource.get("status").and_then(Value::as_str) == Some("disabled") =>
+                {
+                    Ok(())
+                }
+                Some(_) => anyhow::bail!(
+                    "Hue V1 {} {} was not disabled by read-back",
+                    operation.resource_type,
+                    operation.resource_id
+                ),
+            }
+        }
+        _ => anyhow::bail!(
+            "Unsupported Hue ownership verification {} {}",
+            operation.api,
+            operation.action
+        ),
+    }
+}
+
 fn run_journaled_operation<H: HueTransport + ?Sized>(
     storage: &dyn Storage,
     _key: &HubKey,
@@ -882,10 +985,13 @@ fn run_journaled_operation<H: HueTransport + ?Sized>(
     transport: &H,
     username: &str,
     operation: &ControlPlaneOperation,
-) -> Result<bool> {
+) -> Result<()> {
     state.set_receipt(operation, HueOwnershipReceiptStatus::Pending, None);
     persist_controller_ownership(storage, state)?;
-    match execute_operation(transport, username, operation) {
+    match execute_operation(transport, username, operation).and_then(|replacement_id| {
+        verify_operation(transport, username, operation)?;
+        Ok(replacement_id)
+    }) {
         Ok(replacement_id) => {
             state.set_receipt(
                 operation,
@@ -893,30 +999,22 @@ fn run_journaled_operation<H: HueTransport + ?Sized>(
                 replacement_id.clone(),
             );
             persist_controller_ownership(storage, state)?;
-            Ok(true)
+            Ok(())
         }
         Err(error) => {
-            state.set_receipt(operation, HueOwnershipReceiptStatus::Unsupported, None);
+            state.set_receipt(operation, HueOwnershipReceiptStatus::Failed, None);
             if let Err(persist_error) = persist_controller_ownership(storage, state) {
                 let _ = persist_error;
                 return Err(error)
-                    .context("Hue operation was skipped but its receipt could not be persisted");
+                    .context("Hue automation suppression failed and its receipt was not durable");
             }
-            warn!(
-                target: "hue_authority",
-                api = operation.api,
-                action = operation.action,
-                resource_type = operation.resource_type,
-                error = %error,
-                "Skipping unsupported Hue control-plane mutation and continuing authority reconciliation"
-            );
-            Ok(false)
+            Err(error).context("Hue automation suppression was not confirmed")
         }
     }
 }
 
-/// Reassert Rhythm ownership. This is safe to call after interruption and also
-/// clears control-plane resources created out of band while ownership is active.
+/// Reassert Hue automation suppression. This is safe to call after interruption
+/// and writes only when an automation is observed enabled.
 pub fn reconcile_authoritative_control<H: HueTransport + ?Sized>(
     storage: &dyn Storage,
     key: &HubKey,
@@ -934,38 +1032,11 @@ pub fn reconcile_authoritative_control<H: HueTransport + ?Sized>(
         anyhow::bail!("Hue bridge release has started; takeover cannot be resumed");
     }
     state.ensure_bridge_id(&connected_hue_bridge_id(transport, username)?)?;
-    // Older builds stopped authority reconciliation after a single remote
-    // mutation failure. Treat those durable failure receipts as already
-    // skipped so an upgrade can resume the rest of the control-plane pass.
-    for receipt in state.receipts.values_mut() {
-        if receipt.status == HueOwnershipReceiptStatus::Failed {
-            receipt.status = HueOwnershipReceiptStatus::Unsupported;
-        }
-    }
     state.phase = HueOwnershipPhase::Clearing;
     persist_controller_ownership(storage, &state)?;
 
-    let mut skipped_operation_ids = state
-        .receipts
-        .values()
-        .filter(|receipt| receipt.status == HueOwnershipReceiptStatus::Unsupported)
-        .map(|receipt| receipt.operation_id.clone())
-        .collect::<BTreeSet<_>>();
-    let mut previous_operation_id: Option<String> = None;
     loop {
-        let managed_room_ids = state.managed_room_ids();
-        let managed_scene_ids = state
-            .managed_scenes()
-            .values()
-            .map(|scene| scene.hue_scene_id.clone())
-            .collect::<BTreeSet<_>>();
-        let operation = match next_clear_operation(
-            transport,
-            username,
-            &managed_room_ids,
-            &managed_scene_ids,
-            &skipped_operation_ids,
-        ) {
+        let operation = match next_clear_operation(transport, username) {
             Ok(operation) => operation,
             Err(error) => {
                 state.phase = HueOwnershipPhase::ClearIncomplete;
@@ -976,24 +1047,12 @@ pub fn reconcile_authoritative_control<H: HueTransport + ?Sized>(
         let Some(operation) = operation else {
             break;
         };
-        if previous_operation_id.as_deref() == Some(operation.operation_id.as_str()) {
-            state.set_receipt(&operation, HueOwnershipReceiptStatus::Unsupported, None);
+        if let Err(error) =
+            run_journaled_operation(storage, key, &mut state, transport, username, &operation)
+        {
+            state.phase = HueOwnershipPhase::ClearIncomplete;
             persist_controller_ownership(storage, &state)?;
-            warn!(
-                target: "hue_authority",
-                api = operation.api,
-                action = operation.action,
-                resource_type = operation.resource_type,
-                "Skipping Hue control-plane mutation whose acknowledged effect was not observed"
-            );
-            skipped_operation_ids.insert(operation.operation_id.clone());
-            previous_operation_id = None;
-            continue;
-        }
-        previous_operation_id = Some(operation.operation_id.clone());
-        if !run_journaled_operation(storage, key, &mut state, transport, username, &operation)? {
-            skipped_operation_ids.insert(operation.operation_id.clone());
-            previous_operation_id = None;
+            return Err(error.context("Hue automation suppression is incomplete"));
         }
     }
 
@@ -1156,7 +1215,18 @@ mod tests {
         spy.set_resource_response("light", json!({"data": [{"id": "light-1"}], "errors": []}));
         spy.set_resource_response(
             "behavior_instance",
-            json!({"data": [{"id": "behavior-1", "enabled": true}], "errors": []}),
+            json!({"data": [{
+                "id": "behavior-1",
+                "script_id": "automation-script-1",
+                "enabled": true
+            }], "errors": []}),
+        );
+        spy.set_resource_response(
+            "behavior_script",
+            json!({"data": [{
+                "id": "automation-script-1",
+                "metadata": {"name": "Automation", "category": "automation"}
+            }], "errors": []}),
         );
         spy.set_resource_response(
             "room",
@@ -1220,11 +1290,13 @@ mod tests {
                 && resource_id == "behavior-1"
                 && body == &json!({"enabled": false})
         )));
-        assert!(calls.iter().any(|call| matches!(
-            call,
-            HueTransportCall::DeleteResource { resource_type, resource_id }
-                if resource_type == "room" && resource_id == "old-room"
-        )));
+        assert!(!calls
+            .iter()
+            .any(|call| matches!(call, HueTransportCall::DeleteResource { .. })));
+        assert_eq!(
+            spy.get_resources("user", "room").unwrap()["data"][0]["id"],
+            "old-room"
+        );
 
         let mut altered = state.clone();
         altered.baseline.capture_id = "replacement".to_string();
@@ -1298,22 +1370,25 @@ mod tests {
     }
 
     #[test]
-    fn takeover_skips_a_confirmed_clear_that_is_not_observed() {
+    fn takeover_stays_incomplete_when_v2_disable_is_not_observed() {
         let temp = TempStorage::new("clear-readback");
         let spy = SpyHueTransport::new();
         seed_bridge(&spy, json!([]));
         spy.set_ignore_resource_mutations(true);
 
-        let state = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
+        let error = acquire_authoritative_control(&temp.storage, &key(), &spy, "user")
+            .expect_err("an unobserved disable must block active authority");
 
-        assert_eq!(state.phase, HueOwnershipPhase::Active);
+        assert!(error
+            .to_string()
+            .contains("Hue automation suppression is incomplete"));
         let persisted = load_controller_ownership(&temp.storage, "bridge-1")
             .unwrap()
             .unwrap();
-        assert_eq!(persisted.phase, HueOwnershipPhase::Active);
+        assert_eq!(persisted.phase, HueOwnershipPhase::ClearIncomplete);
         assert!(persisted.receipts().any(|receipt| {
             receipt.resource_type == "behavior_instance"
-                && receipt.status == HueOwnershipReceiptStatus::Unsupported
+                && receipt.status == HueOwnershipReceiptStatus::Failed
         }));
         assert_eq!(
             spy.calls()
@@ -1331,24 +1406,31 @@ mod tests {
     }
 
     #[test]
-    fn takeover_skips_one_rejected_mutation_and_continues_clearing() {
+    fn takeover_stays_incomplete_when_v2_disable_is_rejected() {
         let temp = TempStorage::new("skip-rejected-mutation");
         let spy = SpyHueTransport::new();
         seed_bridge(&spy, json!([]));
         spy.set_fail_resource_update("behavior_instance", "behavior-1");
 
-        let state = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
+        acquire_authoritative_control(&temp.storage, &key(), &spy, "user")
+            .expect_err("a rejected disable must block active authority");
 
-        assert_eq!(state.phase, HueOwnershipPhase::Active);
+        let state = load_controller_ownership(&temp.storage, "bridge-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(state.phase, HueOwnershipPhase::ClearIncomplete);
         assert!(state.receipts().any(|receipt| {
             receipt.resource_type == "behavior_instance"
-                && receipt.status == HueOwnershipReceiptStatus::Unsupported
+                && receipt.status == HueOwnershipReceiptStatus::Failed
         }));
-        assert!(spy.calls().iter().any(|call| matches!(
-            call,
-            HueTransportCall::DeleteResource { resource_type, resource_id }
-                if resource_type == "room" && resource_id == "old-room"
-        )));
+        assert!(!spy
+            .calls()
+            .iter()
+            .any(|call| matches!(call, HueTransportCall::DeleteResource { .. })));
+        assert!(!spy
+            .calls()
+            .iter()
+            .any(|call| matches!(call, HueTransportCall::PutV1 { .. })));
         assert_eq!(
             spy.calls()
                 .iter()
@@ -1363,7 +1445,266 @@ mod tests {
     }
 
     #[test]
-    fn takeover_resumes_past_a_failure_persisted_by_an_older_build() {
+    fn takeover_preserves_source_only_and_known_non_automatic_behaviors() {
+        let temp = TempStorage::new("accessory-behavior");
+        let spy = SpyHueTransport::new();
+        seed_bridge(&spy, json!([]));
+        spy.set_resource_response(
+            "behavior_instance",
+            json!({"data": [
+                {
+                    "id": "accessory-behavior-1",
+                    "script_id": "accessory-script-1",
+                    "enabled": true,
+                    "configuration": {
+                        "device": {"rid": "button-1", "rtype": "device"}
+                    },
+                    "dependees": [{
+                        "target": {"rid": "button-1", "rtype": "device"}
+                    }]
+                },
+                {
+                    "id": "entertainment-behavior-1",
+                    "script_id": "entertainment-script-1",
+                    "enabled": true
+                },
+                {
+                    "id": "other-behavior-1",
+                    "script_id": "other-script-1",
+                    "enabled": true
+                }
+            ], "errors": []}),
+        );
+        spy.set_resource_response(
+            "behavior_script",
+            json!({"data": [
+                {
+                    "id": "accessory-script-1",
+                    "metadata": {"name": "Dimmer", "category": "accessory"}
+                },
+                {
+                    "id": "entertainment-script-1",
+                    "metadata": {"name": "Entertainment", "category": "entertainment"}
+                },
+                {
+                    "id": "other-script-1",
+                    "metadata": {"name": "Internal", "category": "other"}
+                }
+            ], "errors": []}),
+        );
+        spy.set_fail_resource_update("behavior_instance", "accessory-behavior-1");
+
+        let active = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
+
+        assert_eq!(active.phase, HueOwnershipPhase::Active);
+        assert!(!spy.calls().iter().any(|call| matches!(
+            call,
+            HueTransportCall::UpdateResource {
+                resource_type,
+                resource_id,
+                ..
+            } if resource_type == "behavior_instance"
+                && resource_id == "accessory-behavior-1"
+        )));
+        assert!(
+            spy.get_resources("user", "behavior_instance").unwrap()["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|behavior| behavior["enabled"] == true)
+        );
+    }
+
+    #[test]
+    fn takeover_disables_accessory_behavior_that_targets_lighting() {
+        let temp = TempStorage::new("effectful-accessory-behavior");
+        let spy = SpyHueTransport::new();
+        seed_bridge(&spy, json!([]));
+        spy.set_resource_response(
+            "behavior_instance",
+            json!({"data": [{
+                "id": "accessory-behavior-1",
+                "script_id": "accessory-script-1",
+                "enabled": true,
+                "configuration": {
+                    "device": {"rid": "button-1", "rtype": "device"},
+                    "buttons": {
+                        "button-1": {
+                            "where": [{
+                                "group": {"rid": "room-1", "rtype": "room"}
+                            }]
+                        }
+                    }
+                },
+                "dependees": [
+                    {"target": {"rid": "button-1", "rtype": "device"}},
+                    {"target": {"rid": "room-1", "rtype": "room"}}
+                ]
+            }], "errors": []}),
+        );
+        spy.set_resource_response(
+            "behavior_script",
+            json!({"data": [{
+                "id": "accessory-script-1",
+                "metadata": {"name": "Dimmer", "category": "accessory"}
+            }], "errors": []}),
+        );
+
+        let active = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
+
+        assert_eq!(active.phase, HueOwnershipPhase::Active);
+        assert_eq!(
+            spy.get_resources("user", "behavior_instance").unwrap()["data"][0]["enabled"],
+            false
+        );
+        assert!(spy.calls().iter().any(|call| matches!(
+            call,
+            HueTransportCall::UpdateResource {
+                resource_type,
+                resource_id,
+                body,
+            } if resource_type == "behavior_instance"
+                && resource_id == "accessory-behavior-1"
+                && body == &json!({"enabled": false})
+        )));
+    }
+
+    #[test]
+    fn unclassified_enabled_behavior_blocks_before_any_suppression_write() {
+        let temp = TempStorage::new("unclassified-behavior");
+        let spy = SpyHueTransport::new();
+        seed_bridge(&spy, json!([]));
+        spy.set_resource_response(
+            "behavior_instance",
+            json!({"data": [
+                {
+                    "id": "known-automation",
+                    "script_id": "automation-script-1",
+                    "enabled": true
+                },
+                {
+                    "id": "unclassified-behavior",
+                    "script_id": "missing-script",
+                    "enabled": true
+                }
+            ], "errors": []}),
+        );
+
+        acquire_authoritative_control(&temp.storage, &key(), &spy, "user")
+            .expect_err("unclassified enabled behavior must keep authority fenced");
+
+        assert!(!spy.calls().iter().any(|call| matches!(
+            call,
+            HueTransportCall::UpdateResource { .. } | HueTransportCall::PutV1 { .. }
+        )));
+        assert_eq!(
+            load_controller_ownership(&temp.storage, "bridge-1")
+                .unwrap()
+                .unwrap()
+                .phase,
+            HueOwnershipPhase::ClearIncomplete
+        );
+    }
+
+    #[test]
+    fn malformed_accessory_behavior_blocks_before_any_suppression_write() {
+        let temp = TempStorage::new("malformed-accessory-behavior");
+        let spy = SpyHueTransport::new();
+        seed_bridge(&spy, json!([]));
+        spy.set_resource_response(
+            "behavior_instance",
+            json!({"data": [
+                {
+                    "id": "known-automation",
+                    "script_id": "automation-script-1",
+                    "enabled": true
+                },
+                {
+                    "id": "malformed-accessory",
+                    "script_id": "accessory-script-1",
+                    "enabled": true
+                }
+            ], "errors": []}),
+        );
+        spy.set_resource_response(
+            "behavior_script",
+            json!({"data": [
+                {
+                    "id": "automation-script-1",
+                    "metadata": {"name": "Automation", "category": "automation"}
+                },
+                {
+                    "id": "accessory-script-1",
+                    "metadata": {"name": "Accessory", "category": "accessory"}
+                }
+            ], "errors": []}),
+        );
+
+        acquire_authoritative_control(&temp.storage, &key(), &spy, "user")
+            .expect_err("malformed accessory behavior must keep authority fenced");
+
+        assert!(!spy.calls().iter().any(|call| matches!(
+            call,
+            HueTransportCall::UpdateResource { .. } | HueTransportCall::PutV1 { .. }
+        )));
+    }
+
+    #[test]
+    fn unknown_behavior_category_blocks_before_any_suppression_write() {
+        let temp = TempStorage::new("unknown-behavior-category");
+        let spy = SpyHueTransport::new();
+        seed_bridge(&spy, json!([]));
+        spy.set_resource_response(
+            "behavior_script",
+            json!({"data": [{
+                "id": "automation-script-1",
+                "metadata": {"name": "Future", "category": "future_category"}
+            }], "errors": []}),
+        );
+
+        acquire_authoritative_control(&temp.storage, &key(), &spy, "user")
+            .expect_err("unknown behavior categories must keep authority fenced");
+
+        assert!(!spy.calls().iter().any(|call| matches!(
+            call,
+            HueTransportCall::UpdateResource { .. } | HueTransportCall::PutV1 { .. }
+        )));
+    }
+
+    #[test]
+    fn disabled_unclassified_behavior_does_not_block_known_automation_suppression() {
+        let temp = TempStorage::new("disabled-unclassified-behavior");
+        let spy = SpyHueTransport::new();
+        seed_bridge(&spy, json!([]));
+        let mut behaviors = spy.get_resources("user", "behavior_instance").unwrap()["data"]
+            .as_array()
+            .unwrap()
+            .clone();
+        behaviors.push(json!({
+            "id": "disabled-unclassified",
+            "script_id": "missing-script",
+            "enabled": false
+        }));
+        spy.set_resource_response(
+            "behavior_instance",
+            json!({"data": behaviors, "errors": []}),
+        );
+
+        let active = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
+
+        assert_eq!(active.phase, HueOwnershipPhase::Active);
+        assert!(spy.calls().iter().any(|call| matches!(
+            call,
+            HueTransportCall::UpdateResource {
+                resource_type,
+                resource_id,
+                ..
+            } if resource_type == "behavior_instance" && resource_id == "behavior-1"
+        )));
+    }
+
+    #[test]
+    fn takeover_retries_an_unsupported_receipt_persisted_by_an_older_build() {
         let temp = TempStorage::new("resume-old-failure");
         let spy = SpyHueTransport::new();
         seed_bridge(&spy, json!([]));
@@ -1380,7 +1721,7 @@ mod tests {
                 resource_id: "behavior-1".to_string(),
                 body: Some(json!({"enabled": false})),
             },
-            HueOwnershipReceiptStatus::Failed,
+            HueOwnershipReceiptStatus::Unsupported,
             None,
         );
         persist_controller_ownership(&temp.storage, &interrupted).unwrap();
@@ -1391,18 +1732,100 @@ mod tests {
         assert_eq!(active.phase, HueOwnershipPhase::Active);
         assert!(active.receipts().any(|receipt| {
             receipt.resource_type == "behavior_instance"
-                && receipt.status == HueOwnershipReceiptStatus::Unsupported
+                && receipt.status == HueOwnershipReceiptStatus::Succeeded
         }));
-        assert!(!spy.calls().iter().any(|call| matches!(
+        assert!(spy.calls().iter().any(|call| matches!(
             call,
             HueTransportCall::UpdateResource { resource_type, .. }
                 if resource_type == "behavior_instance"
         )));
-        assert!(spy.calls().iter().any(|call| matches!(
+        assert!(!spy
+            .calls()
+            .iter()
+            .any(|call| matches!(call, HueTransportCall::DeleteResource { .. })));
+    }
+
+    #[test]
+    fn takeover_retires_an_old_unsupported_accessory_receipt_without_retrying_it() {
+        let temp = TempStorage::new("retire-old-accessory-failure");
+        let spy = SpyHueTransport::new();
+        seed_bridge(&spy, json!([]));
+        spy.set_resource_response(
+            "behavior_instance",
+            json!({"data": [{
+                "id": "behavior-1",
+                "script_id": "accessory-script-1",
+                "enabled": true,
+                "configuration": {
+                    "device": {"rid": "button-1", "rtype": "device"}
+                },
+                "dependees": [{
+                    "target": {"rid": "button-1", "rtype": "device"}
+                }]
+            }], "errors": []}),
+        );
+        spy.set_resource_response(
+            "behavior_script",
+            json!({"data": [{
+                "id": "accessory-script-1",
+                "metadata": {"name": "Dimmer", "category": "accessory"}
+            }], "errors": []}),
+        );
+        let mut interrupted = HueControllerOwnership::captured(
+            capture_baseline(&spy, "user", "old-build-capture".to_string()).unwrap(),
+        );
+        interrupted.phase = HueOwnershipPhase::ClearIncomplete;
+        interrupted.set_receipt(
+            &ControlPlaneOperation {
+                operation_id: "clear:v2:behavior_instance:behavior-1".to_string(),
+                api: "v2",
+                action: "disable",
+                resource_type: "behavior_instance",
+                resource_id: "behavior-1".to_string(),
+                body: Some(json!({"enabled": false})),
+            },
+            HueOwnershipReceiptStatus::Unsupported,
+            None,
+        );
+        persist_controller_ownership(&temp.storage, &interrupted).unwrap();
+        spy.reset();
+
+        let active = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
+
+        assert_eq!(active.phase, HueOwnershipPhase::Active);
+        assert!(active.receipts().any(|receipt| {
+            receipt.original_resource_id == "behavior-1"
+                && receipt.status == HueOwnershipReceiptStatus::Unsupported
+        }));
+        assert!(!spy.calls().iter().any(|call| matches!(
             call,
-            HueTransportCall::DeleteResource { resource_type, resource_id }
-                if resource_type == "room" && resource_id == "old-room"
+            HueTransportCall::UpdateResource {
+                resource_type,
+                resource_id,
+                ..
+            } if resource_type == "behavior_instance" && resource_id == "behavior-1"
         )));
+    }
+
+    #[test]
+    fn v1_disable_requires_disabled_readback() {
+        let spy = SpyHueTransport::new();
+        seed_bridge(&spy, json!([]));
+        let operation = ControlPlaneOperation {
+            operation_id: "clear:v1:rules:1".to_string(),
+            api: "v1",
+            action: "disable",
+            resource_type: "rules",
+            resource_id: "1".to_string(),
+            body: Some(json!({"status": "disabled"})),
+        };
+
+        let error = verify_operation(&spy, "user", &operation)
+            .expect_err("an enabled read-back cannot confirm suppression");
+        assert!(error.to_string().contains("was not disabled by read-back"));
+
+        spy.set_v1_response("rules", json!({"1": {"status": "disabled"}}));
+        verify_operation(&spy, "user", &operation).unwrap();
     }
 
     #[test]
@@ -1451,7 +1874,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_v1_receipt_is_skipped_and_journaled_as_unsupported() {
+    fn malformed_v1_receipt_keeps_automation_suppression_incomplete() {
         let temp = TempStorage::new("v1-receipt");
         let spy = SpyHueTransport::new();
         seed_bridge(&spy, json!([]));
@@ -1460,27 +1883,25 @@ mod tests {
             "success": {format!("/rules/{private_id}/status"): "disabled"}
         }])));
 
-        let active = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
-        assert_eq!(active.phase, HueOwnershipPhase::Active);
+        acquire_authoritative_control(&temp.storage, &key(), &spy, "user")
+            .expect_err("an unconfirmed V1 disable must block active authority");
         let state = load_controller_ownership(&temp.storage, "bridge-1")
             .unwrap()
             .unwrap();
-        assert_eq!(state.phase, HueOwnershipPhase::Active);
+        assert_eq!(state.phase, HueOwnershipPhase::ClearIncomplete);
         let v1_receipts = state
             .receipts()
             .filter(|receipt| receipt.api == "v1")
             .collect::<Vec<_>>();
-        assert_eq!(v1_receipts.len(), 2);
-        assert!(v1_receipts
-            .iter()
-            .all(|receipt| receipt.status == HueOwnershipReceiptStatus::Unsupported));
+        assert_eq!(v1_receipts.len(), 1);
+        assert_eq!(v1_receipts[0].status, HueOwnershipReceiptStatus::Failed);
         assert!(v1_receipts
             .iter()
             .all(|receipt| !receipt.operation_id.contains(private_id)));
     }
 
     #[test]
-    fn automations_and_smart_scenes_are_captured_then_cleared_without_restore() {
+    fn automations_are_disabled_while_hue_resources_are_preserved() {
         let temp = TempStorage::new("smart-scene");
         let spy = SpyHueTransport::new();
         let smart_scenes = json!([{
@@ -1493,6 +1914,7 @@ mod tests {
             "behavior_instance",
             json!({"data": [{
                 "id": "behavior-1",
+                "script_id": "automation-script-1",
                 "enabled": true,
                 "configuration": {
                     "where": {"rid": "old-room", "rtype": "room"},
@@ -1513,10 +1935,34 @@ mod tests {
             active.baseline.v2_resource("behavior_instance").unwrap()["data"][0]["configuration"]
                 .is_object()
         );
-        assert!(spy.get_resources("user", "smart_scene").unwrap()["data"]
-            .as_array()
-            .unwrap()
-            .is_empty());
+        assert_eq!(
+            spy.get_resources("user", "smart_scene").unwrap()["data"],
+            smart_scenes
+        );
+        assert_eq!(
+            spy.get_resources("user", "scene").unwrap()["data"][0]["id"],
+            "old-scene"
+        );
+        assert_eq!(
+            spy.get_resources("user", "room").unwrap()["data"][0]["id"],
+            "old-room"
+        );
+        assert_eq!(
+            spy.get_resources("user", "behavior_instance").unwrap()["data"][0]["enabled"],
+            false
+        );
+        assert_eq!(
+            spy.get_v1("user", "rules").unwrap()["1"]["status"],
+            "disabled"
+        );
+        assert_eq!(
+            spy.get_v1("user", "schedules").unwrap()["2"]["status"],
+            "disabled"
+        );
+        assert!(!spy
+            .calls()
+            .iter()
+            .any(|call| matches!(call, HueTransportCall::DeleteResource { .. })));
 
         spy.reset();
         let released = release_authoritative_control(&temp.storage, &key(), &spy, "user")
@@ -1542,7 +1988,7 @@ mod tests {
     }
 
     #[test]
-    fn authoritative_reconcile_preserves_regular_scenes_in_managed_rooms_only() {
+    fn authoritative_reconcile_preserves_all_hue_resource_definitions() {
         let temp = TempStorage::new("native-managed-scenes");
         let spy = SpyHueTransport::new();
         seed_bridge(&spy, json!([]));
@@ -1611,26 +2057,17 @@ mod tests {
             BTreeSet::from([
                 "managed-projection".to_string(),
                 "native-managed".to_string(),
+                "native-outside".to_string(),
             ])
         );
-        assert!(spy.get_resources("user", "smart_scene").unwrap()["data"]
-            .as_array()
-            .unwrap()
-            .is_empty());
-        assert!(spy.calls().iter().any(|call| matches!(
-            call,
-            HueTransportCall::DeleteResource {
-                resource_type,
-                resource_id,
-            } if resource_type == "scene" && resource_id == "native-outside"
-        )));
-        assert!(!spy.calls().iter().any(|call| matches!(
-            call,
-            HueTransportCall::DeleteResource {
-                resource_type,
-                resource_id,
-            } if resource_type == "scene" && resource_id == "native-managed"
-        )));
+        assert_eq!(
+            spy.get_resources("user", "smart_scene").unwrap()["data"][0]["id"],
+            "smart-managed"
+        );
+        assert!(!spy
+            .calls()
+            .iter()
+            .any(|call| matches!(call, HueTransportCall::DeleteResource { .. })));
     }
 
     #[test]

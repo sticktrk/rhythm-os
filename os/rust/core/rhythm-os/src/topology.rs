@@ -532,11 +532,27 @@ impl TopologyRoom {
         by_hub
     }
 
-    fn grouped_dispatch_target_for_hub(&self, hub_key: &HubKey) -> Option<HubDispatchTarget> {
+    fn exact_native_grouped_dispatch_target_for_hub(
+        &self,
+        hub_key: &HubKey,
+        assigned_native_ids: &HashSet<String>,
+    ) -> Option<HubDispatchTarget> {
+        if assigned_native_ids.is_empty() {
+            return None;
+        }
         let binding = self
             .hub_room_bindings
             .iter()
-            .filter(|binding| binding.hub_key == *hub_key && !binding.light_device_ids.is_empty())
+            .filter(|binding| {
+                binding.hub_key == *hub_key
+                    && !binding.control_id.is_empty()
+                    && binding
+                        .light_device_ids
+                        .iter()
+                        .cloned()
+                        .collect::<HashSet<_>>()
+                        == *assigned_native_ids
+            })
             .min_by(|left, right| left.hub_room_id.cmp(&right.hub_room_id))?;
         Some(HubDispatchTarget::Group {
             room_id: binding.hub_room_id.clone(),
@@ -590,41 +606,6 @@ impl TopologyRoom {
             self.control_light_endpoints_by_hub(canonical_registry, grouped_room_control_required);
 
         if preferred_light_endpoints.is_empty() {
-            let mut bindings = self.hub_room_bindings.clone();
-            bindings.sort_by(|left, right| {
-                left.hub_key
-                    .to_string()
-                    .cmp(&right.hub_key.to_string())
-                    .then_with(|| left.hub_room_id.cmp(&right.hub_room_id))
-            });
-            for binding in bindings {
-                if grouped_room_control_required.contains(&binding.hub_key.to_string()) {
-                    // Required-group integrations may never gain a route from
-                    // discovery alone. With no assigned canonical lights
-                    // there is no exact desired membership to prove, so keep
-                    // the binding inert until authoritative reconciliation
-                    // publishes explicit ownership metadata.
-                    continue;
-                }
-                if binding.light_device_ids.is_empty() {
-                    continue;
-                }
-                let target = HubDispatchTarget::Group {
-                    room_id: binding.hub_room_id.clone(),
-                    control_id: binding.control_id.clone(),
-                };
-                plan.room_targets
-                    .push((binding.hub_key.clone(), target.clone()));
-                plan.node_routes.push(TopologyLightNodeRoute {
-                    node: TopologyLightNode {
-                        id: group_light_node_id(&self.id, &binding.hub_key, &binding.hub_room_id),
-                        source_node_id: self.id.clone(),
-                        emit_node_id: self.id.clone(),
-                    },
-                    hub_key: binding.hub_key,
-                    target,
-                });
-            }
             return plan;
         }
 
@@ -662,32 +643,27 @@ impl TopologyRoom {
                 continue;
             }
 
-            let mut bindings: Vec<_> = self
-                .hub_room_bindings
-                .iter()
-                .filter(|binding| {
-                    binding.hub_key == hub_key && !binding.light_device_ids.is_empty()
-                })
-                .collect();
-            bindings.sort_by(|left, right| left.hub_room_id.cmp(&right.hub_room_id));
-
-            if !bindings.is_empty() {
-                for binding in bindings {
-                    let target = HubDispatchTarget::Group {
-                        room_id: binding.hub_room_id.clone(),
-                        control_id: binding.control_id.clone(),
-                    };
-                    plan.room_targets.push((hub_key.clone(), target.clone()));
-                    plan.node_routes.push(TopologyLightNodeRoute {
-                        node: TopologyLightNode {
-                            id: group_light_node_id(&self.id, &hub_key, &binding.hub_room_id),
-                            source_node_id: self.id.clone(),
-                            emit_node_id: self.id.clone(),
-                        },
-                        hub_key: hub_key.clone(),
-                        target,
-                    });
-                }
+            let assigned_native_ids = remaining_ids.keys().cloned().collect::<HashSet<_>>();
+            if let Some(target) =
+                self.exact_native_grouped_dispatch_target_for_hub(&hub_key, &assigned_native_ids)
+            {
+                let HubDispatchTarget::Group {
+                    room_id: hub_room_id,
+                    ..
+                } = &target
+                else {
+                    unreachable!("exact native grouped target must be a group")
+                };
+                plan.room_targets.push((hub_key.clone(), target.clone()));
+                plan.node_routes.push(TopologyLightNodeRoute {
+                    node: TopologyLightNode {
+                        id: group_light_node_id(&self.id, &hub_key, hub_room_id),
+                        source_node_id: self.id.clone(),
+                        emit_node_id: self.id.clone(),
+                    },
+                    hub_key,
+                    target,
+                });
                 continue;
             }
 
@@ -734,6 +710,9 @@ pub struct DiscoveredTopologyRoom {
     pub hub_room_id: String,
     /// Room name from the hub.
     pub name: String,
+    /// Whether later source renames may replace the established canonical
+    /// Rhythm room name. The source name always bootstraps a new room.
+    pub source_name_authoritative: bool,
     /// Hub-native control ID (grouped_light, area_id).
     pub control_id: String,
     /// Light device IDs in this room.
@@ -1392,7 +1371,7 @@ impl RoomTopologyStore {
                     light_device_ids: discovered.light_device_ids.clone(),
                 });
 
-                if !room.user_customized {
+                if !room.user_customized && discovered.source_name_authoritative {
                     room.name = discovered.name.clone();
                 }
             }
@@ -2560,23 +2539,20 @@ impl RoomTopologyStore {
             native_ids: vec![endpoint.native_id.clone()],
         };
         let room = self.rooms.get(parent_id)?;
+        let assigned_native_ids = room
+            .control_light_endpoints_by_hub(canonical_registry, &self.grouped_room_control_required)
+            .remove(&hub_key)
+            .unwrap_or_default()
+            .into_keys()
+            .collect::<HashSet<_>>();
         let grouped_target = if self.grouped_room_control_is_required(&hub_key) {
-            let assigned_native_ids = room
-                .control_light_endpoints_by_hub(
-                    canonical_registry,
-                    &self.grouped_room_control_required,
-                )
-                .remove(&hub_key)
-                .unwrap_or_default()
-                .into_keys()
-                .collect::<HashSet<_>>();
             room.authoritative_grouped_dispatch_target_for_hub(
                 &hub_key,
                 &assigned_native_ids,
                 &self.rhythm_managed_bindings,
             )
         } else {
-            room.grouped_dispatch_target_for_hub(&hub_key)
+            room.exact_native_grouped_dispatch_target_for_hub(&hub_key, &assigned_native_ids)
         };
         let target = match grouped_target {
             Some(group_target) => group_target,
@@ -2793,6 +2769,7 @@ mod tests {
         DiscoveredTopologyRoom {
             hub_room_id: hub_room_id.to_string(),
             name: name.to_string(),
+            source_name_authoritative: true,
             control_id: control_id.to_string(),
             light_device_ids: vec![],
             canonical_device_ids: vec![],
@@ -2955,6 +2932,32 @@ mod tests {
         store.sync_hub_room(&hue_key(), &rediscovered);
 
         assert_eq!(store.get(&room_id).unwrap().name, "My Kitchen");
+    }
+
+    #[test]
+    fn non_authoritative_source_name_cannot_replace_a_cross_hub_canonical_name() {
+        let mut store = RoomTopologyStore::new();
+        let room_id = store.translate_or_create(&ha_key(), "kitchen", "Kitchen", "kitchen", &[]);
+        store.approve_binding(hue_key(), "hue-room-1".to_string(), room_id.clone(), 1000);
+        assert_eq!(
+            store.translate_or_create(&hue_key(), "hue-room-1", "Rhythm · Kitchen", "gl-1", &[],),
+            room_id
+        );
+
+        let mut ha_rename = make_discovered("kitchen", "Galley", "kitchen");
+        ha_rename.source_name_authoritative = true;
+        store.sync_hub_room(&ha_key(), &ha_rename);
+
+        let mut hue_rediscovery = make_discovered("hue-room-1", "Rhythm · Kitchen", "gl-2");
+        hue_rediscovery.source_name_authoritative = false;
+        hue_rediscovery.light_device_ids = vec!["hue-light-1".to_string()];
+        store.sync_hub_room(&hue_key(), &hue_rediscovery);
+
+        let room = store.get(&room_id).unwrap();
+        assert_eq!(room.name, "Galley");
+        let hue_binding = room.binding_for_hub(&hue_key()).unwrap();
+        assert_eq!(hue_binding.control_id, "gl-2");
+        assert_eq!(hue_binding.light_device_ids, vec!["hue-light-1"]);
     }
 
     #[test]
@@ -3346,6 +3349,7 @@ mod tests {
         let discovered = DiscoveredTopologyRoom {
             hub_room_id: "hue-room-1".to_string(),
             name: "Kitchen".to_string(),
+            source_name_authoritative: true,
             control_id: "gl-1".to_string(),
             light_device_ids: vec!["light-1".to_string()],
             canonical_device_ids: vec!["canonical-1".to_string()],
@@ -3364,7 +3368,7 @@ mod tests {
     }
 
     #[test]
-    fn composite_routing_no_hub_native_aliases() {
+    fn native_binding_without_assigned_lights_is_inert() {
         let mut store = RoomTopologyStore::new();
         let light_ids = vec!["light-1".to_string()];
         let topo_id =
@@ -3373,9 +3377,7 @@ mod tests {
         let canonical_registry = crate::canonical::registry::CanonicalRegistry::new();
         let routing = store.composite_routing(&canonical_registry);
 
-        // Should have entry for topology ID
-        assert!(routing.contains_key(&topo_id));
-        // Should NOT have alias for hub-native ID
+        assert!(!routing.contains_key(&topo_id));
         assert!(!routing.contains_key("hue-room-1"));
     }
 
@@ -3447,7 +3449,7 @@ mod tests {
     }
 
     #[test]
-    fn composite_routing_prefers_group_target_when_native_binding_exists() {
+    fn composite_routing_falls_back_to_devices_when_native_membership_is_stale() {
         let mut store = RoomTopologyStore::new();
         let room_id = store.translate_or_create(
             &hue_key(),
@@ -3477,9 +3479,8 @@ mod tests {
             routing.get(&room_id),
             Some(&vec![(
                 hue_key().to_string(),
-                HubDispatchTarget::Group {
-                    room_id: "hue-room-1".to_string(),
-                    control_id: "gl-kitchen".to_string(),
+                HubDispatchTarget::Devices {
+                    native_ids: vec!["hue-light-1".to_string()],
                 },
             )])
         );
@@ -3488,8 +3489,8 @@ mod tests {
         assert_eq!(
             nodes,
             vec![TopologyLightNode {
-                id: group_light_node_id(&room_id, &hue_key(), "hue-room-1"),
-                source_node_id: room_id.clone(),
+                id: light_id.clone(),
+                source_node_id: light_id,
                 emit_node_id: room_id.clone(),
             }]
         );
@@ -3888,7 +3889,7 @@ mod tests {
     }
 
     #[test]
-    fn non_light_devices_do_not_block_group_dispatch_nodes() {
+    fn non_light_devices_do_not_activate_an_unproven_group_binding() {
         let mut store = RoomTopologyStore::new();
         let room_id =
             store.translate_or_create(&hue_key(), "hue-room-1", "Kitchen", "gl-kitchen", &[]);
@@ -3911,27 +3912,8 @@ mod tests {
         let _ = room;
         assert!(store.attach_device_user_override(&room_id, &button_id));
 
-        let routing = store.composite_routing(&registry);
-        assert_eq!(
-            routing.get(&room_id),
-            Some(&vec![(
-                hue_key().to_string(),
-                HubDispatchTarget::Group {
-                    room_id: "hue-room-1".to_string(),
-                    control_id: "gl-kitchen".to_string(),
-                },
-            )])
-        );
-
-        let nodes = store.periodic_light_nodes(&registry);
-        assert_eq!(
-            nodes,
-            vec![TopologyLightNode {
-                id: group_light_node_id(&room_id, &hue_key(), "hue-room-1"),
-                source_node_id: room_id.clone(),
-                emit_node_id: room_id.clone(),
-            }]
-        );
+        assert!(store.composite_routing(&registry).get(&room_id).is_none());
+        assert!(store.periodic_light_nodes(&registry).is_empty());
     }
 
     #[test]
@@ -4072,6 +4054,7 @@ mod tests {
         let discovered = DiscoveredTopologyRoom {
             hub_room_id: "hue-office-uuid".to_string(),
             name: "Office".to_string(),
+            source_name_authoritative: true,
             control_id: "gl-office".to_string(),
             light_device_ids: vec!["hue-light-1".to_string()],
             canonical_device_ids: vec!["canonical-hue-1".to_string()],
@@ -4143,6 +4126,7 @@ mod tests {
         let discovered = DiscoveredTopologyRoom {
             hub_room_id: "hue-office-uuid".to_string(),
             name: "Office".to_string(),
+            source_name_authoritative: true,
             control_id: "gl-office".to_string(),
             light_device_ids: vec!["hue-light-1".to_string()],
             canonical_device_ids: vec!["canonical-hue-1".to_string()],
@@ -4190,6 +4174,7 @@ mod tests {
         let hue_discovered = DiscoveredTopologyRoom {
             hub_room_id: "hue-office".to_string(),
             name: "Office".to_string(),
+            source_name_authoritative: true,
             control_id: "gl-office".to_string(),
             light_device_ids: vec!["hue-office-1".to_string()],
             canonical_device_ids: vec![hue_light_id.clone()],
@@ -4209,6 +4194,7 @@ mod tests {
         let ha_discovered = DiscoveredTopologyRoom {
             hub_room_id: "office".to_string(),
             name: "Office".to_string(),
+            source_name_authoritative: true,
             control_id: "office".to_string(),
             light_device_ids: vec!["light.office_bloom".to_string()],
             canonical_device_ids: vec![ha_light_id.clone()],

@@ -71,6 +71,14 @@ pub struct DiscoveredMotionState {
 /// `room_sync::sync_from_hub()` to keep the server's state in sync
 /// with the hub without requiring app-side pushes.
 pub trait HubDiscovery: Send + Sync {
+    /// Whether a later source-room rename should replace an established
+    /// canonical Rhythm room name. Integrations that expose generated or
+    /// controller-facing names can opt out while still using those names to
+    /// bootstrap newly discovered rooms.
+    fn room_names_are_authoritative(&self) -> bool {
+        true
+    }
+
     /// Discover all rooms from the hub.
     fn discover_rooms(&self) -> Result<Vec<DiscoveredRoom>>;
 

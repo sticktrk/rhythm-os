@@ -1,18 +1,12 @@
 //! Scenario coverage for capture-first Hue authority without automatic restore.
 
-use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-
-use rhythm_hue::discovery::HueDiscovery;
-use rhythm_hue::managed_rooms::{reconcile_managed_rooms, DesiredHueRoom};
 use rhythm_hue::ownership::{
     acquire_authoritative_control, finalize_released_control, load_controller_ownership,
     release_authoritative_control, HueBaselineCaptureScope, HueOwnershipPhase,
 };
 use rhythm_hue::test_support::{HueTransportCall, SpyHueTransport};
+use rhythm_hue::transport::HueTransport;
 use rhythm_os::canonical::identity::HubKey;
-use rhythm_os::discovery::HubDiscovery;
 use rhythm_os::hub::HubType;
 use rhythm_os::storage::FileStorage;
 
@@ -22,12 +16,10 @@ struct TempStorage {
 }
 
 impl TempStorage {
-    fn new(name: &str) -> Self {
-        static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+    fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
-            "rhythm-hue-capture-scenario-{name}-{}-{}",
-            std::process::id(),
-            NEXT_TEMP.fetch_add(1, Ordering::Relaxed),
+            "rhythm-hue-capture-scenario-{}",
+            std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&path);
         let storage = FileStorage::new(path.to_str().unwrap()).unwrap();
@@ -46,8 +38,8 @@ fn key() -> HubKey {
 }
 
 #[test]
-fn complete_inventory_survives_takeover_and_release_without_restore_writes() {
-    let temp = TempStorage::new("complete-inventory");
+fn takeover_only_disables_automatic_lighting_programs_and_preserves_hue_topology() {
+    let temp = TempStorage::new();
     let bridge = SpyHueTransport::new();
     bridge.set_resource_response(
         "bridge",
@@ -59,27 +51,108 @@ fn complete_inventory_survives_takeover_and_release_without_restore_writes() {
     );
     bridge.set_resource_response(
         "behavior_instance",
-        serde_json::json!({"data": [{
-            "id": "behavior-1",
-            "enabled": true,
-            "configuration": {
-                "room": {"rid": "room-1", "rtype": "room"},
-                "scene": {"rid": "scene-1", "rtype": "scene"}
+        serde_json::json!({"data": [
+            {
+                "id": "behavior-1",
+                "script_id": "automation-script-1",
+                "enabled": true,
+                "configuration": {
+                    "room": {"rid": "room-1", "rtype": "room"},
+                    "scene": {"rid": "scene-1", "rtype": "scene"}
+                }
+            },
+            {
+                "id": "accessory-behavior-1",
+                "script_id": "accessory-script-1",
+                "enabled": true,
+                "configuration": {
+                    "device": {"rid": "button-1", "rtype": "device"}
+                },
+                "dependees": [{
+                    "target": {"rid": "button-1", "rtype": "device"}
+                }]
+            },
+            {
+                "id": "accessory-target-behavior-1",
+                "script_id": "accessory-script-1",
+                "enabled": true,
+                "configuration": {
+                    "device": {"rid": "button-1", "rtype": "device"},
+                    "buttons": {
+                        "button-1": {
+                            "where": [{
+                                "group": {"rid": "room-1", "rtype": "room"}
+                            }]
+                        }
+                    }
+                },
+                "dependees": [
+                    {"target": {"rid": "button-1", "rtype": "device"}},
+                    {"target": {"rid": "room-1", "rtype": "room"}}
+                ]
             }
-        }], "errors": []}),
+        ], "errors": []}),
+    );
+    bridge.set_resource_response(
+        "behavior_script",
+        serde_json::json!({"data": [
+            {
+                "id": "automation-script-1",
+                "metadata": {"name": "Motion automation", "category": "automation"}
+            },
+            {
+                "id": "accessory-script-1",
+                "metadata": {"name": "Dimmer accessory", "category": "accessory"}
+            }
+        ], "errors": []}),
     );
     bridge.set_resource_response(
         "room",
-        serde_json::json!({"data": [{"id": "room-1"}], "errors": []}),
+        serde_json::json!({"data": [{
+            "id": "room-1",
+            "metadata": {"name": "Bedroom"},
+            "children": [{"rid": "light-device-1", "rtype": "device"}]
+        }], "errors": []}),
+    );
+    bridge.set_resource_response(
+        "zone",
+        serde_json::json!({"data": [{
+            "id": "zone-1",
+            "metadata": {"name": "Upstairs"},
+            "children": [{"rid": "light-device-1", "rtype": "device"}]
+        }], "errors": []}),
     );
     bridge.set_resource_response(
         "scene",
-        serde_json::json!({"data": [{"id": "scene-1"}], "errors": []}),
+        serde_json::json!({"data": [{
+            "id": "scene-1",
+            "metadata": {"name": "Relax"},
+            "group": {"rid": "room-1", "rtype": "room"},
+            "actions": []
+        }], "errors": []}),
     );
     bridge.set_resource_response(
         "smart_scene",
-        serde_json::json!({"data": [{"id": "smart-scene-1"}], "errors": []}),
+        serde_json::json!({"data": [{
+            "id": "smart-scene-1",
+            "metadata": {"name": "Natural light"},
+            "group": {"rid": "room-1", "rtype": "room"}
+        }], "errors": []}),
     );
+    bridge.set_v1_response(
+        "rules",
+        serde_json::json!({"1": {"name": "Motion rule", "status": "enabled"}}),
+    );
+    bridge.set_v1_response(
+        "schedules",
+        serde_json::json!({"2": {"name": "Wake schedule", "status": "enabled"}}),
+    );
+
+    let original_room = bridge.get_resources("user", "room").unwrap();
+    let original_zone = bridge.get_resources("user", "zone").unwrap();
+    let original_scene = bridge.get_resources("user", "scene").unwrap();
+    let original_smart_scene = bridge.get_resources("user", "smart_scene").unwrap();
+    bridge.reset();
 
     let active = acquire_authoritative_control(&temp.storage, &key(), &bridge, "user").unwrap();
 
@@ -88,13 +161,7 @@ fn complete_inventory_survives_takeover_and_release_without_restore_writes() {
         active.baseline().capture_scope(),
         HueBaselineCaptureScope::FullV2Inventory
     );
-    for resource_type in [
-        "button",
-        "behavior_instance",
-        "room",
-        "scene",
-        "smart_scene",
-    ] {
+    for resource_type in ["button", "room", "zone", "scene", "smart_scene"] {
         assert_eq!(
             active.baseline().v2_resource(resource_type).unwrap()["data"]
                 .as_array()
@@ -103,12 +170,138 @@ fn complete_inventory_survives_takeover_and_release_without_restore_writes() {
             1
         );
     }
-    assert!(bridge.calls().iter().any(|call| matches!(
+    assert_eq!(
+        active.baseline().v2_resource("behavior_instance").unwrap()["data"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        active.baseline().v2_resource("behavior_script").unwrap()["data"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(bridge.get_resources("user", "room").unwrap(), original_room);
+    assert_eq!(bridge.get_resources("user", "zone").unwrap(), original_zone);
+    assert_eq!(
+        bridge.get_resources("user", "scene").unwrap(),
+        original_scene
+    );
+    assert_eq!(
+        bridge.get_resources("user", "smart_scene").unwrap(),
+        original_smart_scene
+    );
+    let behaviors = bridge.get_resources("user", "behavior_instance").unwrap();
+    let behavior_enabled = |id: &str| {
+        behaviors["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|behavior| behavior["id"] == id)
+            .unwrap()["enabled"]
+            .as_bool()
+            .unwrap()
+    };
+    assert!(!behavior_enabled("behavior-1"));
+    assert!(behavior_enabled("accessory-behavior-1"));
+    assert!(!behavior_enabled("accessory-target-behavior-1"));
+    assert_eq!(
+        bridge.get_v1("user", "rules").unwrap()["1"]["status"],
+        "disabled"
+    );
+    assert_eq!(
+        bridge.get_v1("user", "schedules").unwrap()["2"]["status"],
+        "disabled"
+    );
+
+    let writes = bridge
+        .calls()
+        .into_iter()
+        .filter(|call| {
+            matches!(
+                call,
+                HueTransportCall::CreateResource { .. }
+                    | HueTransportCall::UpdateResource { .. }
+                    | HueTransportCall::DeleteResource { .. }
+                    | HueTransportCall::PostV1 { .. }
+                    | HueTransportCall::PutV1 { .. }
+                    | HueTransportCall::DeleteV1 { .. }
+                    | HueTransportCall::UpdateRoomChildren { .. }
+                    | HueTransportCall::CreateRoom { .. }
+                    | HueTransportCall::UpdateRoom { .. }
+                    | HueTransportCall::RenameRoom { .. }
+                    | HueTransportCall::DeleteRoom { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(writes.len(), 4);
+    assert!(writes.iter().any(|call| matches!(
         call,
-        HueTransportCall::DeleteResource {
+        HueTransportCall::UpdateResource {
             resource_type,
             resource_id,
-        } if resource_type == "smart_scene" && resource_id == "smart-scene-1"
+            body,
+        } if resource_type == "behavior_instance"
+            && resource_id == "behavior-1"
+            && body == &serde_json::json!({"enabled": false})
+    )));
+    assert!(!writes.iter().any(|call| matches!(
+        call,
+        HueTransportCall::UpdateResource {
+            resource_type,
+            resource_id,
+            ..
+        } if resource_type == "behavior_instance"
+            && resource_id == "accessory-behavior-1"
+    )));
+    assert!(writes.iter().any(|call| matches!(
+        call,
+        HueTransportCall::UpdateResource {
+            resource_type,
+            resource_id,
+            body,
+        } if resource_type == "behavior_instance"
+            && resource_id == "accessory-target-behavior-1"
+            && body == &serde_json::json!({"enabled": false})
+    )));
+    for (path, id) in [("rules/1", "1"), ("schedules/2", "2")] {
+        assert!(
+            writes.iter().any(|call| matches!(
+                call,
+                HueTransportCall::PutV1 { path: written_path, body }
+                    if written_path == path
+                        && body == &serde_json::json!({"status": "disabled"})
+            )),
+            "missing suppression write for {id}"
+        );
+    }
+
+    bridge.reset();
+    let stable = rhythm_hue::ownership::reconcile_authoritative_control(
+        &temp.storage,
+        &key(),
+        &bridge,
+        "user",
+        active,
+    )
+    .unwrap();
+    assert_eq!(stable.phase, HueOwnershipPhase::Active);
+    assert!(!bridge.calls().iter().any(|call| matches!(
+        call,
+        HueTransportCall::CreateResource { .. }
+            | HueTransportCall::UpdateResource { .. }
+            | HueTransportCall::DeleteResource { .. }
+            | HueTransportCall::PostV1 { .. }
+            | HueTransportCall::PutV1 { .. }
+            | HueTransportCall::DeleteV1 { .. }
+            | HueTransportCall::UpdateRoomChildren { .. }
+            | HueTransportCall::CreateRoom { .. }
+            | HueTransportCall::UpdateRoom { .. }
+            | HueTransportCall::RenameRoom { .. }
+            | HueTransportCall::DeleteRoom { .. }
     )));
 
     bridge.reset();
@@ -132,131 +325,5 @@ fn complete_inventory_survives_takeover_and_release_without_restore_writes() {
     assert_eq!(
         retained.baseline().v2_resource("smart_scene").unwrap()["data"][0]["id"],
         "smart-scene-1"
-    );
-}
-
-#[test]
-fn recreated_authority_room_keeps_inputs_discoverable_as_room_members() {
-    let temp = TempStorage::new("input-membership");
-    let bridge = Arc::new(SpyHueTransport::new());
-    for (resource_type, data) in [
-        ("bridge", serde_json::json!([{"id": "bridge-1"}])),
-        (
-            "device",
-            serde_json::json!([
-                {
-                    "id": "light-parent",
-                    "metadata": {"name": "Mud light"},
-                    "product_data": {"manufacturer_name": "Signify", "model_id": "LCA009"},
-                    "services": [{"rid": "light-service", "rtype": "light"}]
-                },
-                {
-                    "id": "button-parent",
-                    "metadata": {"name": "Mud dimmer"},
-                    "product_data": {"manufacturer_name": "Signify", "model_id": "RWL022"},
-                    "services": [{"rid": "button-service", "rtype": "button"}]
-                },
-                {
-                    "id": "motion-parent",
-                    "metadata": {"name": "Mud Motion"},
-                    "product_data": {"manufacturer_name": "Signify", "model_id": "SML003"},
-                    "services": [{"rid": "motion-service", "rtype": "motion"}]
-                }
-            ]),
-        ),
-        ("light", serde_json::json!([])),
-        ("button", serde_json::json!([])),
-        ("motion", serde_json::json!([])),
-        ("behavior_instance", serde_json::json!([])),
-        (
-            "room",
-            serde_json::json!([{
-                "id": "native-mud-room",
-                "metadata": {"name": "Mud Room", "archetype": "living_room"},
-                "children": [
-                    {"rid": "light-parent", "rtype": "device"},
-                    {"rid": "button-parent", "rtype": "device"},
-                    {"rid": "motion-parent", "rtype": "device"}
-                ],
-                "services": [{"rid": "native-group", "rtype": "grouped_light"}]
-            }]),
-        ),
-        ("zone", serde_json::json!([])),
-        ("scene", serde_json::json!([])),
-        ("smart_scene", serde_json::json!([])),
-        (
-            "zigbee_connectivity",
-            serde_json::json!([
-                {"owner": {"rid": "light-parent"}, "mac_address": "00:17:88:00:00:00:00:01"},
-                {"owner": {"rid": "button-parent"}, "mac_address": "00:17:88:00:00:00:00:02"},
-                {"owner": {"rid": "motion-parent"}, "mac_address": "00:17:88:00:00:00:00:03"}
-            ]),
-        ),
-    ] {
-        bridge.set_resource_response(
-            resource_type,
-            serde_json::json!({"data": data, "errors": []}),
-        );
-    }
-    bridge.set_v1_response("rules", serde_json::json!({}));
-    bridge.set_v1_response("schedules", serde_json::json!({}));
-
-    let mut ownership =
-        acquire_authoritative_control(&temp.storage, &key(), bridge.as_ref(), "user").unwrap();
-    let controlled_device_ids = BTreeSet::from([
-        "button-parent".to_string(),
-        "light-parent".to_string(),
-        "motion-parent".to_string(),
-    ]);
-    reconcile_managed_rooms(
-        &temp.storage,
-        &key(),
-        &mut ownership,
-        bridge.as_ref(),
-        "user",
-        &[DesiredHueRoom::new(
-            "rhythm-mud-room",
-            "Rhythm · Mud Room",
-            controlled_device_ids.iter().cloned().collect(),
-        )],
-        &controlled_device_ids,
-    )
-    .unwrap();
-
-    let managed_hue_room_id = ownership.managed_rooms()["rhythm-mud-room"]
-        .hue_room_id
-        .clone();
-    let discovery = HueDiscovery::new_authoritative(
-        bridge,
-        "user".to_string(),
-        BTreeSet::from([managed_hue_room_id.clone()]),
-    );
-    let rooms = discovery.discover_rooms().unwrap();
-    assert_eq!(rooms.len(), 1);
-    assert_eq!(
-        rooms[0].device_ids,
-        vec![
-            "button-parent".to_string(),
-            "light-parent".to_string(),
-            "motion-parent".to_string(),
-        ]
-    );
-
-    let identities = discovery.discover_identities().unwrap();
-    let button = identities
-        .iter()
-        .find(|identity| identity.native_id == "button-parent")
-        .unwrap();
-    let motion = identities
-        .iter()
-        .find(|identity| identity.native_id == "motion-service")
-        .unwrap();
-    assert_eq!(
-        button.room_id.as_deref(),
-        Some(managed_hue_room_id.as_str())
-    );
-    assert_eq!(
-        motion.room_id.as_deref(),
-        Some(managed_hue_room_id.as_str())
     );
 }

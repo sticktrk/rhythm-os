@@ -311,6 +311,7 @@ fn sync_with_discovery(
     // Phase 1: Discover rooms
     // ========================================================================
     let discovered_rooms = discovery.discover_rooms()?;
+    let source_room_names_authoritative = discovery.room_names_are_authoritative();
     info!(target: "room_sync", "Discovered {} rooms from hub", discovered_rooms.len());
 
     // ========================================================================
@@ -539,7 +540,6 @@ fn sync_with_discovery(
 
             let mut canonical_room_devices: HashMap<String, Vec<String>> = HashMap::new();
             let mut room_light_device_ids: HashMap<String, Vec<String>> = HashMap::new();
-            let mut canonically_assigned_roomless_inputs: Vec<(String, String)> = Vec::new();
             let mut new_light_canonical_ids: HashSet<String> = HashSet::new();
             let mut sleep_default_nodes_to_seed: Vec<String> = Vec::new();
 
@@ -600,16 +600,12 @@ fn sync_with_discovery(
                     }
 
                     let Some(hub_room_id) = identity.room_id.clone() else {
-                        let assigned_room_id = s
+                        let still_unassigned = s
                             .canonical_registry
                             .get(&canonical_id)
-                            .and_then(|device| device.room_id.clone());
-                        if let Some(assigned_room_id) = assigned_room_id {
-                            if identity.device_type != DeviceType::Light {
-                                canonically_assigned_roomless_inputs
-                                    .push((canonical_id.clone(), assigned_room_id));
-                            }
-                        } else {
+                            .map(|device| device.room_id.is_none())
+                            .unwrap_or(false);
+                        if still_unassigned {
                             s.canonical_registry.assign_room(&canonical_id, None);
                             s.topology.ensure_standalone_device(&canonical_id);
                             if new_light_canonical_ids.contains(&canonical_id) {
@@ -623,26 +619,6 @@ fn sync_with_discovery(
                         .entry(hub_room_id)
                         .or_default()
                         .push(canonical_id);
-                }
-
-                // An authoritative lighting controller may recreate rooms with
-                // light membership only, leaving buttons and sensors roomless
-                // at the hub even though Rhythm still owns their placement.
-                // Carry those actively rediscovered inputs into the room's
-                // same-hub keep set so topology sync preserves (or repairs)
-                // their canonical default control target.
-                for (canonical_id, rhythm_room_id) in canonically_assigned_roomless_inputs {
-                    let hub_room_id = s
-                        .topology
-                        .get(&rhythm_room_id)
-                        .and_then(|room| room.binding_for_hub(&canonical_hub_key))
-                        .map(|binding| binding.hub_room_id.clone());
-                    if let Some(hub_room_id) = hub_room_id {
-                        canonical_room_devices
-                            .entry(hub_room_id)
-                            .or_default()
-                            .push(canonical_id);
-                    }
                 }
                 for ids in canonical_room_devices.values_mut() {
                     ids.sort();
@@ -673,6 +649,7 @@ fn sync_with_discovery(
                     let topo_room = DiscoveredTopologyRoom {
                         hub_room_id: room.id.clone(),
                         name: room.name.clone(),
+                        source_name_authoritative: source_room_names_authoritative,
                         control_id: room.grouped_light_id.clone(),
                         light_device_ids: light_device_ids.clone(),
                         canonical_device_ids: canonical_device_ids.clone(),
@@ -1690,217 +1667,6 @@ mod tests {
             sensor_only_binding.light_device_ids.is_empty(),
             "rooms with typed identity discovery but no lights must not fall back to all Hue children"
         );
-    }
-
-    #[test]
-    fn authoritative_roomless_input_rediscovery_repairs_every_room_pairing() {
-        let (hub_key, state) = install_test_hub();
-        let make_rooms = || {
-            vec![
-                DiscoveredRoom {
-                    id: "mud-room-hue-id".to_string(),
-                    name: "Mud Room".to_string(),
-                    grouped_light_id: "mud-room-gl".to_string(),
-                    device_ids: vec!["mud-light".to_string()],
-                },
-                DiscoveredRoom {
-                    id: "guest-bath-hue-id".to_string(),
-                    name: "Guest Bath".to_string(),
-                    grouped_light_id: "guest-bath-gl".to_string(),
-                    device_ids: vec!["guest-bath-light".to_string()],
-                },
-            ]
-        };
-        let input_specs = [
-            (
-                "mud-motion",
-                "mud-room-hue-id",
-                "Mud Room",
-                "Mud Motion",
-                DeviceType::Motion,
-            ),
-            (
-                "mud-button",
-                "mud-room-hue-id",
-                "Mud Room",
-                "Mud Dimmer",
-                DeviceType::Button,
-            ),
-            (
-                "guest-bath-motion",
-                "guest-bath-hue-id",
-                "Guest Bath",
-                "Guest Bath Motion",
-                DeviceType::Motion,
-            ),
-            (
-                "guest-bath-button",
-                "guest-bath-hue-id",
-                "Guest Bath",
-                "Guest Bath Dimmer",
-                DeviceType::Button,
-            ),
-        ];
-        let mut initial_identities = vec![
-            make_identity(
-                "mud-light",
-                "mud-room-hue-id",
-                "Mud Room",
-                "Mud Room light",
-                DeviceType::Light,
-            ),
-            make_identity(
-                "guest-bath-light",
-                "guest-bath-hue-id",
-                "Guest Bath",
-                "Guest Bath light",
-                DeviceType::Light,
-            ),
-        ];
-        initial_identities.extend(input_specs.iter().map(
-            |(native_id, hub_room_id, room_name, device_name, device_type)| {
-                make_identity(
-                    native_id,
-                    hub_room_id,
-                    room_name,
-                    device_name,
-                    device_type.clone(),
-                )
-            },
-        ));
-        let initial_discovery = IdentityDiscovery {
-            rooms: make_rooms(),
-            identities: initial_identities,
-        };
-
-        sync_with_discovery(
-            &state,
-            &hub_key,
-            &initial_discovery,
-            true,
-            SyncFailurePolicy::BestEffort,
-        )
-        .unwrap();
-
-        let input_assignments = {
-            let state = state.lock().unwrap();
-            input_specs
-                .iter()
-                .map(|(native_id, hub_room_id, _, _, device_type)| {
-                    let canonical_id = state
-                        .canonical_registry
-                        .find_by_native_id(&hub_key, native_id)
-                        .expect("input should be canonicalized")
-                        .id
-                        .clone();
-                    let rhythm_room_id = state
-                        .topology
-                        .find_by_hub_room(&hub_key, hub_room_id)
-                        .expect("Hue room should be mapped into topology")
-                        .id
-                        .clone();
-                    let control_kind =
-                        crate::topology::NodeControlKind::default_for_device_type(device_type)
-                            .expect("input should have a default control kind");
-                    (canonical_id, rhythm_room_id, control_kind)
-                })
-                .collect::<Vec<_>>()
-        };
-
-        let mut roomless_identities = vec![
-            make_identity(
-                "mud-light",
-                "mud-room-hue-id",
-                "Mud Room",
-                "Mud Room light",
-                DeviceType::Light,
-            ),
-            make_identity(
-                "guest-bath-light",
-                "guest-bath-hue-id",
-                "Guest Bath",
-                "Guest Bath light",
-                DeviceType::Light,
-            ),
-        ];
-        roomless_identities.extend(input_specs.iter().map(
-            |(native_id, _, _, device_name, device_type)| {
-                crate::canonical::identity::DiscoveredIdentity {
-                    native_id: native_id.to_string(),
-                    room_id: None,
-                    room_name: None,
-                    name: device_name.to_string(),
-                    device_type: device_type.clone(),
-                    hardware_ids: vec![],
-                    manufacturer: None,
-                    model: None,
-                }
-            },
-        ));
-        let roomless_rediscovery = IdentityDiscovery {
-            rooms: make_rooms(),
-            identities: roomless_identities,
-        };
-
-        sync_with_discovery(
-            &state,
-            &hub_key,
-            &roomless_rediscovery,
-            true,
-            SyncFailurePolicy::BestEffort,
-        )
-        .unwrap();
-
-        {
-            let state = state.lock().unwrap();
-            for (canonical_id, rhythm_room_id, control_kind) in &input_assignments {
-                assert_eq!(
-                    state.topology.device_parent_room_id(canonical_id),
-                    Some(rhythm_room_id.as_str()),
-                    "an authoritative light-only Hue room must not detach any input"
-                );
-                assert_eq!(
-                    state
-                        .topology
-                        .effective_control_targets(canonical_id, control_kind),
-                    vec![rhythm_room_id.clone()],
-                    "every paired input must retain its default topology control target"
-                );
-            }
-        }
-
-        // Reproduce all 13 persisted splits from DBG-0844025B in miniature:
-        // canonical assigns every input, while every topology node is standalone.
-        {
-            let mut state = state.lock().unwrap();
-            for (canonical_id, _, _) in &input_assignments {
-                state.topology.ensure_standalone_device(canonical_id);
-            }
-        }
-        sync_with_discovery(
-            &state,
-            &hub_key,
-            &roomless_rediscovery,
-            true,
-            SyncFailurePolicy::BestEffort,
-        )
-        .unwrap();
-
-        let state = state.lock().unwrap();
-        for (canonical_id, rhythm_room_id, control_kind) in &input_assignments {
-            assert_eq!(
-                state.topology.device_parent_room_id(canonical_id),
-                Some(rhythm_room_id.as_str()),
-                "roomless rediscovery must repair every standalone topology input"
-            );
-            assert_eq!(
-                state
-                    .topology
-                    .effective_control_targets(canonical_id, control_kind),
-                vec![rhythm_room_id.clone()],
-                "every repaired input must control its canonical room"
-            );
-        }
     }
 
     #[test]

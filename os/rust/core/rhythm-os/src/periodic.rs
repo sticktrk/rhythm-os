@@ -1967,6 +1967,38 @@ mod tests {
         );
     }
 
+    fn attach_test_light(
+        state: &mut crate::state::AppState,
+        room_id: &str,
+        hub_key: &crate::canonical::identity::HubKey,
+        native_id: &str,
+    ) -> String {
+        let identity = crate::canonical::identity::DiscoveredIdentity {
+            native_id: native_id.to_string(),
+            room_id: None,
+            room_name: None,
+            name: "Test light".to_string(),
+            device_type: rhythm_core::runtime::hub_registry::DeviceType::Light,
+            hardware_ids: vec![],
+            manufacturer: None,
+            model: None,
+        };
+        let light_id = match state.canonical_registry.resolve(&identity, hub_key, 1) {
+            crate::canonical::registry::ResolveResult::Created { canonical_id }
+            | crate::canonical::registry::ResolveResult::AlreadyKnown { canonical_id }
+            | crate::canonical::registry::ResolveResult::ReApproved { canonical_id } => {
+                canonical_id
+            }
+            crate::canonical::registry::ResolveResult::Queued { .. } => {
+                panic!("unexpected triage for test light")
+            }
+        };
+        assert!(state
+            .topology
+            .attach_device_user_override(room_id, &light_id));
+        light_id
+    }
+
     fn assert_periodic_item_for_room(rx: &std::sync::mpsc::Receiver<WorkItem>, room_id: &str) {
         match rx.try_recv().expect("periodic work item should be queued") {
             WorkItem::PeriodicNodeTick {
@@ -2550,15 +2582,17 @@ mod tests {
         };
 
         let room_id = state.topology.create_room("Kitchen");
+        let hub_key = crate::canonical::identity::HubKey::new(
+            crate::hub::HubType::new("hue"),
+            "192.168.1.10",
+        );
+        attach_test_light(&mut state, &room_id, &hub_key, "hue-light-1");
         state
             .topology
             .get_mut(&room_id)
             .unwrap()
             .upsert_hub_room_binding(crate::topology::HubRoomBinding {
-                hub_key: crate::canonical::identity::HubKey::new(
-                    crate::hub::HubType::new("hue"),
-                    "192.168.1.10",
-                ),
+                hub_key,
                 hub_room_id: "hue-room-1".to_string(),
                 control_id: "gl-1".to_string(),
                 light_device_ids: vec!["hue-light-1".to_string()],
@@ -2625,15 +2659,17 @@ mod tests {
         };
 
         let room_id = state.topology.create_room("Kitchen");
+        let hub_key = crate::canonical::identity::HubKey::new(
+            crate::hub::HubType::new("hue"),
+            "192.168.1.10",
+        );
+        attach_test_light(&mut state, &room_id, &hub_key, "hue-light-1");
         state
             .topology
             .get_mut(&room_id)
             .unwrap()
             .upsert_hub_room_binding(crate::topology::HubRoomBinding {
-                hub_key: crate::canonical::identity::HubKey::new(
-                    crate::hub::HubType::new("hue"),
-                    "192.168.1.10",
-                ),
+                hub_key,
                 hub_room_id: "hue-room-1".to_string(),
                 control_id: "gl-1".to_string(),
                 light_device_ids: vec!["hue-light-1".to_string()],
@@ -2663,15 +2699,17 @@ mod tests {
         };
 
         let room_id = state.topology.create_room("Kitchen");
+        let hub_key = crate::canonical::identity::HubKey::new(
+            crate::hub::HubType::new("hue"),
+            "192.168.1.10",
+        );
+        let light_id = attach_test_light(&mut state, &room_id, &hub_key, "hue-light-1");
         state
             .topology
             .get_mut(&room_id)
             .unwrap()
             .upsert_hub_room_binding(crate::topology::HubRoomBinding {
-                hub_key: crate::canonical::identity::HubKey::new(
-                    crate::hub::HubType::new("hue"),
-                    "192.168.1.10",
-                ),
+                hub_key,
                 hub_room_id: "hue-room-1".to_string(),
                 control_id: "gl-1".to_string(),
                 light_device_ids: vec!["hue-light-1".to_string()],
@@ -2680,7 +2718,7 @@ mod tests {
         let snapshots = vec![
             make_room(&room_id, 0.0),
             make_node(
-                "attached-light-1",
+                &light_id,
                 rhythm_core::LightNodeKind::LightDevice,
                 Some(&room_id),
             ),

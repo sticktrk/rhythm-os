@@ -640,6 +640,18 @@ pub trait ExternalLightHubIntegration: Send + Sync {
         false
     }
 
+    /// Whether this integration must acquire bridge-scoped authority before
+    /// ordinary control is safe.
+    ///
+    /// This is separate from grouped-room routing: an integration may need to
+    /// suppress a controller's native automations while leaving its topology
+    /// untouched and routing lights individually. The default preserves the
+    /// legacy contract for integrations whose authority exists solely to own
+    /// grouped rooms.
+    fn requires_external_controller_authority(&self) -> bool {
+        self.requires_grouped_room_control()
+    }
+
     /// Acquire or resume authoritative control after the integration's first
     /// discovery sync established Rhythm's desired state.
     ///
@@ -1099,6 +1111,15 @@ fn controller_authority_is_enabled(
     key: &HubKey,
     integration: &dyn ExternalLightHubIntegration,
 ) -> bool {
+    integration.requires_external_controller_authority()
+        && state.external_controller_authority_is_enabled_for(key)
+}
+
+fn grouped_room_control_is_enabled(
+    state: &crate::state::AppState,
+    key: &HubKey,
+    integration: &dyn ExternalLightHubIntegration,
+) -> bool {
     integration.requires_grouped_room_control()
         && state.external_controller_authority_is_enabled_for(key)
 }
@@ -1199,17 +1220,18 @@ fn finish_bootstrapped_hubs<'a>(
 pub(crate) fn discard_active_hub_for_full_bootstrap_retry(state: &SharedState, hub_key: &HubKey) {
     let (old_hub, composite) = match state.lock() {
         Ok(mut state) => {
-            let requires_group_authority = state.topology.grouped_room_control_is_required(hub_key);
+            let requires_controller_authority =
+                state.external_controller_authority_is_required(hub_key);
             let old_hub = state.hubs.remove(hub_key);
             if let Some(hub) = old_hub.as_ref() {
                 hub.shutdown.store(true, Ordering::SeqCst);
             }
             state.clear_hub_connected(hub_key);
             // Clearing the live instance must not create a dispatch window
-            // before the bootstrap worker reacquires grouped-room authority.
+            // before the bootstrap worker reacquires controller authority.
             // Initial-sync pending is intentionally cleared so that worker
             // performs a full discovery, while the authority fence remains.
-            if requires_group_authority {
+            if requires_controller_authority {
                 state.mark_external_controller_authority_pending(hub_key);
             }
             (old_hub, state.composite_controller.clone())
@@ -1581,6 +1603,39 @@ pub fn fence_required_group_authority_uncertainty(state: &SharedState, key: &Hub
     true
 }
 
+/// Fail closed after any external-controller authority operation becomes
+/// uncertain, including integrations that route lights directly.
+pub fn fence_external_controller_authority_uncertainty(state: &SharedState, key: &HubKey) -> bool {
+    let request_bootstrap = {
+        let Ok(mut state) = state.lock() else {
+            warn!(
+                target: "sys",
+                "Unable to fence uncertain external-controller authority: state lock poisoned"
+            );
+            return false;
+        };
+        if !state.external_controller_authority_is_required(key) {
+            return false;
+        }
+        state.clear_hub_startup_retry(key);
+        state.mark_external_controller_authority_pending(key);
+        state.request_hub_bootstrap_fn.clone()
+    };
+
+    crate::state::emit_server_event(
+        state,
+        crate::server_event::ServerEvent::HubStatus {
+            hub_type: Some(key.hub_type.as_str().to_string()),
+            address: Some(key.address.clone()),
+            connected: false,
+        },
+    );
+    if let Some(request_bootstrap) = request_bootstrap {
+        request_bootstrap(state);
+    }
+    true
+}
+
 /// Callback set returned by [`integration_callbacks`].
 #[allow(clippy::type_complexity)]
 pub struct IntegrationCallbacks {
@@ -1649,7 +1704,7 @@ pub struct IntegrationCallbacks {
 ///
 /// Platform crates call this once at startup and store the results in
 /// [`AppState`]. Eliminates per-binary match arms for hub dispatch.
-fn mark_required_group_control_for_active_hubs(
+fn mark_external_controller_policies_for_active_hubs(
     state: &SharedState,
     integrations: &'static [&'static dyn ExternalLightHubIntegration],
 ) -> Result<()> {
@@ -1660,20 +1715,20 @@ fn mark_required_group_control_for_active_hubs(
             .keys()
             .filter_map(|key| {
                 find_integration(integrations, key.hub_type.as_str()).map(|integration| {
-                    (
-                        key.clone(),
-                        controller_authority_is_enabled(&state, key, integration),
-                    )
+                    let grouped = grouped_room_control_is_enabled(&state, key, integration);
+                    let authority = controller_authority_is_enabled(&state, key, integration);
+                    (key.clone(), grouped, authority)
                 })
             })
             .collect::<Vec<_>>()
     };
 
     let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    for (key, required) in policies {
+    for (key, grouped_required, authority_required) in policies {
         state
             .topology
-            .set_grouped_room_control_required(&key, required);
+            .set_grouped_room_control_required(&key, grouped_required);
+        state.set_external_controller_authority_required(&key, authority_required);
     }
     Ok(())
 }
@@ -1689,7 +1744,7 @@ pub fn integration_callbacks(
     hub_capabilities.dedup_by(|left, right| left.hub_type == right.hub_type);
 
     let ensure_runtime_fn = Arc::new(move |state: &SharedState| -> Result<()> {
-        mark_required_group_control_for_active_hubs(state, integrations)?;
+        mark_external_controller_policies_for_active_hubs(state, integrations)?;
         crate::lifecycle::ensure_composite_runtime(state, integrations)
     });
 
@@ -1711,15 +1766,18 @@ pub fn integration_callbacks(
         {
             let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
             let requires_grouped_room_control =
+                grouped_room_control_is_enabled(&state, key, integration);
+            let requires_controller_authority =
                 controller_authority_is_enabled(&state, key, integration);
             state
                 .topology
                 .set_grouped_room_control_required(key, requires_grouped_room_control);
+            state.set_external_controller_authority_required(key, requires_controller_authority);
             // Fence before the controller is inserted into composite routing.
             // Initial discovery and authority acquisition happen immediately
             // after registration, but no periodic/user command may slip into
             // the interval between those steps.
-            if requires_grouped_room_control {
+            if requires_controller_authority {
                 state.mark_external_controller_initial_sync_pending(key);
             }
         }
@@ -1764,7 +1822,7 @@ pub fn integration_callbacks(
                         (
                             key.clone(),
                             integration,
-                            controller_authority_is_enabled(&s, key, integration),
+                            grouped_room_control_is_enabled(&s, key, integration),
                         )
                     })
                 })
@@ -1807,7 +1865,7 @@ pub fn integration_callbacks(
                 .filter_map(|key| {
                     find_integration(integrations, key.hub_type.as_str())
                         .filter(|integration| {
-                            controller_authority_is_enabled(&state, key, *integration)
+                            grouped_room_control_is_enabled(&state, key, *integration)
                         })
                         .map(|integration| (key.clone(), integration))
                 })
@@ -1849,21 +1907,23 @@ pub fn integration_callbacks(
                 find_integration(integrations, key.hub_type.as_str()).ok_or_else(|| {
                     anyhow::anyhow!("No integration for hub type '{}'", key.hub_type.as_str())
                 })?;
-            let requires_grouped_room_control = {
+            let requires_controller_authority = {
                 let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
                 controller_authority_is_enabled(&state, key, integration)
             };
-            if integration.requires_grouped_room_control() && !requires_grouped_room_control {
+            if integration.requires_external_controller_authority()
+                && !requires_controller_authority
+            {
                 return Ok(());
             }
-            if requires_grouped_room_control {
+            if requires_controller_authority {
                 state
                     .lock()
                     .map_err(|_| anyhow::anyhow!("lock"))?
                     .mark_external_controller_authority_pending(key);
             }
             integration.reconcile_external_controller_authority(state, key)?;
-            if requires_grouped_room_control {
+            if requires_controller_authority {
                 state
                     .lock()
                     .map_err(|_| anyhow::anyhow!("lock"))?
@@ -1885,7 +1945,7 @@ pub fn integration_callbacks(
                 find_integration(integrations, key.hub_type.as_str()).ok_or_else(|| {
                     anyhow::anyhow!("No integration for hub type '{}'", key.hub_type.as_str())
                 })?;
-            if integration.requires_grouped_room_control() {
+            if integration.requires_external_controller_authority() {
                 state
                     .lock()
                     .map_err(|_| anyhow::anyhow!("lock"))?
@@ -1925,7 +1985,7 @@ pub fn integration_callbacks(
             let requires_grouped_room_control = {
                 let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
                 let required =
-                    controller_authority_is_enabled(&state, &assignment.hub_key, integration);
+                    grouped_room_control_is_enabled(&state, &assignment.hub_key, integration);
                 state
                     .topology
                     .set_grouped_room_control_required(&assignment.hub_key, required);
@@ -2090,6 +2150,7 @@ mod tests {
         release_count: AtomicU32,
         prepare_count: AtomicU32,
         requires_grouped_room_control: bool,
+        requires_external_controller_authority: bool,
         topology_sync_fails: bool,
     }
 
@@ -2104,6 +2165,7 @@ mod tests {
                 release_count: AtomicU32::new(0),
                 prepare_count: AtomicU32::new(0),
                 requires_grouped_room_control: false,
+                requires_external_controller_authority: false,
                 topology_sync_fails: false,
             }
         }
@@ -2118,6 +2180,22 @@ mod tests {
                 release_count: AtomicU32::new(0),
                 prepare_count: AtomicU32::new(0),
                 requires_grouped_room_control: true,
+                requires_external_controller_authority: true,
+                topology_sync_fails: false,
+            }
+        }
+
+        const fn new_authority_only(hub_type: &'static str) -> Self {
+            Self {
+                hub_type,
+                ensure_count: AtomicU32::new(0),
+                post_connect_count: AtomicU32::new(0),
+                sync_count: AtomicU32::new(0),
+                authority_count: AtomicU32::new(0),
+                release_count: AtomicU32::new(0),
+                prepare_count: AtomicU32::new(0),
+                requires_grouped_room_control: false,
+                requires_external_controller_authority: true,
                 topology_sync_fails: false,
             }
         }
@@ -2132,6 +2210,7 @@ mod tests {
                 release_count: AtomicU32::new(0),
                 prepare_count: AtomicU32::new(0),
                 requires_grouped_room_control: true,
+                requires_external_controller_authority: true,
                 topology_sync_fails: true,
             }
         }
@@ -2223,6 +2302,10 @@ mod tests {
             self.requires_grouped_room_control
         }
 
+        fn requires_external_controller_authority(&self) -> bool {
+            self.requires_external_controller_authority
+        }
+
         fn reconcile_external_controller_authority(
             &self,
             _state: &SharedState,
@@ -2256,6 +2339,8 @@ mod tests {
     static MOCK_HA: MockIntegration = MockIntegration::new("homeassistant");
     static MOCK_GROUP_REQUIRED: MockIntegration =
         MockIntegration::new_group_required("group_required");
+    static MOCK_AUTHORITY_ONLY: MockIntegration =
+        MockIntegration::new_authority_only("authority_only");
     static MOCK_ROLLOUT_GATE: MockIntegration = MockIntegration::new_group_required("rollout_gate");
     static MOCK_GROUP_REQUIRED_SYNC_FAILURE: MockIntegration =
         MockIntegration::new_group_required_with_sync_failure("group_required_sync_failure");
@@ -2265,6 +2350,8 @@ mod tests {
     static TEST_INTEGRATIONS: &[&dyn ExternalLightHubIntegration] = &[&MOCK_HUE, &MOCK_HA];
     static GROUP_POLICY_TEST_INTEGRATIONS: &[&dyn ExternalLightHubIntegration] =
         &[&MOCK_GROUP_REQUIRED, &MOCK_HA];
+    static AUTHORITY_ONLY_TEST_INTEGRATIONS: &[&dyn ExternalLightHubIntegration] =
+        &[&MOCK_AUTHORITY_ONLY];
     static ROLLOUT_GATE_TEST_INTEGRATIONS: &[&dyn ExternalLightHubIntegration] =
         &[&MOCK_ROLLOUT_GATE];
 
@@ -2884,6 +2971,21 @@ mod tests {
         let state = state.lock().unwrap();
         assert!(state.composite_controller.is_none());
         assert!(state.topology.grouped_room_control_is_required(&key));
+        assert!(state.external_controller_initial_sync_is_pending(&key));
+        assert!(!state.external_controller_authority_is_ready(&key));
+    }
+
+    #[test]
+    fn authority_only_registration_fences_without_requiring_group_routing() {
+        let callbacks = integration_callbacks(AUTHORITY_ONLY_TEST_INTEGRATIONS);
+        let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
+        let key = HubKey::new(HubType::new("authority_only"), "fresh-bridge");
+        enable_authority_rollout(&state, "authority_only");
+
+        assert!((callbacks.register_controller_fn)(&state, &key).is_ok());
+        let state = state.lock().unwrap();
+        assert!(state.external_controller_authority_is_required(&key));
+        assert!(!state.topology.grouped_room_control_is_required(&key));
         assert!(state.external_controller_initial_sync_is_pending(&key));
         assert!(!state.external_controller_authority_is_ready(&key));
     }

@@ -432,6 +432,9 @@ pub struct AppState {
     /// Controllers whose transport may be live but whose external authority
     /// acquisition or release has not reached a safe terminal state.
     pub external_controller_authority_pending: HashSet<HubKey>,
+    /// Active hub policies that require external-controller authority even
+    /// when they do not require hub-native grouped-room routing.
+    pub external_controller_authority_required: HashSet<HubKey>,
     /// Hub types admitted to acquire and actively reconcile external-controller
     /// authority. Empty by default so landing the authority machinery cannot
     /// destructively take over a controller before its platform rollout is
@@ -943,6 +946,7 @@ impl Default for AppState {
             hubs: HashMap::new(),
             hub_connection_status: HashMap::new(),
             external_controller_authority_pending: HashSet::new(),
+            external_controller_authority_required: HashSet::new(),
             external_controller_authority_enabled_hub_types: HashSet::new(),
             external_controller_initial_sync_pending: HashSet::new(),
             hub_seen_connected_once: HashSet::new(),
@@ -1336,6 +1340,19 @@ impl AppState {
 
     pub fn external_controller_authority_is_enabled_for(&self, key: &HubKey) -> bool {
         self.external_controller_authority_is_enabled(&key.hub_type)
+    }
+
+    pub fn set_external_controller_authority_required(&mut self, key: &HubKey, required: bool) {
+        if required {
+            self.external_controller_authority_required
+                .insert(key.clone());
+        } else {
+            self.external_controller_authority_required.remove(key);
+        }
+    }
+
+    pub fn external_controller_authority_is_required(&self, key: &HubKey) -> bool {
+        self.external_controller_authority_required.contains(key)
     }
 
     /// Freeze controller writes until acquisition or release is verified.
