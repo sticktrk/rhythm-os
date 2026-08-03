@@ -300,8 +300,7 @@ impl HubDeviceRegistry {
         );
 
         info!(
-            "Registry: upserted room '{}' ({}) gl={} devices={}",
-            name,
+            "Registry: upserted room {} gl={} devices={}",
             room_id,
             grouped_light_id,
             device_ids.len()
