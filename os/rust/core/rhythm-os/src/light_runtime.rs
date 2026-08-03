@@ -660,6 +660,24 @@ pub fn run_light_runtime_event_with_handle(
     event: RuntimeEvent,
 ) -> Result<RuntimePlanApplyReport> {
     validate_runtime_selection(runtime_id, light_runtime, &event)?;
+    let node_action_lock = match &event {
+        RuntimeEvent::Input(input) => {
+            let mut s = state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+            Some(
+                s.node_preference_write_locks
+                    .entry(input.target_id.clone())
+                    .or_insert_with(|| Arc::new(Mutex::new(())))
+                    .clone(),
+            )
+        }
+        RuntimeEvent::PeriodicTick(_) | RuntimeEvent::HostStateChanged { .. } => None,
+    };
+    let _node_action_guard = node_action_lock
+        .as_ref()
+        .map(|lock| lock.lock().map_err(|_| anyhow::anyhow!("node action lock")))
+        .transpose()?;
     let runtime_state = {
         let s = state
             .lock()
@@ -1126,6 +1144,47 @@ mod tests {
             "rhythm-adaptive"
         );
         assert_eq!(report.dispatch_count, 1);
+    }
+
+    #[test]
+    fn selected_input_runtime_uses_the_node_preference_transaction_gate() {
+        let runtime = test_runtime();
+        runtime.add_node("kitchen", "Kitchen", rhythm_core::LightNodeKind::Room, None);
+        let state = make_state_with_runtime(runtime);
+        let gate = {
+            let mut app = state.lock().unwrap();
+            app.node_preference_write_locks
+                .entry("kitchen".to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let guard = gate.lock().unwrap();
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let event_state = state.clone();
+        let worker = std::thread::spawn(move || {
+            let result = run_selected_light_runtime_event(
+                &event_state,
+                RuntimeEvent::Input(RuntimeInputEvent {
+                    source_id: "switch-a".to_string(),
+                    target_id: "kitchen".to_string(),
+                    action: InputAction::On,
+                    epoch_ms: None,
+                    metadata: Default::default(),
+                }),
+            );
+            completed_tx.send(result).unwrap();
+        });
+
+        assert!(completed_rx
+            .recv_timeout(std::time::Duration::from_millis(200))
+            .is_err());
+
+        drop(guard);
+        completed_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("input event should complete after the transaction gate is released")
+            .unwrap();
+        worker.join().unwrap();
     }
 
     #[test]

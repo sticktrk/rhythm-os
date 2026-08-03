@@ -10214,6 +10214,22 @@ pub fn do_node_action(
 ) -> Result<String> {
     let action = parse_node_action(action_str)?;
 
+    // The neutral plan/apply path below must retain the same per-node
+    // transaction boundary as RuntimeHandle::handle_event. Without this gate,
+    // concurrent actions can mutate the engine in one order and dispatch I/O
+    // in another. Share the preference-write gate so settings changes cannot
+    // interleave with an action for the same node either.
+    let node_action_lock = {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.node_preference_write_locks
+            .entry(node_id.to_string())
+            .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
+            .clone()
+    };
+    let _node_action_guard = node_action_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("node action lock"))?;
+
     info!(target: "cmd", "node_action: {} -> {:?}", node_id, action);
 
     let runtime = {
@@ -21771,6 +21787,41 @@ mod tests {
         let events = runtime.events();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0], ("room1".into(), ButtonAction::OnPress));
+    }
+
+    #[test]
+    fn room_actions_share_the_node_preference_transaction_gate() {
+        let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        let gate = {
+            let mut app = state.lock().unwrap();
+            app.node_preference_write_locks
+                .entry("room1".to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let guard = gate.lock().unwrap();
+        let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+        let action_state = state.clone();
+        let worker = std::thread::spawn(move || {
+            let result = do_node_action(&action_state, "room1", "on", false);
+            completed_tx.send(result).unwrap();
+        });
+
+        assert!(completed_rx
+            .recv_timeout(Duration::from_millis(200))
+            .is_err());
+        assert!(runtime.events().is_empty());
+
+        drop(guard);
+        completed_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("action should complete after the transaction gate is released")
+            .unwrap();
+        worker.join().unwrap();
+        assert_eq!(
+            runtime.events(),
+            vec![("room1".to_string(), ButtonAction::OnPress)]
+        );
     }
 
     #[test]
