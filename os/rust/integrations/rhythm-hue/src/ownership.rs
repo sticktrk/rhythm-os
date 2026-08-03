@@ -735,6 +735,28 @@ fn references_lighting_target(value: &Value, source_device_id: Option<&str>) -> 
     }
 }
 
+fn accessory_source_device_id<'a>(
+    configuration: &'a Value,
+    dependees: &'a Value,
+) -> Option<&'a str> {
+    configuration
+        .pointer("/device/rid")
+        .and_then(Value::as_str)
+        .filter(|rid| !rid.trim().is_empty())
+        .or_else(|| {
+            dependees.as_array()?.iter().find_map(|dependee| {
+                let target = dependee.get("target")?;
+                if target.get("rtype").and_then(Value::as_str) != Some("device") {
+                    return None;
+                }
+                target
+                    .get("rid")
+                    .and_then(Value::as_str)
+                    .filter(|rid| !rid.trim().is_empty())
+            })
+        })
+}
+
 fn accessory_behavior_targets_lighting(behavior: &Value, resource_id: &str) -> Result<bool> {
     let configuration = behavior
         .get("configuration")
@@ -752,10 +774,7 @@ fn accessory_behavior_targets_lighting(behavior: &Value, resource_id: &str) -> R
                 "Enabled Hue accessory behavior instance {resource_id} has no dependee array"
             )
         })?;
-    let source_device_id = configuration
-        .pointer("/device/rid")
-        .and_then(Value::as_str)
-        .filter(|rid| !rid.trim().is_empty());
+    let source_device_id = accessory_source_device_id(configuration, dependees);
     Ok(references_lighting_target(configuration, source_device_id)
         || references_lighting_target(dependees, source_device_id))
 }
@@ -1513,6 +1532,50 @@ mod tests {
                 .iter()
                 .all(|behavior| behavior["enabled"] == true)
         );
+    }
+
+    #[test]
+    fn takeover_preserves_dependee_only_accessory_source() {
+        let temp = TempStorage::new("dependee-only-accessory-source");
+        let spy = SpyHueTransport::new();
+        seed_bridge(&spy, json!([]));
+        spy.set_resource_response(
+            "behavior_instance",
+            json!({"data": [{
+                "id": "accessory-behavior-1",
+                "script_id": "accessory-script-1",
+                "enabled": true,
+                "configuration": {},
+                "dependees": [{
+                    "target": {"rid": "button-1", "rtype": "device"}
+                }]
+            }], "errors": []}),
+        );
+        spy.set_resource_response(
+            "behavior_script",
+            json!({"data": [{
+                "id": "accessory-script-1",
+                "metadata": {"name": "Dimmer", "category": "accessory"}
+            }], "errors": []}),
+        );
+        spy.set_fail_resource_update("behavior_instance", "accessory-behavior-1");
+
+        let active = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
+
+        assert_eq!(active.phase, HueOwnershipPhase::Active);
+        assert_eq!(
+            spy.get_resources("user", "behavior_instance").unwrap()["data"][0]["enabled"],
+            true
+        );
+        assert!(!spy.calls().iter().any(|call| matches!(
+            call,
+            HueTransportCall::UpdateResource {
+                resource_type,
+                resource_id,
+                ..
+            } if resource_type == "behavior_instance"
+                && resource_id == "accessory-behavior-1"
+        )));
     }
 
     #[test]
