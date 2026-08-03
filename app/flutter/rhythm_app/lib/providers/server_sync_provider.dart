@@ -2450,8 +2450,7 @@ class ServerSyncProvider extends ChangeNotifier {
     await _connection.reconnect(authoritative: true);
     if (!_connection.connected) return false;
     await Future<void>.delayed(Duration.zero);
-    await _refreshTopologyNodes();
-    return true;
+    return _refreshTopologyNodesWithResult();
   }
 
   /// Trigger an immediate lightweight poll (rooms/state only).
@@ -4478,17 +4477,22 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   Future<void> _refreshTopologyNodes() async {
+    await _refreshTopologyNodesWithResult();
+  }
+
+  Future<bool> _refreshTopologyNodesWithResult() async {
     if (HueServiceLocator.isDemoMode) {
       await _refreshDemoState();
-      return;
+      return true;
     }
-    if (!_connection.connected) return;
+    if (!_connection.connected) return false;
     final topologyNodes = await api.getTopologyNodes();
-    if (topologyNodes.isEmpty && _topologyNodes.isNotEmpty) return;
+    if (topologyNodes.isEmpty && _topologyNodes.isNotEmpty) return false;
     _topologyNodes = topologyNodes;
     _helloRooms = _buildRoomSummaries();
     _roomProvider.setMotionSensorNodes(_sensorTargetNodeIds());
     if (hasListeners) notifyListeners();
+    return true;
   }
 
   Future<bool> setNodeControlTarget({

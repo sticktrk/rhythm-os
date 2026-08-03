@@ -2197,6 +2197,43 @@ void main() {
       connection.dispose();
     });
 
+    test('topology mutation refresh reports a preserved stale topology',
+        () async {
+      api.topologyNodes = [
+        RhythmTopologyNode.fromJson({
+          'id': 'room-1',
+          'name': 'Kitchen',
+          'kind': 'room',
+        }),
+      ];
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'nodes': const <Map<String, dynamic>>[],
+          'location': const <String, dynamic>{},
+        }),
+      );
+      await Future<void>.delayed(Duration.zero);
+      await Future<void>.delayed(Duration.zero);
+      expect(provider.topologyNodes, hasLength(1));
+
+      // RhythmServerApi uses an empty list as the failure result for this
+      // endpoint. Preserve the last good graph, but do not report the move as
+      // authoritatively reconciled.
+      api.topologyNodes = const [];
+      final refreshed = await provider.refreshAfterTopologyMutation();
+
+      expect(refreshed, isFalse);
+      expect(provider.topologyNodes.single.id, 'room-1');
+      expect(connection.lastReconnectAuthoritative, isTrue);
+    });
+
     test('marks and updates multiple motion-target nodes', () async {
       api.topologyNodes = [
         RhythmTopologyNode.fromJson({
