@@ -6722,6 +6722,7 @@ void main() {
       'Room only',
     );
     final semantics = tester.getSemantics(lighting);
+    expect(semantics.label, 'Lighting');
     expect(semantics.value, 'Controlled by room');
     expect(
       semantics.getSemanticsData().flagsCollection.isEnabled,

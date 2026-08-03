@@ -118,6 +118,7 @@ class LightingOverrideRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final interactive = onPressed != null;
     final status = !supported
         ? unsupportedStatus ?? 'Update required'
         : customized
@@ -133,15 +134,16 @@ class LightingOverrideRow extends StatelessWidget {
 
     return Semantics(
       key: ValueKey('$settingsKeyPrefix-settings-$nodeId'),
+      container: true,
       button: true,
-      enabled: supported,
+      enabled: interactive,
       excludeSemantics: true,
       label: 'Lighting',
       value: semanticsValue,
-      onTap: supported ? onPressed : null,
+      onTap: onPressed,
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: supported ? onPressed : null,
+        onTap: onPressed,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
           child: Row(
