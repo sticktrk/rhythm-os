@@ -95,6 +95,15 @@ void main() {
 
       expect(parentNodeId, 'room-topology');
     });
+
+    test('accepts canonical parent for an already-known scanned device', () {
+      final parentNodeId = resolvePairedDeviceParentNodeId(
+        {'id': 'button-1', 'parent_id': 'room-existing'},
+        topologyParentId: 'room-stale',
+      );
+
+      expect(parentNodeId, 'room-existing');
+    });
   });
 
   group('Hue Bridge pairing targets', () {

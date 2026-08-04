@@ -26,6 +26,11 @@ void main() {
   });
 
   test('recent feature events use stable privacy-safe properties', () async {
+    await analytics.logRoomDeviceAddMethodSelected(
+      source: 'room_settings_motion',
+      deviceType: 'motion',
+      method: 'existing',
+    );
     await analytics.logDevicePairingCodeDetected(
       codeKind: 'homekit',
       outcome: 'guidance_shown',
@@ -88,6 +93,7 @@ void main() {
     expect(
       backend.events.map((event) => event.name),
       [
+        'room_device_add_method_selected',
         'device_pairing_code_detected',
         'matter_pairing_completed',
         'mood_scene_apply_completed',
@@ -100,20 +106,25 @@ void main() {
         'device_room_move_completed',
       ],
     );
+    expect(backend.events.first.properties, {
+      'source': 'room_settings_motion',
+      'device_type': 'motion',
+      'method': 'existing',
+    });
     expect(
-      backend.events[1].properties,
+      backend.events[2].properties,
       containsPair('failure_stage', 'wifi_preflight'),
     );
     expect(
-      backend.events[2].properties,
+      backend.events[3].properties,
       containsPair('scene_source', 'native_hue'),
     );
     expect(
-      backend.events[3].properties,
+      backend.events[4].properties,
       containsPair('completed_count', 2),
     );
     expect(
-      backend.events[4].properties,
+      backend.events[5].properties,
       {
         'control': 'color',
         'room_mode': 'on',
@@ -121,22 +132,22 @@ void main() {
       },
     );
     expect(
-      backend.events[6].properties,
+      backend.events[7].properties,
       containsPair('changed_field_count', 2),
     );
     expect(
-      backend.events[7].properties,
+      backend.events[8].properties,
       containsPair('failure_stage', 'request'),
     );
     expect(
-      backend.events[8].properties,
+      backend.events[9].properties,
       {
         'source': 'room_sheet_long_press',
         'outcome': 'succeeded',
       },
     );
     expect(
-      backend.events[9].properties,
+      backend.events[10].properties,
       containsPair('failure_stage', 'authoritative_refresh'),
     );
 

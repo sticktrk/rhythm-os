@@ -14,7 +14,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RoomModeState,
         RhythmNodeProfileSettings,
         RhythmTimerSetting;
-import '../screens/hubs/device_pairing_flow.dart';
+import '../screens/hubs/room_device_add_flow.dart';
 import '../screens/settings/light_screen.dart';
 import '../utils/app_color_temperature.dart';
 import 'device_detail_sheet.dart';
@@ -443,8 +443,8 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
               label: 'Add Motion Sensor',
               icon: Icons.add_circle_outline_rounded,
               color: const Color(0xFF81C784),
+              deviceType: RhythmDeviceType.motion,
               analyticsSource: 'room_settings_motion',
-              unavailableAction: 'add a motion sensor',
             ),
           ]),
         if (motionSensors.isNotEmpty) ...[
@@ -497,8 +497,8 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
               label: 'Add Button',
               icon: Icons.add_circle_outline_rounded,
               color: const Color(0xFF64B5F6),
+              deviceType: RhythmDeviceType.button,
               analyticsSource: 'room_settings_buttons',
-              unavailableAction: 'add a button',
             ),
           ]),
         if (buttons.isNotEmpty) ...[
@@ -514,25 +514,16 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
     required String label,
     required IconData icon,
     required Color color,
+    required RhythmDeviceType deviceType,
     required String analyticsSource,
-    required String unavailableAction,
   }) {
     Future<void> addDevice() async {
       HapticFeedback.lightImpact();
-      final syncProvider = context.read<ServerSyncProvider>();
-      if (!syncProvider.canScanToAddDevice) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Connect or update your Rhythm Box to $unavailableAction.',
-            ),
-          ),
-        );
-        return;
-      }
-
-      await startDevicePairingFlow(
+      await startRoomDeviceAddFlow(
         context,
+        roomId: room.id,
+        roomName: _roomName,
+        deviceType: deviceType,
         analyticsSource: analyticsSource,
       );
     }
@@ -542,7 +533,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
       container: true,
       button: true,
       label: label,
-      hint: 'Opens device pairing',
+      hint: 'Choose Scan or Select from existing',
       onTap: addDevice,
       excludeSemantics: true,
       child: Material(

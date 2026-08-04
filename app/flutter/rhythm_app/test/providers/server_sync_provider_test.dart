@@ -17,6 +17,7 @@ import 'package:rhythm_app/services/demo_server_api.dart';
 import 'package:rhythm_app/services/hue/hue_service_locator.dart';
 import 'package:rhythm_app/services/remote_access_service.dart';
 import 'package:rhythm_app/screens/settings/light_screen.dart';
+import 'package:rhythm_app/screens/hubs/device_pairing_flow.dart';
 import 'package:rhythm_app/widgets/device_detail_sheet.dart';
 import 'package:rhythm_app/widgets/hub_picker_screen.dart';
 import 'package:rhythm_app/widgets/room_settings_sheet.dart';
@@ -148,6 +149,8 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   bool topologyRenameRoomResult = true;
   int triggerSyncCalls = 0;
   final Map<String, Map<String, dynamic>?> canonicalDevices = {};
+  int getCanonicalDevicesCalls = 0;
+  bool getCanonicalDevicesFails = false;
   final List<
       ({
         String hubType,
@@ -651,6 +654,13 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   @override
   Future<Map<String, dynamic>?> getCanonicalDevice(String id) async {
     return canonicalDevices[id];
+  }
+
+  @override
+  Future<List<Map<String, dynamic>>?> getCanonicalDevices() async {
+    getCanonicalDevicesCalls++;
+    if (getCanonicalDevicesFails) return null;
+    return canonicalDevices.values.whereType<Map<String, dynamic>>().toList();
   }
 
   @override
@@ -5271,8 +5281,7 @@ void main() {
     semantics.dispose();
   });
 
-  testWidgets(
-      'room tabs open device pairing from empty motion and button actions',
+  testWidgets('room tabs show Scan above the inline existing-device list',
       (tester) async {
     _registerWidgetCleanup(tester);
     final roomProvider = RoomProvider();
@@ -5364,10 +5373,32 @@ void main() {
     await tester.tap(addMotion);
     await tester.pumpAndSettle();
 
+    expect(
+      find.byKey(const ValueKey('room-device-add-sheet')),
+      findsOneWidget,
+    );
+    expect(find.text('Scan'), findsOneWidget);
+    expect(find.text('Existing devices'), findsOneWidget);
+    expect(find.text('Select from existing'), findsNothing);
+    expect(api.getCanonicalDevicesCalls, 1);
+    expect(
+      tester.getTopLeft(find.byKey(const ValueKey('room-device-add-scan'))).dy,
+      lessThan(
+        tester
+            .getTopLeft(
+              find.byKey(const ValueKey('existing-room-devices-empty')),
+            )
+            .dy,
+      ),
+    );
+
+    await tester.tap(find.byKey(const ValueKey('room-device-add-scan')));
+    await tester.pumpAndSettle();
     expect(pairingIntakeIsVisible(), isTrue);
 
     tester.state<NavigatorState>(find.byType(Navigator)).pop();
     await tester.pumpAndSettle();
+
     await _selectRoomSettingsTab(tester, 'Buttons');
 
     final addButton = find.byKey(const ValueKey('room-settings-add-button'));
@@ -5377,11 +5408,17 @@ void main() {
     await tester.tap(addButton);
     await tester.pumpAndSettle();
 
+    expect(find.text('Scan'), findsOneWidget);
+    expect(find.text('Existing devices'), findsOneWidget);
+    expect(find.text('Select from existing'), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('room-device-add-scan')));
+    await tester.pumpAndSettle();
     expect(pairingIntakeIsVisible(), isTrue);
   });
 
   testWidgets(
-      'room add actions explain unavailable pairing and stay off device cards',
+      'room add actions keep existing devices usable when Scan is unavailable',
       (tester) async {
     _registerWidgetCleanup(tester);
     final roomProvider = RoomProvider();
@@ -5430,10 +5467,17 @@ void main() {
     await tester.tap(
       find.byKey(const ValueKey('room-settings-add-button')),
     );
-    await tester.pump();
+    await tester.pumpAndSettle();
+
+    expect(find.text('Scan'), findsOneWidget);
+    expect(find.text('Existing devices'), findsOneWidget);
+    expect(find.text('Select from existing'), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('room-device-add-scan')));
+    await tester.pumpAndSettle();
 
     expect(
-      find.text('Connect or update your Rhythm Box to add a button.'),
+      find.text('Scanning is not available on this Rhythm Box yet.'),
       findsOneWidget,
     );
     expect(
@@ -5469,6 +5513,314 @@ void main() {
       find.byKey(const ValueKey('room-settings-add-button')),
       findsNothing,
     );
+  });
+
+  testWidgets(
+      'room sheet lists and assigns only existing devices of the tab type',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 1200));
+
+    api.topologyNodes = [
+      RhythmTopologyNode.fromJson({
+        'id': 'room-1',
+        'name': 'Kitchen',
+        'kind': 'room',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'room-2',
+        'name': 'Hall',
+        'kind': 'room',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'motion-current',
+        'name': 'Kitchen Motion',
+        'kind': 'motion_sensor',
+        'parent_id': 'room-1',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'motion-hall',
+        'name': 'Hall Motion',
+        'kind': 'motion_sensor',
+        'parent_id': 'room-2',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'button-1',
+        'name': 'Wall Button',
+        'kind': 'button',
+      }),
+    ];
+    api.canonicalDevices.addAll({
+      'motion-current': {
+        'id': 'motion-current',
+        'name': 'Kitchen Motion',
+        'device_type': 'motion',
+        'room_id': 'room-1',
+        'endpoints': const <Map<String, dynamic>>[],
+      },
+      'motion-hall': {
+        'id': 'motion-hall',
+        'name': 'Hall Motion',
+        'device_type': 'motion',
+        'room_id': 'room-2',
+        'endpoints': const <Map<String, dynamic>>[],
+      },
+      'button-1': {
+        'id': 'button-1',
+        'name': 'Wall Button',
+        'device_type': 'button',
+        'endpoints': const <Map<String, dynamic>>[],
+      },
+    });
+    api.getCanonicalDevicesFails = true;
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'capabilities': {'hubs': const <dynamic>[]},
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': false,
+          },
+          {
+            'id': 'room-2',
+            'name': 'Hall',
+            'kind': 'room',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': false,
+          },
+        ],
+        'location': const <String, dynamic>{},
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await _pumpRoomSettingsSheet(
+      tester,
+      roomProvider: roomProvider,
+      provider: provider,
+      room: const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.unknown,
+        deviceIds: [],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: false,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    await _selectRoomSettingsTab(tester, 'Motion');
+    await tester.tap(
+      find.byKey(const ValueKey('room-settings-add-motion')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(api.getCanonicalDevicesCalls, 1);
+    expect(
+      find.byKey(const ValueKey('existing-room-devices-error')),
+      findsOneWidget,
+    );
+    expect(find.text('Try again'), findsOneWidget);
+
+    api.getCanonicalDevicesFails = false;
+    await tester.tap(find.text('Try again'));
+    await tester.pumpAndSettle();
+
+    expect(api.getCanonicalDevicesCalls, 2);
+    expect(
+      find.byKey(const ValueKey('existing-room-devices-list')),
+      findsOneWidget,
+    );
+    expect(find.text('Select from existing'), findsNothing);
+    expect(
+      find.byKey(const ValueKey('existing-room-device-motion-current')),
+      findsOneWidget,
+    );
+    expect(find.text('Already in Kitchen'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('existing-room-device-motion-hall')),
+      findsOneWidget,
+    );
+    expect(find.text('Currently in Hall'), findsOneWidget);
+    expect(find.text('Wall Button'), findsNothing);
+
+    await tester.tap(
+      find.byKey(const ValueKey('existing-room-device-motion-hall')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(api.assignDeviceParentCalls, 1);
+    expect(api.lastAssignedDeviceId, 'motion-hall');
+    expect(api.lastAssignedParentId, 'room-1');
+    expect(find.text('Moved Hall Motion to Kitchen'), findsOneWidget);
+  });
+
+  testWidgets(
+      'repeat scan resolves the existing canonical device before room assignment',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+
+    api.topologyNodes = [
+      RhythmTopologyNode.fromJson({
+        'id': 'room-1',
+        'name': 'Kitchen',
+        'kind': 'room',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'room-2',
+        'name': 'Hall',
+        'kind': 'room',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'canonical-button-1',
+        'name': 'Wall Button',
+        'kind': 'button',
+        'parent_id': 'room-2',
+      }),
+    ];
+    api.canonicalDevices['canonical-button-1'] = {
+      'id': 'canonical-button-1',
+      'name': 'Wall Button',
+      'device_type': 'button',
+      'room_id': 'room-2',
+      'endpoints': [
+        {
+          'hub_key': {'hub_type': 'local_ble'},
+          'native_id': 'local-ble-existing-public-id',
+          'preferred': true,
+        },
+      ],
+    };
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: Builder(
+          builder: (context) => TextButton(
+            onPressed: () => continueRecoveredLocalBlePairingFlow(
+              context,
+              const RhythmPairedDevice(
+                deviceId: 'local-ble-existing-public-id',
+                name: 'Button',
+                deviceType: 'button',
+              ),
+              analyticsSource: 'room_settings_buttons',
+              roomAssignment: const DevicePairingRoomAssignment(
+                roomId: 'room-1',
+                roomName: 'Kitchen',
+                expectedDeviceType: RhythmDeviceType.button,
+              ),
+            ),
+            child: const Text('Complete scan'),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Complete scan'));
+    await tester.pumpAndSettle();
+
+    expect(api.getCanonicalDevicesCalls, 1);
+    expect(api.assignDeviceParentCalls, 1);
+    expect(api.lastAssignedDeviceId, 'canonical-button-1');
+    expect(api.lastAssignedParentId, 'room-1');
+    expect(find.text('Moved Wall Button to Kitchen'), findsOneWidget);
+  });
+
+  testWidgets('repeat scan already in the room avoids a redundant assignment',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+
+    api.canonicalDevices['canonical-button-1'] = {
+      'id': 'canonical-button-1',
+      'name': 'Wall Button',
+      'device_type': 'button',
+      'room_id': 'room-1',
+      'endpoints': [
+        {
+          'hub_key': {'hub_type': 'local_ble'},
+          'native_id': 'local-ble-existing-public-id',
+        },
+      ],
+    };
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: Builder(
+          builder: (context) => TextButton(
+            onPressed: () => continueRecoveredLocalBlePairingFlow(
+              context,
+              const RhythmPairedDevice(
+                deviceId: 'local-ble-existing-public-id',
+                name: 'Button',
+                deviceType: 'button',
+              ),
+              roomAssignment: const DevicePairingRoomAssignment(
+                roomId: 'room-1',
+                roomName: 'Kitchen',
+                expectedDeviceType: RhythmDeviceType.button,
+              ),
+            ),
+            child: const Text('Complete scan'),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Complete scan'));
+    await tester.pumpAndSettle();
+
+    expect(api.assignDeviceParentCalls, 0);
+    expect(find.text('Wall Button is already in Kitchen'), findsOneWidget);
   });
 
   testWidgets(

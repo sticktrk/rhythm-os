@@ -660,6 +660,20 @@ class AnalyticsService {
   // Device Pairing Events
   // ===========================================================================
 
+  /// Track the room-scoped choice between scanning and selecting a canonical
+  /// device that Rhythm already knows about.
+  Future<void> logRoomDeviceAddMethodSelected({
+    required String source,
+    required String deviceType,
+    required String method,
+  }) async {
+    await logEvent('room_device_add_method_selected', {
+      'source': source,
+      'device_type': deviceType,
+      'method': method,
+    });
+  }
+
   /// Track a scanner classification without retaining its payload.
   Future<void> logDevicePairingCodeDetected({
     required String codeKind,

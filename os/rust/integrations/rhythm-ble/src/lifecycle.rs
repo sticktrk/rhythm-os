@@ -122,6 +122,39 @@ fn terminal_session_for_device(device: &LocalBleDevice) -> Result<PairingSession
     })
 }
 
+/// Resolve a repeat QR scan from authoritative local state without reopening
+/// adapter association. The private profile identity never crosses this
+/// boundary; callers still receive only the appliance-local public device ID.
+fn terminal_session_for_existing_device(
+    state: &SharedState,
+    store: &LocalBleDeviceStore,
+    profile_id: &str,
+    stable_identity: &str,
+) -> Result<Option<PairingSession>> {
+    let Some(existing) = store
+        .get_by_identity(profile_id, stable_identity)
+        .filter(|device| !device.blocked)
+    else {
+        return Ok(None);
+    };
+    let canonical_exists = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .canonical_registry
+        .find_by_native_id(&hub_key(), &existing.id)
+        .is_some();
+    if !canonical_exists {
+        return Ok(None);
+    }
+
+    let mut session = terminal_session_for_device(&existing)?;
+    session.details = Some(serde_json::json!({
+        "profile_id": profile_id,
+        "existing": true,
+    }));
+    Ok(Some(session))
+}
+
 /// Drain the activation outbox before consulting BlueZ. A committed device
 /// association is authoritative even when the prior process died before its
 /// HTTP response or pairing-history write.
@@ -325,6 +358,24 @@ pub fn pair(
     let profile_id = profile.descriptor().id;
     let setup = profile.parse_pairing_setup(setup_value)?;
     let data = get_hub_data(state)?;
+    if let Some(session) = terminal_session_for_existing_device(
+        state,
+        &data.store,
+        profile_id,
+        setup.stable_identity(),
+    )? {
+        rhythm_os::pairing::emit_pairing_progress(
+            state,
+            HUB_TYPE,
+            Some(session_id),
+            PairingStatus::Found,
+            PairingStage::Finalizing,
+            "Existing Bluetooth device found",
+            session.device.clone(),
+            None,
+        );
+        return Ok(session);
+    }
     let association_deadline = association_deadline(deadline)?;
     let mut announce_listener_ready = || {
         rhythm_os::pairing::emit_pairing_progress(
@@ -743,6 +794,91 @@ mod tests {
         let no_finalization_room = association_deadline_at(start, start + FINALIZATION_RESERVE);
         assert!(no_finalization_room.is_err());
         assert!(remaining_pairing_budget(start, "test").is_err());
+    }
+
+    #[test]
+    fn repeat_scan_returns_the_existing_public_device_without_store_mutation() {
+        let root = temporary_dir("repeat-scan");
+        let store = LocalBleDeviceStore::load_shared(&root).unwrap();
+        let setup = ValidatedBleSetup {
+            stable_identity: "A1B2C3D4E5F6".to_string(),
+            metadata: BTreeMap::new(),
+        };
+        let fingerprint = rhythm_os::pairing::pairing_request_fingerprint(
+            TEST_PAIRING_HMAC_KEY,
+            HUB_TYPE,
+            &serde_json::json!({
+                "profile_id": OREIN_OC02001_PROFILE_ID,
+                "setup": {"ble_identity": setup.stable_identity()}
+            }),
+        )
+        .unwrap();
+        let committed = store
+            .upsert_activation_until(
+                LocalBleDevice::from_setup(
+                    OREIN_OC02001_PROFILE_ID,
+                    &setup,
+                    "02:00:00:00:00:31".to_string(),
+                    BTreeMap::new(),
+                    false,
+                    1,
+                ),
+                "repeat-scan-original",
+                &fingerprint,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .unwrap();
+        let state = Arc::new(Mutex::new(AppState::default()));
+
+        assert!(terminal_session_for_existing_device(
+            &state,
+            &store,
+            OREIN_OC02001_PROFILE_ID,
+            setup.stable_identity(),
+        )
+        .unwrap()
+        .is_none());
+
+        state.lock().unwrap().canonical_registry.resolve(
+            &DiscoveredIdentity {
+                native_id: committed.id.clone(),
+                room_id: Some("room-existing".to_string()),
+                room_name: Some("Existing room".to_string()),
+                name: "Button".to_string(),
+                device_type: DeviceType::Button,
+                hardware_ids: vec![HardwareId::serial(&committed.id)],
+                manufacturer: Some("Synthetic".to_string()),
+                model: Some("TEST".to_string()),
+            },
+            &hub_key(),
+            1,
+        );
+
+        let receipt_count = store.pending_activation_receipts().unwrap().len();
+        let session = terminal_session_for_existing_device(
+            &state,
+            &store,
+            OREIN_OC02001_PROFILE_ID,
+            setup.stable_identity(),
+        )
+        .unwrap()
+        .expect("active store and canonical state should resolve the repeat scan");
+
+        assert_eq!(session.status, PairingStatus::Complete);
+        assert_eq!(session.device.unwrap().device_id, committed.id);
+        assert_eq!(
+            session.details,
+            Some(serde_json::json!({
+                "profile_id": OREIN_OC02001_PROFILE_ID,
+                "existing": true,
+            }))
+        );
+        assert_eq!(
+            store.pending_activation_receipts().unwrap().len(),
+            receipt_count,
+            "repeat scan must not append another activation receipt"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     struct DeadlineAvailabilityProbe {

@@ -40,6 +40,97 @@ Future<bool> identifyCanonicalBulb(
   return success;
 }
 
+/// Assign an existing canonical device to a known room without reopening the
+/// general room picker.
+///
+/// Room-scoped add and scan flows already know their destination. The server
+/// remains authoritative: this helper does not mutate local membership until
+/// the assignment is acknowledged and topology refreshes successfully.
+Future<bool> assignCanonicalDeviceToRoom(
+  BuildContext context, {
+  required RhythmDevice device,
+  required String currentParentNodeId,
+  required String targetRoomId,
+  required String targetRoomName,
+  required String analyticsSource,
+}) async {
+  final normalizedCurrentParentNodeId = currentParentNodeId.trim();
+  if (normalizedCurrentParentNodeId == targetRoomId) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('${device.displayName} is already in $targetRoomName'),
+      ),
+    );
+    return true;
+  }
+
+  final syncProvider = context.read<ServerSyncProvider>();
+  final journeyId = 'device-room-move-${_deviceRoomMoveUuid.v4()}';
+  final assigned = await syncProvider.api.assignDeviceParent(
+    device.id,
+    targetRoomId,
+  );
+  if (!context.mounted) return false;
+
+  if (!assigned) {
+    unawaited(
+      AnalyticsService().logDeviceRoomMoveCompleted(
+        journeyId: journeyId,
+        source: analyticsSource,
+        destination: 'room',
+        outcome: 'failed',
+        failureStage: 'assignment_request',
+      ),
+    );
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Failed to place ${device.displayName}')),
+    );
+    return false;
+  }
+
+  final refreshed = await syncProvider.refreshAfterTopologyMutation();
+  if (!context.mounted) return refreshed;
+  if (!refreshed) {
+    unawaited(
+      AnalyticsService().logDeviceRoomMoveCompleted(
+        journeyId: journeyId,
+        source: analyticsSource,
+        destination: 'room',
+        outcome: 'partial',
+        failureStage: 'authoritative_refresh',
+      ),
+    );
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          '${device.displayName} was assigned, but rooms could not refresh. '
+          'Pull to refresh and confirm its room.',
+        ),
+      ),
+    );
+    return false;
+  }
+
+  unawaited(
+    AnalyticsService().logDeviceRoomMoveCompleted(
+      journeyId: journeyId,
+      source: analyticsSource,
+      destination: 'room',
+      outcome: 'succeeded',
+    ),
+  );
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+      content: Text(
+        normalizedCurrentParentNodeId.isEmpty
+            ? 'Assigned ${device.displayName} to $targetRoomName'
+            : 'Moved ${device.displayName} to $targetRoomName',
+      ),
+    ),
+  );
+  return true;
+}
+
 Future<bool> showDeviceNodeAssignmentFlow(
   BuildContext context, {
   required RhythmDevice device,

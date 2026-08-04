@@ -881,6 +881,23 @@ class ServerSyncProvider extends ChangeNotifier {
   String? canonicalLocalBleProfileId(String localProfileId) =>
       _localBleProfileRoutes[localProfileId];
 
+  RhythmDeviceType? localBleDeviceTypeForProfile(String localProfileId) {
+    final canonicalProfileId = canonicalLocalBleProfileId(localProfileId);
+    if (canonicalProfileId == null) return null;
+    final profile = localBleCapabilities?.deviceProfiles
+        .where((candidate) => candidate.id == canonicalProfileId)
+        .firstOrNull;
+    final deviceType = profile?.deviceType.trim();
+    if (deviceType == null || deviceType.isEmpty) return null;
+    return switch (deviceType) {
+      'light' => RhythmDeviceType.light,
+      'button' => RhythmDeviceType.button,
+      'motion' => RhythmDeviceType.motion,
+      'contact' => RhythmDeviceType.contact,
+      _ => null,
+    };
+  }
+
   bool canAddLocalBleProfile(String profileId) =>
       supportedLocalBleProfileIds.contains(profileId);
 
