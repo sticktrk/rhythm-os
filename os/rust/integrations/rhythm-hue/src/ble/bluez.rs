@@ -1801,6 +1801,7 @@ impl HueBleTransport for BluezHueBleTransport {
         let record = record.clone();
         let client = Arc::clone(&self.client);
         let gatt = Arc::clone(&self.gatt);
+        let connections = Arc::clone(&self.connections);
         Ok(self
             .try_run_device_adapter_operation(&device_key, move |_session, adapter| async move {
                 if gatt.foreground_pending(&record.id)? {
@@ -1813,6 +1814,12 @@ impl HueBleTransport for BluezHueBleTransport {
                 if !device.is_connected().await.unwrap_or(false) {
                     return Ok(None);
                 }
+                let address = device.address().to_string();
+                let Some(_connection_lease) = connections.try_lease_existing(&address)? else {
+                    // A connected link not tracked by this pool may be owned by
+                    // another BlueZ client, or already selected for eviction.
+                    return Ok(None);
+                };
                 let Some(catalog) = Self::light_control_characteristics(
                     &gatt,
                     &device,

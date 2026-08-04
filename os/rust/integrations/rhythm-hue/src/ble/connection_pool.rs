@@ -88,6 +88,19 @@ impl PoolState {
         Claim::Evict(victim)
     }
 
+    fn claim_existing(&mut self, key: &str) -> bool {
+        let last_used = self.tick();
+        let Some(entry) = self.entries.get_mut(key) else {
+            return false;
+        };
+        if entry.evicting {
+            return false;
+        }
+        entry.users += 1;
+        entry.last_used = last_used;
+        true
+    }
+
     fn release(&mut self, key: &str) {
         let last_used = self.tick();
         if let Some(entry) = self.entries.get_mut(key) {
@@ -188,6 +201,24 @@ impl BleConnectionPool {
             .await
             .context("timed out waiting for a Hue BLE connect permit")?
             .map_err(|_| anyhow::anyhow!("Hue BLE connect gate closed"))
+    }
+
+    /// Lease a link only when the pool already owns it. Passive reads must not
+    /// create or evict warm links, but they still need to prevent a concurrent
+    /// admission from disconnecting the device while ReadValue is in flight.
+    pub(crate) fn try_lease_existing(
+        self: &Arc<Self>,
+        key: &str,
+    ) -> Result<Option<ConnectionLease>> {
+        let claimed = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Hue BLE connection pool lock poisoned"))?
+            .claim_existing(key);
+        Ok(claimed.then(|| ConnectionLease {
+            pool: Arc::clone(self),
+            key: key.to_string(),
+        }))
     }
 
     #[cfg(all(target_os = "linux", feature = "bluez"))]
@@ -360,5 +391,41 @@ mod tests {
         drop(first);
         assert!(pool.connect_gate.clone().try_acquire_owned().is_ok());
         drop(second);
+    }
+
+    #[tokio::test]
+    async fn passive_existing_lease_prevents_eviction_without_admitting_cold_links() {
+        let pool = BleConnectionPool::with_limits(1, 1);
+        assert!(pool.try_lease_existing("cold-bulb").unwrap().is_none());
+
+        drop(lease(
+            pool.admit(
+                "warm-bulb",
+                tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+            )
+            .await
+            .unwrap(),
+        ));
+        let passive = pool
+            .try_lease_existing("warm-bulb")
+            .unwrap()
+            .expect("warm link should be leased");
+
+        let waiting_pool = Arc::clone(&pool);
+        let waiter = tokio::spawn(async move {
+            waiting_pool
+                .admit(
+                    "next-bulb",
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+                )
+                .await
+                .unwrap()
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiter.is_finished());
+
+        drop(passive);
+        let victim = eviction(waiter.await.unwrap());
+        assert_eq!(victim.key(), "warm-bulb");
     }
 }
