@@ -542,6 +542,7 @@ fn sync_with_discovery(
             let mut room_light_device_ids: HashMap<String, Vec<String>> = HashMap::new();
             let mut new_light_canonical_ids: HashSet<String> = HashSet::new();
             let mut sleep_default_nodes_to_seed: Vec<String> = Vec::new();
+            let mut canonically_assigned_roomless_inputs: Vec<(String, String)> = Vec::new();
 
             {
                 let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -600,17 +601,25 @@ fn sync_with_discovery(
                     }
 
                     let Some(hub_room_id) = identity.room_id.clone() else {
-                        let still_unassigned = s
+                        let canonical_room_id = s
                             .canonical_registry
                             .get(&canonical_id)
-                            .map(|device| device.room_id.is_none())
-                            .unwrap_or(false);
-                        if still_unassigned {
-                            s.canonical_registry.assign_room(&canonical_id, None);
-                            s.topology.ensure_standalone_device(&canonical_id);
-                            if new_light_canonical_ids.contains(&canonical_id) {
-                                sleep_default_nodes_to_seed.push(canonical_id.clone());
+                            .and_then(|device| device.room_id.clone());
+                        match canonical_room_id {
+                            None => {
+                                s.canonical_registry.assign_room(&canonical_id, None);
+                                s.topology.ensure_standalone_device(&canonical_id);
+                                if new_light_canonical_ids.contains(&canonical_id) {
+                                    sleep_default_nodes_to_seed.push(canonical_id.clone());
+                                }
                             }
+                            Some(canonical_room_id)
+                                if identity.device_type != DeviceType::Light =>
+                            {
+                                canonically_assigned_roomless_inputs
+                                    .push((canonical_id.clone(), canonical_room_id));
+                            }
+                            Some(_) => {}
                         }
                         continue;
                     };
@@ -744,6 +753,44 @@ fn sync_with_discovery(
                             );
                         }
                     }
+                }
+
+                canonically_assigned_roomless_inputs.sort();
+                canonically_assigned_roomless_inputs.dedup();
+                let mut repaired_roomless_inputs = 0usize;
+                for (canonical_id, canonical_room_id) in &canonically_assigned_roomless_inputs {
+                    let user_overridden =
+                        s.topology
+                            .get_device_node(canonical_id)
+                            .is_some_and(|node| {
+                                node.placement == crate::topology::DevicePlacement::UserOverride
+                            });
+                    if user_overridden
+                        || s.topology.device_parent_room_id(canonical_id)
+                            == Some(canonical_room_id.as_str())
+                    {
+                        continue;
+                    }
+
+                    if s.topology
+                        .attach_device_hub_default(canonical_room_id, canonical_id)
+                    {
+                        repaired_roomless_inputs += 1;
+                    } else {
+                        warn!(
+                            target: "room_sync",
+                            "Could not restore roomless input '{}' to missing canonical room '{}'",
+                            canonical_id,
+                            canonical_room_id
+                        );
+                    }
+                }
+                if repaired_roomless_inputs > 0 {
+                    info!(
+                        target: "room_sync",
+                        "Restored {} roomless inputs to their canonical rooms",
+                        repaired_roomless_inputs
+                    );
                 }
 
                 // Persist canonical registry and topology
@@ -899,15 +946,25 @@ fn sync_with_discovery(
     match discovery.discover_motion_state() {
         Ok(motion_states) if !motion_states.is_empty() => {
             // Register all discovered motion sensors in the device registry
+            let motion_registry_rooms: Vec<(String, Option<String>)> = motion_states
+                .iter()
+                .map(|ms| {
+                    let device = crate::discovery::DiscoveredDevice {
+                        device_id: ms.sensor_id.clone(),
+                        room_id: ms.room_id.clone(),
+                        buttons: vec![],
+                        device_type: DeviceType::Motion,
+                    };
+                    (
+                        ms.sensor_id.clone(),
+                        registry_room_id_for_discovered_device(state, hub_key, &device),
+                    )
+                })
+                .collect();
             if let Some(registry) = extract_registry_for(state, hub_key) {
                 if let Ok(mut reg) = registry.lock() {
-                    for ms in &motion_states {
-                        reg.upsert_device(
-                            &ms.sensor_id,
-                            Some(&ms.room_id),
-                            &[],
-                            DeviceType::Motion,
-                        );
+                    for (sensor_id, room_id) in &motion_registry_rooms {
+                        reg.upsert_device(sensor_id, room_id.as_deref(), &[], DeviceType::Motion);
                     }
                 }
             }
@@ -1559,6 +1616,191 @@ mod tests {
         );
         let state: SharedState = Arc::new(Mutex::new(app));
         (hub_key, state)
+    }
+
+    /// Issue #302 field reproducer: legacy Hue authority takeover can leave
+    /// input devices canonically assigned while topology still marks them as
+    /// standalone. Hue then reports the inputs without a native room, and the
+    /// next sync must repair topology from the retained canonical room.
+    #[test]
+    fn roomless_hue_motion_inputs_repair_from_canonical_rooms() {
+        let (hub_key, state) = install_test_hub();
+
+        let rooms = || {
+            vec![
+                DiscoveredRoom {
+                    id: "guest-bath-hue-id".to_string(),
+                    name: "Guest Bath".to_string(),
+                    grouped_light_id: "guest-bath-gl".to_string(),
+                    device_ids: vec!["guest-bath-light".to_string()],
+                },
+                DiscoveredRoom {
+                    id: "staircase-hue-id".to_string(),
+                    name: "Staircase".to_string(),
+                    grouped_light_id: "staircase-gl".to_string(),
+                    device_ids: vec!["staircase-light".to_string()],
+                },
+            ]
+        };
+        let initial_discovery = IdentityDiscovery {
+            rooms: rooms(),
+            identities: vec![
+                make_identity(
+                    "guest-bath-light",
+                    "guest-bath-hue-id",
+                    "Guest Bath",
+                    "Guest Bath light",
+                    DeviceType::Light,
+                ),
+                make_identity(
+                    "staircase-light",
+                    "staircase-hue-id",
+                    "Staircase",
+                    "Staircase light",
+                    DeviceType::Light,
+                ),
+                make_identity(
+                    "guest-bath-motion",
+                    "guest-bath-hue-id",
+                    "Guest Bath",
+                    "Guest Bath motion",
+                    DeviceType::Motion,
+                ),
+                make_identity(
+                    "stair-bottom-motion",
+                    "staircase-hue-id",
+                    "Staircase",
+                    "Stair Bottom",
+                    DeviceType::Motion,
+                ),
+                make_identity(
+                    "stairs-top-motion",
+                    "staircase-hue-id",
+                    "Staircase",
+                    "Stairs Top",
+                    DeviceType::Motion,
+                ),
+            ],
+        };
+
+        sync_with_discovery(
+            &state,
+            &hub_key,
+            &initial_discovery,
+            true,
+            SyncFailurePolicy::BestEffort,
+        )
+        .unwrap();
+
+        let expected_assignments: Vec<(String, String)> = {
+            let s = state.lock().unwrap();
+            [
+                ("guest-bath-motion", "guest-bath-hue-id"),
+                ("stair-bottom-motion", "staircase-hue-id"),
+                ("stairs-top-motion", "staircase-hue-id"),
+            ]
+            .into_iter()
+            .map(|(native_id, hub_room_id)| {
+                let canonical_id = s
+                    .canonical_registry
+                    .find_by_native_id(&hub_key, native_id)
+                    .expect("motion sensor should resolve to a canonical device")
+                    .id
+                    .clone();
+                let room_id = s
+                    .topology
+                    .find_by_hub_room(&hub_key, hub_room_id)
+                    .expect("Hue room should resolve to a topology room")
+                    .id
+                    .clone();
+                (canonical_id, room_id)
+            })
+            .collect()
+        };
+
+        // Reproduce the persisted split seen in DBG-612F97F7: the app's
+        // canonical room is intact, but routing topology says standalone.
+        {
+            let mut s = state.lock().unwrap();
+            for (canonical_id, _) in &expected_assignments {
+                s.topology.ensure_standalone_device(canonical_id);
+            }
+        }
+
+        let roomless_motion =
+            |native_id: &str, name: &str| crate::canonical::identity::DiscoveredIdentity {
+                native_id: native_id.to_string(),
+                room_id: None,
+                room_name: None,
+                name: name.to_string(),
+                device_type: DeviceType::Motion,
+                hardware_ids: vec![],
+                manufacturer: None,
+                model: None,
+            };
+        let roomless_discovery = IdentityDiscovery {
+            rooms: rooms(),
+            identities: vec![
+                make_identity(
+                    "guest-bath-light",
+                    "guest-bath-hue-id",
+                    "Guest Bath",
+                    "Guest Bath light",
+                    DeviceType::Light,
+                ),
+                make_identity(
+                    "staircase-light",
+                    "staircase-hue-id",
+                    "Staircase",
+                    "Staircase light",
+                    DeviceType::Light,
+                ),
+                roomless_motion("guest-bath-motion", "Guest Bath motion"),
+                roomless_motion("stair-bottom-motion", "Stair Bottom"),
+                roomless_motion("stairs-top-motion", "Stairs Top"),
+            ],
+        };
+
+        sync_with_discovery(
+            &state,
+            &hub_key,
+            &roomless_discovery,
+            true,
+            SyncFailurePolicy::BestEffort,
+        )
+        .unwrap();
+
+        let serialized_topology = {
+            let s = state.lock().unwrap();
+            for (canonical_id, expected_room_id) in &expected_assignments {
+                let node = s
+                    .topology
+                    .get_device_node(canonical_id)
+                    .expect("roomless motion should remain a first-class topology node");
+                assert_eq!(node.parent_id.as_deref(), Some(expected_room_id.as_str()));
+                assert_eq!(
+                    s.topology.effective_control_target(
+                        canonical_id,
+                        &crate::topology::NodeControlKind::Motion
+                    ),
+                    Some(expected_room_id.clone()),
+                    "roomless Hue motion should route to its canonical current room"
+                );
+            }
+            serde_json::to_string(&s.topology).unwrap()
+        };
+
+        let restored: crate::topology::RoomTopologyStore =
+            serde_json::from_str(&serialized_topology).unwrap();
+        for (canonical_id, expected_room_id) in &expected_assignments {
+            assert_eq!(
+                restored
+                    .get_device_node(canonical_id)
+                    .and_then(|node| node.parent_id.as_deref()),
+                Some(expected_room_id.as_str()),
+                "repaired motion routing must survive authority-state reload"
+            );
+        }
     }
 
     #[test]

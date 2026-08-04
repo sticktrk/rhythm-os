@@ -282,10 +282,7 @@ impl<H: HueTransport> HueDiscovery<H> {
                 Some(id) => id,
                 None => continue,
             };
-            let room_id = match device_to_room.get(device_id) {
-                Some(room_id) => room_id.clone(),
-                None => continue,
-            };
+            let room_id = device_to_room.get(device_id).cloned();
             let is_active = match motion_json
                 .pointer("/motion/motion")
                 .and_then(|v| v.as_bool())
@@ -1816,10 +1813,13 @@ mod tests {
 
         let states = discovery.discover_motion_state().unwrap();
 
-        assert_eq!(states.len(), 1);
+        assert_eq!(states.len(), 2);
         assert_eq!(states[0].sensor_id, "motion-svc-1");
-        assert_eq!(states[0].room_id, "room-1");
+        assert_eq!(states[0].room_id.as_deref(), Some("room-1"));
         assert!(states[0].is_active);
+        assert_eq!(states[1].sensor_id, "roomless-motion");
+        assert_eq!(states[1].room_id, None);
+        assert!(!states[1].is_active);
     }
 
     #[test]

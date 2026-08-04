@@ -856,7 +856,7 @@ impl rhythm_os::discovery::HubDiscovery for HaDiscovery {
             .map(
                 |(sensor_id, room_id, is_active)| rhythm_os::discovery::DiscoveredMotionState {
                     sensor_id: sensor_id.clone(),
-                    room_id: room_id.clone(),
+                    room_id: Some(room_id.clone()),
                     is_active: *is_active,
                 },
             )
