@@ -2028,14 +2028,6 @@ void main() {
       expect(provider.canUnpairLocalBleDevices, isTrue);
       expect(provider.supportsLocalBleRoomlessDevices, isTrue);
       expect(provider.canScanToAddDevice, isTrue);
-      expect(
-        provider.canScanToAddDeviceType(RhythmDeviceType.button),
-        isTrue,
-      );
-      expect(
-        provider.canScanToAddDeviceType(RhythmDeviceType.motion),
-        isFalse,
-      );
     });
 
     test('routes a known parser alias to the advertised current BLE profile',
@@ -5289,8 +5281,7 @@ void main() {
     semantics.dispose();
   });
 
-  testWidgets(
-      'room tabs offer both methods and gate Scan by the requested type',
+  testWidgets('room tabs show Scan above the inline existing-device list',
       (tester) async {
     _registerWidgetCleanup(tester);
     final roomProvider = RoomProvider();
@@ -5383,21 +5374,30 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(
-      find.byKey(const ValueKey('room-device-add-method-chooser')),
+      find.byKey(const ValueKey('room-device-add-sheet')),
       findsOneWidget,
     );
     expect(find.text('Scan'), findsOneWidget);
-    expect(find.text('Select from existing'), findsOneWidget);
+    expect(find.text('Existing devices'), findsOneWidget);
+    expect(find.text('Select from existing'), findsNothing);
+    expect(api.getCanonicalDevicesCalls, 1);
+    expect(
+      tester.getTopLeft(find.byKey(const ValueKey('room-device-add-scan'))).dy,
+      lessThan(
+        tester
+            .getTopLeft(
+              find.byKey(const ValueKey('existing-room-devices-empty')),
+            )
+            .dy,
+      ),
+    );
 
     await tester.tap(find.byKey(const ValueKey('room-device-add-scan')));
     await tester.pumpAndSettle();
-    expect(
-      find.text(
-        'Connect or update your Rhythm Box to scan for motion sensors.',
-      ),
-      findsOneWidget,
-    );
-    expect(pairingIntakeIsVisible(), isFalse);
+    expect(pairingIntakeIsVisible(), isTrue);
+
+    tester.state<NavigatorState>(find.byType(Navigator)).pop();
+    await tester.pumpAndSettle();
 
     await _selectRoomSettingsTab(tester, 'Buttons');
 
@@ -5409,7 +5409,8 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Scan'), findsOneWidget);
-    expect(find.text('Select from existing'), findsOneWidget);
+    expect(find.text('Existing devices'), findsOneWidget);
+    expect(find.text('Select from existing'), findsNothing);
 
     await tester.tap(find.byKey(const ValueKey('room-device-add-scan')));
     await tester.pumpAndSettle();
@@ -5417,7 +5418,7 @@ void main() {
   });
 
   testWidgets(
-      'room add actions explain unavailable pairing and stay off device cards',
+      'room add actions keep existing devices usable when Scan is unavailable',
       (tester) async {
     _registerWidgetCleanup(tester);
     final roomProvider = RoomProvider();
@@ -5469,15 +5470,14 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Scan'), findsOneWidget);
-    expect(find.text('Select from existing'), findsOneWidget);
+    expect(find.text('Existing devices'), findsOneWidget);
+    expect(find.text('Select from existing'), findsNothing);
 
     await tester.tap(find.byKey(const ValueKey('room-device-add-scan')));
     await tester.pumpAndSettle();
 
     expect(
-      find.text(
-        'Connect or update your Rhythm Box to scan for buttons.',
-      ),
+      find.text('Scanning is not available on this Rhythm Box yet.'),
       findsOneWidget,
     );
     expect(
@@ -5516,7 +5516,7 @@ void main() {
   });
 
   testWidgets(
-      'room picker queries and assigns only existing devices of the tab type',
+      'room sheet lists and assigns only existing devices of the tab type',
       (tester) async {
     _registerWidgetCleanup(tester);
     final roomProvider = RoomProvider();
@@ -5584,6 +5584,7 @@ void main() {
         'endpoints': const <Map<String, dynamic>>[],
       },
     });
+    api.getCanonicalDevicesFails = true;
     connection.emitHello(
       RhythmHello.fromJson({
         'capabilities': {'hubs': const <dynamic>[]},
@@ -5637,12 +5638,24 @@ void main() {
       find.byKey(const ValueKey('room-settings-add-motion')),
     );
     await tester.pumpAndSettle();
-    await tester.tap(
-      find.byKey(const ValueKey('room-device-add-existing')),
-    );
-    await tester.pumpAndSettle();
 
     expect(api.getCanonicalDevicesCalls, 1);
+    expect(
+      find.byKey(const ValueKey('existing-room-devices-error')),
+      findsOneWidget,
+    );
+    expect(find.text('Try again'), findsOneWidget);
+
+    api.getCanonicalDevicesFails = false;
+    await tester.tap(find.text('Try again'));
+    await tester.pumpAndSettle();
+
+    expect(api.getCanonicalDevicesCalls, 2);
+    expect(
+      find.byKey(const ValueKey('existing-room-devices-list')),
+      findsOneWidget,
+    );
+    expect(find.text('Select from existing'), findsNothing);
     expect(
       find.byKey(const ValueKey('existing-room-device-motion-current')),
       findsOneWidget,

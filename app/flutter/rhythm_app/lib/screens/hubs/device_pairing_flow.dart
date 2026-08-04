@@ -132,12 +132,7 @@ Future<void> startDevicePairingFlow(
     );
     return;
   }
-  if (!hueBridgeOnly &&
-      !(roomAssignment == null
-          ? syncProvider.canScanToAddDevice
-          : syncProvider.canScanToAddDeviceType(
-              roomAssignment.expectedDeviceType,
-            ))) {
+  if (!hueBridgeOnly && !syncProvider.canScanToAddDevice) {
     return;
   }
   final journeyId = 'device-pair-${const Uuid().v4()}';
@@ -188,6 +183,19 @@ Future<void> startDevicePairingFlow(
               content: Text(
                 'Scan or enter the six-character serial printed on the Hue '
                 'bulb.',
+              ),
+            ),
+          );
+          continue;
+        }
+        final expectedDeviceType = roomAssignment?.expectedDeviceType;
+        if (expectedDeviceType != null &&
+            expectedDeviceType != RhythmDeviceType.light) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'That code is for a light, not a '
+                '${_pairingDeviceTypeLabel(expectedDeviceType)}.',
               ),
             ),
           );

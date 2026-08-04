@@ -25,6 +25,17 @@ class ExistingRoomDeviceCandidate {
   final String parentLabel;
 }
 
+class RoomDeviceAddSelection {
+  const RoomDeviceAddSelection.scan() : candidate = null;
+
+  const RoomDeviceAddSelection.existing(this.candidate)
+      : assert(candidate != null);
+
+  final ExistingRoomDeviceCandidate? candidate;
+
+  bool get isScan => candidate == null;
+}
+
 @visibleForTesting
 List<ExistingRoomDeviceCandidate> existingRoomDeviceCandidates({
   required List<Map<String, dynamic>> canonicalDevices,
@@ -92,11 +103,17 @@ Future<void> startRoomDeviceAddFlow(
   required RhythmDeviceType deviceType,
   required String analyticsSource,
 }) async {
-  final method = await showRoomDeviceAddMethodChooser(
+  final selection = await showRoomDeviceAddSheet(
     context,
+    roomId: roomId,
+    roomName: roomName,
     deviceType: deviceType,
   );
-  if (!context.mounted || method == null) return;
+  if (!context.mounted || selection == null) return;
+
+  final method = selection.isScan
+      ? RoomDeviceAddMethod.scan
+      : RoomDeviceAddMethod.existing;
 
   unawaited(
     AnalyticsService().logRoomDeviceAddMethodSelected(
@@ -106,126 +123,52 @@ Future<void> startRoomDeviceAddFlow(
     ),
   );
 
-  final syncProvider = context.read<ServerSyncProvider>();
-  switch (method) {
-    case RoomDeviceAddMethod.scan:
-      if (!syncProvider.canScanToAddDeviceType(deviceType)) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Connect or update your Rhythm Box to scan for '
-              '${_pluralDeviceLabel(deviceType).toLowerCase()}.',
-            ),
-          ),
-        );
-        return;
-      }
-      await startDevicePairingFlow(
-        context,
-        analyticsSource: analyticsSource,
-        roomAssignment: DevicePairingRoomAssignment(
-          roomId: roomId,
-          roomName: roomName,
-          expectedDeviceType: deviceType,
+  if (selection.isScan) {
+    final syncProvider = context.read<ServerSyncProvider>();
+    if (!syncProvider.canScanToAddDevice) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Scanning is not available on this Rhythm Box yet.'),
         ),
       );
       return;
-
-    case RoomDeviceAddMethod.existing:
-      final selected = await showExistingRoomDevicePicker(
-        context,
+    }
+    await startDevicePairingFlow(
+      context,
+      analyticsSource: analyticsSource,
+      roomAssignment: DevicePairingRoomAssignment(
         roomId: roomId,
         roomName: roomName,
-        deviceType: deviceType,
-      );
-      if (!context.mounted || selected == null) return;
-      await assignCanonicalDeviceToRoom(
-        context,
-        device: selected.device,
-        currentParentNodeId: selected.parentNodeId,
-        targetRoomId: roomId,
-        targetRoomName: roomName,
-        analyticsSource: analyticsSource,
-      );
-  }
-}
-
-@visibleForTesting
-Future<RoomDeviceAddMethod?> showRoomDeviceAddMethodChooser(
-  BuildContext context, {
-  required RhythmDeviceType deviceType,
-}) {
-  final label = _singularDeviceLabel(deviceType).toLowerCase();
-  return showModalBottomSheet<RoomDeviceAddMethod>(
-    context: context,
-    backgroundColor: CelestialColors.backgroundCard,
-    showDragHandle: true,
-    builder: (sheetContext) => SafeArea(
-      child: Padding(
-        key: const ValueKey('room-device-add-method-chooser'),
-        padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              'Add $label',
-              style: const TextStyle(
-                color: CelestialColors.textPrimary,
-                fontSize: 21,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-            const SizedBox(height: 8),
-            const Text(
-              'Scan its code or choose a device Rhythm already knows about.',
-              style: TextStyle(
-                color: CelestialColors.textSecondary,
-                fontSize: 14,
-                height: 1.4,
-              ),
-            ),
-            const SizedBox(height: 18),
-            _MethodTile(
-              key: const ValueKey('room-device-add-scan'),
-              icon: Icons.qr_code_scanner_rounded,
-              color: const Color(0xFF4DD0C8),
-              title: 'Scan',
-              subtitle: 'Use the QR or printed setup code',
-              onTap: () => Navigator.of(sheetContext).pop(
-                RoomDeviceAddMethod.scan,
-              ),
-            ),
-            const SizedBox(height: 10),
-            _MethodTile(
-              key: const ValueKey('room-device-add-existing'),
-              icon: Icons.devices_other_rounded,
-              color: const Color(0xFFFFB74D),
-              title: 'Select from existing',
-              subtitle: 'Choose from devices already in Rhythm',
-              onTap: () => Navigator.of(sheetContext).pop(
-                RoomDeviceAddMethod.existing,
-              ),
-            ),
-          ],
-        ),
+        expectedDeviceType: deviceType,
       ),
-    ),
+    );
+    return;
+  }
+
+  final selected = selection.candidate!;
+  await assignCanonicalDeviceToRoom(
+    context,
+    device: selected.device,
+    currentParentNodeId: selected.parentNodeId,
+    targetRoomId: roomId,
+    targetRoomName: roomName,
+    analyticsSource: analyticsSource,
   );
 }
 
-Future<ExistingRoomDeviceCandidate?> showExistingRoomDevicePicker(
+@visibleForTesting
+Future<RoomDeviceAddSelection?> showRoomDeviceAddSheet(
   BuildContext context, {
   required String roomId,
   required String roomName,
   required RhythmDeviceType deviceType,
 }) {
-  return showModalBottomSheet<ExistingRoomDeviceCandidate>(
+  return showModalBottomSheet<RoomDeviceAddSelection>(
     context: context,
     isScrollControlled: true,
     backgroundColor: CelestialColors.backgroundCard,
     showDragHandle: true,
-    builder: (_) => _ExistingRoomDevicePicker(
+    builder: (_) => _RoomDeviceAddSheet(
       roomId: roomId,
       roomName: roomName,
       deviceType: deviceType,
@@ -233,44 +176,8 @@ Future<ExistingRoomDeviceCandidate?> showExistingRoomDevicePicker(
   );
 }
 
-class _MethodTile extends StatelessWidget {
-  const _MethodTile({
-    super.key,
-    required this.icon,
-    required this.color,
-    required this.title,
-    required this.subtitle,
-    required this.onTap,
-  });
-
-  final IconData icon;
-  final Color color;
-  final String title;
-  final String subtitle;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return ListTile(
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-      tileColor: color.withValues(alpha: 0.1),
-      leading: Icon(icon, color: color),
-      title: Text(title, style: const TextStyle(color: Colors.white)),
-      subtitle: Text(
-        subtitle,
-        style: const TextStyle(color: CelestialColors.textSecondary),
-      ),
-      trailing: const Icon(
-        Icons.chevron_right_rounded,
-        color: CelestialColors.textSecondary,
-      ),
-      onTap: onTap,
-    );
-  }
-}
-
-class _ExistingRoomDevicePicker extends StatefulWidget {
-  const _ExistingRoomDevicePicker({
+class _RoomDeviceAddSheet extends StatefulWidget {
+  const _RoomDeviceAddSheet({
     required this.roomId,
     required this.roomName,
     required this.deviceType,
@@ -281,11 +188,10 @@ class _ExistingRoomDevicePicker extends StatefulWidget {
   final RhythmDeviceType deviceType;
 
   @override
-  State<_ExistingRoomDevicePicker> createState() =>
-      _ExistingRoomDevicePickerState();
+  State<_RoomDeviceAddSheet> createState() => _RoomDeviceAddSheetState();
 }
 
-class _ExistingRoomDevicePickerState extends State<_ExistingRoomDevicePicker> {
+class _RoomDeviceAddSheetState extends State<_RoomDeviceAddSheet> {
   late Future<List<ExistingRoomDeviceCandidate>?> _candidates;
 
   @override
@@ -313,106 +219,232 @@ class _ExistingRoomDevicePickerState extends State<_ExistingRoomDevicePicker> {
   }
 
   void _retry() {
-    setState(() => _candidates = _load());
+    final candidates = _load();
+    setState(() {
+      _candidates = candidates;
+    });
   }
 
   @override
   Widget build(BuildContext context) {
+    final singularLabel = _singularDeviceLabel(widget.deviceType).toLowerCase();
     final label = _pluralDeviceLabel(widget.deviceType).toLowerCase();
+    final accent = _colorForDeviceType(widget.deviceType);
     return SafeArea(
       child: SizedBox(
-        height: MediaQuery.sizeOf(context).height * 0.65,
+        height: MediaQuery.sizeOf(context).height * 0.8,
         child: Padding(
+          key: const ValueKey('room-device-add-sheet'),
           padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Text(
-                'Select from existing',
-                style: const TextStyle(
-                  color: CelestialColors.textPrimary,
-                  fontSize: 21,
-                  fontWeight: FontWeight.w700,
+              Row(
+                children: [
+                  Container(
+                    width: 42,
+                    height: 42,
+                    decoration: BoxDecoration(
+                      color: accent.withValues(alpha: 0.14),
+                      borderRadius: BorderRadius.circular(13),
+                    ),
+                    child: Icon(
+                      _iconForDeviceType(widget.deviceType),
+                      color: accent,
+                      size: 22,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Add $singularLabel',
+                          style: const TextStyle(
+                            color: CelestialColors.textPrimary,
+                            fontSize: 21,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        Text(
+                          'Place it in ${widget.roomName}',
+                          style: const TextStyle(
+                            color: CelestialColors.textSecondary,
+                            fontSize: 13,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 18),
+              _ScanAction(
+                key: const ValueKey('room-device-add-scan'),
+                onTap: () => Navigator.of(context).pop(
+                  const RoomDeviceAddSelection.scan(),
                 ),
               ),
-              const SizedBox(height: 6),
+              const SizedBox(height: 22),
+              Row(
+                children: [
+                  const Text(
+                    'Existing devices',
+                    style: TextStyle(
+                      color: CelestialColors.textPrimary,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(width: 9),
+                  Expanded(
+                    child: Container(
+                      height: 1,
+                      color: Colors.white.withValues(alpha: 0.09),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 5),
               Text(
-                'Choose one of your existing $label for ${widget.roomName}.',
+                'Choose a $singularLabel Rhythm already knows about.',
                 style: const TextStyle(
                   color: CelestialColors.textSecondary,
-                  fontSize: 14,
+                  fontSize: 12,
                 ),
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 12),
               Expanded(
                 child: FutureBuilder<List<ExistingRoomDeviceCandidate>?>(
                   future: _candidates,
                   builder: (context, snapshot) {
                     if (snapshot.connectionState != ConnectionState.done) {
-                      return const Center(
-                        child: CircularProgressIndicator(
-                          key: ValueKey('existing-room-devices-loading'),
-                        ),
+                      return const _PickerMessage(
+                        key: ValueKey('existing-room-devices-loading'),
+                        icon: Icons.manage_search_rounded,
+                        message: 'Finding existing devices…',
+                        loading: true,
                       );
                     }
                     final candidates = snapshot.data;
                     if (snapshot.hasError || candidates == null) {
                       return _PickerMessage(
                         key: const ValueKey('existing-room-devices-error'),
+                        icon: Icons.cloud_off_rounded,
                         message: 'Could not load existing devices.',
-                        actionLabel: 'Retry',
+                        actionLabel: 'Try again',
                         onAction: _retry,
                       );
                     }
                     if (candidates.isEmpty) {
                       return _PickerMessage(
                         key: const ValueKey('existing-room-devices-empty'),
+                        icon: Icons.devices_other_rounded,
                         message: 'No existing $label found.',
                       );
                     }
                     return ListView.separated(
+                      key: const ValueKey('existing-room-devices-list'),
+                      padding: const EdgeInsets.only(bottom: 4),
                       itemCount: candidates.length,
-                      separatorBuilder: (_, __) => const SizedBox(height: 8),
+                      separatorBuilder: (_, __) => const SizedBox(height: 9),
                       itemBuilder: (context, index) {
                         final candidate = candidates[index];
                         final alreadyInRoom =
                             candidate.parentNodeId == widget.roomId;
-                        final subtitle = alreadyInRoom
+                        final status = alreadyInRoom
                             ? 'Already in ${widget.roomName}'
                             : candidate.parentNodeId.isEmpty
                                 ? 'Unassigned'
                                 : 'Currently in ${candidate.parentLabel}';
-                        return ListTile(
+                        final statusColor = alreadyInRoom
+                            ? const Color(0xFF81C784)
+                            : candidate.parentNodeId.isEmpty
+                                ? const Color(0xFFFFB74D)
+                                : CelestialColors.textSecondary;
+                        return Material(
                           key: ValueKey(
                             'existing-room-device-${candidate.device.id}',
                           ),
+                          color: Colors.white.withValues(alpha: 0.055),
                           shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(14),
-                          ),
-                          tileColor: Colors.white.withValues(alpha: 0.06),
-                          leading: Icon(
-                            _iconForDeviceType(widget.deviceType),
-                            color: _colorForDeviceType(widget.deviceType),
-                          ),
-                          title: Text(
-                            candidate.device.displayName,
-                            style: const TextStyle(color: Colors.white),
-                          ),
-                          subtitle: Text(
-                            subtitle,
-                            style: const TextStyle(
-                              color: CelestialColors.textSecondary,
+                            borderRadius: BorderRadius.circular(16),
+                            side: BorderSide(
+                              color: alreadyInRoom
+                                  ? statusColor.withValues(alpha: 0.28)
+                                  : Colors.white.withValues(alpha: 0.07),
                             ),
                           ),
-                          trailing: Icon(
-                            alreadyInRoom
-                                ? Icons.check_circle_outline_rounded
-                                : Icons.chevron_right_rounded,
-                            color: alreadyInRoom
-                                ? const Color(0xFF81C784)
-                                : CelestialColors.textSecondary,
+                          clipBehavior: Clip.antiAlias,
+                          child: InkWell(
+                            onTap: () => Navigator.of(context).pop(
+                              RoomDeviceAddSelection.existing(candidate),
+                            ),
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 14,
+                                vertical: 12,
+                              ),
+                              child: Row(
+                                children: [
+                                  Container(
+                                    width: 40,
+                                    height: 40,
+                                    decoration: BoxDecoration(
+                                      color: accent.withValues(alpha: 0.12),
+                                      shape: BoxShape.circle,
+                                    ),
+                                    child: Icon(
+                                      _iconForDeviceType(widget.deviceType),
+                                      color: accent,
+                                      size: 20,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          candidate.device.displayName,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 15,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 3),
+                                        Text(
+                                          status,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            color: statusColor,
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w500,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Icon(
+                                    alreadyInRoom
+                                        ? Icons.check_circle_rounded
+                                        : Icons.add_circle_outline_rounded,
+                                    color: alreadyInRoom
+                                        ? statusColor
+                                        : CelestialColors.textSecondary,
+                                    size: 22,
+                                  ),
+                                ],
+                              ),
+                            ),
                           ),
-                          onTap: () => Navigator.of(context).pop(candidate),
                         );
                       },
                     );
@@ -427,17 +459,108 @@ class _ExistingRoomDevicePickerState extends State<_ExistingRoomDevicePicker> {
   }
 }
 
+class _ScanAction extends StatelessWidget {
+  const _ScanAction({super.key, required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    const scanColor = Color(0xFF4DD0C8);
+    return Semantics(
+      button: true,
+      label: 'Scan a device code',
+      hint: 'Opens the camera or manual code entry',
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(18),
+        clipBehavior: Clip.antiAlias,
+        child: Ink(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              colors: [
+                scanColor.withValues(alpha: 0.20),
+                const Color(0xFF26A69A).withValues(alpha: 0.08),
+              ],
+            ),
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: scanColor.withValues(alpha: 0.3)),
+          ),
+          child: InkWell(
+            onTap: onTap,
+            child: const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 16, vertical: 15),
+              child: Row(
+                children: [
+                  DecoratedBox(
+                    decoration: BoxDecoration(
+                      color: Color(0x294DD0C8),
+                      shape: BoxShape.circle,
+                    ),
+                    child: SizedBox(
+                      width: 44,
+                      height: 44,
+                      child: Icon(
+                        Icons.qr_code_scanner_rounded,
+                        color: scanColor,
+                        size: 23,
+                      ),
+                    ),
+                  ),
+                  SizedBox(width: 13),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Scan',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        SizedBox(height: 2),
+                        Text(
+                          'Use a QR or printed setup code',
+                          style: TextStyle(
+                            color: CelestialColors.textSecondary,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Icon(
+                    Icons.arrow_forward_rounded,
+                    color: scanColor,
+                    size: 21,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _PickerMessage extends StatelessWidget {
   const _PickerMessage({
     super.key,
+    required this.icon,
     required this.message,
     this.actionLabel,
     this.onAction,
+    this.loading = false,
   });
 
+  final IconData icon;
   final String message;
   final String? actionLabel;
   final VoidCallback? onAction;
+  final bool loading;
 
   @override
   Widget build(BuildContext context) {
@@ -445,14 +568,34 @@ class _PickerMessage extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
+          if (loading)
+            const SizedBox(
+              width: 24,
+              height: 24,
+              child: CircularProgressIndicator(strokeWidth: 2.4),
+            )
+          else
+            Icon(
+              icon,
+              color: CelestialColors.textSecondary,
+              size: 28,
+            ),
+          const SizedBox(height: 10),
           Text(
             message,
             textAlign: TextAlign.center,
             style: const TextStyle(color: CelestialColors.textSecondary),
           ),
           if (actionLabel != null && onAction != null) ...[
-            const SizedBox(height: 12),
-            OutlinedButton(onPressed: onAction, child: Text(actionLabel!)),
+            const SizedBox(height: 9),
+            OutlinedButton(
+              style: OutlinedButton.styleFrom(
+                minimumSize: const Size(0, 36),
+                visualDensity: VisualDensity.compact,
+              ),
+              onPressed: onAction,
+              child: Text(actionLabel!),
+            ),
           ],
         ],
       ),

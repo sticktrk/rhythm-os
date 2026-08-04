@@ -933,21 +933,6 @@ class ServerSyncProvider extends ChangeNotifier {
       canAddHueBleDevice ||
       canAddLocalBleDevice;
 
-  /// Whether at least one advertised scan/pair route can produce [deviceType].
-  /// Current Matter and Hue onboarding routes are light-only. Local-BLE
-  /// profiles advertise an exact type before the app accepts their QR grammar.
-  bool canScanToAddDeviceType(RhythmDeviceType deviceType) {
-    if (deviceType == RhythmDeviceType.light &&
-        (canAddMatterDevice ||
-            canAddHueBridgeDeviceBySerial ||
-            canAddHueBleDevice)) {
-      return true;
-    }
-    return supportedLocalBleProfileIds.any(
-      (profileId) => localBleDeviceTypeForProfile(profileId) == deviceType,
-    );
-  }
-
   /// Whether no hubs are configured on the server.
   bool get hasNoHubConfigured =>
       _lastHubInfos.isEmpty ||
