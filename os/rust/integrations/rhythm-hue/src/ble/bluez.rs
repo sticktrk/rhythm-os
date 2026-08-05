@@ -55,6 +55,13 @@ struct PairCandidate {
     rssi: i16,
 }
 
+struct PooledCommandContext<'a> {
+    pool: &'a Arc<BleConnectionPool>,
+    client: &'a BluezClient,
+    adapter: &'a Adapter,
+    gatt: &'a HueBleGattRuntime,
+}
+
 /// Hue protocol client of rhythm-ble's process-wide BlueZ owner.
 pub struct BluezHueBleTransport {
     client: Arc<BluezClient>,
@@ -654,15 +661,18 @@ impl BluezHueBleTransport {
     }
 
     async fn apply_light_command(
-        pool: &Arc<BleConnectionPool>,
-        client: &BluezClient,
-        adapter: &Adapter,
-        gatt: &HueBleGattRuntime,
+        context: PooledCommandContext<'_>,
         device: &Device,
         device_id: &str,
         command: &HueBleCommand,
         connection_deadline: tokio::time::Instant,
     ) -> Result<()> {
+        let PooledCommandContext {
+            pool,
+            client,
+            adapter,
+            gatt,
+        } = context;
         let total_started = Instant::now();
         let connect_started = Instant::now();
         let (connected_at_start, _connection_lease) =
@@ -1413,10 +1423,12 @@ impl HueBleTransport for BluezHueBleTransport {
             Self::mark_record_operation_uncertain(&client, &record)?;
             let command_result: Result<()> = async {
                 Self::apply_light_command(
-                    &connections,
-                    &client,
-                    &adapter,
-                    &gatt,
+                    PooledCommandContext {
+                        pool: &connections,
+                        client: &client,
+                        adapter: &adapter,
+                        gatt: &gatt,
+                    },
                     &device,
                     &record.id,
                     &command,
@@ -1505,10 +1517,12 @@ impl HueBleTransport for BluezHueBleTransport {
                 let command_started = Instant::now();
                 let command_result = match tokio::time::timeout_at(work_deadline, async {
                     Self::apply_light_command(
-                        &connections,
-                        &client,
-                        &adapter,
-                        &gatt,
+                        PooledCommandContext {
+                            pool: &connections,
+                            client: &client,
+                            adapter: &adapter,
+                            gatt: &gatt,
+                        },
                         &device,
                         &record.id,
                         &command,
