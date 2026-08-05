@@ -5,6 +5,8 @@
 //! hardware identity, allowing Rhythm's canonical registry to deduplicate the
 //! same physical bulb if it later appears through a bridge.
 
+#[cfg(any(test, all(target_os = "linux", feature = "bluez")))]
+mod connection_pool;
 pub mod controller;
 pub mod discovery;
 #[cfg(any(test, all(target_os = "linux", feature = "bluez")))]
@@ -31,3 +33,9 @@ pub use types::{
 
 pub const HUB_TYPE: &str = rhythm_os::hub::HubType::HUE_BLE;
 pub const HUB_ADDRESS: &str = "local";
+
+/// The Pi Zero W controller keeps a small warm working set while the durable
+/// catalog can contain hundreds of bulbs.
+pub(crate) const BLE_CONNECTION_POOL_CAPACITY: usize = 4;
+#[cfg(all(target_os = "linux", feature = "bluez"))]
+pub(crate) const BLE_PARALLEL_CONNECT_LIMIT: usize = 2;

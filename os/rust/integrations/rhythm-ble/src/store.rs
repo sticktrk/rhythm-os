@@ -25,8 +25,8 @@ use crate::profile::{
 const STORE_SCHEMA_VERSION: u32 = 1;
 pub const STORE_DIRECTORY: &str = "local_ble";
 const STORE_FILE: &str = "devices.json";
-const MAX_STORE_BYTES: usize = 1024 * 1024;
-const MAX_STORED_DEVICES: usize = 256;
+const MAX_STORE_BYTES: usize = 2 * 1024 * 1024;
+const MAX_STORED_DEVICES: usize = 512;
 const MAX_ACTIVATION_RECEIPTS: usize = PAIRING_RESULT_LIMIT;
 static SHARED_STORES: OnceLock<Mutex<HashMap<PathBuf, Weak<LocalBleDeviceStore>>>> =
     OnceLock::new();

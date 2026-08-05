@@ -18,6 +18,7 @@ const FACTORY_RESET_BLOCK_FILE: &str = ".hue_ble_factory_reset_pending";
 const FACTORY_RESET_PLAN_FILE: &str = ".hue_ble_factory_reset_plan.json";
 const FACTORY_RESET_PLAN_SCHEMA_VERSION: u32 = 1;
 const STATE_OBSERVATION_MAX_AGE: Duration = Duration::from_secs(60);
+const MAX_STORED_DEVICES: usize = 512;
 
 #[derive(Clone, Copy, Debug)]
 struct TimedStateObservation {
@@ -173,6 +174,12 @@ impl HueBleDeviceStore {
                 "Hue BLE device store schema {} is newer than supported {}",
                 document.schema_version,
                 SCHEMA_VERSION
+            );
+        }
+        if document.devices.len() > MAX_STORED_DEVICES {
+            anyhow::bail!(
+                "Hue BLE device store exceeds the {} device limit",
+                MAX_STORED_DEVICES
             );
         }
         let devices = document
@@ -629,6 +636,18 @@ impl HueBleDeviceStore {
     }
 
     pub fn upsert(&self, device: HueBleDevice) -> Result<()> {
+        {
+            let devices = self
+                .devices
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Hue BLE device store lock poisoned"))?;
+            if !devices.contains_key(&device.id) && devices.len() >= MAX_STORED_DEVICES {
+                anyhow::bail!(
+                    "Hue BLE device store reached the {} device limit",
+                    MAX_STORED_DEVICES
+                );
+            }
+        }
         // Re-pairing or replacing metadata starts a new observation epoch.
         // Conservatively forget any process-local state even if persistence
         // later fails.
@@ -643,6 +662,12 @@ impl HueBleDeviceStore {
             .lock()
             .map_err(|_| anyhow::anyhow!("Hue BLE device store lock poisoned"))?;
         let mut next = devices.clone();
+        if !next.contains_key(&device.id) && next.len() >= MAX_STORED_DEVICES {
+            anyhow::bail!(
+                "Hue BLE device store reached the {} device limit",
+                MAX_STORED_DEVICES
+            );
+        }
         next.insert(device.id.clone(), device.clone());
         let mut observations = self
             .state_observations
@@ -1152,6 +1177,65 @@ mod tests {
                 .as_nanos()
         );
         std::env::temp_dir().join(unique)
+    }
+
+    fn numbered_test_device(index: usize) -> HueBleDevice {
+        let mut device = test_device();
+        device.id = format!("hue-ble-{index:016x}");
+        device.eui64 = format!("{index:016x}");
+        device.address = format!(
+            "AA:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+            (index >> 32) & 0xff,
+            (index >> 24) & 0xff,
+            (index >> 16) & 0xff,
+            (index >> 8) & 0xff,
+            index & 0xff
+        );
+        device
+    }
+
+    fn write_device_fixture(dir: &Path, count: usize) {
+        let store_dir = dir.join("hue_ble");
+        fs::create_dir_all(&store_dir).unwrap();
+        let document = StoreDocument {
+            schema_version: SCHEMA_VERSION,
+            devices: (0..count).map(numbered_test_device).collect(),
+        };
+        fs::write(
+            store_dir.join("devices.json"),
+            serde_json::to_vec_pretty(&document).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn device_store_accepts_512_devices_and_rejects_the_next_new_identity() {
+        let dir = unique_test_dir("512-device-limit");
+        write_device_fixture(&dir, MAX_STORED_DEVICES);
+        let store = HueBleDeviceStore::load(&dir).unwrap();
+
+        let mut replacement = numbered_test_device(0);
+        replacement.name = "Replacement metadata".to_string();
+        store.upsert(replacement).unwrap();
+        let error = store
+            .upsert(numbered_test_device(MAX_STORED_DEVICES))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("512 device limit"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn oversized_device_store_is_rejected_on_load() {
+        let dir = unique_test_dir("oversized-device-limit");
+        write_device_fixture(&dir, MAX_STORED_DEVICES + 1);
+
+        let error = HueBleDeviceStore::load(&dir)
+            .err()
+            .expect("oversized store should fail closed");
+
+        assert!(error.to_string().contains("exceeds the 512 device limit"));
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

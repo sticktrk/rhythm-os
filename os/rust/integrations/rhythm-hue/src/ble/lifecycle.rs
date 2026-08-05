@@ -23,7 +23,7 @@ use super::discovery::HueBleDiscovery;
 use super::store::HueBleDeviceStore;
 use super::transport::{HueBleAdapterAvailability, HueBleTransport};
 use super::types::{HueBleDevice, HueBlePairingOutcome, HueBlePairingRequest};
-use super::{HUB_ADDRESS, HUB_TYPE};
+use super::{BLE_CONNECTION_POOL_CAPACITY, HUB_ADDRESS, HUB_TYPE};
 
 const OBSERVATION_INTERVAL: Duration = Duration::from_secs(15);
 const SHUTDOWN_POLL: Duration = Duration::from_millis(250);
@@ -375,7 +375,23 @@ fn prewarm_known_devices(
     store: &HueBleDeviceStore,
     shutdown: &AtomicBool,
 ) {
-    for device in store.all() {
+    if shutdown.load(Ordering::Relaxed) {
+        return;
+    }
+    let devices = store.all();
+    if let Err(error) = transport.initialize_connection_pool(&devices) {
+        tracing::warn!(
+            target: "cmd",
+            event = "hue_ble_pool_initialize",
+            outcome = "error",
+            error = %error,
+            "Hue BLE startup could not reconcile inherited connections"
+        );
+        return;
+    }
+    // Prewarming beyond the warm-link capacity would churn through the whole
+    // durable catalog at every boot. Cold devices connect on first command.
+    for device in devices.into_iter().take(BLE_CONNECTION_POOL_CAPACITY) {
         if shutdown.load(Ordering::Relaxed) {
             break;
         }
@@ -1684,6 +1700,7 @@ mod tests {
         bond_intent_address: Option<String>,
         available: bool,
         prewarmed: Mutex<Vec<String>>,
+        pool_initializations: Mutex<Vec<Vec<String>>>,
         prewarm_error_device: Option<String>,
         lifecycle_events: Mutex<Vec<String>>,
         validated: Mutex<Vec<String>>,
@@ -1753,6 +1770,14 @@ mod tests {
                 anyhow::bail!("selected bulb prewarm failed");
             }
             Ok(true)
+        }
+
+        fn initialize_connection_pool(&self, devices: &[HueBleDevice]) -> Result<()> {
+            self.pool_initializations
+                .lock()
+                .unwrap()
+                .push(devices.iter().map(|device| device.id.clone()).collect());
+            Ok(())
         }
 
         fn read_state(&self, _device: &HueBleDevice) -> Result<HueBleState> {
@@ -1879,7 +1904,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_prewarm_is_best_effort_across_every_known_bulb() {
+    fn startup_prewarm_is_best_effort_within_the_connection_pool_capacity() {
         let unique = format!(
             "rhythm-hue-ble-prewarm-{}-{}",
             std::process::id(),
@@ -1894,6 +1919,14 @@ mod tests {
         let second = stored_device("000002", "AA:00:00:00:00:02");
         store.upsert(first.clone()).unwrap();
         store.upsert(second.clone()).unwrap();
+        for suffix in 3..=BLE_CONNECTION_POOL_CAPACITY + 1 {
+            store
+                .upsert(stored_device(
+                    &format!("{suffix:06}"),
+                    &format!("AA:00:00:00:00:{suffix:02X}"),
+                ))
+                .unwrap();
+        }
         let transport = CapturingTransport {
             prewarm_error_device: Some(first.id.clone()),
             ..Default::default()
@@ -1901,10 +1934,12 @@ mod tests {
 
         prewarm_known_devices(&transport, &store, &AtomicBool::new(false));
 
-        assert_eq!(
-            *transport.prewarmed.lock().unwrap(),
-            vec![first.id, second.id]
-        );
+        let prewarmed = transport.prewarmed.lock().unwrap();
+        assert_eq!(prewarmed.len(), BLE_CONNECTION_POOL_CAPACITY);
+        assert_eq!(&prewarmed[..2], &[first.id, second.id]);
+        let initializations = transport.pool_initializations.lock().unwrap();
+        assert_eq!(initializations.len(), 1);
+        assert_eq!(initializations[0].len(), BLE_CONNECTION_POOL_CAPACITY + 1);
         std::fs::remove_dir_all(data_dir).unwrap();
     }
 
@@ -1927,6 +1962,7 @@ mod tests {
 
         prewarm_known_devices(&transport, &store, &AtomicBool::new(true));
 
+        assert!(transport.pool_initializations.lock().unwrap().is_empty());
         assert!(transport.prewarmed.lock().unwrap().is_empty());
         std::fs::remove_dir_all(data_dir).unwrap();
     }

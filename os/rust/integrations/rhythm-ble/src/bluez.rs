@@ -110,12 +110,12 @@ where
 impl<T: Send + 'static> operation_output_sealed::Sealed for DetachedBluezOutput<T> {}
 impl<T: Send + 'static> BluezOperationOutput for DetachedBluezOutput<T> {}
 
-const SCAN_CHANNEL_CAPACITY: usize = 512;
+const SCAN_CHANNEL_CAPACITY: usize = 1024;
 const SCAN_RESTART_MIN_BACKOFF: Duration = Duration::from_millis(250);
 const SCAN_RESTART_MAX_BACKOFF: Duration = Duration::from_secs(5);
 const OBSERVATION_CACHE_TTL: Duration = Duration::from_secs(120);
-const OBSERVATION_CACHE_LIMIT: usize = 256;
-const DEVICE_SUBSCRIPTION_LIMIT: usize = 256;
+const OBSERVATION_CACHE_LIMIT: usize = 512;
+const DEVICE_SUBSCRIPTION_LIMIT: usize = 512;
 const DEVICE_SUBSCRIPTION_ROTATION_INTERVAL: Duration = Duration::from_secs(30);
 const RESERVATION_ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const DISCOVERY_STOP_RETRY_INTERVAL: Duration = Duration::from_millis(25);
