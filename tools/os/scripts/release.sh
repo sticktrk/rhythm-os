@@ -44,7 +44,7 @@ SKIP_VERIFY_REASON=""
 WORKSPACE_LOCK_FILES=("Cargo.lock")
 WORKSPACE_VERSION_FILES=("Cargo.toml" "${WORKSPACE_LOCK_FILES[@]}" "os/install/rpiz/builder-image.lock")
 BUILDER_LOCK_FILE="os/install/rpiz/builder-image.lock"
-SERVER_RELEASES_TO_KEEP=5
+SERVER_RELEASES_TO_KEEP=2
 
 usage() {
     cat <<EOF

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Install Rhythm Lighting</title>
+<title>Rhythm Lighting downloads</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
   body { font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; max-width: 640px; margin: 4rem auto; padding: 0 1.25rem; color: #1a1a1a; }
@@ -14,11 +14,14 @@
 </style>
 </head>
 <body>
-  <h1>Install Rhythm Lighting</h1>
-  <p>One-line install for macOS and Linux:</p>
-  <pre><code>curl -fsSL https://get.rhythm.lighting/install.sh | bash</code></pre>
+  <h1>Rhythm Lighting downloads</h1>
+  <p>The hosted macOS/Linux binary installer has been retired. Build
+    <code>rhythm-server</code> from source:</p>
+  <pre><code>git clone https://github.com/sticktrk/cross.git
+cd cross/os
+cargo build -p rhythm-server --release</code></pre>
   <p class="muted">
-    <a href="/install.sh">View install script</a>
+    Rhythm appliance: <a href="https://dl.rhythm.lighting/server/sdcard.img.gz">download the current production SD-card image</a>.
   </p>
 </body>
 </html>

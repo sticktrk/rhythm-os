@@ -1,22 +1,19 @@
 # Cloudflare Pages: get.rhythm.lighting
 
-Static assets served at `https://get.rhythm.lighting/`. The bootstrap installer
-lives here as `install.sh` so users can run:    
-
-```
-curl -fsSL https://get.rhythm.lighting/install.sh | bash
-```
+Static assets served at `https://get.rhythm.lighting/`. The hosted desktop
+binary installer was retired with the legacy `server/install/` CDN tree.
+`install.sh` remains only as an explicit migration message for cached links;
+the page directs appliance users to the canonical production SD-card image and
+desktop users to build from source.
 
 ## Layout
 
 | File            | Served as                | Purpose                                        |
 | --------------- | ------------------------ | ---------------------------------------------- |
-| `install.sh`    | `/install.sh`, `/`       | Bootstrap installer (downloaded by curl).      |
-| `latest.txt`    | `/latest.txt`            | Legacy fallback plain text tag. The bootstrap now reads the primary latest pointer from `https://dl.rhythm.lighting/server/install/latest.txt`. |
-| `installed.txt` | `/installed.txt`         | 1-byte target for the post-install hit-counter ping. Cloudflare logs the request with its query string. |
+| `install.sh`    | `/install.sh`            | Fails with the desktop-installer retirement and migration instructions. |
 | `_headers`      | (Cloudflare directive)   | Sets `Content-Type` and `Cache-Control`.       |
-| `_redirects`    | (Cloudflare directive)   | Maps `/` to `/install.sh` (302).               |
-| `index.html`    | (only if `_redirects` removed) | Minimal landing page with the curl command. |
+| `_redirects`    | (Cloudflare directive)   | Maps `/` to `/index.html` (302).               |
+| `index.html`    | `/index.html`, `/`        | Source-build instructions and appliance image link. |
 
 ## Cloudflare Pages setup
 
@@ -36,28 +33,7 @@ GitHub repo via the dashboard. One-time setup:
 4. **Verify:**
    ```
    curl -I https://get.rhythm.lighting/install.sh
-   curl     https://get.rhythm.lighting/latest.txt
+   curl -I https://dl.rhythm.lighting/server/sdcard.img.gz
    ```
-   The script should come back with `Content-Type: text/x-shellscript` and
-   `latest.txt` should be a single line containing the latest tag.
-
-## Updating `latest.txt`
-
-The CI workflow (`.github/workflows/ci.yml`, job `update-latest-pointer`)
-publishes the current tag to `https://dl.rhythm.lighting/server/install/latest.txt`
-after all release artifacts have uploaded, then prunes old `v*` directories so
-the server repo keeps the latest five releases. `install/pages/latest.txt`
-remains as a Cloudflare Pages fallback and should not drive normal releases.
-
-## Reading install counts
-
-The bootstrap pings `/installed.txt?p=<platform>&v=<version>&os=<uname>&m=<user|system>&e=<install|uninstall>`
-on success (unless `RHYTHM_NO_TELEMETRY=1`). To read counts:
-
-- **Cloudflare Web Analytics** on the Pages project shows page views per path
-  and per query string.
-- **Cloudflare Logpush / Logs** (paid plans) gives the full request log if you
-  need fine-grained slicing by platform.
-
-The `installed.txt` file itself contains a single byte; clients don't read it,
-they only need the `200 OK` response so the request shows up in access logs.
+   The retirement script should come back as `text/x-shellscript`; the factory
+   image should be the latest stable/prod Buildroot disk image.

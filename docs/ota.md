@@ -58,7 +58,7 @@ fast. An emergency bypass must be explicit:
 
 | | Binary (package) | Full image (rootfs) |
 |---|---|---|
-| Ships | `rhythm-server` + `rhythm-chipd` tarball (~MB) | `rootfs.ext2.gz` A/B slot image (+`sdcard.img.gz` factory image) |
+| Ships | `rhythm-server` + `rhythm-chipd` tarball (~MB) | Versioned `rootfs.ext2.gz` A/B slot image; stable image releases also replace the canonical production `sdcard.img.gz` factory image |
 | When | every release | only when the **rootfs fingerprint** changed (or `--with-image` forces it) |
 | Applied by device | staged binary swap + supervisor restart, 3-start probation rollback | dd to inactive slot, binaries overlaid into it, cmdline.txt switch, two-boot probation via S41bootstate |
 
@@ -90,7 +90,7 @@ On every tag, CI compares the checkout's fingerprint against the newest
 published `rootfs_image` entry in the target feed:
 
 - **match** → binary-only release. The manifest **carries the existing image
-  entries forward** (both channels), so a device that is behind on its image
+  rootfs entry forward** (both channels), so a device that is behind on its image
   base still sees the correct rootfs + the new binary in one update.
 - **mismatch / missing / `[with-image]` tag marker** → the Buildroot image
   job is chained into the same release and the manifest gets fresh
@@ -114,13 +114,17 @@ re-seeds the entries — restoration is automatic.
 
 ```
 https://dl.rhythm.lighting/server/
+  sdcard.img.gz    (latest stable/prod factory image; full-card flash)
   rpiz/            (beta)              rpiz-stable/        (stable)
     manifest.json                        manifest.json
     v<ver>/rhythm-server-rpiz.tar.gz     v<ver>/...
     v<ver>/rootfs.ext2.gz  (image releases)
-    v<ver>/sdcard.img.gz   (image releases; factory flash, never OTA-applied)
-    latest/{rootfs.ext2.gz,sdcard.img.gz}
 ```
+
+The factory image is deliberately not part of either OTA manifest. Running
+appliances apply `rootfs.ext2.gz`; operators flash the single production image
+at `/server/sdcard.img.gz`. Beta/dev SD-card images remain attached to their
+GitHub Releases for bench testing without replacing the customer factory image.
 
 `manifest.json` (written only by `tools/os/scripts/package-server-updates.sh`):
 
@@ -149,13 +153,15 @@ to a web server over SSH.
 Publishing is intentionally ordered:
 
 1. Upload new `v<version>/...` payloads with a one-year immutable cache policy.
-2. Upload mutable `latest/...` aliases with revalidation enabled.
+2. On stable image releases, upload the mutable production
+   `/server/sdcard.img.gz` with revalidation enabled.
 3. Upload `manifest.json` last with revalidation enabled. The manifest is the
    fleet's update authority, so it must never reference an incomplete upload.
    A monotonic version check rejects stale reruns, and an R2 conditional write
    rejects a concurrent manifest change instead of overwriting it.
-4. Prune old version prefixes, preserving anything referenced by either live
-   manifest even when that leaves more than five directories. Retention fails
+4. Prune old version prefixes to two rollback releases per feed, preserving
+   anything referenced by either live manifest even when that leaves more than
+   two directories. Retention fails
    closed without deleting anything if either manifest is unavailable or
    invalid.
 
@@ -179,11 +185,12 @@ committed.
 
 ### One-time cutover
 
-Before merging the R2 publisher, create the bucket and mirror the complete live
-`server/` tree to a local directory. Include both manifests, every version
-directory, and the `latest` aliases. Use `publish-server-updates-r2.sh` to
-upload that local tree into an empty R2 `server/` prefix so versioned objects
-receive the SHA-256 and cache metadata expected by later idempotent releases.
+Before merging the R2 publisher, create the bucket and mirror both manifests,
+every object they reference, the desired rollback versions, and the latest
+stable/prod factory image to a local directory. Use
+`publish-server-updates-r2.sh` to upload that local tree into an empty R2
+`server/` prefix so versioned objects receive the SHA-256 and cache metadata
+expected by later idempotent releases.
 Do not pre-populate versioned R2 objects with a generic copy command: the
 publisher correctly refuses an existing immutable object whose SHA-256
 metadata is missing.

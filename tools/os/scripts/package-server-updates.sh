@@ -2,18 +2,18 @@
 # Package rhythm-server binaries into a static OTA feed.
 #
 # Output layout:
+#   <output>/sdcard.img.gz                            (latest stable/prod factory image)
 #   <output>/<target>[-stable]/manifest.json
 #   <output>/<target>[-stable]/v<version>/rhythm-server-<target>.tar.gz
-#   <output>/<target>[-stable]/v<version>/sdcard.img.gz     (optional rpiz factory image, falls back to sdcard.img)
 #   <output>/<target>[-stable]/v<version>/rootfs.ext2.gz    (optional rpiz OTA image, falls back to rootfs.ext2)
-#   <output>/<target>[-stable]/latest/sdcard.img.gz         (optional latest alias)
-#   <output>/<target>[-stable]/latest/rootfs.ext2.gz        (optional latest alias)
 #
 # Binary-only releases on BOTH channels carry forward the newest rootfs image
 # from supplied previous manifests, so devices behind on the image base still
 # pull rootfs + package from a binary-only release. Fresh image entries are
 # published only when --image-root is supplied, and carry the rootfs
-# fingerprint (--image-fingerprint) the CI release gate compares against.
+# fingerprint (--image-fingerprint) the CI release gate compares against. A
+# stable image release also refreshes the one canonical production factory
+# image; beta/dev SD-card images remain GitHub Release assets only.
 
 set -euo pipefail
 
@@ -79,6 +79,7 @@ manifest_images_json() {
     if [ -n "$source_feed" ] && [ "$source_feed" != "$target_feed" ]; then
         jq -c --arg source_feed "$source_feed" '
             (.images // [])
+            | map(select(.kind == "rootfs_image"))
             | map(
                 if ((.url? | type) == "string"
                     and ((.url | test("^[A-Za-z][A-Za-z0-9+.-]*:"))
@@ -90,7 +91,7 @@ manifest_images_json() {
             )
         ' "$manifest_path"
     else
-        jq -c '.images // []' "$manifest_path"
+        jq -c '(.images // []) | map(select(.kind == "rootfs_image"))' "$manifest_path"
     fi
 }
 
@@ -274,17 +275,18 @@ for target in $TARGETS; do
     version_dir="$OUTPUT_DIR/$feed_target/v$VERSION"
     archive_path="$version_dir/$ota_name.tar.gz"
     manifest_path="$OUTPUT_DIR/$feed_target/manifest.json"
-    image_candidates=()
+    rootfs_image_name=""
+    sdcard_image_name=""
     if [ "$target" = "rpiz" ] && [ -n "$IMAGE_ROOT" ]; then
         if [ -f "$IMAGE_ROOT/sdcard.img.gz" ]; then
-            image_candidates+=("sdcard.img.gz")
+            sdcard_image_name="sdcard.img.gz"
         elif [ -f "$IMAGE_ROOT/sdcard.img" ]; then
-            image_candidates+=("sdcard.img")
+            sdcard_image_name="sdcard.img"
         fi
         if [ -f "$IMAGE_ROOT/rootfs.ext2.gz" ]; then
-            image_candidates+=("rootfs.ext2.gz")
+            rootfs_image_name="rootfs.ext2.gz"
         elif [ -f "$IMAGE_ROOT/rootfs.ext2" ]; then
-            image_candidates+=("rootfs.ext2")
+            rootfs_image_name="rootfs.ext2"
         fi
     fi
 
@@ -295,10 +297,11 @@ for target in $TARGETS; do
         [ -f "$chipd_bin" ] && archive_members+=("rhythm-chipd")
         [ -f "$host_recorder_bin" ] && archive_members+=("rhythm-host-recorder")
         echo "  ${archive_members[*]} -> $archive_path"
-        if [ "${#image_candidates[@]}" -gt 0 ]; then
-            for image_name in "${image_candidates[@]}"; do
-                echo "  $IMAGE_ROOT/$image_name -> $version_dir/$image_name"
-            done
+        if [ -n "$rootfs_image_name" ]; then
+            echo "  $IMAGE_ROOT/$rootfs_image_name -> $version_dir/$rootfs_image_name"
+        fi
+        if [ "$CHANNEL" = "stable" ] && [ -n "$sdcard_image_name" ]; then
+            echo "  $IMAGE_ROOT/$sdcard_image_name -> $OUTPUT_DIR/sdcard.img.gz"
         fi
         PACKAGED=$((PACKAGED + 1))
         continue
@@ -330,42 +333,31 @@ for target in $TARGETS; do
         fi
     fi
 
-    image_entries=()
-    if [ "${#image_candidates[@]}" -gt 0 ]; then
-        for image_name in "${image_candidates[@]}"; do
-            image_src="$IMAGE_ROOT/$image_name"
-            image_dst="$version_dir/$image_name"
-            cp "$image_src" "$image_dst"
-            latest_dir="$OUTPUT_DIR/$feed_target/latest"
-            mkdir -p "$latest_dir"
-            cp "$image_src" "$latest_dir/$image_name"
-            image_sha="$(sha256_file "$image_dst")"
-            image_size="$(file_size "$image_dst")"
-            image_kind="disk_image"
-            case "$image_name" in
-                rootfs.ext2|rootfs.ext2.gz)
-                    image_kind="rootfs_image"
-                    ;;
-            esac
-            image_json="{\"name\":\"$(json_escape "$image_name")\",\"kind\":\"$image_kind\",\"url\":\"v$VERSION/$(json_escape "$image_name")\",\"version\":\"$VERSION\",\"sha256\":\"$image_sha\",\"size\":$image_size,\"fingerprint\":\"$(json_escape "$IMAGE_FINGERPRINT")\""
-            case "$image_name" in
-                *.gz)
-                    image_json="$image_json,\"compression\":\"gzip\""
-                    ;;
-            esac
-            image_json="$image_json}"
-            image_entries+=("$image_json")
-        done
+    if [ "$CHANNEL" = "stable" ] && [ -n "$sdcard_image_name" ]; then
+        case "$sdcard_image_name" in
+            *.gz)
+                cp "$IMAGE_ROOT/$sdcard_image_name" "$OUTPUT_DIR/sdcard.img.gz"
+                ;;
+            *)
+                gzip -c -n "$IMAGE_ROOT/$sdcard_image_name" > "$OUTPUT_DIR/sdcard.img.gz"
+                ;;
+        esac
     fi
 
     images_json="[]"
-    if [ "${#image_entries[@]}" -gt 0 ]; then
-        images_json="["
-        for ((i=0; i<${#image_entries[@]}; i++)); do
-            [ "$i" -gt 0 ] && images_json="$images_json,"
-            images_json="$images_json${image_entries[$i]}"
-        done
-        images_json="$images_json]"
+    if [ -n "$rootfs_image_name" ]; then
+        image_src="$IMAGE_ROOT/$rootfs_image_name"
+        image_dst="$version_dir/$rootfs_image_name"
+        cp "$image_src" "$image_dst"
+        image_sha="$(sha256_file "$image_dst")"
+        image_size="$(file_size "$image_dst")"
+        image_json="{\"name\":\"$(json_escape "$rootfs_image_name")\",\"kind\":\"rootfs_image\",\"url\":\"v$VERSION/$(json_escape "$rootfs_image_name")\",\"version\":\"$VERSION\",\"sha256\":\"$image_sha\",\"size\":$image_size,\"fingerprint\":\"$(json_escape "$IMAGE_FINGERPRINT")\""
+        case "$rootfs_image_name" in
+            *.gz)
+                image_json="$image_json,\"compression\":\"gzip\""
+                ;;
+        esac
+        images_json="[$image_json}]"
     elif [ "$target" = "rpiz" ] && [ "${#PREVIOUS_RPIZ_MANIFESTS[@]}" -gt 0 ]; then
         # Binary-only release: carry the current base image forward (both
         # channels) so devices behind on the image still pull rootfs+package.

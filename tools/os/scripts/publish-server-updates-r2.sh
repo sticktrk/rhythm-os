@@ -2,9 +2,9 @@
 # Publish a packaged OTA feed to Cloudflare R2.
 #
 # Versioned objects are immutable: an existing key must carry the same sha256
-# metadata or the publish fails. Mutable aliases are uploaded next, and each
-# manifest is uploaded last so a device never observes references to objects
-# that have not finished uploading.
+# metadata or the publish fails. Mutable non-manifest objects (currently the
+# canonical production sdcard.img.gz) are uploaded next, and each manifest is
+# uploaded last so a device never observes references to incomplete objects.
 
 set -euo pipefail
 
@@ -298,13 +298,13 @@ if [ "$manifest_count" -eq 0 ]; then
     exit 1
 fi
 
-# Reject invalid or stale feed state before changing even mutable aliases.
+# Reject invalid or stale feed state before changing even mutable objects.
 while IFS= read -r file; do
     [ -n "$file" ] || continue
     preflight_manifest "$file"
 done < <(find "$SOURCE_DIR" -type f -name manifest.json | LC_ALL=C sort)
 
-# Upload payloads before mutable aliases. Version paths are content-addressed
+# Upload payloads before mutable objects. Version paths are content-addressed
 # by the manifest's sha256 and may never be changed in place.
 while IFS= read -r file; do
     [ -n "$file" ] || continue
