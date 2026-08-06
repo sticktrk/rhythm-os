@@ -2,7 +2,8 @@
 # Local simulation of the OTA feed packaging lifecycle. No network, no builds.
 #
 # Exercises package-server-updates.sh through the sequence CI produces:
-#   1. image release          -> fresh image entries carry the fingerprint
+#   1. image release          -> fresh rootfs entry carries the fingerprint;
+#                               stable also refreshes the factory SD image
 #   2. binary-only follow-up  -> previous image entries carried forward
 #      (asserted for BOTH channels — the carry-forward is channel-symmetric)
 #   3. [no-image] release     -> neither image flag -> manifest ships images: []
@@ -29,6 +30,14 @@ assert_eq() {
     else
         echo "FAIL $label: expected '$expected', got '$actual'"
         FAILURES=$((FAILURES + 1))
+    fi
+}
+
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
     fi
 }
 
@@ -71,7 +80,24 @@ for channel in beta stable; do
     assert_eq "$channel image manifest version" "$image_version" "$(jq -r '.version' "$manifest")"
     assert_eq "$channel fresh rootfs fingerprint" "$FINGERPRINT" \
         "$(jq -r '.images[] | select(.kind == "rootfs_image") | .fingerprint' "$manifest")"
-    assert_eq "$channel fresh image count" "2" "$(jq -r '.images | length' "$manifest")"
+    assert_eq "$channel fresh image count" "1" "$(jq -r '.images | length' "$manifest")"
+    assert_eq "$channel disk image omitted from manifest" "0" \
+        "$(jq -r '[.images[] | select(.kind == "disk_image")] | length' "$manifest")"
+    if [ "$channel" = "stable" ]; then
+        assert_eq "$channel canonical factory image" "$(sha256_file "$IMAGE_ROOT/sdcard.img.gz")" \
+            "$(sha256_file "$out_image/sdcard.img.gz")"
+    elif [ -e "$out_image/sdcard.img.gz" ]; then
+        echo "FAIL beta image unexpectedly produced the production factory image"
+        FAILURES=$((FAILURES + 1))
+    else
+        echo "ok   beta image did not replace the production factory image"
+    fi
+    if [ -d "$out_image/$feed/latest" ]; then
+        echo "FAIL $channel image produced an unreferenced latest alias directory"
+        FAILURES=$((FAILURES + 1))
+    else
+        echo "ok   $channel image produced no latest alias directory"
+    fi
 
     # --- 2. Binary-only follow-up: images carried forward --------------------
     bash "$PACKAGER" \

@@ -10,7 +10,7 @@ PRUNER="$SCRIPT_DIR/../prune-r2-releases.sh"
 TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/rhythm-r2-publish-test.XXXXXX")"
 trap 'rm -rf "$TEMP_DIR"' EXIT
 
-mkdir -p "$TEMP_DIR/bin" "$TEMP_DIR/fake/remote" "$TEMP_DIR/feed/rpiz/v1.2.3-beta" "$TEMP_DIR/feed/rpiz/latest"
+mkdir -p "$TEMP_DIR/bin" "$TEMP_DIR/fake/remote" "$TEMP_DIR/feed/rpiz/v1.2.3-beta"
 touch "$TEMP_DIR/fake/objects" "$TEMP_DIR/fake/metadata" "$TEMP_DIR/fake/calls"
 
 cat > "$TEMP_DIR/bin/aws" <<'FAKE_AWS'
@@ -132,7 +132,7 @@ FAKE_AWS
 chmod +x "$TEMP_DIR/bin/aws"
 
 printf 'versioned payload\n' > "$TEMP_DIR/feed/rpiz/v1.2.3-beta/rhythm-server-rpiz.tar.gz"
-printf 'latest alias\n' > "$TEMP_DIR/feed/rpiz/latest/rootfs.ext2.gz"
+printf 'production factory image\n' > "$TEMP_DIR/feed/sdcard.img.gz"
 cat > "$TEMP_DIR/feed/rpiz/manifest.json" <<'JSON'
 {
   "version": "1.2.3-beta",
@@ -151,11 +151,12 @@ export CLOUDFLARE_R2_BUCKET=rhythm-updates-test
 "$PUBLISHER" --source-dir "$TEMP_DIR/feed"
 
 versioned_line="$(grep -n 's3 cp .*v1.2.3-beta/rhythm-server-rpiz.tar.gz' "$TEMP_DIR/fake/calls" | tail -1 | cut -d: -f1)"
-latest_line="$(grep -n 's3 cp .*latest/rootfs.ext2.gz' "$TEMP_DIR/fake/calls" | tail -1 | cut -d: -f1)"
+factory_line="$(grep -n 's3 cp .*sdcard.img.gz' "$TEMP_DIR/fake/calls" | tail -1 | cut -d: -f1)"
 manifest_line="$(grep -n 's3api put-object .*manifest.json' "$TEMP_DIR/fake/calls" | tail -1 | cut -d: -f1)"
-[ "$versioned_line" -lt "$latest_line" ]
-[ "$latest_line" -lt "$manifest_line" ]
+[ "$versioned_line" -lt "$factory_line" ]
+[ "$factory_line" -lt "$manifest_line" ]
 grep -q 'v1.2.3-beta/rhythm-server-rpiz.tar.gz.*public, max-age=31536000, immutable' "$TEMP_DIR/fake/calls"
+grep -q 'sdcard.img.gz.*no-cache, must-revalidate' "$TEMP_DIR/fake/calls"
 grep -q 'manifest.json.*no-cache, must-revalidate' "$TEMP_DIR/fake/calls"
 
 # An idempotent rerun keeps the immutable object and republishes mutable keys.
@@ -186,14 +187,14 @@ mv "$TEMP_DIR/feed/rpiz/manifest.new" "$TEMP_DIR/feed/rpiz/manifest.json"
 jq '.version = "1.2.3-beta" | .package.url = "v1.2.3-beta/rhythm-server-rpiz.tar.gz"' \
     "$TEMP_DIR/feed/rpiz/manifest.json" > "$TEMP_DIR/feed/rpiz/manifest.new"
 mv "$TEMP_DIR/feed/rpiz/manifest.new" "$TEMP_DIR/feed/rpiz/manifest.json"
-printf 'stale latest alias\n' > "$TEMP_DIR/feed/rpiz/latest/rootfs.ext2.gz"
+printf 'stale production factory image\n' > "$TEMP_DIR/feed/sdcard.img.gz"
 if "$PUBLISHER" --source-dir "$TEMP_DIR/feed" >"$TEMP_DIR/stale-manifest.out" 2>&1; then
     echo "stale manifest publish unexpectedly succeeded" >&2
     exit 1
 fi
 grep -q 'refusing to replace newer manifest' "$TEMP_DIR/stale-manifest.out"
 jq -e '.version == "1.2.4-beta"' "$TEMP_DIR/fake/remote/server/rpiz/manifest.json" >/dev/null
-grep -q '^latest alias$' "$TEMP_DIR/fake/remote/server/rpiz/latest/rootfs.ext2.gz"
+grep -q '^production factory image$' "$TEMP_DIR/fake/remote/server/sdcard.img.gz"
 
 # A concurrent manifest change invalidates the conditional commit instead of
 # being overwritten by a publisher that inspected an older object.

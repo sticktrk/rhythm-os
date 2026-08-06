@@ -7,7 +7,7 @@ set -euo pipefail
 BUCKET="${RHYTHM_R2_BUCKET:-${CLOUDFLARE_R2_BUCKET:-}}"
 PREFIX="${RHYTHM_R2_PREFIX:-server}"
 ENDPOINT="${RHYTHM_R2_ENDPOINT:-${CLOUDFLARE_S3_API_ENDPOINT:-}}"
-KEEP=5
+KEEP=2
 DRY_RUN=false
 RELEASE_ROOTS=(rpiz rpiz-stable)
 
@@ -19,7 +19,7 @@ Options:
   --bucket NAME    R2 bucket (default: CLOUDFLARE_R2_BUCKET)
   --prefix PREFIX  Object key prefix (default: RHYTHM_R2_PREFIX or server)
   --endpoint URL   R2 S3 endpoint (default: CLOUDFLARE_S3_API_ENDPOINT)
-  --keep N         Number of releases to keep per feed (default: 5)
+  --keep N         Number of releases to keep per feed (default: 2)
   --dry-run        Print objects that would be removed
   -h, --help       Show this help
 EOF
