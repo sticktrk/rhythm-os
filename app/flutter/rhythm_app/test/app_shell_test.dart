@@ -1221,6 +1221,14 @@ void main() {
     );
     expect(
         find.byKey(const Key('all_rooms_connecting_banner')), findsOneWidget);
+    expect(find.byKey(const Key('all_rooms_waiting_scrim')), findsOneWidget);
+    expect(find.text('Connecting to your lights…'), findsOneWidget);
+    expect(
+      find.text(
+        'Controls are temporarily unavailable. You can still swipe between room pages.',
+      ),
+      findsOneWidget,
+    );
 
     _emitSyncedHello(
       connection,
@@ -1233,6 +1241,8 @@ void main() {
     expect(find.text('AUTOMATIC LIGHTING OFF'), findsOneWidget);
     expect(find.text('Kitchen'), findsOneWidget);
     expect(find.byKey(const Key('all_rooms_read_only')), findsNothing);
+    expect(find.byKey(const Key('all_rooms_waiting_scrim')), findsNothing);
+    expect(find.text('Connecting to your lights…'), findsNothing);
   });
 
   testWidgets(
@@ -1270,6 +1280,14 @@ void main() {
     );
     expect(
         find.byKey(const Key('all_rooms_connecting_banner')), findsOneWidget);
+    expect(find.byKey(const Key('all_rooms_waiting_scrim')), findsOneWidget);
+    expect(find.text('Connecting to your lights…'), findsOneWidget);
+    expect(
+      find.text(
+        'Controls are temporarily unavailable. You can still swipe between room pages.',
+      ),
+      findsOneWidget,
+    );
   });
 
   testWidgets('cached room pages remain horizontally swipeable',

@@ -944,23 +944,92 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
               key: const Key('all_rooms_read_only'),
               child: allRooms,
             ),
+            Positioned.fill(
+              child: IgnorePointer(
+                child: ColoredBox(
+                  key: const Key('all_rooms_waiting_scrim'),
+                  color: CelestialColors.backgroundDark.withValues(alpha: 0.38),
+                ),
+              ),
+            ),
             SafeArea(
-              child: Align(
-                alignment: Alignment.topCenter,
-                child: Container(
-                  key: const Key('all_rooms_connecting_banner'),
-                  margin: const EdgeInsets.only(top: 12),
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: CelestialColors.backgroundCard.withValues(
-                      alpha: 0.92,
+              child: IgnorePointer(
+                child: Align(
+                  alignment: Alignment.topCenter,
+                  child: Semantics(
+                    container: true,
+                    liveRegion: true,
+                    excludeSemantics: true,
+                    label:
+                        'Connecting to your lights. Controls are temporarily unavailable. You can still swipe between room pages.',
+                    child: Container(
+                      key: const Key('all_rooms_connecting_banner'),
+                      constraints: const BoxConstraints(maxWidth: 520),
+                      margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 13,
+                      ),
+                      decoration: BoxDecoration(
+                        color: CelestialColors.backgroundCard.withValues(
+                          alpha: 0.98,
+                        ),
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: CelestialColors.accentBlue.withValues(
+                            alpha: 0.55,
+                          ),
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withValues(alpha: 0.42),
+                            blurRadius: 18,
+                            offset: const Offset(0, 8),
+                          ),
+                        ],
+                      ),
+                      child: const Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Padding(
+                            padding: EdgeInsets.only(top: 2),
+                            child: SizedBox.square(
+                              dimension: 22,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2.5,
+                                color: CelestialColors.accentBlue,
+                              ),
+                            ),
+                          ),
+                          SizedBox(width: 13),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  'Connecting to your lights…',
+                                  style: TextStyle(
+                                    color: CelestialColors.textPrimary,
+                                    fontSize: 15,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                                SizedBox(height: 3),
+                                Text(
+                                  'Controls are temporarily unavailable. You can still swipe between room pages.',
+                                  style: TextStyle(
+                                    color: CelestialColors.textSecondary,
+                                    fontSize: 12.5,
+                                    height: 1.3,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
-                    borderRadius: BorderRadius.circular(999),
-                  ),
-                  child: const Text(
-                    'Connecting… controls will be ready shortly',
-                    style: TextStyle(fontSize: 12),
                   ),
                 ),
               ),
