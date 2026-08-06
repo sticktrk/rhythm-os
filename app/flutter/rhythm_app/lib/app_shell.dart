@@ -922,6 +922,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           globalConfig: configModel.config,
           curveData: _curveData,
           pageController: _roomPageController,
+          interactionsEnabled: interactionsEnabled,
           activeMode: serverSync.activeMode,
           pendingMode: _pendingModeAction ??
               (roomProvider.anyRoomTransitioning
@@ -939,7 +940,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         return Stack(
           fit: StackFit.expand,
           children: [
-            AbsorbPointer(
+            KeyedSubtree(
               key: const Key('all_rooms_read_only'),
               child: allRooms,
             ),

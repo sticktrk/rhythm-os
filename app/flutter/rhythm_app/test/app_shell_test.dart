@@ -1214,10 +1214,11 @@ void main() {
     expect(find.text('Setting up...'), findsNothing);
     expect(find.text('AUTOMATIC LIGHTING OFF'), findsNothing);
     expect(find.text('Kitchen'), findsOneWidget);
-    final readOnly = tester.widget<AbsorbPointer>(
-      find.byKey(const Key('all_rooms_read_only')),
+    expect(find.byKey(const Key('all_rooms_read_only')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('all-rooms-page-read-only-0')),
+      findsOneWidget,
     );
-    expect(readOnly.absorbing, isTrue);
     expect(
         find.byKey(const Key('all_rooms_connecting_banner')), findsOneWidget);
 
@@ -1262,12 +1263,91 @@ void main() {
 
     expect(find.text('Setting up...'), findsNothing);
     expect(find.text('Kitchen'), findsOneWidget);
-    final readOnly = tester.widget<AbsorbPointer>(
-      find.byKey(const Key('all_rooms_read_only')),
+    expect(find.byKey(const Key('all_rooms_read_only')), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('all-rooms-page-read-only-0')),
+      findsOneWidget,
     );
-    expect(readOnly.absorbing, isTrue);
     expect(
         find.byKey(const Key('all_rooms_connecting_banner')), findsOneWidget);
+  });
+
+  testWidgets('cached room pages remain horizontally swipeable',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await roomProvider.addRoomsFromSource(
+      RoomSourceDto.matter,
+      const [
+        RoomDto(
+          id: 'room-1',
+          name: 'Kitchen',
+          source: RoomSourceDto.matter,
+          kind: RoomNodeKind.room,
+          deviceIds: ['light-1'],
+          rhythmEnabled: true,
+          disabled: false,
+          lightsOn: true,
+          timeOffsetMinutes: 0,
+          brightnessOffset: 0,
+        ),
+        RoomDto(
+          id: 'room-2',
+          name: 'Bedroom',
+          source: RoomSourceDto.matter,
+          kind: RoomNodeKind.room,
+          deviceIds: ['light-2'],
+          rhythmEnabled: true,
+          disabled: false,
+          lightsOn: true,
+          timeOffsetMinutes: 0,
+          brightnessOffset: 0,
+        ),
+      ],
+    );
+    final roomPageProvider = RoomPageProvider(
+      layoutStore: _MemoryRoomPageLayoutStore(),
+    )..initialize();
+    roomPageProvider.reconcileRooms(roomProvider.enabledRooms);
+    roomPageProvider.moveRoom('room-2', 1);
+    final homeProvider = _FakeHomeProvider([_serverHub()]);
+    final connection = _TestRhythmConnection(
+      initialState: RhythmConnectionState.connecting,
+    );
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(roomPageProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await _pumpAppShell(
+      tester,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+      serverSync: serverSync,
+      roomPageProvider: roomPageProvider,
+    );
+
+    expect(find.byKey(const Key('all_rooms_read_only')), findsOneWidget);
+    expect(find.text('Kitchen'), findsOneWidget);
+    expect(find.text('Bedroom'), findsNothing);
+
+    await tester.longPress(find.text('Kitchen'), warnIfMissed: false);
+    await tester.pump();
+    expect(find.text('Edit Rooms'), findsNothing);
+
+    await tester.flingFrom(
+      tester.getCenter(find.byType(PageView)),
+      const Offset(-320, 0),
+      1000,
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Bedroom'), findsOneWidget);
   });
 
   testWidgets('shows the room grid when rooms exist without a server hub',

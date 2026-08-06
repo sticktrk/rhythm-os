@@ -30,6 +30,7 @@ class AllRoomsScreen extends StatefulWidget {
   final CurveConfigDto globalConfig;
   final CurveData? curveData;
   final PageController pageController;
+  final bool interactionsEnabled;
   final ValueChanged<int>? onPageChanged;
   final RhythmMode? activeMode;
   final RhythmMode? pendingMode;
@@ -43,6 +44,7 @@ class AllRoomsScreen extends StatefulWidget {
     required this.globalConfig,
     this.curveData,
     required this.pageController,
+    this.interactionsEnabled = true,
     this.onPageChanged,
     this.activeMode,
     this.pendingMode,
@@ -534,11 +536,21 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
                       pageIndex,
                       widget.rooms,
                     );
-                    return _buildPageContent(
+                    final pageContent = _buildPageContent(
                       pageIndex: pageIndex,
                       rooms: pageRooms,
                       bottomPad: bottomPad,
                       editMode: pageProvider.editMode,
+                    );
+                    if (widget.interactionsEnabled) return pageContent;
+
+                    // Block room controls, edit gestures, scrolling, and
+                    // pull-to-refresh while cached state is presentation-only.
+                    // This lives inside the PageView so its horizontal gesture
+                    // recognizer remains available for room-page navigation.
+                    return AbsorbPointer(
+                      key: ValueKey('all-rooms-page-read-only-$pageIndex'),
+                      child: pageContent,
                     );
                   },
                 ),
@@ -1266,7 +1278,7 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
   }
 
   Widget _buildGlobalActionDock() {
-    final enabled = !_globalActionPending;
+    final enabled = widget.interactionsEnabled && !_globalActionPending;
     return Container(
       key: const ValueKey('global-room-action-dock'),
       height: _headerControlHeight,
@@ -1348,7 +1360,9 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
                 .reduce((left, right) => left + right) /
             targets.length;
     final value = (_globalSliderValue ?? average).clamp(1.0, 100.0).toDouble();
-    final enabled = !_globalActionPending && targets.isNotEmpty;
+    final enabled = widget.interactionsEnabled &&
+        !_globalActionPending &&
+        targets.isNotEmpty;
 
     return Container(
       key: const ValueKey('global-room-slider-panel'),
