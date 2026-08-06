@@ -42,13 +42,15 @@ Mostly invoked by the main flows above, but usable standalone:
 | `check-rpiz-image-mode.sh` | Validate that rpiz Buildroot output matches the requested image posture (dev vs prod) and the expected fingerprint |
 | `compute-rootfs-fingerprint.sh` | Content-hash the rootfs inputs; drives the CI binary-vs-image release gate |
 | `package-server-updates.sh` | Package rhythm-server binaries (+ optional images) into a static OTA feed manifest |
+| `publish-server-updates-r2.sh` | Publish payloads then manifests to Cloudflare R2 with cache metadata and immutable version keys |
 | `promote-stable.sh` | Promote a tested beta release to stable by creating the matching `-stable` tag |
-| `prune-server-releases.sh` | Prune old versioned release directories from the dl.rhythm.lighting server repo (manifest-referenced dirs are kept) |
+| `prune-r2-releases.sh` | Prune old R2 version prefixes while preserving manifest-referenced releases |
 | `push-rpiz-dev.sh` | Fast dev loop: cross-compile the appliance binary, scp it to a device, respawn init |
 | `verify-beta-release.sh` | Verify remote beta tag/public feed and optionally exact package + journey endpoints on a live rpiz |
 | `resolve-version.sh` | Resolve the current version for a shipped Rhythm artifact from Git tags |
 | `lib/` | Shared helpers sourced by the scripts above (`version.sh` semver/channel/feed, `artifact.sh` sha256/size/json) |
 | `tests/package-feed-sim.sh` | Local OTA feed lifecycle simulation (image release → binary carry-forward → dry-run); runs in CI |
+| `tests/r2-publishing-sim.sh` | Verify R2 publish ordering, immutability, cache policy, and manifest-aware retention; runs in repository invariants |
 | `tests/rpiz-hardware-watchdog-sim.sh` | Verify the rpiz watchdog starts from init, emits keepalives, and disarms cleanly; runs in CI |
 | `tests/rpiz-host-recorder-sim.sh` | Verify deterministic pre-watchdog boot capture, independent init supervision, and sampling after server exit; runs in CI |
 
@@ -226,8 +228,8 @@ version:
   fingerprint against the published feed. `--with-image` forces the image
   build (it embeds a `[with-image]` marker in the tag message).
 - `--upload` is the escape hatch when GitHub Actions is down: builds,
-  packages, and uploads the feed locally using `.env` `RHYTHM_UPDATES_*`
-  credentials (`RHYTHM_UPDATES_SSH_KEY_FILE` or `RHYTHM_UPDATES_SSH_KEY`).
+  packages, and uploads the feed locally to Cloudflare R2 using the first
+  available ignored environment file: `os/.env`, `.env`, or `admin-api/.env`.
 
 ```bash
 ./tools/os/scripts/release.sh                    # Next patch beta release
@@ -396,11 +398,10 @@ These can be set in `.env` or exported in your shell:
 | `HA_USER` | deploy-addon.sh | SSH user for local deploy |
 | `HA_ARCH` | deploy-addon.sh | Target architecture |
 | `INGRESS_PORT` | run-dev.sh | Local web UI port |
-| `RHYTHM_UPDATES_SSH_HOST` | release.sh `--upload` | OTA upload SSH host |
-| `RHYTHM_UPDATES_SSH_USER` | release.sh `--upload` | OTA upload SSH user |
-| `RHYTHM_UPDATES_BASE_DIR` | release.sh `--upload` | OTA upload destination directory |
-| `RHYTHM_UPDATES_SSH_KEY_FILE` | release.sh `--upload` | Path to the SSH private key to use for OTA upload |
-| `RHYTHM_UPDATES_SSH_KEY` | release.sh `--upload` | Inline SSH private key, used when no key file path is set |
+| `CLOUDFLARE_ACCESS_KEY` | release.sh `--upload` | R2 S3 access key ID with Object Read & Write access |
+| `CLOUDFLARE_SECRET_ACCESS_KEY` | release.sh `--upload` | Matching R2 S3 secret access key |
+| `CLOUDFLARE_S3_API_ENDPOINT` | release.sh `--upload` | Account endpoint ending in `.r2.cloudflarestorage.com` |
+| `CLOUDFLARE_R2_BUCKET` | release.sh `--upload` | R2 bucket containing the `server/` OTA tree |
 
 ---
 

@@ -5,8 +5,7 @@
 # (or to pass an explicit path where a function accepts one).
 #
 # This is the single home for semver parsing/comparison in the release
-# tooling. Exception: prune-server-releases.sh is piped to the CDN host over
-# `ssh bash -s` and must stay self-contained, so its sort stays inline there.
+# tooling.
 
 # Strip a leading v and any prerelease/build metadata; validate X.Y.Z.
 semver_core() {

@@ -235,53 +235,33 @@ require_env_value() {
 }
 
 load_project_env() {
-    local env_file="$PROJECT_ROOT/.env"
+    local env_file=""
+    local candidate
 
-    if [ ! -f "$env_file" ]; then
-        echo "Error: --upload requires $env_file" >&2
+    for candidate in "$PROJECT_ROOT/.env" "$REPO_ROOT/.env" "$REPO_ROOT/admin-api/.env"; do
+        if [ -f "$candidate" ]; then
+            env_file="$candidate"
+            break
+        fi
+    done
+
+    if [ -z "$env_file" ]; then
+        echo "Error: --upload requires os/.env, .env, or admin-api/.env" >&2
         exit 1
     fi
 
-    echo "Loading environment from .env"
+    echo "Loading environment from ${env_file#"$REPO_ROOT"/}"
     set -a
     # shellcheck disable=SC1090
     source "$env_file"
     set +a
 }
 
-resolve_project_path() {
-    local path_value="$1"
-
-    case "$path_value" in
-        /*)
-            echo "$path_value"
-            ;;
-        ~/*)
-            echo "$HOME/${path_value#~/}"
-            ;;
-        *)
-            echo "$PROJECT_ROOT/$path_value"
-            ;;
-    esac
-}
-
 ensure_upload_env() {
-    require_env_value RHYTHM_UPDATES_SSH_HOST
-    require_env_value RHYTHM_UPDATES_SSH_USER
-    require_env_value RHYTHM_UPDATES_BASE_DIR
-
-    if [ -z "${RHYTHM_UPDATES_SSH_KEY_FILE:-}" ] && [ -z "${RHYTHM_UPDATES_SSH_KEY:-}" ]; then
-        echo "Error: Set RHYTHM_UPDATES_SSH_KEY_FILE or RHYTHM_UPDATES_SSH_KEY in .env for --upload" >&2
-        exit 1
-    fi
-
-    if [ -n "${RHYTHM_UPDATES_SSH_KEY_FILE:-}" ]; then
-        RHYTHM_UPDATES_SSH_KEY_FILE="$(resolve_project_path "$RHYTHM_UPDATES_SSH_KEY_FILE")"
-        if [ ! -f "$RHYTHM_UPDATES_SSH_KEY_FILE" ]; then
-            echo "Error: RHYTHM_UPDATES_SSH_KEY_FILE does not exist: $RHYTHM_UPDATES_SSH_KEY_FILE" >&2
-            exit 1
-        fi
-    fi
+    require_env_value CLOUDFLARE_ACCESS_KEY
+    require_env_value CLOUDFLARE_SECRET_ACCESS_KEY
+    require_env_value CLOUDFLARE_S3_API_ENDPOINT
+    require_env_value CLOUDFLARE_R2_BUCKET
 }
 
 normalize_release_version() {
@@ -339,22 +319,6 @@ cleanup_temp_release_dir() {
     fi
 }
 
-setup_upload_ssh() {
-    local key_path="$TEMP_RELEASE_DIR/id_ed25519"
-    local known_hosts_path="$TEMP_RELEASE_DIR/known_hosts"
-
-    mkdir -p "$TEMP_RELEASE_DIR"
-
-    if [ -n "${RHYTHM_UPDATES_SSH_KEY_FILE:-}" ]; then
-        cp "$RHYTHM_UPDATES_SSH_KEY_FILE" "$key_path"
-    else
-        printf '%s\n' "$RHYTHM_UPDATES_SSH_KEY" > "$key_path"
-    fi
-
-    chmod 600 "$key_path"
-    ssh-keyscan -H "$RHYTHM_UPDATES_SSH_HOST" > "$known_hosts_path"
-}
-
 # Fetch the currently published manifest for a feed from the public CDN URL —
 # the same URL appliances poll, so no publish credentials are needed.
 fetch_rpiz_manifest() {
@@ -370,27 +334,10 @@ fetch_rpiz_manifest() {
     fi
 }
 
-prune_uploaded_server_releases() {
-    local ssh_key_path="$TEMP_RELEASE_DIR/id_ed25519"
-    local known_hosts_path="$TEMP_RELEASE_DIR/known_hosts"
-    local remote_base_dir
-
-    printf -v remote_base_dir '%q' "$RHYTHM_UPDATES_BASE_DIR"
-
-    echo ""
-    echo "=== Pruning old server releases ==="
-    ssh -i "$ssh_key_path" -o UserKnownHostsFile="$known_hosts_path" \
-        "$RHYTHM_UPDATES_SSH_USER@$RHYTHM_UPDATES_SSH_HOST" \
-        "bash -s -- --base-dir $remote_base_dir --keep $SERVER_RELEASES_TO_KEEP" \
-        < "$SCRIPT_DIR/prune-server-releases.sh"
-}
-
 upload_rpiz_feed() {
     local version="$1"
     local artifact_root="$TEMP_RELEASE_DIR/dist/bin"
     local output_dir="$PROJECT_ROOT/out/server-updates"
-    local ssh_key_path="$TEMP_RELEASE_DIR/id_ed25519"
-    local known_hosts_path="$TEMP_RELEASE_DIR/known_hosts"
     local package_args=()
     local release_channel release_feed
     local manifest_spec=""
@@ -412,9 +359,6 @@ upload_rpiz_feed() {
     mkdir -p "$artifact_root"
     cp -R "$PROJECT_ROOT/dist/bin/rpiz" "$artifact_root/"
 
-    echo ""
-    echo "=== Configuring SSH upload ==="
-    setup_upload_ssh
     # Both channels carry the current base image forward in their manifests,
     # so always offer the previous manifest to the packager — unless this is
     # a --no-image release, whose manifest must ship without image entries.
@@ -445,18 +389,27 @@ upload_rpiz_feed() {
         "${package_args[@]}"
 
     echo ""
-    echo "=== Uploading rpiz OTA feed ==="
-    ssh -i "$ssh_key_path" -o UserKnownHostsFile="$known_hosts_path" \
-        "$RHYTHM_UPDATES_SSH_USER@$RHYTHM_UPDATES_SSH_HOST" \
-        "mkdir -p '$RHYTHM_UPDATES_BASE_DIR'"
-    scp -i "$ssh_key_path" -o UserKnownHostsFile="$known_hosts_path" -r \
-        "$output_dir/." \
-        "$RHYTHM_UPDATES_SSH_USER@$RHYTHM_UPDATES_SSH_HOST:$RHYTHM_UPDATES_BASE_DIR/"
-
-    prune_uploaded_server_releases
+    echo "=== Uploading rpiz OTA feed to Cloudflare R2 ==="
+    AWS_ACCESS_KEY_ID="$CLOUDFLARE_ACCESS_KEY" \
+    AWS_SECRET_ACCESS_KEY="$CLOUDFLARE_SECRET_ACCESS_KEY" \
+    AWS_DEFAULT_REGION=auto \
+    AWS_PAGER='' \
+    CLOUDFLARE_S3_API_ENDPOINT="$CLOUDFLARE_S3_API_ENDPOINT" \
+    CLOUDFLARE_R2_BUCKET="$CLOUDFLARE_R2_BUCKET" \
+        "$SCRIPT_DIR/publish-server-updates-r2.sh" --source-dir "$output_dir"
 
     echo ""
-    echo "Uploaded rpiz OTA feed for $version to $RHYTHM_UPDATES_SSH_USER@$RHYTHM_UPDATES_SSH_HOST:$RHYTHM_UPDATES_BASE_DIR"
+    echo "=== Pruning old Cloudflare R2 releases ==="
+    AWS_ACCESS_KEY_ID="$CLOUDFLARE_ACCESS_KEY" \
+    AWS_SECRET_ACCESS_KEY="$CLOUDFLARE_SECRET_ACCESS_KEY" \
+    AWS_DEFAULT_REGION=auto \
+    AWS_PAGER='' \
+    CLOUDFLARE_S3_API_ENDPOINT="$CLOUDFLARE_S3_API_ENDPOINT" \
+    CLOUDFLARE_R2_BUCKET="$CLOUDFLARE_R2_BUCKET" \
+        "$SCRIPT_DIR/prune-r2-releases.sh" --keep "$SERVER_RELEASES_TO_KEEP"
+
+    echo ""
+    echo "Uploaded rpiz OTA feed for $version to Cloudflare R2 bucket $CLOUDFLARE_R2_BUCKET"
 }
 
 update_workspace_version_files() {
@@ -607,9 +560,8 @@ if [ "$WITH_IMAGE" = true ] && [ "$UPLOAD" = true ]; then
 fi
 
 if [ "$UPLOAD" = true ]; then
-    require_command ssh
-    require_command scp
-    require_command ssh-keyscan
+    require_command aws
+    require_command jq
     load_project_env
     ensure_upload_env
 fi
@@ -723,7 +675,7 @@ else
     echo "  rpiz sd image: auto — CI builds a full image only when the rootfs fingerprint changed"
 fi
 if [ "$UPLOAD" = true ]; then
-    echo "  Upload: rpiz OTA feed -> $RHYTHM_UPDATES_SSH_USER@$RHYTHM_UPDATES_SSH_HOST:$RHYTHM_UPDATES_BASE_DIR"
+    echo "  Upload: rpiz OTA feed -> Cloudflare R2 bucket $CLOUDFLARE_R2_BUCKET/server"
     echo "  Retention: keep the latest $SERVER_RELEASES_TO_KEEP server release(s)"
 fi
 echo ""
@@ -740,8 +692,8 @@ if [ "$DRY_RUN" = true ]; then
     if [ "$UPLOAD" = true ]; then
         echo "[dry-run] Would build rpiz release binary: ./tools/os/scripts/build-server.sh --release --target rpiz"
         echo "[dry-run] Would package rpiz OTA feed from a temporary artifact root"
-        echo "[dry-run] Would upload OTA feed to $RHYTHM_UPDATES_SSH_USER@$RHYTHM_UPDATES_SSH_HOST:$RHYTHM_UPDATES_BASE_DIR"
-        echo "[dry-run] Would prune old server releases, keeping the latest $SERVER_RELEASES_TO_KEEP per release root"
+        echo "[dry-run] Would upload OTA feed to Cloudflare R2 bucket $CLOUDFLARE_R2_BUCKET/server"
+        echo "[dry-run] Would prune old R2 releases, keeping the latest $SERVER_RELEASES_TO_KEEP per release root"
         echo "[dry-run] Would not push branch or tag in --upload mode"
     elif [ "$PUSH" = true ]; then
         echo "[dry-run] Would push branch: git push $REMOTE HEAD:refs/heads/$CURRENT_BRANCH"

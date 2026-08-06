@@ -4,11 +4,15 @@ One tag-driven pipeline, two channels, two payload tiers. Everything else is
 detail.
 
 ```
-                       ┌────────────────────────────────────────────────┐
-release.sh ── tag ────▶│ ci.yml: release-plan → binaries (+image?) →    │──▶ dl.rhythm.lighting/server/rpiz/
-  --promote-stable ───▶│          publish (one manifest per release)    │──▶ dl.rhythm.lighting/server/rpiz-stable/
-                       └────────────────────────────────────────────────┘
-                                                                  ▲ polled by appliances
+                       ┌──────────────────────────────────────────────┐
+release.sh ── tag ────▶│ ci.yml: release-plan → binaries (+image?) →  │
+  --promote-stable ───▶│          publish (one manifest per release)  │
+                       └──────────────────────┬───────────────────────┘
+                                              ▼
+                       Cloudflare R2 bucket → edge cache
+                                              │
+                       dl.rhythm.lighting/server/{rpiz,rpiz-stable}/
+                                              ▲ polled by appliances
 ```
 
 ## Terminology (three things "dev" used to mean — now separated)
@@ -131,9 +135,71 @@ https://dl.rhythm.lighting/server/
 }
 ```
 
-Carried-forward image entries keep their original `v<ver>/` URL; the CDN
-prune script never deletes a version directory that any feed manifest still
+Carried-forward image entries keep their original `v<ver>/` URL; the R2
+retention script never deletes a version directory that any feed manifest still
 references.
+
+## Cloudflare R2 hosting
+
+`dl.rhythm.lighting` is a Cloudflare R2 custom domain. The bucket stores the
+same `server/...` keys shown above, so appliances and release verification keep
+their existing URLs. CI uses R2's S3-compatible API; it no longer copies files
+to a web server over SSH.
+
+Publishing is intentionally ordered:
+
+1. Upload new `v<version>/...` payloads with a one-year immutable cache policy.
+2. Upload mutable `latest/...` aliases with revalidation enabled.
+3. Upload `manifest.json` last with revalidation enabled. The manifest is the
+   fleet's update authority, so it must never reference an incomplete upload.
+   A monotonic version check rejects stale reruns, and an R2 conditional write
+   rejects a concurrent manifest change instead of overwriting it.
+4. Prune old version prefixes, preserving anything referenced by either live
+   manifest even when that leaves more than five directories. Retention fails
+   closed without deleting anything if either manifest is unavailable or
+   invalid.
+
+Reusing a versioned key with different bytes is a hard failure. R2 objects
+carry their SHA-256 in metadata so a retry can keep an identical object but
+cannot silently replace an artifact already named by a release manifest.
+
+GitHub Actions requires these repository secrets:
+
+| Secret | Value |
+|---|---|
+| `CLOUDFLARE_ACCESS_KEY` | R2 S3 access key ID with Object Read & Write for the update bucket |
+| `CLOUDFLARE_SECRET_ACCESS_KEY` | Matching R2 S3 secret access key |
+| `CLOUDFLARE_S3_API_ENDPOINT` | `https://<account-id>.r2.cloudflarestorage.com` |
+| `CLOUDFLARE_R2_BUCKET` | Update bucket name |
+
+The standalone `rpiz-sd-image.yml` publisher uses the same secrets. Local
+`release.sh --upload` reads them from the first existing file among `os/.env`,
+the repository `.env`, and `admin-api/.env`; none of those files may be
+committed.
+
+### One-time cutover
+
+Before merging the R2 publisher, create the bucket and mirror the complete live
+`server/` tree to a local directory. Include both manifests, every version
+directory, and the `latest` aliases. Use `publish-server-updates-r2.sh` to
+upload that local tree into an empty R2 `server/` prefix so versioned objects
+receive the SHA-256 and cache metadata expected by later idempotent releases.
+Do not pre-populate versioned R2 objects with a generic copy command: the
+publisher correctly refuses an existing immutable object whose SHA-256
+metadata is missing.
+
+Then:
+
+1. Add the four repository secrets above.
+2. Attach `dl.rhythm.lighting` as the R2 bucket's custom domain. Do not use the
+   rate-limited `r2.dev` development URL.
+3. Enable Smart Tiered Cache. The object `Cache-Control` metadata handles the
+   split between immutable payloads and revalidated manifests.
+4. Fetch both public manifests and every URL they reference; compare each
+   downloaded size and SHA-256 with the manifest.
+5. Keep the previous DigitalOcean origin intact until a beta appliance has
+   downloaded, installed, rebooted, and completed probation through the R2
+   domain. Rollback is restoring the previous `dl.rhythm.lighting` DNS/origin.
 
 ## Device state files (rpiz appliance)
 
@@ -165,7 +231,7 @@ references.
 ./tools/os/scripts/release.sh --promote-stable --no-image
 
 # Escape hatch: build + publish the feed locally when GitHub Actions is down.
-./tools/os/scripts/release.sh --upload            # uses .env RHYTHM_UPDATES_* creds
+./tools/os/scripts/release.sh --upload            # uses local CLOUDFLARE_* R2 credentials
 
 # Factory/manual image build without the tag pipeline:
 gh workflow run rpiz-sd-image.yml -f tag=vX.Y.Z-beta -f image_mode=auto \
