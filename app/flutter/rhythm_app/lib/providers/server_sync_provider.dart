@@ -1762,7 +1762,6 @@ class ServerSyncProvider extends ChangeNotifier {
     required RoomProvider roomProvider,
     required HomeProvider homeProvider,
     @visibleForTesting ServerEndpointReachability? endpointReachability,
-    @visibleForTesting
     Future<List<ConnectivityResult>> Function()? connectivityCheck,
     @visibleForTesting ServerAuthApiFactory? authApiFactory,
     @visibleForTesting
@@ -1837,7 +1836,11 @@ class ServerSyncProvider extends ChangeNotifier {
 
   void _scheduleRoomReadinessGraceExpiryIfNeeded() {
     final signature = _blockingAutomaticHubStartupSignature;
-    if (signature == null || HueServiceLocator.isDemoMode) {
+    // Once hello already contains usable rooms, integration recovery is no
+    // longer a presentation gate and does not need an eight-second timer.
+    if (_helloRooms.isNotEmpty ||
+        signature == null ||
+        HueServiceLocator.isDemoMode) {
       _roomReadinessGraceTimer?.cancel();
       _roomReadinessGraceTimer = null;
       _automaticHubStartupGraceActive = false;
@@ -1953,12 +1956,12 @@ class ServerSyncProvider extends ChangeNotifier {
     bool assumeLanReachable = false,
     bool assumeSavedAuth = false,
   }) async {
-    var targetHub = hub;
-    if (FeatureFlags.remoteAccessTunnel) {
-      targetHub = await _homeProvider.refreshServerHubEndpoints(hub);
-      if (!_sameServerHubIdentity(_serverHub, hub)) return;
-      _serverHub = targetHub;
-    }
+    // Saved endpoints are the fastest usable candidates. Refreshing the same
+    // hub through Supabase before every connection adds two cloud reads and
+    // prevents an otherwise reachable LAN/tunnel endpoint from starting. The
+    // existing disconnect/failover path refreshes endpoint metadata when a
+    // saved candidate actually fails.
+    final targetHub = hub;
 
     if (clearTransientState) {
       _roomProvider.clearTransientState();
@@ -2166,6 +2169,19 @@ class ServerSyncProvider extends ChangeNotifier {
       return hub.endpoint;
     }
 
+    if (await _isCellularOnly()) {
+      if (authToken?.trim().isEmpty != false) {
+        debugPrint(
+          'ServerSync: Cellular connection requires a saved owner token for remote access',
+        );
+        return null;
+      }
+      debugPrint(
+        'ServerSync: Cellular connection detected, skipping LAN probe and using ${remote.host}:${remote.port}',
+      );
+      return remote;
+    }
+
     if (await _canReachEndpoint(hub.endpoint, authToken)) {
       return hub.endpoint;
     }
@@ -2183,6 +2199,21 @@ class ServerSyncProvider extends ChangeNotifier {
       'unreachable, falling back to ${remote.host}:${remote.port}',
     );
     return remote;
+  }
+
+  Future<bool> _isCellularOnly() async {
+    final connectivityCheck = _connectivityCheck;
+    if (connectivityCheck == null) return false;
+    try {
+      final results =
+          await connectivityCheck().timeout(_homeEntryConnectivityTimeout);
+      final hasLan = results.contains(ConnectivityResult.wifi) ||
+          results.contains(ConnectivityResult.ethernet);
+      return !hasLan && results.contains(ConnectivityResult.mobile);
+    } catch (_) {
+      // Unknown connectivity still gets the bounded LAN reachability probe.
+      return false;
+    }
   }
 
   Future<bool> _canReachEndpoint(
@@ -3145,7 +3176,9 @@ class ServerSyncProvider extends ChangeNotifier {
 
     final hub = _serverHub;
     final activeEndpoint = _activeConnectionEndpoint;
-    if (hub == null || !_sameEndpoint(activeEndpoint, hub.endpoint)) {
+    final activeIsLan = _sameEndpoint(activeEndpoint, hub?.endpoint);
+    final activeIsRemote = _sameEndpoint(activeEndpoint, hub?.remoteEndpoint);
+    if (hub == null || (!activeIsLan && !activeIsRemote)) {
       return;
     }
 
@@ -3161,23 +3194,26 @@ class ServerSyncProvider extends ChangeNotifier {
         final failoverHub = await _homeProvider.refreshServerHubEndpoints(hub);
         final currentHub = _serverHub;
         if (!_sameServerHubIdentity(currentHub, hub) ||
-            !_sameEndpoint(_activeConnectionEndpoint, hub.endpoint)) {
+            !_sameEndpoint(_activeConnectionEndpoint, activeEndpoint)) {
           return;
         }
 
         final remote = failoverHub.remoteEndpoint;
-        if (remote == null) return;
+        if (remote == null ||
+            (activeIsRemote && _sameEndpoint(remote, activeEndpoint))) {
+          return;
+        }
 
         final token = failoverHub.token?.trim();
         if (token == null || token.isEmpty) {
           debugPrint(
-            'ServerSync: LAN endpoint lost but remote access has no saved owner token',
+            'ServerSync: Connection target lost but remote access has no saved owner token',
           );
           return;
         }
 
         debugPrint(
-          'ServerSync: LAN endpoint ${hub.endpoint.host}:${hub.endpoint.port} '
+          'ServerSync: Saved endpoint ${activeEndpoint?.host}:${activeEndpoint?.port} '
           'lost, reconnecting through ${remote.host}:${remote.port}',
         );
         _serverHub = failoverHub;

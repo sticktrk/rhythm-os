@@ -45,7 +45,6 @@ class SupabaseAuthBackend implements AuthBackend {
       anonKey: supabaseAnonKey,
     );
     _client = Supabase.instance.client;
-    await _initializeGoogleSignIn();
 
     // Set up auth state stream
     _authStateController = StreamController<AuthUser?>.broadcast();
@@ -366,6 +365,10 @@ class SupabaseAuthBackend implements AuthBackend {
   /// Native sign-in flow for iOS/Android using google_sign_in package.
   Future<GoogleSignInResult> _signInWithGoogleNative() async {
     try {
+      // Native Google setup is only needed when the user chooses this sign-in
+      // method; it must not delay every recovered-session app launch.
+      await _initializeGoogleSignIn();
+
       // Use google_sign_in v7 API
       final GoogleSignInAccount googleUser;
       try {

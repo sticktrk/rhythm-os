@@ -138,6 +138,7 @@ class RecentServersService extends ChangeNotifier {
       }
     }
     _initialized = true;
+    notifyListeners();
   }
 
   /// Record a successful connection. Upserts by `host:port`, bumps the

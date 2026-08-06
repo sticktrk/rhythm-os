@@ -129,7 +129,9 @@ class AppStateRefresh {
         );
         // Recalculate solarNoonHour from the real coordinates
         try {
-          await api.getCurveData();
+          await api.getCurveData(
+            overrides: home?.curveConfig ?? defaultCurveConfig,
+          );
         } catch (_) {}
         debugPrint(
             'AppStateRefresh: Synced location lat=${loc.latitude} lon=${loc.longitude} '

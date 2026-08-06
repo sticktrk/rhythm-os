@@ -15,6 +15,9 @@ class AnalyticsService {
   AnalyticsService._internal();
 
   bool _initialized = false;
+  String? _pendingUserId;
+  final List<({String name, Map<String, Object> properties})>
+      _pendingStartupEvents = [];
 
   /// Whether analytics is ready to use.
   bool get isInitialized => _initialized;
@@ -22,6 +25,8 @@ class AnalyticsService {
   @visibleForTesting
   void resetForTesting() {
     _initialized = false;
+    _pendingUserId = null;
+    _pendingStartupEvents.clear();
   }
 
   AnalyticsBackend? get _analytics {
@@ -40,6 +45,16 @@ class AnalyticsService {
           BackendProvider.instance.analytics.isInitialized;
       if (_initialized) {
         debugPrint('AnalyticsService: initialized');
+        final pendingUserId = _pendingUserId;
+        _pendingUserId = null;
+        if (pendingUserId != null) {
+          await identifyUser(pendingUserId);
+        }
+        final pendingEvents = List.of(_pendingStartupEvents);
+        _pendingStartupEvents.clear();
+        for (final event in pendingEvents) {
+          await logEvent(event.name, event.properties);
+        }
       }
     } catch (e) {
       debugPrint('AnalyticsService: initialization failed: $e');
@@ -77,7 +92,10 @@ class AnalyticsService {
   /// Call this at every auth state transition (sign-in, session recovery,
   /// anonymous user creation) to link PostHog events to the Supabase user ID.
   Future<void> identifyUser(String userId) async {
-    if (!_initialized || _analytics == null) return;
+    if (!_initialized || _analytics == null) {
+      _pendingUserId = userId;
+      return;
+    }
 
     try {
       await _analytics!.setUserId(userId);
@@ -91,6 +109,7 @@ class AnalyticsService {
   /// Generates a new anonymous distinct_id in PostHog so subsequent
   /// events are not attributed to the deleted account.
   Future<void> resetUser() async {
+    _pendingUserId = null;
     if (!_initialized || _analytics == null) return;
 
     try {
@@ -109,6 +128,45 @@ class AnalyticsService {
     } catch (e) {
       debugPrint('Analytics error: $e');
     }
+  }
+
+  /// Record the first frame containing the All Rooms grid.
+  Future<void> logStartupAllRoomsVisible({
+    required int elapsedMs,
+    required bool fromCache,
+    required String roomCountBucket,
+  }) async {
+    await _logOrQueueStartupEvent('app_startup_all_rooms_visible', {
+      'elapsed_ms': elapsedMs,
+      'from_cache': fromCache ? 1 : 0,
+      'room_count_bucket': roomCountBucket,
+      'presentation_state': fromCache ? 'cached_read_only' : 'authoritative',
+    });
+  }
+
+  /// Record when the authoritative All Rooms grid first accepts controls.
+  Future<void> logStartupAllRoomsInteractive({
+    required int elapsedMs,
+    required bool showedCachedRooms,
+    required String roomCountBucket,
+  }) async {
+    await _logOrQueueStartupEvent('app_startup_all_rooms_interactive', {
+      'elapsed_ms': elapsedMs,
+      'showed_cached_rooms': showedCachedRooms ? 1 : 0,
+      'room_count_bucket': roomCountBucket,
+      'presentation_state': 'authoritative_interactive',
+    });
+  }
+
+  Future<void> _logOrQueueStartupEvent(
+    String name,
+    Map<String, Object> properties,
+  ) async {
+    if (!_initialized || _analytics == null) {
+      _pendingStartupEvents.add((name: name, properties: properties));
+      return;
+    }
+    await logEvent(name, properties);
   }
 
   // ===========================================================================

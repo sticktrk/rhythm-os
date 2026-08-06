@@ -505,6 +505,34 @@ void main() {
     expect(find.text('Do you have\na LightBox?'), findsOneWidget);
   });
 
+  testWidgets('startup curve load does not issue a config-state request',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    final homeProvider = _FakeHomeProvider(const []);
+    final connection = _TestRhythmConnection();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    final api = MockRhythmApi();
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await _pumpAppShell(
+      tester,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+      serverSync: serverSync,
+      api: api,
+    );
+
+    expect(api.getConfigStateCallCount, 0);
+    expect(api.getCurveDataCallCount, 1);
+  });
+
   testWidgets(
       'shows Setting up during the first server connection with no rooms',
       (tester) async {
@@ -581,7 +609,7 @@ void main() {
     expect(find.text('Welcome to Rhythm'), findsOneWidget);
   });
 
-  testWidgets('scheduled BLE startup cannot leave the home UI stuck setting up',
+  testWidgets('scheduled BLE startup keeps existing hello rooms available',
       (tester) async {
     final roomProvider = RoomProvider();
     final homeProvider = _FakeHomeProvider([_serverHub()]);
@@ -647,13 +675,9 @@ void main() {
     connection.emitHello(scheduledBleHello);
     await tester.pump(const Duration(milliseconds: 10));
 
-    expect(find.text('Setting up...'), findsOneWidget);
-    expect(find.text('Kitchen'), findsNothing);
-
-    await tester.pump(const Duration(seconds: 8));
-
     expect(find.text('Setting up...'), findsNothing);
     expect(find.text('Kitchen'), findsOneWidget);
+    expect(find.byKey(const Key('all_rooms_read_only')), findsNothing);
 
     connection.emitHello(scheduledBleHello);
     await tester.pump(const Duration(milliseconds: 10));
@@ -1129,7 +1153,7 @@ void main() {
     expect(find.text('What went wrong? (optional)'), findsOneWidget);
   });
 
-  testWidgets('app resume refresh gates cached rooms until fresh hello',
+  testWidgets('app resume shows cached rooms read-only until fresh hello',
       (tester) async {
     final roomProvider = RoomProvider();
     await _seedRoom(roomProvider);
@@ -1187,9 +1211,15 @@ void main() {
     expect(connection.lastReconnectAuthoritative, isTrue);
     expect(find.text('Waiting to Retry...'), findsNothing);
     expect(find.byType(ServerDisconnectedScreen), findsNothing);
-    expect(find.text('Setting up...'), findsOneWidget);
+    expect(find.text('Setting up...'), findsNothing);
     expect(find.text('AUTOMATIC LIGHTING OFF'), findsNothing);
-    expect(find.text('Kitchen'), findsNothing);
+    expect(find.text('Kitchen'), findsOneWidget);
+    final readOnly = tester.widget<AbsorbPointer>(
+      find.byKey(const Key('all_rooms_read_only')),
+    );
+    expect(readOnly.absorbing, isTrue);
+    expect(
+        find.byKey(const Key('all_rooms_connecting_banner')), findsOneWidget);
 
     _emitSyncedHello(
       connection,
@@ -1201,10 +1231,11 @@ void main() {
     expect(find.text('Setting up...'), findsNothing);
     expect(find.text('AUTOMATIC LIGHTING OFF'), findsOneWidget);
     expect(find.text('Kitchen'), findsOneWidget);
+    expect(find.byKey(const Key('all_rooms_read_only')), findsNothing);
   });
 
   testWidgets(
-      'shows setup loading while a server with cached rooms is still connecting',
+      'shows cached rooms read-only while the server is still connecting',
       (tester) async {
     final roomProvider = RoomProvider();
     await _seedRoom(roomProvider);
@@ -1229,8 +1260,14 @@ void main() {
       serverSync: serverSync,
     );
 
-    expect(find.text('Setting up...'), findsOneWidget);
-    expect(find.text('Kitchen'), findsNothing);
+    expect(find.text('Setting up...'), findsNothing);
+    expect(find.text('Kitchen'), findsOneWidget);
+    final readOnly = tester.widget<AbsorbPointer>(
+      find.byKey(const Key('all_rooms_read_only')),
+    );
+    expect(readOnly.absorbing, isTrue);
+    expect(
+        find.byKey(const Key('all_rooms_connecting_banner')), findsOneWidget);
   });
 
   testWidgets('shows the room grid when rooms exist without a server hub',

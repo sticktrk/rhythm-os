@@ -25,7 +25,7 @@ import 'config/platform_capabilities.dart';
 import 'main.dart';
 import 'services/account_session_service.dart';
 import 'services/analytics_service.dart';
-import 'services/app_state_refresh.dart';
+import 'services/app_startup_performance.dart';
 import 'services/auth_service.dart';
 import 'services/hue/hue_service_locator.dart';
 import 'services/virtual_experience_service.dart';
@@ -180,37 +180,17 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     try {
       final api = context.read<RhythmApi>();
       final configModel = context.read<ConfigModel>();
-
-      final results = await Future.wait([
-        api.getConfigState(),
-        api.getCurveData(),
-      ]);
+      final curveData = await api.getCurveData(
+        overrides: configModel.config,
+      );
 
       if (mounted) {
-        final configState = results[0] as ConfigState;
-        final curveData = results[1] as CurveData;
-
-        configModel.updateFromConfigState(configState);
-
         setState(() {
           _curveData = curveData;
         });
       }
     } catch (e) {
-      debugPrint('AppShell: Config/curve load failed: $e');
-    }
-
-    // Sync rooms from cloud/hubs — must run even if config load failed
-    // (HA addon has no WASM brain, but still needs to fetch rooms from backend)
-    try {
-      if (mounted) {
-        await AppStateRefresh.sync(context,
-            options: const SyncOptions(
-              rooms: true,
-            ));
-      }
-    } catch (e) {
-      debugPrint('AppShell: Sync failed: $e');
+      debugPrint('AppShell: Initial curve load failed: $e');
     }
   }
 
@@ -860,12 +840,22 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
           }
 
           if (!serverSync.hasBeenSynced || !roomsReady) {
+            if (roomProvider.hasRooms) {
+              return _buildRoomGrid(
+                roomProvider,
+                interactionsEnabled: false,
+                fromCache: true,
+              );
+            }
             return _buildServerConnectingState();
           }
 
           if (state == RhythmConnectionState.connected) {
             if (roomProvider.hasRooms) {
-              return _buildRoomGrid(roomProvider);
+              return _buildRoomGrid(
+                roomProvider,
+                interactionsEnabled: serverSync.canDispatchActions,
+              );
             }
             return HubPickerScreen(
               onChooseHome: () => ConnectHubScreen.show(
@@ -880,7 +870,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
             return _buildServerConnectingState();
           }
 
-          return _buildRoomGrid(roomProvider);
+          return _buildRoomGrid(
+            roomProvider,
+            interactionsEnabled: serverSync.canDispatchActions,
+          );
         }
 
         // No server hub paired.
@@ -897,7 +890,11 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   }
 
   /// The main room constellation grid (Home tab body content).
-  Widget _buildRoomGrid(RoomProvider roomProvider) {
+  Widget _buildRoomGrid(
+    RoomProvider roomProvider, {
+    bool interactionsEnabled = true,
+    bool fromCache = false,
+  }) {
     final serverSync = context.watch<ServerSyncProvider>();
     final enabledRooms = roomProvider.enabledRooms;
     final visibleRooms =
@@ -907,11 +904,20 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       context.read<RoomPageProvider>().reconcileRooms(visibleRooms);
+      AppStartupPerformance.instance.markAllRoomsVisible(
+        fromCache: fromCache,
+        roomCount: visibleRooms.length,
+      );
+      if (interactionsEnabled) {
+        AppStartupPerformance.instance.markAllRoomsInteractive(
+          roomCount: visibleRooms.length,
+        );
+      }
     });
 
     return Consumer<ConfigModel>(
       builder: (context, configModel, _) {
-        return AllRoomsScreen(
+        final allRooms = AllRoomsScreen(
           rooms: visibleRooms,
           globalConfig: configModel.config,
           curveData: _curveData,
@@ -927,6 +933,38 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
             context,
             mode: ConnectHubMode.rhythmServer,
           ),
+        );
+        if (interactionsEnabled) return allRooms;
+
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            AbsorbPointer(
+              key: const Key('all_rooms_read_only'),
+              child: allRooms,
+            ),
+            SafeArea(
+              child: Align(
+                alignment: Alignment.topCenter,
+                child: Container(
+                  key: const Key('all_rooms_connecting_banner'),
+                  margin: const EdgeInsets.only(top: 12),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: CelestialColors.backgroundCard.withValues(
+                      alpha: 0.92,
+                    ),
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: const Text(
+                    'Connecting… controls will be ready shortly',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                ),
+              ),
+            ),
+          ],
         );
       },
     );

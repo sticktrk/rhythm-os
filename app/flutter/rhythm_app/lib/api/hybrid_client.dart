@@ -59,12 +59,11 @@ class HybridApiClient implements RhythmApi {
       // Fall back to remote-only mode
       debugPrint('NativeBrain not available, using remote-only mode: $e');
     }
+    final storedToken = startupServerHub?.token?.trim();
     final authToken = effectiveBaseUrl ==
-            _normalizeBaseUrl(startupServerHub?.endpoint.baseUrl)
-        ? await _resolveStartupAuthToken(
-            effectiveBaseUrl,
-            startupServerHub?.token,
-          )
+                _normalizeBaseUrl(startupServerHub?.endpoint.baseUrl) &&
+            storedToken?.isNotEmpty == true
+        ? storedToken
         : null;
 
     final client = HybridApiClient._(
@@ -93,22 +92,6 @@ class HybridApiClient implements RhythmApi {
     }
 
     return client;
-  }
-
-  static Future<String?> _resolveStartupAuthToken(
-    String? baseUrl,
-    String? storedToken,
-  ) async {
-    if (baseUrl == null) return null;
-    final token = storedToken?.trim();
-    try {
-      final status = await sdk.RhythmAuthApi(baseUrl: baseUrl).getStatus();
-      if (!status.requiresAuth) return null;
-      return token == null || token.isEmpty ? null : token;
-    } catch (error) {
-      debugPrint('HybridApiClient: auth status unavailable: $error');
-      return token == null || token.isEmpty ? null : token;
-    }
   }
 
   /// Create a remote-only client (no local Rust calculations).

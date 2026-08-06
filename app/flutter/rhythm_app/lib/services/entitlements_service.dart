@@ -48,6 +48,25 @@ class EntitlementsService {
     return service;
   }
 
+  /// Create the singleton immediately and resolve its tier in the background.
+  ///
+  /// This is safe when entitlement enforcement is disabled because [has]
+  /// bypasses the tier entirely. Call [bootstrap] when the initial tier is a
+  /// functional prerequisite.
+  static EntitlementsService start(PlatformCapabilities capabilities) {
+    final existing = _instance;
+    if (existing != null) return existing;
+    final service = EntitlementsService._(capabilities);
+    _instance = service;
+    unawaited(
+      service._initialize().catchError((Object error, StackTrace stackTrace) {
+        debugPrint('EntitlementsService: background bootstrap failed: $error');
+        debugPrint('$stackTrace');
+      }),
+    );
+    return service;
+  }
+
   final PlatformCapabilities _capabilities;
   final StreamController<PlanTier> _controller =
       StreamController<PlanTier>.broadcast();
@@ -77,6 +96,7 @@ class EntitlementsService {
     if (!FeatureFlags.entitlementsEnabled) return true;
     return _currentTier.grants(e);
   }
+
   Stream<PlanTier> get tierChanges => _controller.stream;
 
   Future<void> _initialize() async {

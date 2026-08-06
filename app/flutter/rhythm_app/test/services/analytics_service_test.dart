@@ -211,6 +211,54 @@ void main() {
     );
   });
 
+  test('startup milestones queue until the analytics backend is ready',
+      () async {
+    analytics.resetForTesting();
+    backend.dispose();
+
+    await analytics.logStartupAllRoomsVisible(
+      elapsedMs: 120,
+      fromCache: true,
+      roomCountBucket: '2_4',
+    );
+    await analytics.logStartupAllRoomsInteractive(
+      elapsedMs: 340,
+      showedCachedRooms: true,
+      roomCountBucket: '2_4',
+    );
+
+    expect(backend.events, isEmpty);
+
+    await backend.initialize();
+    await analytics.initialize();
+
+    expect(
+      backend.events.map((event) => event.name),
+      [
+        'app_startup_all_rooms_visible',
+        'app_startup_all_rooms_interactive',
+      ],
+    );
+    expect(backend.events.first.properties, {
+      'elapsed_ms': 120,
+      'from_cache': 1,
+      'room_count_bucket': '2_4',
+      'presentation_state': 'cached_read_only',
+    });
+    final serialized = backend.events
+        .map((event) => '${event.name}:${event.properties}')
+        .join('\n');
+    for (final forbidden in [
+      'room_name',
+      'home_name',
+      'hub_id',
+      'endpoint',
+      'token',
+    ]) {
+      expect(serialized, isNot(contains(forbidden)));
+    }
+  });
+
   test('analytics remains a no-op when the backend is unavailable', () async {
     BackendProvider.resetForTesting();
 

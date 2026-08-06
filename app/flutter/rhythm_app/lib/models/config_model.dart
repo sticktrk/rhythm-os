@@ -68,6 +68,18 @@ class ConfigModel extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Accept a cached or server-reconciled Home config as the saved baseline.
+  ///
+  /// Provider reconciliation can run again while an editor has local changes;
+  /// in that case, preserve the in-progress edit until it is saved or reset.
+  void updateFromHomeCurveConfig(CurveConfigDto config) {
+    if (_savedConfig != null && _config != _savedConfig) return;
+    _config = config;
+    _syncRawConfigFromDto(config);
+    _savedConfig = config;
+    notifyListeners();
+  }
+
   /// Update config DTO directly (for live preview during edits).
   /// Also syncs changes to rawConfig.
   void updateConfig(CurveConfigDto config) {

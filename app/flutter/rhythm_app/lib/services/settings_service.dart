@@ -504,6 +504,7 @@ class SettingsService {
 
   /// Mark onboarding as complete.
   Future<void> setOnboardingComplete(bool value) async {
+    if (_settings.onboardingComplete == value) return;
     _settings = _settings.copyWith(onboardingComplete: value);
     await _save();
   }
