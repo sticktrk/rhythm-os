@@ -22,6 +22,7 @@ import 'services/auth_service.dart';
 import 'services/analytics_service.dart';
 import 'services/app_log_service.dart';
 import 'services/entitlements_service.dart';
+import 'services/cloud_backup_service.dart';
 import 'services/recent_servers_service.dart';
 import 'services/settings_service.dart';
 import 'services/app_state_refresh.dart';
@@ -350,6 +351,15 @@ class RhythmApp extends StatelessWidget {
           create: (_) => RoomPageProvider(),
           update: (_, homeProvider, roomPageProvider) {
             roomPageProvider ??= RoomPageProvider();
+            roomPageProvider.configureUserLayoutChanged((scopeKey) {
+              final serverHub = homeProvider.getFirstHubOfType(HubType.server);
+              if (serverHub == null) return;
+              CloudBackupService.instance.scheduleAppSettingsSync(
+                serverHub: serverHub,
+                home: homeProvider.currentHome,
+                roomLayoutScopeKey: scopeKey,
+              );
+            });
             roomPageProvider.setLayoutScope(
               RoomPageProvider.layoutScopeFor(
                 home: homeProvider.currentHome,

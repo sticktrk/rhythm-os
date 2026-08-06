@@ -9,6 +9,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../backend/backend.dart';
 import '../providers/room_page_provider.dart';
 import 'account_cloud_sync_service.dart';
+import 'analytics_service.dart';
 import 'auth_service.dart';
 import 'server_endpoint_resolver.dart';
 import 'settings_service.dart';
@@ -121,6 +122,10 @@ class CloudBackupService {
   final Map<String, Future<CloudBackupSnapshot>> _capturesInFlight =
       <String, Future<CloudBackupSnapshot>>{};
   final Set<String> _capturesQueued = <String>{};
+  final Map<String, Timer> _appSettingsSyncTimers = <String, Timer>{};
+  final Map<String, Future<void>> _appSettingsSyncTails =
+      <String, Future<void>>{};
+  final Map<String, int> _appSettingsSyncGenerations = <String, int>{};
 
   String? get _currentUserId => AuthService().currentUserId;
 
@@ -161,6 +166,81 @@ class CloudBackupService {
           reason: reason,
         ),
       );
+    });
+  }
+
+  /// Debounce a user-authored All Rooms layout into the signed-in account's
+  /// existing app-settings bundle without fetching an appliance backup.
+  void scheduleAppSettingsSync({
+    required Hub serverHub,
+    required String? roomLayoutScopeKey,
+    Home? home,
+    Duration delay = const Duration(milliseconds: 600),
+    String reason = 'room_layout_changed',
+  }) {
+    final userId = _currentUserId;
+    if (!canUseCloudBackups ||
+        userId == null ||
+        serverHub.type != HubType.server) {
+      return;
+    }
+
+    final opKey = '$userId:${RoomPageProvider.hubLayoutKey(serverHub)}';
+    final generation = (_appSettingsSyncGenerations[opKey] ?? 0) + 1;
+    _appSettingsSyncGenerations[opKey] = generation;
+    unawaited(
+      _markLayoutDirtyAndSchedule(
+        opKey: opKey,
+        generation: generation,
+        userId: userId,
+        serverHub: serverHub,
+        home: home,
+        roomLayoutScopeKey: roomLayoutScopeKey,
+        delay: delay,
+        reason: reason,
+      ),
+    );
+  }
+
+  Future<void> _markLayoutDirtyAndSchedule({
+    required String opKey,
+    required int generation,
+    required String userId,
+    required Hub serverHub,
+    required Home? home,
+    required String? roomLayoutScopeKey,
+    required Duration delay,
+    required String reason,
+  }) async {
+    await SettingsService.instance.setRoomPageLayoutCloudDirty(
+      userId: userId,
+      scopeKey: roomLayoutScopeKey,
+      dirty: true,
+    );
+    if (_appSettingsSyncGenerations[opKey] != generation) return;
+
+    _appSettingsSyncTimers.remove(opKey)?.cancel();
+    _appSettingsSyncTimers[opKey] = Timer(delay, () {
+      _appSettingsSyncTimers.remove(opKey);
+      final previous = _appSettingsSyncTails[opKey] ?? Future<void>.value();
+      final next = previous.then((_) async {
+        await _syncAppSettingsSilently(
+          opKey: opKey,
+          generation: generation,
+          expectedUserId: userId,
+          serverHub: serverHub,
+          home: home,
+          roomLayoutScopeKey: roomLayoutScopeKey,
+          reason: reason,
+        );
+      });
+      late final Future<void> tail;
+      tail = next.whenComplete(() {
+        if (identical(_appSettingsSyncTails[opKey], tail)) {
+          _appSettingsSyncTails.remove(opKey);
+        }
+      });
+      _appSettingsSyncTails[opKey] = tail;
     });
   }
 
@@ -236,6 +316,155 @@ class CloudBackupService {
     return CloudBackupSnapshot.fromRow(row);
   }
 
+  Future<void> _syncAppSettingsSilently({
+    required String opKey,
+    required int generation,
+    required String expectedUserId,
+    required Hub serverHub,
+    required Home? home,
+    required String? roomLayoutScopeKey,
+    required String reason,
+  }) async {
+    if (_currentUserId != expectedUserId) return;
+    var outcome = 'failed';
+    try {
+      final synced = await _syncAppSettingsNow(
+        expectedUserId: expectedUserId,
+        serverHub: serverHub,
+        home: home,
+        roomLayoutScopeKey: roomLayoutScopeKey,
+        reason: reason,
+      );
+      if (!synced) return;
+      outcome = 'succeeded';
+      if (_appSettingsSyncGenerations[opKey] == generation) {
+        await SettingsService.instance.setRoomPageLayoutCloudDirty(
+          userId: expectedUserId,
+          scopeKey: roomLayoutScopeKey,
+          dirty: false,
+        );
+      }
+    } catch (error, stackTrace) {
+      debugPrint('CloudBackupService: app settings sync failed: $error');
+      debugPrint('$stackTrace');
+    } finally {
+      final pages = SettingsService.instance.getRoomPageLayout(
+            scopeKey: roomLayoutScopeKey,
+          ) ??
+          const <List<String>>[];
+      unawaited(
+        AnalyticsService().logRoomLayoutCloudSyncCompleted(
+          direction: 'upload',
+          outcome: outcome,
+          pageCount: pages.length,
+          roomCount: pages.expand((page) => page).toSet().length,
+        ),
+      );
+    }
+  }
+
+  Future<bool> _syncAppSettingsNow({
+    required String expectedUserId,
+    required Hub serverHub,
+    required Home? home,
+    required String? roomLayoutScopeKey,
+    required String reason,
+  }) async {
+    final client = _client;
+    if (!canUseCloudBackups ||
+        client == null ||
+        _currentUserId != expectedUserId) {
+      return false;
+    }
+
+    final localBundle = SettingsService.instance.buildCloudSettingsBundle(
+      roomLayoutScopeKey: roomLayoutScopeKey,
+      roomLayoutHubKey: RoomPageProvider.hubLayoutKey(serverHub),
+      roomLayoutHubKeyAliases: RoomPageProvider.hubLayoutKeyAliases(serverHub),
+    );
+    if (localBundle['all_rooms_layouts'] == null) return false;
+
+    var row = await client
+        .from(tableName)
+        .select('app_settings_bundle')
+        .eq('user_id', expectedUserId)
+        .maybeSingle();
+    if (row == null) {
+      // A snapshot row has required appliance-backup metadata. Let the normal
+      // capture path create it rather than fabricating an empty backup record.
+      await captureNow(
+        serverHub: serverHub,
+        home: home,
+        reason: '${reason}_initial_snapshot',
+      );
+      if (_currentUserId != expectedUserId) return false;
+      // A capture already in flight may have built its settings bundle before
+      // this edit. Read the created row and apply the exact debounced layout
+      // before considering the dirty marker delivered.
+      row = await client
+          .from(tableName)
+          .select('app_settings_bundle')
+          .eq('user_id', expectedUserId)
+          .maybeSingle();
+      if (row == null) return false;
+    }
+
+    final existingRaw = row['app_settings_bundle'];
+    final existing = existingRaw is Map
+        ? Map<String, dynamic>.from(existingRaw)
+        : const <String, dynamic>{};
+    final merged = mergeAppSettingsBundles(existing, localBundle);
+    await client
+        .from(tableName)
+        .update({'app_settings_bundle': merged}).eq('user_id', expectedUserId);
+    debugPrint(
+      'CloudBackupService: synced account All Rooms layout reason=$reason',
+    );
+    return true;
+  }
+
+  @visibleForTesting
+  static Map<String, dynamic> mergeAppSettingsBundles(
+    Map<String, dynamic> existing,
+    Map<String, dynamic> replacement,
+  ) {
+    final merged = Map<String, dynamic>.from(existing);
+    merged['schema_version'] =
+        replacement['schema_version'] ?? existing['schema_version'] ?? 1;
+
+    final replacementLayouts = _layoutMaps(replacement['all_rooms_layouts']);
+    if (replacementLayouts.isEmpty) return merged;
+    final replacementKeys =
+        replacementLayouts.expand(_layoutIdentityKeys).toSet();
+    final retained = _layoutMaps(existing['all_rooms_layouts'])
+        .where(
+          (layout) => _layoutIdentityKeys(layout)
+              .toSet()
+              .intersection(replacementKeys)
+              .isEmpty,
+        )
+        .toList(growable: true);
+    retained.addAll(replacementLayouts);
+    merged['all_rooms_layouts'] = retained;
+    return merged;
+  }
+
+  static List<Map<String, dynamic>> _layoutMaps(Object? value) {
+    if (value is! List) return <Map<String, dynamic>>[];
+    return value
+        .whereType<Map>()
+        .map((layout) => Map<String, dynamic>.from(layout))
+        .toList(growable: false);
+  }
+
+  static Iterable<String> _layoutIdentityKeys(
+      Map<String, dynamic> layout) sync* {
+    final primary = layout['hub_key'];
+    if (primary is String && primary.isNotEmpty) yield primary;
+    final aliases = layout['hub_key_aliases'];
+    if (aliases is List) yield* aliases.whereType<String>();
+  }
+
   @visibleForTesting
   static CloudBackupSnapshot buildSnapshot({
     required String userId,
@@ -270,6 +499,12 @@ class CloudBackupService {
     _captureTimers.clear();
     _capturesInFlight.clear();
     _capturesQueued.clear();
+    for (final timer in _appSettingsSyncTimers.values) {
+      timer.cancel();
+    }
+    _appSettingsSyncTimers.clear();
+    _appSettingsSyncTails.clear();
+    _appSettingsSyncGenerations.clear();
   }
 
   String _operationKey(Hub serverHub) {
@@ -366,10 +601,8 @@ class CloudBackupService {
     final bundle = SettingsService.instance.buildCloudSettingsBundle(
       roomLayoutScopeKey: roomLayoutScopeKey,
       roomLayoutHubKey: RoomPageProvider.hubLayoutKey(serverHub),
+      roomLayoutHubKeyAliases: RoomPageProvider.hubLayoutKeyAliases(serverHub),
     );
-    if (bundle['all_rooms_layouts'] != null) {
-      return bundle;
-    }
 
     try {
       final row = await client
@@ -379,7 +612,10 @@ class CloudBackupService {
           .maybeSingle();
       final existingBundle = row?['app_settings_bundle'];
       if (existingBundle is Map) {
-        return Map<String, dynamic>.from(existingBundle);
+        final existing = Map<String, dynamic>.from(existingBundle);
+        return bundle['all_rooms_layouts'] == null
+            ? existing
+            : mergeAppSettingsBundles(existing, bundle);
       }
     } catch (error) {
       debugPrint(

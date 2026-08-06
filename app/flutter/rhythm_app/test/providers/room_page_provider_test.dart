@@ -61,6 +61,36 @@ void main() {
       );
     });
 
+    test('uses durable server identity for account-cloud layout matching', () {
+      final first = Hub.server(
+        id: 'server-1',
+        homeId: 'home-1',
+        name: 'RhythmServer',
+        host: '10.0.0.15',
+        port: 54448,
+        serverInstanceId: 'BOX-INSTANCE-1',
+      );
+      final second = Hub.create(
+        id: 'server-2',
+        homeId: 'home-2',
+        type: HubType.server,
+        name: 'RhythmServer',
+        endpoint: const HubEndpoint(
+          host: 'remote.rhythm.test',
+          port: 443,
+          useSsl: true,
+        ),
+        serverInstanceId: 'box-instance-1',
+      );
+
+      expect(RoomPageProvider.hubLayoutKey(first),
+          RoomPageProvider.hubLayoutKey(second));
+      expect(
+        RoomPageProvider.hubLayoutKeyAliases(first),
+        ['server:10.0.0.15:54448:plain'],
+      );
+    });
+
     test('keys direct layouts by enabled hub set regardless of order', () {
       final home = Home.create(id: 'home-1', name: 'Home', ownerId: 'user-1');
       final hue = Hub.hue(
@@ -165,6 +195,24 @@ void main() {
       expect(store.scopedLayouts['scope-b'], [
         ['room-b']
       ]);
+    });
+
+    test('only user-authored layout moves request account sync', () {
+      final changes = <String?>[];
+      final provider = RoomPageProvider(
+        layoutStore: _FakeRoomPageLayoutStore(),
+        onUserLayoutChanged: changes.add,
+      );
+      provider.setLayoutScope('scope-a');
+
+      provider.reconcileRooms([_room('room-a'), _room('room-b')]);
+      expect(changes, isEmpty);
+
+      provider.moveRoom('room-b', 1);
+      expect(changes, ['scope-a']);
+
+      provider.reorderInPage('room-a', 0, 0);
+      expect(changes, ['scope-a']);
     });
   });
 }

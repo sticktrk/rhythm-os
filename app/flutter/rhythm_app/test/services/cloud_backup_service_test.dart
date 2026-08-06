@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/services/cloud_backed_server_api.dart';
 import 'package:rhythm_app/services/cloud_backup_service.dart';
+import 'package:rhythm_app/services/settings_service.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
@@ -120,6 +121,81 @@ void main() {
           ],
         },
       );
+    });
+
+    test('layout-only sync replaces the same hub and preserves other hubs', () {
+      final merged = CloudBackupService.mergeAppSettingsBundles(
+        const <String, dynamic>{
+          'schema_version': 1,
+          'future_setting': true,
+          'all_rooms_layouts': [
+            {
+              'hub_key': 'server:other:54448:plain',
+              'pages': [
+                ['other-room'],
+              ],
+            },
+            {
+              'hub_key': 'server:10.0.0.15:54448:plain',
+              'pages': [
+                ['old-room'],
+              ],
+            },
+          ],
+        },
+        const <String, dynamic>{
+          'schema_version': 1,
+          'all_rooms_layouts': [
+            {
+              'hub_key': 'server_instance:box-instance-1',
+              'hub_key_aliases': ['server:10.0.0.15:54448:plain'],
+              'pages': [
+                ['kitchen'],
+                ['bedroom'],
+              ],
+            },
+          ],
+        },
+      );
+
+      expect(merged['future_setting'], isTrue);
+      expect(merged['all_rooms_layouts'], [
+        {
+          'hub_key': 'server:other:54448:plain',
+          'pages': [
+            ['other-room'],
+          ],
+        },
+        {
+          'hub_key': 'server_instance:box-instance-1',
+          'hub_key_aliases': ['server:10.0.0.15:54448:plain'],
+          'pages': [
+            ['kitchen'],
+            ['bedroom'],
+          ],
+        },
+      ]);
+    });
+
+    test('cloud layout aliases bridge durable and legacy endpoint identity',
+        () {
+      const layout = <String, dynamic>{
+        'hub_key': 'server_instance:box-instance-1',
+        'hub_key_aliases': ['server:10.0.0.15:54448:plain'],
+        'pages': [
+          ['kitchen'],
+          ['bedroom'],
+        ],
+      };
+      final selected = SettingsService.findCloudRoomLayoutForTesting(
+        const <String, dynamic>{
+          'schema_version': 1,
+          'all_rooms_layouts': [layout],
+        },
+        roomLayoutHubKey: 'server:10.0.0.15:54448:plain',
+      );
+
+      expect(selected, layout);
     });
   });
 

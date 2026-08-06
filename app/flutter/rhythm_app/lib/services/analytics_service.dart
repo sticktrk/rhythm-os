@@ -435,6 +435,29 @@ class AnalyticsService {
     });
   }
 
+  /// Track the terminal account-roaming outcome without layout contents or
+  /// account/home/hub identifiers.
+  Future<void> logRoomLayoutCloudSyncCompleted({
+    required String direction,
+    required String outcome,
+    required int pageCount,
+    required int roomCount,
+  }) async {
+    await logEvent('room_layout_cloud_sync_completed', {
+      'direction': direction,
+      'outcome': outcome,
+      'page_count_bucket': _layoutCountBucket(pageCount),
+      'room_count_bucket': _layoutCountBucket(roomCount),
+    });
+  }
+
+  String _layoutCountBucket(int count) {
+    if (count <= 0) return '0';
+    if (count == 1) return '1';
+    if (count <= 4) return '2_4';
+    return '5_plus';
+  }
+
   // ===========================================================================
   // Curve Editing Events (Lower Priority)
   // ===========================================================================

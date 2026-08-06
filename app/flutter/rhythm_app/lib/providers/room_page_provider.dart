@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import '../services/server_identity.dart';
 import '../services/settings_service.dart';
 
 /// Manages room-to-page assignments and ordering for multi-screen room layout.
@@ -51,6 +52,7 @@ class SettingsRoomPageLayoutStore implements RoomPageLayoutStore {
 
 class RoomPageProvider extends ChangeNotifier {
   final RoomPageLayoutStore _layoutStore;
+  void Function(String? scopeKey)? _onUserLayoutChanged;
 
   /// Ordered room IDs per page. Index = page number.
   List<List<String>> _pages = [];
@@ -61,8 +63,11 @@ class RoomPageProvider extends ChangeNotifier {
   bool _pausePersistenceUntilRoomSetChanges = false;
   String? _roomSignatureAtScopeChange;
 
-  RoomPageProvider({RoomPageLayoutStore? layoutStore})
-      : _layoutStore = layoutStore ??
+  RoomPageProvider({
+    RoomPageLayoutStore? layoutStore,
+    void Function(String? scopeKey)? onUserLayoutChanged,
+  })  : _onUserLayoutChanged = onUserLayoutChanged,
+        _layoutStore = layoutStore ??
             SettingsRoomPageLayoutStore(SettingsService.instance);
 
   /// Whether edit mode (wiggle + drag) is active.
@@ -70,6 +75,12 @@ class RoomPageProvider extends ChangeNotifier {
 
   /// Active layout scope key.
   String? get scopeKey => _scopeKey;
+
+  void configureUserLayoutChanged(
+    void Function(String? scopeKey)? onUserLayoutChanged,
+  ) {
+    _onUserLayoutChanged = onUserLayoutChanged;
+  }
 
   /// Load saved page layout from persistent storage.
   void initialize({String? scopeKey}) {
@@ -92,11 +103,11 @@ class RoomPageProvider extends ChangeNotifier {
     final serverHub =
         enabledHubs.where((hub) => hub.type == HubType.server).firstOrNull;
     if (serverHub != null) {
-      return 'server:${hubLayoutKey(serverHub)}';
+      return 'server:${_hubFingerprint(serverHub)}';
     }
 
     if (enabledHubs.isNotEmpty) {
-      final fingerprints = enabledHubs.map(hubLayoutKey).toList()..sort();
+      final fingerprints = enabledHubs.map(_hubFingerprint).toList()..sort();
       return 'hubs:${fingerprints.join('|')}';
     }
 
@@ -105,7 +116,21 @@ class RoomPageProvider extends ChangeNotifier {
 
   /// Stable key used by cloud layout sync to match an All Rooms layout to the
   /// same physical/logical hub on another phone.
-  static String hubLayoutKey(Hub hub) => _hubFingerprint(hub);
+  static String hubLayoutKey(Hub hub) {
+    final identity = normalizeServerIdentity(hub.serverInstanceId);
+    if (serverIdentityKind(identity) == ServerIdentityKind.durable) {
+      return 'server_instance:${Uri.encodeComponent(identity!)}';
+    }
+    return _hubFingerprint(hub);
+  }
+
+  /// Keys accepted while restoring account layouts. The endpoint fingerprint
+  /// keeps cloud bundles written before durable server identity compatible.
+  static List<String> hubLayoutKeyAliases(Hub hub) {
+    final primary = hubLayoutKey(hub);
+    final endpoint = _hubFingerprint(hub);
+    return primary == endpoint ? const <String>[] : <String>[endpoint];
+  }
 
   /// Reload the persisted layout for a new room source scope.
   void setLayoutScope(String? scopeKey, {bool notify = true}) {
@@ -222,6 +247,7 @@ class RoomPageProvider extends ChangeNotifier {
     }
 
     _save();
+    _onUserLayoutChanged?.call(_scopeKey);
     notifyListeners();
   }
 
@@ -238,6 +264,7 @@ class RoomPageProvider extends ChangeNotifier {
     page.insert(clampedIndex, roomId);
 
     _save();
+    _onUserLayoutChanged?.call(_scopeKey);
     notifyListeners();
   }
 

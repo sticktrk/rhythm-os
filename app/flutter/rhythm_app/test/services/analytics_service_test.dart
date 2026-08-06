@@ -259,6 +259,29 @@ void main() {
     }
   });
 
+  test('layout cloud sync analytics excludes profile and layout identity',
+      () async {
+    await analytics.logRoomLayoutCloudSyncCompleted(
+      direction: 'restore',
+      outcome: 'succeeded',
+      pageCount: 2,
+      roomCount: 5,
+    );
+
+    final event = backend.events.single;
+    expect(event.name, 'room_layout_cloud_sync_completed');
+    expect(event.properties, {
+      'direction': 'restore',
+      'outcome': 'succeeded',
+      'page_count_bucket': '2_4',
+      'room_count_bucket': '5_plus',
+    });
+    expect(
+      event.properties.keys,
+      isNot(containsAll(['user_id', 'home_id', 'hub_id', 'room_id'])),
+    );
+  });
+
   test('analytics remains a no-op when the backend is unavailable', () async {
     BackendProvider.resetForTesting();
 
