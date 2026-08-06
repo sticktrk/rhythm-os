@@ -8,6 +8,10 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/version.sh
+source "$SCRIPT_DIR/lib/version.sh"
+
 SOURCE_DIR=""
 BUCKET="${RHYTHM_R2_BUCKET:-${CLOUDFLARE_R2_BUCKET:-}}"
 PREFIX="${RHYTHM_R2_PREFIX:-server}"
@@ -104,9 +108,17 @@ fi
 
 require_command aws
 require_command jq
+AWS_PUT_OBJECT_SKELETON="$(aws s3api put-object --generate-cli-skeleton input 2>/dev/null || true)"
+if ! grep -q '"IfMatch"' <<<"$AWS_PUT_OBJECT_SKELETON" \
+    || ! grep -q '"IfNoneMatch"' <<<"$AWS_PUT_OBJECT_SKELETON"; then
+    echo "Error: AWS CLI must support conditional PutObject (--if-match/--if-none-match)" >&2
+    exit 1
+fi
 
 SOURCE_DIR="$(cd "$SOURCE_DIR" && pwd)"
 AWS_ARGS=(--endpoint-url "$ENDPOINT" --no-cli-pager)
+TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/rhythm-r2-publish.XXXXXX")"
+trap 'rm -rf "$TEMP_DIR"' EXIT
 
 object_key_for_file() {
     local file="$1"
@@ -185,11 +197,112 @@ upload_file() {
     echo "Published s3://$BUCKET/$key"
 }
 
+preflight_manifest() {
+    local file="$1"
+    local key local_version remote_file remote_version
+
+    key="$(object_key_for_file "$file")"
+    if ! local_version="$(jq -er '.version | select(type == "string" and length > 0)' "$file")" \
+        || ! parse_release_version_parts "$local_version" >/dev/null; then
+        echo "Error: refusing to publish invalid local manifest $file" >&2
+        exit 1
+    fi
+
+    if object_exists "$key"; then
+        remote_file="$TEMP_DIR/preflight-manifest.json"
+        if ! aws "${AWS_ARGS[@]}" s3 cp "s3://$BUCKET/$key" "$remote_file" \
+            --no-progress --only-show-errors; then
+            echo "Error: unable to read current manifest s3://$BUCKET/$key" >&2
+            exit 1
+        fi
+        if ! remote_version="$(jq -er '.version | select(type == "string" and length > 0)' "$remote_file")" \
+            || ! parse_release_version_parts "$remote_version" >/dev/null; then
+            echo "Error: refusing to replace invalid current manifest s3://$BUCKET/$key" >&2
+            exit 1
+        fi
+        if release_version_gt "$remote_version" "$local_version"; then
+            echo "Error: refusing to replace newer manifest s3://$BUCKET/$key" >&2
+            echo "Local version $local_version is older than published version $remote_version" >&2
+            exit 1
+        fi
+    fi
+}
+
+upload_manifest() {
+    local file="$1"
+    local key sha content_type local_version remote_file remote_result
+    local remote_etag remote_version
+    local condition_args=()
+
+    key="$(object_key_for_file "$file")"
+    sha="$(sha256_file "$file")"
+    content_type="$(content_type_for_file "$file")"
+    if ! local_version="$(jq -er '.version | select(type == "string" and length > 0)' "$file")" \
+        || ! parse_release_version_parts "$local_version" >/dev/null; then
+        echo "Error: refusing to publish invalid local manifest $file" >&2
+        exit 1
+    fi
+
+    remote_file="$TEMP_DIR/remote-manifest.json"
+    if object_exists "$key"; then
+        if ! remote_result="$(aws "${AWS_ARGS[@]}" s3api get-object \
+            --bucket "$BUCKET" \
+            --key "$key" \
+            "$remote_file")"; then
+            echo "Error: unable to read current manifest s3://$BUCKET/$key" >&2
+            exit 1
+        fi
+        if ! remote_etag="$(jq -er '.ETag | select(type == "string" and length > 0)' <<<"$remote_result")" \
+            || ! remote_version="$(jq -er '.version | select(type == "string" and length > 0)' "$remote_file")" \
+            || ! parse_release_version_parts "$remote_version" >/dev/null; then
+            echo "Error: refusing to replace invalid current manifest s3://$BUCKET/$key" >&2
+            exit 1
+        fi
+        if release_version_gt "$remote_version" "$local_version"; then
+            echo "Error: refusing to replace newer manifest s3://$BUCKET/$key" >&2
+            echo "Local version $local_version is older than published version $remote_version" >&2
+            exit 1
+        fi
+        condition_args=(--if-match "$remote_etag")
+    else
+        condition_args=(--if-none-match '*')
+    fi
+
+    if [ "$DRY_RUN" = true ]; then
+        echo "[dry-run] Upload $file -> s3://$BUCKET/$key (no-cache, must-revalidate; conditional manifest commit)"
+        return
+    fi
+
+    if ! aws "${AWS_ARGS[@]}" s3api put-object \
+        --bucket "$BUCKET" \
+        --key "$key" \
+        --body "$file" \
+        --cache-control 'no-cache, must-revalidate' \
+        --content-type "$content_type" \
+        --metadata "sha256=$sha" \
+        "${condition_args[@]}" >/dev/null; then
+        echo "Error: manifest changed concurrently; refusing to overwrite s3://$BUCKET/$key" >&2
+        exit 1
+    fi
+
+    if [ "$(remote_sha256 "$key")" != "$sha" ]; then
+        echo "Error: R2 metadata verification failed for s3://$BUCKET/$key" >&2
+        exit 1
+    fi
+    echo "Published s3://$BUCKET/$key"
+}
+
 manifest_count="$(find "$SOURCE_DIR" -type f -name manifest.json | wc -l | tr -d ' ')"
 if [ "$manifest_count" -eq 0 ]; then
     echo "Error: no manifest.json found under $SOURCE_DIR" >&2
     exit 1
 fi
+
+# Reject invalid or stale feed state before changing even mutable aliases.
+while IFS= read -r file; do
+    [ -n "$file" ] || continue
+    preflight_manifest "$file"
+done < <(find "$SOURCE_DIR" -type f -name manifest.json | LC_ALL=C sort)
 
 # Upload payloads before mutable aliases. Version paths are content-addressed
 # by the manifest's sha256 and may never be changed in place.
@@ -215,7 +328,7 @@ done < <(find "$SOURCE_DIR" -type f ! -name manifest.json | LC_ALL=C sort)
 # The manifest is the fleet's OTA authority and is always committed last.
 while IFS= read -r file; do
     [ -n "$file" ] || continue
-    upload_file "$file" 'no-cache, must-revalidate' false
+    upload_manifest "$file"
 done < <(find "$SOURCE_DIR" -type f -name manifest.json | LC_ALL=C sort)
 
 echo "Published $manifest_count OTA feed manifest(s) to R2"

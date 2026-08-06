@@ -64,15 +64,27 @@ TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/rhythm-r2-prune.XXXXXX")"
 trap 'rm -rf "$TEMP_DIR"' EXIT
 
 collect_protected_dirs() {
-    local root manifest key url rel other_root rest ver_dir
+    local root manifest key urls url rel other_root rest ver_dir
 
     for root in "${RELEASE_ROOTS[@]}"; do
         manifest="$TEMP_DIR/$root-manifest.json"
         key="$PREFIX/$root/manifest.json"
         if ! aws "${AWS_ARGS[@]}" s3 cp "s3://$BUCKET/$key" "$manifest" \
-            --no-progress --only-show-errors 2>/dev/null; then
-            continue
+            --no-progress --only-show-errors; then
+            echo "Error: refusing to prune without live manifest s3://$BUCKET/$key" >&2
+            return 1
         fi
+        if ! jq -e '
+            type == "object"
+            and (.package | type == "object")
+            and (.package.url | type == "string")
+            and ((.images // []) | type == "array")
+            and all((.images // [])[]; type == "object" and (.url | type == "string"))
+        ' "$manifest" >/dev/null; then
+            echo "Error: refusing to prune with invalid live manifest s3://$BUCKET/$key" >&2
+            return 1
+        fi
+        urls="$(jq -r '[.package.url?, .images[]?.url?] | .[] | select(type == "string")' "$manifest")"
         while IFS= read -r url; do
             [ -n "$url" ] || continue
             case "$url" in
@@ -95,7 +107,7 @@ collect_protected_dirs() {
                     printf '%s/%s\n' "$other_root" "$ver_dir"
                     ;;
             esac
-        done < <(jq -r '[.package.url?, .images[]?.url?] | .[] | select(type == "string")' "$manifest")
+        done <<<"$urls"
     done
 }
 

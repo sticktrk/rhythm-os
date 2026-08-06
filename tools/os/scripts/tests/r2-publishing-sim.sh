@@ -34,6 +34,14 @@ value_after() {
     done
 }
 
+file_sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
 replace_metadata() {
     local key="$1"
     local sha="$2"
@@ -54,6 +62,47 @@ case "${1:-} ${2:-}" in
         sha="$(awk -F '\t' -v key="$key" '$1 == key { print $2; exit }' "$FAKE_R2_ROOT/metadata")"
         [ -n "$sha" ] || exit 1
         printf '%s\n' "$sha"
+        ;;
+    "s3api get-object")
+        key="$(value_after --key "$@")"
+        destination="${!#}"
+        source_path="$FAKE_R2_ROOT/remote/$key"
+        [ -f "$source_path" ] || exit 1
+        cp "$source_path" "$destination"
+        etag="\"$(file_sha256 "$source_path")\""
+        jq -n --arg etag "$etag" '{ETag: $etag}'
+        ;;
+    "s3api put-object")
+        if printf '%s\n' "$*" | grep -q -- '--generate-cli-skeleton input'; then
+            jq -n '{IfMatch: "", IfNoneMatch: ""}'
+            exit 0
+        fi
+        key="$(value_after --key "$@")"
+        source_path="$(value_after --body "$@")"
+        destination="$FAKE_R2_ROOT/remote/$key"
+        if [ -n "${FAKE_R2_CONCURRENT_MANIFEST:-}" ] && [[ "$key" == */manifest.json ]]; then
+            mkdir -p "$(dirname "$destination")"
+            cp "$FAKE_R2_CONCURRENT_MANIFEST" "$destination"
+        fi
+        if_match="$(value_after --if-match "$@")"
+        if_none_match="$(value_after --if-none-match "$@")"
+        if [ -f "$destination" ]; then
+            current_etag="\"$(file_sha256 "$destination")\""
+        else
+            current_etag=""
+        fi
+        if [ -n "$if_match" ] && [ "$if_match" != "$current_etag" ]; then
+            exit 1
+        fi
+        if [ "$if_none_match" = "*" ] && [ -f "$destination" ]; then
+            exit 1
+        fi
+        mkdir -p "$(dirname "$destination")"
+        cp "$source_path" "$destination"
+        grep -Fqx "$key" "$FAKE_R2_ROOT/objects" || printf '%s\n' "$key" >> "$FAKE_R2_ROOT/objects"
+        metadata="$(value_after --metadata "$@")"
+        replace_metadata "$key" "${metadata#sha256=}"
+        jq -n '{ETag: "fake"}'
         ;;
     "s3 head-bucket")
         ;;
@@ -103,7 +152,7 @@ export CLOUDFLARE_R2_BUCKET=rhythm-updates-test
 
 versioned_line="$(grep -n 's3 cp .*v1.2.3-beta/rhythm-server-rpiz.tar.gz' "$TEMP_DIR/fake/calls" | tail -1 | cut -d: -f1)"
 latest_line="$(grep -n 's3 cp .*latest/rootfs.ext2.gz' "$TEMP_DIR/fake/calls" | tail -1 | cut -d: -f1)"
-manifest_line="$(grep -n 's3 cp .*manifest.json' "$TEMP_DIR/fake/calls" | tail -1 | cut -d: -f1)"
+manifest_line="$(grep -n 's3api put-object .*manifest.json' "$TEMP_DIR/fake/calls" | tail -1 | cut -d: -f1)"
 [ "$versioned_line" -lt "$latest_line" ]
 [ "$latest_line" -lt "$manifest_line" ]
 grep -q 'v1.2.3-beta/rhythm-server-rpiz.tar.gz.*public, max-age=31536000, immutable' "$TEMP_DIR/fake/calls"
@@ -124,6 +173,42 @@ if "$PUBLISHER" --source-dir "$TEMP_DIR/feed" >"$TEMP_DIR/mismatch.out" 2>&1; th
     exit 1
 fi
 grep -q 'refusing to overwrite immutable' "$TEMP_DIR/mismatch.out"
+
+# A stale rerun cannot roll a feed manifest back to an older version.
+printf 'versioned payload\n' > "$TEMP_DIR/feed/rpiz/v1.2.3-beta/rhythm-server-rpiz.tar.gz"
+mkdir -p "$TEMP_DIR/feed/rpiz/v1.2.4-beta"
+printf 'newer payload\n' > "$TEMP_DIR/feed/rpiz/v1.2.4-beta/rhythm-server-rpiz.tar.gz"
+jq '.version = "1.2.4-beta" | .package.url = "v1.2.4-beta/rhythm-server-rpiz.tar.gz"' \
+    "$TEMP_DIR/feed/rpiz/manifest.json" > "$TEMP_DIR/feed/rpiz/manifest.new"
+mv "$TEMP_DIR/feed/rpiz/manifest.new" "$TEMP_DIR/feed/rpiz/manifest.json"
+"$PUBLISHER" --source-dir "$TEMP_DIR/feed" >/dev/null
+
+jq '.version = "1.2.3-beta" | .package.url = "v1.2.3-beta/rhythm-server-rpiz.tar.gz"' \
+    "$TEMP_DIR/feed/rpiz/manifest.json" > "$TEMP_DIR/feed/rpiz/manifest.new"
+mv "$TEMP_DIR/feed/rpiz/manifest.new" "$TEMP_DIR/feed/rpiz/manifest.json"
+printf 'stale latest alias\n' > "$TEMP_DIR/feed/rpiz/latest/rootfs.ext2.gz"
+if "$PUBLISHER" --source-dir "$TEMP_DIR/feed" >"$TEMP_DIR/stale-manifest.out" 2>&1; then
+    echo "stale manifest publish unexpectedly succeeded" >&2
+    exit 1
+fi
+grep -q 'refusing to replace newer manifest' "$TEMP_DIR/stale-manifest.out"
+jq -e '.version == "1.2.4-beta"' "$TEMP_DIR/fake/remote/server/rpiz/manifest.json" >/dev/null
+grep -q '^latest alias$' "$TEMP_DIR/fake/remote/server/rpiz/latest/rootfs.ext2.gz"
+
+# A concurrent manifest change invalidates the conditional commit instead of
+# being overwritten by a publisher that inspected an older object.
+jq '.version = "1.2.5-beta" | .package.url = "v1.2.4-beta/rhythm-server-rpiz.tar.gz"' \
+    "$TEMP_DIR/feed/rpiz/manifest.json" > "$TEMP_DIR/feed/rpiz/manifest.new"
+mv "$TEMP_DIR/feed/rpiz/manifest.new" "$TEMP_DIR/feed/rpiz/manifest.json"
+jq '.version = "1.2.6-beta"' "$TEMP_DIR/feed/rpiz/manifest.json" > "$TEMP_DIR/concurrent-manifest.json"
+export FAKE_R2_CONCURRENT_MANIFEST="$TEMP_DIR/concurrent-manifest.json"
+if "$PUBLISHER" --source-dir "$TEMP_DIR/feed" >"$TEMP_DIR/concurrent-manifest.out" 2>&1; then
+    echo "concurrent manifest overwrite unexpectedly succeeded" >&2
+    exit 1
+fi
+unset FAKE_R2_CONCURRENT_MANIFEST
+grep -q 'manifest changed concurrently' "$TEMP_DIR/concurrent-manifest.out"
+jq -e '.version == "1.2.6-beta"' "$TEMP_DIR/fake/remote/server/rpiz/manifest.json" >/dev/null
 
 # Populate seven releases and protect the oldest through the live manifest.
 : > "$TEMP_DIR/fake/objects"
@@ -152,6 +237,39 @@ if grep -q 's3 rm s3://rhythm-updates-test/server/rpiz/v1.0.1-beta/' "$TEMP_DIR/
 fi
 if grep -q 's3 rm s3://rhythm-updates-test/server/rpiz/v1.0.[67]-beta/' "$TEMP_DIR/fake/calls"; then
     echo "retained release was unexpectedly pruned" >&2
+    exit 1
+fi
+
+# Retention fails closed before deleting anything if either live manifest is
+# unavailable or malformed, because that manifest may protect an old release.
+for version in 1 2 3; do
+    key="server/rpiz-stable/v1.0.${version}-stable/payload.tar.gz"
+    printf '%s\n' "$key" >> "$TEMP_DIR/fake/objects"
+    mkdir -p "$TEMP_DIR/fake/remote/$(dirname "$key")"
+    printf 'stable payload %s\n' "$version" > "$TEMP_DIR/fake/remote/$key"
+done
+
+: > "$TEMP_DIR/fake/calls"
+rm "$TEMP_DIR/fake/remote/server/rpiz-stable/manifest.json"
+if "$PRUNER" --keep 2 >"$TEMP_DIR/missing-manifest.out" 2>&1; then
+    echo "pruning unexpectedly succeeded without a live manifest" >&2
+    exit 1
+fi
+grep -q 'refusing to prune without live manifest' "$TEMP_DIR/missing-manifest.out"
+if grep -q 's3 rm ' "$TEMP_DIR/fake/calls"; then
+    echo "objects were deleted without a complete manifest protection set" >&2
+    exit 1
+fi
+
+: > "$TEMP_DIR/fake/calls"
+printf '{not-json\n' > "$TEMP_DIR/fake/remote/server/rpiz-stable/manifest.json"
+if "$PRUNER" --keep 2 >"$TEMP_DIR/invalid-manifest.out" 2>&1; then
+    echo "pruning unexpectedly succeeded with an invalid live manifest" >&2
+    exit 1
+fi
+grep -q 'refusing to prune with invalid live manifest' "$TEMP_DIR/invalid-manifest.out"
+if grep -q 's3 rm ' "$TEMP_DIR/fake/calls"; then
+    echo "objects were deleted with an invalid manifest protection set" >&2
     exit 1
 fi
 

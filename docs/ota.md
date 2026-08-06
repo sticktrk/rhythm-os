@@ -152,8 +152,12 @@ Publishing is intentionally ordered:
 2. Upload mutable `latest/...` aliases with revalidation enabled.
 3. Upload `manifest.json` last with revalidation enabled. The manifest is the
    fleet's update authority, so it must never reference an incomplete upload.
+   A monotonic version check rejects stale reruns, and an R2 conditional write
+   rejects a concurrent manifest change instead of overwriting it.
 4. Prune old version prefixes, preserving anything referenced by either live
-   manifest even when that leaves more than five directories.
+   manifest even when that leaves more than five directories. Retention fails
+   closed without deleting anything if either manifest is unavailable or
+   invalid.
 
 Reusing a versioned key with different bytes is a hard failure. R2 objects
 carry their SHA-256 in metadata so a retry can keep an identical object but
@@ -175,11 +179,14 @@ committed.
 
 ### One-time cutover
 
-Before merging the R2 publisher, create the bucket and copy the complete live
-`server/` tree into it. Include both manifests, every version directory, and
-the `latest` aliases. Publish the copied tree with
-`publish-server-updates-r2.sh` so versioned objects receive the SHA-256 and
-cache metadata expected by later idempotent releases.
+Before merging the R2 publisher, create the bucket and mirror the complete live
+`server/` tree to a local directory. Include both manifests, every version
+directory, and the `latest` aliases. Use `publish-server-updates-r2.sh` to
+upload that local tree into an empty R2 `server/` prefix so versioned objects
+receive the SHA-256 and cache metadata expected by later idempotent releases.
+Do not pre-populate versioned R2 objects with a generic copy command: the
+publisher correctly refuses an existing immutable object whose SHA-256
+metadata is missing.
 
 Then:
 
