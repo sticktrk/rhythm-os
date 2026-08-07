@@ -14544,12 +14544,16 @@ pub fn do_canonical_assign_room(
         && source_room_id.as_deref() != room_id
     {
         let target_room_id = room_id.expect("checked above");
-        apply_parent_room_output_to_light(state, device_id, target_room_id).with_context(|| {
-            format!(
-                "Failed to apply destination room '{}' output to moved light '{}'",
-                target_room_id, device_id
-            )
-        })?;
+        if let Err(error) = apply_parent_room_output_to_light(state, device_id, target_room_id) {
+            // The topology assignment and its persisted canonical registry update are already
+            // committed at this point. Treat the immediate output refresh as best effort so a
+            // transient runtime failure cannot report a durable move as failed (and make a retry
+            // skip the refresh because the light is already in the destination room).
+            warn!(
+                "Failed to apply destination room '{}' output to moved light '{}': {:#}",
+                target_room_id, device_id, error
+            );
+        }
     }
 
     {
@@ -16007,6 +16011,7 @@ mod tests {
         periodic_light_state_queries: AtomicUsize,
         fail_light_state_queries: AtomicBool,
         fail_periodic_light_state_queries: AtomicBool,
+        fail_turn_on: AtomicBool,
         scene_dispatch_transaction_lock: Mutex<Option<Arc<Mutex<()>>>>,
         pause_after_scene_dispatch: AtomicBool,
         scene_dispatch_paused: AtomicBool,
@@ -16031,6 +16036,7 @@ mod tests {
                 periodic_light_state_queries: AtomicUsize::new(0),
                 fail_light_state_queries: AtomicBool::new(false),
                 fail_periodic_light_state_queries: AtomicBool::new(false),
+                fail_turn_on: AtomicBool::new(false),
                 scene_dispatch_transaction_lock: Mutex::new(None),
                 pause_after_scene_dispatch: AtomicBool::new(false),
                 scene_dispatch_paused: AtomicBool::new(false),
@@ -16071,6 +16077,10 @@ mod tests {
         fn fail_periodic_light_state_queries(&self) {
             self.fail_periodic_light_state_queries
                 .store(true, Ordering::SeqCst);
+        }
+
+        fn fail_turn_on(&self) {
+            self.fail_turn_on.store(true, Ordering::SeqCst);
         }
 
         fn set_light_on(&self, node_id: &str, on: bool) {
@@ -16316,6 +16326,9 @@ mod tests {
                     })
                 })
                 .transpose()?;
+            if self.fail_turn_on.load(Ordering::SeqCst) {
+                anyhow::bail!("simulated turn-on failure");
+            }
             self.turn_on_calls.lock().unwrap().push(room_id.to_string());
             self.set_target_lights(room_id, true);
             Ok(())
@@ -30656,6 +30669,38 @@ mod tests {
                 .expect("moved light should remain in the runtime")
                 .parent_id
                 .as_deref(),
+            Some(room_two.as_str())
+        );
+    }
+
+    #[test]
+    fn canonical_assign_room_keeps_committed_move_when_output_refresh_fails() {
+        let (state, runtime, hub_key) = setup_state_with_deferred_runtime();
+        let room_one = state.lock().unwrap().topology.create_room("Office");
+        let room_two = state.lock().unwrap().topology.create_room("Guest Room");
+        let device_id = insert_canonical_device(&state, hub_key, "matter-100", "Desk Lamp", "", "");
+
+        do_canonical_assign_room(&state, &device_id, Some(&room_one)).unwrap();
+        runtime.fail_turn_on();
+
+        do_canonical_assign_room(&state, &device_id, Some(&room_two))
+            .expect("a transient output failure must not report the durable move as failed");
+
+        assert_eq!(
+            runtime
+                .engine_node_snapshot(&device_id)
+                .expect("moved light should remain in the runtime")
+                .parent_id
+                .as_deref(),
+            Some(room_two.as_str())
+        );
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .canonical_registry
+                .get(&device_id)
+                .and_then(|device| device.room_id.as_deref()),
             Some(room_two.as_str())
         );
     }
