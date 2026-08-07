@@ -5313,6 +5313,44 @@ fn apply_mood_scene_or_tick(
     runtime.mood_tick_room(node_id)
 }
 
+fn apply_parent_room_output_to_light(
+    state: &SharedState,
+    device_id: &str,
+    room_id: &str,
+) -> Result<()> {
+    let Some(runtime) = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .hub_runtime()
+    else {
+        return Ok(());
+    };
+    let Some(room) = runtime.engine_effective_node_snapshot(room_id) else {
+        warn!(
+            target: "cmd",
+            "Skipping moved-light output refresh because destination room '{}' is not in the runtime",
+            room_id
+        );
+        return Ok(());
+    };
+
+    if room.hard_off {
+        runtime.lights_off_room(device_id, None)
+    } else if room.soft_off {
+        runtime.soft_off_tick_room(device_id)
+    } else if room.mood_active {
+        apply_mood_scene_or_tick(
+            state,
+            &runtime,
+            device_id,
+            room.profile_settings.mood_scene_id.as_deref(),
+            false,
+        )
+    } else {
+        runtime.turn_on_room(device_id)
+    }
+}
+
 fn source_room_manager_for_export(state: &SharedState) -> rhythm_core::RoomManager {
     let runtime = state.lock().ok().and_then(|s| s.hub_runtime());
     let source = if let Some(runtime) = runtime {
@@ -14501,6 +14539,18 @@ pub fn do_canonical_assign_room(
         clear_runtime_node_off_flags(state, device_id)?;
         persist_rooms(state);
     }
+    if matches!(device_type, DeviceType::Light)
+        && room_id.is_some()
+        && source_room_id.as_deref() != room_id
+    {
+        let target_room_id = room_id.expect("checked above");
+        apply_parent_room_output_to_light(state, device_id, target_room_id).with_context(|| {
+            format!(
+                "Failed to apply destination room '{}' output to moved light '{}'",
+                target_room_id, device_id
+            )
+        })?;
+    }
 
     {
         emit_triage_changed(state);
@@ -15945,6 +15995,7 @@ mod tests {
         snapshots: Mutex<Vec<RoomSnapshot>>,
         events: Mutex<Vec<(String, ButtonAction)>>,
         applied_commands: Mutex<Vec<(String, rhythm_core::LightingCommand)>>,
+        turn_on_calls: Mutex<Vec<String>>,
         lights_off_calls: Mutex<Vec<(String, Option<u32>)>>,
         applied_states: Mutex<Vec<(String, RoomModeState)>>,
         config_updates: Mutex<Vec<LightProfileConfig>>,
@@ -15968,6 +16019,7 @@ mod tests {
                 snapshots: Mutex::new(snapshots),
                 events: Mutex::new(Vec::new()),
                 applied_commands: Mutex::new(Vec::new()),
+                turn_on_calls: Mutex::new(Vec::new()),
                 lights_off_calls: Mutex::new(Vec::new()),
                 applied_states: Mutex::new(Vec::new()),
                 config_updates: Mutex::new(Vec::new()),
@@ -16075,6 +16127,14 @@ mod tests {
 
         fn applied_commands(&self) -> Vec<(String, rhythm_core::LightingCommand)> {
             self.applied_commands.lock().unwrap().clone()
+        }
+
+        fn turn_on_calls(&self) -> Vec<String> {
+            self.turn_on_calls.lock().unwrap().clone()
+        }
+
+        fn clear_turn_on_calls(&self) {
+            self.turn_on_calls.lock().unwrap().clear();
         }
 
         fn lights_off_calls(&self) -> Vec<(String, Option<u32>)> {
@@ -16256,6 +16316,7 @@ mod tests {
                     })
                 })
                 .transpose()?;
+            self.turn_on_calls.lock().unwrap().push(room_id.to_string());
             self.set_target_lights(room_id, true);
             Ok(())
         }
@@ -30568,6 +30629,34 @@ mod tests {
                 .expect("runtime node should return after standalone confirmation")
                 .parent_id,
             None
+        );
+    }
+
+    #[test]
+    fn canonical_assign_room_applies_destination_room_output_to_moved_light() {
+        let (state, runtime, hub_key) = setup_state_with_deferred_runtime();
+        let room_one = state.lock().unwrap().topology.create_room("Office");
+        let room_two = state.lock().unwrap().topology.create_room("Guest Room");
+        let device_id = insert_canonical_device(&state, hub_key, "matter-100", "Desk Lamp", "", "");
+
+        do_canonical_assign_room(&state, &device_id, Some(&room_one)).unwrap();
+        runtime.clear_turn_on_calls();
+        runtime.set_light_on(&device_id, false);
+
+        do_canonical_assign_room(&state, &device_id, Some(&room_two)).unwrap();
+
+        assert_eq!(runtime.turn_on_calls(), vec![device_id.clone()]);
+        assert!(
+            runtime.any_target_lights_on(&device_id),
+            "moving the light should immediately render the destination room output"
+        );
+        assert_eq!(
+            runtime
+                .engine_node_snapshot(&device_id)
+                .expect("moved light should remain in the runtime")
+                .parent_id
+                .as_deref(),
+            Some(room_two.as_str())
         );
     }
 
