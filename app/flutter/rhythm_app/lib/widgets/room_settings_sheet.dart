@@ -818,7 +818,8 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
         newName.isNotEmpty &&
         newName != _roomName &&
         context.mounted) {
-      final http = context.read<ServerSyncProvider>().api;
+      final syncProvider = context.read<ServerSyncProvider>();
+      final http = syncProvider.api;
       final success = isRoom
           ? await http.topologyRenameRoom(room.id, newName)
           : await http.renameCanonicalDevice(room.id, newName);
@@ -832,7 +833,16 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
         return;
       }
       setState(() => _roomName = newName);
-      unawaited(http.triggerSync());
+      final refreshed = await syncProvider.refreshAfterTopologyMutation();
+      if (!context.mounted || refreshed) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '${isRoom ? 'Room' : 'Bulb'} was renamed, but rooms could not refresh. '
+            'Pull to refresh and confirm its name.',
+          ),
+        ),
+      );
     }
   }
 
