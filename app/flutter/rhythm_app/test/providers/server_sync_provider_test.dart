@@ -5247,6 +5247,31 @@ void main() {
       findsNothing,
     );
 
+    connection.helloOnReconnect = RhythmHello.fromJson({
+      'nodes': [
+        {
+          'id': 'room-1',
+          'name': 'Dining Room',
+          'kind': 'room',
+          'hub_types': ['matter'],
+          'state': 'active',
+          'rhythm_enabled': true,
+          'disabled': false,
+          'time_offset': 0.0,
+          'brightness_offset': 0.0,
+          'lights_on': true,
+        },
+      ],
+      'location': const <String, dynamic>{},
+    });
+    api.topologyNodes = [
+      RhythmTopologyNode.fromJson({
+        'id': 'room-1',
+        'name': 'Dining Room',
+        'kind': 'room',
+      }),
+    ];
+
     await tester.tap(find.byKey(const ValueKey('room-settings-rename')));
     await tester.pumpAndSettle();
     expect(find.text('Rename Room'), findsOneWidget);
@@ -5269,7 +5294,11 @@ void main() {
     expect(api.topologyRenameRoomCalls, 1);
     expect(api.lastRenamedRoomId, 'room-1');
     expect(api.lastRenamedRoomName, 'Dining Room');
-    expect(api.triggerSyncCalls, 1);
+    expect(api.triggerSyncCalls, 0);
+    expect(connection.reconnectCalls, 1);
+    expect(connection.lastReconnectAuthoritative, isTrue);
+    expect(roomProvider.getRoom('room-1')?.name, 'Dining Room');
+    expect(provider.helloRooms.single.name, 'Dining Room');
     expect(
       tester
           .widget<Text>(
