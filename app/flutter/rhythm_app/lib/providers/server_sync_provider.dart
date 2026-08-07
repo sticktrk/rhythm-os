@@ -3198,31 +3198,43 @@ class ServerSyncProvider extends ChangeNotifier {
           return;
         }
 
-        final remote = failoverHub.remoteEndpoint;
-        if (remote == null ||
-            (activeIsRemote && _sameEndpoint(remote, activeEndpoint))) {
-          return;
-        }
-
         final token = failoverHub.token?.trim();
-        if (token == null || token.isEmpty) {
-          debugPrint(
-            'ServerSync: Connection target lost but remote access has no saved owner token',
+        final savedToken = token == null || token.isEmpty ? null : token;
+        final HubEndpoint? replacement;
+        if (activeIsLan &&
+            _sameEndpoint(failoverHub.endpoint, activeEndpoint)) {
+          // The active LAN endpoint has just failed. Do not probe and select it
+          // again merely because a reachability check still succeeds; move to
+          // the refreshed tunnel candidate instead.
+          replacement = savedToken == null ? null : failoverHub.remoteEndpoint;
+        } else {
+          // Cloud metadata can replace a stale LAN endpoint without providing
+          // a tunnel. Reselect from the refreshed hub rather than assuming that
+          // every recovery target is remote.
+          replacement = await _selectConnectionEndpoint(
+            failoverHub,
+            savedToken,
           );
+        }
+        if (!_sameServerHubIdentity(_serverHub, hub) ||
+            !_sameEndpoint(_activeConnectionEndpoint, activeEndpoint) ||
+            replacement == null ||
+            _sameEndpoint(replacement, activeEndpoint)) {
           return;
         }
 
         debugPrint(
           'ServerSync: Saved endpoint ${activeEndpoint?.host}:${activeEndpoint?.port} '
-          'lost, reconnecting through ${remote.host}:${remote.port}',
+          'lost, reconnecting through refreshed endpoint '
+          '${replacement.host}:${replacement.port}',
         );
         _serverHub = failoverHub;
-        _activeConnectionEndpoint = remote;
+        _activeConnectionEndpoint = replacement;
         await _connection.connect(
-          remote.host,
-          port: remote.port,
-          useSsl: remote.useSsl,
-          authToken: token,
+          replacement.host,
+          port: replacement.port,
+          useSsl: replacement.useSsl,
+          authToken: savedToken,
         );
       } catch (error) {
         debugPrint('ServerSync: remote access failover failed: $error');

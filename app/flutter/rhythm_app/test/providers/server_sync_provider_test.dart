@@ -4833,7 +4833,8 @@ void main() {
           provider.activeConnectionEndpoint?.host, 'old-cabin.rhythm.lighting');
     });
 
-    test('retry uses the saved local endpoint before cloud refresh', () async {
+    test('retry recovers a failed saved local endpoint from cloud refresh',
+        () async {
       final api = _FakeRhythmServerApi();
       final connection = _HelloRhythmConnection(api);
       addTearDown(connection.dispose);
@@ -4893,6 +4894,19 @@ void main() {
         '100.64.0.12',
       );
       expect(provider.activeConnectionEndpoint?.host, '100.64.0.12');
+
+      connection.emitConnectionState(RhythmConnectionState.reconnecting);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(connection.connectCalls, hasLength(2));
+      expect(connection.connectCalls.last.host, '192.168.5.123');
+      expect(connection.connectCalls.last.port, 54448);
+      expect(connection.connectCalls.last.authToken, 'owner-token');
+      expect(
+        homeProvider.currentHomeHubs.single.endpoint.host,
+        '192.168.5.123',
+      );
+      expect(provider.activeConnectionEndpoint?.host, '192.168.5.123');
     });
 
     test('refreshes authoritative state when preview tick is missing',
