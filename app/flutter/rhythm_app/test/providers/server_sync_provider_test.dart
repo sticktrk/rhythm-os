@@ -4070,6 +4070,42 @@ void main() {
       expect(provider.roomsReadyForDisplay, isTrue);
     });
 
+    test('scheduled hub startup does not gate usable hello rooms', () async {
+      final helloConnection = _HelloRhythmConnection(api);
+      addTearDown(helloConnection.dispose);
+      final provider = ServerSyncProvider(
+        connection: helloConnection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+
+      helloConnection.emitHello(RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+          },
+        ],
+        'hubs': [
+          {
+            'type': 'matter',
+            'address': 'matter',
+            'connected': false,
+            'startup_retry': {'status': 'scheduled'},
+          },
+        ],
+      }));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      expect(provider.hasPendingAutomaticHubStartup, isFalse);
+      expect(provider.roomsReadyForDisplay, isTrue);
+    });
+
     test('scheduled hub startup cannot gate rooms past the bounded grace', () {
       fakeAsync((async) {
         final localRoomProvider = RoomProvider();
@@ -4557,6 +4593,46 @@ void main() {
       expect(provider.activeConnectionEndpoint?.host, 'server.rhythm.lighting');
     });
 
+    test('cellular startup skips the LAN probe when remote access is saved',
+        () async {
+      final api = _FakeRhythmServerApi();
+      final connection = _HelloRhythmConnection(api);
+      addTearDown(connection.dispose);
+      var lanProbeCalls = 0;
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider([
+          Hub.server(
+            id: 'server-1',
+            homeId: 'home-1',
+            name: 'Kitchen Server',
+            host: '192.168.1.20',
+            port: 54448,
+            token: 'owner-token',
+            remoteEndpoint: const HubEndpoint(
+              host: 'server.rhythm.lighting',
+              port: 443,
+              useSsl: true,
+            ),
+          ),
+        ]),
+        connectivityCheck: () async => const [ConnectivityResult.mobile],
+        endpointReachability: (endpoint, authToken) async {
+          lanProbeCalls += 1;
+          return false;
+        },
+      );
+      addTearDown(provider.dispose);
+
+      await provider.retryActiveServerConnection();
+
+      expect(lanProbeCalls, 0);
+      expect(connection.connectCalls, hasLength(1));
+      expect(connection.connectCalls.single.host, 'server.rhythm.lighting');
+      expect(connection.connectCalls.single.authToken, 'owner-token');
+    });
+
     test('retry does not use a remote endpoint without an owner token',
         () async {
       final api = _FakeRhythmServerApi();
@@ -4593,8 +4669,7 @@ void main() {
       expect(provider.activeConnectionEndpoint, isNull);
     });
 
-    test('retry refreshes changed tunnel endpoint before reconnecting',
-        () async {
+    test('retry uses the saved tunnel endpoint before cloud refresh', () async {
       final api = _FakeRhythmServerApi();
       final connection = _HelloRhythmConnection(api);
       addTearDown(connection.dispose);
@@ -4653,17 +4728,25 @@ void main() {
       await provider.retryActiveServerConnection();
 
       expect(connection.connectCalls, hasLength(1));
-      expect(connection.connectCalls.single.host, 'new-server.rhythm.lighting');
+      expect(connection.connectCalls.single.host, 'old-server.rhythm.lighting');
       expect(connection.connectCalls.single.port, 443);
       expect(connection.connectCalls.single.useSsl, isTrue);
       expect(connection.connectCalls.single.authToken, 'owner-token');
       expect(homeProvider.currentHomeHubs.single.remoteEndpoint?.host,
-          'new-server.rhythm.lighting');
+          'old-server.rhythm.lighting');
       expect(provider.activeConnectionEndpoint?.host,
+          'old-server.rhythm.lighting');
+
+      connection.emitConnectionState(RhythmConnectionState.reconnecting);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(connection.connectCalls, hasLength(2));
+      expect(connection.connectCalls.last.host, 'new-server.rhythm.lighting');
+      expect(homeProvider.currentHomeHubs.single.remoteEndpoint?.host,
           'new-server.rhythm.lighting');
     });
 
-    test('retry refreshes tunnel endpoint from the selected Home', () async {
+    test('retry does not await the selected Home cloud snapshot', () async {
       final api = _FakeRhythmServerApi();
       final connection = _HelloRhythmConnection(api);
       addTearDown(connection.dispose);
@@ -4743,15 +4826,14 @@ void main() {
       await provider.retryActiveServerConnection();
 
       expect(connection.connectCalls, hasLength(1));
-      expect(
-          connection.connectCalls.single.host, 'fresh-cabin.rhythm.lighting');
+      expect(connection.connectCalls.single.host, 'old-cabin.rhythm.lighting');
       expect(homeProvider.currentHomeHubs.single.remoteEndpoint?.host,
-          'fresh-cabin.rhythm.lighting');
-      expect(provider.activeConnectionEndpoint?.host,
-          'fresh-cabin.rhythm.lighting');
+          'old-cabin.rhythm.lighting');
+      expect(
+          provider.activeConnectionEndpoint?.host, 'old-cabin.rhythm.lighting');
     });
 
-    test('retry refreshes changed local endpoint before reconnecting',
+    test('retry recovers a failed saved local endpoint from cloud refresh',
         () async {
       final api = _FakeRhythmServerApi();
       final connection = _HelloRhythmConnection(api);
@@ -4796,7 +4878,7 @@ void main() {
         homeProvider: homeProvider,
         endpointReachability: (endpoint, authToken) async {
           expect(authToken, 'owner-token');
-          return endpoint.host == '192.168.5.123';
+          return endpoint.host == '100.64.0.12';
         },
       );
       addTearDown(provider.dispose);
@@ -4804,9 +4886,22 @@ void main() {
       await provider.retryActiveServerConnection();
 
       expect(connection.connectCalls, hasLength(1));
-      expect(connection.connectCalls.single.host, '192.168.5.123');
+      expect(connection.connectCalls.single.host, '100.64.0.12');
       expect(connection.connectCalls.single.port, 54448);
       expect(connection.connectCalls.single.authToken, 'owner-token');
+      expect(
+        homeProvider.currentHomeHubs.single.endpoint.host,
+        '100.64.0.12',
+      );
+      expect(provider.activeConnectionEndpoint?.host, '100.64.0.12');
+
+      connection.emitConnectionState(RhythmConnectionState.reconnecting);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+
+      expect(connection.connectCalls, hasLength(2));
+      expect(connection.connectCalls.last.host, '192.168.5.123');
+      expect(connection.connectCalls.last.port, 54448);
+      expect(connection.connectCalls.last.authToken, 'owner-token');
       expect(
         homeProvider.currentHomeHubs.single.endpoint.host,
         '192.168.5.123',

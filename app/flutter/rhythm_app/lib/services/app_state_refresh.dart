@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
@@ -10,6 +12,8 @@ import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
 import '../providers/hub_connection_provider.dart';
 import 'account_cloud_sync_service.dart';
+import 'analytics_service.dart';
+import 'auth_service.dart';
 import 'cloud_backup_service.dart';
 import 'demo_server_api.dart';
 import 'hue/hue_service_locator.dart';
@@ -129,7 +133,9 @@ class AppStateRefresh {
         );
         // Recalculate solarNoonHour from the real coordinates
         try {
-          await api.getCurveData();
+          await api.getCurveData(
+            overrides: home?.curveConfig ?? defaultCurveConfig,
+          );
         } catch (_) {}
         debugPrint(
             'AppStateRefresh: Synced location lat=${loc.latitude} lon=${loc.longitude} '
@@ -206,6 +212,7 @@ class AppStateRefresh {
       hubs: homeProvider.currentHomeHubs,
     );
     final hubKey = RoomPageProvider.hubLayoutKey(serverHub);
+    final hubKeyAliases = RoomPageProvider.hubLayoutKeyAliases(serverHub);
 
     RoomPageProvider? roomPageProvider;
     try {
@@ -218,6 +225,23 @@ class AppStateRefresh {
     }
 
     try {
+      final userId = AuthService().currentUserId;
+      final hasUnsyncedLocalEdit = userId != null &&
+          SettingsService.instance.isRoomPageLayoutCloudDirty(
+            userId: userId,
+            scopeKey: scopeKey,
+          );
+      if (hasUnsyncedLocalEdit) {
+        CloudBackupService.instance.scheduleAppSettingsSync(
+          serverHub: serverHub,
+          home: homeProvider.currentHome,
+          roomLayoutScopeKey: scopeKey,
+          delay: Duration.zero,
+          reason: 'app_state_refresh_retry',
+        );
+        return;
+      }
+
       final snapshot =
           await CloudBackupService.instance.getSnapshotForCurrentUser();
       if (snapshot == null) return;
@@ -226,17 +250,38 @@ class AppStateRefresh {
         snapshot.appSettingsBundle,
         roomLayoutScopeKey: scopeKey,
         roomLayoutHubKey: hubKey,
-        overwrite: false,
+        roomLayoutHubKeyAliases: hubKeyAliases,
+        overwrite: true,
       );
       if (!restored) return;
 
       roomPageProvider?.setLayoutScope(scopeKey);
       roomPageProvider?.reloadLayout();
       debugPrint(
-        'AppStateRefresh: Restored All Rooms layout from cloud for hub=$hubKey',
+        'AppStateRefresh: Restored signed-in All Rooms layout from cloud',
+      );
+      final pages = SettingsService.instance.getRoomPageLayout(
+            scopeKey: scopeKey,
+          ) ??
+          const <List<String>>[];
+      unawaited(
+        AnalyticsService().logRoomLayoutCloudSyncCompleted(
+          direction: 'restore',
+          outcome: 'succeeded',
+          pageCount: pages.length,
+          roomCount: pages.expand((page) => page).toSet().length,
+        ),
       );
     } catch (error) {
       debugPrint('AppStateRefresh: Cloud app settings restore skipped: $error');
+      unawaited(
+        AnalyticsService().logRoomLayoutCloudSyncCompleted(
+          direction: 'restore',
+          outcome: 'failed',
+          pageCount: 0,
+          roomCount: 0,
+        ),
+      );
     }
   }
 

@@ -65,7 +65,10 @@ class BackendProvider {
   /// Initialize the backend provider with the given configuration.
   ///
   /// Must be called once before accessing [instance].
-  static Future<void> initialize(BackendConfig config) async {
+  static Future<void> initialize(
+    BackendConfig config, {
+    bool initializeAnalytics = true,
+  }) async {
     if (_instance != null) {
       debugPrint(
           'BackendProvider: Already initialized, disposing old instance');
@@ -92,9 +95,13 @@ class BackendProvider {
         auth = OfflineAuthBackend();
     }
 
-    // Initialize backends
+    // Authentication is a startup prerequisite because the account gate reads
+    // the recovered session. Analytics is optional and may be initialized by
+    // the caller after the first app frame/provider graph is available.
     await auth.initialize();
-    await analytics.initialize();
+    if (initializeAnalytics) {
+      await analytics.initialize();
+    }
 
     _instance = BackendProvider._(
       config: config,
@@ -103,6 +110,13 @@ class BackendProvider {
     );
 
     debugPrint('BackendProvider: Initialized with ${config.type.name} backend');
+  }
+
+  /// Initialize the configured analytics backend after auth startup.
+  static Future<void> initializeAnalytics() async {
+    final provider = instance;
+    if (provider.analytics.isInitialized) return;
+    await provider.analytics.initialize();
   }
 
   /// Get the current configuration.

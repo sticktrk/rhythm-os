@@ -4,6 +4,20 @@ import 'package:rhythm_core/rhythm_core.dart';
 
 void main() {
   group('ConfigModel', () {
+    test('Home reconciliation preserves an unsaved local edit', () {
+      final model = ConfigModel();
+      final saved = defaultCurveConfig.copyWith(maxBrightness: 80);
+      final edited = saved.copyWith(maxBrightness: 70);
+      final lateHomeUpdate = saved.copyWith(maxBrightness: 90);
+
+      model.updateFromHomeCurveConfig(saved);
+      model.updateConfig(edited);
+      model.updateFromHomeCurveConfig(lateHomeUpdate);
+
+      expect(model.config, edited);
+      expect(model.canResetToSaved, isTrue);
+    });
+
     test('starts with shared default config and solar context', () {
       final model = ConfigModel();
 

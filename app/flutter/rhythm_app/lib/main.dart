@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:app_links/app_links.dart';
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter/foundation.dart' show debugPrint, kDebugMode, kIsWeb;
 import 'package:flutter/material.dart';
@@ -21,9 +22,11 @@ import 'services/auth_service.dart';
 import 'services/analytics_service.dart';
 import 'services/app_log_service.dart';
 import 'services/entitlements_service.dart';
+import 'services/cloud_backup_service.dart';
 import 'services/recent_servers_service.dart';
 import 'services/settings_service.dart';
 import 'services/app_state_refresh.dart';
+import 'services/app_startup_performance.dart';
 import 'services/virtual_experience_service.dart';
 import 'data/local_data_source.dart';
 import 'providers/hub_connection_provider.dart';
@@ -32,6 +35,7 @@ import 'providers/room_page_provider.dart';
 import 'providers/home_provider.dart';
 import 'providers/server_sync_provider.dart';
 import 'providers/subscription_provider.dart';
+import 'config/feature_flags.dart';
 import 'config/platform_capabilities.dart';
 import 'config/supabase_config.dart';
 import 'widgets/hub_connection_loading_screen.dart';
@@ -44,6 +48,7 @@ void main() {
   }
 
   final caps = PlatformCapabilities.fromPlatform();
+  AppStartupPerformance.instance.start();
 
   // Render a Flutter frame immediately so iOS/Android can release the native
   // launch screen while storage, account, and local-brain startup continues.
@@ -156,10 +161,7 @@ Future<RhythmStartupResult> initializeRhythmApp(
   // Initialize SettingsService BEFORE Backend (for onboardingComplete check)
   // This also performs one-time migration from SharedPreferences to Hive
   await SettingsService.instance.initialize();
-  await AppLogService.instance.initializeStorage();
-  // Local-only recent servers list. Initialized here so the connect screen
-  // can render cached entries before HomeProvider/mDNS come up.
-  await RecentServersService.instance.initialize();
+  _startOptionalLocalServices();
 
   String? initError;
 
@@ -175,15 +177,16 @@ Future<RhythmStartupResult> initializeRhythmApp(
       debugPrint(initError);
     } else {
       try {
-        await BackendProvider.initialize(BackendConfig.supabase(
-          url: SupabaseConfig.url,
-          anonKey: SupabaseConfig.anonKey,
-          enableLogging: true,
-        )).timeout(const Duration(seconds: 20));
+        await BackendProvider.initialize(
+          BackendConfig.supabase(
+            url: SupabaseConfig.url,
+            anonKey: SupabaseConfig.anonKey,
+            enableLogging: true,
+          ),
+          initializeAnalytics: false,
+        ).timeout(const Duration(seconds: 20));
         debugPrint('Backend initialized with Supabase');
-        // Initialize auth service for deep link handling.
-        await AuthService().initialize().timeout(const Duration(seconds: 20));
-        await AnalyticsService().initialize();
+        unawaited(_initializeAnalyticsInBackground());
       } catch (e) {
         initError =
             'Account sign-in could not be initialized. Check your connection and restart the app. ($e)';
@@ -192,10 +195,15 @@ Future<RhythmStartupResult> initializeRhythmApp(
     }
   }
 
-  // Entitlements: resolves the user's plan tier (Basic vs Pro). Always
-  // bootstraps — for HA add-on (no cloud) this short-circuits to Pro.
+  // Entitlements are only a presentation prerequisite when enforcement is on.
+  // With the current disabled default, expose the service immediately and let
+  // its cloud/preferences work complete without delaying the provider graph.
   if (initError == null) {
-    await EntitlementsService.bootstrap(caps);
+    if (FeatureFlags.entitlementsEnabled) {
+      await EntitlementsService.bootstrap(caps);
+    } else {
+      EntitlementsService.start(caps);
+    }
   }
 
   HybridApiClient? client;
@@ -237,6 +245,35 @@ Future<RhythmStartupResult> initializeRhythmApp(
     client: client,
     initError: initError,
   );
+}
+
+void _startOptionalLocalServices() {
+  unawaited(
+    AppLogService.instance.initializeStorage().catchError(
+      (Object error, StackTrace stackTrace) {
+        debugPrint('App log storage initialization failed: $error');
+        debugPrint('$stackTrace');
+      },
+    ),
+  );
+  unawaited(
+    RecentServersService.instance.initialize().catchError(
+      (Object error, StackTrace stackTrace) {
+        debugPrint('Recent server hydration failed: $error');
+        debugPrint('$stackTrace');
+      },
+    ),
+  );
+}
+
+Future<void> _initializeAnalyticsInBackground() async {
+  try {
+    await BackendProvider.initializeAnalytics();
+    await AnalyticsService().initialize();
+  } catch (error, stackTrace) {
+    debugPrint('Analytics background initialization failed: $error');
+    debugPrint('$stackTrace');
+  }
 }
 
 class RhythmApp extends StatelessWidget {
@@ -281,12 +318,24 @@ class RhythmApp extends StatelessWidget {
         ChangeNotifierProvider(
           create: (_) => SubscriptionProvider(EntitlementsService.instance),
         ),
-        ChangeNotifierProvider(create: (_) => ConfigModel()),
         Provider<RhythmApi>.value(value: client!),
         // Also expose the hybrid client directly for local brain access
         Provider<HybridApiClient>.value(value: client!),
         // Home and hub management (local storage)
         ChangeNotifierProvider(create: (_) => HomeProvider()..initialize()),
+        // Mirror the current Home's cached/server-accepted curve without an
+        // extra startup `/api/state` read.
+        ChangeNotifierProxyProvider<HomeProvider, ConfigModel>(
+          create: (_) => ConfigModel(),
+          update: (_, homeProvider, configModel) {
+            configModel ??= ConfigModel();
+            final curveConfig = homeProvider.currentHome?.curveConfig;
+            if (curveConfig != null && curveConfig != configModel.config) {
+              configModel.updateFromHomeCurveConfig(curveConfig);
+            }
+            return configModel;
+          },
+        ),
         // Hub connection management - wired to HomeProvider for hub data
         ChangeNotifierProxyProvider<HomeProvider, HubConnectionProvider>(
           create: (_) => HubConnectionProvider(),
@@ -302,6 +351,15 @@ class RhythmApp extends StatelessWidget {
           create: (_) => RoomPageProvider(),
           update: (_, homeProvider, roomPageProvider) {
             roomPageProvider ??= RoomPageProvider();
+            roomPageProvider.configureUserLayoutChanged((scopeKey) {
+              final serverHub = homeProvider.getFirstHubOfType(HubType.server);
+              if (serverHub == null) return;
+              CloudBackupService.instance.scheduleAppSettingsSync(
+                serverHub: serverHub,
+                home: homeProvider.currentHome,
+                roomLayoutScopeKey: scopeKey,
+              );
+            });
             roomPageProvider.setLayoutScope(
               RoomPageProvider.layoutScopeFor(
                 home: homeProvider.currentHome,
@@ -322,6 +380,7 @@ class RhythmApp extends StatelessWidget {
             connection: context.read<RhythmConnection>(),
             roomProvider: context.read<RoomProvider>(),
             homeProvider: context.read<HomeProvider>(),
+            connectivityCheck: Connectivity().checkConnectivity,
           ),
           update: (_, connection, roomProvider, homeProvider, syncProvider) {
             syncProvider?.connectIfAvailable();
@@ -581,6 +640,7 @@ class _AuthGateState extends State<AuthGate> {
       setState(() {
         _isLoading = false;
       });
+      _refreshAppStateInBackground();
       return;
     }
 

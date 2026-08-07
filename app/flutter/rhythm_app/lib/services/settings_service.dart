@@ -379,6 +379,8 @@ class LocalBlePairingRouteOwnership {
 /// device-local settings.
 class SettingsService {
   static const String roomPageLayoutScopePrefix = 'room_page_layout::';
+  static const String _roomPageLayoutCloudDirtyPrefix =
+      'room_page_layout_cloud_dirty::';
   static const String selectedHomeIdKey = 'selected_home_id';
   static const String _handledPasswordRecoveryLinksKey =
       'handled_password_recovery_links_v1';
@@ -504,6 +506,7 @@ class SettingsService {
 
   /// Mark onboarding as complete.
   Future<void> setOnboardingComplete(bool value) async {
+    if (_settings.onboardingComplete == value) return;
     _settings = _settings.copyWith(onboardingComplete: value);
     await _save();
   }
@@ -960,6 +963,39 @@ class SettingsService {
     return '$roomPageLayoutScopePrefix$scopeKey';
   }
 
+  /// Whether this account has a user-authored layout that has not reached the
+  /// account cloud bundle yet.
+  bool isRoomPageLayoutCloudDirty({
+    required String userId,
+    String? scopeKey,
+  }) {
+    return _localDataSource!.getSettingsValue(
+          _roomPageLayoutCloudDirtyKey(userId, scopeKey),
+        ) ==
+        true;
+  }
+
+  /// Keep failed layout uploads authoritative across restart without changing
+  /// the existing page-layout or cloud-bundle schema.
+  Future<void> setRoomPageLayoutCloudDirty({
+    required String userId,
+    required bool dirty,
+    String? scopeKey,
+  }) async {
+    final key = _roomPageLayoutCloudDirtyKey(userId, scopeKey);
+    if (dirty) {
+      await _localDataSource!.saveSettingsValue(key, true);
+      return;
+    }
+    await _localDataSource!.deleteSettingsValue(key);
+  }
+
+  String _roomPageLayoutCloudDirtyKey(String userId, String? scopeKey) {
+    final encodedUser = Uri.encodeComponent(userId);
+    final encodedScope = Uri.encodeComponent(scopeKey ?? 'unscoped');
+    return '$_roomPageLayoutCloudDirtyPrefix$encodedUser::$encodedScope';
+  }
+
   /// Export app settings that should roam with a signed-in account.
   ///
   /// Keep this deliberately narrow for now. Device-local preferences stay
@@ -967,6 +1003,7 @@ class SettingsService {
   Map<String, dynamic> buildCloudSettingsBundle({
     String? roomLayoutScopeKey,
     String? roomLayoutHubKey,
+    Iterable<String> roomLayoutHubKeyAliases = const <String>[],
   }) {
     final bundle = <String, dynamic>{
       'schema_version': 1,
@@ -979,6 +1016,8 @@ class SettingsService {
       bundle['all_rooms_layouts'] = <Map<String, dynamic>>[
         <String, dynamic>{
           if (roomLayoutHubKey != null) 'hub_key': roomLayoutHubKey,
+          if (roomLayoutHubKeyAliases.isNotEmpty)
+            'hub_key_aliases': roomLayoutHubKeyAliases.toList(growable: false),
           if (roomLayoutScopeKey != null)
             'source_scope_key': roomLayoutScopeKey,
           'pages': pages,
@@ -998,6 +1037,7 @@ class SettingsService {
     Map<String, dynamic> bundle, {
     String? roomLayoutScopeKey,
     String? roomLayoutHubKey,
+    Iterable<String> roomLayoutHubKeyAliases = const <String>[],
     bool overwrite = true,
   }) async {
     if (!overwrite && getRoomPageLayout(scopeKey: roomLayoutScopeKey) != null) {
@@ -1007,6 +1047,7 @@ class SettingsService {
     final layout = _findAllRoomsLayoutForHub(
       bundle,
       roomLayoutHubKey: roomLayoutHubKey,
+      roomLayoutHubKeyAliases: roomLayoutHubKeyAliases,
     );
     if (layout == null) return false;
 
@@ -1017,15 +1058,26 @@ class SettingsService {
     return true;
   }
 
-  Map<dynamic, dynamic>? _findAllRoomsLayoutForHub(
+  static Map<dynamic, dynamic>? _findAllRoomsLayoutForHub(
     Map<String, dynamic> bundle, {
     String? roomLayoutHubKey,
+    Iterable<String> roomLayoutHubKeyAliases = const <String>[],
   }) {
+    final acceptedHubKeys = <String>{
+      if (roomLayoutHubKey != null) roomLayoutHubKey,
+      ...roomLayoutHubKeyAliases,
+    };
     final layouts = bundle['all_rooms_layouts'];
     if (layouts is List) {
       for (final layout in layouts) {
         if (layout is! Map) continue;
-        if (roomLayoutHubKey == null || layout['hub_key'] == roomLayoutHubKey) {
+        final layoutHubKeys = <String>{
+          if (layout['hub_key'] is String) layout['hub_key'] as String,
+          if (layout['hub_key_aliases'] is List)
+            ...(layout['hub_key_aliases'] as List).whereType<String>(),
+        };
+        if (acceptedHubKeys.isEmpty ||
+            acceptedHubKeys.any(layoutHubKeys.contains)) {
           return layout;
         }
       }
@@ -1035,6 +1087,19 @@ class SettingsService {
     // keyed by hub.
     final legacyLayout = bundle['all_rooms_layout'];
     return legacyLayout is Map ? legacyLayout : null;
+  }
+
+  @visibleForTesting
+  static Map<dynamic, dynamic>? findCloudRoomLayoutForTesting(
+    Map<String, dynamic> bundle, {
+    String? roomLayoutHubKey,
+    Iterable<String> roomLayoutHubKeyAliases = const <String>[],
+  }) {
+    return _findAllRoomsLayoutForHub(
+      bundle,
+      roomLayoutHubKey: roomLayoutHubKey,
+      roomLayoutHubKeyAliases: roomLayoutHubKeyAliases,
+    );
   }
 
   String? _roomPageLayoutJson({String? scopeKey}) {

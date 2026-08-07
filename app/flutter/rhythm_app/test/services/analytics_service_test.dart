@@ -211,6 +211,77 @@ void main() {
     );
   });
 
+  test('startup milestones queue until the analytics backend is ready',
+      () async {
+    analytics.resetForTesting();
+    backend.dispose();
+
+    await analytics.logStartupAllRoomsVisible(
+      elapsedMs: 120,
+      fromCache: true,
+      roomCountBucket: '2_4',
+    );
+    await analytics.logStartupAllRoomsInteractive(
+      elapsedMs: 340,
+      showedCachedRooms: true,
+      roomCountBucket: '2_4',
+    );
+
+    expect(backend.events, isEmpty);
+
+    await backend.initialize();
+    await analytics.initialize();
+
+    expect(
+      backend.events.map((event) => event.name),
+      [
+        'app_startup_all_rooms_visible',
+        'app_startup_all_rooms_interactive',
+      ],
+    );
+    expect(backend.events.first.properties, {
+      'elapsed_ms': 120,
+      'from_cache': 1,
+      'room_count_bucket': '2_4',
+      'presentation_state': 'cached_read_only',
+    });
+    final serialized = backend.events
+        .map((event) => '${event.name}:${event.properties}')
+        .join('\n');
+    for (final forbidden in [
+      'room_name',
+      'home_name',
+      'hub_id',
+      'endpoint',
+      'token',
+    ]) {
+      expect(serialized, isNot(contains(forbidden)));
+    }
+  });
+
+  test('layout cloud sync analytics excludes profile and layout identity',
+      () async {
+    await analytics.logRoomLayoutCloudSyncCompleted(
+      direction: 'restore',
+      outcome: 'succeeded',
+      pageCount: 2,
+      roomCount: 5,
+    );
+
+    final event = backend.events.single;
+    expect(event.name, 'room_layout_cloud_sync_completed');
+    expect(event.properties, {
+      'direction': 'restore',
+      'outcome': 'succeeded',
+      'page_count_bucket': '2_4',
+      'room_count_bucket': '5_plus',
+    });
+    expect(
+      event.properties.keys,
+      isNot(containsAll(['user_id', 'home_id', 'hub_id', 'room_id'])),
+    );
+  });
+
   test('analytics remains a no-op when the backend is unavailable', () async {
     BackendProvider.resetForTesting();
 
