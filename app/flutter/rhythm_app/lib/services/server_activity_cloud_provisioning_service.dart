@@ -35,7 +35,14 @@ class ServerActivityCloudProvisioningService {
     String? serverInstanceId,
   }) async {
     if (!canProvision || serverHub.type != HubType.server) return;
-    final key = '${serverHub.homeId}:${serverHub.id}';
+    final effectiveServerInstanceId = preferredServerIdentity(
+      existing: serverHub.serverInstanceId,
+      candidate: serverInstanceId,
+    );
+    final key = provisioningKey(
+      serverHub: serverHub,
+      serverInstanceId: effectiveServerInstanceId,
+    );
     final inFlight = _inFlight[key];
     if (inFlight != null) return inFlight;
 
@@ -43,7 +50,7 @@ class ServerActivityCloudProvisioningService {
       serverHub: serverHub,
       runtimeApi: runtimeApi,
       home: home,
-      serverInstanceId: serverInstanceId,
+      serverInstanceId: effectiveServerInstanceId,
     );
     _inFlight[key] = future;
     try {
@@ -59,15 +66,11 @@ class ServerActivityCloudProvisioningService {
     required Home? home,
     required String? serverInstanceId,
   }) async {
-    final effectiveServerInstanceId = preferredServerIdentity(
-      existing: serverHub.serverInstanceId,
-      candidate: serverInstanceId,
-    );
     final status = await runtimeApi.getActivityCloudConfig();
-    if (_statusMatchesHub(
+    if (statusMatchesHub(
       status,
       serverHub,
-      expectedServerInstanceId: effectiveServerInstanceId,
+      expectedServerInstanceId: serverInstanceId,
     )) {
       return;
     }
@@ -79,7 +82,7 @@ class ServerActivityCloudProvisioningService {
       body: buildBootstrapBody(
         serverHub: serverHub,
         home: home,
-        serverInstanceId: effectiveServerInstanceId,
+        serverInstanceId: serverInstanceId,
       ),
     );
     final data = Map<String, dynamic>.from(response.data as Map);
@@ -104,7 +107,8 @@ class ServerActivityCloudProvisioningService {
     );
   }
 
-  bool _statusMatchesHub(
+  @visibleForTesting
+  static bool statusMatchesHub(
     Map<String, dynamic>? status,
     Hub serverHub, {
     String? expectedServerInstanceId,
@@ -114,19 +118,55 @@ class ServerActivityCloudProvisioningService {
         status['upload_status']?.toString() == 'auth_failed') {
       return false;
     }
+    final normalizedServerInstanceId = normalizeServerIdentity(
+        expectedServerInstanceId ?? serverHub.serverInstanceId);
+    final configuredServerInstanceId =
+        normalizeServerIdentity(status['server_instance_id']?.toString());
+
+    // The bootstrap function can resolve a provisional/local hub snapshot to
+    // a different canonical cloud Home and hub. Once both sides agree on the
+    // durable Box identity, those record IDs are aliases for the same device;
+    // rotating solely because the aliases differ can revoke a still-healthy
+    // token and race a concurrent provisioning attempt.
+    if (normalizedServerInstanceId != null &&
+        configuredServerInstanceId != null &&
+        serverIdentityKind(normalizedServerInstanceId) ==
+            ServerIdentityKind.durable &&
+        serverIdentityKind(configuredServerInstanceId) ==
+            ServerIdentityKind.durable) {
+      return serverIdentitiesMatch(
+        normalizedServerInstanceId,
+        configuredServerInstanceId,
+      );
+    }
+
     if (status['hub_id']?.toString() != serverHub.id ||
         status['home_id']?.toString() != serverHub.homeId) {
       return false;
     }
-    final normalizedServerInstanceId =
-        (expectedServerInstanceId ?? serverHub.serverInstanceId)?.trim();
     if (normalizedServerInstanceId != null &&
-        normalizedServerInstanceId.isNotEmpty &&
-        status['server_instance_id']?.toString() !=
-            normalizedServerInstanceId) {
+        !serverIdentitiesMatch(
+          normalizedServerInstanceId,
+          configuredServerInstanceId,
+        )) {
       return false;
     }
     return true;
+  }
+
+  @visibleForTesting
+  static String provisioningKey({
+    required Hub serverHub,
+    required String? serverInstanceId,
+  }) {
+    final normalizedServerInstanceId = normalizeServerIdentity(
+      serverInstanceId ?? serverHub.serverInstanceId,
+    );
+    if (serverIdentityKind(normalizedServerInstanceId) ==
+        ServerIdentityKind.durable) {
+      return 'server:$normalizedServerInstanceId';
+    }
+    return '${serverHub.homeId}:${serverHub.id}';
   }
 
   @visibleForTesting
