@@ -15362,6 +15362,9 @@ pub fn do_topology_delete_room(state: &SharedState, room_id: &str) -> Result<()>
             })
             .cloned()
             .collect::<Vec<_>>();
+        if source_bindings.len() > 1 {
+            anyhow::bail!("Source-backed room deletion requires exactly one authoritative source");
+        }
         let delete_source_room = s.delete_source_room_fn.clone();
         if !source_bindings.is_empty() && delete_source_room.is_none() {
             anyhow::bail!("Source-backed room deletion is unavailable");
@@ -31495,6 +31498,43 @@ mod tests {
         let error = do_topology_delete_room(&state, &room_id).unwrap_err();
 
         assert!(format!("{error:#}").contains("bridge rejected room deletion"));
+        assert!(state.lock().unwrap().topology.get(&room_id).is_some());
+    }
+
+    #[test]
+    fn topology_delete_room_rejects_multiple_sources_before_external_mutation() {
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+        let created: serde_json::Value =
+            serde_json::from_str(&do_topology_create_room(&state, "Shared Room").unwrap()).unwrap();
+        let room_id = created["id"].as_str().unwrap().to_string();
+        let other_hub_key = HubKey::new(HubType::new("homeassistant"), "other");
+        let external_calls = Arc::new(Mutex::new(0usize));
+        {
+            let mut s = state.lock().unwrap();
+            for (binding_hub_key, native_id) in
+                [(hub_key, "source-room-1"), (other_hub_key, "source-room-2")]
+            {
+                assert!(s.topology.upsert_room_binding(
+                    &room_id,
+                    crate::topology::HubRoomBinding {
+                        hub_key: binding_hub_key,
+                        hub_room_id: native_id.to_string(),
+                        control_id: native_id.to_string(),
+                        light_device_ids: Vec::new(),
+                    },
+                ));
+            }
+            let external_calls = external_calls.clone();
+            s.delete_source_room_fn = Some(Arc::new(move |_, _| {
+                *external_calls.lock().unwrap() += 1;
+                Ok(())
+            }));
+        }
+
+        let error = do_topology_delete_room(&state, &room_id).unwrap_err();
+
+        assert!(format!("{error:#}").contains("exactly one authoritative source"));
+        assert_eq!(*external_calls.lock().unwrap(), 0);
         assert!(state.lock().unwrap().topology.get(&room_id).is_some());
     }
 

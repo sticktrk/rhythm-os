@@ -637,7 +637,7 @@ pub trait ExternalLightHubIntegration: Send + Sync {
         _state: &SharedState,
         _binding: &crate::topology::HubRoomBinding,
     ) -> Result<()> {
-        Ok(())
+        anyhow::bail!("Source room deletion is not supported by this integration")
     }
 
     /// Whether every light attached to a Rhythm room must route through a
