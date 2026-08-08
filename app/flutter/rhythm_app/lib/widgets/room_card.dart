@@ -1062,55 +1062,74 @@ class _RoomCardState extends State<RoomCard> {
                           padding: const EdgeInsets.fromLTRB(14, 14, 14, 0),
                           child: Row(
                             children: [
-                              Semantics(
-                                button: true,
-                                label: 'Open settings for ${room.name}',
-                                child: GestureDetector(
-                                  key: ValueKey(
-                                    'room-card-settings-${widget.roomId}',
-                                  ),
-                                  behavior: HitTestBehavior.opaque,
-                                  onTap: () => _openSettings(room),
-                                  child: SizedBox.square(
-                                    dimension: _roomHeaderActionHitSize,
-                                    child: Icon(
-                                      Icons.settings_rounded,
-                                      size: 19,
-                                      color: iconColor.withValues(alpha: 0.68),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(width: 8),
                               Expanded(
                                 child: Row(
                                   children: [
                                     Flexible(
                                       fit: FlexFit.loose,
-                                      child: Text(
-                                        room.name,
-                                        key: ValueKey(
-                                          'room-card-title-${widget.roomId}',
-                                        ),
-                                        maxLines: 2,
-                                        overflow: TextOverflow.ellipsis,
-                                        style: TextStyle(
-                                          color: titleColor,
-                                          fontSize: 20,
-                                          fontWeight: FontWeight.w700,
-                                          letterSpacing: -0.35,
-                                          height: 1.08,
-                                          shadows: onLight
-                                              ? const []
-                                              : [
-                                                  Shadow(
-                                                    color: Colors.black
-                                                        .withValues(
-                                                            alpha: 0.42),
-                                                    blurRadius: 10,
-                                                    offset: const Offset(0, 1),
-                                                  ),
-                                                ],
+                                      child: Semantics(
+                                        button: true,
+                                        label: 'Open settings for ${room.name}',
+                                        excludeSemantics: true,
+                                        child: TextButton.icon(
+                                          key: ValueKey(
+                                            'room-card-settings-${widget.roomId}',
+                                          ),
+                                          onPressed: () => _openSettings(room),
+                                          style: TextButton.styleFrom(
+                                            foregroundColor: titleColor,
+                                            overlayColor: titleColor.withValues(
+                                              alpha: 0.08,
+                                            ),
+                                            minimumSize: const Size(
+                                              0,
+                                              _roomHeaderActionHitSize,
+                                            ),
+                                            padding: EdgeInsets.zero,
+                                            tapTargetSize: MaterialTapTargetSize
+                                                .shrinkWrap,
+                                            visualDensity:
+                                                VisualDensity.compact,
+                                            alignment: Alignment.centerLeft,
+                                          ),
+                                          icon: Icon(
+                                            Icons.settings_rounded,
+                                            key: ValueKey(
+                                              'room-card-settings-icon-${widget.roomId}',
+                                            ),
+                                            size: 19,
+                                            color: iconColor.withValues(
+                                              alpha: 0.68,
+                                            ),
+                                          ),
+                                          label: Text(
+                                            room.name,
+                                            key: ValueKey(
+                                              'room-card-title-${widget.roomId}',
+                                            ),
+                                            maxLines: 2,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: TextStyle(
+                                              color: titleColor,
+                                              fontSize: 20,
+                                              fontWeight: FontWeight.w700,
+                                              letterSpacing: -0.35,
+                                              height: 1.08,
+                                              shadows: onLight
+                                                  ? const []
+                                                  : [
+                                                      Shadow(
+                                                        color: Colors.black
+                                                            .withValues(
+                                                          alpha: 0.42,
+                                                        ),
+                                                        blurRadius: 10,
+                                                        offset:
+                                                            const Offset(0, 1),
+                                                      ),
+                                                    ],
+                                            ),
+                                          ),
                                         ),
                                       ),
                                     ),

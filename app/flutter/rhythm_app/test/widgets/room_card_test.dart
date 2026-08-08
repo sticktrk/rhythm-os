@@ -649,6 +649,9 @@ void main() {
     final motion = find.byKey(const ValueKey('room-card-motion-room-1'));
     final reset = find.byKey(const ValueKey('room-card-reset-control-room-1'));
     final settings = find.byKey(const ValueKey('room-card-settings-room-1'));
+    final settingsIcon = find.byKey(
+      const ValueKey('room-card-settings-icon-room-1'),
+    );
     final titleText = tester.widget<Text>(title);
     expect(titleText.style?.fontSize, 20);
     expect(titleText.style?.fontWeight, FontWeight.w700);
@@ -657,6 +660,18 @@ void main() {
     expect(find.byIcon(Icons.settings_rounded), findsOneWidget);
     expect(find.byIcon(Icons.meeting_room_rounded), findsNothing);
     expect(find.byIcon(Icons.lightbulb_outline_rounded), findsNothing);
+    expect(
+      tester.getCenter(settingsIcon).dy,
+      closeTo(tester.getCenter(title).dy, 1),
+    );
+    expect(
+      tester.getRect(settings).contains(tester.getCenter(settingsIcon)),
+      isTrue,
+    );
+    expect(
+      tester.getRect(settings).contains(tester.getCenter(title)),
+      isTrue,
+    );
     expect(
       tester.getCenter(title).dx,
       lessThan(tester.getCenter(activity).dx),
@@ -775,7 +790,7 @@ void main() {
     expect(find.text('Settings'), findsNothing);
   });
 
-  testWidgets('settings gear is the only card surface that opens settings',
+  testWidgets('settings gear and room title share the aligned settings target',
       (tester) async {
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
@@ -821,17 +836,28 @@ void main() {
 
     final title = find.byKey(const ValueKey('room-card-title-room-1'));
     final settings = find.byKey(const ValueKey('room-card-settings-room-1'));
+    final settingsIcon = find.byKey(
+      const ValueKey('room-card-settings-icon-room-1'),
+    );
     expect(settings, findsOneWidget);
     expect(find.byIcon(Icons.settings_rounded), findsOneWidget);
     expect(find.byIcon(Icons.meeting_room_rounded), findsNothing);
     expect(find.byIcon(Icons.lightbulb_outline_rounded), findsNothing);
+    expect(
+      tester.getCenter(settingsIcon).dy,
+      closeTo(tester.getCenter(title).dy, 1),
+    );
 
     await tester.tap(title);
-    await tester.pump();
+    await tester.pumpAndSettle();
+    expect(find.byType(RoomSettingsSheet), findsOneWidget);
+
+    Navigator.of(tester.element(find.byType(RoomSettingsSheet))).pop();
+    await tester.pumpAndSettle();
     expect(find.byType(RoomSettingsSheet), findsNothing);
 
-    await tester.tap(settings);
-    await tester.pump();
+    await tester.tap(settingsIcon);
+    await tester.pumpAndSettle();
     expect(find.byType(RoomSettingsSheet), findsOneWidget);
   });
 
