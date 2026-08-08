@@ -5640,7 +5640,7 @@ void main() {
   });
 
   testWidgets(
-      'room sheet lists and assigns only existing devices of the tab type',
+      'room sheet adds existing motion as an additional room control',
       (tester) async {
     _registerWidgetCleanup(tester);
     final roomProvider = RoomProvider();
@@ -5797,10 +5797,15 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(api.assignDeviceParentCalls, 1);
-    expect(api.lastAssignedDeviceId, 'motion-hall');
-    expect(api.lastAssignedParentId, 'room-1');
-    expect(find.text('Moved Hall Motion to Kitchen'), findsOneWidget);
+    expect(api.assignDeviceParentCalls, 0);
+    expect(api.setTopologyNodeControlTargetsCalls, 1);
+    expect(api.lastControlSourceNodeId, 'motion-hall');
+    expect(api.lastControlKind, 'motion');
+    expect(api.lastControlTargetIds, ['room-1', 'room-2']);
+    expect(
+      find.text('Added Hall Motion as additional motion for Kitchen'),
+      findsOneWidget,
+    );
   });
 
   testWidgets(

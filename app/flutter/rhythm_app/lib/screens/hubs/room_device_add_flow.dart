@@ -146,6 +146,35 @@ Future<void> startRoomDeviceAddFlow(
   }
 
   final selected = selection.candidate!;
+  if (deviceType == RhythmDeviceType.motion) {
+    final syncProvider = context.read<ServerSyncProvider>();
+    final targetRoomIds = syncProvider
+        .controlTargetNodeIds(
+          sourceNodeId: selected.device.id,
+          controlKind: 'motion',
+        )
+        .toSet();
+    if (selected.parentNodeId.isNotEmpty) {
+      targetRoomIds.add(selected.parentNodeId);
+    }
+    targetRoomIds.add(roomId);
+    final success = await syncProvider.setNodeControlTargets(
+      sourceNodeId: selected.device.id,
+      controlKind: 'motion',
+      targetNodeIds: targetRoomIds,
+    );
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          success
+              ? 'Added ${selected.device.displayName} as additional motion for $roomName'
+              : 'Failed to add ${selected.device.displayName}',
+        ),
+      ),
+    );
+    return;
+  }
   await assignCanonicalDeviceToRoom(
     context,
     device: selected.device,
