@@ -3209,7 +3209,7 @@ class _RhythmServerHubManagementSectionState
     return [
       _buildHubOptionRow(
         icon: Icons.bluetooth_rounded,
-        label: 'Scan for nearby Hue Bluetooth bulbs',
+        label: 'Add nearby Hue Bluetooth bulbs',
         color: const Color(0xFFFFB900),
         onTap: () => _startHueBleAddFlow(),
       ),
@@ -4524,7 +4524,7 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                       const SizedBox(height: 10),
                       _buildActionButton(
                         icon: Icons.add_circle_outline,
-                        label: 'Scan for nearby Hue Bluetooth bulbs',
+                        label: 'Add nearby Hue Bluetooth bulbs',
                         color: const Color(0xFFFFB900),
                         onTap: () async {
                           await startDevicePairingFlow(

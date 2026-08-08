@@ -316,10 +316,11 @@ DevicePairingGuidance guidanceForDevicePairingCode(
             'your connected Hue Bridge.',
       ),
     DevicePairingCodeKind.hue => const DevicePairingGuidance(
-        title: 'Use nearby Bluetooth scan',
+        title: 'Use Add Device',
         message: 'A six-character Hue serial can add a Zigbee bulb through a '
             'connected Hue Bridge, but that path is not available right now. '
-            'To pair directly, choose “Scan for nearby Hue Bluetooth bulbs.”',
+            'To pair directly, open Add Device and keep the bulb powered on '
+            'nearby. Rhythm will offer it when it appears.',
       ),
     DevicePairingCodeKind.localBle when localBleProfileAvailable =>
       const DevicePairingGuidance(

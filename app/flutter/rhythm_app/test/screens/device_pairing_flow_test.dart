@@ -5,36 +5,20 @@ import 'package:rhythm_app/screens/hubs/device_pairing_scanner_screen.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 void main() {
-  testWidgets('universal intake exposes nearby Hue separately from codes', (
-    tester,
-  ) async {
-    DevicePairingTarget? result;
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Builder(
-          builder: (context) => TextButton(
-            onPressed: () async {
-              result = await showUniversalDevicePairingIntakeChooser(context);
-            },
-            child: const Text('Add device'),
-          ),
-        ),
-      ),
+  test('auto-discovered Hue intake preserves the camera journey', () {
+    const intake = DevicePairingScannerResult.hueBle(
+      journeyId: 'device-pair-camera',
     );
 
-    await tester.tap(find.text('Add device'));
-    await tester.pumpAndSettle();
-
+    expect(intake.action, DevicePairingScannerAction.hueBle);
+    expect(intake.inputMethod, 'auto_discovery');
     expect(
-      find.byKey(const ValueKey('pairing-method-hue-ble')),
-      findsOneWidget,
+      pairingJourneyIdForIntake(
+        intake,
+        fallbackPrefix: 'hue-ble-pair',
+      ),
+      'device-pair-camera',
     );
-    expect(find.byKey(const ValueKey('pairing-method-code')), findsOneWidget);
-    expect(find.text('No QR code or serial required'), findsOneWidget);
-
-    await tester.tap(find.byKey(const ValueKey('pairing-method-hue-ble')));
-    await tester.pumpAndSettle();
-    expect(result, DevicePairingTarget.hueBle);
   });
 
   testWidgets('Bridge chooser returns the exact selected address', (

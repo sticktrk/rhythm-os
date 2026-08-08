@@ -930,6 +930,35 @@ class AnalyticsService {
     });
   }
 
+  /// Track one bounded phone-side Hue BLE observation without advertisement
+  /// identity, signal strength, or raw plugin errors.
+  Future<void> logHueBleNearbyDiscoveryCompleted({
+    required String source,
+    required String outcome,
+    required int deviceCount,
+  }) async {
+    await logEvent('hue_ble_nearby_discovery_completed', {
+      'source': source,
+      'outcome': outcome,
+      'device_count': deviceCount < 0
+          ? 0
+          : deviceCount > 10
+              ? 10
+              : deviceCount,
+    });
+  }
+
+  /// Track the user's response to the privacy-safe nearby-bulb invitation.
+  Future<void> logHueBleNearbyPromptAnswered({
+    required String source,
+    required String outcome,
+  }) async {
+    await logEvent('hue_ble_nearby_prompt_answered', {
+      'source': source,
+      'outcome': outcome,
+    });
+  }
+
   /// Track a local-BLE pairing attempt without retaining setup or identity.
   Future<void> logLocalBlePairingAttempted({
     required String journeyId,

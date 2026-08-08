@@ -257,7 +257,7 @@ void main() {
 
       expect(decision?.canContinue, isFalse);
       expect(decision?.requiresChoice, isFalse);
-      expect(decision?.guidance.title, 'Use nearby Bluetooth scan');
+      expect(decision?.guidance.title, 'Use Add Device');
       expect(decision?.guidance.message, contains('not available right now'));
     });
 
@@ -335,7 +335,7 @@ void main() {
       );
       expect(
         guidanceForDevicePairingCode(DevicePairingCodeKind.hue).title,
-        'Use nearby Bluetooth scan',
+        'Use Add Device',
       );
       expect(
         guidanceForDevicePairingCode(DevicePairingCodeKind.unknown).title,

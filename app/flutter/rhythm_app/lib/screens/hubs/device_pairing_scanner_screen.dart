@@ -5,9 +5,17 @@ import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../../services/analytics_service.dart';
 import '../../services/device_pairing_code.dart';
+import '../../services/hue_ble_auto_discovery_service.dart';
+import '../../widgets/nearby_hue_ble_prompt.dart';
 import '../../widgets/solar_orbit.dart';
 
-enum DevicePairingScannerAction { matter, hueBridge, localBle, enterCode }
+enum DevicePairingScannerAction {
+  matter,
+  hueBridge,
+  hueBle,
+  localBle,
+  enterCode,
+}
 
 class DevicePairingScannerResult {
   const DevicePairingScannerResult._({
@@ -36,6 +44,15 @@ class DevicePairingScannerResult {
   }) : this._(
           action: DevicePairingScannerAction.hueBridge,
           payload: serial,
+          inputMethod: inputMethod,
+          journeyId: journeyId,
+        );
+
+  const DevicePairingScannerResult.hueBle({
+    String inputMethod = 'auto_discovery',
+    String? journeyId,
+  }) : this._(
+          action: DevicePairingScannerAction.hueBle,
           inputMethod: inputMethod,
           journeyId: journeyId,
         );
@@ -89,6 +106,9 @@ class DevicePairingScannerScreen extends StatefulWidget {
     this.supportedLocalBleProfileIds = const {},
     this.hueBridgeOnly = false,
     this.journeyId,
+    this.autoDiscoverHueBle = false,
+    this.analyticsSource = 'unknown',
+    @visibleForTesting this.hueBleDiscoveryRequest,
     @visibleForTesting this.cameraBuilder,
   });
 
@@ -97,6 +117,9 @@ class DevicePairingScannerScreen extends StatefulWidget {
   final Set<String> supportedLocalBleProfileIds;
   final bool hueBridgeOnly;
   final String? journeyId;
+  final bool autoDiscoverHueBle;
+  final String analyticsSource;
+  final HueBleDiscoveryRequest? hueBleDiscoveryRequest;
   final DevicePairingCameraBuilder? cameraBuilder;
 
   static Future<DevicePairingScannerResult?> show(
@@ -106,6 +129,8 @@ class DevicePairingScannerScreen extends StatefulWidget {
     Set<String> supportedLocalBleProfileIds = const {},
     bool hueBridgeOnly = false,
     String? journeyId,
+    bool autoDiscoverHueBle = false,
+    String analyticsSource = 'unknown',
   }) {
     return Navigator.of(context).push<DevicePairingScannerResult>(
       PageRouteBuilder<DevicePairingScannerResult>(
@@ -118,6 +143,8 @@ class DevicePairingScannerScreen extends StatefulWidget {
             supportedLocalBleProfileIds: supportedLocalBleProfileIds,
             hueBridgeOnly: hueBridgeOnly,
             journeyId: journeyId,
+            autoDiscoverHueBle: autoDiscoverHueBle,
+            analyticsSource: analyticsSource,
           );
         },
         transitionsBuilder: (context, animation, secondaryAnimation, child) {
@@ -145,6 +172,7 @@ class _DevicePairingScannerScreenState
   DevicePairingGuidance? _guidance;
   DevicePairingCodeDecision? _pendingDecision;
   bool _handledDetection = false;
+  bool _nearbyHuePromptInFlight = false;
 
   @override
   void initState() {
@@ -154,6 +182,11 @@ class _DevicePairingScannerScreenState
       _controller = MobileScannerController(
         formats: const [BarcodeFormat.qrCode],
       );
+    }
+    if (widget.autoDiscoverHueBle) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _discoverNearbyHueBle();
+      });
     }
   }
 
@@ -221,6 +254,54 @@ class _DevicePairingScannerScreenState
       _pendingDecision = null;
       _guidance = decision.guidance;
     });
+  }
+
+  Future<void> _discoverNearbyHueBle() async {
+    if (_nearbyHuePromptInFlight || _handledDetection) return;
+    final discover = widget.hueBleDiscoveryRequest ??
+        HueBleAutoDiscoveryService.instance.discover;
+    final discovery = await discover(source: widget.analyticsSource);
+    if (!mounted ||
+        !discovery.found ||
+        _handledDetection ||
+        ModalRoute.of(context)?.isCurrent != true) {
+      return;
+    }
+
+    _nearbyHuePromptInFlight = true;
+    _handledDetection = true;
+    try {
+      await _controller?.stop();
+    } catch (_) {
+      // The invitation is still useful if the camera cannot be paused. The
+      // detection gate prevents a QR result from racing the prompt.
+    }
+    if (!mounted) return;
+
+    final accepted = await showNearbyHueBlePrompt(
+      context,
+      source: widget.analyticsSource,
+      discovery: discovery,
+    );
+    if (!mounted) return;
+    if (accepted) {
+      Navigator.of(context).pop(
+        DevicePairingScannerResult.hueBle(
+          journeyId: widget.journeyId,
+        ),
+      );
+      return;
+    }
+
+    setState(() {
+      _nearbyHuePromptInFlight = false;
+      _handledDetection = false;
+    });
+    try {
+      await _controller?.start();
+    } catch (_) {
+      // Manual entry remains available if camera restart fails.
+    }
   }
 
   void _continueWithCode(DevicePairingCode code) {
