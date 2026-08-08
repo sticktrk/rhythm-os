@@ -1104,7 +1104,7 @@ void main() {
     );
   });
 
-  testWidgets('settings fan opens report bug flow from the room grid',
+  testWidgets('settings fan opens support report flow from the room grid',
       (tester) async {
     final roomProvider = RoomProvider();
     await _seedRoom(roomProvider);
@@ -1132,9 +1132,9 @@ void main() {
     await tester.pump(const Duration(milliseconds: 10));
 
     await _openNavigationFan(tester);
-    expect(find.text('Report Bug'), findsOneWidget);
+    expect(find.text('Report / Request'), findsOneWidget);
     await tester.pump(const Duration(milliseconds: 300));
-    final reportBugTop = tester.getTopLeft(find.text('Report Bug')).dy;
+    final reportBugTop = tester.getTopLeft(find.text('Report / Request')).dy;
     final scheduleTop = tester.getTopLeft(find.text('Schedule')).dy;
     final lightingTop = tester.getTopLeft(find.text('Lighting')).dy;
     final settingsTop = tester.getTopLeft(find.text('Settings')).dy;
@@ -1142,16 +1142,15 @@ void main() {
     expect(scheduleTop, lessThan(lightingTop));
     expect(lightingTop, lessThan(settingsTop));
 
-    await tester.tap(find.text('Report Bug'));
+    await tester.tap(find.text('Report / Request'));
     await tester.pump();
 
     expect(
-      find.text(
-        'This sends a snapshot of recent logs and redacted state to Rhythm support.',
-      ),
+      find.textContaining('A private debug bundle is included either way'),
       findsOneWidget,
     );
     expect(find.text('What went wrong? (optional)'), findsOneWidget);
+    expect(find.text('Feature'), findsOneWidget);
   });
 
   testWidgets('app resume shows cached rooms read-only until fresh hello',

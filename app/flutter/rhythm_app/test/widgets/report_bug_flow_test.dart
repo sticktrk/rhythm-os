@@ -1,8 +1,65 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rhythm_app/services/debug_bundle_submission_service.dart';
 import 'package:rhythm_app/widgets/report_bug_flow.dart';
 
 void main() {
   group('report bug flow', () {
+    testWidgets('prompt classifies a feature and promises a debug bundle',
+        (tester) async {
+      SupportReportRequest? result;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (context) => TextButton(
+              onPressed: () async {
+                result = await showDialog<SupportReportRequest>(
+                  context: context,
+                  builder: (_) => const ReportPromptDialog(),
+                );
+              },
+              child: const Text('Open report'),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Open report'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Report an issue or idea'), findsOneWidget);
+      expect(
+        find.textContaining('A private debug bundle is included either way'),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<SegmentedButton<SupportReportKind>>(
+              find.byKey(const Key('support-report-kind-selector')),
+            )
+            .selected,
+        {SupportReportKind.bug},
+      );
+      expect(find.text('What went wrong? (optional)'), findsOneWidget);
+
+      await tester.tap(find.text('Feature'));
+      await tester.pump();
+      expect(
+        find.text('What would you like Rhythm to do? (optional)'),
+        findsOneWidget,
+      );
+
+      await tester.enterText(
+        find.byKey(const Key('support-report-summary')),
+        'Add sunrise previews',
+      );
+      await tester.tap(find.text('Request feature'));
+      await tester.pumpAndSettle();
+
+      expect(result?.kind, SupportReportKind.feature);
+      expect(result?.summary, 'Add sunrise previews');
+    });
+
     test('fallback summary preserves user text and debug bundle failure', () {
       final summary = summaryWithDebugBundleFailureForTesting(
         summary: 'Lights are stuck',

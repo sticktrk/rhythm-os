@@ -6,6 +6,10 @@ import {
   readString,
   withAuthenticatedRequest,
 } from '../_shared/auth.ts'
+import {
+  githubLabelsForSupportReport,
+  supportReportIssueCopy,
+} from './support_report_contract.ts'
 
 // Required secrets:
 // - GITHUB_ISSUES_TOKEN: fine-grained token with issue write access
@@ -24,6 +28,7 @@ type DebugBundleSubmission = {
   is_anonymous: boolean
   reference_code: string
   status: string
+  report_kind: string | null
   summary: string | null
   app_version: string | null
   app_build: string | null
@@ -153,12 +158,11 @@ async function handleRequest(
       token: githubToken,
       title: buildIssueTitle(submission),
       body: buildIssueBody(submission, signedBundleLink),
-      labels: dedupe([
-        'App Bug Report',
-        'light-hub',
-        ...(isFleetSubmission(submission) ? ['fleet-detected'] : []),
-        ...readCsvEnv('GITHUB_ISSUES_LABELS'),
-      ]),
+      labels: githubLabelsForSupportReport({
+        kind: submission.report_kind,
+        fleet: isFleetSubmission(submission),
+        configuredLabels: readCsvEnv('GITHUB_ISSUES_LABELS'),
+      }),
       assignees: readCsvEnv('GITHUB_ISSUES_ASSIGNEES'),
     })
 
@@ -296,7 +300,10 @@ async function createGitHubIssue({
 
 function buildIssueTitle(submission: DebugBundleSubmission): string {
   const fleet = isFleetSubmission(submission)
-  const prefix = fleet ? 'fleet-report: ' : 'app-report: '
+  const prefix = supportReportIssueCopy(
+    submission.report_kind,
+    fleet,
+  ).titlePrefix
   const suffix = ` (${submission.reference_code})`
   const maxDetailLength = 256 - prefix.length - suffix.length
   const titleDetail =
@@ -333,6 +340,7 @@ function buildIssueBody(
   signedBundleLink: SignedBundleLink | null,
 ): string {
   const fleet = isFleetSubmission(submission)
+  const reportCopy = supportReportIssueCopy(submission.report_kind, fleet)
   const summary = submission.summary?.trim()
   const hasBundle = !!submission.bundle_storage_path
   const bundleSection = hasBundle
@@ -360,16 +368,15 @@ function buildIssueBody(
       ]
 
   return [
-    fleet
-      ? 'Created automatically from the Rhythm fleet log triage flow.'
-      : 'Created automatically from the Rhythm app Report Bug flow.',
+    reportCopy.intro,
     '',
-    fleet ? '## Detected Finding' : '## User Summary',
+    `## ${reportCopy.summaryHeading}`,
     summary ? quoteBlock(summary) : '_No summary provided._',
     '',
     '## Submission',
     `- Reference: ${submission.reference_code}`,
     `- Submission ID: ${submission.id}`,
+    `- Kind: ${reportCopy.kind}`,
     `- Submitted at: ${submission.created_at}`,
     `- Auth mode: ${submission.is_anonymous ? 'anonymous' : 'signed in'}`,
     '',
@@ -417,10 +424,6 @@ function readCsvEnv(name: string): string[] {
     .split(',')
     .map((value) => value.trim())
     .filter((value) => value.length > 0)
-}
-
-function dedupe(values: string[]): string[] {
-  return Array.from(new Set(values))
 }
 
 function formatEndpoint(submission: DebugBundleSubmission): string {

@@ -62,6 +62,7 @@ void main() {
       roomMode: 'on',
       expanded: true,
     );
+    await analytics.logRoomCardSettingsOpened(nodeKind: 'room');
     await analytics.logRoomLightSettingsOpened(
       hasOverrides: true,
       overrideProfileCount: 1,
@@ -99,6 +100,7 @@ void main() {
         'mood_scene_apply_completed',
         'global_room_action_completed',
         'room_card_detail_toggled',
+        'room_card_settings_opened',
         'room_light_settings_opened',
         'room_light_settings_save_completed',
         'room_light_settings_reset_completed',
@@ -132,22 +134,26 @@ void main() {
       },
     );
     expect(
-      backend.events[7].properties,
-      containsPair('changed_field_count', 2),
+      backend.events[6].properties,
+      {'node_kind': 'room'},
     );
     expect(
       backend.events[8].properties,
-      containsPair('failure_stage', 'request'),
+      containsPair('changed_field_count', 2),
     );
     expect(
       backend.events[9].properties,
+      containsPair('failure_stage', 'request'),
+    );
+    expect(
+      backend.events[10].properties,
       {
         'source': 'room_sheet_long_press',
         'outcome': 'succeeded',
       },
     );
     expect(
-      backend.events[10].properties,
+      backend.events[11].properties,
       containsPair('failure_stage', 'authoritative_refresh'),
     );
 
@@ -160,6 +166,51 @@ void main() {
       'scene_id',
       'room_id',
       'device_id',
+      'error',
+    ]) {
+      expect(serialized, isNot(contains(forbidden)));
+    }
+  });
+
+  test('support report analytics correlate privacy-safe outcomes', () async {
+    await analytics.logSupportReportAttempted(
+      journeyId: 'support-report-123',
+      reportKind: 'feature',
+      bundleScope: 'server_and_app',
+    );
+    await analytics.logSupportReportCompleted(
+      journeyId: 'support-report-123',
+      reportKind: 'feature',
+      bundleScope: 'app_only_after_server_failure',
+      outcome: 'failed',
+      failureStage: 'submission',
+    );
+
+    expect(backend.events.map((event) => event.name), [
+      'support_report_attempted',
+      'support_report_completed',
+    ]);
+    expect(backend.events.first.properties, {
+      'journey_id': 'support-report-123',
+      'report_kind': 'feature',
+      'bundle_scope': 'server_and_app',
+    });
+    expect(backend.events.last.properties, {
+      'journey_id': 'support-report-123',
+      'report_kind': 'feature',
+      'bundle_scope': 'app_only_after_server_failure',
+      'outcome': 'failed',
+      'failure_stage': 'submission',
+    });
+
+    final serialized = backend.events
+        .map((event) => '${event.name}:${event.properties}')
+        .join('\n');
+    for (final forbidden in [
+      'summary',
+      'endpoint',
+      'bundle_path',
+      'reference_code',
       'error',
     ]) {
       expect(serialized, isNot(contains(forbidden)));

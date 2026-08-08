@@ -563,6 +563,8 @@ void main() {
 
   testWidgets('header docks motion right and neutral tap disables motion only',
       (tester) async {
+    await tester.binding.setSurfaceSize(const Size(320, 700));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
       const RoomDto(
@@ -635,7 +637,7 @@ void main() {
       'room-1',
       rhythmEnabled: true,
       timeOffset: 0,
-      brightnessOffset: 0,
+      brightnessOffset: 1,
       state: RoomModeState.active,
       transitioning: true,
       lightsOn: true,
@@ -645,12 +647,16 @@ void main() {
     final title = find.byKey(const ValueKey('room-card-title-room-1'));
     final activity = find.byKey(const ValueKey('room-card-activity-room-1'));
     final motion = find.byKey(const ValueKey('room-card-motion-room-1'));
+    final reset = find.byKey(const ValueKey('room-card-reset-control-room-1'));
+    final settings = find.byKey(const ValueKey('room-card-settings-room-1'));
     final titleText = tester.widget<Text>(title);
     expect(titleText.style?.fontSize, 20);
     expect(titleText.style?.fontWeight, FontWeight.w700);
     expect(titleText.style?.letterSpacing, -0.35);
     expect(titleText.maxLines, 2);
-    expect(find.byIcon(Icons.meeting_room_rounded), findsOneWidget);
+    expect(find.byIcon(Icons.settings_rounded), findsOneWidget);
+    expect(find.byIcon(Icons.meeting_room_rounded), findsNothing);
+    expect(find.byIcon(Icons.lightbulb_outline_rounded), findsNothing);
     expect(
       tester.getCenter(title).dx,
       lessThan(tester.getCenter(activity).dx),
@@ -660,6 +666,20 @@ void main() {
       lessThan(tester.getCenter(motion).dx),
     );
     expect(tester.getSize(motion), const Size(28, 28));
+    expect(tester.getSize(reset), const Size(28, 28));
+    expect(tester.getCenter(motion).dx, lessThan(tester.getCenter(reset).dx));
+    expect(
+      tester.getRect(motion).overlaps(tester.getRect(reset)),
+      isFalse,
+    );
+    expect(
+      tester.getRect(activity).overlaps(tester.getRect(reset)),
+      isFalse,
+    );
+    expect(
+      tester.getRect(settings).overlaps(tester.getRect(reset)),
+      isFalse,
+    );
 
     await roomProvider.applyServerNodeState(
       'room-1',
@@ -753,6 +773,66 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('Settings'), findsNothing);
+  });
+
+  testWidgets('settings gear is the only card surface that opens settings',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await roomProvider.addRoom(
+      const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.hue,
+        kind: RoomNodeKind.room,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    final connection = _TestRhythmConnection();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _FakeHomeProvider(),
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'room-1',
+              globalConfig: defaultCurveConfig,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final title = find.byKey(const ValueKey('room-card-title-room-1'));
+    final settings = find.byKey(const ValueKey('room-card-settings-room-1'));
+    expect(settings, findsOneWidget);
+    expect(find.byIcon(Icons.settings_rounded), findsOneWidget);
+    expect(find.byIcon(Icons.meeting_room_rounded), findsNothing);
+    expect(find.byIcon(Icons.lightbulb_outline_rounded), findsNothing);
+
+    await tester.tap(title);
+    await tester.pump();
+    expect(find.byType(RoomSettingsSheet), findsNothing);
+
+    await tester.tap(settings);
+    await tester.pump();
+    expect(find.byType(RoomSettingsSheet), findsOneWidget);
   });
 
   testWidgets('motion countdown tap cancels motion activation', (tester) async {
@@ -2440,6 +2520,13 @@ void main() {
       ),
     );
 
+    expect(
+      find.byKey(const ValueKey('room-card-settings-bulb-1')),
+      findsOneWidget,
+    );
+    expect(find.byIcon(Icons.settings_rounded), findsOneWidget);
+    expect(find.byIcon(Icons.lightbulb_outline_rounded), findsNothing);
+
     await _tapRoomSegment(tester, 'Color', roomId: 'bulb-1');
     final slider = tester.widget<Slider>(_cctSlider(roomId: 'bulb-1'));
     expect(slider.min, 1000);
@@ -2802,16 +2889,10 @@ void main() {
       1,
     );
     expect(
-      tester
-          .widget<AnimatedOpacity>(
-            find.byKey(
-              const ValueKey('room-card-reset-control-opacity-room-1'),
-            ),
-          )
-          .opacity,
-      1,
+      find.byKey(const ValueKey('room-card-reset-control-room-1')),
+      findsOneWidget,
     );
-    expect(find.text('Reset'), findsOneWidget);
+    expect(find.byIcon(Icons.sync_rounded), findsOneWidget);
 
     tester.widget<Slider>(_sceneBrightnessSlider()).onChanged!(35);
     await tester.pump();

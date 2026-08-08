@@ -273,6 +273,26 @@ class _RoomCardState extends State<RoomCard> {
     setState(() => _expandedControl = null);
   }
 
+  void _openSettings(RoomDto room) {
+    unawaited(
+      AnalyticsService().logRoomCardSettingsOpened(
+        nodeKind: room.kind.name,
+      ),
+    );
+    if (room.kind == RoomNodeKind.lightDevice) {
+      final device = context.read<ServerSyncProvider>().deviceForNode(room.id);
+      if (device != null) {
+        DeviceDetailSheet.show(
+          context,
+          device,
+          room.parentId ?? '',
+        );
+        return;
+      }
+    }
+    RoomSettingsSheet.show(context, room);
+  }
+
   void _showMoodScenePicker({bool previewCurrentCt = false}) {
     final sync = context.read<ServerSyncProvider>();
     final roomProvider = context.read<RoomProvider>();
@@ -952,33 +972,12 @@ class _RoomCardState extends State<RoomCard> {
         final sliderInactiveTrackColor = Colors.black.withValues(alpha: 0.20);
         final sliderThumbColor = Colors.white;
         final sliderOverlayColor = cctColor.withValues(alpha: 0.15);
-        final titleIcon = switch (room.kind) {
-          RoomNodeKind.lightDevice => Icons.lightbulb_outline_rounded,
-          RoomNodeKind.room => Icons.meeting_room_rounded,
-          _ => null,
-        };
-
         return IgnorePointer(
           ignoring: !hubConnected,
           child: AnimatedOpacity(
             opacity: hubConnected ? 1.0 : 0.35,
             duration: const Duration(milliseconds: 400),
             child: GestureDetector(
-              onTap: () {
-                if (room.kind == RoomNodeKind.lightDevice) {
-                  final device =
-                      context.read<ServerSyncProvider>().deviceForNode(room.id);
-                  if (device != null) {
-                    DeviceDetailSheet.show(
-                      context,
-                      device,
-                      room.parentId ?? '',
-                    );
-                    return;
-                  }
-                }
-                RoomSettingsSheet.show(context, room);
-              },
               // Only register double-tap when reset is available to avoid tap
               // delay on cards that are already following the curve.
               onDoubleTap: resetAvailable ? _resetRoom : null,
@@ -1063,15 +1062,26 @@ class _RoomCardState extends State<RoomCard> {
                           padding: const EdgeInsets.fromLTRB(14, 14, 14, 0),
                           child: Row(
                             children: [
-                              if (titleIcon != null)
-                                Padding(
-                                  padding: const EdgeInsets.only(right: 8),
-                                  child: Icon(
-                                    titleIcon,
-                                    size: 20,
-                                    color: iconColor.withValues(alpha: 0.68),
+                              Semantics(
+                                button: true,
+                                label: 'Open settings for ${room.name}',
+                                child: GestureDetector(
+                                  key: ValueKey(
+                                    'room-card-settings-${widget.roomId}',
+                                  ),
+                                  behavior: HitTestBehavior.opaque,
+                                  onTap: () => _openSettings(room),
+                                  child: SizedBox.square(
+                                    dimension: _roomHeaderActionHitSize,
+                                    child: Icon(
+                                      Icons.settings_rounded,
+                                      size: 19,
+                                      color: iconColor.withValues(alpha: 0.68),
+                                    ),
                                   ),
                                 ),
+                              ),
+                              const SizedBox(width: 8),
                               Expanded(
                                 child: Row(
                                   children: [
@@ -1253,6 +1263,17 @@ class _RoomCardState extends State<RoomCard> {
                                     ),
                                   ),
                                 ),
+                              if (resetAvailable)
+                                Padding(
+                                  padding: const EdgeInsets.only(left: 8),
+                                  child: _OffCurveResetButton(
+                                    controlKey: ValueKey(
+                                      'room-card-reset-control-${widget.roomId}',
+                                    ),
+                                    color: glowColor,
+                                    onReset: _resetRoom,
+                                  ),
+                                ),
                             ],
                           ),
                         ),
@@ -1411,24 +1432,6 @@ class _RoomCardState extends State<RoomCard> {
                           active: resetAvailable,
                           color: glowColor,
                         ),
-                      ),
-                    ),
-                    // Re-sync "clasp" docked on the broken ring's top-right
-                    // corner — tap to snap the room back onto the curve,
-                    // closing the orbit. Present for drift and active Scenes.
-                    Positioned(
-                      top: 0,
-                      right: 0,
-                      child: _OffCurveResetButton(
-                        opacityKey: ValueKey(
-                          'room-card-reset-control-opacity-${widget.roomId}',
-                        ),
-                        controlKey: ValueKey(
-                          'room-card-reset-control-${widget.roomId}',
-                        ),
-                        active: resetAvailable,
-                        color: glowColor,
-                        onReset: _resetRoom,
                       ),
                     ),
                   ],
@@ -3408,93 +3411,54 @@ class _OrbitRingPainter extends CustomPainter {
       old.phase != phase || old.color != color;
 }
 
-/// Circular "re-sync" button docked on the [_OffCurveOrbitRing] at the card's
-/// top-right corner. Styled to sit on the ring (same color, matching 2px
-/// stroke) and pops in with a slight overshoot when the room drifts off-curve.
-/// Tapping snaps the room back to the curve, which closes the ring.
+/// Compact re-sync action laid out beside the room's other header controls.
+/// Keeping it in the row prevents reset from painting over motion or status.
 class _OffCurveResetButton extends StatelessWidget {
-  final bool active;
   final Color color;
   final VoidCallback onReset;
-  final Key? opacityKey;
   final Key? controlKey;
 
   const _OffCurveResetButton({
-    required this.active,
     required this.color,
     required this.onReset,
-    this.opacityKey,
     this.controlKey,
   });
 
   @override
   Widget build(BuildContext context) {
-    return IgnorePointer(
-      ignoring: !active,
-      child: AnimatedScale(
-        scale: active ? 1.0 : 0.6,
-        duration: Duration(milliseconds: active ? 280 : 180),
-        curve: active ? Curves.easeOutBack : Curves.easeIn,
-        child: AnimatedOpacity(
-          key: opacityKey,
-          opacity: active ? 1.0 : 0.0,
-          duration: Duration(milliseconds: active ? 240 : 160),
-          curve: Curves.easeInOut,
-          child: Semantics(
-            button: true,
-            label: 'Reset to curve',
-            child: GestureDetector(
-              key: controlKey,
-              onTap: () {
-                HapticFeedback.selectionClick();
-                onReset();
-              },
-              behavior: HitTestBehavior.opaque,
-              // Transparent padding keeps a generous tap target around the
-              // compact reset pill tucked into the corner.
-              child: Padding(
-                padding: const EdgeInsets.all(6),
-                child: Container(
-                  height: 30,
-                  padding: const EdgeInsets.symmetric(horizontal: 10),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(15),
-                    color: Color.lerp(const Color(0xFF141210), color, 0.18)!
-                        .withValues(alpha: 0.92),
-                    border: Border.all(
-                      color: color.withValues(alpha: 0.9),
-                      width: 2,
-                    ),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withValues(alpha: 0.35),
-                        blurRadius: 6,
-                        offset: const Offset(0, 2),
-                      ),
-                    ],
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        'Reset',
-                        style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.92),
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 0.2,
-                        ),
-                      ),
-                      const SizedBox(width: 4),
-                      Icon(
-                        Icons.sync_rounded,
-                        size: 16,
-                        color: Colors.white.withValues(alpha: 0.92),
-                      ),
-                    ],
-                  ),
-                ),
+    return Semantics(
+      button: true,
+      label: 'Reset to curve',
+      child: GestureDetector(
+        key: controlKey,
+        onTap: () {
+          HapticFeedback.selectionClick();
+          onReset();
+        },
+        behavior: HitTestBehavior.opaque,
+        child: SizedBox.square(
+          dimension: _roomHeaderActionHitSize,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: Color.lerp(const Color(0xFF141210), color, 0.18)!
+                  .withValues(alpha: 0.92),
+              border: Border.all(
+                color: color.withValues(alpha: 0.9),
+                width: 2,
               ),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.35),
+                  blurRadius: 6,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+            ),
+            child: Icon(
+              Icons.sync_rounded,
+              size: 16,
+              color: Colors.white.withValues(alpha: 0.92),
             ),
           ),
         ),
