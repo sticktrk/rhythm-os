@@ -160,6 +160,7 @@ fn main() -> Result<()> {
             Some(callbacks.finalize_external_controller_release_fn);
         s.prepare_hub_device_room_assignment_fn =
             Some(callbacks.prepare_hub_device_room_assignment_fn);
+        s.delete_source_room_fn = Some(callbacks.delete_source_room_fn);
         s.start_pairing_fn = Some(callbacks.start_pairing_fn);
         s.reconcile_pairing_results_fn = Some(callbacks.reconcile_pairing_results_fn);
         s.start_unpairing_fn = Some(callbacks.start_unpairing_fn);

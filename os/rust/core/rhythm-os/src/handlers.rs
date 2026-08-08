@@ -6608,8 +6608,17 @@ mod tests {
 
     #[test]
     fn delete_topology_room_returns_204() {
-        let (state, _registry, canonical_id, room_id, _hub_key) =
+        let (state, _registry, canonical_id, room_id, hub_key) =
             handler_state_with_canonical_light();
+        assert!(state.lock().unwrap().topology.upsert_managed_room_binding(
+            &room_id,
+            HubRoomBinding {
+                hub_key,
+                hub_room_id: "device-1".to_string(),
+                control_id: "device-1".to_string(),
+                light_device_ids: vec!["device-1".to_string()],
+            },
+        ));
         let r = handle_delete_topology_room(&state, &room_id);
         assert_eq!(r.status, 204);
         assert!(r.body.is_empty());

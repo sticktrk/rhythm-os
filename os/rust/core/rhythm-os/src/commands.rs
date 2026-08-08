@@ -15347,8 +15347,25 @@ pub fn do_topology_delete_room(state: &SharedState, room_id: &str) -> Result<()>
     let _transaction = transaction_lock
         .lock()
         .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
-    let (topology_before, canonical_before, detached_devices) = {
+    let (topology_before, canonical_before, detached_devices, source_bindings, delete_source_room) = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let room = s
+            .topology
+            .get(room_id)
+            .ok_or_else(|| anyhow::anyhow!("Room not found: {}", room_id))?;
+        let source_bindings = room
+            .hub_room_bindings
+            .iter()
+            .filter(|binding| {
+                !s.topology
+                    .room_binding_is_managed(room_id, &binding.hub_key, &binding.hub_room_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let delete_source_room = s.delete_source_room_fn.clone();
+        if !source_bindings.is_empty() && delete_source_room.is_none() {
+            anyhow::bail!("Source-backed room deletion is unavailable");
+        }
         let topology_before = s.topology.clone();
         let canonical_before = s.canonical_registry.clone();
         let detached_device_ids = s
@@ -15366,7 +15383,13 @@ pub fn do_topology_delete_room(state: &SharedState, room_id: &str) -> Result<()>
             s.canonical_registry.assign_room(&device_id, None);
             detached_devices.push((device, active_endpoints));
         }
-        (topology_before, canonical_before, detached_devices)
+        (
+            topology_before,
+            canonical_before,
+            detached_devices,
+            source_bindings,
+            delete_source_room,
+        )
     };
 
     if let Err(error) = sync_required_topology_groups(state) {
@@ -15401,6 +15424,32 @@ pub fn do_topology_delete_room(state: &SharedState, room_id: &str) -> Result<()>
             "delete persistence",
             error,
         ));
+    }
+
+    if let Some(delete_source_room) = delete_source_room {
+        for binding in &source_bindings {
+            if let Err(error) = delete_source_room(state, binding) {
+                let recovery_error = {
+                    let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+                    state.topology = topology_before;
+                    state.canonical_registry = canonical_before;
+                    save_authority_state(&state).err()
+                };
+                let error = match recovery_error {
+                    None => error.context("Source-backed room deletion failed"),
+                    Some(recovery_error) => anyhow::anyhow!(
+                        "Source-backed room deletion failed: {:#}; restoring prior persistence failed: {:#}",
+                        error,
+                        recovery_error
+                    ),
+                };
+                return Err(required_topology_group_sync_error(
+                    state,
+                    "delete rollback",
+                    error,
+                ));
+            }
+        }
     }
 
     {
@@ -31375,6 +31424,78 @@ mod tests {
             runtime.engine_room_snapshot(&room_id).is_none(),
             "deleted room should be removed from runtime"
         );
+    }
+
+    #[test]
+    fn topology_delete_room_propagates_external_source_deletion() {
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+
+        let result = do_topology_create_room(&state, "Guest Bath").unwrap();
+        let created: serde_json::Value = serde_json::from_str(&result).unwrap();
+        let room_id = created["id"].as_str().unwrap().to_string();
+        {
+            let mut s = state.lock().unwrap();
+            assert!(s.topology.upsert_room_binding(
+                &room_id,
+                crate::topology::HubRoomBinding {
+                    hub_key,
+                    hub_room_id: "external-room-1".to_string(),
+                    control_id: "external-room-1".to_string(),
+                    light_device_ids: Vec::new(),
+                },
+            ));
+        }
+        let deleted_native_room = Arc::new(Mutex::new(None));
+        {
+            let deleted_native_room = deleted_native_room.clone();
+            let room_id_for_callback = room_id.clone();
+            state.lock().unwrap().delete_source_room_fn = Some(Arc::new(move |state, binding| {
+                assert!(state
+                    .lock()
+                    .unwrap()
+                    .topology
+                    .get(&room_id_for_callback)
+                    .is_none());
+                *deleted_native_room.lock().unwrap() = Some(binding.hub_room_id.clone());
+                Ok(())
+            }));
+        }
+
+        do_topology_delete_room(&state, &room_id).unwrap();
+
+        assert_eq!(
+            deleted_native_room.lock().unwrap().as_deref(),
+            Some("external-room-1")
+        );
+        assert!(state.lock().unwrap().topology.get(&room_id).is_none());
+    }
+
+    #[test]
+    fn topology_delete_room_rolls_back_when_external_source_rejects_delete() {
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+        let created: serde_json::Value =
+            serde_json::from_str(&do_topology_create_room(&state, "Guest Bath").unwrap()).unwrap();
+        let room_id = created["id"].as_str().unwrap().to_string();
+        {
+            let mut s = state.lock().unwrap();
+            assert!(s.topology.upsert_room_binding(
+                &room_id,
+                crate::topology::HubRoomBinding {
+                    hub_key,
+                    hub_room_id: "external-room-1".to_string(),
+                    control_id: "external-room-1".to_string(),
+                    light_device_ids: Vec::new(),
+                },
+            ));
+            s.delete_source_room_fn = Some(Arc::new(|_, _| {
+                Err(anyhow::anyhow!("bridge rejected room deletion"))
+            }));
+        }
+
+        let error = do_topology_delete_room(&state, &room_id).unwrap_err();
+
+        assert!(format!("{error:#}").contains("bridge rejected room deletion"));
+        assert!(state.lock().unwrap().topology.get(&room_id).is_some());
     }
 
     #[test]

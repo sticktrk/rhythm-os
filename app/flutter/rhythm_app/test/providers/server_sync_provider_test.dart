@@ -8179,7 +8179,7 @@ void main() {
     expect(find.text('Removed Kitchen Motion from its room'), findsOneWidget);
   });
 
-  testWidgets('Delete Room is hidden when the room has Hue bulbs',
+  testWidgets('Delete Room is available for a source-backed Hue room',
       (tester) async {
     _registerWidgetCleanup(tester);
     final roomProvider = RoomProvider();
@@ -8239,8 +8239,22 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Rename Room'), findsOneWidget);
-    expect(find.text('Delete Room'), findsNothing);
-    expect(api.topologyDeleteRoomCalls, 0);
+    expect(
+      find.byKey(const ValueKey('room-settings-delete-room')),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Delete Room'));
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(
+      find.textContaining('also be deleted there when supported'),
+      findsOneWidget,
+    );
+    await tester.tap(find.widgetWithText(TextButton, 'Delete'));
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(api.topologyDeleteRoomCalls, 1);
+    expect(api.lastDeletedRoomId, 'room-1');
   });
 
   testWidgets('room page explains unavailable Light settings capability',
