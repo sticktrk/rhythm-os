@@ -155,6 +155,7 @@ async function handleRequest(
       body: buildIssueBody(submission, signedBundleLink),
       labels: dedupe([
         'App Bug Report',
+        'light-hub',
         ...(isFleetSubmission(submission) ? ['fleet-detected'] : []),
         ...readCsvEnv('GITHUB_ISSUES_LABELS'),
       ]),
