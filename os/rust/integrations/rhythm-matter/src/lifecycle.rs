@@ -9,6 +9,7 @@ use std::time::Duration;
 use anyhow::Result;
 use log::{info, warn};
 use rhythm_devices::{DeviceQuirk, LightCapabilities};
+use rhythm_os::api_types::{LightCapabilitiesDto, LightColorTemperatureCapabilitiesDto};
 use rhythm_os::canonical::identity::HubKey;
 use rhythm_os::hub::{ActiveHub, HubEvent, HubType};
 use rhythm_os::registry::HubDeviceRegistry;
@@ -252,6 +253,7 @@ pub fn connect_matter(
         &cloud_profiles,
         &hub_key,
     );
+    publish_endpoint_capabilities(state, &hub_key, &initial_metadata.device_caps)?;
     let next_node_id = next_node_id_seed(&commissioned);
     let fabric_id = configured_fabric_id(state, &hub_key);
 
@@ -364,6 +366,73 @@ fn next_node_id_seed(commissioned: &[MatterDeviceInfo]) -> u64 {
 struct InitialDeviceMetadata {
     device_caps: HashMap<String, LightCapabilities>,
     device_quirks: HashMap<String, Vec<DeviceQuirk>>,
+}
+
+pub(crate) fn normalized_endpoint_capabilities(
+    capabilities: &LightCapabilities,
+) -> Option<serde_json::Value> {
+    let color_temperature = if capabilities.supports_color_temp() {
+        let min_kelvin = capabilities.min_kelvin?;
+        let max_kelvin = capabilities.max_kelvin?;
+        if min_kelvin == 0 || min_kelvin > max_kelvin {
+            return None;
+        }
+        Some(LightColorTemperatureCapabilitiesDto {
+            min_kelvin,
+            max_kelvin,
+        })
+    } else {
+        None
+    };
+
+    Some(serde_json::json!({
+        "light_capabilities": LightCapabilitiesDto {
+            color_temperature,
+            individual_profile_overrides: None,
+        }
+    }))
+}
+
+fn publish_endpoint_capabilities(
+    state: &SharedState,
+    hub_key: &HubKey,
+    device_capabilities: &HashMap<String, LightCapabilities>,
+) -> Result<()> {
+    let mut state = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Failed to lock state"))?;
+    let mut changed = false;
+
+    let canonical_ids = state
+        .canonical_registry
+        .devices()
+        .map(|device| device.id.clone())
+        .collect::<Vec<_>>();
+    for canonical_id in canonical_ids {
+        let Some(device) = state.canonical_registry.get_mut(&canonical_id) else {
+            continue;
+        };
+        for endpoint in &mut device.endpoints {
+            if &endpoint.hub_key != hub_key || !endpoint.active {
+                continue;
+            }
+            let Some(capabilities) = device_capabilities.get(&endpoint.native_id) else {
+                continue;
+            };
+            let Some(normalized) = normalized_endpoint_capabilities(capabilities) else {
+                continue;
+            };
+            if endpoint.capabilities.as_ref() != Some(&normalized) {
+                endpoint.capabilities = Some(normalized);
+                changed = true;
+            }
+        }
+    }
+
+    if changed {
+        rhythm_os::commands::save_authority_state(&state)?;
+    }
+    Ok(())
 }
 
 /// Build the best metadata available without talking to the device.
@@ -844,6 +913,58 @@ mod tests {
 
         assert!(metadata.device_caps.contains_key("matter-12"));
         assert!(metadata.device_caps.contains_key("matter-12-2"));
+    }
+
+    #[test]
+    fn startup_publishes_persisted_matter_capabilities_to_canonical_endpoint() {
+        let state = shared_state("publish-endpoint-capabilities");
+        let key = HubKey::new(HubType::new("matter"), "local");
+        let identity = DiscoveredIdentity {
+            native_id: "matter-101".to_string(),
+            room_id: None,
+            room_name: None,
+            name: "AiDot Smart RGBTW Bulb".to_string(),
+            device_type: DeviceType::Light,
+            hardware_ids: vec![HardwareId::matter("101")],
+            manufacturer: Some("AiDot".to_string()),
+            model: Some("Smart RGBTW Bulb".to_string()),
+        };
+        state
+            .lock()
+            .unwrap()
+            .canonical_registry
+            .resolve(&identity, &key, 100);
+        let capabilities = HashMap::from([(
+            "matter-101".to_string(),
+            LightCapabilities {
+                color_modes: vec![
+                    rhythm_devices::ColorMode::HueSaturation,
+                    rhythm_devices::ColorMode::ColorTemperature,
+                ],
+                min_kelvin: Some(2702),
+                max_kelvin: Some(6535),
+                ..LightCapabilities::defaults_for(rhythm_devices::LightType::ExtendedColor)
+            },
+        )]);
+
+        publish_endpoint_capabilities(&state, &key, &capabilities).unwrap();
+
+        let state = state.lock().unwrap();
+        let endpoint = state
+            .canonical_registry
+            .find_by_native_id(&key, "matter-101")
+            .and_then(|device| device.endpoint_by_native_id("matter-101"))
+            .unwrap();
+        assert_eq!(
+            endpoint
+                .capabilities
+                .as_ref()
+                .and_then(|value| value.pointer("/light_capabilities/color_temperature")),
+            Some(&serde_json::json!({
+                "min_kelvin": 2702,
+                "max_kelvin": 6535,
+            }))
+        );
     }
 
     #[test]
