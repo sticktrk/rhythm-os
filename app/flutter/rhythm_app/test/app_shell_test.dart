@@ -14,6 +14,7 @@ import 'package:rhythm_app/providers/room_page_provider.dart';
 import 'package:rhythm_app/providers/room_provider.dart';
 import 'package:rhythm_app/providers/server_sync_provider.dart';
 import 'package:rhythm_app/providers/subscription_provider.dart';
+import 'package:rhythm_app/screens/all_rooms_screen.dart';
 import 'package:rhythm_app/screens/server_disconnected_screen.dart';
 import 'package:rhythm_app/screens/settings/automations_screen.dart';
 import 'package:rhythm_app/screens/settings/light_screen.dart';
@@ -1288,6 +1289,25 @@ void main() {
       ),
       findsOneWidget,
     );
+
+    final homeIcon = find.descendant(
+      of: find.byType(AllRoomsScreen),
+      matching: find.byIcon(Icons.home_rounded),
+    );
+    final connectingBanner =
+        find.byKey(const Key('all_rooms_connecting_banner'));
+    expect(homeIcon, findsOneWidget);
+    expect(homeIcon.hitTestable(), findsOneWidget);
+    expect(
+      tester.getTopLeft(connectingBanner).dy,
+      greaterThanOrEqualTo(tester.getBottomLeft(homeIcon).dy + 12),
+    );
+
+    await tester.tap(homeIcon);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
+
+    expect(find.text('Welcome to Rhythm'), findsOneWidget);
   });
 
   testWidgets('cached room pages remain horizontally swipeable',
