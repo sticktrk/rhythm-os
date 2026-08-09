@@ -143,7 +143,7 @@ function uploadedUpdate({
   const fileName = recoveredObject?.name ?? readSafeFileName(payload, 'file_name')
   const sizeBytes = recoveredObject?.size ??
     readBoundedInt(payload, 'size_bytes', 1, maxBundleBytes)
-  if (!fileName || (!recoveredObject && sizeBytes == null)) {
+  if (!fileName || sizeBytes == null) {
     throw new Error('Uploaded completion requires file_name and size_bytes')
   }
 
