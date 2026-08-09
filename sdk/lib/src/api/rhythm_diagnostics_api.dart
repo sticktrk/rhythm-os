@@ -86,6 +86,17 @@ class RhythmDebugBundleSubmissionResult {
   bool get uploadedByDevice => uploadedFileName != null;
 }
 
+/// Durable acknowledgement for server-owned background bundle collection.
+class RhythmDebugBundleQueueResult {
+  const RhythmDebugBundleQueueResult({
+    required this.submissionId,
+    required this.alreadyQueued,
+  });
+
+  final String submissionId;
+  final bool alreadyQueued;
+}
+
 /// Lightweight HTTP client for device diagnostic endpoints.
 ///
 /// Can be instantiated directly with a host for one-off operations
@@ -269,6 +280,66 @@ class RhythmDiagnosticsApi {
       throw _wrapDioException(
         e,
         message: 'Device debug bundle upload failed',
+      );
+    }
+  }
+
+  /// Ask a capable server to durably queue bundle collection and return as
+  /// soon as ownership no longer depends on the app process.
+  Future<RhythmDebugBundleQueueResult> queueDebugBundle({
+    required String submissionId,
+    required String uploadUrl,
+    required String completionUrl,
+    required String completionToken,
+    String? appLog,
+    Map<String, dynamic>? appMetadata,
+  }) async {
+    try {
+      final response = await _dio.post(
+        'api/diag/debug-bundle',
+        data: {
+          'upload_url': uploadUrl,
+          if (appLog != null) 'app_log': appLog,
+          if (appMetadata != null) 'app_metadata': appMetadata,
+          'async_submission': {
+            'submission_id': submissionId,
+            'completion_url': completionUrl,
+            'completion_token': completionToken,
+          },
+        },
+        options: Options(validateStatus: (_) => true),
+      );
+      if (response.statusCode != 202) {
+        throw RhythmApiException(
+          'Failed to queue debug bundle',
+          statusCode: response.statusCode,
+          serverMessage: _responseBodyText(response.data),
+        );
+      }
+      if (response.data is! Map) {
+        throw RhythmApiException(
+          'Failed to queue debug bundle',
+          statusCode: response.statusCode,
+          serverMessage:
+              'Server did not return a durable queue acknowledgement.',
+        );
+      }
+      final json = Map<String, dynamic>.from(response.data as Map);
+      if (json['queued'] != true || json['submission_id'] != submissionId) {
+        throw RhythmApiException(
+          'Failed to queue debug bundle',
+          statusCode: response.statusCode,
+          serverMessage: 'Server returned an invalid queue acknowledgement.',
+        );
+      }
+      return RhythmDebugBundleQueueResult(
+        submissionId: submissionId,
+        alreadyQueued: json['already_queued'] == true,
+      );
+    } on DioException catch (error) {
+      throw _wrapDioException(
+        error,
+        message: 'Failed to queue debug bundle',
       );
     }
   }

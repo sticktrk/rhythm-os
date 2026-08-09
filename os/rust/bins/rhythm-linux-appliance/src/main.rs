@@ -830,6 +830,7 @@ async fn run_server(
     periodic_gate_heartbeat: PeriodicGateHeartbeat,
 ) -> Result<()> {
     rhythm_os::state::capture_tokio_runtime_handle(&state);
+    rhythm_server::support_bundle_jobs::resume_pending(state.clone());
 
     let addr = format!("0.0.0.0:{}", port);
     info!(target: "sys", "Starting HTTP server on {}", addr);

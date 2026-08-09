@@ -40,6 +40,9 @@ verify_jwt = false
 [functions.report-bug]
 verify_jwt = false
 
+[functions.report-bug-bundle-complete]
+verify_jwt = false
+
 [functions.matter-device-profiles]
 verify_jwt = false
 

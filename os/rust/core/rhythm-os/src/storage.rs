@@ -2053,6 +2053,7 @@ impl Storage for FileStorage {
             "topology.json",
             "commissioning_wifi.json",
             "auth.json",
+            "support_bundle_jobs.json",
         ] {
             self.remove_if_exists(name)?;
         }
@@ -5229,6 +5230,7 @@ mod tests {
             std::fs::create_dir_all(path.join("cloudflared")).unwrap();
             std::fs::write(path.join("cloudflared").join("connector_token"), "secret").unwrap();
             std::fs::write(path.join("cloudflared").join("hostname"), "host").unwrap();
+            std::fs::write(path.join("support_bundle_jobs.json"), "secret job").unwrap();
 
             storage.clear_remote_access_config().unwrap();
             assert!(storage.load_remote_access_config().unwrap().is_none());
@@ -5457,6 +5459,7 @@ mod tests {
                 "auth.json",
                 "activity_cloud.json",
                 "remote_access.json",
+                "support_bundle_jobs.json",
                 "cloudflared/connector_token",
                 "cloudflared/hostname",
                 "hub_registry_hue_192_168_1_2.json",

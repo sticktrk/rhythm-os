@@ -1,11 +1,13 @@
 import 'dart:convert';
 
 import 'package:archive/archive.dart';
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter/foundation.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:uuid/uuid.dart';
 
 import '../backend/backend.dart';
 import 'app_log_service.dart';
@@ -18,6 +20,7 @@ class DebugBundleSubmission {
     required this.id,
     required this.referenceCode,
     required this.status,
+    this.bundleStatus = 'none',
     this.reportKind = SupportReportKind.bug,
     this.createdAt,
     this.githubIssueUrl,
@@ -28,6 +31,7 @@ class DebugBundleSubmission {
   final String id;
   final String referenceCode;
   final String status;
+  final String bundleStatus;
   final SupportReportKind reportKind;
   final DateTime? createdAt;
   final String? githubIssueUrl;
@@ -39,6 +43,8 @@ class DebugBundleSubmission {
       id: row['id'] as String? ?? '',
       referenceCode: row['reference_code'] as String? ?? '',
       status: row['status'] as String? ?? 'received',
+      bundleStatus: row['bundle_status'] as String? ??
+          (row['bundle_storage_path'] == null ? 'none' : 'uploaded'),
       reportKind: switch (row['report_kind']) {
         'feature' => SupportReportKind.feature,
         _ => SupportReportKind.bug,
@@ -60,6 +66,7 @@ class DebugBundleSubmission {
       id: id,
       referenceCode: referenceCode,
       status: status ?? this.status,
+      bundleStatus: bundleStatus,
       reportKind: reportKind,
       createdAt: createdAt,
       githubIssueUrl: githubIssueUrl ?? this.githubIssueUrl,
@@ -97,10 +104,115 @@ class DebugBundleSubmissionService {
   static const String bucketName = 'support-debug-bundles';
   static const String tableName = 'support_debug_bundle_submissions';
   static const String reportBugFunctionName = 'report-bug';
+  static const String reportBugBundleCompleteFunctionName =
+      'report-bug-bundle-complete';
+  static const Uuid _uuid = Uuid();
 
   static DebugBundleSubmissionService? _instance;
   static DebugBundleSubmissionService get instance =>
       _instance ??= DebugBundleSubmissionService._();
+
+  /// Persist the report, then transfer collection ownership to a capable
+  /// RhythmServer. The returned future completes on durable HTTP 202 queue
+  /// acknowledgement; bundle generation/upload/GitHub continue without the
+  /// app process.
+  Future<DebugBundleSubmission> submitViaServerQueue({
+    required String submissionId,
+    required SupportReportKind reportKind,
+    required Hub serverHub,
+    required RhythmDiagnosticsApi deviceClient,
+    required String serverVersion,
+    required String serverPlatformContext,
+    String? summary,
+  }) async {
+    final auth = AuthService();
+    final userId = auth.currentUserId;
+    final client = _client;
+    final backend =
+        BackendProvider.isInitialized ? BackendProvider.instance.auth : null;
+    if (client == null ||
+        backend is! SupabaseAuthBackend ||
+        userId == null ||
+        auth.currentUser == null) {
+      throw const DebugBundleSubmissionException(
+        'Debug bundle submissions are unavailable right now.',
+      );
+    }
+
+    final packageInfo = await _loadPackageInfo();
+    final fileName = _sanitizeFileName(
+      'rhythm-debug-bundle-$serverPlatformContext-$submissionId.tar.gz',
+    );
+    final storagePath = _buildStoragePath(
+      userId: userId,
+      submissionId: submissionId,
+      fileName: fileName,
+    );
+    final completionToken = _uuid.v4();
+    final completionTokenHash =
+        crypto.sha256.convert(utf8.encode(completionToken)).toString();
+    final collectionStartedAt = DateTime.now().toUtc().toIso8601String();
+    final signedUpload = await client.storage
+        .from(bucketName)
+        .createSignedUploadUrl(storagePath);
+
+    late final DebugBundleSubmission submission;
+    try {
+      final row = await client
+          .from(tableName)
+          .insert({
+            'id': submissionId,
+            'user_id': userId,
+            'user_email': auth.currentUser?.email,
+            'is_anonymous': auth.isAnonymous,
+            'report_kind': reportKind.name,
+            'summary': _normalizeSummary(summary),
+            'app_version': packageInfo.version,
+            'app_build': packageInfo.buildNumber,
+            'app_platform': _platformLabel(),
+            'server_hub_id': serverHub.id,
+            'server_name': serverHub.name,
+            'server_host': serverHub.endpoint.host,
+            'server_port': serverHub.endpoint.port,
+            'server_version': serverVersion,
+            'server_platform_context': serverPlatformContext,
+            'bundle_storage_path': storagePath,
+            'bundle_file_name': fileName,
+            'bundle_content_type': 'application/gzip',
+            'bundle_status': 'collecting',
+            'bundle_completion_token_hash': completionTokenHash,
+            'bundle_collection_started_at': collectionStartedAt,
+          })
+          .select()
+          .single();
+      submission =
+          DebugBundleSubmission.fromRow(Map<String, dynamic>.from(row));
+    } catch (error) {
+      throw DebugBundleSubmissionException(
+        _formatInsertError(error),
+        cause: error,
+      );
+    }
+
+    final completionUrl =
+        '${backend.supabaseUrl.replaceAll(RegExp(r'/+$'), '')}'
+        '/functions/v1/$reportBugBundleCompleteFunctionName';
+    try {
+      await deviceClient.queueDebugBundle(
+        submissionId: submissionId,
+        uploadUrl: signedUpload.signedUrl,
+        completionUrl: completionUrl,
+        completionToken: completionToken,
+        appLog: await AppLogService.instance.snapshotText(),
+        appMetadata: _appLogMetadata(packageInfo),
+      );
+    } catch (error) {
+      await _markAsyncQueueFailed(client, submissionId);
+      rethrow;
+    }
+
+    return submission;
+  }
 
   /// Preferred submission path: mint a signed upload URL and let the device
   /// push the bundle straight to storage. Large bundles no longer round-trip
@@ -175,6 +287,9 @@ class DebugBundleSubmissionService {
             'bundle_file_name': result.uploadedFileName ?? fileName,
             'bundle_content_type': 'application/gzip',
             'bundle_size_bytes': result.uploadedSizeBytes,
+            'bundle_status': 'uploaded',
+            'bundle_collection_completed_at':
+                DateTime.now().toUtc().toIso8601String(),
           })
           .select()
           .single();
@@ -256,6 +371,9 @@ class DebugBundleSubmissionService {
             'bundle_file_name': uploadedBundle.fileName,
             'bundle_content_type': uploadedBundle.contentType,
             'bundle_size_bytes': uploadedBundle.sizeBytes,
+            'bundle_status': 'uploaded',
+            'bundle_collection_completed_at':
+                DateTime.now().toUtc().toIso8601String(),
           })
           .select()
           .single();
@@ -336,6 +454,10 @@ class DebugBundleSubmissionService {
               'bundle_content_type': uploadedBundle.contentType,
             if (uploadedBundle != null)
               'bundle_size_bytes': uploadedBundle.sizeBytes,
+            'bundle_status': uploadedBundle == null ? 'none' : 'uploaded',
+            if (uploadedBundle != null)
+              'bundle_collection_completed_at':
+                  DateTime.now().toUtc().toIso8601String(),
           })
           .select()
           .single();
@@ -566,6 +688,25 @@ class DebugBundleSubmissionService {
       return _GitHubIssueReport(
         status: 'received',
         error: _formatGitHubIssueError(error.toString()),
+      );
+    }
+  }
+
+  Future<void> _markAsyncQueueFailed(
+    SupabaseClient client,
+    String submissionId,
+  ) async {
+    try {
+      await client.functions.invoke(
+        reportBugFunctionName,
+        body: {
+          'submission_id': submissionId,
+          'action': 'mark_queue_failed',
+        },
+      );
+    } catch (error) {
+      debugPrint(
+        'DebugBundleSubmissionService: failed to mark queue rejection: $error',
       );
     }
   }

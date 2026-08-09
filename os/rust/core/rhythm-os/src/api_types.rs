@@ -270,6 +270,7 @@ pub struct HubStartupRetryDto {
 
 /// API capability metadata in state snapshot.
 pub const API_SCHEMA_VERSION: u32 = 2;
+pub const FEATURE_ASYNC_DEBUG_BUNDLE_UPLOAD: &str = "async_debug_bundle_upload";
 pub const FEATURE_MOTION_ACTIVATION_TOGGLE: &str = "motion_activation_toggle";
 pub const FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES: &str = "room_light_profile_overrides";
 pub const FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES: &str =
@@ -290,6 +291,7 @@ impl Serialize for ApiCapabilitiesDto {
         state.serialize_field(
             "features",
             &[
+                FEATURE_ASYNC_DEBUG_BUNDLE_UPLOAD,
                 FEATURE_MOTION_ACTIVATION_TOGGLE,
                 FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES,
                 FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
@@ -1486,14 +1488,18 @@ mod tests {
         );
         assert_eq!(
             json["capabilities"]["features"][0],
-            FEATURE_MOTION_ACTIVATION_TOGGLE
+            FEATURE_ASYNC_DEBUG_BUNDLE_UPLOAD
         );
         assert_eq!(
             json["capabilities"]["features"][1],
-            FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES
+            FEATURE_MOTION_ACTIVATION_TOGGLE
         );
         assert_eq!(
             json["capabilities"]["features"][2],
+            FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES
+        );
+        assert_eq!(
+            json["capabilities"]["features"][3],
             FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES
         );
         assert_eq!(

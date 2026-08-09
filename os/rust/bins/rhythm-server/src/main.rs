@@ -291,6 +291,7 @@ fn install_factory_reset_hook(state: &SharedState) -> Result<()> {
 
 async fn run_server(state: SharedState, port: u16) -> Result<()> {
     rhythm_os::state::capture_tokio_runtime_handle(&state);
+    rhythm_server::support_bundle_jobs::resume_pending(state.clone());
 
     // Start HTTP server
     let addr = format!("0.0.0.0:{}", port);

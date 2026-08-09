@@ -14,3 +14,4 @@ pub mod hub;
 pub mod liveness;
 pub mod ota_history;
 pub mod self_update;
+pub mod support_bundle_jobs;

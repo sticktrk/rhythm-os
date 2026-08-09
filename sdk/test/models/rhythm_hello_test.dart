@@ -374,6 +374,7 @@ void main() {
             'legacy_rooms_projection',
             'sse_event_ids',
             'async_dispatch_metadata',
+            RhythmFeature.asyncDebugBundleUpload,
           ],
           'hubs': [
             {
@@ -424,6 +425,11 @@ void main() {
       expect(hello.capabilities, isNotNull);
       expect(hello.capabilities!.apiSchemaVersion, 2);
       expect(hello.capabilities!.supportsFeature('node_state'), isTrue);
+      expect(
+        hello.capabilities!
+            .supportsFeature(RhythmFeature.asyncDebugBundleUpload),
+        isTrue,
+      );
       expect(hello.capabilities!.supportsFeature('missing'), isFalse);
       expect(hello.capabilities!.hub('matter')?.supportsUnpairing, isTrue);
       expect(
