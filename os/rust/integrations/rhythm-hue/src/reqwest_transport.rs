@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use crate::api_types::{HueV2GroupedLight, HueV2Light, HueV2Response};
 use crate::transport::{
-    HueBridgeSearchLight, HueBridgeSearchSensor, HueCreatedResource, HueCreatedRoom,
-    HueRoomDefinition, HueTransport,
+    HueBridgeDeviceClass, HueBridgeSearchLight, HueBridgeSearchSensor, HueCreatedResource,
+    HueCreatedRoom, HueRoomDefinition, HueTransport,
 };
 use anyhow::Result;
 
@@ -407,6 +407,13 @@ fn completed_new_sensor_scan(
     saw_active: bool,
 ) -> bool {
     !current.active && (saw_active || current.generation != before.generation)
+}
+
+fn legacy_collection_for_device_class(device_class: HueBridgeDeviceClass) -> &'static str {
+    match device_class {
+        HueBridgeDeviceClass::Light => "lights",
+        HueBridgeDeviceClass::Sensor => "sensors",
+    }
 }
 
 fn validate_hue_v2_envelope<'a>(
@@ -1126,7 +1133,12 @@ impl HueTransport for ReqwestHueTransport {
         }))
     }
 
-    fn remove_device(&self, username: &str, v2_device_id: &str) -> Result<()> {
+    fn remove_device(
+        &self,
+        username: &str,
+        v2_device_id: &str,
+        device_class: HueBridgeDeviceClass,
+    ) -> Result<()> {
         if !self.device_exists(username, v2_device_id)? {
             return Ok(());
         }
@@ -1134,8 +1146,9 @@ impl HueTransport for ReqwestHueTransport {
         let zigbee = self.get_resources(username, "zigbee_connectivity")?;
         let macs = zigbee_macs_for_device(&zigbee, v2_device_id)?;
 
+        let collection = legacy_collection_for_device_class(device_class);
         let mut matches = Vec::new();
-        for collection in ["lights", "sensors"] {
+        for collection in [collection] {
             let collection_url = format!("{}/api/{}/{}", self.base_url(), username, collection);
             let response = self
                 .client
@@ -1157,7 +1170,7 @@ impl HueTransport for ReqwestHueTransport {
             );
         }
         if matches.is_empty() {
-            anyhow::bail!("No Hue V1 light or sensor exactly matched the V2 device Zigbee MAC");
+            anyhow::bail!("No Hue V1 {collection} exactly matched the V2 device Zigbee MAC");
         }
 
         for (index, (collection, legacy_id)) in matches.iter().enumerate() {
@@ -1646,6 +1659,14 @@ mod tests {
 
     #[test]
     fn bridge_removal_maps_v2_device_mac_to_exact_v1_light_and_sensor_ids() {
+        assert_eq!(
+            legacy_collection_for_device_class(HueBridgeDeviceClass::Light),
+            "lights"
+        );
+        assert_eq!(
+            legacy_collection_for_device_class(HueBridgeDeviceClass::Sensor),
+            "sensors"
+        );
         let macs = zigbee_macs_for_device(
             &serde_json::json!({
                 "errors": [],

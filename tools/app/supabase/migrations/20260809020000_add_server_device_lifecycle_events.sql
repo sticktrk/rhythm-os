@@ -102,6 +102,8 @@ FROM public.server_device_lifecycle_events
 WHERE public.is_rhythm_staff();
 
 REVOKE ALL ON public.rhythm_support_server_device_lifecycle_events FROM PUBLIC;
+REVOKE ALL ON public.rhythm_support_server_device_lifecycle_events FROM anon;
+REVOKE ALL ON public.rhythm_support_server_device_lifecycle_events FROM authenticated;
 GRANT SELECT ON public.rhythm_support_server_device_lifecycle_events TO authenticated;
 
 COMMENT ON TABLE public.server_device_lifecycle_events IS

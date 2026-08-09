@@ -18,6 +18,12 @@ pub struct HueBridgeSearchSensor {
     pub name: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HueBridgeDeviceClass {
+    Light,
+    Sensor,
+}
+
 /// Complete, typed definition used when Rhythm creates or replaces a Hue room.
 ///
 /// `device_ids` are Hue V2 `device` resource IDs. The archetype remains a
@@ -235,13 +241,19 @@ pub trait HueTransport: Send + Sync {
         anyhow::bail!("Hue Bridge device lookup is not supported by this transport")
     }
 
-    /// Remove every V1 light or sensor belonging to one Hue V2 device.
+    /// Remove every V1 resource in the selected device class belonging to one
+    /// Hue V2 device.
     ///
     /// Hue exposes light deletion only through its V1 API. Implementations
     /// therefore resolve the V2 device to its Zigbee MAC, match that MAC
     /// against V1 `uniqueid` values, delete every exact match from the owning
     /// V1 collections, and wait for the V2 device projection to disappear.
-    fn remove_device(&self, _username: &str, _v2_device_id: &str) -> anyhow::Result<()> {
+    fn remove_device(
+        &self,
+        _username: &str,
+        _v2_device_id: &str,
+        _device_class: HueBridgeDeviceClass,
+    ) -> anyhow::Result<()> {
         anyhow::bail!("Hue Bridge device removal is not supported by this transport")
     }
 

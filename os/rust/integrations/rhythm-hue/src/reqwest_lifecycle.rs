@@ -19,7 +19,7 @@ use crate::reqwest_sse::start_reqwest_sse;
 use crate::reqwest_transport::ReqwestHueTransport;
 use crate::sse::HueSseConfig;
 use crate::sse_liveness::HueSseLiveness;
-use crate::transport::HueTransport;
+use crate::transport::{HueBridgeDeviceClass, HueTransport};
 
 use rhythm_os::canonical::identity::HubKey;
 use rhythm_os::hub::{
@@ -1363,7 +1363,17 @@ impl ExternalLightHubIntegration for HueIntegration {
                         .storage
                         .clone();
                     ensure_physical_hue_unpair_allowed(storage.as_deref(), &bridge_id)?;
-                    transport.remove_device(&target.username, &target.native_id)?;
+                    let device_class = match target.device_type {
+                        rhythm_core::runtime::hub_registry::DeviceType::Light => {
+                            HueBridgeDeviceClass::Light
+                        }
+                        rhythm_core::runtime::hub_registry::DeviceType::Button
+                        | rhythm_core::runtime::hub_registry::DeviceType::Motion
+                        | rhythm_core::runtime::hub_registry::DeviceType::Contact => {
+                            HueBridgeDeviceClass::Sensor
+                        }
+                    };
+                    transport.remove_device(&target.username, &target.native_id, device_class)?;
                 }
                 if transport.device_exists(&target.username, &target.native_id)? {
                     anyhow::bail!(
@@ -1720,12 +1730,14 @@ struct BridgeUnpairTarget {
     bridge_ip: String,
     username: String,
     native_id: String,
+    device_type: rhythm_core::runtime::hub_registry::DeviceType,
 }
 
 fn bridge_unpair_target(
     state: &SharedState,
     requested_id: &str,
     requested_address: Option<&str>,
+    requested_device_type: Option<&str>,
 ) -> Result<BridgeUnpairTarget> {
     let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let canonical = state
@@ -1741,20 +1753,37 @@ fn bridge_unpair_target(
                 requested_address
                     .is_none_or(|address| endpoint.hub_key.address.eq_ignore_ascii_case(address))
             })
-            .map(|endpoint| (endpoint.hub_key.clone(), endpoint.native_id.clone()))
+            .map(|endpoint| {
+                (
+                    endpoint.hub_key.clone(),
+                    endpoint.native_id.clone(),
+                    device.device_type.clone(),
+                )
+            })
             .collect::<Vec<_>>()
     } else {
         state
             .canonical_registry
             .devices()
-            .flat_map(|device| device.endpoints.iter())
-            .filter(|endpoint| endpoint.hub_key.hub_type.as_str() == HubType::HUE)
-            .filter(|endpoint| endpoint.native_id == requested_id)
-            .filter(|endpoint| {
+            .flat_map(|device| {
+                device
+                    .endpoints
+                    .iter()
+                    .map(move |endpoint| (device, endpoint))
+            })
+            .filter(|(_, endpoint)| endpoint.hub_key.hub_type.as_str() == HubType::HUE)
+            .filter(|(_, endpoint)| endpoint.native_id == requested_id)
+            .filter(|(_, endpoint)| {
                 requested_address
                     .is_none_or(|address| endpoint.hub_key.address.eq_ignore_ascii_case(address))
             })
-            .map(|endpoint| (endpoint.hub_key.clone(), endpoint.native_id.clone()))
+            .map(|(device, endpoint)| {
+                (
+                    endpoint.hub_key.clone(),
+                    endpoint.native_id.clone(),
+                    device.device_type.clone(),
+                )
+            })
             .collect::<Vec<_>>()
     };
     endpoints.sort_by(|left, right| {
@@ -1784,11 +1813,22 @@ fn bridge_unpair_target(
                     && requested_address
                         .is_none_or(|address| key.address.eq_ignore_ascii_case(address))
             })
-            .map(|(key, _)| (key.clone(), requested_id.to_string()))
+            .map(|(key, _)| {
+                (
+                    key.clone(),
+                    requested_id.to_string(),
+                    match requested_device_type {
+                        Some("button") => rhythm_core::runtime::hub_registry::DeviceType::Button,
+                        Some("motion") => rhythm_core::runtime::hub_registry::DeviceType::Motion,
+                        Some("contact") => rhythm_core::runtime::hub_registry::DeviceType::Contact,
+                        _ => rhythm_core::runtime::hub_registry::DeviceType::Light,
+                    },
+                )
+            })
             .collect();
     }
 
-    let (hub_key, native_id) = match endpoints.as_slice() {
+    let (hub_key, native_id, device_type) = match endpoints.as_slice() {
         [] if requested_address.is_some() => anyhow::bail!(
             "The requested Hue Bridge is not connected: {}",
             requested_address.unwrap_or_default()
@@ -1809,6 +1849,7 @@ fn bridge_unpair_target(
         bridge_ip: hue.bridge_ip.clone(),
         username: hue.username.clone(),
         native_id,
+        device_type,
     })
 }
 
@@ -1837,7 +1878,17 @@ where
         .get("force")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    let target = bridge_unpair_target(state, requested_id, requested_address)?;
+    let requested_device_type = params
+        .get("device_type")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let target = bridge_unpair_target(
+        state,
+        requested_id,
+        requested_address,
+        requested_device_type,
+    )?;
     let failed = |error: anyhow::Error| UnpairingResult {
         hub_type: HubType::HUE.to_string(),
         hub_address: Some(target.hub_key.address.clone()),
@@ -2986,10 +3037,14 @@ mod tests {
                 Ok(())
             }
         }));
-        let mut paired_devices = bridge_light_devices(&state, &key)
-            .into_iter()
-            .filter(|device| device.device_id == "hue-paired")
-            .collect::<Vec<_>>();
+        let mut paired_devices = bridge_devices(
+            &state,
+            &key,
+            rhythm_core::runtime::hub_registry::DeviceType::Light,
+        )
+        .into_iter()
+        .filter(|device| device.device_id == "hue-paired")
+        .collect::<Vec<_>>();
 
         reconcile_paired_light_names(&state, &key, &mut paired_devices).unwrap();
 
@@ -3533,10 +3588,10 @@ mod tests {
             .unwrap()
             .upsert_endpoint(second.clone(), "device-a-via-second".to_string(), 2, None);
 
-        let ambiguous = bridge_unpair_target(&state, &canonical_id, None).unwrap_err();
+        let ambiguous = bridge_unpair_target(&state, &canonical_id, None, None).unwrap_err();
         assert!(ambiguous.to_string().contains("multiple Bridges"));
 
-        let target = bridge_unpair_target(&state, &canonical_id, Some("192.0.2.11")).unwrap();
+        let target = bridge_unpair_target(&state, &canonical_id, Some("192.0.2.11"), None).unwrap();
         assert_eq!(target.hub_key, second);
         assert_eq!(target.native_id, "device-a-via-second");
     }
