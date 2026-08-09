@@ -1,4 +1,5 @@
 import 'package:bonsoir/bonsoir.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/services/account_cloud_sync_service.dart';
 import 'package:rhythm_app/services/cloud_home_join_service.dart';
@@ -1165,6 +1166,33 @@ void main() {
       );
 
       expect(openedHubPicker, isFalse);
+    });
+  });
+
+  group('Home actions menu', () {
+    testWidgets('exposes a visible Remove Home action', (tester) async {
+      var removeCalls = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: Center(
+              child: rhythmHomeActionsButtonForTesting(
+                homeId: 'home-1',
+                homeName: 'Lake House',
+                onRemove: () => removeCalls += 1,
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.byTooltip('Manage Lake House'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Remove Home'), findsOneWidget);
+      await tester.tap(find.text('Remove Home'));
+      await tester.pumpAndSettle();
+      expect(removeCalls, 1);
     });
   });
 }
