@@ -1997,6 +1997,14 @@ void main() {
       expect(provider.canUnpairHueBleDevices, isTrue);
       expect(provider.supportsHueBleRoomlessDevices, isTrue);
       expect(provider.canScanToAddDevice, isTrue);
+      expect(
+        provider.canScanToAddDeviceType(RhythmDeviceType.light),
+        isTrue,
+      );
+      expect(
+        provider.canScanToAddDeviceType(RhythmDeviceType.button),
+        isFalse,
+      );
       expect(provider.canAddMatterDevice, isFalse);
     });
 
@@ -2045,6 +2053,18 @@ void main() {
       expect(provider.canUnpairLocalBleDevices, isTrue);
       expect(provider.supportsLocalBleRoomlessDevices, isTrue);
       expect(provider.canScanToAddDevice, isTrue);
+      expect(
+        provider.canScanToAddDeviceType(RhythmDeviceType.button),
+        isTrue,
+      );
+      expect(
+        provider.canScanToAddDeviceType(RhythmDeviceType.light),
+        isFalse,
+      );
+      expect(
+        provider.canScanToAddDeviceType(RhythmDeviceType.motion),
+        isFalse,
+      );
     });
 
     test('routes a known parser alias to the advertised current BLE profile',
@@ -5225,6 +5245,7 @@ void main() {
     expect(find.text('Hide this light'), findsNothing);
     expect(find.text('Lighting'), findsOneWidget);
     expect(find.text('Low glow'), findsOneWidget);
+    expect(find.text('Add Bulb'), findsOneWidget);
     expect(find.text('LIGHTS'), findsOneWidget);
     expect(find.text('Ceiling Light'), findsOneWidget);
     expect(
@@ -5235,6 +5256,19 @@ void main() {
       find.byKey(const ValueKey('light-profile-override-badge-light-1')),
       findsNothing,
     );
+    final lightContent = find.byKey(const ValueKey('light'));
+    expect(
+      find.descendant(
+        of: lightContent,
+        matching: find.byKey(const ValueKey('room-settings-add-bulb')),
+      ),
+      findsOneWidget,
+    );
+    final addBulbSemantics = tester.getSemantics(
+      find.byKey(const ValueKey('room-settings-add-bulb')),
+    );
+    expect(addBulbSemantics.label, 'Add Bulb');
+    expect(addBulbSemantics.hint, 'Choose Scan or Select from existing');
     expect(find.text('Delete Room'), findsNothing);
     expect(find.text('Entry Motion'), findsNothing);
     expect(find.text('Wall Button'), findsNothing);
@@ -5481,6 +5515,35 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 10));
     expect(provider.canScanToAddDevice, isTrue);
+    expect(
+      provider.canScanToAddDeviceType(RhythmDeviceType.light),
+      isFalse,
+    );
+    api.canonicalDevices['light-hall'] = {
+      'id': 'light-hall',
+      'name': 'Hall Lamp',
+      'device_type': 'light',
+      'room_id': 'room-2',
+      'endpoints': const <Map<String, dynamic>>[],
+    };
+    api.topologyNodes = [
+      RhythmTopologyNode.fromJson({
+        'id': 'room-1',
+        'name': 'Kitchen',
+        'kind': 'room',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'room-2',
+        'name': 'Hall',
+        'kind': 'room',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'light-hall',
+        'name': 'Hall Lamp',
+        'kind': 'light',
+        'parent_id': 'room-2',
+      }),
+    ];
 
     await _pumpRoomSettingsSheet(
       tester,
@@ -5498,6 +5561,50 @@ void main() {
         brightnessOffset: 0,
       ),
     );
+
+    final addBulb = find.byKey(const ValueKey('room-settings-add-bulb'));
+    expect(addBulb, findsOneWidget);
+    expect(find.text('Add Bulb'), findsOneWidget);
+
+    await tester.tap(addBulb);
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('room-device-add-sheet')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('existing-room-device-light-hall')),
+      findsOneWidget,
+    );
+    expect(find.text('Wall Button'), findsNothing);
+
+    await tester.tap(find.byKey(const ValueKey('room-device-add-scan')));
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Adding bulbs is not available on this Rhythm Box yet.'),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('device-pairing-code-input')),
+      findsNothing,
+    );
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+
+    await tester.tap(addBulb);
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey('existing-room-device-light-hall')),
+    );
+    await tester.pumpAndSettle();
+    expect(api.assignDeviceParentCalls, 1);
+    expect(api.lastAssignedDeviceId, 'light-hall');
+    expect(api.lastAssignedParentId, 'room-1');
+    expect(find.text('Moved Hall Lamp to Kitchen'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+    api.getCanonicalDevicesCalls = 0;
 
     bool pairingIntakeIsVisible() =>
         find.byTooltip('Back to Add & Review').evaluate().isNotEmpty ||
@@ -5535,9 +5642,14 @@ void main() {
 
     await tester.tap(find.byKey(const ValueKey('room-device-add-scan')));
     await tester.pumpAndSettle();
-    expect(pairingIntakeIsVisible(), isTrue);
-
-    tester.state<NavigatorState>(find.byType(Navigator)).pop();
+    expect(pairingIntakeIsVisible(), isFalse);
+    expect(
+      find.text(
+        'Adding motion sensors is not available on this Rhythm Box yet.',
+      ),
+      findsOneWidget,
+    );
+    await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
 
     await _selectRoomSettingsTab(tester, 'Buttons');
@@ -5618,7 +5730,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(
-      find.text('Scanning is not available on this Rhythm Box yet.'),
+      find.text('Adding buttons is not available on this Rhythm Box yet.'),
       findsOneWidget,
     );
     expect(
@@ -5652,6 +5764,11 @@ void main() {
     await _selectRoomSettingsTab(tester, 'Buttons');
     expect(
       find.byKey(const ValueKey('room-settings-add-button')),
+      findsNothing,
+    );
+    await _selectRoomSettingsTab(tester, 'Light');
+    expect(
+      find.byKey(const ValueKey('room-settings-add-bulb')),
       findsNothing,
     );
   });
