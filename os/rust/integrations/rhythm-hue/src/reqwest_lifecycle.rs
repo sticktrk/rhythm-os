@@ -1055,16 +1055,29 @@ impl ExternalLightHubIntegration for HueIntegration {
         let transport = ReqwestHueTransport::new(&context.bridge_ip)?;
         let bridge_id = crate::ownership::connected_hue_bridge_id(&transport, &context.username)?;
         persist_connected_bridge_identity(state, key, &bridge_id)?;
+        if crate::ownership::load_controller_ownership(context.storage.as_ref(), &bridge_id)?
+            .is_some_and(|ownership| {
+                matches!(
+                    ownership.phase,
+                    crate::ownership::HueOwnershipPhase::Restoring
+                        | crate::ownership::HueOwnershipPhase::RestoreIncomplete
+                        | crate::ownership::HueOwnershipPhase::Restored
+                        | crate::ownership::HueOwnershipPhase::ReleasePending
+                )
+            })
+        {
+            anyhow::bail!("Hue bridge release has started; takeover cannot be resumed");
+        }
         let operation_lock = crate::ownership::controller_operation_lock(&bridge_id);
         let _operation = operation_lock
             .lock()
             .map_err(|_| anyhow::anyhow!("Failed to lock Hue controller operations"))?;
-        crate::ownership::acquire_authoritative_control(
+        let _ = crate::ownership::acquire_authoritative_control_best_effort(
             context.storage.as_ref(),
             key,
             &transport,
             &context.username,
-        )?;
+        );
         Ok(())
     }
 

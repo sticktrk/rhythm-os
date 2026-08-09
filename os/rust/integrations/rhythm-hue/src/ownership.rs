@@ -11,6 +11,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
+use log::warn;
 use rhythm_os::canonical::identity::HubKey;
 use rhythm_os::storage::Storage;
 use serde::{Deserialize, Serialize};
@@ -709,6 +710,31 @@ pub fn acquire_authoritative_control<H: HueTransport + ?Sized>(
     reconcile_authoritative_control(storage, key, transport, username, state)
 }
 
+/// Attempt to capture Hue recovery state and suppress competing automations
+/// without turning a healthy bridge into an unavailable controller.
+///
+/// Callers must separately fence release/credential teardown before invoking
+/// this function. Every takeover error is advisory: mutations remain guarded
+/// by durable receipts, while direct light control is allowed to continue.
+pub fn acquire_authoritative_control_best_effort<H: HueTransport + ?Sized>(
+    storage: &dyn Storage,
+    key: &HubKey,
+    transport: &H,
+    username: &str,
+) -> Option<HueControllerOwnership> {
+    match acquire_authoritative_control(storage, key, transport, username) {
+        Ok(ownership) => Some(ownership),
+        Err(error) => {
+            warn!(
+                target: "hue_authority",
+                "Hue controller takeover was incomplete; continuing with direct light control: {}",
+                error
+            );
+            None
+        }
+    }
+}
+
 fn references_lighting_target(value: &Value, source_device_id: Option<&str>) -> bool {
     match value {
         Value::Array(values) => values
@@ -782,6 +808,7 @@ fn accessory_behavior_targets_lighting(behavior: &Value, resource_id: &str) -> R
 fn next_clear_operation<H: HueTransport + ?Sized>(
     transport: &H,
     username: &str,
+    skipped_operation_ids: &BTreeSet<String>,
 ) -> Result<Option<ControlPlaneOperation>> {
     let behavior_payload = transport.get_resources(username, "behavior_instance")?;
     let script_payload = transport.get_resources(username, "behavior_script")?;
@@ -825,12 +852,22 @@ fn next_clear_operation<H: HueTransport + ?Sized>(
                 anyhow::anyhow!("Hue behavior script {script_id} has no string metadata category")
             })?;
         match category {
-            "automation" => behavior_ids.push(resource_id.to_string()),
+            "automation"
+                if !skipped_operation_ids
+                    .contains(&format!("clear:v2:behavior_instance:{resource_id}")) =>
+            {
+                behavior_ids.push(resource_id.to_string());
+            }
+            "automation" => {}
             // Accessory scripts include both source-only device plumbing and
             // button/sensor programs that target lights or groups. Suppress
-            // only the latter so Rhythm does not disable inert input metadata
-            // that some bridge versions reject as immutable.
-            "accessory" if accessory_behavior_targets_lighting(behavior, resource_id)? => {
+            // only the latter, while treating a rejected mutation as a
+            // best-effort gap rather than a controller-wide command fence.
+            "accessory"
+                if accessory_behavior_targets_lighting(behavior, resource_id)?
+                    && !skipped_operation_ids
+                        .contains(&format!("clear:v2:behavior_instance:{resource_id}")) =>
+            {
                 behavior_ids.push(resource_id.to_string());
             }
             // Entertainment playback and source-only/internal behavior
@@ -857,6 +894,9 @@ fn next_clear_operation<H: HueTransport + ?Sized>(
             .iter()
             .filter(|(_, resource)| {
                 resource.get("status").and_then(Value::as_str) != Some("disabled")
+            })
+            .filter(|(resource_id, _)| {
+                !skipped_operation_ids.contains(&format!("clear:v1:{resource_type}:{resource_id}"))
             })
             .map(|(id, _)| id.clone())
             .collect::<Vec<_>>();
@@ -997,6 +1037,12 @@ fn verify_operation<H: HueTransport + ?Sized>(
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JournaledOperationOutcome {
+    Succeeded,
+    Failed,
+}
+
 fn run_journaled_operation<H: HueTransport + ?Sized>(
     storage: &dyn Storage,
     _key: &HubKey,
@@ -1004,7 +1050,7 @@ fn run_journaled_operation<H: HueTransport + ?Sized>(
     transport: &H,
     username: &str,
     operation: &ControlPlaneOperation,
-) -> Result<()> {
+) -> Result<JournaledOperationOutcome> {
     state.set_receipt(operation, HueOwnershipReceiptStatus::Pending, None);
     persist_controller_ownership(storage, state)?;
     match execute_operation(transport, username, operation).and_then(|replacement_id| {
@@ -1018,7 +1064,7 @@ fn run_journaled_operation<H: HueTransport + ?Sized>(
                 replacement_id.clone(),
             );
             persist_controller_ownership(storage, state)?;
-            Ok(())
+            Ok(JournaledOperationOutcome::Succeeded)
         }
         Err(error) => {
             state.set_receipt(operation, HueOwnershipReceiptStatus::Failed, None);
@@ -1027,7 +1073,14 @@ fn run_journaled_operation<H: HueTransport + ?Sized>(
                 return Err(error)
                     .context("Hue automation suppression failed and its receipt was not durable");
             }
-            Err(error).context("Hue automation suppression was not confirmed")
+            warn!(
+                target: "hue_authority",
+                "Hue {} {} could not be suppressed; continuing controller takeover: {}",
+                operation.api,
+                operation.resource_type,
+                error
+            );
+            Ok(JournaledOperationOutcome::Failed)
         }
     }
 }
@@ -1054,24 +1107,33 @@ pub fn reconcile_authoritative_control<H: HueTransport + ?Sized>(
     state.phase = HueOwnershipPhase::Clearing;
     persist_controller_ownership(storage, &state)?;
 
+    let mut skipped_operation_ids = BTreeSet::new();
     loop {
-        let operation = match next_clear_operation(transport, username) {
+        let operation = match next_clear_operation(transport, username, &skipped_operation_ids) {
             Ok(operation) => operation,
             Err(error) => {
-                state.phase = HueOwnershipPhase::ClearIncomplete;
+                // Automation suppression is best-effort. A bridge can expose
+                // an unknown or temporarily unreadable control-plane resource
+                // without making otherwise healthy light endpoints unsafe to
+                // command. Preserve the gap in logs and the durable receipts,
+                // then let the controller become available.
+                warn!(
+                    target: "hue_authority",
+                    "Hue automation suppression inspection was incomplete; continuing controller takeover: {}",
+                    error
+                );
+                state.phase = HueOwnershipPhase::Active;
                 persist_controller_ownership(storage, &state)?;
-                return Err(error.context("Failed to inspect the Hue control plane while clearing"));
+                return Ok(state);
             }
         };
         let Some(operation) = operation else {
             break;
         };
-        if let Err(error) =
-            run_journaled_operation(storage, key, &mut state, transport, username, &operation)
+        if run_journaled_operation(storage, key, &mut state, transport, username, &operation)?
+            == JournaledOperationOutcome::Failed
         {
-            state.phase = HueOwnershipPhase::ClearIncomplete;
-            persist_controller_ownership(storage, &state)?;
-            return Err(error.context("Hue automation suppression is incomplete"));
+            skipped_operation_ids.insert(operation.operation_id);
         }
     }
 
@@ -1389,26 +1451,43 @@ mod tests {
     }
 
     #[test]
-    fn takeover_stays_incomplete_when_v2_disable_is_not_observed() {
+    fn best_effort_takeover_downgrades_capture_failure_without_mutation() {
+        let spy = SpyHueTransport::new();
+        seed_bridge(&spy, json!([]));
+
+        let ownership = acquire_authoritative_control_best_effort(
+            &AckWithoutPersistStorage,
+            &key(),
+            &spy,
+            "user",
+        );
+
+        assert!(ownership.is_none());
+        assert!(!spy.calls().iter().any(|call| matches!(
+            call,
+            HueTransportCall::UpdateResource { .. }
+                | HueTransportCall::DeleteResource { .. }
+                | HueTransportCall::PutV1 { .. }
+        )));
+    }
+
+    #[test]
+    fn takeover_remains_available_when_suppression_readback_is_not_observed() {
         let temp = TempStorage::new("clear-readback");
         let spy = SpyHueTransport::new();
         seed_bridge(&spy, json!([]));
         spy.set_ignore_resource_mutations(true);
 
-        let error = acquire_authoritative_control(&temp.storage, &key(), &spy, "user")
-            .expect_err("an unobserved disable must block active authority");
+        let active = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
 
-        assert!(error
-            .to_string()
-            .contains("Hue automation suppression is incomplete"));
+        assert_eq!(active.phase, HueOwnershipPhase::Active);
         let persisted = load_controller_ownership(&temp.storage, "bridge-1")
             .unwrap()
             .unwrap();
-        assert_eq!(persisted.phase, HueOwnershipPhase::ClearIncomplete);
-        assert!(persisted.receipts().any(|receipt| {
-            receipt.resource_type == "behavior_instance"
-                && receipt.status == HueOwnershipReceiptStatus::Failed
-        }));
+        assert_eq!(persisted.phase, HueOwnershipPhase::Active);
+        assert!(persisted
+            .receipts()
+            .any(|receipt| { receipt.status == HueOwnershipReceiptStatus::Failed }));
         assert_eq!(
             spy.calls()
                 .iter()
@@ -1425,19 +1504,19 @@ mod tests {
     }
 
     #[test]
-    fn takeover_stays_incomplete_when_v2_disable_is_rejected() {
+    fn takeover_continues_to_v1_when_a_v2_disable_is_rejected() {
         let temp = TempStorage::new("skip-rejected-mutation");
         let spy = SpyHueTransport::new();
         seed_bridge(&spy, json!([]));
         spy.set_fail_resource_update("behavior_instance", "behavior-1");
 
-        acquire_authoritative_control(&temp.storage, &key(), &spy, "user")
-            .expect_err("a rejected disable must block active authority");
+        let active = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
 
         let state = load_controller_ownership(&temp.storage, "bridge-1")
             .unwrap()
             .unwrap();
-        assert_eq!(state.phase, HueOwnershipPhase::ClearIncomplete);
+        assert_eq!(active.phase, HueOwnershipPhase::Active);
+        assert_eq!(state.phase, HueOwnershipPhase::Active);
         assert!(state.receipts().any(|receipt| {
             receipt.resource_type == "behavior_instance"
                 && receipt.status == HueOwnershipReceiptStatus::Failed
@@ -1446,10 +1525,14 @@ mod tests {
             .calls()
             .iter()
             .any(|call| matches!(call, HueTransportCall::DeleteResource { .. })));
-        assert!(!spy
-            .calls()
-            .iter()
-            .any(|call| matches!(call, HueTransportCall::PutV1 { .. })));
+        assert_eq!(
+            spy.get_v1("user", "rules").unwrap()["1"]["status"],
+            "disabled"
+        );
+        assert_eq!(
+            spy.get_v1("user", "schedules").unwrap()["2"]["status"],
+            "disabled"
+        );
         assert_eq!(
             spy.calls()
                 .iter()
@@ -1579,7 +1662,7 @@ mod tests {
     }
 
     #[test]
-    fn takeover_disables_accessory_behavior_that_targets_lighting() {
+    fn takeover_continues_after_rejected_accessory_suppression() {
         let temp = TempStorage::new("effectful-accessory-behavior");
         let spy = SpyHueTransport::new();
         seed_bridge(&spy, json!([]));
@@ -1612,28 +1695,35 @@ mod tests {
                 "metadata": {"name": "Dimmer", "category": "accessory"}
             }], "errors": []}),
         );
+        spy.set_fail_resource_update("behavior_instance", "accessory-behavior-1");
 
         let active = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
 
         assert_eq!(active.phase, HueOwnershipPhase::Active);
         assert_eq!(
             spy.get_resources("user", "behavior_instance").unwrap()["data"][0]["enabled"],
-            false
+            true
         );
         assert!(spy.calls().iter().any(|call| matches!(
             call,
             HueTransportCall::UpdateResource {
                 resource_type,
                 resource_id,
-                body,
-            } if resource_type == "behavior_instance"
-                && resource_id == "accessory-behavior-1"
-                && body == &json!({"enabled": false})
+                ..
+            } if resource_type == "behavior_instance" && resource_id == "accessory-behavior-1"
         )));
+        assert_eq!(
+            spy.get_v1("user", "rules").unwrap()["1"]["status"],
+            "disabled"
+        );
+        assert_eq!(
+            spy.get_v1("user", "schedules").unwrap()["2"]["status"],
+            "disabled"
+        );
     }
 
     #[test]
-    fn unclassified_enabled_behavior_blocks_before_any_suppression_write() {
+    fn unclassified_enabled_behavior_is_recorded_without_fencing_commands() {
         let temp = TempStorage::new("unclassified-behavior");
         let spy = SpyHueTransport::new();
         seed_bridge(&spy, json!([]));
@@ -1653,9 +1743,9 @@ mod tests {
             ], "errors": []}),
         );
 
-        acquire_authoritative_control(&temp.storage, &key(), &spy, "user")
-            .expect_err("unclassified enabled behavior must keep authority fenced");
+        let active = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
 
+        assert_eq!(active.phase, HueOwnershipPhase::Active);
         assert!(!spy.calls().iter().any(|call| matches!(
             call,
             HueTransportCall::UpdateResource { .. } | HueTransportCall::PutV1 { .. }
@@ -1665,12 +1755,12 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .phase,
-            HueOwnershipPhase::ClearIncomplete
+            HueOwnershipPhase::Active
         );
     }
 
     #[test]
-    fn malformed_accessory_behavior_blocks_before_any_suppression_write() {
+    fn malformed_accessory_payload_does_not_fence_controller_commands() {
         let temp = TempStorage::new("malformed-accessory-behavior");
         let spy = SpyHueTransport::new();
         seed_bridge(&spy, json!([]));
@@ -1703,9 +1793,12 @@ mod tests {
             ], "errors": []}),
         );
 
-        acquire_authoritative_control(&temp.storage, &key(), &spy, "user")
-            .expect_err("malformed accessory behavior must keep authority fenced");
+        let active = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
 
+        assert_eq!(active.phase, HueOwnershipPhase::Active);
+        let behaviors = spy.get_resources("user", "behavior_instance").unwrap();
+        assert_eq!(behaviors["data"][0]["enabled"], true);
+        assert_eq!(behaviors["data"][1]["enabled"], true);
         assert!(!spy.calls().iter().any(|call| matches!(
             call,
             HueTransportCall::UpdateResource { .. } | HueTransportCall::PutV1 { .. }
@@ -1713,7 +1806,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_behavior_category_blocks_before_any_suppression_write() {
+    fn unknown_behavior_category_does_not_fence_commands() {
         let temp = TempStorage::new("unknown-behavior-category");
         let spy = SpyHueTransport::new();
         seed_bridge(&spy, json!([]));
@@ -1725,9 +1818,9 @@ mod tests {
             }], "errors": []}),
         );
 
-        acquire_authoritative_control(&temp.storage, &key(), &spy, "user")
-            .expect_err("unknown behavior categories must keep authority fenced");
+        let active = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
 
+        assert_eq!(active.phase, HueOwnershipPhase::Active);
         assert!(!spy.calls().iter().any(|call| matches!(
             call,
             HueTransportCall::UpdateResource { .. } | HueTransportCall::PutV1 { .. }
@@ -1937,7 +2030,7 @@ mod tests {
     }
 
     #[test]
-    fn malformed_v1_receipt_keeps_automation_suppression_incomplete() {
+    fn malformed_v1_receipts_do_not_fence_controller_commands() {
         let temp = TempStorage::new("v1-receipt");
         let spy = SpyHueTransport::new();
         seed_bridge(&spy, json!([]));
@@ -1946,18 +2039,20 @@ mod tests {
             "success": {format!("/rules/{private_id}/status"): "disabled"}
         }])));
 
-        acquire_authoritative_control(&temp.storage, &key(), &spy, "user")
-            .expect_err("an unconfirmed V1 disable must block active authority");
+        let active = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
         let state = load_controller_ownership(&temp.storage, "bridge-1")
             .unwrap()
             .unwrap();
-        assert_eq!(state.phase, HueOwnershipPhase::ClearIncomplete);
+        assert_eq!(active.phase, HueOwnershipPhase::Active);
+        assert_eq!(state.phase, HueOwnershipPhase::Active);
         let v1_receipts = state
             .receipts()
             .filter(|receipt| receipt.api == "v1")
             .collect::<Vec<_>>();
-        assert_eq!(v1_receipts.len(), 1);
-        assert_eq!(v1_receipts[0].status, HueOwnershipReceiptStatus::Failed);
+        assert_eq!(v1_receipts.len(), 2);
+        assert!(v1_receipts
+            .iter()
+            .all(|receipt| receipt.status == HueOwnershipReceiptStatus::Failed));
         assert!(v1_receipts
             .iter()
             .all(|receipt| !receipt.operation_id.contains(private_id)));
