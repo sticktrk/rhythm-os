@@ -1,5 +1,24 @@
 # Test and grading matrix
 
+## Profile MVP gate
+
+The first automated gate is intentionally smaller than the complete matrix
+below. It compares a candidate Matter bulb with a current, same-bench measured
+Hue baseline and answers where the candidate is deployable.
+
+- normalized brightness curve at 100, 75, 50, 25, 10, 5, 3, and 1 percent as
+  supported, plus refinement and repetition at the stable floor;
+- CCT and Duv at supported endpoints and applicable 2200, 2700, 3000, 4000,
+  5000, and 6500 K commands at one fixed representative brightness;
+- explicit-on, CT-level reset, command spacing, readback, convergence, and one
+  safe recovery check;
+- Hue-relative brightness and CT correction tables;
+- reachable envelope, uncorrectable tint, suitable/avoid roles, evidence
+  validity, and a typed `rhythm-devices` export.
+
+This gate produces a profile recommendation, not the formal grades defined
+later in this document. See [Matter bulb profile MVP](MATTER_PROFILE_MVP.md).
+
 ## Sample identity and claims
 
 - brand, model, retail SKU, GTIN/UPC, region, voltage, frequency, wattage;

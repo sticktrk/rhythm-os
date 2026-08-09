@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use bulb_bench::{build_plan, require_dry_run, BenchConfig, RunManifest, Suite};
+use bulb_bench::{
+    analyze_profile, build_plan, require_dry_run, update_rhythm_devices_database, BenchConfig,
+    ComparisonDataset, RunManifest, Suite,
+};
 use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
@@ -25,6 +28,20 @@ enum Command {
     Plan {
         #[arg(long, value_enum)]
         suite: Suite,
+    },
+    /// Derive a Hue-relative candidate profile from imported optical measurements.
+    AnalyzeProfile {
+        #[arg(long)]
+        input: PathBuf,
+    },
+    /// Insert or replace a measured candidate in a rhythm-devices JSON database.
+    UpdateRhythmDevices {
+        #[arg(long)]
+        input: PathBuf,
+        #[arg(long)]
+        database: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
     },
     /// Build a run manifest. Live execution remains disabled in this phase.
     Run {
@@ -51,6 +68,29 @@ fn main() -> Result<()> {
             for (index, step) in plan.steps.iter().enumerate() {
                 println!("{:>2}. {:?}: {}", index + 1, step.kind, step.description);
             }
+        }
+        Command::AnalyzeProfile { input } => {
+            let dataset = ComparisonDataset::load(&input)?;
+            let proposal = analyze_profile(&dataset)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&proposal)
+                    .context("serializing Matter profile proposal")?
+            );
+        }
+        Command::UpdateRhythmDevices {
+            input,
+            database,
+            output,
+        } => {
+            let dataset = ComparisonDataset::load(&input)?;
+            let proposal = analyze_profile(&dataset)?;
+            let update = update_rhythm_devices_database(&dataset, &proposal, &database, &output)?;
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&update)
+                    .context("serializing rhythm-devices database update")?
+            );
         }
         Command::Run {
             config,

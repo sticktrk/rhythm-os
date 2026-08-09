@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum Suite {
+    MatterProfile,
     Quick,
     OpticalFull,
     MatterFull,
@@ -17,6 +18,7 @@ pub enum Suite {
 impl fmt::Display for Suite {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
+            Self::MatterProfile => "matter-profile",
             Self::Quick => "quick",
             Self::OpticalFull => "optical-full",
             Self::MatterFull => "matter-full",
@@ -37,6 +39,10 @@ pub enum StepKind {
     Commission,
     Stabilize,
     CapabilityDiscovery,
+    ReferenceBaseline,
+    BrightnessSweep,
+    ColorTemperatureSweep,
+    ProfileAnalysis,
     OpticalQuick,
     OpticalFull,
     TemporalLight,
@@ -100,6 +106,28 @@ pub fn build_plan(suite: Suite) -> RunPlan {
     ];
 
     match suite {
+        Suite::MatterProfile => {
+            steps.push(step(
+                StepKind::ReferenceBaseline,
+                "load a current same-bench Hue reference baseline and reject stale or configuration-mismatched evidence",
+            ));
+            steps.push(step(
+                StepKind::BrightnessSweep,
+                "find the candidate's stable floor and measure its command-to-output curve against the Hue baseline",
+            ));
+            steps.push(step(
+                StepKind::ColorTemperatureSweep,
+                "measure representative white targets and derive Hue-relative Kelvin corrections plus uncorrectable Duv error",
+            ));
+            steps.push(step(
+                StepKind::MatterBehavior,
+                "check explicit-on, CT-level reset, command spacing, readback, and final-state convergence behaviors",
+            ));
+            steps.push(step(
+                StepKind::ProfileAnalysis,
+                "emit deployment guidance, current runtime hints, proposed correction tables, and residual limitations",
+            ));
+        }
         Suite::Quick => {
             steps.push(step(
                 StepKind::OpticalQuick,
@@ -218,6 +246,7 @@ mod tests {
     #[test]
     fn every_suite_starts_safe_and_ends_with_shutdown_and_report() {
         for suite in [
+            Suite::MatterProfile,
             Suite::Quick,
             Suite::OpticalFull,
             Suite::MatterFull,
@@ -249,5 +278,14 @@ mod tests {
         assert!(contains(&ble, StepKind::OpticalFull));
         assert!(contains(&ble, StepKind::TemporalLight));
         assert!(contains(&ble, StepKind::BleBehavior));
+    }
+
+    #[test]
+    fn matter_profile_suite_prioritizes_actionable_corrections() {
+        let plan = build_plan(Suite::MatterProfile);
+        assert!(contains(&plan, StepKind::ReferenceBaseline));
+        assert!(contains(&plan, StepKind::BrightnessSweep));
+        assert!(contains(&plan, StepKind::ColorTemperatureSweep));
+        assert!(contains(&plan, StepKind::ProfileAnalysis));
     }
 }
