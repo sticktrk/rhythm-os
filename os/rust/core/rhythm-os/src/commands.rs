@@ -11106,7 +11106,7 @@ pub fn do_device_hard_remove(
         .lock()
         .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
 
-    let (canonical_id, canonical_device, assignments, prepare_assignment) = {
+    let (canonical_id, canonical_device, assignments, prepare_assignment, automatic_name_scope) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let canonical_id = if s.canonical_registry.get(device_id).is_some() {
             Some(device_id.to_string())
@@ -11128,11 +11128,23 @@ pub fn do_device_hard_remove(
             .as_ref()
             .map(|device| build_hub_device_room_assignments(&s, device, None))
             .unwrap_or_default();
+        let automatic_name_scope = canonical_device
+            .as_ref()
+            .filter(|device| device.device_type == DeviceType::Light)
+            .map(|device| {
+                let room_id = s
+                    .topology
+                    .device_parent_room_id(&device.id)
+                    .map(str::to_string)
+                    .or_else(|| device.room_id.clone());
+                LightNameReconciliationScope::for_room(room_id)
+            });
         (
             canonical_id,
             canonical_device,
             assignments,
             s.prepare_hub_device_room_assignment_fn.clone(),
+            automatic_name_scope,
         )
     };
     let prepared_assignments =
@@ -11281,6 +11293,9 @@ pub fn do_device_hard_remove(
     }
 
     persist_registry(state);
+    if let Some(name_scope) = automatic_name_scope.as_ref() {
+        reconcile_automatic_light_names_best_effort(state, name_scope);
+    }
     reconcile_runtime_from_state(state)?;
 
     {
@@ -31992,6 +32007,50 @@ mod tests {
             runtime.engine_node_snapshot(&device_id).is_none(),
             "hard-removed device should be removed from runtime"
         );
+    }
+
+    #[test]
+    fn device_hard_remove_renumbers_remaining_automatic_light_names() {
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+        let room: serde_json::Value =
+            serde_json::from_str(&do_topology_create_room(&state, "Office").unwrap()).unwrap();
+        let room_id = room["id"].as_str().unwrap().to_string();
+        let device_one =
+            insert_canonical_device(&state, hub_key.clone(), "matter-100", "Lamp A", "", "");
+        let device_two = insert_canonical_device(&state, hub_key, "matter-101", "Lamp B", "", "");
+
+        do_canonical_assign_room(&state, &device_one, Some(&room_id)).unwrap();
+        do_canonical_assign_room(&state, &device_two, Some(&room_id)).unwrap();
+
+        let (first_id, second_id) = {
+            let state = state.lock().unwrap();
+            let one = state.canonical_registry.get(&device_one).unwrap();
+            let two = state.canonical_registry.get(&device_two).unwrap();
+            if one.name.contains(" 1 ") {
+                (one.id.clone(), two.id.clone())
+            } else {
+                (two.id.clone(), one.id.clone())
+            }
+        };
+        assert!(state
+            .lock()
+            .unwrap()
+            .canonical_registry
+            .get(&second_id)
+            .unwrap()
+            .name
+            .contains(" 2 "));
+
+        do_device_hard_remove(&state, &first_id, None).unwrap();
+
+        let state = state.lock().unwrap();
+        assert!(state.canonical_registry.get(&first_id).is_none());
+        assert!(state
+            .canonical_registry
+            .get(&second_id)
+            .unwrap()
+            .name
+            .contains(" 1 "));
     }
 
     #[test]
