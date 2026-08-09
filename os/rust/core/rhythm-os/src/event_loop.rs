@@ -15,7 +15,7 @@ use rhythm_runtime_api::{RuntimeEvent, RuntimeInputEvent, TickContext};
 
 use crate::canonical::identity::HubKey;
 use crate::commands;
-use crate::hub::HubEvent;
+use crate::hub::{HubEvent, HubType};
 use crate::logging;
 use crate::server_event::{InputEventResource, InputEventRoute, ServerEvent};
 use crate::state::{current_epoch_ms, MotionSeedEntry, MotionSnapshot, SharedState, WorkItem};
@@ -51,6 +51,20 @@ fn runtime_event_for_button(
         epoch_ms: Some(chrono::Utc::now().timestamp_millis()),
         metadata: Default::default(),
     })
+}
+
+/// Resolve the ordinary node-control meaning of an unbound physical press.
+///
+/// The current local-BLE input profile is the one-button Orein OC02001. It
+/// reports its physical gesture as `OnPress` so input bindings can continue to
+/// match the stable event contract, but its product-default behavior is a
+/// power toggle. Configured input bindings are resolved before this fallback.
+fn effective_unbound_button_action(hub_key: &HubKey, action: ButtonAction) -> ButtonAction {
+    if hub_key.hub_type.as_str() == HubType::LOCAL_BLE && action == ButtonAction::OnPress {
+        ButtonAction::Toggle
+    } else {
+        action
+    }
 }
 
 fn runtime_event_for_periodic_tick(
@@ -1460,6 +1474,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 );
                 return;
             };
+            let effective_action = effective_unbound_button_action(key, action);
             emit_button_input_event(
                 state,
                 hub_key.as_ref(),
@@ -1476,6 +1491,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 event = "button_ingress",
                 command_id = %command_id,
                 action = ?action,
+                effective_action = ?effective_action,
                 node_id = %node_id,
                 source_node_id = %source_node_id,
                 source_room_id = %room_id,
@@ -1489,6 +1505,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                     event = "button_node_control_suppressed",
                     command_id = %command_id,
                     action = ?action,
+                    effective_action = ?effective_action,
                     node_id = %node_id,
                     source_node_id = %source_node_id,
                     source_room_id = %room_id,
@@ -1521,7 +1538,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             spawn_button_ingress_action(
                 state,
                 node_id,
-                action,
+                effective_action,
                 device_id.clone(),
                 command_id,
                 true,
@@ -4026,10 +4043,13 @@ mod tests {
         }
     }
 
-    fn make_state_with_runtime(runtime: Arc<dyn RuntimeHandle>) -> SharedState {
+    fn make_state_with_runtime_for_hub_type(
+        runtime: Arc<dyn RuntimeHandle>,
+        hub_type: &str,
+    ) -> SharedState {
         let mut app = crate::state::AppState::default();
         install_test_light_runtime_modules(&mut app);
-        let hub_type = HubType::new("test");
+        let hub_type = HubType::new(hub_type);
         let hub_key = HubKey::new(hub_type.clone(), "hub.local");
         app.hubs.insert(
             hub_key.clone(),
@@ -4044,6 +4064,10 @@ mod tests {
             },
         );
         Arc::new(Mutex::new(app))
+    }
+
+    fn make_state_with_runtime(runtime: Arc<dyn RuntimeHandle>) -> SharedState {
+        make_state_with_runtime_for_hub_type(runtime, "test")
     }
 
     fn install_test_light_runtime_modules(app: &mut crate::state::AppState) {
@@ -5265,7 +5289,69 @@ mod tests {
     }
 
     #[test]
-    fn button_event_broadcasts_input_binding_route_before_automation_dispatch() {
+    fn unbound_local_ble_on_press_dispatches_toggle_and_reports_physical_press() {
+        let runtime = Arc::new(RecordingRuntime::default());
+        let runtime_events = runtime.events.clone();
+        let state = make_state_with_runtime_for_hub_type(runtime, HubType::LOCAL_BLE);
+        let hub_key = only_hub_key(&state);
+        let source_id = add_canonical_control_source(
+            &state,
+            &hub_key,
+            "orein-button",
+            "room_a",
+            DeviceType::Button,
+        );
+        let mut event_rx = subscribe_events(&state);
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Button {
+                hub_key: Some(hub_key),
+                room_id: "room_a".into(),
+                action: ButtonAction::OnPress,
+                device_id: Some("orein-button".into()),
+            },
+            &mut MotionTimerState::new(),
+        );
+
+        let event = event_rx.try_recv().expect("expected input event broadcast");
+        match event {
+            crate::server_event::ServerEvent::InputEvent(InputEventResource::Button {
+                route,
+                hub_type,
+                source_node_id,
+                target_node_id,
+                button_action,
+                ..
+            }) => {
+                assert_eq!(route, InputEventRoute::NodeControl);
+                assert_eq!(hub_type.as_deref(), Some(HubType::LOCAL_BLE));
+                assert_eq!(source_node_id.as_deref(), Some(source_id.as_str()));
+                assert_eq!(target_node_id.as_deref(), Some("room_a"));
+                assert_eq!(button_action, Some(ButtonAction::OnPress));
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+
+        for _ in 0..30 {
+            if !runtime_events.lock().unwrap().is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let applied = runtime_events.lock().unwrap();
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].action, ButtonAction::Toggle);
+        drop(applied);
+
+        wait_for_light_activity_len(&state, 1);
+        let activity = state.lock().unwrap().light_activity[0].clone();
+        assert_eq!(activity.action_id, "toggle");
+        assert_eq!(activity.node_id, "room_a");
+    }
+
+    #[test]
+    fn local_ble_button_binding_wins_before_default_toggle_dispatch() {
         let handle_event_calls = Arc::new(AtomicUsize::new(0));
         let runtime: Arc<dyn RuntimeHandle> = Arc::new(SlowDispatchRuntime {
             handle_event_delay: Duration::ZERO,
@@ -5273,7 +5359,7 @@ mod tests {
             handle_event_calls: handle_event_calls.clone(),
             turn_on_room_calls: Arc::new(AtomicUsize::new(0)),
         });
-        let state = make_state_with_runtime(runtime);
+        let state = make_state_with_runtime_for_hub_type(runtime, HubType::LOCAL_BLE);
         let hub_key = only_hub_key(&state);
         let source_id = add_canonical_control_source(
             &state,
@@ -5319,7 +5405,7 @@ mod tests {
             }) => {
                 assert!(epoch_ms > 0);
                 assert_eq!(route, InputEventRoute::InputBinding);
-                assert_eq!(hub_type.as_deref(), Some("test"));
+                assert_eq!(hub_type.as_deref(), Some(HubType::LOCAL_BLE));
                 assert_eq!(address.as_deref(), Some("hub.local"));
                 assert_eq!(source_node_id.as_deref(), Some(source_id.as_str()));
                 assert_eq!(target_node_id, None);
