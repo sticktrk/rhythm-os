@@ -13857,12 +13857,12 @@ pub fn do_canonical_rename_device(state: &SharedState, device_id: &str, name: &s
 
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        let device = s
+        if !s
             .canonical_registry
-            .get_mut(device_id)
-            .filter(|device| !device.is_removed())
-            .ok_or_else(|| anyhow::anyhow!("Device not found: {}", device_id))?;
-        device.name = trimmed.to_string();
+            .rename_device_by_user(device_id, trimmed)
+        {
+            return Err(anyhow::anyhow!("Device not found: {}", device_id));
+        }
         persist_canonical(&s);
     }
 

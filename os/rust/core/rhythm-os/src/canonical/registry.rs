@@ -36,6 +36,20 @@ pub struct EndpointVisibilityReport {
     pub hidden_device_ids: Vec<String>,
 }
 
+/// Durable ownership for a canonical device name.
+///
+/// A missing entry represents legacy state whose name origin is unknown. Such
+/// a name stays protected until discovery proves it still matches an
+/// integration source name. This lets upgrades preserve pre-existing manual
+/// overrides without making every legacy source name permanently ineligible
+/// for automatic naming.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CanonicalNameOwnership {
+    Automatic,
+    User,
+}
+
 /// The canonical device registry.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CanonicalRegistry {
@@ -43,6 +57,12 @@ pub struct CanonicalRegistry {
     devices: HashMap<String, CanonicalDevice>,
     /// Triage queue for ambiguous matches.
     triage: TriageQueue,
+    /// Explicit name ownership keyed by canonical device ID.
+    ///
+    /// Missing legacy entries are intentionally protected until a matching
+    /// source name is observed during discovery.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    name_ownership: HashMap<String, CanonicalNameOwnership>,
     /// Index: hardware ID value → canonical device ID (for fast lookup).
     #[serde(skip)]
     hw_index: HashMap<String, String>,
@@ -62,6 +82,7 @@ impl CanonicalRegistry {
         Self {
             devices: HashMap::new(),
             triage: TriageQueue::new(),
+            name_ownership: HashMap::new(),
             hw_index: HashMap::new(),
             native_index: HashMap::new(),
         }
@@ -110,8 +131,11 @@ impl CanonicalRegistry {
         // Phase 1: Native ID lookup (same hub, already known)
         let native_key = (hub_key.to_string(), identity.native_id.clone());
         if let Some(canonical_id) = self.native_index.get(&native_key).cloned() {
+            let ownership_is_legacy = !self.name_ownership.contains_key(&canonical_id);
             if let Some(device) = self.devices.get_mut(&canonical_id) {
                 if !device.is_removed() {
+                    let source_name_still_matches =
+                        ownership_is_legacy && device.name.trim() == identity.name.trim();
                     device.upsert_endpoint(
                         hub_key.clone(),
                         identity.native_id.clone(),
@@ -125,6 +149,10 @@ impl CanonicalRegistry {
                             self.hw_index
                                 .insert(hw_id.value().to_string(), canonical_id.clone());
                         }
+                    }
+                    if source_name_still_matches {
+                        self.name_ownership
+                            .insert(canonical_id.clone(), CanonicalNameOwnership::Automatic);
                     }
                     debug!(target: "canonical", "Already known: {} → {}", identity.native_id, canonical_id);
                     return ResolveResult::AlreadyKnown { canonical_id };
@@ -292,6 +320,8 @@ impl CanonicalRegistry {
 
         let canonical_id = device.id.clone();
         self.devices.insert(canonical_id.clone(), device);
+        self.name_ownership
+            .insert(canonical_id.clone(), CanonicalNameOwnership::Automatic);
 
         // Index hardware IDs
         for hw_id in &identity.hardware_ids {
@@ -432,7 +462,35 @@ impl CanonicalRegistry {
             None => return false,
         };
 
+        let source_user_name = self
+            .native_index
+            .get(&(hub_key.to_string(), entry.discovered.native_id.clone()))
+            .filter(|source_id| source_id.as_str() != canonical_id)
+            .and_then(|source_id| {
+                matches!(
+                    self.name_ownership.get(source_id),
+                    Some(CanonicalNameOwnership::User)
+                )
+                .then(|| {
+                    self.devices
+                        .get(source_id)
+                        .map(|device| device.name.clone())
+                })
+                .flatten()
+            });
+        let target_is_user_named = matches!(
+            self.name_ownership.get(canonical_id),
+            Some(CanonicalNameOwnership::User)
+        );
+
         if let Some(device) = self.devices.get_mut(canonical_id) {
+            if !target_is_user_named {
+                if let Some(source_user_name) = source_user_name {
+                    device.name = source_user_name;
+                    self.name_ownership
+                        .insert(canonical_id.to_string(), CanonicalNameOwnership::User);
+                }
+            }
             let source_room = if entry.discovered.room_name.is_empty() {
                 None
             } else {
@@ -475,6 +533,7 @@ impl CanonicalRegistry {
 
         let native_key = (hub_key.to_string(), entry.discovered.native_id.clone());
         if let Some(existing_id) = self.native_index.get(&native_key).cloned() {
+            let automatic_name_eligible = self.automatic_name_eligible(&existing_id);
             if let Some(device) = self.devices.get_mut(&existing_id) {
                 if !device.is_removed() {
                     let source_room = if entry.discovered.room_name.is_empty() {
@@ -482,7 +541,9 @@ impl CanonicalRegistry {
                     } else {
                         Some(entry.discovered.room_name.clone())
                     };
-                    device.name = entry.discovered.name.clone();
+                    if automatic_name_eligible {
+                        device.name = entry.discovered.name.clone();
+                    }
                     if device.manufacturer.is_none() {
                         device.manufacturer = entry.discovered.manufacturer.clone();
                     }
@@ -525,6 +586,8 @@ impl CanonicalRegistry {
         let native_key = (hub_key.to_string(), entry.discovered.native_id);
         self.native_index.insert(native_key, canonical_id.clone());
         self.devices.insert(canonical_id.clone(), device);
+        self.name_ownership
+            .insert(canonical_id.clone(), CanonicalNameOwnership::Automatic);
         self.triage.resolve_new(triage_entry_id, now);
 
         Some(canonical_id)
@@ -674,6 +737,33 @@ impl CanonicalRegistry {
     /// Get a device by canonical ID (mutable).
     pub fn get_mut(&mut self, id: &str) -> Option<&mut CanonicalDevice> {
         self.devices.get_mut(id)
+    }
+
+    /// Whether automatic naming currently owns this device's display name.
+    ///
+    /// Missing legacy ownership is deliberately false until discovery sees a
+    /// source name that still matches the canonical name.
+    pub fn automatic_name_eligible(&self, device_id: &str) -> bool {
+        matches!(
+            self.name_ownership.get(device_id),
+            Some(CanonicalNameOwnership::Automatic)
+        )
+    }
+
+    /// Rename a device through the user-facing canonical rename contract and
+    /// permanently transfer name ownership to the user.
+    pub fn rename_device_by_user(&mut self, device_id: &str, name: &str) -> bool {
+        let Some(device) = self
+            .devices
+            .get_mut(device_id)
+            .filter(|device| !device.is_removed())
+        else {
+            return false;
+        };
+        device.name = name.to_string();
+        self.name_ownership
+            .insert(device_id.to_string(), CanonicalNameOwnership::User);
+        true
     }
 
     /// Find a device by native ID on a specific hub.
@@ -827,6 +917,7 @@ impl CanonicalRegistry {
     /// Remove a canonical device and clean up indices.
     pub fn remove_device(&mut self, device_id: &str) -> Option<CanonicalDevice> {
         if let Some(device) = self.devices.remove(device_id) {
+            self.name_ownership.remove(device_id);
             let removed_device_id = device.id.clone();
             // Auto-resolve any pending unassigned triage entry
             let now = std::time::SystemTime::now()
@@ -1100,6 +1191,63 @@ mod tests {
 
         assert!(matches!(result, ResolveResult::Created { .. }));
         assert_eq!(reg.device_count(), 2);
+    }
+
+    #[test]
+    fn legacy_name_stays_protected_until_discovery_proves_it_is_a_source_name() {
+        let identity = make_identity(
+            "hue-light-1",
+            "Kitchen Spot 1",
+            vec![HardwareId::mac("00:17:88:01:09:ab:cd:ef")],
+        );
+        let mut registry = CanonicalRegistry::new();
+        let canonical_id = match registry.resolve(&identity, &hue_key(), 1000) {
+            ResolveResult::Created { canonical_id } => canonical_id,
+            other => panic!("expected Created, got {other:?}"),
+        };
+
+        let mut legacy_value = serde_json::to_value(&registry).unwrap();
+        legacy_value
+            .as_object_mut()
+            .unwrap()
+            .remove("name_ownership");
+        let mut legacy: CanonicalRegistry = serde_json::from_value(legacy_value).unwrap();
+        legacy.rebuild_indices();
+        legacy.get_mut(&canonical_id).unwrap().name = "My Reading Light".to_string();
+
+        assert!(!legacy.automatic_name_eligible(&canonical_id));
+        assert!(matches!(
+            legacy.resolve(&identity, &hue_key(), 2000),
+            ResolveResult::AlreadyKnown { .. }
+        ));
+        assert!(!legacy.automatic_name_eligible(&canonical_id));
+        assert_eq!(legacy.get(&canonical_id).unwrap().name, "My Reading Light");
+
+        legacy.get_mut(&canonical_id).unwrap().name = identity.name.clone();
+        assert!(matches!(
+            legacy.resolve(&identity, &hue_key(), 3000),
+            ResolveResult::AlreadyKnown { .. }
+        ));
+        assert!(legacy.automatic_name_eligible(&canonical_id));
+    }
+
+    #[test]
+    fn explicit_user_name_ownership_cannot_be_reenabled_by_discovery() {
+        let identity = make_identity("hue-light-1", "Kitchen Spot 1", vec![]);
+        let mut registry = CanonicalRegistry::new();
+        let canonical_id = match registry.resolve(&identity, &hue_key(), 1000) {
+            ResolveResult::Created { canonical_id } => canonical_id,
+            other => panic!("expected Created, got {other:?}"),
+        };
+        assert!(registry.rename_device_by_user(&canonical_id, &identity.name));
+        assert!(!registry.automatic_name_eligible(&canonical_id));
+
+        assert!(matches!(
+            registry.resolve(&identity, &hue_key(), 2000),
+            ResolveResult::AlreadyKnown { .. }
+        ));
+        assert!(!registry.automatic_name_eligible(&canonical_id));
+        assert_eq!(registry.get(&canonical_id).unwrap().name, identity.name);
     }
 
     #[test]

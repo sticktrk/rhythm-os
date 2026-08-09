@@ -119,6 +119,49 @@ fn backup_restore_preserves_standalone_device_nodes() {
 }
 
 #[test]
+fn backup_restore_preserves_user_owned_device_name_across_room_assignment() {
+    let harness = TestHarness::new().with_discovery(vec![], vec![light("matter-override", "")]);
+    harness.sync();
+
+    let canonical_id = {
+        let state = harness.state.lock().unwrap();
+        state
+            .canonical_registry
+            .find_by_native_id(&harness.hub_key, "matter-override")
+            .unwrap()
+            .id
+            .clone()
+    };
+    commands::do_canonical_rename_device(&harness.state, &canonical_id, "Cozy Corner").unwrap();
+    {
+        let state = harness.state.lock().unwrap();
+        assert!(!state
+            .canonical_registry
+            .automatic_name_eligible(&canonical_id));
+    }
+
+    {
+        let mut state = harness.state.lock().unwrap();
+        state.composite_controller = Some(Arc::new(CompositeController::new()));
+    }
+    let bundle = commands::build_backup_bundle_dto(&harness.state, false).unwrap();
+    let restored = TestHarness::new();
+    commands::do_backup_restore(&restored.state, bundle).unwrap();
+
+    let room = commands::do_topology_create_room(&restored.state, "Office").unwrap();
+    let room: serde_json::Value = serde_json::from_str(&room).unwrap();
+    let room_id = room["id"].as_str().unwrap();
+    commands::do_canonical_assign_room(&restored.state, &canonical_id, Some(room_id)).unwrap();
+
+    let state = restored.state.lock().unwrap();
+    let device = state.canonical_registry.get(&canonical_id).unwrap();
+    assert_eq!(device.name, "Cozy Corner");
+    assert!(!state
+        .canonical_registry
+        .automatic_name_eligible(&canonical_id));
+}
+
+#[test]
 fn backup_restore_preserves_topology_control_links() {
     let harness = TestHarness::new().with_discovery(vec![], vec![light("matter-100", "")]);
     harness.sync();

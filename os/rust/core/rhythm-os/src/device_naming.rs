@@ -73,6 +73,14 @@ pub fn reconcile_automatic_light_names(
 
     let mut changed = 0;
     for plan in plans {
+        let still_automatic = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .canonical_registry
+            .automatic_name_eligible(&plan.canonical_id);
+        if !still_automatic {
+            continue;
+        }
         let mut native_rename_failed = false;
         let hue_endpoints = if plan.canonical_name_changed {
             plan.hue_endpoints.as_slice()
@@ -112,6 +120,9 @@ pub fn reconcile_automatic_light_names(
         };
         if device.is_removed()
             || device.device_type != DeviceType::Light
+            || !state_guard
+                .canonical_registry
+                .automatic_name_eligible(&plan.canonical_id)
             || device.name == plan.desired_name
         {
             continue;
@@ -187,7 +198,10 @@ fn planned_light_names(
         .filter_map(|(device, room_id)| {
             let ordinal = ordinals.entry(room_id.clone()).or_insert(0);
             *ordinal += 1;
-            if !device.has_active_endpoint() || !scope.includes(&device.id, &room_id) {
+            if !device.has_active_endpoint()
+                || !scope.includes(&device.id, &room_id)
+                || !state.canonical_registry.automatic_name_eligible(&device.id)
+            {
                 return None;
             }
             let room_suffix = room_id
@@ -748,5 +762,48 @@ mod tests {
             "Unrelated source name"
         );
         assert_eq!(calls.lock().unwrap().as_slice(), ["hue-target"]);
+    }
+
+    #[test]
+    fn user_override_survives_scoped_reconciliation_without_a_hue_write() {
+        let shared = Arc::new(Mutex::new(AppState::default()));
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let canonical_id = {
+            let mut state = shared.lock().unwrap();
+            let canonical_id = add_light(
+                &mut state,
+                HubKey::new(HubType::new(HubType::HUE), "bridge"),
+                "hue-user-named",
+                "Hue source name",
+                "Signify Netherlands B.V.",
+                "LCT016",
+                1,
+            );
+            assert!(state
+                .canonical_registry
+                .rename_device_by_user(&canonical_id, "Cozy Corner"));
+            state.rename_hub_device_fn = Some(Arc::new({
+                let calls = calls.clone();
+                move |_, _, native_id, _| {
+                    calls.lock().unwrap().push(native_id.to_string());
+                    Ok(())
+                }
+            }));
+            canonical_id
+        };
+
+        let scope = LightNameReconciliationScope::for_device(canonical_id.clone());
+        assert_eq!(reconcile_automatic_light_names(&shared, &scope).unwrap(), 0);
+        assert_eq!(
+            shared
+                .lock()
+                .unwrap()
+                .canonical_registry
+                .get(&canonical_id)
+                .unwrap()
+                .name,
+            "Cozy Corner"
+        );
+        assert!(calls.lock().unwrap().is_empty());
     }
 }
