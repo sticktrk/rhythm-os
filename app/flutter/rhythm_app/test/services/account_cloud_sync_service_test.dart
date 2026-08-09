@@ -693,4 +693,144 @@ void main() {
       );
     });
   });
+
+  group('Account Home removal', () {
+    const homeId = 'd5f28205-02de-4a39-a7fc-35777e4964c7';
+    const ownerId = '8f075ac1-e4e7-40f7-817c-4a27424307f4';
+    const memberId = '7e3862cb-af58-4537-b323-7a5f8c8ffc5d';
+
+    test('owners delete the canonical Home and verify it is gone', () async {
+      final requests = <http.Request>[];
+      var homeReadCount = 0;
+      final client = SupabaseClient(
+        'http://localhost:54321',
+        'test-key',
+        accessToken: () async => 'test-token',
+        httpClient: MockClient((request) async {
+          requests.add(request);
+          if (request.method == 'GET') {
+            homeReadCount += 1;
+            return http.Response(
+              homeReadCount == 1
+                  ? jsonEncode([
+                      {
+                        'id': homeId,
+                        'owner_id': ownerId,
+                        'member_ids': [ownerId],
+                      },
+                    ])
+                  : '[]',
+              200,
+              headers: {'content-type': 'application/json'},
+              request: request,
+            );
+          }
+          expect(request.method, 'DELETE');
+          return http.Response('', 204, request: request);
+        }),
+      );
+      addTearDown(client.dispose);
+
+      final outcome = await AccountCloudSyncService.removeHomeFromAccount(
+        client: client,
+        homeId: homeId,
+        userId: ownerId,
+      );
+
+      expect(outcome, AccountHomeRemovalOutcome.deleted);
+      expect(
+          requests.map((request) => request.method), ['GET', 'DELETE', 'GET']);
+    });
+
+    test('non-owner members leave without deleting the shared Home', () async {
+      final requests = <http.Request>[];
+      var homeReadCount = 0;
+      final client = SupabaseClient(
+        'http://localhost:54321',
+        'test-key',
+        accessToken: () async => 'test-token',
+        httpClient: MockClient((request) async {
+          requests.add(request);
+          if (request.method == 'GET') {
+            homeReadCount += 1;
+            return http.Response(
+              jsonEncode([
+                {
+                  'id': homeId,
+                  'owner_id': ownerId,
+                  'member_ids':
+                      homeReadCount == 1 ? [ownerId, memberId] : [ownerId],
+                },
+              ]),
+              200,
+              headers: {'content-type': 'application/json'},
+              request: request,
+            );
+          }
+          expect(request.method, 'POST');
+          expect(request.url.path, '/rest/v1/rpc/remove_home_member');
+          expect(
+            jsonDecode(request.body),
+            {
+              'home_uuid': homeId,
+              'user_uuid': memberId,
+            },
+          );
+          return http.Response('', 204, request: request);
+        }),
+      );
+      addTearDown(client.dispose);
+
+      final outcome = await AccountCloudSyncService.removeHomeFromAccount(
+        client: client,
+        homeId: homeId,
+        userId: memberId,
+      );
+
+      expect(outcome, AccountHomeRemovalOutcome.left);
+      expect(requests.map((request) => request.method), ['GET', 'POST', 'GET']);
+    });
+
+    test('an RLS-filtered delete no-op is reported as failure', () async {
+      final homeRow = jsonEncode([
+        {
+          'id': homeId,
+          'owner_id': ownerId,
+          'member_ids': [ownerId],
+        },
+      ]);
+      final client = SupabaseClient(
+        'http://localhost:54321',
+        'test-key',
+        accessToken: () async => 'test-token',
+        httpClient: MockClient((request) async {
+          if (request.method == 'GET') {
+            return http.Response(
+              homeRow,
+              200,
+              headers: {'content-type': 'application/json'},
+              request: request,
+            );
+          }
+          return http.Response('', 204, request: request);
+        }),
+      );
+      addTearDown(client.dispose);
+
+      await expectLater(
+        AccountCloudSyncService.removeHomeFromAccount(
+          client: client,
+          homeId: homeId,
+          userId: ownerId,
+        ),
+        throwsA(
+          isA<StateError>().having(
+            (error) => error.message,
+            'message',
+            contains('remained available'),
+          ),
+        ),
+      );
+    });
+  });
 }

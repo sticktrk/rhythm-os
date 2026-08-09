@@ -597,17 +597,22 @@ class HomeProvider extends ChangeNotifier {
   }
 
   /// Delete a home.
-  Future<bool> deleteHome(String id) async {
+  Future<bool> deleteHome(
+    String id, {
+    bool removeFromAccount = true,
+  }) async {
     final home = _repository.getHome(id);
     try {
       await _repository.deleteHome(id);
-      if (home != null) {
-        unawaited(
-          AccountCloudSyncService.instance.deleteHome(
-            homeId: home.id,
-            reason: 'home_deleted',
-          ),
+      var removedFromAccount = true;
+      if (home != null && removeFromAccount) {
+        removedFromAccount = await AccountCloudSyncService.instance.deleteHome(
+          homeId: home.id,
+          reason: 'home_deleted',
         );
+        if (!removedFromAccount) {
+          _error = 'Failed to remove Home from the signed-in account.';
+        }
       }
 
       // If deleting current home, switch to another
@@ -619,7 +624,7 @@ class HomeProvider extends ChangeNotifier {
       }
 
       notifyListeners();
-      return true;
+      return removedFromAccount;
     } catch (e) {
       _error = 'Failed to delete home: $e';
       notifyListeners();

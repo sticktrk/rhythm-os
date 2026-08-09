@@ -46,6 +46,67 @@ import '../services/server_identity.dart';
 /// Which empty-state variant to show.
 enum ConnectHubMode { rhythmServer, hue }
 
+enum _HomeCardAction { remove }
+
+@visibleForTesting
+Widget rhythmHomeActionsButtonForTesting({
+  required String homeId,
+  required String homeName,
+  required VoidCallback onRemove,
+}) =>
+    _HomeActionsButton(
+      homeId: homeId,
+      homeName: homeName,
+      color: const Color(0xFF00BCD4),
+      onRemove: onRemove,
+    );
+
+class _HomeActionsButton extends StatelessWidget {
+  const _HomeActionsButton({
+    required this.homeId,
+    required this.homeName,
+    required this.color,
+    required this.onRemove,
+  });
+
+  final String homeId;
+  final String homeName;
+  final Color color;
+  final VoidCallback onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<_HomeCardAction>(
+      key: ValueKey('home-actions-$homeId'),
+      tooltip: 'Manage $homeName',
+      color: CelestialColors.backgroundCard,
+      icon: Icon(
+        Icons.more_horiz_rounded,
+        color: color.withValues(alpha: 0.85),
+        size: 21,
+      ),
+      onSelected: (action) {
+        if (action == _HomeCardAction.remove) onRemove();
+      },
+      itemBuilder: (context) => [
+        const PopupMenuItem(
+          value: _HomeCardAction.remove,
+          child: Row(
+            children: [
+              Icon(Icons.delete_outline_rounded, color: Colors.redAccent),
+              SizedBox(width: 12),
+              Text(
+                'Remove Home',
+                style: TextStyle(color: Colors.redAccent),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 @visibleForTesting
 const int rhythmServerDefaultPort = 54448;
 
@@ -2955,7 +3016,10 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
           const SizedBox(height: 4),
           if (showHomeSection) ...[
             // ── Path A: enter an existing Home (solid cards) ──────────────
-            _buildDiscoverySectionHeader('YOUR HOMES', 'Tap to enter'),
+            _buildDiscoverySectionHeader(
+              'YOUR HOMES',
+              'Tap to enter • ⋯ to manage',
+            ),
             const SizedBox(height: 4),
             if (_homeActionError != null) ...[
               _buildInlineError(_homeActionError!),
@@ -3304,7 +3368,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
 
     return GestureDetector(
       onTap: isBusy ? null : () => _enterHome(snapshot),
-      onLongPress: isBusy ? null : () => _confirmDeleteHome(snapshot),
+      onLongPress: isBusy ? null : () => _confirmRemoveHome(snapshot),
       behavior: HitTestBehavior.opaque,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 200),
@@ -3416,20 +3480,13 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
                 ),
               )
             else
-              Container(
-                width: 30,
-                height: 30,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: isCurrent
-                      ? color.withValues(alpha: 0.20)
-                      : Colors.white.withValues(alpha: 0.05),
-                ),
-                child: Icon(
-                  Icons.arrow_forward_rounded,
-                  color: color.withValues(alpha: isCurrent ? 0.95 : 0.70),
-                  size: 18,
-                ),
+              _HomeActionsButton(
+                homeId: snapshot.home.id,
+                homeName: snapshot.home.name,
+                color: color,
+                onRemove: () {
+                  unawaited(_confirmRemoveHome(snapshot));
+                },
               ),
           ],
         ),
@@ -3456,17 +3513,17 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
     return '$prefix$suffix saved';
   }
 
-  Future<void> _confirmDeleteHome(AccountHomeServerHubs snapshot) async {
+  Future<void> _confirmRemoveHome(AccountHomeServerHubs snapshot) async {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: CelestialColors.backgroundCard,
         title: Text(
-          'Delete ${snapshot.home.name}?',
+          'Remove ${snapshot.home.name}?',
           style: const TextStyle(color: CelestialColors.textPrimary),
         ),
         content: const Text(
-          'This removes the Home and its saved Boxes from this app. If it is saved to your account, it will be removed there too.',
+          'This removes the Home and its saved Boxes from this app and account. If you share the Home, only your access is removed.',
           style: TextStyle(color: CelestialColors.textSecondary),
         ),
         actions: [
@@ -3480,7 +3537,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(true),
             child: const Text(
-              'Delete',
+              'Remove',
               style: TextStyle(color: Colors.redAccent),
             ),
           ),
@@ -3504,23 +3561,36 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
 
     var success = true;
     for (final homeId in representedHomeIds) {
+      var removedLocally = true;
       if (localHomeIds.contains(homeId)) {
-        success = await homeProvider.deleteHome(homeId) && success;
+        removedLocally = await homeProvider.deleteHome(
+          homeId,
+          removeFromAccount: false,
+        );
+        success = removedLocally && success;
       }
-      await AccountCloudSyncService.instance.deleteHome(
-        homeId: homeId,
-        reason: 'home_deleted',
-      );
+      if (removedLocally) {
+        final removedFromAccount =
+            await AccountCloudSyncService.instance.deleteHome(
+          homeId: homeId,
+          reason: 'home_deleted',
+        );
+        success = removedFromAccount && success;
+      }
     }
 
     if (!mounted) return;
     setState(() {
       _deletingHomeId = null;
-      _accountHomes = _accountHomes
-          .where((snapshot) => !representedHomeIds.contains(snapshot.home.id))
-          .toList(growable: false);
+      if (success) {
+        _accountHomes = _accountHomes
+            .where(
+              (snapshot) => !representedHomeIds.contains(snapshot.home.id),
+            )
+            .toList(growable: false);
+      }
       _homeActionError =
-          success ? null : 'Could not delete ${snapshot.home.name}';
+          success ? null : 'Could not remove ${snapshot.home.name}';
     });
 
     if (success && _canUseAccountHomes) {
