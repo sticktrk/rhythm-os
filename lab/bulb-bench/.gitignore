@@ -1,0 +1,4 @@
+# Local bench evidence can contain large waveforms and device identifiers.
+runs/
+data/
+bench.local.json
