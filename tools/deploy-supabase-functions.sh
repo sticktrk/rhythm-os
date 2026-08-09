@@ -112,8 +112,6 @@ else
     done
 fi
 
-command -v supabase >/dev/null 2>&1 || die "Supabase CLI is required: https://supabase.com/docs/guides/cli"
-
 if [ -n "${SUPABASE_PROJECT_REF:-}" ]; then
     PROJECT_REF="$SUPABASE_PROJECT_REF"
     USE_EXPLICIT_PROJECT_REF=true
@@ -149,6 +147,8 @@ if [ "$DRY_RUN" = true ]; then
     echo "Dry run only; nothing was deployed."
     exit 0
 fi
+
+command -v supabase >/dev/null 2>&1 || die "Supabase CLI is required: https://supabase.com/docs/guides/cli"
 
 cd "$REPO_ROOT"
 "${COMMAND[@]}"

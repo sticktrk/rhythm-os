@@ -9,10 +9,18 @@ TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/rhythm-supabase-deploy-test.XXXXXX")"
 trap 'rm -r "$TEMP_DIR"' EXIT
 
 mkdir -p "$TEMP_DIR/bin"
-ln -s "$(command -v true)" "$TEMP_DIR/bin/supabase"
+for utility in dirname basename; do
+    utility_path="$(type -P "$utility")"
+    [ -n "$utility_path" ] || {
+        echo "required test utility is unavailable: $utility" >&2
+        exit 1
+    }
+    ln -s "$utility_path" "$TEMP_DIR/bin/$utility"
+done
 
 run_dry() {
-    PATH="$TEMP_DIR/bin:$PATH" \
+    # Prove dry-run command validation works without a Supabase CLI in PATH.
+    PATH="$TEMP_DIR/bin" \
         SUPABASE_PROJECT_REF=test-project-ref \
         "$DEPLOY_SCRIPT" "$@" --dry-run
 }
@@ -46,5 +54,12 @@ if run_dry --prune >"$TEMP_DIR/prune.out" 2>&1; then
     echo "--prune was unexpectedly accepted" >&2
     exit 1
 fi
+
+if PATH="$TEMP_DIR/bin" SUPABASE_PROJECT_REF=test-project-ref \
+    "$DEPLOY_SCRIPT" report-bug >"$TEMP_DIR/missing-cli.out" 2>&1; then
+    echo "real deployment unexpectedly accepted a missing Supabase CLI" >&2
+    exit 1
+fi
+grep -Fq 'Supabase CLI is required' "$TEMP_DIR/missing-cli.out"
 
 echo "Supabase function deployment wrapper contract passed."
