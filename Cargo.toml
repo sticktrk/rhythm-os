@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "app/flutter/rhythm_app/rust",
+    "lab/bulb-bench",
     "os/rust/core/rhythm-profile",
     "os/rust/core/rhythm-devices",
     "os/rust/core/rhythm-core",

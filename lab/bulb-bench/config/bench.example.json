@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "bench_id": "bulb-bench-development",
+  "measurement_mode": "comparative",
+  "safety": {
+    "max_bulb_watts": 25.0,
+    "max_chamber_celsius": 45.0,
+    "max_socket_celsius": 90.0,
+    "max_run_minutes": 1440,
+    "door_interlock_required": true,
+    "emergency_stop_required": true,
+    "independent_thermal_cutoff_required": true
+  },
+  "instruments": {
+    "protocol_controller": {
+      "driver": "rpiz-http",
+      "endpoint": "http://rpiz.example.invalid",
+      "configured": false
+    },
+    "spectrometer": {
+      "driver": "nanolambda-unselected",
+      "endpoint": null,
+      "configured": false
+    },
+    "mains_controller": {
+      "driver": "unselected-isolated-relay",
+      "endpoint": null,
+      "configured": false
+    },
+    "power_analyzer": {
+      "driver": "unselected",
+      "endpoint": null,
+      "configured": false
+    },
+    "fast_light_meter": {
+      "driver": "unselected-photodiode-adc",
+      "endpoint": null,
+      "configured": false
+    },
+    "environment_monitor": {
+      "driver": "unselected-temperature-monitor",
+      "endpoint": null,
+      "configured": false
+    }
+  }
+}
