@@ -37,6 +37,23 @@ class RoomDeviceAddSelection {
 }
 
 @visibleForTesting
+Set<String> additionalMotionTargetRoomIds({
+  required Iterable<String> existingTargetRoomIds,
+  required String physicalParentNodeId,
+  required String additionalRoomId,
+}) {
+  final targetRoomIds = existingTargetRoomIds
+      .map((roomId) => roomId.trim())
+      .where((roomId) => roomId.isNotEmpty)
+      .toSet();
+  if (targetRoomIds.isEmpty && physicalParentNodeId.isNotEmpty) {
+    targetRoomIds.add(physicalParentNodeId);
+  }
+  targetRoomIds.add(additionalRoomId);
+  return targetRoomIds;
+}
+
+@visibleForTesting
 List<ExistingRoomDeviceCandidate> existingRoomDeviceCandidates({
   required List<Map<String, dynamic>> canonicalDevices,
   required List<RhythmTopologyNode> topologyNodes,
@@ -146,6 +163,33 @@ Future<void> startRoomDeviceAddFlow(
   }
 
   final selected = selection.candidate!;
+  if (deviceType == RhythmDeviceType.motion) {
+    final syncProvider = context.read<ServerSyncProvider>();
+    final targetRoomIds = additionalMotionTargetRoomIds(
+      existingTargetRoomIds: syncProvider.controlTargetNodeIds(
+        sourceNodeId: selected.device.id,
+        controlKind: 'motion',
+      ),
+      physicalParentNodeId: selected.parentNodeId,
+      additionalRoomId: roomId,
+    );
+    final success = await syncProvider.setNodeControlTargets(
+      sourceNodeId: selected.device.id,
+      controlKind: 'motion',
+      targetNodeIds: targetRoomIds,
+    );
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          success
+              ? 'Added ${selected.device.displayName} as additional motion for $roomName'
+              : 'Failed to add ${selected.device.displayName}',
+        ),
+      ),
+    );
+    return;
+  }
   await assignCanonicalDeviceToRoom(
     context,
     device: selected.device,

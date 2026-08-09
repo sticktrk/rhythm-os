@@ -18,6 +18,7 @@ import 'package:rhythm_app/services/hue/hue_service_locator.dart';
 import 'package:rhythm_app/services/remote_access_service.dart';
 import 'package:rhythm_app/screens/settings/light_screen.dart';
 import 'package:rhythm_app/screens/hubs/device_pairing_flow.dart';
+import 'package:rhythm_app/screens/hubs/room_device_add_flow.dart';
 import 'package:rhythm_app/widgets/device_detail_sheet.dart';
 import 'package:rhythm_app/widgets/hub_picker_screen.dart';
 import 'package:rhythm_app/widgets/room_settings_sheet.dart';
@@ -1053,6 +1054,17 @@ RhythmSceneDefinition _testPresetOnlyScene(String id) =>
     });
 
 void main() {
+  test('additional motion preserves explicit targets over physical placement', () {
+    expect(
+      additionalMotionTargetRoomIds(
+        existingTargetRoomIds: const ['room-explicit'],
+        physicalParentNodeId: 'room-physical',
+        additionalRoomId: 'room-new',
+      ),
+      {'room-explicit', 'room-new'},
+    );
+  });
+
   group('ServerSyncProvider.applyProfileConfig', () {
     late RoomProvider roomProvider;
     late _FakeRhythmServerApi api;
@@ -5645,7 +5657,7 @@ void main() {
   });
 
   testWidgets(
-      'room sheet lists and assigns only existing devices of the tab type',
+      'room sheet adds existing motion as an additional room control',
       (tester) async {
     _registerWidgetCleanup(tester);
     final roomProvider = RoomProvider();
@@ -5802,10 +5814,15 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(api.assignDeviceParentCalls, 1);
-    expect(api.lastAssignedDeviceId, 'motion-hall');
-    expect(api.lastAssignedParentId, 'room-1');
-    expect(find.text('Moved Hall Motion to Kitchen'), findsOneWidget);
+    expect(api.assignDeviceParentCalls, 0);
+    expect(api.setTopologyNodeControlTargetsCalls, 1);
+    expect(api.lastControlSourceNodeId, 'motion-hall');
+    expect(api.lastControlKind, 'motion');
+    expect(api.lastControlTargetIds, ['room-1', 'room-2']);
+    expect(
+      find.text('Added Hall Motion as additional motion for Kitchen'),
+      findsOneWidget,
+    );
   });
 
   testWidgets(
