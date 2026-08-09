@@ -280,10 +280,10 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     SignInModal.show(context);
   }
 
-  Future<void> _showReportBug() async {
+  Future<void> _showSupportReport() async {
     final serverHub =
         context.read<HomeProvider>().getFirstHubOfType(HubType.server);
-    await showReportBugFlow(context, serverHub: serverHub);
+    await showSupportReportFlow(context, serverHub: serverHub);
   }
 
   /// Leave the Virtual Experience: clear the seeded demo state and land back
@@ -730,7 +730,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
                         tabs: visibleTabs,
                         disabledTabs: disabledTabs,
                         onSelected: _handleTabSelected,
-                        onReportBug: () => unawaited(_showReportBug()),
+                        onReportBug: () => unawaited(_showSupportReport()),
                       ),
                     ),
                 ],
@@ -1491,9 +1491,9 @@ class _NavFanButtonState extends State<_NavFanButton>
   Widget _buildReportBugFanItem(int slotFromBottom) {
     return _buildMenuItem(
       slotFromBottom: slotFromBottom,
-      outline: Icons.bug_report_outlined,
-      filled: Icons.bug_report_rounded,
-      label: 'Report Bug',
+      outline: Icons.rate_review_outlined,
+      filled: Icons.rate_review_rounded,
+      label: 'Report / Request',
       accent: const Color(0xFF26C6DA),
       onTap: _reportBug,
     );

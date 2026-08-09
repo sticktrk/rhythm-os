@@ -302,6 +302,13 @@ class AnalyticsService {
     });
   }
 
+  /// Track the dedicated room-card settings affordance without identifiers.
+  Future<void> logRoomCardSettingsOpened({required String nodeKind}) async {
+    await logEvent('room_card_settings_opened', {
+      'node_kind': nodeKind,
+    });
+  }
+
   /// Track resetting an individual room back to its adaptive curve.
   Future<void> logRoomResetToCurve({required String roomId}) async {
     await logEvent('room_reset_to_curve', {'room_id': roomId});
@@ -585,6 +592,36 @@ class AnalyticsService {
   /// Track opening the in-app feedback surface.
   Future<void> logFeedbackOpened() async {
     await logEvent('feedback_opened');
+  }
+
+  /// Track a classified support-report attempt without report contents.
+  Future<void> logSupportReportAttempted({
+    required String journeyId,
+    required String reportKind,
+    required String bundleScope,
+  }) async {
+    await logEvent('support_report_attempted', {
+      'journey_id': journeyId,
+      'report_kind': reportKind,
+      'bundle_scope': bundleScope,
+    });
+  }
+
+  /// Track the terminal app-observed support-report outcome.
+  Future<void> logSupportReportCompleted({
+    required String journeyId,
+    required String reportKind,
+    required String bundleScope,
+    required String outcome,
+    String? failureStage,
+  }) async {
+    await logEvent('support_report_completed', {
+      'journey_id': journeyId,
+      'report_kind': reportKind,
+      'bundle_scope': bundleScope,
+      'outcome': outcome,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
   }
 
   // ===========================================================================

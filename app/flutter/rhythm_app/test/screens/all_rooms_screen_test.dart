@@ -569,7 +569,8 @@ void main() {
     expect(find.text('Adjusted 2 of 2 rooms.'), findsOneWidget);
   });
 
-  testWidgets('room cards show the default room icon', (tester) async {
+  testWidgets('room cards show the shared title and settings affordance',
+      (tester) async {
     final roomProvider = RoomProvider();
     final homeProvider = _FakeHomeProvider();
     final connection = _TestRhythmConnection();
@@ -616,7 +617,12 @@ void main() {
     await tester.pump();
 
     expect(find.text('Kitchen'), findsOneWidget);
-    expect(find.byIcon(Icons.meeting_room_rounded), findsOneWidget);
+    expect(find.byIcon(Icons.settings_rounded), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('room-card-settings-room-1')),
+      findsOneWidget,
+    );
+    expect(find.byIcon(Icons.meeting_room_rounded), findsNothing);
     expect(find.byIcon(Icons.lightbulb_outline_rounded), findsNothing);
   });
 

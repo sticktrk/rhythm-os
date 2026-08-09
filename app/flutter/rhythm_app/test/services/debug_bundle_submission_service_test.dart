@@ -7,6 +7,25 @@ import 'package:rhythm_app/services/debug_bundle_submission_service.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 void main() {
+  test('submission rows preserve feature classification with bug fallback', () {
+    final feature = DebugBundleSubmission.fromRow({
+      'id': 'submission-1',
+      'reference_code': 'RHY-1234',
+      'status': 'received',
+      'report_kind': 'feature',
+    });
+    final legacy = DebugBundleSubmission.fromRow({
+      'id': 'submission-2',
+      'reference_code': 'RHY-5678',
+      'status': 'received',
+    });
+
+    expect(feature.reportKind, SupportReportKind.feature);
+    expect(feature.copyWith(status: 'reported').reportKind,
+        SupportReportKind.feature);
+    expect(legacy.reportKind, SupportReportKind.bug);
+  });
+
   test('appends app log while preserving server tarball entries', () {
     final serverArchive = Archive()
       ..addFile(ArchiveFile.string('state.json', '{"ok":true}'));

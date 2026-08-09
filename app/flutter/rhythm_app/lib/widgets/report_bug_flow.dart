@@ -1,29 +1,42 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
     show RhythmApiException, RhythmDebugBundle;
+import 'package:uuid/uuid.dart';
 
 import '../providers/server_sync_provider.dart';
+import '../services/analytics_service.dart';
 import '../services/debug_bundle_submission_service.dart';
 import '../services/server_endpoint_resolver.dart';
 import 'solar_orbit.dart';
 
 const Color _teal = Color(0xFF26C6DA);
 const Duration _serverDebugBundleReceiveTimeout = Duration(minutes: 5);
+const Uuid _supportReportUuid = Uuid();
 
-/// Public dialog that prompts the user for a bug summary.
-///
-/// Returns the entered text via [Navigator.pop], or `null` if cancelled.
-class ReportBugPromptDialog extends StatefulWidget {
-  const ReportBugPromptDialog({super.key});
+class SupportReportRequest {
+  const SupportReportRequest({required this.kind, required this.summary});
 
-  @override
-  State<ReportBugPromptDialog> createState() => _ReportBugPromptDialogState();
+  final SupportReportKind kind;
+  final String summary;
 }
 
-class _ReportBugPromptDialogState extends State<ReportBugPromptDialog> {
+/// Public dialog that prompts the user for a classified support report.
+///
+/// Returns the kind and entered text via [Navigator.pop], or null if cancelled.
+class ReportPromptDialog extends StatefulWidget {
+  const ReportPromptDialog({super.key});
+
+  @override
+  State<ReportPromptDialog> createState() => _ReportPromptDialogState();
+}
+
+class _ReportPromptDialogState extends State<ReportPromptDialog> {
   final TextEditingController _controller = TextEditingController();
+  SupportReportKind _kind = SupportReportKind.bug;
 
   @override
   void dispose() {
@@ -39,7 +52,7 @@ class _ReportBugPromptDialogState extends State<ReportBugPromptDialog> {
         borderRadius: BorderRadius.circular(20),
       ),
       title: const Text(
-        'Report Bug',
+        'Report an issue or idea',
         style: TextStyle(
           color: CelestialColors.textPrimary,
           fontSize: 17,
@@ -52,14 +65,39 @@ class _ReportBugPromptDialogState extends State<ReportBugPromptDialog> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'This sends a snapshot of recent logs and redacted state to Rhythm support.',
+              'Choose what you want to share. A private debug bundle is included either way, with recent app logs and redacted server state when available.',
               style: TextStyle(
                 color: CelestialColors.textSecondary,
                 fontSize: 14,
               ),
             ),
             const SizedBox(height: 14),
+            SizedBox(
+              width: double.infinity,
+              child: SegmentedButton<SupportReportKind>(
+                key: const Key('support-report-kind-selector'),
+                showSelectedIcon: false,
+                segments: const [
+                  ButtonSegment(
+                    value: SupportReportKind.bug,
+                    icon: Icon(Icons.bug_report_rounded),
+                    label: Text('Bug'),
+                  ),
+                  ButtonSegment(
+                    value: SupportReportKind.feature,
+                    icon: Icon(Icons.lightbulb_rounded),
+                    label: Text('Feature'),
+                  ),
+                ],
+                selected: {_kind},
+                onSelectionChanged: (selection) {
+                  setState(() => _kind = selection.single);
+                },
+              ),
+            ),
+            const SizedBox(height: 14),
             TextField(
+              key: const Key('support-report-summary'),
               controller: _controller,
               autofocus: true,
               maxLines: 4,
@@ -69,7 +107,9 @@ class _ReportBugPromptDialogState extends State<ReportBugPromptDialog> {
                 color: CelestialColors.textPrimary,
               ),
               decoration: InputDecoration(
-                hintText: 'What went wrong? (optional)',
+                hintText: _kind == SupportReportKind.bug
+                    ? 'What went wrong? (optional)'
+                    : 'What would you like Rhythm to do? (optional)',
                 hintStyle: TextStyle(
                   color: CelestialColors.textSecondary.withValues(alpha: 0.45),
                 ),
@@ -103,36 +143,50 @@ class _ReportBugPromptDialogState extends State<ReportBugPromptDialog> {
           ),
         ),
         ElevatedButton(
-          onPressed: () => Navigator.of(context).pop(_controller.text),
+          onPressed: () => Navigator.of(context).pop(
+            SupportReportRequest(kind: _kind, summary: _controller.text),
+          ),
           style: ElevatedButton.styleFrom(
             backgroundColor: _teal,
             foregroundColor: const Color(0xFF0A0F14),
           ),
-          child: const Text('Report'),
+          child: Text(
+            _kind == SupportReportKind.bug ? 'Report bug' : 'Request feature',
+          ),
         ),
       ],
     );
   }
 }
 
-/// Runs the full bug-report flow: prompt → progress → submit → success/error.
+/// Runs the full support-report flow: prompt → bundle → issue → result.
 ///
 /// When [serverHub] is provided, downloads a server debug bundle and submits
-/// the full payload. When null, submits a text-only report.
-Future<void> showReportBugFlow(
+/// the full payload. When null, submits the app-only debug bundle.
+Future<void> showSupportReportFlow(
   BuildContext context, {
   Hub? serverHub,
   bool localServerOnly = false,
   String? serverVersionOverride,
   String? serverPlatformContextOverride,
 }) async {
-  final summary = await showDialog<String>(
+  final request = await showDialog<SupportReportRequest>(
     context: context,
-    builder: (ctx) => const ReportBugPromptDialog(),
+    builder: (ctx) => const ReportPromptDialog(),
   );
-  if (summary == null || !context.mounted) return;
+  if (request == null || !context.mounted) return;
 
-  _showReportBugProgress(context);
+  final submissionId = _supportReportUuid.v4();
+  final journeyId = 'support-report-$submissionId';
+  var bundleScope = serverHub == null ? 'app_only' : 'server_and_app';
+  unawaited(
+    AnalyticsService().logSupportReportAttempted(
+      journeyId: journeyId,
+      reportKind: request.kind.name,
+      bundleScope: bundleScope,
+    ),
+  );
+  _showSupportReportProgress(context, request.kind);
 
   try {
     final DebugBundleSubmission submission;
@@ -163,11 +217,13 @@ Future<void> showReportBugFlow(
       try {
         final direct =
             await DebugBundleSubmissionService.instance.submitViaDeviceUpload(
+          submissionId: submissionId,
+          reportKind: request.kind,
           serverHub: serverHub,
           deviceClient: client,
           serverVersion: serverVersion,
           serverPlatformContext: serverPlatformContext,
-          summary: summary,
+          summary: request.summary,
         );
         directSubmission = direct.submission;
         // Older firmware ignores the upload request and returns the bundle
@@ -175,7 +231,7 @@ Future<void> showReportBugFlow(
         bundle = direct.legacyBundle;
       } catch (error) {
         debugPrint(
-          'ReportBugFlow: device-direct upload unavailable from '
+          'SupportReportFlow: device-direct upload unavailable from '
           '${resolved.baseUrl}, falling back to download: $error',
         );
       }
@@ -187,7 +243,7 @@ Future<void> showReportBugFlow(
         } catch (error) {
           bundleFailure = _formatDebugBundleFailure(error);
           debugPrint(
-            'ReportBugFlow: server debug bundle download failed from '
+            'SupportReportFlow: server debug bundle download failed from '
             '${resolved.baseUrl}: $bundleFailure',
           );
         }
@@ -197,16 +253,21 @@ Future<void> showReportBugFlow(
         submission = directSubmission;
       } else if (bundle != null) {
         submission = await DebugBundleSubmissionService.instance.submit(
+          submissionId: submissionId,
+          reportKind: request.kind,
           serverHub: serverHub,
           bundle: bundle,
           serverVersion: serverVersion,
           serverPlatformContext: serverPlatformContext,
-          summary: summary,
+          summary: request.summary,
         );
       } else {
+        bundleScope = 'app_only_after_server_failure';
         submission = await DebugBundleSubmissionService.instance.submitTextOnly(
+          submissionId: submissionId,
+          reportKind: request.kind,
           summary: _summaryWithDebugBundleFailure(
-            summary: summary,
+            summary: request.summary,
             endpoint: resolved.baseUrl,
             detail: bundleFailure,
           ),
@@ -217,20 +278,47 @@ Future<void> showReportBugFlow(
       }
     } else {
       submission = await DebugBundleSubmissionService.instance.submitTextOnly(
-        summary: summary,
+        submissionId: submissionId,
+        reportKind: request.kind,
+        summary: request.summary,
       );
     }
 
+    unawaited(
+      AnalyticsService().logSupportReportCompleted(
+        journeyId: journeyId,
+        reportKind: request.kind.name,
+        bundleScope: bundleScope,
+        outcome: 'succeeded',
+      ),
+    );
     if (!context.mounted) return;
     Navigator.of(context, rootNavigator: true).pop();
-    await _showReportBugSubmitted(context, submission.referenceCode);
+    await _showSupportReportSubmitted(
+      context,
+      submission.referenceCode,
+      request.kind,
+    );
   } catch (error) {
+    unawaited(
+      AnalyticsService().logSupportReportCompleted(
+        journeyId: journeyId,
+        reportKind: request.kind.name,
+        bundleScope: bundleScope,
+        outcome: 'failed',
+        failureStage: error is RhythmApiException
+            ? 'server_bundle'
+            : error is DebugBundleSubmissionException
+                ? 'submission'
+                : 'unknown',
+      ),
+    );
     if (!context.mounted) return;
     Navigator.of(context, rootNavigator: true).pop();
     final message = switch (error) {
       RhythmApiException apiError => apiError.serverMessage ?? apiError.message,
       DebugBundleSubmissionException submitError => submitError.message,
-      _ => 'Failed to report the bug.',
+      _ => 'Failed to submit the report.',
     };
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -242,7 +330,10 @@ Future<void> showReportBugFlow(
   }
 }
 
-void _showReportBugProgress(BuildContext context) {
+void _showSupportReportProgress(
+  BuildContext context,
+  SupportReportKind kind,
+) {
   showDialog<void>(
     context: context,
     barrierDismissible: false,
@@ -257,9 +348,11 @@ void _showReportBugProgress(BuildContext context) {
           ),
           const SizedBox(width: 16),
           Expanded(
-            child: const Text(
-              'Creating bug report...',
-              style: TextStyle(color: CelestialColors.textPrimary),
+            child: Text(
+              kind == SupportReportKind.bug
+                  ? 'Creating bug report...'
+                  : 'Creating feature request...',
+              style: const TextStyle(color: CelestialColors.textPrimary),
             ),
           ),
         ],
@@ -268,9 +361,10 @@ void _showReportBugProgress(BuildContext context) {
   );
 }
 
-Future<void> _showReportBugSubmitted(
+Future<void> _showSupportReportSubmitted(
   BuildContext context,
   String referenceCode,
+  SupportReportKind kind,
 ) {
   return showDialog<void>(
     context: context,
@@ -279,9 +373,11 @@ Future<void> _showReportBugSubmitted(
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(20),
       ),
-      title: const Text(
-        'Bug report submitted',
-        style: TextStyle(
+      title: Text(
+        kind == SupportReportKind.bug
+            ? 'Bug report submitted'
+            : 'Feature request submitted',
+        style: const TextStyle(
           color: CelestialColors.textPrimary,
           fontSize: 17,
           fontWeight: FontWeight.w600,
@@ -291,9 +387,11 @@ Future<void> _showReportBugSubmitted(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'Support can now review this report.',
-            style: TextStyle(
+          Text(
+            kind == SupportReportKind.bug
+                ? 'Support can now review this report.'
+                : 'The product team can now review this request.',
+            style: const TextStyle(
               color: CelestialColors.textSecondary,
               fontSize: 14,
             ),

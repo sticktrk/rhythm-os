@@ -6,17 +6,19 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'package:uuid/uuid.dart';
 
 import '../backend/backend.dart';
 import 'app_log_service.dart';
 import 'auth_service.dart';
+
+enum SupportReportKind { bug, feature }
 
 class DebugBundleSubmission {
   const DebugBundleSubmission({
     required this.id,
     required this.referenceCode,
     required this.status,
+    this.reportKind = SupportReportKind.bug,
     this.createdAt,
     this.githubIssueUrl,
     this.githubIssueNumber,
@@ -26,6 +28,7 @@ class DebugBundleSubmission {
   final String id;
   final String referenceCode;
   final String status;
+  final SupportReportKind reportKind;
   final DateTime? createdAt;
   final String? githubIssueUrl;
   final int? githubIssueNumber;
@@ -36,6 +39,10 @@ class DebugBundleSubmission {
       id: row['id'] as String? ?? '',
       referenceCode: row['reference_code'] as String? ?? '',
       status: row['status'] as String? ?? 'received',
+      reportKind: switch (row['report_kind']) {
+        'feature' => SupportReportKind.feature,
+        _ => SupportReportKind.bug,
+      },
       createdAt: _tryParseDateTime(row['created_at']),
       githubIssueUrl: row['github_issue_url'] as String?,
       githubIssueNumber: _tryParseInt(row['github_issue_number']),
@@ -53,6 +60,7 @@ class DebugBundleSubmission {
       id: id,
       referenceCode: referenceCode,
       status: status ?? this.status,
+      reportKind: reportKind,
       createdAt: createdAt,
       githubIssueUrl: githubIssueUrl ?? this.githubIssueUrl,
       githubIssueNumber: githubIssueNumber ?? this.githubIssueNumber,
@@ -94,8 +102,6 @@ class DebugBundleSubmissionService {
   static DebugBundleSubmissionService get instance =>
       _instance ??= DebugBundleSubmissionService._();
 
-  static const _uuid = Uuid();
-
   /// Preferred submission path: mint a signed upload URL and let the device
   /// push the bundle straight to storage. Large bundles no longer round-trip
   /// through the app (the old device -> app hop is what timed out in the
@@ -103,6 +109,8 @@ class DebugBundleSubmissionService {
   /// it. Throws on failure; callers fall back to the download-then-upload
   /// path.
   Future<DeviceDirectUploadOutcome> submitViaDeviceUpload({
+    required String submissionId,
+    required SupportReportKind reportKind,
     required Hub serverHub,
     required RhythmDiagnosticsApi deviceClient,
     required String serverVersion,
@@ -120,7 +128,6 @@ class DebugBundleSubmissionService {
     }
 
     final packageInfo = await _loadPackageInfo();
-    final submissionId = _uuid.v4();
     final fileName = _sanitizeFileName(
       'rhythm-debug-bundle-$serverPlatformContext-$submissionId.tar.gz',
     );
@@ -130,8 +137,9 @@ class DebugBundleSubmissionService {
       fileName: fileName,
     );
 
-    final signedUpload =
-        await client.storage.from(bucketName).createSignedUploadUrl(storagePath);
+    final signedUpload = await client.storage
+        .from(bucketName)
+        .createSignedUploadUrl(storagePath);
 
     final result = await deviceClient.submitDebugBundle(
       uploadUrl: signedUpload.signedUrl,
@@ -152,6 +160,7 @@ class DebugBundleSubmissionService {
             'user_id': userId,
             'user_email': auth.currentUser?.email,
             'is_anonymous': auth.isAnonymous,
+            'report_kind': reportKind.name,
             'summary': _normalizeSummary(summary),
             'app_version': packageInfo.version,
             'app_build': packageInfo.buildNumber,
@@ -187,6 +196,8 @@ class DebugBundleSubmissionService {
   }
 
   Future<DebugBundleSubmission> submit({
+    required String submissionId,
+    required SupportReportKind reportKind,
     required Hub serverHub,
     required RhythmDebugBundle bundle,
     required String serverVersion,
@@ -204,7 +215,6 @@ class DebugBundleSubmissionService {
     }
 
     final packageInfo = await _loadPackageInfo();
-    final submissionId = _uuid.v4();
     final uploadBundle = await _bundleWithAppLog(bundle);
     late final _UploadedDebugBundle uploadedBundle;
 
@@ -227,9 +237,11 @@ class DebugBundleSubmissionService {
       final row = await client
           .from(tableName)
           .insert({
+            'id': submissionId,
             'user_id': userId,
             'user_email': auth.currentUser?.email,
             'is_anonymous': auth.isAnonymous,
+            'report_kind': reportKind.name,
             'summary': _normalizeSummary(summary),
             'app_version': packageInfo.version,
             'app_build': packageInfo.buildNumber,
@@ -262,8 +274,10 @@ class DebugBundleSubmissionService {
     return _applyGitHubIssueReport(submission, issueReport);
   }
 
-  /// Submit a text-only bug report — no debug bundle, no required server hub.
+  /// Submit an app-only report when no server bundle is available.
   Future<DebugBundleSubmission> submitTextOnly({
+    required String submissionId,
+    required SupportReportKind reportKind,
     String? summary,
     Hub? serverHub,
     String? serverVersion,
@@ -275,12 +289,11 @@ class DebugBundleSubmissionService {
 
     if (client == null || userId == null || auth.currentUser == null) {
       throw const DebugBundleSubmissionException(
-        'Bug report submissions are unavailable right now.',
+        'Support report submissions are unavailable right now.',
       );
     }
 
     final packageInfo = await _loadPackageInfo();
-    final submissionId = _uuid.v4();
     _UploadedDebugBundle? uploadedBundle;
     try {
       uploadedBundle = await _uploadBundle(
@@ -303,6 +316,7 @@ class DebugBundleSubmissionService {
             'user_id': userId,
             'user_email': auth.currentUser?.email,
             'is_anonymous': auth.isAnonymous,
+            'report_kind': reportKind.name,
             'summary': _normalizeSummary(summary),
             'app_version': packageInfo.version,
             'app_build': packageInfo.buildNumber,

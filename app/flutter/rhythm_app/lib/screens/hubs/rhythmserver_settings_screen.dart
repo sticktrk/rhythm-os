@@ -1189,8 +1189,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
   Widget _buildDebugSection() {
     final subtitle = _isSubmittingDebugBundle
-        ? 'Generating logs and creating a bug report...'
-        : 'Send logs and redacted state from this server to Rhythm support.';
+        ? 'Generating logs and creating a support report...'
+        : 'Report a bug or request a feature with logs and redacted state.';
 
     return _buildSection(
       title: 'DEBUG',
@@ -1232,7 +1232,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           const Text(
-                            'Report Bug',
+                            'Report / Request',
                             style: TextStyle(
                               color: CelestialColors.textPrimary,
                               fontSize: 15,
@@ -1283,7 +1283,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     if (_isSubmittingDebugBundle) return;
     setState(() => _isSubmittingDebugBundle = true);
     try {
-      await showReportBugFlow(
+      await showSupportReportFlow(
         context,
         serverHub: _currentHub,
         localServerOnly: !widget.homeManaged,
