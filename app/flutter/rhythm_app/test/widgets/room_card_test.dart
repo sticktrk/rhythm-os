@@ -13,10 +13,12 @@ import 'package:rhythm_app/providers/server_sync_provider.dart';
 import 'package:rhythm_app/providers/subscription_provider.dart';
 import 'package:rhythm_app/models/plan_tier.dart';
 import 'package:rhythm_app/services/analytics_service.dart';
+import 'package:rhythm_app/widgets/compact_room_orb.dart';
 import 'package:rhythm_app/widgets/first_run_explainer.dart';
 import 'package:rhythm_app/widgets/mood_sheet.dart';
 import 'package:rhythm_app/widgets/room_card.dart';
 import 'package:rhythm_app/widgets/room_settings_sheet.dart';
+import 'package:rhythm_app/widgets/solar_orbit.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
@@ -2204,6 +2206,85 @@ void main() {
     final call = connection.api.nodeCurveBrightnessCalls.single;
     expect(call.nodeId, 'room-1');
     expect(call.brightness, 67);
+  });
+
+  testWidgets('home orb brightness preserves custom color mood',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await roomProvider.addRoom(
+      const RoomDto(
+        id: 'room-1',
+        name: 'Foyer',
+        source: RoomSourceDto.hue,
+        kind: RoomNodeKind.room,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    await roomProvider.applyServerNodeState(
+      'room-1',
+      rhythmEnabled: true,
+      timeOffset: 0,
+      brightnessOffset: 0,
+      state: RoomModeState.mood,
+      lightsOn: true,
+      brightness: 42,
+      kelvin: 0,
+      color: (255, 134, 5),
+      moodEnabled: true,
+      moodActive: true,
+    );
+
+    final homeProvider = _FakeHomeProvider();
+    final connection = _TestRhythmConnection();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(homeProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<HomeProvider>.value(value: homeProvider),
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 320,
+              height: 320,
+              child: CompactRoomOrb(
+                roomId: 'room-1',
+                globalConfig: defaultCurveConfig,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    tester.widget<SolarOrbit>(find.byType(SolarOrbit)).onBrightnessChanged!(35);
+    await tester.pump();
+    tester.widget<SolarOrbit>(find.byType(SolarOrbit)).onBrightnessChangeEnd!();
+    await tester.pump();
+
+    expect(connection.api.nodeBrightnessCalls, [
+      (nodeId: 'room-1', brightness: 35),
+    ]);
+    expect(connection.api.nodeCurveBrightnessCalls, isEmpty);
+    expect(roomProvider.getMoodBrightness('room-1'), 35);
+    expect(roomProvider.getRoomState('room-1'), RoomModeState.mood);
   });
 
   testWidgets('active CCT slider uses curve color-temperature modifier',

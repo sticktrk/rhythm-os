@@ -162,8 +162,15 @@ class _CompactRoomOrbState extends State<CompactRoomOrb> {
 
   void _onBrightnessChangeEnd() {
     if (_manualBrightness == null) return;
+    final brightness = _manualBrightness!;
+    final roomProvider = context.read<RoomProvider>();
     final serverSync = context.read<ServerSyncProvider>();
-    serverSync.dispatchNodeCurveBrightness(widget.roomId, _manualBrightness!);
+    if (roomProvider.getDisplayRoomState(widget.roomId) == RoomModeState.mood) {
+      roomProvider.setMoodBrightnessLocal(widget.roomId, brightness);
+      serverSync.dispatchNodeBrightness(widget.roomId, brightness);
+      return;
+    }
+    serverSync.dispatchNodeCurveBrightness(widget.roomId, brightness);
   }
 
   int _getBrightnessAtHour(double hour, CurveData? curveData) {
