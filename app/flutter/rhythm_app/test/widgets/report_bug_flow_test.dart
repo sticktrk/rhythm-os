@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/services/debug_bundle_submission_service.dart';
 import 'package:rhythm_app/widgets/report_bug_flow.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 void main() {
   group('report bug flow', () {
@@ -90,6 +91,30 @@ void main() {
       expect(
           summary, contains('Endpoint: https://server.rhythm.lighting:443/'));
       expect(summary, isNot(contains('Error:')));
+    });
+
+    test('async acknowledgement says the app may close', () {
+      final message = supportReportSubmittedMessageForTesting(
+        kind: SupportReportKind.bug,
+        collectingInBackground: true,
+      );
+
+      expect(message, contains('collecting the private debug bundle'));
+      expect(message, contains('You can close the app'));
+    });
+
+    test('server-managed submission requires an advertised capability', () {
+      expect(supportsServerManagedSupportReport(null), isFalse);
+      expect(
+        supportsServerManagedSupportReport(const RhythmCapabilities()),
+        isFalse,
+      );
+      expect(
+        supportsServerManagedSupportReport(const RhythmCapabilities(
+          features: [RhythmFeature.asyncDebugBundleUpload],
+        )),
+        isTrue,
+      );
     });
   });
 }

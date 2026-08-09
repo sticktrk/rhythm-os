@@ -237,76 +237,21 @@ struct DebugBundleRequest {
     upload_url: Option<String>,
     app_log: Option<String>,
     app_metadata: Option<serde_json::Value>,
+    async_submission: Option<AsyncDebugBundleRequest>,
 }
 
-const DEBUG_BUNDLE_UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
-const DEBUG_BUNDLE_UPLOAD_CACHE_CONTROL: &str = "3600";
+#[derive(Debug, serde::Deserialize)]
+struct AsyncDebugBundleRequest {
+    submission_id: String,
+    completion_url: String,
+    completion_token: String,
+}
 
 /// The upload URL comes from the authenticated app, but the device still
 /// refuses to POST its diagnostics anywhere unencrypted — except loopback,
 /// which local development and the handler tests rely on.
 fn upload_url_is_acceptable(url: &str) -> bool {
-    if url.starts_with("https://") {
-        return true;
-    }
-    let Some(rest) = url.strip_prefix("http://") else {
-        return false;
-    };
-    let host_port = rest.split(['/', '?']).next().unwrap_or("");
-    let host = host_port
-        .strip_prefix('[')
-        .and_then(|bracketed| bracketed.split(']').next())
-        .unwrap_or_else(|| host_port.split(':').next().unwrap_or(""));
-    host == "localhost" || host == "127.0.0.1" || host == "::1"
-}
-
-fn debug_bundle_upload_boundary(size_bytes: usize) -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    format!(
-        "rhythm-debug-bundle-{}-{nanos}-{size_bytes}",
-        std::process::id()
-    )
-}
-
-fn append_multipart_text_field(body: &mut Vec<u8>, boundary: &str, name: &str, value: &str) {
-    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-    body.extend_from_slice(
-        format!("content-disposition: form-data; name=\"{name}\"\r\n\r\n").as_bytes(),
-    );
-    body.extend_from_slice(value.as_bytes());
-    body.extend_from_slice(b"\r\n");
-}
-
-fn append_multipart_file_field(
-    body: &mut Vec<u8>,
-    boundary: &str,
-    content_type: &str,
-    bytes: Vec<u8>,
-) {
-    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-    body.extend_from_slice(format!("content-type: {content_type}\r\n").as_bytes());
-    body.extend_from_slice(b"content-disposition: form-data; name=\"\"; filename=\"\"\r\n\r\n");
-    body.extend_from_slice(&bytes);
-    body.extend_from_slice(b"\r\n");
-}
-
-/// Supabase signed upload URLs use `multipart/form-data` for `PUT` uploads.
-/// This mirrors `storage_client`'s `uploadBinaryToSignedUrl` wire shape so the
-/// device can upload directly with only the signed URL from the app.
-fn supabase_signed_upload_body(bundle_bytes: Vec<u8>, boundary: &str) -> Vec<u8> {
-    let mut body = Vec::with_capacity(bundle_bytes.len() + 512);
-    append_multipart_text_field(
-        &mut body,
-        boundary,
-        "cacheControl",
-        DEBUG_BUNDLE_UPLOAD_CACHE_CONTROL,
-    );
-    append_multipart_file_field(&mut body, boundary, "application/gzip", bundle_bytes);
-    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
-    body
+    crate::support_bundle_jobs::outbound_url_is_acceptable(url)
 }
 
 async fn debug_bundle(
@@ -326,6 +271,63 @@ async fn debug_bundle(
                 }),
             );
         }
+    }
+
+    if let Some(async_submission) = request.async_submission.as_ref() {
+        let Some(upload_url) = request.upload_url.clone() else {
+            return json_status(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({
+                    "status": "error",
+                    "message": "async debug bundle submission requires upload_url",
+                }),
+            );
+        };
+        if !crate::support_bundle_jobs::outbound_url_is_acceptable(&async_submission.completion_url)
+        {
+            return json_status(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({
+                    "status": "error",
+                    "message": "completion_url must be an https URL (or http to loopback)",
+                }),
+            );
+        }
+        let job = crate::support_bundle_jobs::NewSupportBundleJob {
+            submission_id: async_submission.submission_id.clone(),
+            upload_url,
+            completion_url: async_submission.completion_url.clone(),
+            completion_token: async_submission.completion_token.clone(),
+            app_log: request.app_log.clone(),
+            app_metadata: request.app_metadata.clone(),
+        };
+        return match crate::support_bundle_jobs::enqueue(state, job) {
+            Ok(outcome) => json_status(
+                StatusCode::ACCEPTED,
+                serde_json::json!({
+                    "status": "queued",
+                    "queued": true,
+                    "already_queued": outcome
+                        == crate::support_bundle_jobs::EnqueueOutcome::AlreadyQueued,
+                    "submission_id": async_submission.submission_id,
+                }),
+            ),
+            Err(error) => {
+                log::error!(
+                    target: "support_bundle",
+                    "Failed to durably queue support bundle {}: {}",
+                    async_submission.submission_id,
+                    error
+                );
+                json_status(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    serde_json::json!({
+                        "status": "error",
+                        "message": "failed to durably queue debug bundle",
+                    }),
+                )
+            }
+        };
     }
 
     let app_log = request
@@ -376,28 +378,8 @@ async fn debug_bundle(
     let upload_file_name = bundle.file_name;
     let bundle_bytes = bundle.bytes;
     let size_bytes = bundle_bytes.len();
-    let upload_result = async {
-        let boundary = debug_bundle_upload_boundary(size_bytes);
-        let content_type = format!("multipart/form-data; boundary={boundary}");
-        let upload_body = supabase_signed_upload_body(bundle_bytes, &boundary);
-        let client = reqwest::Client::builder()
-            .timeout(DEBUG_BUNDLE_UPLOAD_TIMEOUT)
-            .build()?;
-        let response = client
-            .put(&upload_url)
-            .header(reqwest::header::CONTENT_TYPE, content_type)
-            .header("x-upsert", "false")
-            .body(upload_body)
-            .send()
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            let detail = response.text().await.unwrap_or_default();
-            anyhow::bail!("upload target returned {status}: {detail}");
-        }
-        anyhow::Ok(())
-    }
-    .await;
+    let upload_result =
+        crate::support_bundle_jobs::upload_bundle_to_signed_url(&upload_url, bundle_bytes).await;
 
     match upload_result {
         Ok(()) => {
@@ -1774,6 +1756,7 @@ mod tests {
                 "kind": "rhythm_app_log",
                 "app_version": "9.9.9",
             })),
+            async_submission: None,
         };
         let response = debug_bundle(State(state), Some(Json(request))).await;
         assert_eq!(response.status(), StatusCode::OK);
@@ -1854,12 +1837,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn async_debug_bundle_returns_after_durable_queue_acceptance() {
+        let data_dir = unique_test_dir("debug-bundle-async-queue");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        std::fs::write(data_dir.join("auth.json"), br#"{"schema_version":1}"#).unwrap();
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        state.lock().unwrap().data_dir = data_dir.display().to_string();
+        let submission_id = "8f68c4ae-edf5-4e7d-9c9a-99cc2e86b1bc";
+        let request = DebugBundleRequest {
+            upload_url: Some("http://127.0.0.1:9/upload".to_string()),
+            app_log: Some("bounded app log".to_string()),
+            app_metadata: Some(serde_json::json!({"app_version": "9.9.9"})),
+            async_submission: Some(AsyncDebugBundleRequest {
+                submission_id: submission_id.to_string(),
+                completion_url: "http://127.0.0.1:9/complete".to_string(),
+                completion_token: "one-time-completion-token-with-entropy".to_string(),
+            }),
+        };
+
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            debug_bundle(State(state), Some(Json(request))),
+        )
+        .await
+        .expect("queue acknowledgement must not wait for bundle generation");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = response_json(response).await;
+        assert_eq!(body["queued"], true);
+        assert_eq!(body["submission_id"], submission_id);
+
+        let queue =
+            std::fs::read_to_string(data_dir.join(crate::support_bundle_jobs::QUEUE_FILE_NAME))
+                .unwrap();
+        assert!(queue.contains(submission_id));
+        assert!(queue.contains("one-time-completion-token-with-entropy"));
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[tokio::test]
     async fn debug_bundle_handler_rejects_non_loopback_http_upload_url() {
         let state: SharedState = Arc::new(Mutex::new(AppState::default()));
         let request = DebugBundleRequest {
             upload_url: Some("http://192.168.5.9/upload".to_string()),
             app_log: None,
             app_metadata: None,
+            async_submission: None,
         };
         let response = debug_bundle(State(state), Some(Json(request))).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);

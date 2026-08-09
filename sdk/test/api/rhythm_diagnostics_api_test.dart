@@ -90,6 +90,34 @@ void main() {
       );
     });
 
+    test('queueDebugBundle returns only after durable server acceptance',
+        () async {
+      server = await _FakeDiagnosticsServer.start(supportsAsyncQueue: true);
+      final api = RhythmDiagnosticsApi(
+        host: '127.0.0.1',
+        port: server!.port,
+      );
+
+      final result = await api.queueDebugBundle(
+        submissionId: '8f68c4ae-edf5-4e7d-9c9a-99cc2e86b1bc',
+        uploadUrl: 'https://storage.example.com/signed-upload',
+        completionUrl: 'https://cloud.example.com/functions/v1/complete',
+        completionToken: 'one-time-completion-token',
+        appLog: 'line one\n',
+      );
+
+      expect(result.submissionId, '8f68c4ae-edf5-4e7d-9c9a-99cc2e86b1bc');
+      expect(result.alreadyQueued, isFalse);
+      expect(
+        server!.debugBundleBodies.single['async_submission'],
+        {
+          'submission_id': '8f68c4ae-edf5-4e7d-9c9a-99cc2e86b1bc',
+          'completion_url': 'https://cloud.example.com/functions/v1/complete',
+          'completion_token': 'one-time-completion-token',
+        },
+      );
+    });
+
     test('downloadDebugBundle posts bundle route and returns attachment',
         () async {
       server = await _FakeDiagnosticsServer.start();
@@ -251,6 +279,7 @@ class _FakeDiagnosticsServer {
     required this.debugBundleStatusCode,
     required this.debugBundleDelay,
     required this.supportsDirectUpload,
+    required this.supportsAsyncQueue,
     required this.factoryResetStatusCode,
     required this.factoryResetBody,
   });
@@ -263,6 +292,7 @@ class _FakeDiagnosticsServer {
   /// `upload_url` gets a JSON `{uploaded: true}` reply instead of bundle
   /// bytes. When false the body is ignored, like pre-upload firmware.
   final bool supportsDirectUpload;
+  final bool supportsAsyncQueue;
   final int factoryResetStatusCode;
   final Map<String, dynamic> factoryResetBody;
   final List<String> requests = [];
@@ -275,6 +305,7 @@ class _FakeDiagnosticsServer {
     int debugBundleStatusCode = HttpStatus.ok,
     Duration debugBundleDelay = Duration.zero,
     bool supportsDirectUpload = false,
+    bool supportsAsyncQueue = false,
     int factoryResetStatusCode = HttpStatus.ok,
     Map<String, dynamic> factoryResetBody = const {'ok': true},
   }) async {
@@ -284,6 +315,7 @@ class _FakeDiagnosticsServer {
       debugBundleStatusCode: debugBundleStatusCode,
       debugBundleDelay: debugBundleDelay,
       supportsDirectUpload: supportsDirectUpload,
+      supportsAsyncQueue: supportsAsyncQueue,
       factoryResetStatusCode: factoryResetStatusCode,
       factoryResetBody: factoryResetBody,
     );
@@ -321,6 +353,19 @@ class _FakeDiagnosticsServer {
         request.response.statusCode = debugBundleStatusCode;
         request.response.write('bundle failed');
         await request.response.close();
+        return;
+      }
+
+      if (supportsAsyncQueue && body?['async_submission'] is Map) {
+        request.response.statusCode = HttpStatus.accepted;
+        final asyncSubmission =
+            Map<String, dynamic>.from(body!['async_submission'] as Map);
+        await _writeJson(request.response, {
+          'status': 'queued',
+          'queued': true,
+          'already_queued': false,
+          'submission_id': asyncSubmission['submission_id'],
+        });
         return;
       }
 

@@ -86,6 +86,21 @@ const THREAD_KERNEL_STACK_CAPTURE_LIMIT: usize = 8;
 pub struct DebugBundle {
     pub file_name: String,
     pub bytes: Vec<u8>,
+    pub summary: DebugBundleSummary,
+}
+
+/// Privacy-bounded manifest coverage suitable for support metadata and issue
+/// text. It deliberately contains counts only: no paths, names, log lines,
+/// endpoints, or raw errors escape the private archive.
+#[derive(Clone, Debug, serde::Deserialize, Serialize)]
+pub struct DebugBundleSummary {
+    pub schema_version: u32,
+    pub captured_log_count: usize,
+    pub captured_persisted_count: usize,
+    pub generated_file_count: usize,
+    pub missing_persisted_count: usize,
+    pub file_error_count: usize,
+    pub app_log_included: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -754,6 +769,7 @@ pub fn build_debug_bundle_with_app_log(
     app_log: Option<AppLogAttachment>,
 ) -> Result<DebugBundle> {
     let created_at = Utc::now();
+    let app_log_included = app_log.is_some();
     let runtime = snapshot_runtime(state)?;
     let debug_state = snapshot_debug_state(state)?;
 
@@ -985,6 +1001,15 @@ pub fn build_debug_bundle_with_app_log(
         file_errors: diagnostics.file_errors.clone(),
         notes,
     };
+    let summary = DebugBundleSummary {
+        schema_version: manifest.schema_version,
+        captured_log_count: manifest.captured_logs.len(),
+        captured_persisted_count: manifest.captured_persisted_files.len(),
+        generated_file_count: manifest.generated_files.len(),
+        missing_persisted_count: manifest.missing_persisted_files.len(),
+        file_error_count: manifest.file_errors.len(),
+        app_log_included,
+    };
     let manifest_json =
         serde_json::to_string_pretty(&manifest).context("serializing debug bundle manifest")?;
     append_bytes(
@@ -1007,6 +1032,7 @@ pub fn build_debug_bundle_with_app_log(
     Ok(DebugBundle {
         file_name: bundle_file_name(&runtime, created_at),
         bytes,
+        summary,
     })
 }
 
@@ -4140,6 +4166,11 @@ mod tests {
             br#"{"schema_version":1,"enabled":true,"hostname":"hub.devices.rhythm.lighting","connector_token":"secret-token","tunnel_id":"tunnel-id","tunnel_name":"tunnel-name","updated_at_epoch_ms":1780588319000}"#,
         )
         .unwrap();
+        fs::write(
+            data_dir.join("support_bundle_jobs.json"),
+            br#"{"completion_token":"must-not-ship"}"#,
+        )
+        .unwrap();
         fs::create_dir_all(data_dir.join("ota")).unwrap();
         fs::write(
             data_dir.join(crate::auto_update::AUTO_UPDATE_STATE_RELATIVE_PATH),
@@ -4290,6 +4321,9 @@ mod tests {
         ));
         assert!(!files.contains_key("persisted/boot-diagnostics/host-flight-recorder/secret.env"));
         assert!(!files.contains_key("persisted/cloudflared/connector_token"));
+        assert!(!files
+            .keys()
+            .any(|path| path.contains("support_bundle_jobs")));
         assert!(files.contains_key("state.json"));
         assert!(files.contains_key("profile_bundle.json"));
         assert!(files.contains_key("topology_debug.json"));
@@ -4307,6 +4341,9 @@ mod tests {
 
         let manifest: Value = serde_json::from_slice(files.get("manifest.json").unwrap()).unwrap();
         assert_eq!(manifest["kind"], "debug_bundle");
+        assert_eq!(bundle.summary.schema_version, DEBUG_BUNDLE_SCHEMA_VERSION);
+        assert_eq!(bundle.summary.captured_log_count, 3);
+        assert!(!bundle.summary.app_log_included);
         assert_eq!(manifest["platform_context"], "rpiz");
         assert_eq!(manifest["captured_logs"].as_array().unwrap().len(), 3);
         assert_eq!(
