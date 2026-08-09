@@ -152,6 +152,9 @@ impl HueTransport for Arc<SpyHueTransport> {
     fn rename_room(&self, username: &str, room_id: &str, name: &str) -> anyhow::Result<()> {
         (**self).rename_room(username, room_id, name)
     }
+    fn rename_device(&self, username: &str, device_id: &str, name: &str) -> anyhow::Result<()> {
+        (**self).rename_device(username, device_id, name)
+    }
     fn delete_room(&self, username: &str, room_id: &str) -> anyhow::Result<()> {
         (**self).delete_room(username, room_id)
     }
@@ -232,6 +235,10 @@ pub enum HueTransportCall {
     },
     RenameRoom {
         room_id: String,
+        name: String,
+    },
+    RenameDevice {
+        device_id: String,
         name: String,
     },
     DeleteRoom {
@@ -925,6 +932,29 @@ impl HueTransport for SpyHueTransport {
             .find(|room| room.get("id").and_then(serde_json::Value::as_str) == Some(room_id))
             .ok_or_else(|| anyhow::anyhow!("spy: room not found"))?;
         room["metadata"]["name"] = serde_json::Value::String(name.to_string());
+        Ok(())
+    }
+
+    fn rename_device(&self, _username: &str, device_id: &str, name: &str) -> anyhow::Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(HueTransportCall::RenameDevice {
+                device_id: device_id.to_string(),
+                name: name.to_string(),
+            });
+        if self.should_fail.load(Ordering::Relaxed) {
+            anyhow::bail!("spy: rename_device failed");
+        }
+        if self.ignore_resource_mutations.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let mut resources = self.resources.lock().unwrap();
+        let device = resource_data_mut(&mut resources, "device")?
+            .iter_mut()
+            .find(|device| device.get("id").and_then(serde_json::Value::as_str) == Some(device_id))
+            .ok_or_else(|| anyhow::anyhow!("spy: device not found"))?;
+        device["metadata"]["name"] = serde_json::Value::String(name.to_string());
         Ok(())
     }
 

@@ -43,6 +43,7 @@ use crate::bundle::{
     PROFILE_BUNDLE_SCHEMA_VERSION,
 };
 use crate::canonical::identity::HubKey;
+use crate::device_naming::LightNameReconciliationScope;
 use crate::discovery::{HubDiscovery, ManagedSceneProjection, ManagedSceneProjectionTarget};
 use crate::factory_default_config::{
     factory_default_active_mode, factory_default_active_profile_config_for_mode,
@@ -11105,7 +11106,7 @@ pub fn do_device_hard_remove(
         .lock()
         .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
 
-    let (canonical_id, canonical_device, assignments, prepare_assignment) = {
+    let (canonical_id, canonical_device, assignments, prepare_assignment, automatic_name_scope) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let canonical_id = if s.canonical_registry.get(device_id).is_some() {
             Some(device_id.to_string())
@@ -11127,11 +11128,23 @@ pub fn do_device_hard_remove(
             .as_ref()
             .map(|device| build_hub_device_room_assignments(&s, device, None))
             .unwrap_or_default();
+        let automatic_name_scope = canonical_device
+            .as_ref()
+            .filter(|device| device.device_type == DeviceType::Light)
+            .map(|device| {
+                let room_id = s
+                    .topology
+                    .device_parent_room_id(&device.id)
+                    .map(str::to_string)
+                    .or_else(|| device.room_id.clone());
+                LightNameReconciliationScope::for_room(room_id)
+            });
         (
             canonical_id,
             canonical_device,
             assignments,
             s.prepare_hub_device_room_assignment_fn.clone(),
+            automatic_name_scope,
         )
     };
     let prepared_assignments =
@@ -11280,6 +11293,9 @@ pub fn do_device_hard_remove(
     }
 
     persist_registry(state);
+    if let Some(name_scope) = automatic_name_scope.as_ref() {
+        reconcile_automatic_light_names_best_effort(state, name_scope);
+    }
     reconcile_runtime_from_state(state)?;
 
     {
@@ -13801,6 +13817,19 @@ pub fn persist_rooms(state: &SharedState) {
 // Canonical device commands
 // ============================================================================
 
+fn reconcile_automatic_light_names_best_effort(
+    state: &SharedState,
+    scope: &LightNameReconciliationScope,
+) {
+    if let Err(error) = crate::device_naming::reconcile_automatic_light_names(state, scope) {
+        warn!(
+            target: "device_naming",
+            "automatic_light_name_reconciliation_failed stage=planning error={}",
+            error
+        );
+    }
+}
+
 /// Build JSON for all canonical devices.
 pub fn build_canonical_devices(state: &SharedState) -> Result<String> {
     // Snapshot while holding the shared-state lock, then serialize outside it.
@@ -13843,12 +13872,12 @@ pub fn do_canonical_rename_device(state: &SharedState, device_id: &str, name: &s
 
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        let device = s
+        if !s
             .canonical_registry
-            .get_mut(device_id)
-            .filter(|device| !device.is_removed())
-            .ok_or_else(|| anyhow::anyhow!("Device not found: {}", device_id))?;
-        device.name = trimmed.to_string();
+            .rename_device_by_user(device_id, trimmed)
+        {
+            return Err(anyhow::anyhow!("Device not found: {}", device_id));
+        }
         persist_canonical(&s);
     }
 
@@ -14534,6 +14563,14 @@ pub fn do_canonical_assign_room(
     if let Some(node_id) = sleep_default_node_to_seed.as_deref() {
         ensure_sleep_mode_hard_off_default(state, node_id);
     }
+    if matches!(device_type, DeviceType::Light) {
+        let mut name_scope = LightNameReconciliationScope::for_device(device_id.to_string());
+        if source_room_id.as_deref() != room_id {
+            name_scope.include_room(source_room_id.clone());
+            name_scope.include_room(room_id.map(str::to_string));
+        }
+        reconcile_automatic_light_names_best_effort(state, &name_scope);
+    }
     reconcile_runtime_from_state(state)?;
     if assigning_standalone_light_child {
         clear_runtime_node_off_flags(state, device_id)?;
@@ -14722,6 +14759,8 @@ pub fn do_triage_merge(state: &SharedState, entry_id: &str, canonical_id: &str) 
         }
         drop(s);
         commit_triage_authority_mutation(state, topology_before, canonical_before, "device merge")?;
+        let name_scope = LightNameReconciliationScope::for_device(canonical_id.to_string());
+        reconcile_automatic_light_names_best_effort(state, &name_scope);
         reconcile_runtime_from_state(state)?;
         {
             emit_triage_changed(state);
@@ -14793,6 +14832,8 @@ pub fn do_triage_new_device(state: &SharedState, entry_id: &str) -> Result<Strin
                         canonical_before,
                         "new device",
                     )?;
+                    let name_scope = LightNameReconciliationScope::for_device(canonical_id.clone());
+                    reconcile_automatic_light_names_best_effort(state, &name_scope);
                     reconcile_runtime_from_state(state)?;
                     {
                         emit_triage_changed(state);
@@ -14831,6 +14872,8 @@ pub fn do_triage_new_device(state: &SharedState, entry_id: &str) -> Result<Strin
             ) {
                 persist_canonical(&s);
                 drop(s);
+                let name_scope = LightNameReconciliationScope::for_device(canonical_id.clone());
+                reconcile_automatic_light_names_best_effort(state, &name_scope);
                 reconcile_runtime_from_state(state)?;
                 emit_triage_changed(state);
                 crate::state::emit_server_event(
@@ -15016,6 +15059,8 @@ pub fn do_triage_bind_room_to(
 
     drop(s);
     commit_triage_authority_mutation(state, topology_before, canonical_before, "room binding")?;
+    let name_scope = LightNameReconciliationScope::for_room(Some(target_id));
+    reconcile_automatic_light_names_best_effort(state, &name_scope);
     reconcile_runtime_from_state(state)?;
 
     // Emit SSE events
@@ -15332,6 +15377,8 @@ pub fn do_topology_rename_room(state: &SharedState, room_id: &str, name: &str) -
             error,
         ));
     }
+    let name_scope = LightNameReconciliationScope::for_room(Some(room_id.to_string()));
+    reconcile_automatic_light_names_best_effort(state, &name_scope);
     reconcile_runtime_from_state(state)?;
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
     Ok(())
@@ -15478,6 +15525,8 @@ pub fn do_topology_delete_room(state: &SharedState, room_id: &str) -> Result<()>
     }
 
     queue_motion_timer_clear(state, room_id);
+    let name_scope = LightNameReconciliationScope::for_room(None);
+    reconcile_automatic_light_names_best_effort(state, &name_scope);
     reconcile_runtime_from_state(state)?;
 
     {
@@ -15557,6 +15606,8 @@ pub fn do_topology_merge_rooms(
                 error,
             ));
         }
+        let name_scope = LightNameReconciliationScope::for_room(Some(target_id.to_string()));
+        reconcile_automatic_light_names_best_effort(state, &name_scope);
         reconcile_runtime_from_state(state)?;
 
         {
@@ -31956,6 +32007,50 @@ mod tests {
             runtime.engine_node_snapshot(&device_id).is_none(),
             "hard-removed device should be removed from runtime"
         );
+    }
+
+    #[test]
+    fn device_hard_remove_renumbers_remaining_automatic_light_names() {
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+        let room: serde_json::Value =
+            serde_json::from_str(&do_topology_create_room(&state, "Office").unwrap()).unwrap();
+        let room_id = room["id"].as_str().unwrap().to_string();
+        let device_one =
+            insert_canonical_device(&state, hub_key.clone(), "matter-100", "Lamp A", "", "");
+        let device_two = insert_canonical_device(&state, hub_key, "matter-101", "Lamp B", "", "");
+
+        do_canonical_assign_room(&state, &device_one, Some(&room_id)).unwrap();
+        do_canonical_assign_room(&state, &device_two, Some(&room_id)).unwrap();
+
+        let (first_id, second_id) = {
+            let state = state.lock().unwrap();
+            let one = state.canonical_registry.get(&device_one).unwrap();
+            let two = state.canonical_registry.get(&device_two).unwrap();
+            if one.name.contains(" 1 ") {
+                (one.id.clone(), two.id.clone())
+            } else {
+                (two.id.clone(), one.id.clone())
+            }
+        };
+        assert!(state
+            .lock()
+            .unwrap()
+            .canonical_registry
+            .get(&second_id)
+            .unwrap()
+            .name
+            .contains(" 2 "));
+
+        do_device_hard_remove(&state, &first_id, None).unwrap();
+
+        let state = state.lock().unwrap();
+        assert!(state.canonical_registry.get(&first_id).is_none());
+        assert!(state
+            .canonical_registry
+            .get(&second_id)
+            .unwrap()
+            .name
+            .contains(" 1 "));
     }
 
     #[test]

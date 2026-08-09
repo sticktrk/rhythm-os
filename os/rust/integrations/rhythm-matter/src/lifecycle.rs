@@ -389,7 +389,14 @@ pub(crate) fn normalized_endpoint_capabilities(
         "light_capabilities": LightCapabilitiesDto {
             color_temperature,
             individual_profile_overrides: None,
-        }
+        },
+        "automatic_naming": {
+            "color_kind": if capabilities.light_type == rhythm_devices::LightType::ExtendedColor {
+                "color"
+            } else {
+                "white"
+            }
+        },
     }))
 }
 

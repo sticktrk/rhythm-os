@@ -281,6 +281,11 @@ pub trait HueTransport: Send + Sync {
         anyhow::bail!("Hue room rename is not supported by this transport")
     }
 
+    /// Rename a Hue V2 device without changing any of its services.
+    fn rename_device(&self, _username: &str, _device_id: &str, _name: &str) -> anyhow::Result<()> {
+        anyhow::bail!("Hue device rename is not supported by this transport")
+    }
+
     /// Delete a Hue V2 room previously recorded as Rhythm-managed.
     fn delete_room(&self, _username: &str, _room_id: &str) -> anyhow::Result<()> {
         anyhow::bail!("Hue room deletion is not supported by this transport")

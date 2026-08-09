@@ -640,6 +640,21 @@ pub trait ExternalLightHubIntegration: Send + Sync {
         anyhow::bail!("Source room deletion is not supported by this integration")
     }
 
+    /// Rename one integration-native device to match its canonical Rhythm name.
+    ///
+    /// Integrations whose source name is not user-visible may keep the default
+    /// no-op. Hue Bridge overrides this because its device name is visible in
+    /// the Hue app and must remain aligned with Rhythm.
+    fn rename_device(
+        &self,
+        _state: &SharedState,
+        _hub_key: &HubKey,
+        _native_device_id: &str,
+        _name: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
+
     /// Whether every light attached to a Rhythm room must route through a
     /// hub-native grouped room binding.
     ///
@@ -1679,6 +1694,9 @@ pub struct IntegrationCallbacks {
     /// Delete a source-owned native room through its owning integration.
     pub delete_source_room_fn:
         Arc<dyn Fn(&SharedState, &crate::topology::HubRoomBinding) -> Result<()> + Send + Sync>,
+    /// Rename one integration-native device through its owning integration.
+    pub rename_hub_device_fn:
+        Arc<dyn Fn(&SharedState, &HubKey, &str, &str) -> Result<()> + Send + Sync>,
     /// Start a device pairing session (delegates to integration's `start_pairing`).
     pub start_pairing_fn: Arc<
         dyn Fn(
@@ -2024,6 +2042,23 @@ pub fn integration_callbacks(
         },
     );
 
+    let rename_hub_device_fn = Arc::new(
+        move |state: &SharedState,
+              hub_key: &HubKey,
+              native_device_id: &str,
+              name: &str|
+              -> Result<()> {
+            let integration = find_integration(integrations, hub_key.hub_type.as_str())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No integration for hub type '{}'",
+                        hub_key.hub_type.as_str()
+                    )
+                })?;
+            integration.rename_device(state, hub_key, native_device_id, name)
+        },
+    );
+
     let start_pairing_fn = Arc::new(
         move |state: &SharedState,
               hub_type: &str,
@@ -2094,6 +2129,7 @@ pub fn integration_callbacks(
         finalize_external_controller_release_fn,
         prepare_hub_device_room_assignment_fn,
         delete_source_room_fn,
+        rename_hub_device_fn,
         start_pairing_fn,
         reconcile_pairing_results_fn,
         start_unpairing_fn,

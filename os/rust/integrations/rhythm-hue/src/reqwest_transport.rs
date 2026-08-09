@@ -61,6 +61,10 @@ fn room_rename_body(name: &str) -> serde_json::Value {
     serde_json::json!({"metadata": {"name": name}})
 }
 
+fn device_rename_body(name: &str) -> serde_json::Value {
+    serde_json::json!({"metadata": {"name": name}})
+}
+
 fn validate_hue_v2_resource_write_response(
     operation: &str,
     body: &str,
@@ -1167,6 +1171,10 @@ impl HueTransport for ReqwestHueTransport {
         self.update_resource(username, "room", room_id, &room_rename_body(name))
     }
 
+    fn rename_device(&self, username: &str, device_id: &str, name: &str) -> Result<()> {
+        self.update_resource(username, "device", device_id, &device_rename_body(name))
+    }
+
     fn delete_room(&self, username: &str, room_id: &str) -> Result<()> {
         self.delete_resource(username, "room", room_id)
     }
@@ -1451,6 +1459,12 @@ mod tests {
             room_rename_body("Studio"),
             serde_json::json!({
                 "metadata": {"name": "Studio"}
+            })
+        );
+        assert_eq!(
+            device_rename_body("Hue Zig Color Lamp 2 GuestBath"),
+            serde_json::json!({
+                "metadata": {"name": "Hue Zig Color Lamp 2 GuestBath"}
             })
         );
         assert_eq!(
