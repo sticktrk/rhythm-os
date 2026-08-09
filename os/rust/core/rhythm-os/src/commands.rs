@@ -13801,6 +13801,16 @@ pub fn persist_rooms(state: &SharedState) {
 // Canonical device commands
 // ============================================================================
 
+fn reconcile_automatic_light_names_best_effort(state: &SharedState) {
+    if let Err(error) = crate::device_naming::reconcile_automatic_light_names(state) {
+        warn!(
+            target: "device_naming",
+            "automatic_light_name_reconciliation_failed stage=planning error={}",
+            error
+        );
+    }
+}
+
 /// Build JSON for all canonical devices.
 pub fn build_canonical_devices(state: &SharedState) -> Result<String> {
     // Snapshot while holding the shared-state lock, then serialize outside it.
@@ -14534,6 +14544,7 @@ pub fn do_canonical_assign_room(
     if let Some(node_id) = sleep_default_node_to_seed.as_deref() {
         ensure_sleep_mode_hard_off_default(state, node_id);
     }
+    reconcile_automatic_light_names_best_effort(state);
     reconcile_runtime_from_state(state)?;
     if assigning_standalone_light_child {
         clear_runtime_node_off_flags(state, device_id)?;
@@ -14722,6 +14733,7 @@ pub fn do_triage_merge(state: &SharedState, entry_id: &str, canonical_id: &str) 
         }
         drop(s);
         commit_triage_authority_mutation(state, topology_before, canonical_before, "device merge")?;
+        reconcile_automatic_light_names_best_effort(state);
         reconcile_runtime_from_state(state)?;
         {
             emit_triage_changed(state);
@@ -14793,6 +14805,7 @@ pub fn do_triage_new_device(state: &SharedState, entry_id: &str) -> Result<Strin
                         canonical_before,
                         "new device",
                     )?;
+                    reconcile_automatic_light_names_best_effort(state);
                     reconcile_runtime_from_state(state)?;
                     {
                         emit_triage_changed(state);
@@ -14831,6 +14844,7 @@ pub fn do_triage_new_device(state: &SharedState, entry_id: &str) -> Result<Strin
             ) {
                 persist_canonical(&s);
                 drop(s);
+                reconcile_automatic_light_names_best_effort(state);
                 reconcile_runtime_from_state(state)?;
                 emit_triage_changed(state);
                 crate::state::emit_server_event(
@@ -15016,6 +15030,7 @@ pub fn do_triage_bind_room_to(
 
     drop(s);
     commit_triage_authority_mutation(state, topology_before, canonical_before, "room binding")?;
+    reconcile_automatic_light_names_best_effort(state);
     reconcile_runtime_from_state(state)?;
 
     // Emit SSE events
@@ -15278,6 +15293,7 @@ pub fn do_topology_create_room(state: &SharedState, name: &str) -> Result<String
     let id = s.topology.create_room(name);
     persist_topology(&s);
     drop(s);
+    reconcile_automatic_light_names_best_effort(state);
     reconcile_runtime_from_state(state)?;
     Ok(format!(r#"{{"id":"{}","name":"{}"}}"#, id, name))
 }
@@ -15332,6 +15348,7 @@ pub fn do_topology_rename_room(state: &SharedState, room_id: &str, name: &str) -
             error,
         ));
     }
+    reconcile_automatic_light_names_best_effort(state);
     reconcile_runtime_from_state(state)?;
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
     Ok(())
@@ -15478,6 +15495,7 @@ pub fn do_topology_delete_room(state: &SharedState, room_id: &str) -> Result<()>
     }
 
     queue_motion_timer_clear(state, room_id);
+    reconcile_automatic_light_names_best_effort(state);
     reconcile_runtime_from_state(state)?;
 
     {
@@ -15557,6 +15575,7 @@ pub fn do_topology_merge_rooms(
                 error,
             ));
         }
+        reconcile_automatic_light_names_best_effort(state);
         reconcile_runtime_from_state(state)?;
 
         {

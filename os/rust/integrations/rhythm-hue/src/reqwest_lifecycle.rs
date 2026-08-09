@@ -1046,6 +1046,23 @@ impl ExternalLightHubIntegration for HueIntegration {
         )
     }
 
+    fn rename_device(
+        &self,
+        state: &SharedState,
+        key: &HubKey,
+        native_device_id: &str,
+        name: &str,
+    ) -> Result<()> {
+        let context = hue_authority_context(state, key)?;
+        let transport = ReqwestHueTransport::new(&context.bridge_ip)?;
+        let bridge_id = crate::ownership::connected_hue_bridge_id(&transport, &context.username)?;
+        let operation_lock = crate::ownership::controller_operation_lock(&bridge_id);
+        let _operation = operation_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Failed to lock Hue controller operations"))?;
+        transport.rename_device(&context.username, native_device_id, name)
+    }
+
     fn reconcile_external_controller_authority(
         &self,
         state: &SharedState,

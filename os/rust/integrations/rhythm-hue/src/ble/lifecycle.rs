@@ -1340,7 +1340,10 @@ fn normalized_endpoint_capabilities(device: &HueBleDevice) -> Result<serde_json:
         "light_capabilities": LightCapabilitiesDto {
             color_temperature,
             individual_profile_overrides: None,
-        }
+        },
+        "automatic_naming": {
+            "color_kind": if device.capabilities.xy_color { "color" } else { "white" }
+        },
     }))
 }
 
@@ -2412,6 +2415,9 @@ mod tests {
         assert_eq!(
             endpoint.capabilities,
             Some(serde_json::json!({
+                "automatic_naming": {
+                    "color_kind": "color"
+                },
                 "light_capabilities": {
                     "color_temperature": {
                         "min_kelvin": 1000,

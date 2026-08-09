@@ -287,6 +287,14 @@ fn sync_from_hub_for_key_acquired(
         discover_devices,
         failure_policy,
     )?;
+    if let Err(error) = crate::device_naming::reconcile_automatic_light_names_after_discovery(state)
+    {
+        warn!(
+            target: "device_naming",
+            "automatic_light_name_reconciliation_failed stage=discovery error={}",
+            error
+        );
+    }
     commands::reconcile_runtime_from_state(state)?;
     Ok(report)
 }
