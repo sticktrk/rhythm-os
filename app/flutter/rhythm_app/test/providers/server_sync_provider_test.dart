@@ -1488,6 +1488,11 @@ void main() {
       connection.emitHello(roomLightHello(supported: false));
       await tester.pump();
       expect(
+        provider.hasNodeLightProfileOverrides('room-1'),
+        isFalse,
+        reason: 'motion timeout overrides are not custom light settings',
+      );
+      expect(
         provider.lightProfileOverridesSupportedForNode('room-1'),
         isFalse,
       );

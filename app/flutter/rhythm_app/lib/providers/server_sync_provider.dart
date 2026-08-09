@@ -1026,9 +1026,10 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   bool hasNodeLightProfileOverrides(String nodeId) {
-    final overrides = nodeById(nodeId)?.profileSettings?.profileOverrides;
-    return overrides != null &&
-        overrides.values.any((profileOverride) => !profileOverride.isEmpty);
+    final summary = lightProfileOverrideSummaryForNode(nodeId);
+    return summary.brightnessRange ||
+        summary.colorTemperatureRange ||
+        summary.otherVisual;
   }
 
   /// Visual light-profile customization shown by compact room/node cues.
