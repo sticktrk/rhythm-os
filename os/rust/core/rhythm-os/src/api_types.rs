@@ -313,6 +313,8 @@ pub struct HubCapabilityDto {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub device_profiles: Vec<crate::hub::HubDeviceProfileCapability>,
     pub supports_unpairing: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unpairable_device_types: Vec<String>,
     pub supports_roomless_devices: bool,
     pub blocks_room_readiness: bool,
 }
@@ -1158,6 +1160,7 @@ mod tests {
                 onboarding_methods: vec!["local_ble_qr".into()],
             }],
             supports_unpairing: true,
+            unpairable_device_types: vec!["button".into()],
             supports_roomless_devices: true,
             blocks_room_readiness: false,
         };
@@ -1166,6 +1169,7 @@ mod tests {
         assert!(json.get("hub_type").is_none());
         assert_eq!(json["device_onboarding_methods"][0], "local_ble_qr");
         assert_eq!(json["supports_roomless_devices"], true);
+        assert_eq!(json["unpairable_device_types"][0], "button");
         assert_eq!(json["device_profiles"][0]["id"], "orein.oc02001.button.v2");
         assert_eq!(
             json["device_profiles"][0]["compatible_profile_ids"][0],
@@ -1407,6 +1411,7 @@ mod tests {
                     device_onboarding_methods: vec!["matter_on_network_setup_code".into()],
                     device_profiles: Vec::new(),
                     supports_unpairing: true,
+                    unpairable_device_types: vec!["light".into()],
                     supports_roomless_devices: true,
                     blocks_room_readiness: true,
                 }],

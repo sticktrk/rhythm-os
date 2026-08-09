@@ -31,6 +31,7 @@ import '../../widgets/info_tooltip.dart';
 import '../../widgets/report_bug_flow.dart';
 import '../settings/sections/lights_devices_section.dart';
 import 'device_pairing_flow.dart';
+import 'hue_bridge_button_add_screen.dart';
 import 'matter_pairing_flow.dart';
 import 'ota_update_overlay.dart';
 
@@ -4333,6 +4334,8 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
     final canAddHueBridge = connected &&
         _type == 'hue' &&
         syncProvider.canAddHueBridgeDeviceBySerial;
+    final canAddHueBridgeButton =
+        connected && _type == 'hue' && syncProvider.canAddHueBridgeButton;
     const matterActionLabel = 'Add Matter Device';
 
     return Scaffold(
@@ -4546,6 +4549,22 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                             target: DevicePairingTarget.hueBridge,
                             analyticsSource: 'hue_bridge_hub_detail',
                             hubAddress: hubInfo['address']?.toString(),
+                          );
+                          if (!mounted) return;
+                          await _fetchCanonicalDevices();
+                        },
+                      ),
+                    ],
+                    if (canAddHueBridgeButton) ...[
+                      const SizedBox(height: 10),
+                      _buildActionButton(
+                        icon: Icons.toggle_on_rounded,
+                        label: 'Pair button or switch',
+                        color: const Color(0xFFFFB900),
+                        onTap: () async {
+                          await HueBridgeButtonAddScreen.show(
+                            context,
+                            hubAddress: hubInfo['address']?.toString() ?? '',
                           );
                           if (!mounted) return;
                           await _fetchCanonicalDevices();

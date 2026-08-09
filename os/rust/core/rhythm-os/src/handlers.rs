@@ -7575,6 +7575,7 @@ mod tests {
                     device_onboarding_methods: Vec::new(),
                     device_profiles: Vec::new(),
                     supports_unpairing: true,
+                    unpairable_device_types: vec!["light".to_string()],
                     supports_roomless_devices: true,
                     blocks_room_readiness: true,
                 });
@@ -7627,6 +7628,7 @@ mod tests {
                     device_onboarding_methods: Vec::new(),
                     device_profiles: Vec::new(),
                     supports_unpairing: true,
+                    unpairable_device_types: vec!["light".to_string()],
                     supports_roomless_devices: true,
                     blocks_room_readiness: true,
                 });
@@ -7665,6 +7667,7 @@ mod tests {
                     device_onboarding_methods: Vec::new(),
                     device_profiles: Vec::new(),
                     supports_unpairing: true,
+                    unpairable_device_types: vec!["light".to_string()],
                     supports_roomless_devices: true,
                     blocks_room_readiness: true,
                 });

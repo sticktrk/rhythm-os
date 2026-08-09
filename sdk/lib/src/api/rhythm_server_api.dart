@@ -2047,10 +2047,14 @@ class RhythmServerApi {
     required String hubType,
     required String deviceId,
     String? hubAddress,
+    String? deviceType,
+    String? correlationId,
     bool force = false,
     Duration receiveTimeout = const Duration(seconds: 90),
   }) async {
     final normalizedHubAddress = hubAddress?.trim();
+    final normalizedDeviceType = deviceType?.trim();
+    final normalizedCorrelationId = correlationId?.trim();
     try {
       final response = await _dio.post(
         'api/devices/unpair',
@@ -2060,6 +2064,11 @@ class RhythmServerApi {
             'device_id': deviceId,
             if (normalizedHubAddress != null && normalizedHubAddress.isNotEmpty)
               'hub_address': normalizedHubAddress,
+            if (normalizedDeviceType != null && normalizedDeviceType.isNotEmpty)
+              'device_type': normalizedDeviceType,
+            if (normalizedCorrelationId != null &&
+                normalizedCorrelationId.isNotEmpty)
+              'correlation_id': normalizedCorrelationId,
             'force': force,
           },
         },

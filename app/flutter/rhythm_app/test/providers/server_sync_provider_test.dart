@@ -162,6 +162,8 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   Map<String, dynamic>? unpairResult = const {'status': 'complete'};
   List<Map<String, dynamic>?>? unpairResults;
   Completer<Map<String, dynamic>?>? unpairCompleter;
+  final List<String?> unpairDeviceTypes = [];
+  final List<String?> unpairCorrelationIds = [];
   bool removeCanonicalEndpointOnUnpair = true;
   List<RhythmInputBinding> inputBindings = const [];
   int createDaySleepToggleInputBindingCalls = 0;
@@ -669,9 +671,13 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     required String hubType,
     required String deviceId,
     String? hubAddress,
+    String? deviceType,
+    String? correlationId,
     bool force = false,
     Duration receiveTimeout = const Duration(seconds: 90),
   }) async {
+    unpairDeviceTypes.add(deviceType);
+    unpairCorrelationIds.add(correlationId);
     unpairCalls.add((
       hubType: hubType,
       deviceId: deviceId,
@@ -1054,7 +1060,8 @@ RhythmSceneDefinition _testPresetOnlyScene(String id) =>
     });
 
 void main() {
-  test('additional motion preserves explicit targets over physical placement', () {
+  test('additional motion preserves explicit targets over physical placement',
+      () {
     expect(
       additionalMotionTargetRoomIds(
         existingTargetRoomIds: const ['room-explicit'],
@@ -2216,8 +2223,10 @@ void main() {
                   'configurable': true,
                   'device_onboarding_methods': [
                     'hue_bridge_serial_search',
+                    'hue_bridge_button_search',
                   ],
                   'supports_unpairing': true,
+                  'unpairable_device_types': ['light', 'button', 'motion'],
                   'supports_roomless_devices': false,
                 },
               ],
@@ -2227,14 +2236,42 @@ void main() {
       connection.emitHello(hello(connected: false));
       await Future<void>.delayed(Duration.zero);
       expect(provider.canAddHueBridgeDeviceBySerial, isFalse);
+      expect(provider.canAddHueBridgeButton, isFalse);
       expect(provider.canUnpairHueBridgeDevices, isTrue);
+      expect(
+        provider.canUnpairHueBridgeDeviceType(RhythmDeviceType.button),
+        isTrue,
+      );
       expect(provider.canScanToAddDevice, isFalse);
 
       connection.emitHello(hello(connected: true));
       await Future<void>.delayed(Duration.zero);
       expect(provider.canAddHueBridgeDeviceBySerial, isTrue);
+      expect(provider.canAddHueBridgeButton, isTrue);
       expect(provider.canUnpairHueBridgeDevices, isTrue);
       expect(provider.canScanToAddDevice, isTrue);
+
+      final legacy = RhythmHello.fromJson({
+        'hubs': [
+          {'type': 'hue', 'address': '192.168.1.20:443', 'connected': true},
+        ],
+        'capabilities': {
+          'hubs': [
+            {'type': 'hue', 'supports_unpairing': true},
+          ],
+        },
+      });
+      connection.emitHello(legacy);
+      await Future<void>.delayed(Duration.zero);
+      expect(provider.canAddHueBridgeButton, isFalse);
+      expect(
+        provider.canUnpairHueBridgeDeviceType(RhythmDeviceType.light),
+        isTrue,
+      );
+      expect(
+        provider.canUnpairHueBridgeDeviceType(RhythmDeviceType.button),
+        isFalse,
+      );
     });
   });
 
@@ -5773,8 +5810,7 @@ void main() {
     );
   });
 
-  testWidgets(
-      'room sheet adds existing motion as an additional room control',
+  testWidgets('room sheet adds existing motion as an additional room control',
       (tester) async {
     _registerWidgetCleanup(tester);
     final roomProvider = RoomProvider();
@@ -7669,6 +7705,144 @@ void main() {
     expect(find.text('Hue Bridge'), findsNothing);
     expect(find.text('Hue Bluetooth'), findsOneWidget);
     expect(find.text('Remove Device'), findsOneWidget);
+  });
+
+  testWidgets('Hue Bridge switch removal uses typed capability and copy',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 900));
+
+    api.canonicalDevices['switch-1'] = {
+      'id': 'switch-1',
+      'name': 'Kitchen Dimmer',
+      'endpoints': [
+        {
+          'hub_key': {
+            'hub_type': 'hue',
+            'address': '192.168.1.20',
+          },
+          'native_id': 'hue-device-switch-1',
+          'preferred': true,
+        },
+      ],
+    };
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'capabilities': {
+          'hubs': [
+            {
+              'type': 'hue',
+              'supports_unpairing': true,
+              'unpairable_device_types': ['light', 'button', 'motion'],
+            },
+          ],
+        },
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const DeviceDetailSheet(
+          device: RhythmDevice(
+            id: 'switch-1',
+            type: RhythmDeviceType.button,
+            name: 'Kitchen Dimmer',
+          ),
+          roomId: '',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Network'));
+    await tester.pumpAndSettle();
+    expect(find.text('Remove Device'), findsOneWidget);
+
+    await tester.tap(find.text('Remove Device'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('whether the switch is already absent'),
+        findsOneWidget);
+    expect(find.textContaining('bulb'), findsNothing);
+
+    await tester.tap(find.text('Remove'));
+    await tester.pumpAndSettle();
+    expect(api.unpairCalls.single.hubType, 'hue');
+    expect(api.unpairCalls.single.deviceId, 'hue-device-switch-1');
+    expect(api.unpairCalls.single.hubAddress, '192.168.1.20');
+    expect(api.unpairDeviceTypes.single, 'button');
+    expect(
+      api.unpairCorrelationIds.single,
+      startsWith('hue-bridge-remove-'),
+    );
+  });
+
+  testWidgets('legacy Hue capability hides switch removal', (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 900));
+    api.canonicalDevices['switch-legacy'] = {
+      'id': 'switch-legacy',
+      'name': 'Legacy Dimmer',
+      'endpoints': [
+        {
+          'hub_key': {'hub_type': 'hue', 'address': '192.168.1.20'},
+          'native_id': 'hue-device-switch-legacy',
+        },
+      ],
+    };
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'capabilities': {
+          'hubs': [
+            {'type': 'hue', 'supports_unpairing': true},
+          ],
+        },
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const DeviceDetailSheet(
+          device: RhythmDevice(
+            id: 'switch-legacy',
+            type: RhythmDeviceType.button,
+            name: 'Legacy Dimmer',
+          ),
+          roomId: '',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Network'));
+    await tester.pumpAndSettle();
+    expect(find.text('Remove Device'), findsNothing);
   });
 
   testWidgets('Hue Bridge fallback only finishes after absence confirmation',

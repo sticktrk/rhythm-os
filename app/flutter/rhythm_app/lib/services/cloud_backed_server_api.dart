@@ -739,6 +739,8 @@ class CloudBackedServerApi {
     required String hubType,
     required String deviceId,
     String? hubAddress,
+    String? deviceType,
+    String? correlationId,
     bool force = false,
     Duration receiveTimeout = const Duration(seconds: 90),
   }) {
@@ -746,6 +748,8 @@ class CloudBackedServerApi {
       hubType: hubType,
       deviceId: deviceId,
       hubAddress: hubAddress,
+      deviceType: deviceType,
+      correlationId: correlationId,
       force: force,
       receiveTimeout: receiveTimeout,
     );

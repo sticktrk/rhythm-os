@@ -912,6 +912,15 @@ class ServerSyncProvider extends ChangeNotifier {
           ) ??
           false);
 
+  /// Whether a connected Hue Bridge can run its native accessory search for
+  /// a physical button, remote, or wall switch.
+  bool get canAddHueBridgeButton =>
+      connectedHubTypes.contains('hue') &&
+      (hueBridgeCapabilities?.supportsDeviceOnboardingMethod(
+            RhythmDeviceOnboardingMethod.hueBridgeButtonSearch,
+          ) ??
+          false);
+
   bool get canUnpairHueBleDevices =>
       hueBleCapabilities?.supportsUnpairing ?? false;
 
@@ -920,6 +929,16 @@ class ServerSyncProvider extends ChangeNotifier {
 
   bool get canUnpairHueBridgeDevices =>
       hueBridgeCapabilities?.supportsUnpairing ?? false;
+
+  bool canUnpairHueBridgeDeviceType(RhythmDeviceType deviceType) {
+    final type = switch (deviceType) {
+      RhythmDeviceType.light => 'light',
+      RhythmDeviceType.button => 'button',
+      RhythmDeviceType.motion => 'motion',
+      RhythmDeviceType.contact => 'contact',
+    };
+    return hueBridgeCapabilities?.supportsUnpairingDeviceType(type) ?? false;
+  }
 
   bool get supportsHueBleRoomlessDevices =>
       hueBleCapabilities?.supportsRoomlessDevices ?? false;
