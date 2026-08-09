@@ -737,6 +737,17 @@ pub struct AppState {
         >,
     >,
 
+    /// Delete a source-owned native room before committing its local topology
+    /// deletion. Built from the integration registry.
+    #[allow(clippy::type_complexity)]
+    pub delete_source_room_fn: Option<
+        Arc<
+            dyn Fn(&SharedState, &crate::topology::HubRoomBinding) -> anyhow::Result<()>
+                + Send
+                + Sync,
+        >,
+    >,
+
     /// Platform-specific hub provider lookup.
     /// Returns a hub provider for a given hub type.
     pub get_hub_provider_fn: Option<
@@ -1021,6 +1032,7 @@ impl Default for AppState {
             release_external_controller_authority_fn: None,
             finalize_external_controller_release_fn: None,
             prepare_hub_device_room_assignment_fn: None,
+            delete_source_room_fn: None,
             get_hub_provider_fn: None,
             start_pairing_fn: None,
             reconcile_pairing_results_fn: None,

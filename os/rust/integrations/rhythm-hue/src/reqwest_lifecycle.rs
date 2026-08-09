@@ -1021,10 +1021,29 @@ impl ExternalLightHubIntegration for HueIntegration {
     }
 
     fn sync_topology_groups(&self, _state: &SharedState, _key: &HubKey) -> Result<()> {
-        // Hue topology is customer-owned. Rhythm room changes remain local;
-        // native groups are read-only routing opportunities discovered from
-        // the bridge rather than resources to reconcile.
+        // Hue discovery remains authoritative. Ordinary sync never infers
+        // native room identity from a local name; explicit user mutations use
+        // the dedicated source-room lifecycle hooks below.
         Ok(())
+    }
+
+    fn delete_source_room(
+        &self,
+        state: &SharedState,
+        binding: &rhythm_os::topology::HubRoomBinding,
+    ) -> Result<()> {
+        let context = hue_authority_context(state, &binding.hub_key)?;
+        let transport = ReqwestHueTransport::new(&context.bridge_ip)?;
+        let bridge_id = crate::ownership::connected_hue_bridge_id(&transport, &context.username)?;
+        let operation_lock = crate::ownership::controller_operation_lock(&bridge_id);
+        let _operation = operation_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Failed to lock Hue controller operations"))?;
+        crate::managed_rooms::delete_source_room(
+            &transport,
+            &context.username,
+            &binding.hub_room_id,
+        )
     }
 
     fn reconcile_external_controller_authority(

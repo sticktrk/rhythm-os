@@ -116,6 +116,7 @@ impl TestHarness {
             ..Default::default()
         };
         install_test_light_runtime_modules(&mut app);
+        app.delete_source_room_fn = Some(Arc::new(|_, _| Ok(())));
 
         app.hubs.insert(
             hub_key.clone(),
@@ -191,6 +192,7 @@ impl TestHarness {
             ..Default::default()
         };
         install_test_light_runtime_modules(&mut app);
+        app.delete_source_room_fn = Some(Arc::new(|_, _| Ok(())));
 
         app.hubs.insert(
             hub_key.clone(),

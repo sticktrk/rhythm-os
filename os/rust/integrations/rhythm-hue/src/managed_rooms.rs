@@ -188,6 +188,30 @@ pub fn observe_hue_rooms<H: HueTransport + ?Sized>(
     parse_rooms(&transport.get_resources(username, "room")?)
 }
 
+/// Delete one explicitly selected source room and verify Hue no longer
+/// reports it. Missing rooms are already converged and make retries safe.
+pub fn delete_source_room<H: HueTransport + ?Sized>(
+    transport: &H,
+    username: &str,
+    hue_room_id: &str,
+) -> Result<()> {
+    if !observe_hue_rooms(transport, username)?
+        .iter()
+        .any(|room| room.hue_room_id == hue_room_id)
+    {
+        return Ok(());
+    }
+
+    transport.delete_room(username, hue_room_id)?;
+    if observe_hue_rooms(transport, username)?
+        .iter()
+        .any(|room| room.hue_room_id == hue_room_id)
+    {
+        anyhow::bail!("Hue still reports the deleted source room");
+    }
+    Ok(())
+}
+
 fn validate_desired(
     desired: &[DesiredHueRoom],
     controlled_device_ids: &BTreeSet<String>,
@@ -624,6 +648,55 @@ mod tests {
         assert!(multibyte.ends_with('…'));
         assert!(multibyte.len() <= MAX_MANAGED_HUE_ROOM_NAME_BYTES);
         assert!(multibyte.is_char_boundary(multibyte.len()));
+    }
+
+    #[test]
+    fn source_room_delete_is_verified_and_idempotent() {
+        let spy = SpyHueTransport::new();
+        let created = spy
+            .create_room(
+                "user",
+                &HueRoomDefinition {
+                    name: "Guest Bath".to_string(),
+                    archetype: DEFAULT_MANAGED_HUE_ROOM_ARCHETYPE.to_string(),
+                    device_ids: vec!["bulb".to_string()],
+                },
+            )
+            .unwrap();
+        spy.reset();
+
+        delete_source_room(&spy, "user", &created.room_id).unwrap();
+        delete_source_room(&spy, "user", &created.room_id).unwrap();
+
+        assert_eq!(
+            spy.calls()
+                .iter()
+                .filter(|call| matches!(call, HueTransportCall::DeleteRoom { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn source_room_delete_fails_when_hue_readback_still_contains_room() {
+        let spy = SpyHueTransport::new();
+        let created = spy
+            .create_room(
+                "user",
+                &HueRoomDefinition {
+                    name: "Guest Bath".to_string(),
+                    archetype: DEFAULT_MANAGED_HUE_ROOM_ARCHETYPE.to_string(),
+                    device_ids: vec!["bulb".to_string()],
+                },
+            )
+            .unwrap();
+        spy.set_ignore_resource_mutations(true);
+
+        let error = delete_source_room(&spy, "user", &created.room_id).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("Hue still reports the deleted source room"));
     }
 
     #[test]

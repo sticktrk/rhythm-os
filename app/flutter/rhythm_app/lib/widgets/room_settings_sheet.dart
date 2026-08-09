@@ -870,19 +870,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
 
   bool _canDeleteRoom(ServerSyncProvider syncProvider) {
     if (!room.kind.isRoom) return false;
-    final roomSummary =
-        syncProvider.helloRooms.where((r) => r.id == room.id).firstOrNull;
-    if (roomSummary == null) return false;
-    final hasProtectedHubBulbs = roomSummary.lightCount > 0 &&
-        roomSummary.hubTypes.any(_isProtectedLightHubType);
-    return !hasProtectedHubBulbs;
-  }
-
-  bool _isProtectedLightHubType(String hubType) {
-    return switch (hubType) {
-      'hue' || 'homeassistant' || 'home_assistant' || 'ha' => true,
-      _ => false,
-    };
+    return syncProvider.helloRooms.any((candidate) => candidate.id == room.id);
   }
 
   Future<void> _confirmDeleteRoom(BuildContext context) async {
@@ -895,7 +883,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
           style: TextStyle(color: CelestialColors.textPrimary),
         ),
         content: Text(
-          'Delete "$_roomName" from the topology? Any remaining devices in this room will become unassigned.',
+          'Delete "$_roomName"? If this room comes from a connected hub, it will also be deleted there when supported. Any remaining devices will become unassigned.',
           style: const TextStyle(color: CelestialColors.textSecondary),
         ),
         actions: [

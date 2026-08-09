@@ -630,6 +630,16 @@ pub trait ExternalLightHubIntegration: Send + Sync {
         Ok(())
     }
 
+    /// Delete one source-owned native room after Rhythm has durably staged
+    /// the corresponding local topology deletion.
+    fn delete_source_room(
+        &self,
+        _state: &SharedState,
+        _binding: &crate::topology::HubRoomBinding,
+    ) -> Result<()> {
+        anyhow::bail!("Source room deletion is not supported by this integration")
+    }
+
     /// Whether every light attached to a Rhythm room must route through a
     /// hub-native grouped room binding.
     ///
@@ -1666,6 +1676,9 @@ pub struct IntegrationCallbacks {
             + Send
             + Sync,
     >,
+    /// Delete a source-owned native room through its owning integration.
+    pub delete_source_room_fn:
+        Arc<dyn Fn(&SharedState, &crate::topology::HubRoomBinding) -> Result<()> + Send + Sync>,
     /// Start a device pairing session (delegates to integration's `start_pairing`).
     pub start_pairing_fn: Arc<
         dyn Fn(
@@ -1998,6 +2011,19 @@ pub fn integration_callbacks(
         },
     );
 
+    let delete_source_room_fn = Arc::new(
+        move |state: &SharedState, binding: &crate::topology::HubRoomBinding| -> Result<()> {
+            let integration = find_integration(integrations, binding.hub_key.hub_type.as_str())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No integration for hub type '{}'",
+                        binding.hub_key.hub_type.as_str()
+                    )
+                })?;
+            integration.delete_source_room(state, binding)
+        },
+    );
+
     let start_pairing_fn = Arc::new(
         move |state: &SharedState,
               hub_type: &str,
@@ -2067,6 +2093,7 @@ pub fn integration_callbacks(
         release_external_controller_authority_fn,
         finalize_external_controller_release_fn,
         prepare_hub_device_room_assignment_fn,
+        delete_source_room_fn,
         start_pairing_fn,
         reconcile_pairing_results_fn,
         start_unpairing_fn,
