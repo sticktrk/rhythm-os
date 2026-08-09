@@ -47,12 +47,25 @@ class _MutableHubProvider extends ServerSyncProvider {
   }) : _hubs = hubs;
 
   List<Map<String, dynamic>> _hubs;
+  RhythmHubCapabilities? hueCapabilitiesForTest;
 
   @override
   List<Map<String, dynamic>> get serverHubInfos => _hubs;
 
   @override
   RhythmConnectionState get connectionState => RhythmConnectionState.connected;
+
+  @override
+  Set<String> get connectedHubTypes => _hubs
+      .where((hub) => hub['connected'] == true && hub['type'] != 'none')
+      .map((hub) => hub['type'] as String)
+      .toSet();
+
+  @override
+  RhythmHubCapabilities? hubCapabilities(String hubType) {
+    if (hubType == 'hue') return hueCapabilitiesForTest;
+    return super.hubCapabilities(hubType);
+  }
 
   void replaceHubs(List<Map<String, dynamic>> hubs) {
     _hubs = hubs;
@@ -71,6 +84,12 @@ const _localBleHub = <String, dynamic>{
 const _matterHub = <String, dynamic>{
   'type': 'matter',
   'address': 'local',
+  'connected': true,
+};
+
+const _hueHub = <String, dynamic>{
+  'type': 'hue',
+  'address': '192.0.2.25',
   'connected': true,
 };
 
@@ -184,5 +203,39 @@ void main() {
       await tester.pump(const Duration(milliseconds: 16));
     }
     expect(api.canonicalDeviceCalls, 1);
+  });
+
+  testWidgets('Hue detail offers Bridge button search only when advertised', (
+    tester,
+  ) async {
+    syncProvider.replaceHubs(const [_hueHub]);
+    syncProvider.hueCapabilitiesForTest = const RhythmHubCapabilities(
+      type: 'hue',
+      configurable: true,
+      deviceOnboardingMethods: [
+        RhythmDeviceOnboardingMethod.hueBridgeButtonSearch,
+      ],
+      supportsUnpairing: true,
+      unpairableDeviceTypes: ['light', 'button'],
+      supportsRoomlessDevices: true,
+    );
+
+    await tester.pumpWidget(buildSection(showConfigured: true));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Philips Hue'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Pair button or switch'), findsOneWidget);
+  });
+
+  testWidgets('legacy Hue detail hides Bridge button search', (tester) async {
+    syncProvider.replaceHubs(const [_hueHub]);
+
+    await tester.pumpWidget(buildSection(showConfigured: true));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Philips Hue'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Pair button or switch'), findsNothing);
   });
 }

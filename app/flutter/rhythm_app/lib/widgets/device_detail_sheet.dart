@@ -530,7 +530,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       (sync) => sync.canUnpairLocalBleDevices,
     );
     final canUnpairHueBridge = context.select<ServerSyncProvider, bool>(
-      (sync) => sync.canUnpairHueBridgeDevices,
+      (sync) => sync.canUnpairHueBridgeDeviceType(device.type),
     );
     // Low glow and profile overrides are node-level settings. Only expose
     // them for bulbs that the server reports as independently addressable
@@ -796,8 +796,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
               unsupportedStatus: groupedLightSettings ? 'Room only' : null,
               unsupportedSemanticsValue:
                   groupedLightSettings ? 'Controlled by room' : null,
-              unsupportedIcon:
-                  groupedLightSettings ? Icons.home_rounded : null,
+              unsupportedIcon: groupedLightSettings ? Icons.home_rounded : null,
               onPressed: lightSettingsSupported
                   ? () => _openBulbLightSettings(device)
                   : groupedLightSettings
@@ -1299,6 +1298,20 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
         _ => 'Matter',
       };
 
+  String get _deviceTypeAnalyticsLabel => switch (widget.device.type) {
+        RhythmDeviceType.light => 'light',
+        RhythmDeviceType.button => 'button',
+        RhythmDeviceType.motion => 'motion',
+        RhythmDeviceType.contact => 'contact',
+      };
+
+  String get _hueRemovalNoun => switch (widget.device.type) {
+        RhythmDeviceType.light => 'bulb',
+        RhythmDeviceType.button => 'switch',
+        RhythmDeviceType.motion => 'motion sensor',
+        RhythmDeviceType.contact => 'contact sensor',
+      };
+
   String _removeConfirmation(
     _DeviceEndpoint endpoint, {
     required bool removesConnectionOnly,
@@ -1312,7 +1325,8 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       return 'This will ask your Hue Bridge to remove "$name", then remove '
           'the $connectionLabel connection from Rhythm.$otherConnectionNote'
           '\n\nIf bridge removal does not return cleanly, Rhythm can check '
-          'whether the bulb is already absent before finishing cleanup.';
+          'whether the $_hueRemovalNoun is already absent before finishing '
+          'cleanup.';
     }
     if (removesConnectionOnly) {
       final handoffNote = endpoint.hubType == 'hue_ble'
@@ -1453,14 +1467,19 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   }) async {
     final syncProvider = context.read<ServerSyncProvider>();
     final api = syncProvider.api;
+    final hueJourneyId = endpoint.hubType == 'hue'
+        ? 'hue-bridge-remove-${const Uuid().v4()}'
+        : null;
 
     var retryHueBleRelease = false;
+    var forceAttempted = false;
     Map<String, dynamic>? completionResult;
     late MatterRemovalOutcome outcome;
     do {
       retryHueBleRelease = false;
       outcome = await runMatterRemovalFlow(
         unpair: ({required bool force}) {
+          forceAttempted = forceAttempted || force;
           if (mounted) setState(() => _removingEndpoint = endpoint);
           return api.unpairDevice(
             hubType: endpoint.hubType,
@@ -1469,6 +1488,8 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                 endpoint.hubType == 'hue' && endpoint.hubAddress.isNotEmpty
                     ? endpoint.hubAddress
                     : null,
+            deviceType: _deviceTypeAnalyticsLabel,
+            correlationId: hueJourneyId,
             force: force,
           );
         },
@@ -1533,8 +1554,9 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
           final isHueBridge = endpoint.hubType == 'hue';
           final forceRemovalExplanation = isHueBridge
               ? 'Check the Hue Bridge and finish removal? Rhythm will clean '
-                  'up its connection only after the bridge confirms the bulb '
-                  'is absent. If the bridge still owns it, this fails safely.'
+                  'up its connection only after the bridge confirms the '
+                  '$_hueRemovalNoun is absent. If the bridge still owns it, '
+                  'this fails safely.'
               : 'Force remove? This cleans up local state without contacting '
                   'the device.';
           final forceRemove = await showDialog<bool>(
@@ -1568,6 +1590,19 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
         onComplete: (result) => completionResult = result,
       );
     } while (retryHueBleRelease && context.mounted);
+
+    if (hueJourneyId != null) {
+      unawaited(
+        AnalyticsService().logHueBridgeDeviceRemovalCompleted(
+          journeyId: hueJourneyId,
+          deviceType: _deviceTypeAnalyticsLabel,
+          outcome: outcome == MatterRemovalOutcome.removed
+              ? 'succeeded'
+              : 'cancelled',
+          force: forceAttempted,
+        ),
+      );
+    }
 
     if (!context.mounted) return;
 

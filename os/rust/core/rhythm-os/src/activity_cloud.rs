@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 use crate::activity::{LightActivityEvent, LIGHT_ACTIVITY_HISTORY_LIMIT};
 use crate::auth::{ApiAuthRequestInfo, ApiTokenRole};
 use crate::handlers::ApiResponse;
+use crate::pairing::{PairingHistoryEntry, PAIRING_HISTORY_LIMIT};
 use crate::state::SharedState;
 
 const ACTIVITY_CLOUD_SCHEMA_VERSION: u8 = 1;
@@ -326,10 +327,10 @@ fn hex_lower(bytes: &[u8]) -> String {
 }
 
 pub fn enqueue_recent_activity_upload(state: &SharedState) {
-    let Some((config, activities)) = upload_snapshot(state) else {
+    let Some(snapshot) = upload_snapshot(state) else {
         return;
     };
-    if activities.is_empty() {
+    if snapshot.activities.is_empty() && snapshot.device_events.is_empty() {
         return;
     }
 
@@ -344,11 +345,20 @@ pub fn enqueue_recent_activity_upload(state: &SharedState) {
     let state_for_result = state.clone();
     handle.spawn(async move {
         let attempt_epoch_ms = current_epoch_ms();
-        match upload_activity_batch(&config, &activities).await {
+        match upload_activity_batch(
+            &snapshot.config,
+            &snapshot.activities,
+            &snapshot.device_events,
+        )
+        .await
+        {
             Ok(()) => {
-                crate::activity::remove_uploaded_light_activity(&state_for_result, &activities);
+                crate::activity::remove_uploaded_light_activity(
+                    &state_for_result,
+                    &snapshot.activities,
+                );
                 if let Err(error) =
-                    record_upload_success(&state_for_result, &config, attempt_epoch_ms)
+                    record_upload_success(&state_for_result, &snapshot.config, attempt_epoch_ms)
                 {
                     log::warn!(
                         target: "cmd",
@@ -363,9 +373,12 @@ pub fn enqueue_recent_activity_upload(state: &SharedState) {
                     "Failed to upload server light activity batch: {:#}",
                     error
                 );
-                if let Err(record_error) =
-                    record_upload_failure(&state_for_result, &config, attempt_epoch_ms, &error)
-                {
+                if let Err(record_error) = record_upload_failure(
+                    &state_for_result,
+                    &snapshot.config,
+                    attempt_epoch_ms,
+                    &error,
+                ) {
                     log::warn!(
                         target: "cmd",
                         "Failed to record server activity cloud upload failure: {:#}",
@@ -418,28 +431,110 @@ fn config_from_body(body: PutActivityCloudConfig) -> Result<StoredActivityCloudC
     })
 }
 
-fn upload_snapshot(
-    state: &SharedState,
-) -> Option<(StoredActivityCloudConfig, Vec<LightActivityEvent>)> {
+#[derive(Debug)]
+struct ActivityCloudUploadSnapshot {
+    config: StoredActivityCloudConfig,
+    activities: Vec<LightActivityEvent>,
+    device_events: Vec<DeviceLifecycleCloudEvent>,
+}
+
+fn upload_snapshot(state: &SharedState) -> Option<ActivityCloudUploadSnapshot> {
     let config = load_config(state).ok().flatten()?.normalized();
     if !config.is_usable() {
         return None;
     }
 
-    let activities = state
+    let (activities, storage) = state
         .lock()
         .ok()
         .map(|state| {
-            state
+            let activities = state
                 .light_activity
                 .iter()
                 .take(LIGHT_ACTIVITY_HISTORY_LIMIT)
                 .cloned()
+                .collect::<Vec<_>>();
+            (activities, state.storage.clone())
+        })
+        .unwrap_or_default();
+
+    let device_events = storage
+        .and_then(|storage| storage.load_pairing_history().ok().flatten())
+        .map(|history| {
+            history
+                .entries
+                .iter()
+                .rev()
+                .take(PAIRING_HISTORY_LIMIT)
+                .filter_map(device_lifecycle_cloud_event)
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
 
-    Some((config, activities))
+    Some(ActivityCloudUploadSnapshot {
+        config,
+        activities,
+        device_events,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct DeviceLifecycleCloudEvent {
+    id: String,
+    epoch_ms: u64,
+    action: String,
+    hub_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device_type: Option<String>,
+    outcome: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_stage: Option<String>,
+    force: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    correlation_id: Option<String>,
+}
+
+fn privacy_safe_token(value: &str, max_len: usize) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()
+        && value.len() <= max_len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':')))
+    .then(|| value.to_string())
+}
+
+fn device_lifecycle_cloud_event(entry: &PairingHistoryEntry) -> Option<DeviceLifecycleCloudEvent> {
+    let action = match entry.kind.as_str() {
+        "pair" | "unpair" => entry.kind.clone(),
+        _ => return None,
+    };
+    let hub_type = privacy_safe_token(&entry.hub_type, 64)?;
+    let outcome = privacy_safe_token(&entry.status, 32)?;
+    let device_type = entry
+        .device_type
+        .as_deref()
+        .filter(|value| matches!(*value, "light" | "button" | "motion" | "contact"))
+        .map(str::to_string);
+    let correlation_id = entry
+        .correlation_id
+        .as_deref()
+        .and_then(|value| privacy_safe_token(value, 96));
+    let failure_stage = entry.failure_stage.map(|stage| stage.as_str().to_string());
+    let serialized = serde_json::to_vec(entry).ok()?;
+    let event_hash = Sha256::digest(serialized);
+
+    Some(DeviceLifecycleCloudEvent {
+        id: format!("device-lifecycle-{}", hex_lower(&event_hash)),
+        epoch_ms: entry.epoch_ms,
+        action,
+        hub_type,
+        device_type,
+        outcome,
+        failure_stage,
+        force: entry.force.unwrap_or(false),
+        correlation_id,
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -449,17 +544,20 @@ struct ActivityCloudUploadBody<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     server_instance_id: Option<&'a str>,
     events: &'a [LightActivityEvent],
+    device_events: &'a [DeviceLifecycleCloudEvent],
 }
 
 async fn upload_activity_batch(
     config: &StoredActivityCloudConfig,
     activities: &[LightActivityEvent],
+    device_events: &[DeviceLifecycleCloudEvent],
 ) -> Result<(), UploadFailure> {
     let body = ActivityCloudUploadBody {
         home_id: &config.home_id,
         hub_id: &config.hub_id,
         server_instance_id: config.server_instance_id.as_deref(),
         events: activities,
+        device_events,
     };
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -875,6 +973,50 @@ mod tests {
         }
     }
 
+    fn test_device_lifecycle_entry() -> PairingHistoryEntry {
+        PairingHistoryEntry {
+            at: "2026-08-09T12:00:00.000Z".into(),
+            epoch_ms: 1_786_277_600_000,
+            kind: "unpair".into(),
+            hub_type: "hue".into(),
+            correlation_id: Some("hue-bridge-remove-journey".into()),
+            device_type: Some("button".into()),
+            profile_id: None,
+            device_id: Some("private-device-id".into()),
+            force: Some(true),
+            rendezvous: None,
+            network: None,
+            status: "complete".into(),
+            error: Some("private raw bridge error".into()),
+            failure_stage: None,
+            device: Some("Private Switch Name (private-device-id)".into()),
+            devices: vec!["Private Switch Name (private-device-id)".into()],
+            warnings: vec!["private warning".into()],
+        }
+    }
+
+    #[test]
+    fn device_lifecycle_cloud_event_is_stable_and_privacy_bounded() {
+        let entry = test_device_lifecycle_entry();
+        let first = device_lifecycle_cloud_event(&entry).unwrap();
+        let second = device_lifecycle_cloud_event(&entry).unwrap();
+        assert_eq!(first, second);
+        assert!(first.id.starts_with("device-lifecycle-"));
+        assert_eq!(first.action, "unpair");
+        assert_eq!(first.device_type.as_deref(), Some("button"));
+        assert!(first.force);
+
+        let serialized = serde_json::to_string(&first).unwrap();
+        for private_value in [
+            "private-device-id",
+            "Private Switch Name",
+            "private raw bridge error",
+            "private warning",
+        ] {
+            assert!(!serialized.contains(private_value));
+        }
+    }
+
     #[test]
     fn upload_runtime_handle_prefers_ambient_runtime() {
         let state = test_state();
@@ -1251,9 +1393,21 @@ mod tests {
                 app.light_activity.push(activity);
             }
         }
-        let (_, activities) = upload_snapshot(&state).unwrap();
-        assert_eq!(activities.len(), LIGHT_ACTIVITY_HISTORY_LIMIT);
-        assert_eq!(activities.first().unwrap().id, "activity-0");
+        storage
+            .save_pairing_history(&crate::pairing::PairingHistory {
+                schema_version: crate::pairing::PAIRING_HISTORY_SCHEMA_VERSION,
+                entries: vec![test_device_lifecycle_entry()],
+                pairing_results: Vec::new(),
+            })
+            .unwrap();
+        let snapshot = upload_snapshot(&state).unwrap();
+        assert_eq!(snapshot.activities.len(), LIGHT_ACTIVITY_HISTORY_LIMIT);
+        assert_eq!(snapshot.activities.first().unwrap().id, "activity-0");
+        assert_eq!(snapshot.device_events.len(), 1);
+        assert_eq!(
+            snapshot.device_events[0].device_type.as_deref(),
+            Some("button")
+        );
         std::fs::remove_dir_all(data_dir).ok();
     }
 

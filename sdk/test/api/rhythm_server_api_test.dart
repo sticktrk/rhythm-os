@@ -2652,6 +2652,37 @@ void main() {
       });
     });
 
+    test('passes bounded lifecycle correlation metadata for removal', () async {
+      when(() => dio.post(
+            any(),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/devices/unpair'),
+            statusCode: 200,
+            data: {'status': 'complete'},
+          ));
+
+      await api.unpairDevice(
+        hubType: 'hue',
+        deviceId: 'hue-switch-7',
+        deviceType: ' button ',
+        correlationId: ' hue-bridge-remove-journey ',
+      );
+
+      final data = verify(() => dio.post(
+            'api/devices/unpair',
+            data: captureAny(named: 'data'),
+            options: any(named: 'options'),
+          )).captured.single as Map<String, dynamic>;
+      expect(data['params'], {
+        'device_id': 'hue-switch-7',
+        'device_type': 'button',
+        'correlation_id': 'hue-bridge-remove-journey',
+        'force': false,
+      });
+    });
+
     test('returns actionable timeout details on DioException', () async {
       when(() => dio.post(
             any(),

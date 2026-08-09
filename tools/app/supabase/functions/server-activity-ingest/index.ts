@@ -1,6 +1,8 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2'
-
-type JsonObject = Record<string, unknown>
+import {
+  JsonObject,
+  rowForDeviceLifecycle,
+} from './device_lifecycle_contract.ts'
 
 type DeviceTokenRow = {
   id: string
@@ -61,7 +63,9 @@ Deno.serve(async (req) => {
 
     const events = readEvents(body)
     if (events instanceof Response) return events
-    if (events.length === 0) {
+    const deviceEvents = readDeviceEvents(body)
+    if (deviceEvents instanceof Response) return deviceEvents
+    if (events.length === 0 && deviceEvents.length === 0) {
       return jsonResponse({ status: 'ok', inserted: 0 })
     }
 
@@ -78,15 +82,37 @@ Deno.serve(async (req) => {
       )
       .filter((row): row is Record<string, unknown> => row != null)
 
-    if (rows.length === 0) {
+    const deviceRows = deviceEvents
+      .map((event) =>
+        rowForDeviceLifecycle({
+          userId: tokenRow.user_id,
+          homeId,
+          hubId,
+          serverInstanceId: serverInstanceId ?? tokenRow.server_instance_id ??
+            null,
+          event,
+        })
+      )
+      .filter((row): row is Record<string, unknown> => row != null)
+
+    if (rows.length === 0 && deviceRows.length === 0) {
       return jsonResponse({ status: 'ok', inserted: 0 })
     }
 
     const uniqueRows = uniqueRowsByConflictKey(rows)
-    const { error } = await adminClient
-      .from('server_light_activity_events')
-      .upsert(uniqueRows, { onConflict: 'user_id,hub_id,event_id' })
-    if (error) throw new Error(error.message)
+    if (uniqueRows.length > 0) {
+      const { error } = await adminClient
+        .from('server_light_activity_events')
+        .upsert(uniqueRows, { onConflict: 'user_id,hub_id,event_id' })
+      if (error) throw new Error(error.message)
+    }
+    const uniqueDeviceRows = uniqueRowsByConflictKey(deviceRows)
+    if (uniqueDeviceRows.length > 0) {
+      const { error } = await adminClient
+        .from('server_device_lifecycle_events')
+        .upsert(uniqueDeviceRows, { onConflict: 'user_id,hub_id,event_id' })
+      if (error) throw new Error(error.message)
+    }
 
     await adminClient
       .from('server_light_activity_device_tokens')
@@ -95,8 +121,11 @@ Deno.serve(async (req) => {
 
     return jsonResponse({
       status: 'ok',
-      inserted: uniqueRows.length,
-      deduplicated: rows.length - uniqueRows.length,
+      inserted: uniqueRows.length + uniqueDeviceRows.length,
+      light_inserted: uniqueRows.length,
+      device_lifecycle_inserted: uniqueDeviceRows.length,
+      deduplicated: rows.length - uniqueRows.length +
+        deviceRows.length - uniqueDeviceRows.length,
     })
   } catch (error) {
     return jsonResponse({ error: errorMessage(error) }, 500)
@@ -248,6 +277,21 @@ function readEvents(body: JsonObject): JsonObject[] | Response {
     return jsonResponse({ error: 'events must contain objects' }, 400)
   }
   return events.slice(0, 2000)
+}
+
+function readDeviceEvents(body: JsonObject): JsonObject[] | Response {
+  const value = body.device_events
+  if (value == null) return []
+  if (!Array.isArray(value)) {
+    return jsonResponse({ error: 'device_events must be an array' }, 400)
+  }
+  const events = value.filter(
+    (event) => event && typeof event === 'object' && !Array.isArray(event),
+  ) as JsonObject[]
+  if (events.length !== value.length) {
+    return jsonResponse({ error: 'device_events must contain objects' }, 400)
+  }
+  return events.slice(0, 200)
 }
 
 function uniqueRowsByConflictKey(

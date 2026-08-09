@@ -217,6 +217,52 @@ void main() {
     }
   });
 
+  test('Hue Bridge lifecycle analytics omit device and Bridge identity',
+      () async {
+    await analytics.logHueBridgeButtonPairingAttempted(
+      journeyId: 'hue-button-journey',
+      source: 'hue_bridge_hub_detail',
+      attemptNumber: 1,
+    );
+    await analytics.logHueBridgeButtonPairingCompleted(
+      journeyId: 'hue-button-journey',
+      source: 'hue_bridge_hub_detail',
+      attemptNumber: 1,
+      outcome: 'failed',
+      failureStage: 'bridge_search',
+    );
+    await analytics.logHueBridgeDeviceRemovalCompleted(
+      journeyId: 'hue-remove-journey',
+      deviceType: 'button',
+      outcome: 'succeeded',
+      force: false,
+    );
+
+    expect(backend.events.map((event) => event.name), [
+      'hue_bridge_button_pairing_attempted',
+      'hue_bridge_button_pairing_completed',
+      'hue_bridge_device_removal_completed',
+    ]);
+    expect(backend.events.last.properties, {
+      'journey_id': 'hue-remove-journey',
+      'device_type': 'button',
+      'outcome': 'succeeded',
+      'force': 0,
+    });
+    final serialized = backend.events
+        .map((event) => '${event.name}:${event.properties}')
+        .join('\n');
+    for (final forbidden in [
+      'device_id',
+      'device_name',
+      'hub_address',
+      'serial',
+      'error',
+    ]) {
+      expect(serialized, isNot(contains(forbidden)));
+    }
+  });
+
   test('Mood picker analytics use privacy-bounded categories', () async {
     await analytics.logMoodPickerOpened(
       roomSource: 'matter',

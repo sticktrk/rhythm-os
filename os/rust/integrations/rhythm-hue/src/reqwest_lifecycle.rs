@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use log::warn;
@@ -25,7 +25,8 @@ use rhythm_os::canonical::identity::HubKey;
 use rhythm_os::hub::{
     ActiveHub, ExternalControllerReleaseReason, ExternalLightHubIntegration, HubCredentials,
     HubDeviceRoomAssignment, HubDeviceRoomAssignmentOutcome, HubEvent, HubIntegrationCapability,
-    HubProvider, HubType, DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_SERIAL_SEARCH,
+    HubProvider, HubType, DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_BUTTON_SEARCH,
+    DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_SERIAL_SEARCH,
 };
 use rhythm_os::pairing::{
     PairedDeviceInfo, PairingSession, PairingStage, PairingStatus, UnpairingResult,
@@ -34,6 +35,8 @@ use rhythm_os::state::SharedState;
 use rhythm_os::storage::Storage;
 
 const HUE_ADDRESS_MIGRATION_FROM_FIELD: &str = "address_migration_from";
+const HUE_BUTTON_PROJECTION_TIMEOUT: Duration = Duration::from_secs(45);
+const HUE_BUTTON_SYNC_SLOT_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ============================================================================
 // Boot-time connection
@@ -1164,10 +1167,16 @@ impl ExternalLightHubIntegration for HueIntegration {
             hub_type: HubType::HUE.to_string(),
             configurable: true,
             device_onboarding_methods: vec![
-                DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_SERIAL_SEARCH.to_string()
+                DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_SERIAL_SEARCH.to_string(),
+                DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_BUTTON_SEARCH.to_string(),
             ],
             device_profiles: Vec::new(),
             supports_unpairing: true,
+            unpairable_device_types: vec![
+                "light".to_string(),
+                "button".to_string(),
+                "motion".to_string(),
+            ],
             supports_roomless_devices: true,
             blocks_room_readiness: true,
         }
@@ -1178,6 +1187,18 @@ impl ExternalLightHubIntegration for HueIntegration {
         state: &SharedState,
         params: &serde_json::Value,
     ) -> Result<PairingSession> {
+        let device_kind = params
+            .get("device_kind")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("light");
+        if device_kind == "button" {
+            return start_bridge_button_pairing(state, params);
+        }
+        if device_kind != "light" {
+            anyhow::bail!("Unsupported Hue Bridge pairing device kind");
+        }
         let raw_serial = params
             .get("serial")
             .and_then(serde_json::Value::as_str)
@@ -1255,8 +1276,12 @@ impl ExternalLightHubIntegration for HueIntegration {
                             true,
                             Duration::from_secs(30),
                         ) {
-                            Ok(_) => match exact_bridge_light_projection(
-                                bridge_light_devices(state, &key),
+                            Ok(_) => match exact_bridge_device_projection(
+                                bridge_devices(
+                                    state,
+                                    &key,
+                                    rhythm_core::runtime::hub_registry::DeviceType::Light,
+                                ),
                                 &expected_device_ids,
                             ) {
                                 Ok(devices) => {
@@ -1338,7 +1363,7 @@ impl ExternalLightHubIntegration for HueIntegration {
                         .storage
                         .clone();
                     ensure_physical_hue_unpair_allowed(storage.as_deref(), &bridge_id)?;
-                    transport.remove_light_device(&target.username, &target.native_id)?;
+                    transport.remove_device(&target.username, &target.native_id)?;
                 }
                 if transport.device_exists(&target.username, &target.native_id)? {
                     anyhow::bail!(
@@ -1386,6 +1411,121 @@ fn target_hub_room_id_for_assignment(assignment: &HubDeviceRoomAssignment) -> Re
     })
 }
 
+fn start_bridge_button_pairing(
+    state: &SharedState,
+    params: &serde_json::Value,
+) -> Result<PairingSession> {
+    let session_id = params
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|session_id| !session_id.is_empty());
+    let requested_address = params
+        .get("hub_address")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|address| !address.is_empty());
+    let (key, bridge_ip, username) = bridge_pairing_target(state, requested_address)?;
+    rhythm_os::pairing::emit_pairing_progress(
+        state,
+        HubType::HUE,
+        session_id,
+        PairingStatus::Searching,
+        PairingStage::Searching,
+        "Asking the Hue Bridge to search for a button or switch",
+        None,
+        None,
+    );
+    let transport = ReqwestHueTransport::new(&bridge_ip)?;
+    let found = transport.search_new_sensors(&username)?;
+    if found.is_empty() {
+        anyhow::bail!(
+            "The Hue Bridge did not find a new button or switch. Put the accessory in pairing mode and try again"
+        );
+    }
+
+    rhythm_os::pairing::emit_pairing_progress(
+        state,
+        HubType::HUE,
+        session_id,
+        PairingStatus::Commissioning,
+        PairingStage::Finalizing,
+        "Hue Bridge search finished; confirming the new button or switch",
+        None,
+        None,
+    );
+    let found_ids = found
+        .iter()
+        .map(|sensor| sensor.legacy_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut projected_devices = None;
+    let mut projection_error = "Hue V2 has not projected a button resource".to_string();
+    let projection_deadline = Instant::now() + HUE_BUTTON_PROJECTION_TIMEOUT;
+    const PROJECTION_ATTEMPTS: usize = 15;
+    for attempt in 0..PROJECTION_ATTEMPTS {
+        match transport
+            .get_resources(&username, "button")
+            .and_then(|resources| v2_device_ids_for_legacy_buttons(&resources, &found_ids))
+        {
+            Ok(mapped) if mapped.is_empty() => {
+                projection_error =
+                    "The Hue Bridge found sensors, but none exposed a button service".to_string();
+            }
+            Ok(mapped) => {
+                let expected_device_ids = mapped.into_values().collect::<BTreeSet<_>>();
+                match rhythm_os::room_sync::sync_from_hub_for_key_wait(
+                    state,
+                    &key,
+                    true,
+                    HUE_BUTTON_SYNC_SLOT_TIMEOUT,
+                ) {
+                    Ok(_) => match exact_bridge_device_projection(
+                        bridge_devices(
+                            state,
+                            &key,
+                            rhythm_core::runtime::hub_registry::DeviceType::Button,
+                        ),
+                        &expected_device_ids,
+                    ) {
+                        Ok(devices) => {
+                            projected_devices = Some(devices);
+                            break;
+                        }
+                        Err(error) => projection_error = error.to_string(),
+                    },
+                    Err(error) => {
+                        projection_error = format!("Hue Bridge refresh failed: {error:#}");
+                    }
+                }
+            }
+            Err(error) => {
+                projection_error = format!("Hue V2 button projection lookup failed: {error:#}");
+            }
+        }
+        if attempt + 1 < PROJECTION_ATTEMPTS && Instant::now() < projection_deadline {
+            std::thread::sleep(Duration::from_secs(1));
+        } else {
+            break;
+        }
+    }
+    let mut devices = projected_devices.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Hue Bridge search completed, but Rhythm could not confirm an exact button or switch after refresh: {projection_error}"
+        )
+    })?;
+    devices.sort_by(|left, right| left.device_id.cmp(&right.device_id));
+    Ok(PairingSession {
+        hub_type: HubType::HUE.to_string(),
+        status: PairingStatus::Complete,
+        device: devices.first().cloned(),
+        devices,
+        error: None,
+        failure_stage: None,
+        warnings: Vec::new(),
+        details: None,
+    })
+}
+
 fn bridge_pairing_target(
     state: &SharedState,
     requested_address: Option<&str>,
@@ -1408,16 +1548,21 @@ fn bridge_pairing_target(
             "The requested Hue Bridge is not connected: {}",
             requested_address.unwrap_or_default()
         ),
-        0 => anyhow::bail!("Connect a Hue Bridge before adding a bulb by serial"),
+        0 => anyhow::bail!("Connect a Hue Bridge before adding a device"),
         1 => Ok(candidates.pop().expect("one candidate")),
         _ => anyhow::bail!(
-            "Multiple Hue Bridges are connected; provide hub_address for the bridge that should add the bulb"
+            "Multiple Hue Bridges are connected; provide hub_address for the bridge that should add the device"
         ),
     }
 }
 
 fn legacy_id_from_v2_id_v1(id_v1: &str) -> Option<&str> {
     let id = id_v1.strip_prefix("/lights/")?;
+    (!id.is_empty() && !id.contains('/')).then_some(id)
+}
+
+fn legacy_sensor_id_from_v2_id_v1(id_v1: &str) -> Option<&str> {
+    let id = id_v1.strip_prefix("/sensors/")?;
     (!id.is_empty() && !id.contains('/')).then_some(id)
 }
 
@@ -1477,7 +1622,58 @@ fn v2_device_ids_for_legacy_lights(
     Ok(mapped)
 }
 
-fn exact_bridge_light_projection(
+fn v2_device_ids_for_legacy_buttons(
+    value: &serde_json::Value,
+    requested_legacy_ids: &BTreeSet<String>,
+) -> Result<BTreeMap<String, String>> {
+    let errors = value
+        .get("errors")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("GET button returned an invalid Hue V2 response"))?;
+    if !errors.is_empty() {
+        anyhow::bail!("GET button returned {} Hue error(s)", errors.len());
+    }
+    let data = value
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("GET button returned a Hue V2 response without data"))?;
+
+    let mut mapped = BTreeMap::new();
+    for button in data {
+        let Some(legacy_id) = button
+            .get("id_v1")
+            .and_then(serde_json::Value::as_str)
+            .and_then(legacy_sensor_id_from_v2_id_v1)
+        else {
+            continue;
+        };
+        if !requested_legacy_ids.contains(legacy_id) {
+            continue;
+        }
+        if button
+            .pointer("/owner/rtype")
+            .and_then(serde_json::Value::as_str)
+            != Some("device")
+        {
+            continue;
+        }
+        let Some(device_id) = button
+            .pointer("/owner/rid")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+        else {
+            continue;
+        };
+        if let Some(previous) = mapped.insert(legacy_id.to_string(), device_id.to_string()) {
+            if previous != device_id {
+                anyhow::bail!("Hue V1 sensor {legacy_id} maps to multiple Hue V2 button devices");
+            }
+        }
+    }
+    Ok(mapped)
+}
+
+fn exact_bridge_device_projection(
     devices: Vec<PairedDeviceInfo>,
     expected_device_ids: &BTreeSet<String>,
 ) -> Result<Vec<PairedDeviceInfo>> {
@@ -1513,7 +1709,7 @@ fn ensure_physical_hue_unpair_allowed(
         return Ok(());
     };
     if crate::ownership::load_controller_ownership(storage, bridge_id)?.is_some() {
-        anyhow::bail!("Release Rhythm control of this Hue Bridge before removing a Bridge bulb");
+        anyhow::bail!("Release Rhythm control of this Hue Bridge before removing a Bridge device");
     }
     Ok(())
 }
@@ -1597,7 +1793,7 @@ fn bridge_unpair_target(
             "The requested Hue Bridge is not connected: {}",
             requested_address.unwrap_or_default()
         ),
-        [] => anyhow::bail!("Connect a Hue Bridge before removing a Bridge light"),
+        [] => anyhow::bail!("Connect a Hue Bridge before removing a Bridge device"),
         [only] => only.clone(),
         _ => anyhow::bail!(
             "The Hue device is reachable through multiple Bridges; provide hub_address for the exact endpoint"
@@ -1672,17 +1868,18 @@ where
     })
 }
 
-fn bridge_light_devices(state: &SharedState, key: &HubKey) -> Vec<PairedDeviceInfo> {
+fn bridge_devices(
+    state: &SharedState,
+    key: &HubKey,
+    device_type: rhythm_core::runtime::hub_registry::DeviceType,
+) -> Vec<PairedDeviceInfo> {
     let Ok(state) = state.lock() else {
         return Vec::new();
     };
     state
         .canonical_registry
         .devices()
-        .filter(|device| {
-            !device.is_removed()
-                && device.device_type == rhythm_core::runtime::hub_registry::DeviceType::Light
-        })
+        .filter(|device| !device.is_removed() && device.device_type == device_type)
         .filter_map(|device| {
             let endpoint = device
                 .active_endpoints()
@@ -1690,7 +1887,7 @@ fn bridge_light_devices(state: &SharedState, key: &HubKey) -> Vec<PairedDeviceIn
             Some(PairedDeviceInfo {
                 device_id: endpoint.native_id.clone(),
                 name: device.name.clone(),
-                device_type: rhythm_core::runtime::hub_registry::DeviceType::Light,
+                device_type: device.device_type.clone(),
                 manufacturer: device.manufacturer.clone(),
                 model: device.model.clone(),
             })
@@ -2569,9 +2766,16 @@ mod tests {
         assert!(caps.configurable);
         assert_eq!(
             caps.device_onboarding_methods,
-            vec![DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_SERIAL_SEARCH]
+            vec![
+                DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_SERIAL_SEARCH,
+                DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_BUTTON_SEARCH,
+            ]
         );
         assert!(caps.supports_unpairing);
+        assert_eq!(
+            caps.unpairable_device_types,
+            vec!["light", "button", "motion"]
+        );
         assert!(caps.supports_roomless_devices);
     }
 
@@ -2659,6 +2863,41 @@ mod tests {
     }
 
     #[test]
+    fn bridge_button_pairing_maps_only_exact_new_sensor_ids_to_button_owners() {
+        let requested = BTreeSet::from(["21".to_string(), "22".to_string()]);
+        let mapped = v2_device_ids_for_legacy_buttons(
+            &serde_json::json!({
+                "errors": [],
+                "data": [
+                    {
+                        "id": "button-a",
+                        "id_v1": "/sensors/21",
+                        "owner": {"rtype": "device", "rid": "device-a"}
+                    },
+                    {
+                        "id": "button-unrelated",
+                        "id_v1": "/sensors/23",
+                        "owner": {"rtype": "device", "rid": "device-unrelated"}
+                    },
+                    {
+                        "id": "malformed-owner",
+                        "id_v1": "/sensors/22",
+                        "owner": {"rtype": "room", "rid": "room-a"}
+                    }
+                ]
+            }),
+            &requested,
+        )
+        .unwrap();
+        assert_eq!(
+            mapped,
+            BTreeMap::from([("21".to_string(), "device-a".to_string())])
+        );
+        assert!(!mapped.contains_key("22"));
+        assert!(!mapped.contains_key("23"));
+    }
+
+    #[test]
     fn bridge_pairing_requires_nonempty_exact_canonical_projection() {
         let expected = BTreeSet::from(["device-a".to_string()]);
         let unrelated = PairedDeviceInfo {
@@ -2668,8 +2907,8 @@ mod tests {
             manufacturer: None,
             model: None,
         };
-        assert!(exact_bridge_light_projection(vec![unrelated], &expected).is_err());
-        assert!(exact_bridge_light_projection(Vec::new(), &BTreeSet::new()).is_err());
+        assert!(exact_bridge_device_projection(vec![unrelated], &expected).is_err());
+        assert!(exact_bridge_device_projection(Vec::new(), &BTreeSet::new()).is_err());
 
         let exact = PairedDeviceInfo {
             device_id: "device-a".to_string(),
@@ -2678,7 +2917,7 @@ mod tests {
             manufacturer: Some("Signify".to_string()),
             model: Some("LCA009".to_string()),
         };
-        let projected = exact_bridge_light_projection(vec![exact.clone()], &expected).unwrap();
+        let projected = exact_bridge_device_projection(vec![exact.clone()], &expected).unwrap();
         assert_eq!(projected, vec![exact]);
     }
 

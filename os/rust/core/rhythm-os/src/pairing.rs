@@ -642,6 +642,14 @@ pub struct PairingHistoryEntry {
     /// "pair" or "unpair".
     pub kind: String,
     pub hub_type: String,
+    /// App-generated privacy-safe journey correlation. This deliberately does
+    /// not fall back to the transport session ID because retries have their
+    /// own session IDs while one user journey owns the lifecycle outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    /// Canonical device class involved in the lifecycle attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_type: Option<String>,
     /// Bounded protocol profile identifier (for example
     /// `orein.oc02001.button.v1`). Raw setup or hardware identity values are
     /// never persisted in pairing history.
@@ -1453,6 +1461,29 @@ fn bounded_profile_id(params: &serde_json::Value) -> Option<String> {
     crate::hub::is_valid_device_profile_id(profile_id).then(|| profile_id.to_string())
 }
 
+fn bounded_correlation_id(params: &serde_json::Value) -> Option<String> {
+    let correlation_id = params.get("correlation_id")?.as_str()?.trim();
+    validate_pairing_session_id(correlation_id)
+        .is_ok()
+        .then(|| correlation_id.to_string())
+}
+
+fn device_type_label(device_type: &DeviceType) -> &'static str {
+    match device_type {
+        DeviceType::Light => "light",
+        DeviceType::Button => "button",
+        DeviceType::Motion => "motion",
+        DeviceType::Contact => "contact",
+    }
+}
+
+fn bounded_device_type(params: &serde_json::Value) -> Option<String> {
+    match params.get("device_type")?.as_str()?.trim() {
+        value @ ("light" | "button" | "motion" | "contact") => Some(value.to_string()),
+        _ => None,
+    }
+}
+
 fn canonical_advertised_profile_id(
     capabilities: &[crate::hub::HubIntegrationCapability],
     hub_type: &str,
@@ -1481,6 +1512,18 @@ pub fn pairing_history_entry_for_pair(
         epoch_ms: crate::state::current_epoch_ms(),
         kind: "pair".to_string(),
         hub_type: hub_type.to_string(),
+        correlation_id: bounded_correlation_id(params),
+        device_type: completed_devices
+            .first()
+            .map(|device| device_type_label(&device.device_type).to_string())
+            .or_else(|| bounded_device_type(params))
+            .or_else(|| {
+                (params
+                    .get("device_kind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("button"))
+                .then(|| "button".to_string())
+            }),
         profile_id: bounded_profile_id(params),
         device_id: session
             .device
@@ -1517,6 +1560,8 @@ pub fn pairing_history_entry_for_unpair(
         epoch_ms: crate::state::current_epoch_ms(),
         kind: "unpair".to_string(),
         hub_type: hub_type.to_string(),
+        correlation_id: bounded_correlation_id(params),
+        device_type: bounded_device_type(params),
         profile_id: bounded_profile_id(params),
         device_id: device_id
             .map(str::to_string)
@@ -1572,7 +1617,10 @@ pub fn record_pairing_history(state: &crate::state::SharedState, mut entry: Pair
     let history = history.normalized();
     if let Err(e) = storage.save_pairing_history(&history) {
         log::warn!(target: "pair", "Failed to save pairing history: {e}");
+        return;
     }
+    drop(_guard);
+    crate::activity_cloud::enqueue_recent_activity_upload(state);
 }
 
 #[cfg(test)]
@@ -1716,6 +1764,29 @@ mod tests {
             &session,
         );
         assert_eq!(lowercased_identity.profile_id, None);
+
+        let hue_button = pairing_history_entry_for_pair(
+            "hue",
+            &serde_json::json!({
+                "device_kind": "button",
+                "correlation_id": "hue-button-journey"
+            }),
+            &session,
+        );
+        assert_eq!(hue_button.device_type.as_deref(), Some("button"));
+        assert_eq!(
+            hue_button.correlation_id.as_deref(),
+            Some("hue-button-journey")
+        );
+        let unsafe_correlation = pairing_history_entry_for_pair(
+            "hue",
+            &serde_json::json!({
+                "device_kind": "button",
+                "correlation_id": "contains/unsafe/path"
+            }),
+            &session,
+        );
+        assert_eq!(unsafe_correlation.correlation_id, None);
     }
 
     #[test]
@@ -1733,6 +1804,7 @@ mod tests {
                 onboarding_methods: vec!["local_ble_qr".to_string()],
             }],
             supports_unpairing: true,
+            unpairable_device_types: vec!["button".to_string()],
             supports_roomless_devices: true,
             blocks_room_readiness: false,
         }];
@@ -1831,7 +1903,12 @@ mod tests {
 
     #[test]
     fn unpair_entry_captures_force_flag_and_device_id() {
-        let params = serde_json::json!({ "device_id": "matter-102", "force": true });
+        let params = serde_json::json!({
+            "device_id": "matter-102",
+            "device_type": "button",
+            "correlation_id": "hue-remove-journey",
+            "force": true
+        });
         let entry = pairing_history_entry_for_unpair(
             "matter",
             &params,
@@ -1843,6 +1920,8 @@ mod tests {
         assert_eq!(entry.device_id.as_deref(), Some("matter-102"));
         assert_eq!(entry.force, Some(true));
         assert_eq!(entry.status, "complete");
+        assert_eq!(entry.device_type.as_deref(), Some("button"));
+        assert_eq!(entry.correlation_id.as_deref(), Some("hue-remove-journey"));
     }
 
     #[test]
@@ -1890,6 +1969,8 @@ mod tests {
             epoch_ms,
             kind: "pair".to_string(),
             hub_type: "matter".to_string(),
+            correlation_id: None,
+            device_type: None,
             profile_id: None,
             device_id: None,
             force: None,
@@ -1937,6 +2018,8 @@ mod tests {
         let history = history.normalized();
         assert_eq!(history.schema_version, 1);
         assert_eq!(history.entries[0].profile_id, None);
+        assert_eq!(history.entries[0].correlation_id, None);
+        assert_eq!(history.entries[0].device_type, None);
         assert!(history.pairing_results.is_empty());
     }
 

@@ -2883,6 +2883,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
                     device_onboarding_methods: capability.device_onboarding_methods.clone(),
                     device_profiles: capability.device_profiles.clone(),
                     supports_unpairing: capability.supports_unpairing,
+                    unpairable_device_types: capability.unpairable_device_types.clone(),
                     supports_roomless_devices: capability.supports_roomless_devices,
                     blocks_room_readiness: capability.blocks_room_readiness,
                 })

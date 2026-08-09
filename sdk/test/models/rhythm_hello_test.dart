@@ -458,6 +458,35 @@ void main() {
       expect(hello.powerSchedules.single['node_id'], 'room-1');
     });
 
+    test('parses typed unpair support and keeps legacy Hue light-only', () {
+      final current = RhythmHubCapabilities.fromJson({
+        'type': 'hue',
+        'configurable': true,
+        'device_onboarding_methods': [
+          RhythmDeviceOnboardingMethod.hueBridgeSerialSearch,
+          RhythmDeviceOnboardingMethod.hueBridgeButtonSearch,
+        ],
+        'supports_unpairing': true,
+        'unpairable_device_types': ['light', 'button', 'motion'],
+      });
+      expect(
+        current.supportsDeviceOnboardingMethod(
+          RhythmDeviceOnboardingMethod.hueBridgeButtonSearch,
+        ),
+        isTrue,
+      );
+      expect(current.supportsUnpairingDeviceType('button'), isTrue);
+
+      final legacy = RhythmHubCapabilities.fromJson({
+        'type': 'hue',
+        'configurable': true,
+        'supports_unpairing': true,
+      });
+      expect(legacy.unpairableDeviceTypes, ['light']);
+      expect(legacy.supportsUnpairingDeviceType('light'), isTrue);
+      expect(legacy.supportsUnpairingDeviceType('button'), isFalse);
+    });
+
     test('tolerates absent or malformed local device profile metadata', () {
       final hello = RhythmHello.fromJson({
         'capabilities': {

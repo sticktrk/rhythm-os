@@ -202,6 +202,12 @@ impl ExternalLightHubIntegration for BluezLocalBleIntegration {
                 })
                 .collect(),
             supports_unpairing: true,
+            unpairable_device_types: profiles()
+                .iter()
+                .map(|profile| profile.descriptor().device_type.to_string())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
             supports_roomless_devices: true,
             blocks_room_readiness: false,
         }

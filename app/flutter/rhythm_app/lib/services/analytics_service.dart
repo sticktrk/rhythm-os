@@ -881,6 +881,55 @@ class AnalyticsService {
     });
   }
 
+  /// Track an explicit Hue Bridge button/switch search request.
+  Future<void> logHueBridgeButtonPairingAttempted({
+    required String journeyId,
+    required String source,
+    required int attemptNumber,
+  }) async {
+    await logEvent('hue_bridge_button_pairing_attempted', {
+      'journey_id': journeyId,
+      'source': source,
+      'input_method': 'bridge_search',
+      'attempt_number': attemptNumber,
+    });
+  }
+
+  /// Track the terminal app-observed result of one Bridge accessory search.
+  Future<void> logHueBridgeButtonPairingCompleted({
+    required String journeyId,
+    required String source,
+    required int attemptNumber,
+    required String outcome,
+    String? failureStage,
+  }) async {
+    await logEvent('hue_bridge_button_pairing_completed', {
+      'journey_id': journeyId,
+      'source': source,
+      'input_method': 'bridge_search',
+      'attempt_number': attemptNumber,
+      'outcome': outcome,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
+  /// Track a terminal Hue Bridge device removal without retaining identity.
+  Future<void> logHueBridgeDeviceRemovalCompleted({
+    required String journeyId,
+    required String deviceType,
+    required String outcome,
+    required bool force,
+    String? failureStage,
+  }) async {
+    await logEvent('hue_bridge_device_removal_completed', {
+      'journey_id': journeyId,
+      'device_type': deviceType,
+      'outcome': outcome,
+      'force': force ? 1 : 0,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
   /// Track a local-BLE pairing attempt without retaining setup or identity.
   Future<void> logLocalBlePairingAttempted({
     required String journeyId,

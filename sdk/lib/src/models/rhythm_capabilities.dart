@@ -29,6 +29,7 @@ abstract final class RhythmDeviceOnboardingMethod {
   static const String hueBleNearbyScan = 'hue_ble_nearby_scan';
   static const String localBleQr = 'local_ble_qr';
   static const String hueBridgeSerialSearch = 'hue_bridge_serial_search';
+  static const String hueBridgeButtonSearch = 'hue_bridge_button_search';
 }
 
 /// Stable local-device profile IDs advertised by a Rhythm appliance.
@@ -88,6 +89,7 @@ class RhythmHubCapabilities {
   final bool configurable;
   final List<String> deviceOnboardingMethods;
   final bool supportsUnpairing;
+  final List<String> unpairableDeviceTypes;
   final bool supportsRoomlessDevices;
   final bool blocksRoomReadiness;
   final List<RhythmDeviceProfile> deviceProfiles;
@@ -98,6 +100,7 @@ class RhythmHubCapabilities {
     required this.configurable,
     this.deviceOnboardingMethods = const [],
     required this.supportsUnpairing,
+    this.unpairableDeviceTypes = const [],
     required this.supportsRoomlessDevices,
     this.blocksRoomReadiness = true,
     this.deviceProfiles = const [],
@@ -114,6 +117,10 @@ class RhythmHubCapabilities {
     return deviceProfiles.any((profile) => profile.acceptsProfileId(profileId));
   }
 
+  bool supportsUnpairingDeviceType(String deviceType) {
+    return supportsUnpairing && unpairableDeviceTypes.contains(deviceType);
+  }
+
   factory RhythmHubCapabilities.fromJson(Map<String, dynamic> json) {
     final legacyAddDevice =
         jsonMap(json['add_device']) ?? const <String, dynamic>{};
@@ -122,11 +129,24 @@ class RhythmHubCapabilities {
       legacyAddDevice: legacyAddDevice,
     );
 
+    final type = json['type'] as String? ?? '';
+    final supportsUnpairing = json['supports_unpairing'] as bool? ?? false;
+    var unpairableDeviceTypes = _parseStringList(
+      json['unpairable_device_types'],
+    );
+    // Hue Bridge appliances before typed unpair metadata only implemented
+    // exact V1 light deletion. Preserve that path without exposing their
+    // broken switch/sensor removal behavior.
+    if (unpairableDeviceTypes.isEmpty && supportsUnpairing && type == 'hue') {
+      unpairableDeviceTypes = const ['light'];
+    }
+
     return RhythmHubCapabilities(
-      type: json['type'] as String? ?? '',
+      type: type,
       configurable: json['configurable'] as bool? ?? false,
       deviceOnboardingMethods: deviceOnboardingMethods,
-      supportsUnpairing: json['supports_unpairing'] as bool? ?? false,
+      supportsUnpairing: supportsUnpairing,
+      unpairableDeviceTypes: unpairableDeviceTypes,
       supportsRoomlessDevices:
           json['supports_roomless_devices'] as bool? ?? false,
       blocksRoomReadiness: json['blocks_room_readiness'] as bool? ?? true,

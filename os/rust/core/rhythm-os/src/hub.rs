@@ -314,6 +314,10 @@ pub struct HubIntegrationCapability {
     pub device_onboarding_methods: Vec<String>,
     pub device_profiles: Vec<HubDeviceProfileCapability>,
     pub supports_unpairing: bool,
+    /// Stable device-type labels whose physical/integration-owned resources
+    /// this hub can remove. An empty list means callers must use the legacy
+    /// aggregate flag conservatively.
+    pub unpairable_device_types: Vec<String>,
     pub supports_roomless_devices: bool,
     /// Whether a configured-but-disconnected instance should hold the app's
     /// Rooms startup gate because its control plane must rebuild authoritative
@@ -334,6 +338,9 @@ pub const DEVICE_ONBOARDING_METHOD_LOCAL_BLE_QR: &str = "local_ble_qr";
 /// Ask an already connected Hue Bridge to find one Zigbee light by its
 /// six-character printed serial.
 pub const DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_SERIAL_SEARCH: &str = "hue_bridge_serial_search";
+/// Ask an already connected Hue Bridge to discover a physical button, remote,
+/// or wall switch through its native Zigbee accessory search.
+pub const DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_BUTTON_SEARCH: &str = "hue_bridge_button_search";
 
 impl HubIntegrationCapability {
     pub fn new(hub_type: impl Into<String>) -> Self {
@@ -343,6 +350,7 @@ impl HubIntegrationCapability {
             device_onboarding_methods: Vec::new(),
             device_profiles: Vec::new(),
             supports_unpairing: false,
+            unpairable_device_types: Vec::new(),
             supports_roomless_devices: false,
             blocks_room_readiness: true,
         }
