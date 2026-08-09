@@ -462,6 +462,27 @@ fn register_canonical_identity(
 
     let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     state.canonical_registry.resolve(&identity, hub_key, now);
+    let canonical_id = state
+        .canonical_registry
+        .find_by_native_id(hub_key, device_id)
+        .map(|device| device.id.clone())
+        .ok_or_else(|| anyhow::anyhow!("Canonical Matter endpoint was not registered"))?;
+    if let Some(normalized) =
+        crate::lifecycle::normalized_endpoint_capabilities(&build_device_capabilities(device))
+    {
+        let endpoint = state
+            .canonical_registry
+            .get_mut(&canonical_id)
+            .and_then(|device| {
+                device.endpoints.iter_mut().find(|endpoint| {
+                    endpoint.hub_key == *hub_key && endpoint.native_id == device_id
+                })
+            })
+            .ok_or_else(|| anyhow::anyhow!("Canonical Matter endpoint disappeared"))?;
+        endpoint.capabilities = Some(normalized);
+        rhythm_os::commands::save_authority_state(&state)
+            .context("persisting Matter endpoint capabilities")?;
+    }
     Ok(())
 }
 
@@ -1001,6 +1022,16 @@ mod tests {
             .canonical_registry
             .find_by_native_id(&matter_key, "matter-10-2")
             .expect("paired device should be in canonical registry");
+        assert_eq!(
+            canonical
+                .endpoint_by_native_id("matter-10-2")
+                .and_then(|endpoint| endpoint.capabilities.as_ref())
+                .and_then(|value| value.pointer("/light_capabilities/color_temperature")),
+            Some(&serde_json::json!({
+                "min_kelvin": 2200,
+                "max_kelvin": 6500,
+            }))
+        );
         assert!(state_guard
             .topology
             .get_device_node(&canonical.id)
