@@ -6,6 +6,7 @@ import 'package:rhythm_app/providers/home_provider.dart';
 import 'package:rhythm_app/providers/room_provider.dart';
 import 'package:rhythm_app/providers/server_sync_provider.dart';
 import 'package:rhythm_app/screens/triage_screen.dart';
+import 'package:rhythm_app/services/hue_ble_auto_discovery_service.dart';
 import 'package:rhythm_app/widgets/settings_row.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
@@ -112,16 +113,22 @@ class _TestServerSyncProvider extends ServerSyncProvider {
   });
 
   bool matterPairingEnabled = false;
+  bool hueBlePairingEnabled = false;
 
   @override
   bool get canAddMatterDevice =>
       matterPairingEnabled || super.canAddMatterDevice;
+
+  @override
+  bool get canAddHueBleDevice =>
+      hueBlePairingEnabled || super.canAddHueBleDevice;
 }
 
 Widget _buildTestApp({
   required RoomProvider roomProvider,
   required RhythmConnection connection,
   required ServerSyncProvider serverSyncProvider,
+  HueBleDiscoveryRequest? hueBleDiscoveryRequest,
 }) {
   return MultiProvider(
     providers: [
@@ -130,8 +137,10 @@ Widget _buildTestApp({
       ChangeNotifierProvider<ServerSyncProvider>.value(
           value: serverSyncProvider),
     ],
-    child: const MaterialApp(
-      home: TriageScreen(),
+    child: MaterialApp(
+      home: TriageScreen(
+        hueBleDiscoveryRequest: hueBleDiscoveryRequest,
+      ),
     ),
   );
 }
@@ -280,6 +289,7 @@ void main() {
       );
       expect(find.text('No hardware'), findsNothing);
       expect(find.text('Scan a code or find nearby bulbs'), findsOneWidget);
+      expect(find.text('Add nearby Hue Bluetooth bulbs'), findsNothing);
 
       final scanCardSize = tester.getSize(
         find.byKey(const ValueKey('add-review-scan-device')),
@@ -299,6 +309,47 @@ void main() {
       expect(
         tester.getTopLeft(find.text('SYNC FROM A HUB')).dy,
         lessThan(tester.getTopLeft(find.text('CREATE A ROOM')).dy),
+      );
+    });
+
+    testWidgets('offers a phone-discovered Hue bulb on Add & Review', (
+      tester,
+    ) async {
+      serverSyncProvider.hueBlePairingEnabled = true;
+      var discoveryCalls = 0;
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          connection: connection,
+          serverSyncProvider: serverSyncProvider,
+          hueBleDiscoveryRequest: ({required source}) async {
+            discoveryCalls += 1;
+            expect(source, 'add_review');
+            return const HueBleDiscoveryResult(
+              HueBleDiscoveryOutcome.found,
+              deviceCount: 1,
+            );
+          },
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(discoveryCalls, 1);
+      expect(
+        find.byKey(const ValueKey('nearby-hue-ble-prompt')),
+        findsOneWidget,
+      );
+      expect(find.text('How do you want to add it?'), findsNothing);
+      expect(find.text('Add nearby Hue Bluetooth bulbs'), findsNothing);
+
+      await tester.tap(find.byKey(const ValueKey('nearby-hue-ble-dismiss')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Add a Device'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('nearby-hue-ble-prompt')),
+        findsNothing,
       );
     });
 

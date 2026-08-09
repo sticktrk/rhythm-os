@@ -85,12 +85,14 @@ class HueBleDeviceAddScreen extends StatefulWidget {
     super.key,
     this.analyticsSource = 'unknown',
     this.journeyId,
+    this.inputMethod = 'nearby_scan',
     @visibleForTesting this.pairingRequest,
     @visibleForTesting this.progressEvents,
   });
 
   final String analyticsSource;
   final String? journeyId;
+  final String inputMethod;
   final HueBlePairingRequest? pairingRequest;
   final Stream<RhythmPairingProgress>? progressEvents;
 
@@ -98,12 +100,14 @@ class HueBleDeviceAddScreen extends StatefulWidget {
     BuildContext context, {
     String analyticsSource = 'unknown',
     String? journeyId,
+    String inputMethod = 'nearby_scan',
   }) {
     return Navigator.of(context).push<HueBleDevicePairingResult>(
       MaterialPageRoute(
         builder: (_) => HueBleDeviceAddScreen(
           analyticsSource: analyticsSource,
           journeyId: journeyId,
+          inputMethod: inputMethod,
         ),
       ),
     );
@@ -143,13 +147,14 @@ class _HueBleDeviceAddScreenState extends State<HueBleDeviceAddScreen> {
   int _attemptNumber = 0;
   int _requestGeneration = 0;
   int _lastActiveStage = 0;
-  String _activeInputMethod = 'nearby_scan';
+  late String _activeInputMethod;
 
   @override
   void initState() {
     super.initState();
     _journeyId = widget.journeyId ??
         'hue-ble-pair-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}';
+    _activeInputMethod = widget.inputMethod;
     AnalyticsService().logScreenView('hue_ble_device_add');
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _startPairing();
@@ -254,7 +259,7 @@ class _HueBleDeviceAddScreenState extends State<HueBleDeviceAddScreen> {
     _requestInFlight = true;
     _attemptNumber += 1;
     _activeInputMethod =
-        replaceStaleBonds ? 'stale_bond_recovery' : 'nearby_scan';
+        replaceStaleBonds ? 'stale_bond_recovery' : widget.inputMethod;
     final requestGeneration = ++_requestGeneration;
     _activeSessionId = _attemptNumber == 1
         ? _journeyId
@@ -661,7 +666,7 @@ class _HueBleDeviceAddScreenState extends State<HueBleDeviceAddScreen> {
         appBar: AppBar(
           backgroundColor: CelestialColors.backgroundDark,
           foregroundColor: CelestialColors.textPrimary,
-          title: const Text('Scan for Hue Bluetooth Bulbs'),
+          title: const Text('Add Hue Bluetooth Bulbs'),
           elevation: 0,
         ),
         body: SafeArea(
@@ -688,7 +693,7 @@ class _HueBleDeviceAddScreenState extends State<HueBleDeviceAddScreen> {
               ),
               const SizedBox(height: 20),
               const Text(
-                'Scanning for nearby Hue Bluetooth bulbs',
+                'Adding nearby Hue Bluetooth bulbs',
                 style: TextStyle(
                   color: CelestialColors.textPrimary,
                   fontSize: 25,

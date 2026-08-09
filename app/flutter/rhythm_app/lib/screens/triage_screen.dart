@@ -1,9 +1,13 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
 import '../services/analytics_service.dart';
+import '../services/hue_ble_auto_discovery_service.dart';
+import '../widgets/nearby_hue_ble_prompt.dart';
 import '../widgets/room_picker_sheet.dart';
 import '../widgets/settings_row.dart';
 import '../widgets/solar_orbit.dart'; // For CelestialColors
@@ -17,7 +21,12 @@ enum _TriageFilter { all, devices, rooms }
 /// Shows pending triage entries (device merges and room bindings) and allows
 /// the user to merge, keep separate, bind rooms, or dismiss.
 class TriageScreen extends StatefulWidget {
-  const TriageScreen({super.key});
+  const TriageScreen({
+    super.key,
+    @visibleForTesting this.hueBleDiscoveryRequest,
+  });
+
+  final HueBleDiscoveryRequest? hueBleDiscoveryRequest;
 
   /// Combined "Add & Review" screen — pair new devices/rooms and resolve any
   /// pending device-review items in one place.
@@ -47,6 +56,38 @@ class _TriageScreenState extends State<TriageScreen> {
     super.initState();
     AnalyticsService().logScreenView('device_review');
     _loadEntries();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_discoverNearbyHueBle());
+    });
+  }
+
+  Future<void> _discoverNearbyHueBle() async {
+    final syncProvider = context.read<ServerSyncProvider>();
+    if (!syncProvider.canAddHueBleDevice) return;
+
+    final discover = widget.hueBleDiscoveryRequest ??
+        HueBleAutoDiscoveryService.instance.discover;
+    final discovery = await discover(source: 'add_review');
+    if (!mounted ||
+        !discovery.found ||
+        ModalRoute.of(context)?.isCurrent != true) {
+      return;
+    }
+
+    final accepted = await showNearbyHueBlePrompt(
+      context,
+      source: 'add_review',
+      discovery: discovery,
+    );
+    if (!accepted || !mounted) return;
+
+    await startDevicePairingFlow(
+      context,
+      target: DevicePairingTarget.hueBle,
+      analyticsSource: 'add_review',
+      hueBleInputMethod: 'auto_discovery',
+    );
+    if (mounted) await _loadEntries();
   }
 
   String _kindForEntry(Map<String, dynamic> entry) =>
@@ -266,7 +307,7 @@ class _TriageScreenState extends State<TriageScreen> {
         RhythmServerHubManagementSection(
           showConfigured: false,
           showMatterAddOption: false,
-          showHueBleAddOption: true,
+          showHueBleAddOption: false,
           addOptionsTitle: 'SYNC FROM A HUB',
           addOptionsSubtitle:
               'Bring in devices already paired with Home Assistant or '

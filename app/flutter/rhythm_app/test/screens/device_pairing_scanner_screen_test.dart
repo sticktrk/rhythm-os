@@ -4,6 +4,7 @@ import 'package:rhythm_app/backend/backend.dart';
 import 'package:rhythm_app/screens/hubs/device_pairing_code_entry_screen.dart';
 import 'package:rhythm_app/screens/hubs/device_pairing_scanner_screen.dart';
 import 'package:rhythm_app/services/analytics_service.dart';
+import 'package:rhythm_app/services/hue_ble_auto_discovery_service.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 import '../helpers/capturing_analytics_backend.dart';
@@ -17,11 +18,16 @@ void main() {
   Widget buildScanner({
     bool hueBridgeSerialSearchAvailable = false,
     bool hueBridgeOnly = false,
+    bool autoDiscoverHueBle = false,
+    HueBleDiscoveryRequest? hueBleDiscoveryRequest,
   }) {
     return MaterialApp(
       home: DevicePairingScannerScreen(
         hueBridgeSerialSearchAvailable: hueBridgeSerialSearchAvailable,
         hueBridgeOnly: hueBridgeOnly,
+        autoDiscoverHueBle: autoDiscoverHueBle,
+        analyticsSource: 'device_camera',
+        hueBleDiscoveryRequest: hueBleDiscoveryRequest,
         cameraBuilder: (context, onDetect) {
           detect = onDetect;
           return const ColoredBox(color: Colors.black);
@@ -56,6 +62,106 @@ void main() {
     expect(find.text('Enter a Code'), findsOneWidget);
   });
 
+  testWidgets('offers a nearby Hue bulb without blocking camera intake', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(430, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    var discoveryCalls = 0;
+
+    await tester.pumpWidget(
+      buildScanner(
+        autoDiscoverHueBle: true,
+        hueBleDiscoveryRequest: ({required source}) async {
+          discoveryCalls += 1;
+          expect(source, 'device_camera');
+          return const HueBleDiscoveryResult(
+            HueBleDiscoveryOutcome.found,
+            deviceCount: 1,
+          );
+        },
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(discoveryCalls, 1);
+    expect(
+      find.byKey(const ValueKey('nearby-hue-ble-prompt')),
+      findsOneWidget,
+    );
+    expect(find.text('Nearby bulb found'), findsOneWidget);
+    expect(
+      find.text(
+        'Rhythm found a nearby Hue Bluetooth bulb. Would you like to add it?',
+      ),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.byKey(const ValueKey('nearby-hue-ble-dismiss')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Scan any device QR code'), findsOneWidget);
+    expect(find.text('Enter a Code'), findsOneWidget);
+    final promptEvent = analyticsBackend.events.singleWhere(
+      (event) => event.name == 'hue_ble_nearby_prompt_answered',
+    );
+    expect(promptEvent.properties, {
+      'source': 'device_camera',
+      'outcome': 'dismissed',
+    });
+  });
+
+  testWidgets('returns an accepted nearby Hue bulb to the add flow', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(430, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    DevicePairingScannerResult? result;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () async {
+                result = await Navigator.of(context)
+                    .push<DevicePairingScannerResult>(
+                  MaterialPageRoute(
+                    builder: (_) => DevicePairingScannerScreen(
+                      autoDiscoverHueBle: true,
+                      analyticsSource: 'device_camera',
+                      journeyId: 'device-pair-nearby',
+                      hueBleDiscoveryRequest: ({required source}) async {
+                        return const HueBleDiscoveryResult(
+                          HueBleDiscoveryOutcome.found,
+                          deviceCount: 1,
+                        );
+                      },
+                      cameraBuilder: (context, onDetect) {
+                        detect = onDetect;
+                        return const ColoredBox(color: Colors.black);
+                      },
+                    ),
+                  ),
+                );
+              },
+              child: const Text('Open scanner'),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Open scanner'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('nearby-hue-ble-accept')));
+    await tester.pumpAndSettle();
+
+    expect(result?.action, DevicePairingScannerAction.hueBle);
+    expect(result?.inputMethod, 'auto_discovery');
+    expect(result?.journeyId, 'device-pair-nearby');
+  });
+
   testWidgets('fits the camera actions on a short phone', (tester) async {
     await tester.binding.setSurfaceSize(const Size(320, 568));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -88,7 +194,7 @@ void main() {
       await tester.pump();
       detect(const ['https://www.philips-hue.com/connectproduct']);
       await tester.pump();
-      expect(find.text('Use nearby Bluetooth scan'), findsOneWidget);
+      expect(find.text('Use Add Device'), findsOneWidget);
 
       await tester.tap(find.text('Scan Another Code'));
       await tester.pump();
@@ -452,7 +558,7 @@ void main() {
     await tester.pump();
 
     expect(result, isNull);
-    expect(find.text('Use nearby Bluetooth scan'), findsOneWidget);
+    expect(find.text('Use Add Device'), findsOneWidget);
     expect(find.textContaining('directly'), findsOneWidget);
   });
 
