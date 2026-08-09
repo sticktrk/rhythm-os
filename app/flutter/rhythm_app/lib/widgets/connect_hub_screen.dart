@@ -3187,12 +3187,17 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
           ),
           if (subtitle != null) ...[
             const SizedBox(width: 8),
-            Text(
-              subtitle,
-              style: TextStyle(
-                color: CelestialColors.textSecondary.withValues(alpha: 0.42),
-                fontSize: 10.5,
-                fontWeight: FontWeight.w500,
+            Flexible(
+              child: Text(
+                subtitle,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color:
+                      CelestialColors.textSecondary.withValues(alpha: 0.42),
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.w500,
+                ),
               ),
             ),
           ],
