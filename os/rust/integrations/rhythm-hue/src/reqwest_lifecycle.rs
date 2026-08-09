@@ -1291,6 +1291,7 @@ impl ExternalLightHubIntegration for HueIntegration {
                 "Hue Bridge found the bulb, but Rhythm could not confirm its exact V2 device projection after refresh: {projection_error}"
             )
         })?;
+        reconcile_paired_light_names(state, &key, &mut devices)?;
         devices.sort_by(|left, right| left.device_id.cmp(&right.device_id));
         Ok(PairingSession {
             hub_type: HubType::HUE.to_string(),
@@ -1695,6 +1696,45 @@ fn bridge_light_devices(state: &SharedState, key: &HubKey) -> Vec<PairedDeviceIn
             })
         })
         .collect()
+}
+
+fn reconcile_paired_light_names(
+    state: &SharedState,
+    key: &HubKey,
+    devices: &mut [PairedDeviceInfo],
+) -> Result<()> {
+    let transaction_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .external_topology_transaction_lock
+        .clone();
+    let _transaction = transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
+    let mut scope = rhythm_os::device_naming::LightNameReconciliationScope::default();
+    {
+        let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        for device in devices.iter() {
+            if let Some(canonical) = state
+                .canonical_registry
+                .find_by_native_id(key, &device.device_id)
+            {
+                scope.include_device(canonical.id.clone());
+            }
+        }
+    }
+    rhythm_os::device_naming::reconcile_automatic_light_names(state, &scope)?;
+
+    let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    for device in devices {
+        if let Some(canonical) = state
+            .canonical_registry
+            .find_by_native_id(key, &device.device_id)
+        {
+            device.name = canonical.name.clone();
+        }
+    }
+    Ok(())
 }
 
 // ============================================================================
@@ -2688,6 +2728,48 @@ mod tests {
             | ResolveResult::Created { canonical_id } => canonical_id,
             ResolveResult::Queued { .. } => panic!("unexpected triage"),
         }
+    }
+
+    #[test]
+    fn pairing_name_reconciliation_only_touches_projected_devices() {
+        let state = shared_state();
+        let key = hue_key("192.0.2.10");
+        let paired_id = add_hue_light_endpoint(&state, &key, "hue-paired");
+        let unrelated_id = add_hue_light_endpoint(&state, &key, "hue-unrelated");
+        let renamed_native_ids = Arc::new(Mutex::new(Vec::<String>::new()));
+        state.lock().unwrap().rename_hub_device_fn = Some(Arc::new({
+            let renamed_native_ids = renamed_native_ids.clone();
+            move |_, _, native_id, _| {
+                renamed_native_ids
+                    .lock()
+                    .unwrap()
+                    .push(native_id.to_string());
+                Ok(())
+            }
+        }));
+        let mut paired_devices = bridge_light_devices(&state, &key)
+            .into_iter()
+            .filter(|device| device.device_id == "hue-paired")
+            .collect::<Vec<_>>();
+
+        reconcile_paired_light_names(&state, &key, &mut paired_devices).unwrap();
+
+        let state = state.lock().unwrap();
+        assert!(state
+            .canonical_registry
+            .get(&paired_id)
+            .unwrap()
+            .name
+            .starts_with("Hue Zig "));
+        assert_eq!(
+            state.canonical_registry.get(&unrelated_id).unwrap().name,
+            "Test Hue lamp"
+        );
+        assert!(paired_devices[0].name.starts_with("Hue Zig "));
+        assert_eq!(
+            renamed_native_ids.lock().unwrap().as_slice(),
+            ["hue-paired"]
+        );
     }
 
     fn install_address_migration_graph(state: &SharedState, old_key: &HubKey) -> (String, String) {

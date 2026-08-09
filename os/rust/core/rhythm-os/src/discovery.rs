@@ -109,6 +109,15 @@ pub trait HubDiscovery: Send + Sync {
             .collect())
     }
 
+    /// Return integration-normalized metadata for one canonical endpoint.
+    ///
+    /// Discovery calls this only after `discover_identities`, allowing an
+    /// integration to publish capabilities gathered while producing the
+    /// identity snapshot at the same time the canonical endpoint is created.
+    fn endpoint_capabilities(&self, _native_id: &str) -> Option<serde_json::Value> {
+        None
+    }
+
     /// Discover current motion sensor states from the hub.
     ///
     /// Used at startup to seed the motion timer system with sensors

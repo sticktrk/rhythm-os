@@ -287,14 +287,6 @@ fn sync_from_hub_for_key_acquired(
         discover_devices,
         failure_policy,
     )?;
-    if let Err(error) = crate::device_naming::reconcile_automatic_light_names_after_discovery(state)
-    {
-        warn!(
-            target: "device_naming",
-            "automatic_light_name_reconciliation_failed stage=discovery error={}",
-            error
-        );
-    }
     commands::reconcile_runtime_from_state(state)?;
     Ok(report)
 }
@@ -526,6 +518,14 @@ fn sync_with_discovery(
             .iter()
             .map(|identity| identity.native_id.clone())
             .collect();
+        let discovered_endpoint_capabilities: HashMap<String, serde_json::Value> = identities
+            .iter()
+            .filter_map(|identity| {
+                discovery
+                    .endpoint_capabilities(&identity.native_id)
+                    .map(|capabilities| (identity.native_id.clone(), capabilities))
+            })
+            .collect();
         let has_typed_light_identities = identities
             .iter()
             .any(|identity| identity.device_type == DeviceType::Light);
@@ -604,6 +604,22 @@ fn sync_with_discovery(
                         ResolveResult::Queued { .. } => continue,
                         ResolveResult::Created { canonical_id } => (canonical_id, true),
                     };
+                    if let Some(capabilities) =
+                        discovered_endpoint_capabilities.get(&identity.native_id)
+                    {
+                        if let Some(endpoint) = s
+                            .canonical_registry
+                            .get_mut(&canonical_id)
+                            .and_then(|device| {
+                                device.endpoints.iter_mut().find(|endpoint| {
+                                    endpoint.hub_key == canonical_hub_key
+                                        && endpoint.native_id == identity.native_id
+                                })
+                            })
+                        {
+                            endpoint.capabilities = Some(capabilities.clone());
+                        }
+                    }
                     if created_canonical_device && identity.device_type == DeviceType::Light {
                         new_light_canonical_ids.insert(canonical_id.clone());
                     }

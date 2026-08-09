@@ -1,6 +1,6 @@
 //! Deterministic automatic names for canonical light devices.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 use log::warn;
@@ -19,27 +19,54 @@ struct PlannedLightName {
     hue_endpoints: Vec<(HubKey, String)>,
 }
 
-/// Reconcile every active light name from canonical metadata and topology.
+/// The smallest canonical/topology region whose generated light names may
+/// have changed after one user or discovery operation.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LightNameReconciliationScope {
+    device_ids: HashSet<String>,
+    room_ids: HashSet<Option<String>>,
+}
+
+impl LightNameReconciliationScope {
+    pub fn for_device(device_id: impl Into<String>) -> Self {
+        let mut scope = Self::default();
+        scope.include_device(device_id);
+        scope
+    }
+
+    pub fn for_room(room_id: Option<String>) -> Self {
+        let mut scope = Self::default();
+        scope.include_room(room_id);
+        scope
+    }
+
+    pub fn include_device(&mut self, device_id: impl Into<String>) {
+        self.device_ids.insert(device_id.into());
+    }
+
+    pub fn include_room(&mut self, room_id: Option<String>) {
+        self.room_ids.insert(room_id);
+    }
+
+    fn includes(&self, device_id: &str, room_id: &Option<String>) -> bool {
+        self.device_ids.contains(device_id) || self.room_ids.contains(room_id)
+    }
+}
+
+/// Reconcile only active light names affected by one discovery/topology event.
 ///
 /// Callers already serialize discovery/topology mutations with the external
 /// topology transaction. Hue native writes happen before the corresponding
 /// local name is committed. Per-device failures are deliberately contained so
 /// an unavailable bridge cannot roll back an otherwise durable room mutation.
-pub fn reconcile_automatic_light_names(state: &SharedState) -> Result<usize> {
-    reconcile_light_names(state, false)
-}
-
-/// Reconcile names after a fresh discovery snapshot, including idempotently
-/// repairing a Hue Bridge name that drifted while Rhythm was offline.
-pub fn reconcile_automatic_light_names_after_discovery(state: &SharedState) -> Result<usize> {
-    reconcile_light_names(state, true)
-}
-
-fn reconcile_light_names(state: &SharedState, verify_hue_native_name: bool) -> Result<usize> {
+pub fn reconcile_automatic_light_names(
+    state: &SharedState,
+    scope: &LightNameReconciliationScope,
+) -> Result<usize> {
     let (plans, rename_hub_device) = {
         let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         (
-            planned_light_names(&state),
+            planned_light_names(&state, scope),
             state.rename_hub_device_fn.clone(),
         )
     };
@@ -47,7 +74,7 @@ fn reconcile_light_names(state: &SharedState, verify_hue_native_name: bool) -> R
     let mut changed = 0;
     for plan in plans {
         let mut native_rename_failed = false;
-        let hue_endpoints = if plan.canonical_name_changed || verify_hue_native_name {
+        let hue_endpoints = if plan.canonical_name_changed {
             plan.hue_endpoints.as_slice()
         } else {
             &[]
@@ -130,7 +157,10 @@ fn sanitized_error_class(error: &anyhow::Error) -> &'static str {
     }
 }
 
-fn planned_light_names(state: &AppState) -> Vec<PlannedLightName> {
+fn planned_light_names(
+    state: &AppState,
+    scope: &LightNameReconciliationScope,
+) -> Vec<PlannedLightName> {
     let mut candidates = state
         .canonical_registry
         .devices()
@@ -157,7 +187,7 @@ fn planned_light_names(state: &AppState) -> Vec<PlannedLightName> {
         .filter_map(|(device, room_id)| {
             let ordinal = ordinals.entry(room_id.clone()).or_insert(0);
             *ordinal += 1;
-            if !device.has_active_endpoint() {
+            if !device.has_active_endpoint() || !scope.includes(&device.id, &room_id) {
                 return None;
             }
             let room_suffix = room_id
@@ -455,7 +485,11 @@ mod tests {
             3,
         );
 
-        let plans = planned_light_names(&state);
+        let mut scope = LightNameReconciliationScope::default();
+        for id in [&hue_id, &matter_id, &roomless_id] {
+            scope.include_device(id.clone());
+        }
+        let plans = planned_light_names(&state, &scope);
         let names = plans
             .into_iter()
             .map(|plan| (plan.canonical_id, plan.desired_name))
@@ -488,8 +522,9 @@ mod tests {
                 }
             }));
 
-        let first = planned_light_names(&state);
-        let second = planned_light_names(&state);
+        let scope = LightNameReconciliationScope::for_device(id);
+        let first = planned_light_names(&state, &scope);
+        let second = planned_light_names(&state, &scope);
         assert_eq!(first, second);
         assert_eq!(first[0].desired_name, "VEND MatThr Color Lamp 1");
     }
@@ -513,7 +548,8 @@ mod tests {
             .endpoints[0]
             .active = false;
 
-        assert!(planned_light_names(&state).is_empty());
+        let scope = LightNameReconciliationScope::for_device(light_id);
+        assert!(planned_light_names(&state, &scope).is_empty());
     }
 
     #[test]
@@ -556,7 +592,8 @@ mod tests {
             .endpoints[0]
             .active = false;
 
-        let plans = planned_light_names(&state);
+        let scope = LightNameReconciliationScope::for_room(Some(room_id));
+        let plans = planned_light_names(&state, &scope);
         assert_eq!(plans.len(), 1);
         assert!(plans[0].desired_name.starts_with("Hue Zig Color Lamp 2 "));
         assert!(plans[0].desired_name.len() <= 32);
@@ -567,7 +604,7 @@ mod tests {
     fn reconciliation_updates_hue_first_then_tracks_room_rename() {
         let shared = Arc::new(Mutex::new(AppState::default()));
         let calls = Arc::new(Mutex::new(Vec::<String>::new()));
-        let canonical_id = {
+        let (canonical_id, room_id) = {
             let mut state = shared.lock().unwrap();
             let room_id = state.topology.create_room("Guest Bath");
             let canonical_id = add_light(
@@ -595,10 +632,14 @@ mod tests {
                     Ok(())
                 }
             }));
-            canonical_id
+            (canonical_id, room_id)
         };
 
-        assert_eq!(reconcile_automatic_light_names(&shared).unwrap(), 1);
+        let device_scope = LightNameReconciliationScope::for_device(canonical_id.clone());
+        assert_eq!(
+            reconcile_automatic_light_names(&shared, &device_scope).unwrap(),
+            1
+        );
         assert_eq!(
             shared
                 .lock()
@@ -611,16 +652,13 @@ mod tests {
         );
         {
             let mut state = shared.lock().unwrap();
-            let room_id = state
-                .canonical_registry
-                .get(&canonical_id)
-                .unwrap()
-                .room_id
-                .clone()
-                .unwrap();
             assert!(state.topology.rename_room(&room_id, "Master Bedroom"));
         }
-        assert_eq!(reconcile_automatic_light_names(&shared).unwrap(), 1);
+        let room_scope = LightNameReconciliationScope::for_room(Some(room_id));
+        assert_eq!(
+            reconcile_automatic_light_names(&shared, &room_scope).unwrap(),
+            1
+        );
         assert_eq!(
             calls.lock().unwrap().as_slice(),
             [
@@ -650,7 +688,8 @@ mod tests {
             canonical_id
         };
 
-        assert_eq!(reconcile_automatic_light_names(&shared).unwrap(), 0);
+        let scope = LightNameReconciliationScope::for_device(canonical_id.clone());
+        assert_eq!(reconcile_automatic_light_names(&shared, &scope).unwrap(), 0);
         assert_eq!(
             shared
                 .lock()
@@ -664,38 +703,50 @@ mod tests {
     }
 
     #[test]
-    fn discovery_reconciliation_repairs_hue_native_drift_idempotently() {
+    fn scoped_reconciliation_never_renames_an_unrelated_hue_light() {
         let shared = Arc::new(Mutex::new(AppState::default()));
-        let calls = Arc::new(Mutex::new(0usize));
-        {
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let (target_id, unrelated_id) = {
             let mut state = shared.lock().unwrap();
-            let canonical_id = add_light(
+            let target_id = add_light(
                 &mut state,
                 HubKey::new(HubType::new(HubType::HUE), "bridge"),
-                "hue-device",
-                "Original Hue name",
+                "hue-target",
+                "Target source name",
                 "Signify Netherlands B.V.",
                 "LCT016",
                 1,
             );
+            let unrelated_id = add_light(
+                &mut state,
+                HubKey::new(HubType::new(HubType::HUE), "bridge"),
+                "hue-unrelated",
+                "Unrelated source name",
+                "Signify Netherlands B.V.",
+                "LCT016",
+                2,
+            );
             state.rename_hub_device_fn = Some(Arc::new({
                 let calls = calls.clone();
-                move |_, _, _, _| {
-                    *calls.lock().unwrap() += 1;
+                move |_, _, native_id, _| {
+                    calls.lock().unwrap().push(native_id.to_string());
                     Ok(())
                 }
             }));
-            state
-                .canonical_registry
-                .get_mut(&canonical_id)
-                .unwrap()
-                .name = "Hue Zig Color Lamp 1".to_string();
-        }
+            (target_id, unrelated_id)
+        };
 
+        let scope = LightNameReconciliationScope::for_device(target_id.clone());
+        assert_eq!(reconcile_automatic_light_names(&shared, &scope).unwrap(), 1);
+        let state = shared.lock().unwrap();
         assert_eq!(
-            reconcile_automatic_light_names_after_discovery(&shared).unwrap(),
-            0
+            state.canonical_registry.get(&target_id).unwrap().name,
+            "Hue Zig Color Lamp 1"
         );
-        assert_eq!(*calls.lock().unwrap(), 1);
+        assert_eq!(
+            state.canonical_registry.get(&unrelated_id).unwrap().name,
+            "Unrelated source name"
+        );
+        assert_eq!(calls.lock().unwrap().as_slice(), ["hue-target"]);
     }
 }

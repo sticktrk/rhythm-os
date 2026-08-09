@@ -129,6 +129,17 @@ impl HubDiscovery for MatterDiscovery {
 
         Ok(identities)
     }
+
+    fn endpoint_capabilities(&self, native_id: &str) -> Option<serde_json::Value> {
+        let capabilities = self
+            .hub_data
+            .device_caps
+            .lock()
+            .ok()?
+            .get(native_id)
+            .cloned()?;
+        crate::lifecycle::normalized_endpoint_capabilities(&capabilities)
+    }
 }
 
 #[cfg(test)]
