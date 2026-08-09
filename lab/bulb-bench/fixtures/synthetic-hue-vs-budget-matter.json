@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "metadata": {
+    "label": "synthetic Hue reference versus budget Matter bulb",
+    "synthetic": true,
+    "notes": [
+      "Development fixture only; values are intentionally illustrative and are not measurements of a retail product.",
+      "Brightness readings compare curve shape after per-bulb normalization, not absolute lumen output.",
+      "CCT observations are assumed to have been captured at the same representative brightness and geometry."
+    ]
+  },
+  "reference": {
+    "bulb_id": "synthetic-hue-reference",
+    "protocol": "hue",
+    "device": {
+      "manufacturer": "Synthetic Signify",
+      "model": "SYNTH-HUE-REF",
+      "name": "Synthetic Hue reference",
+      "light_type": "color_temperature",
+      "color_modes": ["color_temperature"],
+      "min_kelvin": 2200,
+      "max_kelvin": 6500
+    },
+    "brightness": [
+      { "command_percent": 1, "measured_lux": 1, "stable": true },
+      { "command_percent": 5, "measured_lux": 6, "stable": true },
+      { "command_percent": 10, "measured_lux": 14, "stable": true },
+      { "command_percent": 25, "measured_lux": 35, "stable": true },
+      { "command_percent": 50, "measured_lux": 62, "stable": true },
+      { "command_percent": 75, "measured_lux": 82, "stable": true },
+      { "command_percent": 100, "measured_lux": 100, "stable": true }
+    ],
+    "color_temperature": [
+      { "command_kelvin": 2200, "measured_kelvin": 2230, "duv": 0.0008, "stable": true },
+      { "command_kelvin": 2700, "measured_kelvin": 2715, "duv": 0.0005, "stable": true },
+      { "command_kelvin": 3000, "measured_kelvin": 3020, "duv": 0.0004, "stable": true },
+      { "command_kelvin": 4000, "measured_kelvin": 3980, "duv": 0.0003, "stable": true },
+      { "command_kelvin": 5000, "measured_kelvin": 4960, "duv": 0.0006, "stable": true },
+      { "command_kelvin": 6500, "measured_kelvin": 6420, "duv": 0.001, "stable": true }
+    ]
+  },
+  "candidate": {
+    "bulb_id": "synthetic-budget-matter",
+    "protocol": "matter-over-wifi",
+    "device": {
+      "manufacturer": "Synthetic Budget Lighting",
+      "model": "SYNTH-MATTER-A19",
+      "name": "Synthetic budget Matter A19",
+      "light_type": "color_temperature",
+      "color_modes": ["color_temperature"],
+      "min_kelvin": 2200,
+      "max_kelvin": 6500,
+      "matter": {
+        "vendor_id": 65534,
+        "product_id": 1
+      }
+    },
+    "brightness": [
+      { "command_percent": 1, "measured_lux": 0, "stable": false },
+      { "command_percent": 3, "measured_lux": 0.1, "stable": false },
+      { "command_percent": 5, "measured_lux": 0.3, "stable": false },
+      { "command_percent": 7, "measured_lux": 1, "stable": true },
+      { "command_percent": 10, "measured_lux": 4, "stable": true },
+      { "command_percent": 15, "measured_lux": 8, "stable": true },
+      { "command_percent": 25, "measured_lux": 20, "stable": true },
+      { "command_percent": 50, "measured_lux": 52, "stable": true },
+      { "command_percent": 75, "measured_lux": 79, "stable": true },
+      { "command_percent": 100, "measured_lux": 100, "stable": true }
+    ],
+    "color_temperature": [
+      { "command_kelvin": 2200, "measured_kelvin": 2500, "duv": 0.007, "stable": true },
+      { "command_kelvin": 2700, "measured_kelvin": 3040, "duv": 0.006, "stable": true },
+      { "command_kelvin": 3000, "measured_kelvin": 3350, "duv": 0.0055, "stable": true },
+      { "command_kelvin": 4000, "measured_kelvin": 4320, "duv": 0.0045, "stable": true },
+      { "command_kelvin": 5000, "measured_kelvin": 5300, "duv": 0.004, "stable": true },
+      { "command_kelvin": 6500, "measured_kelvin": 6700, "duv": 0.004, "stable": true }
+    ],
+    "behavior": {
+      "needs_explicit_on": true,
+      "color_temperature_command_resets_level": true,
+      "recommended_command_spacing_ms": 120,
+      "notes": [
+        "Synthetic example of a bulb that drops rapid commands and reloads level on CT changes."
+      ]
+    }
+  }
+}

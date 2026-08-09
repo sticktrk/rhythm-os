@@ -25,6 +25,7 @@
 
 pub mod adapt;
 pub mod capabilities;
+pub mod correction;
 pub mod entry;
 pub mod gamut;
 pub mod lookup;
@@ -32,6 +33,9 @@ pub mod quirks;
 
 pub use adapt::{adapt_command, AdaptedCommand, ColorPreference, ColorRequest};
 pub use capabilities::{ColorMode, LightCapabilities, LightType};
+pub use correction::{
+    BrightnessCorrectionPoint, ColorTemperatureCorrectionPoint, ControlCorrections,
+};
 pub use entry::DeviceEntry;
 pub use gamut::{GamutTriangle, XyPoint};
 pub use lookup::DeviceDatabase;

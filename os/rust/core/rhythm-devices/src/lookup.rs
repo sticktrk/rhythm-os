@@ -65,6 +65,12 @@ impl DeviceDatabase {
     pub fn builtin() -> Self {
         let entries: Vec<DeviceEntry> = serde_json::from_str(include_str!("../data/devices.json"))
             .expect("built-in devices.json must be valid");
+        assert!(
+            entries
+                .iter()
+                .all(|entry| entry.control_corrections.is_valid()),
+            "built-in devices.json control corrections must be valid"
+        );
         Self::from_entries(entries)
     }
 
@@ -224,6 +230,7 @@ mod tests {
             gamut: None,
             min_brightness: Some(3),
             supports_transition: true,
+            control_corrections: crate::ControlCorrections::default(),
             aliases: vec![],
             zigbee: None,
             hue_api: None,

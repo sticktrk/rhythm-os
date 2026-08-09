@@ -280,6 +280,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "rhythm-devices",
  "serde",
  "serde_json",
 ]

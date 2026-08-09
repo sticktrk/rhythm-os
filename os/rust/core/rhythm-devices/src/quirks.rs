@@ -31,19 +31,31 @@ pub enum DeviceQuirk {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct ZigbeeDeviceData {
     /// Zigbee model identifier string (often matches the model field, but not always).
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
     pub model_id: Option<String>,
 
     /// Manufacturer code (e.g., "0x100B" for Signify).
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
     pub mfr_code: Option<String>,
 
     /// ZigBee endpoint for light control.
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
     pub endpoint: Option<u8>,
 
     /// Zigbee-specific quirks.
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Vec::is_empty")
+    )]
     pub quirks: Vec<DeviceQuirk>,
 }
 
@@ -52,7 +64,10 @@ pub struct ZigbeeDeviceData {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct HueApiData {
     /// Delay needed between grouped_light commands for this device (ms).
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
     pub grouped_light_delay_ms: Option<u32>,
 }
 
@@ -61,15 +76,24 @@ pub struct HueApiData {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct MatterDeviceData {
     /// Matter vendor ID (from Basic Information cluster).
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
     pub vendor_id: Option<u16>,
 
     /// Matter product ID (from Basic Information cluster).
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
     pub product_id: Option<u16>,
 
     /// Matter-specific quirks.
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Vec::is_empty")
+    )]
     pub quirks: Vec<DeviceQuirk>,
 }
 

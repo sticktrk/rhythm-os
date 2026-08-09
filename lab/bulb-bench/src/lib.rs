@@ -7,10 +7,15 @@ pub mod config;
 pub mod drivers;
 pub mod manifest;
 pub mod plan;
+pub mod profile;
 
 pub use config::{BenchConfig, MeasurementMode};
 pub use manifest::RunManifest;
 pub use plan::{build_plan, PlannedStep, RunPlan, StepKind, Suite};
+pub use profile::{
+    analyze_profile, update_rhythm_devices_database, ComparisonDataset, DatabaseUpdate,
+    MatterProfileProposal,
+};
 
 use anyhow::{bail, Result};
 

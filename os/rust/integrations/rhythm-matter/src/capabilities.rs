@@ -37,6 +37,7 @@ pub fn capabilities_from_commissioned(device: &CommissionedDevice) -> LightCapab
         gamut: None, // Matter doesn't report gamut; can be enriched from DB later
         min_brightness: None, // Not reported by Matter; can be enriched from DB later
         supports_transition: true, // Matter Level Control supports transitions
+        control_corrections: rhythm_devices::ControlCorrections::default(),
     }
 }
 
@@ -80,6 +81,17 @@ pub fn enrich_from_db(
         }
         if caps.min_brightness.is_none() {
             caps.min_brightness = entry.min_brightness;
+        }
+        if caps.control_corrections.is_empty() {
+            caps.control_corrections = entry.control_corrections.clone();
+        }
+        // A measurement-derived correction profile makes the database's
+        // logical CT envelope authoritative. The Matter cluster range still
+        // describes accepted device commands; the correction curve may map a
+        // logical endpoint to a command outside this narrower logical range.
+        if !entry.control_corrections.color_temperature.is_empty() {
+            caps.min_kelvin = entry.min_kelvin.or(caps.min_kelvin);
+            caps.max_kelvin = entry.max_kelvin.or(caps.max_kelvin);
         }
 
         // Some Matter bulbs omit XY from their descriptor even though XY is
@@ -254,6 +266,7 @@ mod tests {
             gamut: Some(gamut.clone()),
             min_brightness: Some(3),
             supports_transition: true,
+            control_corrections: rhythm_devices::ControlCorrections::default(),
             aliases: vec![],
             zigbee: None,
             hue_api: None,
@@ -294,6 +307,74 @@ mod tests {
         assert_eq!(caps.gamut, None);
         assert_eq!(caps.min_brightness, None);
         assert_eq!(caps.min_kelvin, Some(2700));
+    }
+
+    #[test]
+    fn measured_profile_enriches_corrections_and_logical_ct_envelope() {
+        use rhythm_devices::{
+            BrightnessCorrectionPoint, ColorTemperatureCorrectionPoint, ControlCorrections,
+            DeviceDatabase, DeviceEntry,
+        };
+
+        let device = CommissionedDevice {
+            node_id: 7,
+            vendor_name: "BudgetCo".to_string(),
+            product_name: "Matter A19".to_string(),
+            vendor_id: 0,
+            product_id: 0,
+            serial_number: None,
+            light_endpoint: 1,
+            color_modes: vec![MatterColorMode::ColorTemperature],
+            min_kelvin: Some(2200),
+            max_kelvin: Some(7000),
+        };
+        let db = DeviceDatabase::from_entries(vec![DeviceEntry {
+            manufacturer: "BudgetCo".to_string(),
+            model: "Matter A19".to_string(),
+            name: "BudgetCo Matter A19".to_string(),
+            light_type: LightType::ColorTemperature,
+            color_modes: vec![ColorMode::ColorTemperature],
+            min_kelvin: Some(2700),
+            max_kelvin: Some(6500),
+            gamut: None,
+            min_brightness: Some(7),
+            supports_transition: true,
+            control_corrections: ControlCorrections {
+                brightness: vec![
+                    BrightnessCorrectionPoint {
+                        logical_percent: 1,
+                        command_percent: 7,
+                    },
+                    BrightnessCorrectionPoint {
+                        logical_percent: 100,
+                        command_percent: 100,
+                    },
+                ],
+                color_temperature: vec![
+                    ColorTemperatureCorrectionPoint {
+                        logical_kelvin: 2700,
+                        command_kelvin: 2400,
+                    },
+                    ColorTemperatureCorrectionPoint {
+                        logical_kelvin: 6500,
+                        command_kelvin: 6200,
+                    },
+                ],
+            },
+            aliases: vec![],
+            zigbee: None,
+            hue_api: None,
+            matter: None,
+        }]);
+
+        let mut caps = capabilities_from_commissioned(&device);
+        enrich_from_db(&mut caps, &device, &db);
+
+        assert_eq!(caps.min_brightness, Some(7));
+        assert_eq!(caps.min_kelvin, Some(2700));
+        assert_eq!(caps.max_kelvin, Some(6500));
+        assert_eq!(caps.control_corrections.map_brightness(1), 7);
+        assert_eq!(caps.control_corrections.map_color_temperature(2700), 2400);
     }
 
     #[test]
@@ -358,6 +439,7 @@ mod tests {
             gamut: None,
             min_brightness: None,
             supports_transition: true,
+            control_corrections: rhythm_devices::ControlCorrections::default(),
             aliases: vec![],
             zigbee: None,
             hue_api: None,
