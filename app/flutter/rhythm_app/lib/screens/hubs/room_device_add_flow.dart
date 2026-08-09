@@ -142,10 +142,15 @@ Future<void> startRoomDeviceAddFlow(
 
   if (selection.isScan) {
     final syncProvider = context.read<ServerSyncProvider>();
-    if (!syncProvider.canScanToAddDevice) {
+    if (!syncProvider.canScanToAddDeviceType(deviceType)) {
+      final unavailableLabel = deviceType == RhythmDeviceType.light
+          ? 'bulbs'
+          : _pluralDeviceLabel(deviceType).toLowerCase();
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Scanning is not available on this Rhythm Box yet.'),
+        SnackBar(
+          content: Text(
+            'Adding $unavailableLabel is not available on this Rhythm Box yet.',
+          ),
         ),
       );
       return;

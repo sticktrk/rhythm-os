@@ -933,6 +933,23 @@ class ServerSyncProvider extends ChangeNotifier {
       canAddHueBleDevice ||
       canAddLocalBleDevice;
 
+  /// Whether at least one advertised onboarding path can produce [deviceType].
+  ///
+  /// Room-scoped add actions use this narrower predicate so, for example, a
+  /// Box advertising only a button QR profile does not offer bulb pairing.
+  bool canScanToAddDeviceType(RhythmDeviceType deviceType) {
+    final hasMatchingLocalBleProfile = supportedLocalBleProfileIds.any(
+      (profileId) => localBleDeviceTypeForProfile(profileId) == deviceType,
+    );
+    if (deviceType == RhythmDeviceType.light) {
+      return canAddMatterDevice ||
+          canAddHueBridgeDeviceBySerial ||
+          canAddHueBleDevice ||
+          hasMatchingLocalBleProfile;
+    }
+    return hasMatchingLocalBleProfile;
+  }
+
   /// Whether no hubs are configured on the server.
   bool get hasNoHubConfigured =>
       _lastHubInfos.isEmpty ||

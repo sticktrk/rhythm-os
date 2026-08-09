@@ -27,8 +27,8 @@ void main() {
 
   test('recent feature events use stable privacy-safe properties', () async {
     await analytics.logRoomDeviceAddMethodSelected(
-      source: 'room_settings_motion',
-      deviceType: 'motion',
+      source: 'room_settings_light',
+      deviceType: 'light',
       method: 'existing',
     );
     await analytics.logDevicePairingCodeDetected(
@@ -109,8 +109,8 @@ void main() {
       ],
     );
     expect(backend.events.first.properties, {
-      'source': 'room_settings_motion',
-      'device_type': 'motion',
+      'source': 'room_settings_light',
+      'device_type': 'light',
       'method': 'existing',
     });
     expect(

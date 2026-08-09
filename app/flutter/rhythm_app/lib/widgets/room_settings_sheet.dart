@@ -392,6 +392,19 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
       key: const ValueKey('light'),
       padding: const EdgeInsets.symmetric(horizontal: 20),
       children: [
+        if (room.kind.isRoom) ...[
+          _buildSettingsGroup('', [
+            _buildAddDeviceAction(
+              key: const ValueKey('room-settings-add-bulb'),
+              label: 'Add Bulb',
+              icon: Icons.add_circle_outline_rounded,
+              color: const Color(0xFFFFB74D),
+              deviceType: RhythmDeviceType.light,
+              analyticsSource: 'room_settings_light',
+            ),
+          ]),
+          const SizedBox(height: 16),
+        ],
         // Low glow is the user-facing name for the room's existing Standby
         // preference, independent of the Day/Sleep profile selection.
         _buildSettingsGroup('', [
