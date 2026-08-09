@@ -7976,6 +7976,138 @@ void main() {
     );
   });
 
+  testWidgets('room motion tab includes a sensor parented to another room',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.binding.setSurfaceSize(const Size(390, 900));
+    api.topologyNodes = [
+      RhythmTopologyNode.fromJson({
+        'id': 'room-1',
+        'name': 'Drop Zone',
+        'kind': 'room',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'room-2',
+        'name': 'Stairwell',
+        'kind': 'room',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'sensor-1',
+        'name': 'Drop zone hallway',
+        'kind': 'motion_sensor',
+        'parent_id': 'room-2',
+        'controls': [
+          {'kind': 'motion', 'target_id': 'room-1', 'inherited': false},
+          {'kind': 'motion', 'target_id': 'room-2', 'inherited': true},
+        ],
+      }),
+    ];
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Drop Zone',
+            'kind': 'room',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+          },
+          {
+            'id': 'room-2',
+            'name': 'Stairwell',
+            'kind': 'room',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+            'devices': [
+              {
+                'id': 'sensor-1',
+                'type': 'motion',
+                'name': 'Drop zone hallway',
+              },
+            ],
+          },
+        ],
+        'location': const <String, dynamic>{},
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pump();
+    expect(provider.topologyNodes, hasLength(3));
+    expect(
+      provider.controlSourceNodesForTarget(
+        targetNodeId: 'room-1',
+        controlKind: 'motion',
+      ),
+      hasLength(1),
+    );
+    expect(provider.deviceForNode('sensor-1')?.type, RhythmDeviceType.motion);
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const RoomSettingsSheet(
+          enableLivePreview: false,
+          room: RoomDto(
+            id: 'room-1',
+            name: 'Drop Zone',
+            source: RoomSourceDto.matter,
+            deviceIds: [],
+            rhythmEnabled: true,
+            disabled: false,
+            lightsOn: true,
+            timeOffsetMinutes: 0,
+            brightnessOffset: 0,
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+    await _selectRoomSettingsTab(tester, 'Motion');
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('motion')), findsOneWidget);
+    expect(
+      find.text('MOTION SENSORS', skipOffstage: false),
+      findsOneWidget,
+    );
+    expect(
+      find.text('Drop zone hallway', skipOffstage: false),
+      findsOneWidget,
+    );
+
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget.runtimeType.toString() == '_DeviceRow' &&
+            (widget as dynamic).roomId == 'room-2',
+        skipOffstage: false,
+      ),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('Room card device flow offers Remove from Room for Matter bulbs',
       (tester) async {
     _registerWidgetCleanup(tester);

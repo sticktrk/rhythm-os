@@ -425,9 +425,27 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
     );
     final settings = syncProvider.nodeById(room.id)?.profileSettings;
     final devices = syncProvider.devicesForRoom(room.id);
-    final motionSensors = devices
-        .where((device) => device.type == RhythmDeviceType.motion)
-        .toList(growable: false);
+    final motionSensorsById = <String, RhythmDevice>{
+      for (final device in devices)
+        if (device.type == RhythmDeviceType.motion) device.id: device,
+    };
+    final motionParentIds = <String, String>{};
+    for (final sourceNode in syncProvider.controlSourceNodesForTarget(
+      targetNodeId: room.id,
+      controlKind: 'motion',
+    )) {
+      final device = syncProvider.deviceForNode(sourceNode.id);
+      if (device == null || device.type != RhythmDeviceType.motion) continue;
+      motionSensorsById[device.id] = device;
+      final parentId = sourceNode.parentId;
+      if (parentId != null && parentId.isNotEmpty) {
+        motionParentIds[device.id] = parentId;
+      }
+    }
+    final motionSensors = motionSensorsById.values.toList(growable: false)
+      ..sort(
+        (left, right) => (left.name ?? '').compareTo(right.name ?? ''),
+      );
     final contactSensors = devices
         .where((device) => device.type == RhythmDeviceType.contact)
         .toList(growable: false);
@@ -449,7 +467,11 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
           ]),
         if (motionSensors.isNotEmpty) ...[
           if (room.kind.isRoom) const SizedBox(height: 16),
-          _buildDeviceGroup('Motion Sensors', motionSensors),
+          _buildDeviceGroup(
+            'Motion Sensors',
+            motionSensors,
+            parentNodeIdsByDevice: motionParentIds,
+          ),
         ],
         if (hasMotionBehavior) ...[
           if (room.kind.isRoom || motionSensors.isNotEmpty)
@@ -926,9 +948,17 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
     );
   }
 
-  Widget _buildDeviceGroup(String title, List<RhythmDevice> devices) {
+  Widget _buildDeviceGroup(
+    String title,
+    List<RhythmDevice> devices, {
+    Map<String, String> parentNodeIdsByDevice = const {},
+  }) {
     return _buildSettingsGroup(title, [
-      for (final device in devices) _DeviceRow(device: device, roomId: room.id),
+      for (final device in devices)
+        _DeviceRow(
+          device: device,
+          roomId: parentNodeIdsByDevice[device.id] ?? room.id,
+        ),
     ]);
   }
 
