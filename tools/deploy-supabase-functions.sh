@@ -83,8 +83,9 @@ WORKDIR="tools/app"
 FUNCTION_DIR="$REPO_ROOT/tools/app/supabase/functions"
 
 AVAILABLE_FUNCTIONS=()
-for function_path in "$FUNCTION_DIR"/*; do
-    [ -d "$function_path" ] || continue
+for entrypoint in "$FUNCTION_DIR"/*/index.ts; do
+    [ -f "$entrypoint" ] || continue
+    function_path="$(dirname "$entrypoint")"
     function_name="$(basename "$function_path")"
     case "$function_name" in
         _*) continue ;;
@@ -105,8 +106,8 @@ else
                 die "invalid function name: $function_name"
                 ;;
         esac
-        if [ ! -d "$FUNCTION_DIR/$function_name" ]; then
-            die "function '$function_name' is not in the canonical project (available: ${AVAILABLE_FUNCTIONS[*]})"
+        if [ ! -f "$FUNCTION_DIR/$function_name/index.ts" ]; then
+            die "function '$function_name' has no canonical index.ts entrypoint (available: ${AVAILABLE_FUNCTIONS[*]})"
         fi
     done
 fi

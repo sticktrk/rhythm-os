@@ -32,6 +32,10 @@ if printf '%s\n' "$all_output" | grep -Fq '_shared'; then
     echo "--all attempted to deploy the shared source directory" >&2
     exit 1
 fi
+if printf '%s\n' "$all_output" | grep -Fq 'join-home-by-server-instance'; then
+    echo "--all attempted to deploy a directory without an index.ts entrypoint" >&2
+    exit 1
+fi
 
 if run_dry app report-bug >"$TEMP_DIR/old-scope.out" 2>&1; then
     echo "legacy split-workdir scope was unexpectedly accepted" >&2
