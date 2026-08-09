@@ -28,6 +28,7 @@ const MAX_URL_BYTES: usize = 8 * 1024;
 const MAX_TOKEN_BYTES: usize = 200;
 const CALLBACK_RETRY_INITIAL: Duration = Duration::from_secs(5);
 const CALLBACK_RETRY_MAX: Duration = Duration::from_secs(15 * 60);
+const CALLBACK_TIMEOUT: Duration = Duration::from_secs(30);
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(180);
 const UPLOAD_CACHE_CONTROL: &str = "3600";
 
@@ -107,7 +108,7 @@ pub fn enqueue(state: SharedState, new_job: NewSupportBundleJob) -> Result<Enque
         app_log: new_job.app_log,
         app_metadata: new_job.app_metadata,
         queued_at_epoch_ms: epoch_ms(),
-        auth_fingerprint: auth_fingerprint(&data_dir)
+        auth_fingerprint: auth_fingerprint(&state)
             .ok_or_else(|| anyhow!("server auth identity is unavailable"))?,
         completion: None,
     };
@@ -147,7 +148,7 @@ pub fn resume_pending(state: SharedState) {
             return;
         }
     };
-    let current_fingerprint = auth_fingerprint(&data_dir);
+    let current_fingerprint = auth_fingerprint(&state);
     let ids = {
         let Ok(_guard) = queue_lock().lock() else {
             log::warn!(target: "support_bundle", "Support queue lock poisoned at startup");
@@ -435,12 +436,15 @@ async fn send_completion(
     job: &PersistedSupportBundleJob,
     completion: &SupportBundleCompletion,
 ) -> CallbackDisposition {
-    let response = reqwest::Client::new()
-        .post(&job.completion_url)
-        .bearer_auth(&job.completion_token)
-        .json(completion)
-        .send()
-        .await;
+    let response = match reqwest::Client::builder().timeout(CALLBACK_TIMEOUT).build() {
+        Ok(client) => client,
+        Err(_) => return CallbackDisposition::Retry,
+    }
+    .post(&job.completion_url)
+    .bearer_auth(&job.completion_token)
+    .json(completion)
+    .send()
+    .await;
     match response {
         Ok(response) => callback_status_disposition(response.status()),
         Err(_) => CallbackDisposition::Retry,
@@ -587,9 +591,15 @@ fn sync_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn auth_fingerprint(data_dir: &Path) -> Option<String> {
-    let bytes = fs::read(data_dir.join("auth.json")).ok()?;
-    Some(format!("{:x}", Sha256::digest(bytes)))
+fn auth_fingerprint(state: &SharedState) -> Option<String> {
+    let state = state.lock().ok()?;
+    if !state.pairing_hmac_key_durable || state.pairing_hmac_key.trim().is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{:x}",
+        Sha256::digest(state.pairing_hmac_key.as_bytes())
+    ))
 }
 
 fn valid_submission_id(value: &str) -> bool {
@@ -761,12 +771,25 @@ mod tests {
     }
 
     #[test]
-    fn missing_auth_has_no_resumable_identity() {
-        let dir = temp_dir("missing-auth");
-        assert_eq!(auth_fingerprint(&dir), None);
-        fs::write(dir.join("auth.json"), b"identity").unwrap();
-        assert!(auth_fingerprint(&dir).is_some());
-        fs::remove_dir_all(dir).unwrap();
+    fn auth_fingerprint_uses_the_reset_rotated_pairing_identity() {
+        let state: SharedState = Arc::new(Mutex::new(rhythm_os::state::AppState::default()));
+        let first = auth_fingerprint(&state).unwrap();
+        state
+            .lock()
+            .unwrap()
+            .api_auth
+            .tokens
+            .push(rhythm_os::auth::StoredApiToken {
+                id: "support-session".to_string(),
+                role: rhythm_os::auth::ApiTokenRole::Support,
+                token_hash: "mutable-token-hash".to_string(),
+                created_at_epoch_ms: 1,
+                label: None,
+                expires_at_epoch_ms: Some(2),
+            });
+        assert_eq!(auth_fingerprint(&state).as_deref(), Some(first.as_str()));
+        state.lock().unwrap().pairing_hmac_key = "reset-rotated-key".to_string();
+        assert_ne!(auth_fingerprint(&state).as_deref(), Some(first.as_str()));
     }
 
     #[test]
@@ -830,7 +853,9 @@ mod tests {
         });
 
         let id = "dad2114d-8123-4cfb-92f2-91d711057b49";
-        let mut job = persisted_job(id, &auth_fingerprint(&dir).unwrap());
+        let state: SharedState = Arc::new(Mutex::new(rhythm_os::state::AppState::default()));
+        state.lock().unwrap().data_dir = dir.display().to_string();
+        let mut job = persisted_job(id, &auth_fingerprint(&state).unwrap());
         job.completion_url = format!("http://127.0.0.1:{callback_port}/complete");
         job.upload_url.clear();
         job.app_log = None;
@@ -851,9 +876,6 @@ mod tests {
             },
         )
         .unwrap();
-        let state: SharedState = Arc::new(Mutex::new(rhythm_os::state::AppState::default()));
-        state.lock().unwrap().data_dir = dir.display().to_string();
-
         resume_pending(state);
 
         let request = tokio::time::timeout(Duration::from_secs(2), callback)

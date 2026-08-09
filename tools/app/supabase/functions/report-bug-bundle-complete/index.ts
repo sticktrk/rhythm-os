@@ -59,10 +59,16 @@ Deno.serve(async (req) => {
       return jsonResponse({ error: 'Invalid completion status' }, 400)
     }
 
-    const recoveredObject = requestedStatus === 'failed'
-      ? await findUploadedObject(adminClient, submission.bundle_storage_path)
-      : null
-    const effectiveStatus = recoveredObject ? 'uploaded' : requestedStatus
+    const uploadedObject = await findUploadedObject(
+      adminClient,
+      submission.bundle_storage_path,
+    )
+    if (requestedStatus === 'uploaded' && !uploadedObject) {
+      // Storage object presence, not the appliance callback, owns bundle
+      // availability. A short retry also covers object-listing propagation.
+      return jsonResponse({ status: 'retry', bundle_status: 'collecting' }, 409)
+    }
+    const effectiveStatus = uploadedObject ? 'uploaded' : requestedStatus
     const summary = readObject(payload, 'summary')
     const durationMs = readBoundedInt(payload, 'duration_ms', 0, 86_400_000)
     const now = new Date().toISOString()
@@ -71,7 +77,7 @@ Deno.serve(async (req) => {
       ? uploadedUpdate({
           payload,
           summary,
-          recoveredObject,
+          recoveredObject: uploadedObject,
           durationMs,
           now,
         })
