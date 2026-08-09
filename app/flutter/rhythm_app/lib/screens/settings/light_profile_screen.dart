@@ -1983,15 +1983,10 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
           ),
           Padding(
             padding: const EdgeInsets.fromLTRB(2, 10, 2, 4),
-            child: _DualRangeBar(
+            child: LightProfileBrightnessRangeBar(
               minValue: _minBrightness,
               maxValue: _maxBrightness,
-              hardMin: 1,
-              hardMax: 100,
-              minThumbMax: 50,
-              maxThumbMin: 20,
               tint: color,
-              divisions: 99,
               onMinChanged: (v) => _onCurveChanged(() => _minBrightness = v),
               onMaxChanged: (v) => _onCurveChanged(() => _maxBrightness = v),
             ),
@@ -2931,6 +2926,44 @@ class _AdvancedHeaderIcon extends StatelessWidget {
 // ---------------------------------------------------------------------------
 
 enum _DualRangeThumb { min, max }
+
+/// Brightness-specific configuration for the Day profile range control.
+///
+/// Public only so widget tests can exercise the same drag behavior used by the
+/// profile screen without constructing its server-backed provider graph.
+@visibleForTesting
+class LightProfileBrightnessRangeBar extends StatelessWidget {
+  const LightProfileBrightnessRangeBar({
+    super.key,
+    required this.minValue,
+    required this.maxValue,
+    required this.tint,
+    required this.onMinChanged,
+    required this.onMaxChanged,
+  });
+
+  final double minValue;
+  final double maxValue;
+  final Color tint;
+  final ValueChanged<double> onMinChanged;
+  final ValueChanged<double> onMaxChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return _DualRangeBar(
+      minValue: minValue,
+      maxValue: maxValue,
+      hardMin: 1,
+      hardMax: 100,
+      minThumbMax: 50,
+      maxThumbMin: 2,
+      tint: tint,
+      divisions: 99,
+      onMinChanged: onMinChanged,
+      onMaxChanged: onMaxChanged,
+    );
+  }
+}
 
 class _DualRangeBar extends StatefulWidget {
   const _DualRangeBar({
