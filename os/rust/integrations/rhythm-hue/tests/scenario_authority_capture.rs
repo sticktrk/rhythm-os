@@ -9,6 +9,9 @@ use rhythm_hue::transport::HueTransport;
 use rhythm_os::canonical::identity::HubKey;
 use rhythm_os::hub::HubType;
 use rhythm_os::storage::FileStorage;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
 struct TempStorage {
     path: std::path::PathBuf,
@@ -18,8 +21,9 @@ struct TempStorage {
 impl TempStorage {
     fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
-            "rhythm-hue-capture-scenario-{}",
-            std::process::id()
+            "rhythm-hue-capture-scenario-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
         ));
         let _ = std::fs::remove_dir_all(&path);
         let storage = FileStorage::new(path.to_str().unwrap()).unwrap();
@@ -325,5 +329,66 @@ fn takeover_only_disables_automatic_lighting_programs_and_preserves_hue_topology
     assert_eq!(
         retained.baseline().v2_resource("smart_scene").unwrap()["data"][0]["id"],
         "smart-scene-1"
+    );
+}
+
+#[test]
+fn rejected_takeover_mutation_keeps_controller_active_and_continues_suppression() {
+    let temp = TempStorage::new();
+    let bridge = SpyHueTransport::new();
+    bridge.set_resource_response(
+        "bridge",
+        serde_json::json!({"data": [{"id": "bridge-1"}], "errors": []}),
+    );
+    bridge.set_resource_response(
+        "device",
+        serde_json::json!({"data": [{"id": "device-1"}], "errors": []}),
+    );
+    bridge.set_resource_response(
+        "light",
+        serde_json::json!({"data": [{"id": "light-1"}], "errors": []}),
+    );
+    bridge.set_resource_response(
+        "behavior_instance",
+        serde_json::json!({"data": [{
+            "id": "behavior-1",
+            "script_id": "automation-script-1",
+            "enabled": true
+        }], "errors": []}),
+    );
+    bridge.set_resource_response(
+        "behavior_script",
+        serde_json::json!({"data": [{
+            "id": "automation-script-1",
+            "metadata": {"name": "Automation", "category": "automation"}
+        }], "errors": []}),
+    );
+    for resource_type in ["room", "zone", "scene", "smart_scene"] {
+        bridge.set_resource_response(resource_type, serde_json::json!({"data": [], "errors": []}));
+    }
+    bridge.set_v1_response(
+        "rules",
+        serde_json::json!({"1": {"name": "Rule", "status": "enabled"}}),
+    );
+    bridge.set_v1_response(
+        "schedules",
+        serde_json::json!({"2": {"name": "Schedule", "status": "enabled"}}),
+    );
+    bridge.set_fail_resource_update("behavior_instance", "behavior-1");
+
+    let active = acquire_authoritative_control(&temp.storage, &key(), &bridge, "user").unwrap();
+
+    assert_eq!(active.phase, HueOwnershipPhase::Active);
+    assert!(active.receipts().any(|receipt| {
+        receipt.resource_type == "behavior_instance"
+            && receipt.status == rhythm_hue::ownership::HueOwnershipReceiptStatus::Failed
+    }));
+    assert_eq!(
+        bridge.get_v1("user", "rules").unwrap()["1"]["status"],
+        "disabled"
+    );
+    assert_eq!(
+        bridge.get_v1("user", "schedules").unwrap()["2"]["status"],
+        "disabled"
     );
 }
