@@ -9,6 +9,7 @@
 library;
 
 // Models
+export 'src/models/rhythm_assistant.dart';
 export 'src/models/rhythm_config_state.dart';
 export 'src/models/rhythm_connection_state.dart';
 export 'src/models/rhythm_curve_config.dart';

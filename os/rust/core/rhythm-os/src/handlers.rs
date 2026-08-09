@@ -3772,6 +3772,72 @@ pub fn handle_post_device_flash(state: &SharedState, device_id: &str) -> ApiResp
     }
 }
 
+fn assistant_json_response<T: serde::Serialize>(value: &T) -> ApiResponse {
+    match serde_json::to_string(value) {
+        Ok(body) => ApiResponse::json_ok(body),
+        Err(error) => ApiResponse::server_error(error),
+    }
+}
+
+fn assistant_error_response(error: crate::assistant::LightAssistantError) -> ApiResponse {
+    match serde_json::to_string(&error.envelope()) {
+        Ok(body) => ApiResponse::json_status(error.status, body),
+        Err(serialization_error) => ApiResponse::server_error(serialization_error),
+    }
+}
+
+pub fn handle_get_assistant_contract(state: &SharedState) -> ApiResponse {
+    match crate::assistant::build_light_assistant_contract(state) {
+        Ok(contract) => assistant_json_response(&contract),
+        Err(error) => assistant_error_response(error),
+    }
+}
+
+pub fn handle_get_assistant_topology(state: &SharedState) -> ApiResponse {
+    match crate::assistant::build_light_assistant_topology_snapshot(state) {
+        Ok(snapshot) => assistant_json_response(&snapshot),
+        Err(error) => assistant_error_response(error),
+    }
+}
+
+pub fn handle_post_assistant_move_plan(state: &SharedState, body: &Value) -> ApiResponse {
+    let request = match serde_json::from_value(body.clone()) {
+        Ok(request) => request,
+        Err(_) => {
+            return assistant_error_response(crate::assistant::LightAssistantError {
+                status: 400,
+                code: "invalid_request",
+                message: "The move plan request does not match the advertised contract".to_string(),
+                retryable: false,
+                mutation_may_have_applied: false,
+            })
+        }
+    };
+    match crate::assistant::plan_light_assistant_device_room_move(state, request) {
+        Ok(plan) => assistant_json_response(&plan),
+        Err(error) => assistant_error_response(error),
+    }
+}
+
+pub fn handle_post_assistant_move_apply(state: &SharedState, body: &Value) -> ApiResponse {
+    let request = match serde_json::from_value(body.clone()) {
+        Ok(request) => request,
+        Err(_) => {
+            return assistant_error_response(crate::assistant::LightAssistantError {
+                status: 400,
+                code: "invalid_request",
+                message: "The apply request does not match the advertised contract".to_string(),
+                retryable: false,
+                mutation_may_have_applied: false,
+            })
+        }
+    };
+    match crate::assistant::apply_light_assistant_device_room_move(state, request) {
+        Ok(receipt) => assistant_json_response(&receipt),
+        Err(error) => assistant_error_response(error),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Triage handlers
 // ---------------------------------------------------------------------------

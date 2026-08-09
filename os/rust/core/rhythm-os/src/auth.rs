@@ -1361,6 +1361,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn assistant_contract_uses_remote_owner_auth() {
+        let state = test_state();
+        {
+            let mut state = state.lock().unwrap();
+            state.platform_type = "appliance";
+            state.platform_context = "rpiz";
+        }
+        let issued = issue_local_owner_token(&state, Some("phone".into())).unwrap();
+        let app = auth_test_router(state);
+
+        let unauthenticated = app
+            .clone()
+            .oneshot(tunnel_request(
+                Method::GET,
+                crate::assistant::LIGHT_ASSISTANT_CONTRACT_PATH,
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+
+        let authenticated = app
+            .oneshot({
+                let mut request = tunnel_request(
+                    Method::GET,
+                    crate::assistant::LIGHT_ASSISTANT_CONTRACT_PATH,
+                    Body::empty(),
+                );
+                request.headers_mut().insert(
+                    AUTHORIZATION,
+                    format!("Bearer {}", issued.token).parse().unwrap(),
+                );
+                request
+            })
+            .await
+            .unwrap();
+        assert_eq!(authenticated.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn appliance_tunnel_request_cannot_issue_support_token() {
         let state = test_state();
         {

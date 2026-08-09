@@ -9,6 +9,7 @@
 pub mod activity;
 pub mod activity_cloud;
 pub mod api_types;
+pub mod assistant;
 pub mod auth;
 pub mod bundle;
 pub mod button_resolve;

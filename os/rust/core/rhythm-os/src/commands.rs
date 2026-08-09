@@ -14279,6 +14279,53 @@ pub fn do_canonical_assign_room(
     device_id: &str,
     room_id: Option<&str>,
 ) -> Result<()> {
+    do_canonical_assign_room_with_precondition(state, device_id, room_id, None)
+}
+
+#[derive(Clone, Debug)]
+pub struct TopologyAssignmentPrecondition {
+    pub expected_server_instance_id: String,
+    pub expected_resource_sha256: String,
+    pub expected_parent_id: Option<String>,
+}
+
+fn verify_topology_assignment_precondition(
+    state: &AppState,
+    device_id: &str,
+    precondition: &TopologyAssignmentPrecondition,
+) -> Result<()> {
+    if state.server_instance_id != precondition.expected_server_instance_id {
+        anyhow::bail!("assistant topology precondition failed: server_instance_changed");
+    }
+    let current_parent_id = state
+        .topology
+        .device_parent_room_id(device_id)
+        .map(str::to_string)
+        .or_else(|| {
+            state
+                .canonical_registry
+                .get(device_id)
+                .and_then(|device| device.room_id.clone())
+        });
+    if current_parent_id != precondition.expected_parent_id {
+        anyhow::bail!("assistant topology precondition failed: source_placement_changed");
+    }
+    let live_resource_sha256 = topology_resource_sha256_from_app_state(state)?;
+    if live_resource_sha256 != precondition.expected_resource_sha256 {
+        anyhow::bail!("assistant topology precondition failed: topology_changed");
+    }
+    Ok(())
+}
+
+/// Assign a canonical device while an assistant-reviewed topology snapshot is
+/// still current. The precondition is checked before external preparation and
+/// again immediately before the canonical mutation.
+pub fn do_canonical_assign_room_with_precondition(
+    state: &SharedState,
+    device_id: &str,
+    room_id: Option<&str>,
+    precondition: Option<TopologyAssignmentPrecondition>,
+) -> Result<()> {
     let transaction_lock = state
         .lock()
         .map_err(|_| anyhow::anyhow!("lock"))?
@@ -14289,6 +14336,9 @@ pub fn do_canonical_assign_room(
         .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
     let (assignments, source_room_id, prepare_hub_device_room_assignment_fn) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        if let Some(precondition) = precondition.as_ref() {
+            verify_topology_assignment_precondition(&s, device_id, precondition)?;
+        }
         let device = s
             .canonical_registry
             .get(device_id)
@@ -14329,6 +14379,17 @@ pub fn do_canonical_assign_room(
             ));
         }
     };
+
+    if let Some(precondition) = precondition.as_ref() {
+        if let Err(error) = verify_topology_assignment_precondition(&s, device_id, precondition) {
+            drop(s);
+            return Err(rollback_prepared_hub_device_room_assignments(
+                state,
+                prepared_assignments,
+                error,
+            ));
+        }
+    }
 
     let state_is_unchanged = s.canonical_registry.get(device_id).is_some_and(|device| {
         let current_room_id = s
@@ -15117,6 +15178,10 @@ pub fn build_topology_rooms(state: &SharedState) -> Result<String> {
 /// Build JSON for the full public topology graph.
 pub fn build_topology_nodes(state: &SharedState) -> Result<String> {
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    serde_json::to_string(&build_topology_node_dtos(&s)).map_err(|e| anyhow::anyhow!(e))
+}
+
+pub(crate) fn build_topology_node_dtos(s: &AppState) -> Vec<TopologyNodeDto> {
     let mut nodes = Vec::new();
 
     let mut room_ids: Vec<_> = s.topology.rooms().map(|room| room.id.clone()).collect();
@@ -15184,7 +15249,23 @@ pub fn build_topology_nodes(state: &SharedState) -> Result<String> {
         });
     }
 
-    serde_json::to_string(&nodes).map_err(|e| anyhow::anyhow!(e))
+    nodes
+}
+
+pub(crate) fn topology_node_dtos_resource_sha256(nodes: &[TopologyNodeDto]) -> Result<String> {
+    let resource = serde_json::to_value(nodes)
+        .map_err(|error| anyhow::anyhow!("serialize public topology resource: {error}"))?;
+    Ok(canonical_json_sha256(&resource))
+}
+
+pub(crate) fn topology_resource_sha256_from_app_state(state: &AppState) -> Result<String> {
+    topology_node_dtos_resource_sha256(&build_topology_node_dtos(state))
+}
+
+/// Hash the exact canonical node array exposed by `GET /api/topology/nodes`.
+pub fn topology_resource_sha256(state: &SharedState) -> Result<String> {
+    let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    topology_resource_sha256_from_app_state(&state)
 }
 
 /// Set or clear an explicit topology control target for a source node.
