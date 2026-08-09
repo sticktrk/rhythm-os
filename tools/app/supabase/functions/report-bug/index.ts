@@ -19,7 +19,6 @@ import {
 // - GITHUB_ISSUES_REPO: owner/repo, defaults to sticktrk/cross
 // - GITHUB_ISSUES_LABELS: comma-separated labels
 // - GITHUB_ISSUES_ASSIGNEES: comma-separated GitHub usernames
-// - DEBUG_BUNDLE_SIGNED_URL_EXPIRES_SECONDS: default 604800, max 2592000
 
 type DebugBundleSubmission = {
   id: string
@@ -48,21 +47,12 @@ type DebugBundleSubmission = {
   github_issue_number: number | null
 }
 
-type SignedBundleLink = {
-  signedUrl: string | null
-  expiresAt: string | null
-  error: string | null
-}
-
-const bucketName = 'support-debug-bundles'
 const defaultGitHubIssuesRepo = 'sticktrk/cross'
 const legacyGitHubIssuesRepos = new Set([
   'sticktrk/rhythm-app',
   'sticktrk/rhythm-app-flutter',
   'sticktrk/rhythm-os',
 ])
-const defaultSignedUrlExpiresIn = 60 * 60 * 24 * 7
-
 Deno.serve(async (req) => {
   try {
     return await withAuthenticatedRequest(req, ({ userId, adminClient }) => {
@@ -145,19 +135,12 @@ async function handleRequest(
     })
   }
 
-  const signedBundleLink = submission.bundle_storage_path
-    ? await createSignedBundleLink(
-        adminClient,
-        submission.bundle_storage_path,
-      )
-    : null
-
   try {
     const issue = await createGitHubIssue({
       repo: githubRepo,
       token: githubToken,
       title: buildIssueTitle(submission),
-      body: buildIssueBody(submission, signedBundleLink),
+      body: buildIssueBody(submission),
       labels: githubLabelsForSupportReport({
         kind: submission.report_kind,
         fleet: isFleetSubmission(submission),
@@ -210,42 +193,6 @@ function readGitHubIssuesRepo(): string {
   }
 
   return configured
-}
-
-async function createSignedBundleLink(
-  adminClient: ReturnType<typeof createClient>,
-  storagePath: string,
-): Promise<SignedBundleLink> {
-  const expiresIn = readSignedUrlExpiresIn()
-  const expiresAt = new Date(Date.now() + expiresIn * 1000).toISOString()
-  const { data, error } = await adminClient.storage
-    .from(bucketName)
-    .createSignedUrl(storagePath, expiresIn)
-
-  if (error) {
-    console.error('Failed to create signed bundle URL:', error)
-    return {
-      signedUrl: null,
-      expiresAt: null,
-      error: error.message,
-    }
-  }
-
-  return {
-    signedUrl: data?.signedUrl ?? null,
-    expiresAt,
-    error: null,
-  }
-}
-
-function readSignedUrlExpiresIn(): number {
-  const rawValue = Deno.env.get('DEBUG_BUNDLE_SIGNED_URL_EXPIRES_SECONDS')
-  if (!rawValue) return defaultSignedUrlExpiresIn
-
-  const parsed = Number.parseInt(rawValue, 10)
-  if (!Number.isFinite(parsed) || parsed <= 0) return defaultSignedUrlExpiresIn
-
-  return Math.min(parsed, 60 * 60 * 24 * 30)
 }
 
 async function createGitHubIssue({
@@ -304,11 +251,10 @@ function buildIssueTitle(submission: DebugBundleSubmission): string {
     submission.report_kind,
     fleet,
   ).titlePrefix
-  const suffix = ` (${submission.reference_code})`
+  const suffix = fleet ? '' : ` (${submission.reference_code})`
   const maxDetailLength = 256 - prefix.length - suffix.length
   const titleDetail =
-    summaryTitleDetail(submission.summary) ??
-    fallbackTitleDetail(submission)
+    summaryTitleDetail(submission.summary) ?? fallbackTitleDetail(submission)
 
   return `${prefix}${truncate(titleDetail, maxDetailLength)}${suffix}`
 }
@@ -326,6 +272,8 @@ function summaryTitleDetail(summary: string | null): string | null {
 }
 
 function fallbackTitleDetail(submission: DebugBundleSubmission): string {
+  if (isFleetSubmission(submission)) return 'detected fleet finding'
+
   const serverName = submission.server_name?.trim()
   if (serverName) return `${serverName} report`
 
@@ -335,10 +283,7 @@ function fallbackTitleDetail(submission: DebugBundleSubmission): string {
   return 'App report'
 }
 
-function buildIssueBody(
-  submission: DebugBundleSubmission,
-  signedBundleLink: SignedBundleLink | null,
-): string {
+function buildIssueBody(submission: DebugBundleSubmission): string {
   const fleet = isFleetSubmission(submission)
   const reportCopy = supportReportIssueCopy(submission.report_kind, fleet)
   const summary = submission.summary?.trim()
@@ -346,26 +291,9 @@ function buildIssueBody(
   const bundleSection = hasBundle
     ? [
         '## Debug Bundle',
-        `- Storage path: \`${bucketName}/${submission.bundle_storage_path}\``,
-        `- File name: ${valueOrUnknown(submission.bundle_file_name)}`,
-        `- Content type: ${valueOrUnknown(submission.bundle_content_type)}`,
-        `- Size: ${formatBytes(submission.bundle_size_bytes)}`,
-        ...(signedBundleLink?.signedUrl
-          ? [
-              `- Signed download URL: ${signedBundleLink.signedUrl}`,
-              `- Signed URL expires: ${signedBundleLink.expiresAt}`,
-            ]
-          : [
-              '- Signed download URL: unavailable',
-              `- Signed URL error: ${signedBundleLink?.error ?? 'Unknown error'}`,
-            ]),
-        '',
-        'The bundle is private in Supabase Storage. The signed URL is intended for support triage and expires automatically.',
+        '_Private support bundle available. Staff triage tooling resolves it by GitHub issue number._',
       ]
-    : [
-        '## Debug Bundle',
-        '_No debug bundle attached (text-only report)._',
-      ]
+    : ['## Debug Bundle', '_No debug bundle attached (text-only report)._']
 
   return [
     reportCopy.intro,
@@ -374,8 +302,12 @@ function buildIssueBody(
     summary ? quoteBlock(summary) : '_No summary provided._',
     '',
     '## Submission',
-    `- Reference: ${submission.reference_code}`,
-    `- Submission ID: ${submission.id}`,
+    ...(fleet
+      ? []
+      : [
+          `- Reference: ${submission.reference_code}`,
+          `- Submission ID: ${submission.id}`,
+        ]),
     `- Kind: ${reportCopy.kind}`,
     `- Submitted at: ${submission.created_at}`,
     `- Auth mode: ${submission.is_anonymous ? 'anonymous' : 'signed in'}`,
@@ -430,14 +362,6 @@ function formatEndpoint(submission: DebugBundleSubmission): string {
   const host = submission.server_host?.trim()
   if (!host) return 'Unknown'
   return submission.server_port ? `${host}:${submission.server_port}` : host
-}
-
-function formatBytes(size: number | null): string {
-  if (size === null || !Number.isFinite(size) || size <= 0) return 'Unknown'
-  if (size < 1024) return `${size} B`
-  const kib = size / 1024
-  if (kib < 1024) return `${kib.toFixed(1)} KiB`
-  return `${(kib / 1024).toFixed(1)} MiB`
 }
 
 function formatGitHubError(
