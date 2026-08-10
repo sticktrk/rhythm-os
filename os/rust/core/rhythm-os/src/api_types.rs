@@ -275,6 +275,7 @@ pub const FEATURE_MOTION_ACTIVATION_TOGGLE: &str = "motion_activation_toggle";
 pub const FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES: &str = "room_light_profile_overrides";
 pub const FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES: &str =
     "guarded_room_light_profile_overrides";
+pub const FEATURE_HUE_ROOM_AUTHORITY_CONSENT: &str = "hue_room_authority_consent_v1";
 
 #[derive(Clone, Debug)]
 pub struct ApiCapabilitiesDto {
@@ -295,6 +296,7 @@ impl Serialize for ApiCapabilitiesDto {
                 FEATURE_MOTION_ACTIVATION_TOGGLE,
                 FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES,
                 FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
+                FEATURE_HUE_ROOM_AUTHORITY_CONSENT,
             ],
         )?;
         state.serialize_field("hubs", &self.hubs)?;
@@ -641,6 +643,54 @@ pub struct SyncResponse {
 #[derive(Debug, Serialize)]
 pub struct HubCredentialsResponse {
     pub hub_connected: bool,
+}
+
+/// Explicit room choice accepted by `PUT /api/hue/authority`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HueRoomAuthorityOwnerDto {
+    Hue,
+    Rhythm,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct HueRoomAuthorityDecisionRequest {
+    pub room_id: String,
+    pub owner: HueRoomAuthorityOwnerDto,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct HueAuthorityUpdateRequest {
+    pub address: String,
+    pub revision: String,
+    pub correlation_id: String,
+    pub rooms: Vec<HueRoomAuthorityDecisionRequest>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct HueRoomAuthorityDto {
+    pub room_id: String,
+    pub name: String,
+    /// `unreviewed`, `hue`, or `rhythm`.
+    pub owner: String,
+    pub rhythm_automation_enabled: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct HueBridgeAuthorityDto {
+    pub address: String,
+    pub revision: String,
+    /// Hue control-plane suppression is still bridge-scoped. It is attempted
+    /// only when every listed room explicitly chooses Rhythm.
+    pub takeover_scope: &'static str,
+    pub bridge_takeover_requested: bool,
+    pub rooms: Vec<HueRoomAuthorityDto>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct HueAuthorityResponse {
+    pub schema_version: u32,
+    pub bridges: Vec<HueBridgeAuthorityDto>,
 }
 
 // ---------------------------------------------------------------------------

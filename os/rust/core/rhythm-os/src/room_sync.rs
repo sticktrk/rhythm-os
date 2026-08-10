@@ -185,19 +185,23 @@ pub fn sync_from_hub_for_key(
         .map_err(|_| anyhow::anyhow!("lock"))?
         .external_topology_transaction_lock
         .clone();
-    let _transaction = transaction_lock
-        .lock()
-        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
-    let Some(_guard) = try_acquire_hub_sync_guard(state, hub_key)? else {
-        debug!(target: "room_sync", "Skipping sync for {}: already in progress", hub_key);
-        return Ok(SyncReport::default());
+    let report = {
+        let _transaction = transaction_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
+        let Some(_guard) = try_acquire_hub_sync_guard(state, hub_key)? else {
+            debug!(target: "room_sync", "Skipping sync for {}: already in progress", hub_key);
+            return Ok(SyncReport::default());
+        };
+        sync_from_hub_for_key_acquired(
+            state,
+            hub_key,
+            discover_devices,
+            SyncFailurePolicy::BestEffort,
+        )?
     };
-    sync_from_hub_for_key_acquired(
-        state,
-        hub_key,
-        discover_devices,
-        SyncFailurePolicy::BestEffort,
-    )
+    reconcile_external_controller_authority_after_sync(state, hub_key)?;
+    Ok(report)
 }
 
 /// Build the complete desired graph required before taking authority over an
@@ -247,16 +251,40 @@ pub fn sync_from_hub_for_key_wait(
         .map_err(|_| anyhow::anyhow!("lock"))?
         .external_topology_transaction_lock
         .clone();
-    let _transaction = transaction_lock
-        .lock()
-        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
-    let _guard = acquire_hub_sync_guard_with_timeout(state, hub_key, timeout)?;
-    sync_from_hub_for_key_acquired(
-        state,
-        hub_key,
-        discover_devices,
-        SyncFailurePolicy::BestEffort,
-    )
+    let report = {
+        let _transaction = transaction_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
+        let _guard = acquire_hub_sync_guard_with_timeout(state, hub_key, timeout)?;
+        sync_from_hub_for_key_acquired(
+            state,
+            hub_key,
+            discover_devices,
+            SyncFailurePolicy::BestEffort,
+        )?
+    };
+    reconcile_external_controller_authority_after_sync(state, hub_key)?;
+    Ok(report)
+}
+
+/// A room discovered after prior all-Rhythm consent invalidates that complete
+/// consent set. Reconcile only after dropping the topology transaction guard:
+/// the integration callback acquires that same guard around capture/release.
+fn reconcile_external_controller_authority_after_sync(
+    state: &SharedState,
+    hub_key: &HubKey,
+) -> Result<()> {
+    let callback = {
+        let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        if state.external_controller_initial_sync_is_pending(hub_key) {
+            return Ok(());
+        }
+        state.reconcile_external_controller_authority_fn.clone()
+    };
+    if let Some(callback) = callback {
+        callback(state, hub_key)?;
+    }
+    Ok(())
 }
 
 fn sync_from_hub_for_key_acquired(
@@ -1384,6 +1412,41 @@ mod tests {
         let error = sync_from_hub_for_key_before_authority(&state, &hub_key, false).unwrap_err();
 
         assert!(error.to_string().contains("Complete device discovery"));
+    }
+
+    #[test]
+    fn completed_refresh_reconciles_authority_after_the_topology_guard_is_released() {
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        let hub_key = HubKey::new(HubType::new(HubType::HUE), "bridge-refresh");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        {
+            let calls = calls.clone();
+            state
+                .lock()
+                .unwrap()
+                .reconcile_external_controller_authority_fn = Some(Arc::new(move |state, _| {
+                let transaction = state
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("lock"))?
+                    .external_topology_transaction_lock
+                    .clone();
+                let _guard = transaction
+                    .try_lock()
+                    .map_err(|_| anyhow::anyhow!("topology guard was still held after refresh"))?;
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }));
+        }
+
+        reconcile_external_controller_authority_after_sync(&state, &hub_key).unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        state
+            .lock()
+            .unwrap()
+            .mark_external_controller_initial_sync_pending(&hub_key);
+        reconcile_external_controller_authority_after_sync(&state, &hub_key).unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[test]

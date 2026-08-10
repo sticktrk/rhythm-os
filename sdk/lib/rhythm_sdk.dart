@@ -19,6 +19,7 @@ export 'src/models/rhythm_firmware.dart';
 export 'src/models/rhythm_capabilities.dart';
 export 'src/models/rhythm_hello.dart';
 export 'src/models/rhythm_hub_info.dart';
+export 'src/models/rhythm_hue_authority.dart';
 export 'src/models/rhythm_input_binding.dart';
 export 'src/models/rhythm_input_event.dart';
 export 'src/models/rhythm_environment.dart';

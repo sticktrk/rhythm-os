@@ -412,6 +412,22 @@ class CloudBackedServerApi {
     );
   }
 
+  Future<RhythmHueAuthority?> getHueAuthority() {
+    return _delegate.getHueAuthority();
+  }
+
+  Future<RhythmHueAuthority?> updateHueAuthority({
+    required RhythmHueBridgeAuthority bridge,
+    required Map<String, RhythmHueRoomAuthorityOwner> owners,
+    required String correlationId,
+  }) {
+    return _delegate.updateHueAuthority(
+      bridge: bridge,
+      owners: owners,
+      correlationId: correlationId,
+    );
+  }
+
   Future<void> hubDisconnect() {
     return _delegate.hubDisconnect();
   }

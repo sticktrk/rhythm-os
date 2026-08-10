@@ -1697,6 +1697,56 @@ fn build_hue_controller_debug_json(
     generated_at: DateTime<Utc>,
     diagnostics: &mut BundleDiagnostics,
 ) -> Result<String> {
+    let room_policy = state
+        .lock()
+        .ok()
+        .map(|state| {
+            let mut bridge_count = 0usize;
+            let mut unreviewed_room_count = 0usize;
+            let mut hue_room_count = 0usize;
+            let mut rhythm_requested_room_count = 0usize;
+            let mut rhythm_effective_room_count = 0usize;
+            for key in state
+                .topology
+                .referenced_hub_keys()
+                .into_iter()
+                .filter(|key| key.hub_type.as_str() == rhythm_os::hub::HubType::HUE)
+            {
+                let rooms = state.topology.external_automation_rooms_for_hub(&key);
+                if rooms.is_empty() {
+                    continue;
+                }
+                bridge_count += 1;
+                for (room_id, _, owner) in rooms {
+                    match owner {
+                        None => unreviewed_room_count += 1,
+                        Some(rhythm_os::topology::ExternalRoomAutomationOwner::External) => {
+                            hue_room_count += 1
+                        }
+                        Some(rhythm_os::topology::ExternalRoomAutomationOwner::Rhythm) => {
+                            rhythm_requested_room_count += 1
+                        }
+                    }
+                    if state.rhythm_automation_allowed_for_node(&room_id) {
+                        rhythm_effective_room_count += 1;
+                    }
+                }
+            }
+            serde_json::json!({
+                "schema_version": 1,
+                "bridge_count": bridge_count,
+                "unreviewed_room_count": unreviewed_room_count,
+                "hue_room_count": hue_room_count,
+                "rhythm_requested_room_count": rhythm_requested_room_count,
+                "rhythm_effective_room_count": rhythm_effective_room_count,
+            })
+        })
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "schema_version": 1,
+                "status": "state_unavailable"
+            })
+        });
     let storage = state.lock().ok().and_then(|state| state.storage.clone());
     let authority = match storage {
         Some(storage) => {
@@ -1721,6 +1771,7 @@ fn build_hue_controller_debug_json(
         "schema_version": 1,
         "generated_at": generated_at.to_rfc3339(),
         "authority": authority,
+        "room_policy": room_policy,
     }))
     .context("serializing Hue controller debug snapshot")
 }
@@ -3714,6 +3765,21 @@ mod tests {
             .unwrap();
         let mut app_state = AppState::default();
         app_state.storage = Some(storage);
+        let hub_key = rhythm_os::canonical::identity::HubKey::new(
+            rhythm_os::hub::HubType::new(rhythm_os::hub::HubType::HUE),
+            "private-bridge-address",
+        );
+        let room_id = app_state.topology.create_room("Private room name");
+        app_state
+            .topology
+            .get_mut(&room_id)
+            .unwrap()
+            .upsert_hub_room_binding(rhythm_os::topology::HubRoomBinding {
+                hub_key,
+                hub_room_id: "private-native-room".to_string(),
+                control_id: "private-control-id".to_string(),
+                light_device_ids: Vec::new(),
+            });
         let state = Arc::new(Mutex::new(app_state));
         let generated_at = Utc
             .with_ymd_and_hms(2026, 5, 20, 12, 0, 0)
@@ -3728,6 +3794,9 @@ mod tests {
         assert_eq!(value["authority"]["managed_room_count"], 1);
         assert_eq!(value["authority"]["phases"]["active"], 1);
         assert_eq!(value["authority"]["receipt_statuses"]["succeeded"], 1);
+        assert_eq!(value["room_policy"]["bridge_count"], 1);
+        assert_eq!(value["room_policy"]["unreviewed_room_count"], 1);
+        assert_eq!(value["room_policy"]["rhythm_effective_room_count"], 0);
         for sensitive in [
             "bridge-secret",
             "capture-secret",
@@ -3736,6 +3805,10 @@ mod tests {
             "group-secret",
             "resource-secret",
             "receipt-secret",
+            "private-bridge-address",
+            "Private room name",
+            "private-native-room",
+            "private-control-id",
         ] {
             assert!(!json.contains(sensitive));
         }

@@ -176,6 +176,10 @@ fn shared_routes() -> Router<SharedState> {
             "/api/hub/credentials",
             put(put_hub_credentials).delete(delete_hub),
         )
+        .route(
+            "/api/hue/authority",
+            get(get_hue_authority).put(put_hue_authority),
+        )
         .route("/api/hub/retry", post(post_hub_retry))
         .route("/api/nodes/preferences", put(put_node_preferences))
         .route(
@@ -1085,6 +1089,17 @@ pub async fn put_hub_credentials(
     Json(body): Json<Value>,
 ) -> ApiResponse {
     run_blocking(move || handlers::handle_put_hub_credentials(&state, &body)).await
+}
+
+async fn get_hue_authority(State(state): State<SharedState>) -> ApiResponse {
+    handlers::handle_get_hue_authority(&state)
+}
+
+async fn put_hue_authority(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_put_hue_authority(&state, &body)).await
 }
 
 pub async fn delete_hub(

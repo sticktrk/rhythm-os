@@ -537,6 +537,9 @@ pub type HubDeviceRoomAssignmentRollback = Box<dyn FnOnce() -> Result<()> + Send
 /// the callback succeeds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalControllerReleaseReason {
+    /// A reviewed room policy no longer grants the integration authority.
+    /// Credentials remain connected after the integration restores its work.
+    RoomAuthorityChanged,
     UserDisconnect,
     FactoryReset,
     BackupRestore,

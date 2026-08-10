@@ -2755,4 +2755,65 @@ void main() {
       expect(result?['warning'], 'The retained bond can be re-adopted.');
     });
   });
+
+  group('Hue room authority', () {
+    final payload = {
+      'schema_version': 1,
+      'bridges': [
+        {
+          'address': 'bridge.local',
+          'revision': '0123456789abcdef',
+          'takeover_scope': 'bridge',
+          'bridge_takeover_requested': false,
+          'rooms': [
+            {
+              'room_id': 'office',
+              'name': 'Office',
+              'owner': 'unreviewed',
+              'rhythm_automation_enabled': false,
+            },
+          ],
+        },
+      ],
+    };
+
+    test('fetches the complete review', () async {
+      when(() => dio.get(any())).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/hue/authority'),
+            statusCode: 200,
+            data: payload,
+          ));
+
+      final result = await api.getHueAuthority();
+
+      expect(result?.bridges.single.rooms.single.name, 'Office');
+      verify(() => dio.get('api/hue/authority')).called(1);
+    });
+
+    test('submits every room and defaults unreviewed rooms to Hue', () async {
+      when(() => dio.put(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions: RequestOptions(path: 'api/hue/authority'),
+                statusCode: 200,
+                data: payload,
+              ));
+      final bridge = RhythmHueAuthority.fromJson(payload).bridges.single;
+
+      final result = await api.updateHueAuthority(
+        bridge: bridge,
+        owners: const {},
+        correlationId: 'hue-authority-test',
+      );
+
+      expect(result, isNotNull);
+      verify(() => dio.put('api/hue/authority', data: {
+            'address': 'bridge.local',
+            'revision': '0123456789abcdef',
+            'correlation_id': 'hue-authority-test',
+            'rooms': [
+              {'room_id': 'office', 'owner': 'hue'},
+            ],
+          })).called(1);
+    });
+  });
 }

@@ -593,6 +593,17 @@ fn run_button_ingress_action(
     command_id: &str,
     persist_after: bool,
 ) {
+    if !commands::rhythm_automation_allowed_for_node(state, node_id) {
+        tracing::info!(
+            target: "evt",
+            event = "queued_button_automation_suppressed",
+            command_id = %command_id,
+            node_id = %node_id,
+            reason = "external_room_authority",
+            "Queued button action retired after an authority handoff"
+        );
+        return;
+    }
     // Physical button ingress is fast lane: execute inline on the ingress
     // dispatch thread and never enqueue behind paced HTTP/system batches.
     if process_button_inline(state, node_id, action, device_id, command_id) && persist_after {
@@ -668,6 +679,17 @@ fn run_input_binding_action(
     device_id: Option<&str>,
     command_id: &str,
 ) {
+    if !commands::rhythm_automation_allowed_for_node(state, source_node_id) {
+        tracing::info!(
+            target: "evt",
+            event = "queued_input_binding_suppressed",
+            command_id = %command_id,
+            source_node_id = %source_node_id,
+            reason = "external_room_authority",
+            "Queued input binding retired after an authority handoff"
+        );
+        return;
+    }
     let started = Instant::now();
     match crate::commands::do_execute_automation_action(state, &action) {
         Ok(outcome) => {
@@ -788,6 +810,16 @@ fn spawn_input_binding_action(
 }
 
 fn run_motion_turn_on_action(state: &SharedState, node_id: &str) {
+    if !commands::rhythm_automation_allowed_for_node(state, node_id) {
+        tracing::info!(
+            target: "evt",
+            event = "queued_motion_automation_suppressed",
+            node_id = %node_id,
+            reason = "external_room_authority",
+            "Queued motion action retired after an authority handoff"
+        );
+        return;
+    }
     // Motion ingress is fast lane for occupancy responsiveness.
     if !turn_on_node_inline(state, node_id) {
         return;
@@ -825,7 +857,9 @@ fn spawn_motion_dim_action(state: &SharedState, node_id: String, factor: f32) {
     let node_id_clone = node_id.clone();
 
     if let Err(error) = builder.spawn(move || {
-        dim_node_inline(&state_clone, &node_id_clone, factor);
+        if commands::rhythm_automation_allowed_for_node(&state_clone, &node_id_clone) {
+            dim_node_inline(&state_clone, &node_id_clone, factor);
+        }
     }) {
         warn!(
             target: "evt",
@@ -1390,6 +1424,20 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             };
             let command_id = logging::next_command_id("button");
 
+            if !commands::rhythm_automation_allowed_for_node(state, &source_node_id) {
+                tracing::info!(
+                    target: "evt",
+                    event = "button_automation_suppressed",
+                    command_id = %command_id,
+                    action = ?action,
+                    source_node_id = %source_node_id,
+                    source_room_id = %room_id,
+                    reason = "external_room_authority",
+                    "Button automation left to the room's external controller"
+                );
+                return;
+            }
+
             if let Some(binding_action) =
                 commands::matching_button_input_binding_action(state, &source_node_id, action)
             {
@@ -1499,6 +1547,19 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 hub_present = hub_key.is_some(),
                 "Button event received"
             );
+            if !commands::rhythm_automation_allowed_for_node(state, &node_id) {
+                tracing::info!(
+                    target: "evt",
+                    event = "button_node_control_suppressed",
+                    command_id = %command_id,
+                    action = ?action,
+                    node_id = %node_id,
+                    source_node_id = %source_node_id,
+                    reason = "external_room_authority",
+                    "Button target left to the room's external controller"
+                );
+                return;
+            }
             if !light_breaker_enabled {
                 tracing::info!(
                     target: "evt",
@@ -1594,6 +1655,19 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 );
                 return;
             };
+            if !commands::rhythm_automation_allowed_for_node(state, &source_node_id) {
+                tracing::info!(
+                    target: "evt",
+                    event = "motion_node_control_suppressed",
+                    source_node_id = %source_node_id,
+                    source_room_id = %room_id,
+                    native_sensor_id = %sensor_id,
+                    detected,
+                    reason = "external_room_authority",
+                    "Motion automation left to the room's external controller"
+                );
+                return;
+            }
             let target_node_ids = commands::resolve_node_control_targets_for_source(
                 state,
                 &source_node_id,
@@ -1634,6 +1708,20 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                         route: InputEventRoute::NodeControl,
                     },
                 );
+                if !commands::rhythm_automation_allowed_for_node(state, &target_node_id) {
+                    tracing::info!(
+                        target: "evt",
+                        event = "motion_node_control_suppressed",
+                        source_node_id = %source_node_id,
+                        target_node_id = %target_node_id,
+                        source_room_id = %room_id,
+                        native_sensor_id = %sensor_id,
+                        detected,
+                        reason = "external_room_authority",
+                        "Motion target left to the room's external controller"
+                    );
+                    continue;
+                }
                 if !light_breaker_enabled {
                     tracing::info!(
                         target: "evt",
@@ -1808,6 +1896,19 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 );
                 return;
             };
+            if !commands::rhythm_automation_allowed_for_node(state, &source_node_id) {
+                tracing::info!(
+                    target: "evt",
+                    event = "contact_node_control_suppressed",
+                    source_node_id = %source_node_id,
+                    source_room_id = %room_id,
+                    native_sensor_id = %sensor_id,
+                    open,
+                    reason = "external_room_authority",
+                    "Contact automation left to the room's external controller"
+                );
+                return;
+            }
             let Some(target_node_id) = commands::resolve_node_control_target_for_source(
                 state,
                 &source_node_id,
@@ -1855,6 +1956,21 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 open,
                 "Contact event received"
             );
+            if !commands::rhythm_automation_allowed_for_node(state, &target_node_id) {
+                tracing::info!(
+                    target: "evt",
+                    event = "contact_node_control_suppressed",
+                    action = ?action,
+                    source_node_id = %source_node_id,
+                    target_node_id = %target_node_id,
+                    source_room_id = %room_id,
+                    native_sensor_id = %sensor_id,
+                    open,
+                    reason = "external_room_authority",
+                    "Contact target left to the room's external controller"
+                );
+                return;
+            }
             if !light_breaker_enabled {
                 tracing::info!(
                     target: "evt",
@@ -2283,6 +2399,28 @@ pub fn check_motion_timers(state: &SharedState, motion: &mut MotionTimerState) {
         .ok()
         .map(|s| s.default_motion_timeout_secs)
         .unwrap_or(0);
+
+    // A policy handoff can happen while an old motion countdown is still
+    // armed. Retire that ownership before warning-dim or timeout-off can emit
+    // an unattended command under the previous controller policy.
+    let suppressed_targets = motion
+        .sensors
+        .values()
+        .map(|source| source.target_node_id.clone())
+        .filter(|target_node_id| {
+            !commands::rhythm_automation_allowed_for_node(state, target_node_id)
+        })
+        .collect::<HashSet<_>>();
+    if !suppressed_targets.is_empty() {
+        motion
+            .sensors
+            .retain(|_, source| !suppressed_targets.contains(source.target_node_id.as_str()));
+        for target_node_id in &suppressed_targets {
+            motion.motion_owned.remove(target_node_id);
+            motion.motion_turn_on_requested.remove(target_node_id);
+            motion.warning_active.remove(target_node_id);
+        }
+    }
 
     let mut targets: HashMap<String, Vec<(&String, &MotionSourceState)>> = HashMap::new();
     for (source_key, source) in &motion.sensors {
@@ -8041,6 +8179,42 @@ mod tests {
 
         // Sensors removed but no OffPress sent (not owned)
         assert!(motion.sensors.is_empty());
+    }
+
+    #[test]
+    fn authority_handoff_retires_an_armed_motion_timeout_without_output() {
+        let state = make_state();
+        state.lock().unwrap().default_motion_timeout_secs = 120;
+        {
+            let mut app = state.lock().unwrap();
+            let key = HubKey::new(HubType::new(HubType::HUE), "bridge.local");
+            let mut room = crate::topology::TopologyRoom::new("room_a", "Room A");
+            room.upsert_hub_room_binding(crate::topology::HubRoomBinding {
+                hub_key: key,
+                hub_room_id: "hue-room-a".to_string(),
+                control_id: "hue-group-a".to_string(),
+                light_device_ids: Vec::new(),
+            });
+            app.topology.insert_room(room);
+        }
+
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            "s1".into(),
+            motion_source(
+                "s1",
+                "room_a",
+                Some(Instant::now() - Duration::from_secs(200)),
+            ),
+        );
+        motion.motion_owned.insert("room_a".into());
+        motion.warning_active.insert("room_a".into());
+
+        check_motion_timers(&state, &mut motion);
+
+        assert!(motion.sensors.is_empty());
+        assert!(!motion.motion_owned.contains("room_a"));
+        assert!(!motion.warning_active.contains("room_a"));
     }
 
     #[test]

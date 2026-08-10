@@ -57,6 +57,8 @@ class DemoServerApi extends RhythmServerApi {
   bool _lightBreakerEnabled = true;
   RhythmMode _activeMode = RhythmMode.day;
   RhythmLightRuntime _lightRuntime = RhythmLightRuntime.rhythmAdaptive;
+  int _hueAuthorityRevision = 1;
+  final Map<String, RhythmHueRoomAuthorityOwner> _hueRoomOwners = {};
 
   Stream<void> get changes => _changes.stream;
 
@@ -83,6 +85,78 @@ class DemoServerApi extends RhythmServerApi {
     ];
   }
 
+  @override
+  Future<bool> hubCredentials({
+    required String hubType,
+    required String address,
+    required Map<String, dynamic> credentials,
+  }) async {
+    return hubType == 'hue';
+  }
+
+  @override
+  Future<RhythmHueAuthority?> getHueAuthority() async {
+    ensureSeeded();
+    final roomEntries = _nodeStates.values
+        .where(
+          (room) =>
+              room['hub_types'] is List &&
+              (room['hub_types'] as List).contains('hue'),
+        )
+        .toList(growable: false);
+    final allRhythm = roomEntries.isNotEmpty &&
+        roomEntries.every(
+          (room) =>
+              _hueRoomOwners[room['id']] == RhythmHueRoomAuthorityOwner.rhythm,
+        );
+    final rooms = roomEntries
+        .map(
+          (room) => RhythmHueRoomAuthority(
+            roomId: room['id'] as String,
+            name: room['name'] as String? ?? 'Hue room',
+            owner: _hueRoomOwners[room['id']] ??
+                RhythmHueRoomAuthorityOwner.unreviewed,
+            rhythmAutomationEnabled: allRhythm,
+          ),
+        )
+        .toList(growable: false);
+    return RhythmHueAuthority(
+      schemaVersion: 1,
+      bridges: [
+        RhythmHueBridgeAuthority(
+          address: _demoHubAddress,
+          revision: _hueAuthorityRevision.toRadixString(16).padLeft(16, '0'),
+          takeoverScope: 'bridge',
+          bridgeTakeoverRequested: allRhythm,
+          rooms: rooms,
+        ),
+      ],
+    );
+  }
+
+  @override
+  Future<RhythmHueAuthority?> updateHueAuthority({
+    required RhythmHueBridgeAuthority bridge,
+    required Map<String, RhythmHueRoomAuthorityOwner> owners,
+    required String correlationId,
+  }) async {
+    final current = await getHueAuthority();
+    if (current == null || current.bridges.isEmpty) return null;
+    final currentBridge = current.bridges.first;
+    final roomIds = currentBridge.rooms.map((room) => room.roomId).toSet();
+    if (currentBridge.revision != bridge.revision ||
+        owners.length != roomIds.length ||
+        owners.keys.any((roomId) => !roomIds.contains(roomId))) {
+      return null;
+    }
+    _hueRoomOwners
+      ..clear()
+      ..addAll(owners);
+    _hueAuthorityRevision++;
+    _changes.add(null);
+    return getHueAuthority();
+  }
+
   void ensureSeeded() {
     if (_seeded) return;
     reset();
@@ -95,6 +169,8 @@ class DemoServerApi extends RhythmServerApi {
     _lightBreakerEnabled = true;
     _activeMode = RhythmMode.day;
     _lightRuntime = RhythmLightRuntime.rhythmAdaptive;
+    _hueAuthorityRevision = 1;
+    _hueRoomOwners.clear();
     _nextRoomOrdinal = 5;
     _nodeStates.clear();
     _topologyNodes.clear();

@@ -237,6 +237,59 @@ class AnalyticsService {
     });
   }
 
+  Future<void> logHueAuthorityReviewOpened({
+    required String journeyId,
+    required String source,
+    required int roomCount,
+    required bool hadPriorReview,
+  }) async {
+    await logEvent('hue_authority_review_opened', {
+      'journey_id': journeyId,
+      'source': source,
+      'affected_room_count_bucket': _layoutCountBucket(roomCount),
+      'had_prior_review': hadPriorReview ? 1 : 0,
+    });
+  }
+
+  Future<void> logHueAuthorityReviewSubmitted({
+    required String journeyId,
+    required String source,
+    required int roomCount,
+    required int hueRoomCount,
+    required int rhythmRoomCount,
+    required bool bridgeTakeoverRequested,
+  }) async {
+    final choice = hueRoomCount == roomCount
+        ? 'all_hue'
+        : rhythmRoomCount == roomCount
+            ? 'all_rhythm'
+            : 'mixed';
+    await logEvent('hue_room_control_choice_submitted', {
+      'journey_id': journeyId,
+      'source': source,
+      'choice': choice,
+      'affected_room_count_bucket': _layoutCountBucket(roomCount),
+      'conflict_count_bucket': 'unknown',
+      'bridge_takeover_requested': bridgeTakeoverRequested ? 1 : 0,
+    });
+  }
+
+  Future<void> logHueAuthorityReviewCompleted({
+    required String journeyId,
+    required String source,
+    required String outcome,
+    required bool bridgeTakeoverRequested,
+    String? failureStage,
+  }) async {
+    await logEvent('hue_room_control_transition_completed', {
+      'journey_id': journeyId,
+      'source': source,
+      'outcome': outcome,
+      'bridge_takeover_requested': bridgeTakeoverRequested ? 1 : 0,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
   // ===========================================================================
   // Lighting Control Events
   // ===========================================================================

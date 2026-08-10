@@ -1,10 +1,11 @@
-//! Durable Hue bridge inventory capture and automation suppression.
+//! Durable Hue bridge inventory capture, automation suppression, and release.
 //!
 //! Rhythm treats a paired Hue bridge as a Zigbee control plane. Before the
 //! first mutation this module captures a complete Hue V2 inventory plus the V1
 //! automation collections and durably persists that bridge-scoped baseline.
-//! Automated restoration is intentionally deferred; releasing authority keeps
-//! the snapshot instead of writing it back to the bridge.
+//! Releasing authority restores only fields that Rhythm journaled, and only
+//! when the live resource still matches either Rhythm's written value or the
+//! immutable baseline. Any intervening Hue/user edit fails closed.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -695,7 +696,11 @@ pub fn acquire_authoritative_control<H: HueTransport + ?Sized>(
         Some(state)
             if matches!(
                 state.phase,
-                HueOwnershipPhase::Restored | HueOwnershipPhase::ReleasePending
+                HueOwnershipPhase::Restoring
+                    | HueOwnershipPhase::RestoreIncomplete
+                    | HueOwnershipPhase::Restored
+                    | HueOwnershipPhase::ReleasePending
+                    | HueOwnershipPhase::SnapshotRetained
             ) =>
         {
             state.ensure_bridge_id(&connected_id)?;
@@ -708,31 +713,6 @@ pub fn acquire_authoritative_control<H: HueTransport + ?Sized>(
     };
     let state = upgrade_uncleared_baseline(storage, transport, username, &connected_id, state)?;
     reconcile_authoritative_control(storage, key, transport, username, state)
-}
-
-/// Attempt to capture Hue recovery state and suppress competing automations
-/// without turning a healthy bridge into an unavailable controller.
-///
-/// Callers must separately fence release/credential teardown before invoking
-/// this function. Every takeover error is advisory: mutations remain guarded
-/// by durable receipts, while direct light control is allowed to continue.
-pub fn acquire_authoritative_control_best_effort<H: HueTransport + ?Sized>(
-    storage: &dyn Storage,
-    key: &HubKey,
-    transport: &H,
-    username: &str,
-) -> Option<HueControllerOwnership> {
-    match acquire_authoritative_control(storage, key, transport, username) {
-        Ok(ownership) => Some(ownership),
-        Err(error) => {
-            warn!(
-                target: "hue_authority",
-                "Hue controller takeover was incomplete; continuing with direct light control: {}",
-                error
-            );
-            None
-        }
-    }
 }
 
 fn references_lighting_target(value: &Value, source_device_id: Option<&str>) -> bool {
@@ -861,8 +841,8 @@ fn next_clear_operation<H: HueTransport + ?Sized>(
             "automation" => {}
             // Accessory scripts include both source-only device plumbing and
             // button/sensor programs that target lights or groups. Suppress
-            // only the latter, while treating a rejected mutation as a
-            // best-effort gap rather than a controller-wide command fence.
+            // only the latter. A rejected target suppression fences the
+            // complete bridge takeover.
             "accessory"
                 if accessory_behavior_targets_lighting(behavior, resource_id)?
                     && !skipped_operation_ids
@@ -975,6 +955,30 @@ fn execute_operation<H: HueTransport + ?Sized>(
             validate_v1_update_receipt(operation, &receipt)?;
             Ok(None)
         }
+        ("v2", "restore") => {
+            transport.update_resource(
+                username,
+                operation.resource_type,
+                &operation.resource_id,
+                operation
+                    .body
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Hue restore operation has no body"))?,
+            )?;
+            Ok(None)
+        }
+        ("v1", "restore") => {
+            let receipt = transport.put_v1(
+                username,
+                &format!("{}/{}", operation.resource_type, operation.resource_id),
+                operation
+                    .body
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Hue restore operation has no body"))?,
+            )?;
+            validate_v1_update_receipt(operation, &receipt)?;
+            Ok(None)
+        }
         _ => anyhow::bail!(
             "Unsupported Hue ownership operation {} {}",
             operation.api,
@@ -1029,11 +1033,261 @@ fn verify_operation<H: HueTransport + ?Sized>(
                 ),
             }
         }
+        ("v2", "restore") => {
+            let payload = transport.get_resources(username, operation.resource_type)?;
+            let resource = data_array(operation.resource_type, &payload)?
+                .iter()
+                .find(|resource| {
+                    resource.get("id").and_then(Value::as_str)
+                        == Some(operation.resource_id.as_str())
+                });
+            match resource {
+                Some(resource)
+                    if resource.get("enabled")
+                        == operation.body.as_ref().and_then(|body| body.get("enabled")) =>
+                {
+                    Ok(())
+                }
+                _ => anyhow::bail!(
+                    "Hue V2 {} was not restored by read-back",
+                    operation.resource_type
+                ),
+            }
+        }
+        ("v1", "restore") => {
+            let payload = transport.get_v1(username, operation.resource_type)?;
+            let resource =
+                object_resource(operation.resource_type, &payload)?.get(&operation.resource_id);
+            match resource {
+                Some(resource)
+                    if resource.get("status")
+                        == operation.body.as_ref().and_then(|body| body.get("status")) =>
+                {
+                    Ok(())
+                }
+                _ => anyhow::bail!(
+                    "Hue V1 {} was not restored by read-back",
+                    operation.resource_type
+                ),
+            }
+        }
         _ => anyhow::bail!(
             "Unsupported Hue ownership verification {} {}",
             operation.api,
             operation.action
         ),
+    }
+}
+
+fn baseline_resource_for_operation<'a>(
+    state: &'a HueControllerOwnership,
+    operation: &ControlPlaneOperation,
+) -> Result<&'a Value> {
+    match operation.api {
+        "v2" => data_array(
+            operation.resource_type,
+            state
+                .baseline
+                .v2_resource(operation.resource_type)
+                .ok_or_else(|| anyhow::anyhow!("Hue V2 restore baseline is incomplete"))?,
+        )?
+        .iter()
+        .find(|resource| {
+            resource.get("id").and_then(Value::as_str) == Some(operation.resource_id.as_str())
+        })
+        .ok_or_else(|| anyhow::anyhow!("Hue V2 restore baseline resource is missing")),
+        "v1" => object_resource(
+            operation.resource_type,
+            state
+                .baseline
+                .v1_resource(operation.resource_type)
+                .ok_or_else(|| anyhow::anyhow!("Hue V1 restore baseline is incomplete"))?,
+        )?
+        .get(&operation.resource_id)
+        .ok_or_else(|| anyhow::anyhow!("Hue V1 restore baseline resource is missing")),
+        _ => anyhow::bail!("Unsupported Hue restore API"),
+    }
+}
+
+fn live_resource_for_operation<H: HueTransport + ?Sized>(
+    transport: &H,
+    username: &str,
+    operation: &ControlPlaneOperation,
+) -> Result<Value> {
+    match operation.api {
+        "v2" => {
+            let payload = transport.get_resources(username, operation.resource_type)?;
+            data_array(operation.resource_type, &payload)?
+                .iter()
+                .find(|resource| {
+                    resource.get("id").and_then(Value::as_str)
+                        == Some(operation.resource_id.as_str())
+                })
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Hue V2 restore target is missing"))
+        }
+        "v1" => {
+            let payload = transport.get_v1(username, operation.resource_type)?;
+            object_resource(operation.resource_type, &payload)?
+                .get(&operation.resource_id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Hue V1 restore target is missing"))
+        }
+        _ => anyhow::bail!("Unsupported Hue restore API"),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RestorePrecondition {
+    AlreadyRestored,
+    WriteRequired,
+}
+
+fn restore_resources_equivalent(api: &str, left: &Value, right: &Value) -> bool {
+    if api != "v2" {
+        return left == right;
+    }
+    let mut left = left.clone();
+    let mut right = right.clone();
+    // A typed V2 collection read may omit the redundant `type` field that is
+    // present in the complete-inventory capture. The endpoint and receipt
+    // already bind the resource type, so this is not a mutable user field.
+    left.as_object_mut().map(|object| object.remove("type"));
+    right.as_object_mut().map(|object| object.remove("type"));
+    left == right
+}
+
+/// Compare the complete live resource with the immutable baseline. The only
+/// accepted pre-write delta is the single field Rhythm previously changed.
+/// This prevents release from overwriting later edits made in Hue.
+fn validate_restore_precondition<H: HueTransport + ?Sized>(
+    state: &HueControllerOwnership,
+    transport: &H,
+    username: &str,
+    operation: &ControlPlaneOperation,
+) -> Result<RestorePrecondition> {
+    let baseline = baseline_resource_for_operation(state, operation)?;
+    let live = live_resource_for_operation(transport, username, operation)?;
+    if restore_resources_equivalent(operation.api, &live, baseline) {
+        return Ok(RestorePrecondition::AlreadyRestored);
+    }
+
+    let mut rhythm_written = baseline.clone();
+    match operation.api {
+        "v2" => rhythm_written["enabled"] = Value::Bool(false),
+        "v1" => rhythm_written["status"] = Value::String("disabled".to_string()),
+        _ => anyhow::bail!("Unsupported Hue restore API"),
+    }
+    if restore_resources_equivalent(operation.api, &live, &rhythm_written) {
+        Ok(RestorePrecondition::WriteRequired)
+    } else {
+        anyhow::bail!("Hue automation changed after Rhythm suppression; automatic restore refused")
+    }
+}
+
+fn restore_operation_for_receipt(
+    state: &HueControllerOwnership,
+    receipt: &HueOwnershipReceipt,
+) -> Result<Option<ControlPlaneOperation>> {
+    if receipt.action != "disable" || receipt.status == HueOwnershipReceiptStatus::Unsupported {
+        return Ok(None);
+    }
+    let operation_id = format!(
+        "restore:{}:{}:{}",
+        receipt.api, receipt.resource_type, receipt.original_resource_id
+    );
+    if state
+        .receipts
+        .get(&operation_id)
+        .is_some_and(|receipt| receipt.status == HueOwnershipReceiptStatus::Succeeded)
+    {
+        return Ok(None);
+    }
+
+    let baseline_operation = ControlPlaneOperation {
+        operation_id: operation_id.clone(),
+        api: if receipt.api == "v2" { "v2" } else { "v1" },
+        action: "restore",
+        resource_type: match receipt.resource_type.as_str() {
+            "behavior_instance" => "behavior_instance",
+            "rules" => "rules",
+            "schedules" => "schedules",
+            _ => anyhow::bail!("Unsupported Hue restore resource type"),
+        },
+        resource_id: receipt.original_resource_id.clone(),
+        body: None,
+    };
+    let baseline = baseline_resource_for_operation(state, &baseline_operation)?;
+    let body = match baseline_operation.api {
+        "v2" if baseline.get("enabled").and_then(Value::as_bool) == Some(true) => {
+            json!({"enabled": true})
+        }
+        "v1" if baseline.get("status").and_then(Value::as_str) != Some("disabled") => {
+            json!({"status": baseline.get("status").cloned().unwrap_or_else(|| json!("enabled"))})
+        }
+        // Rhythm did not change an originally-disabled resource.
+        "v2" | "v1" => return Ok(None),
+        _ => anyhow::bail!("Unsupported Hue restore API"),
+    };
+    Ok(Some(ControlPlaneOperation {
+        body: Some(body),
+        ..baseline_operation
+    }))
+}
+
+fn next_restore_operation(state: &HueControllerOwnership) -> Result<Option<ControlPlaneOperation>> {
+    let mut suppression_receipts = state
+        .receipts
+        .values()
+        .filter(|receipt| receipt.action == "disable")
+        .cloned()
+        .collect::<Vec<_>>();
+    suppression_receipts.sort_by(|left, right| left.operation_id.cmp(&right.operation_id));
+    for receipt in suppression_receipts {
+        if let Some(operation) = restore_operation_for_receipt(state, &receipt)? {
+            return Ok(Some(operation));
+        }
+    }
+    Ok(None)
+}
+
+fn run_restore_operation<H: HueTransport + ?Sized>(
+    storage: &dyn Storage,
+    key: &HubKey,
+    state: &mut HueControllerOwnership,
+    transport: &H,
+    username: &str,
+    operation: &ControlPlaneOperation,
+) -> Result<()> {
+    state.set_receipt(operation, HueOwnershipReceiptStatus::Pending, None);
+    persist_controller_ownership(storage, state)?;
+    let result = (|| {
+        if validate_restore_precondition(state, transport, username, operation)?
+            == RestorePrecondition::WriteRequired
+        {
+            execute_operation(transport, username, operation)?;
+        }
+        verify_operation(transport, username, operation)?;
+        let baseline = baseline_resource_for_operation(state, operation)?;
+        let live = live_resource_for_operation(transport, username, operation)?;
+        if !restore_resources_equivalent(operation.api, &live, baseline) {
+            anyhow::bail!("Hue automation restore did not reproduce the captured baseline");
+        }
+        Ok(())
+    })();
+    match result {
+        Ok(()) => {
+            state.set_receipt(operation, HueOwnershipReceiptStatus::Succeeded, None);
+            persist_controller_ownership(storage, state)
+        }
+        Err(error) => {
+            state.set_receipt(operation, HueOwnershipReceiptStatus::Failed, None);
+            state.phase = HueOwnershipPhase::RestoreIncomplete;
+            persist_controller_ownership(storage, state)
+                .context("Hue restore failed and its recovery receipt was not durable")?;
+            let _ = key;
+            Err(error).context("Hue automation could not be safely restored")
+        }
     }
 }
 
@@ -1075,7 +1329,7 @@ fn run_journaled_operation<H: HueTransport + ?Sized>(
             }
             warn!(
                 target: "hue_authority",
-                "Hue {} {} could not be suppressed; continuing controller takeover: {}",
+                "Hue {} {} could not be suppressed; controller takeover remains fenced: {}",
                 operation.api,
                 operation.resource_type,
                 error
@@ -1107,24 +1361,16 @@ pub fn reconcile_authoritative_control<H: HueTransport + ?Sized>(
     state.phase = HueOwnershipPhase::Clearing;
     persist_controller_ownership(storage, &state)?;
 
-    let mut skipped_operation_ids = BTreeSet::new();
+    let skipped_operation_ids = BTreeSet::new();
     loop {
         let operation = match next_clear_operation(transport, username, &skipped_operation_ids) {
             Ok(operation) => operation,
             Err(error) => {
-                // Automation suppression is best-effort. A bridge can expose
-                // an unknown or temporarily unreadable control-plane resource
-                // without making otherwise healthy light endpoints unsafe to
-                // command. Preserve the gap in logs and the durable receipts,
-                // then let the controller become available.
-                warn!(
-                    target: "hue_authority",
-                    "Hue automation suppression inspection was incomplete; continuing controller takeover: {}",
-                    error
-                );
-                state.phase = HueOwnershipPhase::Active;
+                state.phase = HueOwnershipPhase::ClearIncomplete;
                 persist_controller_ownership(storage, &state)?;
-                return Ok(state);
+                return Err(error).context(
+                    "Hue automation inventory was incomplete; controller takeover refused",
+                );
             }
         };
         let Some(operation) = operation else {
@@ -1133,7 +1379,9 @@ pub fn reconcile_authoritative_control<H: HueTransport + ?Sized>(
         if run_journaled_operation(storage, key, &mut state, transport, username, &operation)?
             == JournaledOperationOutcome::Failed
         {
-            skipped_operation_ids.insert(operation.operation_id);
+            state.phase = HueOwnershipPhase::ClearIncomplete;
+            persist_controller_ownership(storage, &state)?;
+            anyhow::bail!("Hue automation suppression was incomplete; controller takeover refused");
         }
     }
 
@@ -1142,11 +1390,9 @@ pub fn reconcile_authoritative_control<H: HueTransport + ?Sized>(
     Ok(state)
 }
 
-/// Release controller authority without restoring the captured bridge state.
-///
-/// This transition performs no Hue control-plane writes. The complete
-/// pre-takeover snapshot, clear receipts, and managed-resource mappings remain
-/// durable for a future explicit recovery implementation.
+/// Release controller authority by restoring only journaled automation fields
+/// whose complete live resource still matches Rhythm's write. Restoration is
+/// resumable and refuses to overwrite later Hue/user edits.
 pub fn release_authoritative_control<H: HueTransport + ?Sized>(
     storage: &dyn Storage,
     _key: &HubKey,
@@ -1158,42 +1404,42 @@ pub fn release_authoritative_control<H: HueTransport + ?Sized>(
         return Ok(None);
     };
     state.ensure_bridge_id(&connected_id)?;
-    if state.phase != HueOwnershipPhase::ReleasePending {
-        state.phase = HueOwnershipPhase::ReleasePending;
-        persist_controller_ownership(storage, &state)?;
+    if state.phase == HueOwnershipPhase::Restored {
+        return Ok(Some(state));
     }
+    state.phase = HueOwnershipPhase::Restoring;
+    persist_controller_ownership(storage, &state)?;
+    while let Some(operation) = next_restore_operation(&state)? {
+        run_restore_operation(storage, _key, &mut state, transport, username, &operation)?;
+    }
+    state.phase = HueOwnershipPhase::Restored;
+    persist_controller_ownership(storage, &state)?;
     let persisted = load_controller_ownership(storage, &connected_id)?.ok_or_else(|| {
-        anyhow::anyhow!("Retained Hue ownership snapshot was not durable after release")
+        anyhow::anyhow!("Restored Hue ownership receipt was not durable after release")
     })?;
     if persisted != state {
-        anyhow::bail!("Retained Hue ownership snapshot failed durable read-back verification");
+        anyhow::bail!("Restored Hue ownership receipt failed durable read-back verification");
     }
     Ok(Some(persisted))
 }
 
-/// Finalize local credential teardown while deliberately retaining the Hue
-/// snapshot. Legacy `restored` manifests are migrated to the retained phase.
+/// Delete a verified-restored ownership epoch. Callers use this after the
+/// credential-removal durability barrier, or immediately for a room-policy
+/// release where credentials intentionally remain connected.
 pub fn finalize_released_control(storage: &dyn Storage, bridge_id: &str) -> Result<()> {
-    let mut state = load_controller_ownership(storage, bridge_id)?
+    let state = load_controller_ownership(storage, bridge_id)?
         .ok_or_else(|| anyhow::anyhow!("No Hue ownership manifest exists for the bridge"))?;
-    if matches!(
-        state.phase,
-        HueOwnershipPhase::Restored | HueOwnershipPhase::ReleasePending
-    ) {
-        state.phase = HueOwnershipPhase::SnapshotRetained;
-        persist_controller_ownership(storage, &state)?;
-    }
-    if state.phase != HueOwnershipPhase::SnapshotRetained {
+    if state.phase != HueOwnershipPhase::Restored {
         anyhow::bail!(
-            "Refusing to finalize Hue ownership snapshot in {:?} phase",
+            "Refusing to finalize Hue ownership recovery in {:?} phase",
             state.phase
         );
     }
-    let persisted = load_controller_ownership(storage, bridge_id)?.ok_or_else(|| {
-        anyhow::anyhow!("Retained Hue ownership snapshot disappeared during finalization")
-    })?;
-    if persisted.phase != HueOwnershipPhase::SnapshotRetained {
-        anyhow::bail!("Hue ownership snapshot was not durably retained");
+    storage
+        .delete_integration_state_file(&ownership_path(bridge_id)?)
+        .map_err(|_| anyhow::anyhow!("Failed to delete restored Hue ownership recovery"))?;
+    if load_controller_ownership(storage, bridge_id)?.is_some() {
+        anyhow::bail!("Restored Hue ownership recovery was not durably deleted");
     }
     Ok(())
 }
@@ -1451,40 +1697,19 @@ mod tests {
     }
 
     #[test]
-    fn best_effort_takeover_downgrades_capture_failure_without_mutation() {
-        let spy = SpyHueTransport::new();
-        seed_bridge(&spy, json!([]));
-
-        let ownership = acquire_authoritative_control_best_effort(
-            &AckWithoutPersistStorage,
-            &key(),
-            &spy,
-            "user",
-        );
-
-        assert!(ownership.is_none());
-        assert!(!spy.calls().iter().any(|call| matches!(
-            call,
-            HueTransportCall::UpdateResource { .. }
-                | HueTransportCall::DeleteResource { .. }
-                | HueTransportCall::PutV1 { .. }
-        )));
-    }
-
-    #[test]
-    fn takeover_remains_available_when_suppression_readback_is_not_observed() {
+    fn takeover_fails_closed_when_suppression_readback_is_not_observed() {
         let temp = TempStorage::new("clear-readback");
         let spy = SpyHueTransport::new();
         seed_bridge(&spy, json!([]));
         spy.set_ignore_resource_mutations(true);
 
-        let active = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
+        acquire_authoritative_control(&temp.storage, &key(), &spy, "user")
+            .expect_err("unverified suppression must not grant authority");
 
-        assert_eq!(active.phase, HueOwnershipPhase::Active);
         let persisted = load_controller_ownership(&temp.storage, "bridge-1")
             .unwrap()
             .unwrap();
-        assert_eq!(persisted.phase, HueOwnershipPhase::Active);
+        assert_eq!(persisted.phase, HueOwnershipPhase::ClearIncomplete);
         assert!(persisted
             .receipts()
             .any(|receipt| { receipt.status == HueOwnershipReceiptStatus::Failed }));
@@ -1504,19 +1729,19 @@ mod tests {
     }
 
     #[test]
-    fn takeover_continues_to_v1_when_a_v2_disable_is_rejected() {
+    fn takeover_stops_when_a_v2_disable_is_rejected() {
         let temp = TempStorage::new("skip-rejected-mutation");
         let spy = SpyHueTransport::new();
         seed_bridge(&spy, json!([]));
         spy.set_fail_resource_update("behavior_instance", "behavior-1");
 
-        let active = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
+        acquire_authoritative_control(&temp.storage, &key(), &spy, "user")
+            .expect_err("a rejected mutation must not grant authority");
 
         let state = load_controller_ownership(&temp.storage, "bridge-1")
             .unwrap()
             .unwrap();
-        assert_eq!(active.phase, HueOwnershipPhase::Active);
-        assert_eq!(state.phase, HueOwnershipPhase::Active);
+        assert_eq!(state.phase, HueOwnershipPhase::ClearIncomplete);
         assert!(state.receipts().any(|receipt| {
             receipt.resource_type == "behavior_instance"
                 && receipt.status == HueOwnershipReceiptStatus::Failed
@@ -1527,11 +1752,11 @@ mod tests {
             .any(|call| matches!(call, HueTransportCall::DeleteResource { .. })));
         assert_eq!(
             spy.get_v1("user", "rules").unwrap()["1"]["status"],
-            "disabled"
+            "enabled"
         );
         assert_eq!(
             spy.get_v1("user", "schedules").unwrap()["2"]["status"],
-            "disabled"
+            "enabled"
         );
         assert_eq!(
             spy.calls()
@@ -1662,7 +1887,7 @@ mod tests {
     }
 
     #[test]
-    fn takeover_continues_after_rejected_accessory_suppression() {
+    fn takeover_stops_after_rejected_accessory_suppression() {
         let temp = TempStorage::new("effectful-accessory-behavior");
         let spy = SpyHueTransport::new();
         seed_bridge(&spy, json!([]));
@@ -1697,9 +1922,16 @@ mod tests {
         );
         spy.set_fail_resource_update("behavior_instance", "accessory-behavior-1");
 
-        let active = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
+        acquire_authoritative_control(&temp.storage, &key(), &spy, "user")
+            .expect_err("a rejected accessory mutation must not grant authority");
 
-        assert_eq!(active.phase, HueOwnershipPhase::Active);
+        assert_eq!(
+            load_controller_ownership(&temp.storage, "bridge-1")
+                .unwrap()
+                .unwrap()
+                .phase,
+            HueOwnershipPhase::ClearIncomplete
+        );
         assert_eq!(
             spy.get_resources("user", "behavior_instance").unwrap()["data"][0]["enabled"],
             true
@@ -1714,16 +1946,16 @@ mod tests {
         )));
         assert_eq!(
             spy.get_v1("user", "rules").unwrap()["1"]["status"],
-            "disabled"
+            "enabled"
         );
         assert_eq!(
             spy.get_v1("user", "schedules").unwrap()["2"]["status"],
-            "disabled"
+            "enabled"
         );
     }
 
     #[test]
-    fn unclassified_enabled_behavior_is_recorded_without_fencing_commands() {
+    fn unclassified_enabled_behavior_fences_takeover_without_mutation() {
         let temp = TempStorage::new("unclassified-behavior");
         let spy = SpyHueTransport::new();
         seed_bridge(&spy, json!([]));
@@ -1743,9 +1975,8 @@ mod tests {
             ], "errors": []}),
         );
 
-        let active = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
-
-        assert_eq!(active.phase, HueOwnershipPhase::Active);
+        acquire_authoritative_control(&temp.storage, &key(), &spy, "user")
+            .expect_err("an unresolved enabled behavior must fence takeover");
         assert!(!spy.calls().iter().any(|call| matches!(
             call,
             HueTransportCall::UpdateResource { .. } | HueTransportCall::PutV1 { .. }
@@ -1755,12 +1986,12 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .phase,
-            HueOwnershipPhase::Active
+            HueOwnershipPhase::ClearIncomplete
         );
     }
 
     #[test]
-    fn malformed_accessory_payload_does_not_fence_controller_commands() {
+    fn malformed_accessory_payload_fences_takeover_without_mutation() {
         let temp = TempStorage::new("malformed-accessory-behavior");
         let spy = SpyHueTransport::new();
         seed_bridge(&spy, json!([]));
@@ -1793,9 +2024,8 @@ mod tests {
             ], "errors": []}),
         );
 
-        let active = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
-
-        assert_eq!(active.phase, HueOwnershipPhase::Active);
+        acquire_authoritative_control(&temp.storage, &key(), &spy, "user")
+            .expect_err("a malformed enabled accessory must fence takeover");
         let behaviors = spy.get_resources("user", "behavior_instance").unwrap();
         assert_eq!(behaviors["data"][0]["enabled"], true);
         assert_eq!(behaviors["data"][1]["enabled"], true);
@@ -1806,7 +2036,7 @@ mod tests {
     }
 
     #[test]
-    fn unknown_behavior_category_does_not_fence_commands() {
+    fn unknown_behavior_category_fences_takeover_without_mutation() {
         let temp = TempStorage::new("unknown-behavior-category");
         let spy = SpyHueTransport::new();
         seed_bridge(&spy, json!([]));
@@ -1818,9 +2048,8 @@ mod tests {
             }], "errors": []}),
         );
 
-        let active = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
-
-        assert_eq!(active.phase, HueOwnershipPhase::Active);
+        acquire_authoritative_control(&temp.storage, &key(), &spy, "user")
+            .expect_err("an unknown enabled category must fence takeover");
         assert!(!spy.calls().iter().any(|call| matches!(
             call,
             HueTransportCall::UpdateResource { .. } | HueTransportCall::PutV1 { .. }
@@ -1985,24 +2214,28 @@ mod tests {
     }
 
     #[test]
-    fn release_fences_stale_credentials_then_retains_snapshot_for_repair() {
+    fn release_restores_journaled_fields_before_starting_a_fresh_epoch() {
         let temp = TempStorage::new("retained-reacquire");
         let spy = SpyHueTransport::new();
         seed_bridge(&spy, json!([]));
-        let active = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
-        let capture_id = active.baseline.capture_id().to_string();
+        acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
         spy.reset();
-        let pending = release_authoritative_control(&temp.storage, &key(), &spy, "user")
+        let restored = release_authoritative_control(&temp.storage, &key(), &spy, "user")
             .unwrap()
             .unwrap();
-        assert_eq!(pending.phase, HueOwnershipPhase::ReleasePending);
-        assert!(!spy.calls().iter().any(|call| matches!(
-            call,
-            HueTransportCall::CreateResource { .. }
-                | HueTransportCall::UpdateResource { .. }
-                | HueTransportCall::DeleteResource { .. }
-                | HueTransportCall::PutV1 { .. }
-        )));
+        assert_eq!(restored.phase, HueOwnershipPhase::Restored);
+        assert_eq!(
+            spy.get_resources("user", "behavior_instance").unwrap()["data"][0]["enabled"],
+            true
+        );
+        assert_eq!(
+            spy.get_v1("user", "rules").unwrap()["1"]["status"],
+            "enabled"
+        );
+        assert_eq!(
+            spy.get_v1("user", "schedules").unwrap()["2"]["status"],
+            "enabled"
+        );
         spy.reset();
 
         let error = acquire_authoritative_control(&temp.storage, &key(), &spy, "user")
@@ -2017,20 +2250,62 @@ mod tests {
         )));
 
         finalize_released_control(&temp.storage, "bridge-1").unwrap();
-        let retained = load_controller_ownership(&temp.storage, "bridge-1")
+        assert!(load_controller_ownership(&temp.storage, "bridge-1")
             .unwrap()
-            .unwrap();
-        assert_eq!(retained.phase, HueOwnershipPhase::SnapshotRetained);
-        assert_eq!(retained.baseline.capture_id(), capture_id);
+            .is_none());
 
         let reacquired =
             acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
         assert_eq!(reacquired.phase, HueOwnershipPhase::Active);
-        assert_eq!(reacquired.baseline.capture_id(), capture_id);
+        assert!(!reacquired.baseline.capture_id().is_empty());
     }
 
     #[test]
-    fn malformed_v1_receipts_do_not_fence_controller_commands() {
+    fn release_refuses_to_overwrite_a_later_hue_edit() {
+        let temp = TempStorage::new("restore-compare-and-set");
+        let spy = SpyHueTransport::new();
+        seed_bridge(&spy, json!([]));
+        acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
+        spy.update_resource(
+            "user",
+            "behavior_instance",
+            "behavior-1",
+            &json!({"metadata": {"name": "Edited in Hue"}}),
+        )
+        .unwrap();
+        spy.reset();
+
+        let error = release_authoritative_control(&temp.storage, &key(), &spy, "user")
+            .expect_err("a later Hue edit must block automatic restoration");
+
+        assert!(error.to_string().contains("could not be safely restored"));
+        assert_eq!(
+            spy.get_resources("user", "behavior_instance").unwrap()["data"][0]["enabled"],
+            false
+        );
+        assert_eq!(
+            spy.get_resources("user", "behavior_instance").unwrap()["data"][0]["metadata"]["name"],
+            "Edited in Hue"
+        );
+        assert!(!spy.calls().iter().any(|call| matches!(
+            call,
+            HueTransportCall::UpdateResource {
+                resource_type,
+                body,
+                ..
+            } if resource_type == "behavior_instance" && body == &json!({"enabled": true})
+        )));
+        assert_eq!(
+            load_controller_ownership(&temp.storage, "bridge-1")
+                .unwrap()
+                .unwrap()
+                .phase,
+            HueOwnershipPhase::RestoreIncomplete
+        );
+    }
+
+    #[test]
+    fn malformed_v1_receipts_fence_takeover() {
         let temp = TempStorage::new("v1-receipt");
         let spy = SpyHueTransport::new();
         seed_bridge(&spy, json!([]));
@@ -2039,17 +2314,17 @@ mod tests {
             "success": {format!("/rules/{private_id}/status"): "disabled"}
         }])));
 
-        let active = acquire_authoritative_control(&temp.storage, &key(), &spy, "user").unwrap();
+        acquire_authoritative_control(&temp.storage, &key(), &spy, "user")
+            .expect_err("an unverified V1 receipt must fence takeover");
         let state = load_controller_ownership(&temp.storage, "bridge-1")
             .unwrap()
             .unwrap();
-        assert_eq!(active.phase, HueOwnershipPhase::Active);
-        assert_eq!(state.phase, HueOwnershipPhase::Active);
+        assert_eq!(state.phase, HueOwnershipPhase::ClearIncomplete);
         let v1_receipts = state
             .receipts()
             .filter(|receipt| receipt.api == "v1")
             .collect::<Vec<_>>();
-        assert_eq!(v1_receipts.len(), 2);
+        assert_eq!(v1_receipts.len(), 1);
         assert!(v1_receipts
             .iter()
             .all(|receipt| receipt.status == HueOwnershipReceiptStatus::Failed));
@@ -2126,7 +2401,7 @@ mod tests {
         let released = release_authoritative_control(&temp.storage, &key(), &spy, "user")
             .unwrap()
             .unwrap();
-        assert_eq!(released.phase, HueOwnershipPhase::ReleasePending);
+        assert_eq!(released.phase, HueOwnershipPhase::Restored);
         assert!(!spy.calls().iter().any(|call| matches!(
             call,
             HueTransportCall::CreateResource { resource_type, .. }
@@ -2135,14 +2410,9 @@ mod tests {
                 if resource_type == "smart_scene"
         )));
         finalize_released_control(&temp.storage, "bridge-1").unwrap();
-        let retained = load_controller_ownership(&temp.storage, "bridge-1")
+        assert!(load_controller_ownership(&temp.storage, "bridge-1")
             .unwrap()
-            .unwrap();
-        assert_eq!(retained.phase, HueOwnershipPhase::SnapshotRetained);
-        assert_eq!(
-            retained.baseline.v2_resource("smart_scene").unwrap()["data"][0]["id"],
-            "smart-1"
-        );
+            .is_none());
     }
 
     #[test]

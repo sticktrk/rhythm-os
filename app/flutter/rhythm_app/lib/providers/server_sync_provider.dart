@@ -770,6 +770,16 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Host capabilities from the last server hello, if the server advertises them.
   RhythmCapabilities? get serverCapabilities => _capabilities;
 
+  /// Hue configuration is destructive on legacy servers because they can
+  /// seize bridge automation authority without a room review. New app builds
+  /// therefore fail closed unless the server advertises the consent contract.
+  bool get hueRoomAuthorityConsentSupported =>
+      HueServiceLocator.isDemoMode ||
+      _capabilities?.supportsFeature(
+            RhythmFeature.hueRoomAuthorityConsent,
+          ) ==
+          true;
+
   /// Whether the host explicitly advertised supported hub types.
   bool get hasExplicitHubCapabilities => _capabilities != null;
 
@@ -4306,8 +4316,42 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Called after Hue pairing or other hub configuration changes so the
   /// server gets the credentials it needs to connect to the hub.
   Future<bool> pushHubCredentials(RoomSourceDto source) async {
-    if (!_connection.connected) return false;
+    if (!HueServiceLocator.isDemoMode && !_connection.connected) return false;
+    if (source == RoomSourceDto.hue && !hueRoomAuthorityConsentSupported) {
+      debugPrint(
+        'ServerSync: refusing Hue credential push; server lacks room authority consent',
+      );
+      return false;
+    }
     return _pushHubCredentialsForSource(source);
+  }
+
+  Future<RhythmHueAuthority?> fetchHueAuthority() async {
+    if ((!HueServiceLocator.isDemoMode && !_connection.connected) ||
+        !hueRoomAuthorityConsentSupported) {
+      return null;
+    }
+    return api.getHueAuthority();
+  }
+
+  Future<RhythmHueAuthority?> updateHueAuthority({
+    required RhythmHueBridgeAuthority bridge,
+    required Map<String, RhythmHueRoomAuthorityOwner> owners,
+    required String correlationId,
+  }) async {
+    if ((!HueServiceLocator.isDemoMode && !_connection.connected) ||
+        !hueRoomAuthorityConsentSupported) {
+      return null;
+    }
+    final updated = await api.updateHueAuthority(
+      bridge: bridge,
+      owners: owners,
+      correlationId: correlationId,
+    );
+    if (updated != null && !HueServiceLocator.isDemoMode) {
+      await _connection.reconnect();
+    }
+    return updated;
   }
 
   /// Tell the addon to auto-configure HA using its SUPERVISOR_TOKEN.

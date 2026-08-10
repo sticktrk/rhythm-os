@@ -1164,12 +1164,12 @@ void main() {
   group('ServerSyncProvider.pushHubCredentials', () {
     late RoomProvider roomProvider;
     late _FakeRhythmServerApi api;
-    late _FakeRhythmConnection connection;
+    late _HelloRhythmConnection connection;
 
     setUp(() {
       roomProvider = RoomProvider();
       api = _FakeRhythmServerApi();
-      connection = _FakeRhythmConnection(api);
+      connection = _HelloRhythmConnection(api);
     });
 
     tearDown(() {
@@ -1194,6 +1194,15 @@ void main() {
       );
       addTearDown(provider.dispose);
 
+      connection.emitHello(RhythmHello.fromJson({
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': const [RhythmFeature.hueRoomAuthorityConsent],
+          'hubs': const <dynamic>[],
+        },
+      }));
+      await Future<void>.delayed(Duration.zero);
+
       final hubConnected = await provider.pushHubCredentials(RoomSourceDto.hue);
 
       expect(api.hubCredentialsCalls, 1);
@@ -1202,6 +1211,28 @@ void main() {
       expect(api.lastCredentials, {'username': 'hue-user'});
       expect(hubConnected, isTrue);
       expect(connection.reconnectCalls, 1);
+    });
+
+    test('refuses Hue credentials when the server lacks consent support',
+        () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider([
+          Hub.hue(
+            id: 'hue-1',
+            homeId: 'home-1',
+            name: 'Philips Hue',
+            bridgeIp: '192.168.1.20',
+            appKey: 'hue-user',
+          ),
+        ]),
+      );
+      addTearDown(provider.dispose);
+
+      expect(await provider.pushHubCredentials(RoomSourceDto.hue), isFalse);
+      expect(api.hubCredentialsCalls, 0);
+      expect(connection.reconnectCalls, 0);
     });
 
     test('pushes Home Assistant credentials with token payload', () async {

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart';
 import '../../widgets/solar_orbit.dart';
 import '../../widgets/hub_status_indicator.dart';
 import '../../widgets/success_modal.dart';
@@ -13,6 +14,7 @@ import '../../providers/server_sync_provider.dart';
 import '../../providers/hub_connection_provider.dart';
 import '../../providers/home_provider.dart';
 import '../../providers/room_provider.dart';
+import 'hue_authority_screen.dart';
 
 /// Connection status for the Hue configurator.
 enum HueLinkingStatus {
@@ -172,6 +174,17 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
   void _startPairing() {
     if (_selectedBridgeIp == null) return;
 
+    if (!HueServiceLocator.isDemoMode &&
+        !context.read<ServerSyncProvider>().hueRoomAuthorityConsentSupported) {
+      setState(() {
+        _status = HueLinkingStatus.error;
+        _errorMessage = 'Update your Rhythm Light Box before pairing Hue. '
+            'This app will not connect to a server that can take over Hue '
+            'automations without a room review.';
+      });
+      return;
+    }
+
     if (HueServiceLocator.isDemoMode) {
       _startDemoPairing();
       return;
@@ -224,6 +237,7 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
     });
 
     final homeProvider = context.read<HomeProvider>();
+    final syncProvider = context.read<ServerSyncProvider>();
 
     if (homeProvider.currentHome == null) {
       if (!mounted) return;
@@ -275,14 +289,20 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
     AnalyticsService().logHubConnected('hue');
     AnalyticsService().setHubType('hue');
 
-    // Push credentials to server so it can connect to the hub
-    if (mounted) {
-      await context
-          .read<ServerSyncProvider>()
-          .pushHubCredentials(RoomSourceDto.hue);
-    }
+    // Push credentials to an observe-only server connection. Authority remains
+    // with Hue until the explicit review below is durably submitted.
+    final hubConnected =
+        await syncProvider.pushHubCredentials(RoomSourceDto.hue);
 
     if (!mounted) return;
+    if (!hubConnected) {
+      setState(() {
+        _status = HueLinkingStatus.error;
+        _errorMessage = 'Hue was linked locally, but the Rhythm server could '
+            'not connect safely. No Hue automations were changed.';
+      });
+      return;
+    }
     setState(() {
       _connectedBridgeIp = _selectedBridgeIp;
       _isFirstTimePairing = true;
@@ -290,9 +310,34 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
     });
 
     if (_isFirstTimePairing && mounted) {
+      final authority = await syncProvider.fetchHueAuthority();
+      if (!mounted) return;
+      final matchingBridges = authority?.bridges
+              .where(
+                (candidate) =>
+                    candidate.address == _selectedBridgeIp ||
+                    candidate.address.startsWith('$_selectedBridgeIp:'),
+              )
+              .toList(growable: false) ??
+          const <RhythmHueBridgeAuthority>[];
+      final bridge = matchingBridges.isEmpty ? null : matchingBridges.first;
+      if (bridge == null || bridge.rooms.isEmpty) {
+        setState(() {
+          _status = HueLinkingStatus.error;
+          _errorMessage = 'Hue connected in safe mode, but its rooms are not '
+              'ready for review yet. Reconnect after room sync finishes.';
+        });
+        return;
+      }
+      final reviewed = await HueAuthorityScreen.show(
+        context,
+        bridge,
+        source: 'pairing',
+      );
+      if (!mounted || reviewed != true) return;
       await SuccessModal.show(
         context,
-        roomCount: 0,
+        roomCount: bridge.rooms.length,
         hubType: 'Philips Hue',
       );
       if (mounted) {
@@ -946,8 +991,10 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
       children: [
         _buildActionButton(
           onTap: _isReconnecting ? null : _reconnect,
-          icon: Icons.refresh_rounded,
-          label: _isReconnecting ? 'Reconnecting...' : 'Reconnect',
+          icon: Icons.admin_panel_settings_outlined,
+          label: _isReconnecting
+              ? 'Loading room choices...'
+              : 'Review room automation',
           isPrimary: true,
         ),
         const SizedBox(height: 12),
@@ -964,10 +1011,50 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
 
   Future<void> _reconnect() async {
     if (_isReconnecting) return;
+    final syncProvider = context.read<ServerSyncProvider>();
+    if (!syncProvider.hueRoomAuthorityConsentSupported) {
+      setState(() {
+        _status = HueLinkingStatus.error;
+        _errorMessage = 'Update your Rhythm Light Box before reviewing Hue. '
+            'This app will not send credentials to a server that can change '
+            'Hue automations without consent.';
+      });
+      return;
+    }
     setState(() => _isReconnecting = true);
-    await context
-        .read<ServerSyncProvider>()
-        .pushHubCredentials(RoomSourceDto.hue);
+    final connected = await syncProvider.pushHubCredentials(RoomSourceDto.hue);
+    if (connected && mounted) {
+      final authority = await syncProvider.fetchHueAuthority();
+      final bridgeAddress = _connectedBridgeIp;
+      final matchingBridges = authority?.bridges
+              .where(
+                (candidate) =>
+                    bridgeAddress != null &&
+                    (candidate.address == bridgeAddress ||
+                        candidate.address.startsWith('$bridgeAddress:')),
+              )
+              .toList(growable: false) ??
+          const <RhythmHueBridgeAuthority>[];
+      if (mounted && matchingBridges.isNotEmpty) {
+        await HueAuthorityScreen.show(
+          context,
+          matchingBridges.first,
+          source: 'settings',
+        );
+      } else if (mounted) {
+        setState(() {
+          _status = HueLinkingStatus.error;
+          _errorMessage = 'Hue connected in safe mode, but its rooms are not '
+              'ready for review yet. Try again after room sync finishes.';
+        });
+      }
+    } else if (mounted) {
+      setState(() {
+        _status = HueLinkingStatus.error;
+        _errorMessage = 'Rhythm could not open the Hue room review safely. '
+            'No Hue automations were changed.';
+      });
+    }
     if (mounted) {
       setState(() => _isReconnecting = false);
     }

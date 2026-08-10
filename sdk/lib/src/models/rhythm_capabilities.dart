@@ -43,6 +43,7 @@ abstract final class RhythmFeature {
   static const String motionActivationToggle = 'motion_activation_toggle';
   static const String roomLightProfileOverrides =
       'room_light_profile_overrides';
+  static const String hueRoomAuthorityConsent = 'hue_room_authority_consent_v1';
 }
 
 /// Host capabilities advertised by the Rhythm server.

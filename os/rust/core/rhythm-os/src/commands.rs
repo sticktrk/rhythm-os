@@ -2686,6 +2686,15 @@ pub(crate) fn matching_button_input_binding_action(
         .map(|binding| binding.action.clone())
 }
 
+/// Fail-closed gate for unattended behavior in externally automated rooms.
+/// Manual API commands intentionally do not consult this helper.
+pub(crate) fn rhythm_automation_allowed_for_node(state: &SharedState, node_id: &str) -> bool {
+    state
+        .lock()
+        .ok()
+        .is_some_and(|s| s.rhythm_automation_allowed_for_node(node_id))
+}
+
 fn validate_input_binding_source(s: &AppState, source_node_id: &str) -> Result<()> {
     if !s.topology.has_public_node(source_node_id) {
         return Err(anyhow::anyhow!(
@@ -8593,6 +8602,9 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
         timezone_name: timezone_name.as_deref(),
         utc_offset,
     };
+    // Keep internal mode/default state current for every addressable settings
+    // node so a later reviewed handoff starts from the active mode. Only the
+    // physical-output pass below is authority-gated.
     let default_snapshots = addressable_node_snapshots(&runtime);
     let room_defaults_changed = apply_room_mode_defaults(
         state,
@@ -8614,7 +8626,10 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
             room_observed_power = s.room_observed_power.clone();
         }
     }
-    let snapshots = addressable_root_snapshots(&runtime);
+    let snapshots = addressable_root_snapshots(&runtime)
+    .into_iter()
+    .filter(|snapshot| rhythm_automation_allowed_for_node(state, &snapshot.id))
+    .collect::<Vec<_>>();
     let mut room_commands = Vec::new();
     let mut dispatch_snapshots = Vec::new();
     let mut transitioned_rooms = Vec::new();
@@ -12215,6 +12230,226 @@ pub fn do_hub_credentials(
     }
 
     Ok(())
+}
+
+/// Build the privacy-bounded, per-room Hue automation ownership review.
+pub fn build_hue_authority(state: &SharedState) -> Result<crate::api_types::HueAuthorityResponse> {
+    use crate::api_types::{HueAuthorityResponse, HueBridgeAuthorityDto, HueRoomAuthorityDto};
+    use crate::topology::ExternalRoomAutomationOwner;
+
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let mut keys = s
+        .hub_credentials
+        .keys()
+        .chain(s.hubs.keys())
+        .chain(s.topology.referenced_hub_keys().iter())
+        .filter(|key| key.hub_type.as_str() == crate::hub::HubType::HUE)
+        .cloned()
+        .collect::<Vec<_>>();
+    keys.sort_by(|left, right| left.address.cmp(&right.address));
+    keys.dedup();
+
+    let bridges = keys
+        .into_iter()
+        .filter_map(|key| {
+            let rooms = s.topology.external_automation_rooms_for_hub(&key);
+            if rooms.is_empty() {
+                return None;
+            }
+            Some(HueBridgeAuthorityDto {
+                address: key.address.clone(),
+                revision: s.topology.external_automation_revision(&key),
+                takeover_scope: "bridge",
+                bridge_takeover_requested: s.topology.external_hub_has_full_rhythm_consent(&key),
+                rooms: rooms
+                    .into_iter()
+                    .map(|(room_id, name, owner)| HueRoomAuthorityDto {
+                        rhythm_automation_enabled: s.rhythm_automation_allowed_for_node(&room_id),
+                        room_id,
+                        name,
+                        owner: match owner {
+                            None => "unreviewed",
+                            Some(ExternalRoomAutomationOwner::External) => "hue",
+                            Some(ExternalRoomAutomationOwner::Rhythm) => "rhythm",
+                        }
+                        .to_string(),
+                    })
+                    .collect(),
+            })
+        })
+        .collect();
+
+    Ok(HueAuthorityResponse {
+        schema_version: 1,
+        bridges,
+    })
+}
+
+/// Atomically persist one complete Hue room review. A full-Rhythm review may
+/// acquire the existing bridge-wide handoff; every other review freezes
+/// unattended Rhythm output first and restores any prior handoff.
+pub fn do_hue_authority_update(
+    state: &SharedState,
+    request: crate::api_types::HueAuthorityUpdateRequest,
+) -> Result<crate::api_types::HueAuthorityResponse> {
+    use crate::api_types::HueRoomAuthorityOwnerDto;
+    use crate::topology::ExternalRoomAutomationOwner;
+
+    if request.address.trim().is_empty() || request.address.len() > 255 {
+        anyhow::bail!("A valid Hue bridge address is required");
+    }
+    if request.revision.len() != 16
+        || !request
+            .revision
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        anyhow::bail!("A valid Hue authority revision is required");
+    }
+    if request.correlation_id.trim().is_empty()
+        || request.correlation_id.len() > 96
+        || !request
+            .correlation_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        anyhow::bail!("A valid Hue authority correlation ID is required");
+    }
+    let correlation_id = request.correlation_id.clone();
+    let key = HubKey::new(
+        crate::hub::HubType::new(crate::hub::HubType::HUE),
+        request.address,
+    );
+    let (policy_transaction_lock, topology_transaction_lock) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        (
+            s.external_controller_policy_transaction_lock.clone(),
+            s.external_topology_transaction_lock.clone(),
+        )
+    };
+    let _policy_transaction = policy_transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("External controller policy lock poisoned"))?;
+    let full_rhythm_consent = {
+        let _topology_transaction = topology_transaction_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let known = s.hub_credentials.contains_key(&key)
+            || s.hubs.contains_key(&key)
+            || s.topology.references_hub_key(&key);
+        if !known {
+            anyhow::bail!("The selected Hue bridge is not configured");
+        }
+        let current_revision = s.topology.external_automation_revision(&key);
+        if current_revision != request.revision {
+            anyhow::bail!(
+                "Hue rooms changed while they were being reviewed; refresh and try again"
+            );
+        }
+
+        let decisions = request
+            .rooms
+            .into_iter()
+            .map(|room| {
+                (
+                    room.room_id,
+                    match room.owner {
+                        HueRoomAuthorityOwnerDto::Hue => ExternalRoomAutomationOwner::External,
+                        HueRoomAuthorityOwnerDto::Rhythm => ExternalRoomAutomationOwner::Rhythm,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let topology_before = s.topology.clone();
+        let changed = s
+            .topology
+            .replace_external_room_automation_decisions(&key, &decisions)
+            .map_err(anyhow::Error::msg)?;
+        if changed {
+            if let Err(error) = save_authority_state(&s) {
+                s.topology = topology_before;
+                return Err(error).context("Failed to persist Hue room authority choices");
+            }
+            // Any command queued under the previous admission policy must
+            // fail its final generation check before it can reach a light.
+            s.invalidate_queued_light_dispatches();
+        }
+        let full_rhythm_consent = s.topology.external_hub_has_full_rhythm_consent(&key);
+        if full_rhythm_consent {
+            // Publish the transition fence in the same state-lock epoch as
+            // the desired policy, leaving no window where periodic work can
+            // observe consent before controller suppression begins.
+            s.mark_external_controller_authority_pending(&key);
+        }
+        full_rhythm_consent
+    };
+
+    if full_rhythm_consent {
+        if let Err(acquire_error) = reconcile_external_controller_authority(state, &key) {
+            // Never publish a Rhythm-owned policy after an incomplete bridge
+            // handoff. Restore the previous fail-closed policy, then ask Hue
+            // to undo any successfully journaled partial mutations.
+            let _topology_transaction = topology_transaction_lock
+                .lock()
+                .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
+            {
+                let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+                let fail_closed_decisions = s
+                    .topology
+                    .external_automation_rooms_for_hub(&key)
+                    .into_iter()
+                    .map(|(room_id, _, _)| (room_id, ExternalRoomAutomationOwner::External))
+                    .collect::<Vec<_>>();
+                if !fail_closed_decisions.is_empty() {
+                    s.topology
+                        .replace_external_room_automation_decisions(&key, &fail_closed_decisions)
+                        .map_err(anyhow::Error::msg)?;
+                }
+                save_authority_state(&s)
+                    .context("Failed to roll back Hue room choices after takeover failure")?;
+                s.invalidate_queued_light_dispatches();
+            }
+            prepare_external_controller_release(
+                state,
+                std::slice::from_ref(&key),
+                crate::hub::ExternalControllerReleaseReason::RoomAuthorityChanged,
+            )
+            .context("Failed to restore Hue after an incomplete room handoff")?;
+            state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("lock"))?
+                .mark_external_controller_authority_ready(&key);
+            return Err(acquire_error)
+                .context("Hue room choices were not applied because bridge authority failed");
+        }
+        state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .mark_external_controller_authority_ready(&key);
+    } else {
+        let _topology_transaction = topology_transaction_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
+        prepare_external_controller_release(
+            state,
+            std::slice::from_ref(&key),
+            crate::hub::ExternalControllerReleaseReason::RoomAuthorityChanged,
+        )
+        .context("Hue room choices were saved, but prior bridge changes could not be restored")?;
+        state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .mark_external_controller_authority_ready(&key);
+    }
+    info!(
+        target: "hue_authority",
+        "event=hue_room_authority_transition_completed correlation_id={} outcome=succeeded bridge_takeover={}",
+        correlation_id,
+        full_rhythm_consent
+    );
+    crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
+    build_hue_authority(state)
 }
 
 /// Reset startup retry state for one configured hub and request an immediate
@@ -19831,7 +20066,16 @@ mod tests {
         assert!(!device.mood_active);
         assert_eq!(device.profile_settings.mood_scene_id, None);
 
-        let s = state.lock().unwrap();
+        let mut s = state.lock().unwrap();
+        s.topology
+            .replace_external_room_automation_decisions(
+                &HubKey::new(HubType::new(HubType::HUE), "bridge"),
+                &[(
+                    "room1".to_string(),
+                    crate::topology::ExternalRoomAutomationOwner::Rhythm,
+                )],
+            )
+            .unwrap();
         let snapshots = runtime.engine_all_node_snapshots();
         let dispatch_nodes = crate::periodic::periodic_dispatch_nodes_from_state(&s, &snapshots);
         assert!(

@@ -160,6 +160,12 @@ pub(crate) fn periodic_dispatch_nodes_from_state(
     let mut eligible_room_ids: Vec<String> = room_snapshots
         .iter()
         .filter(|node| node.kind.is_light_addressable())
+        .filter(|node| {
+            state.rhythm_automation_allowed_for_node(periodic_settings_node_id(
+                node,
+                has_composite_controller,
+            ))
+        })
         .map(|node| periodic_settings_node_id(node, has_composite_controller).to_string())
         .collect();
     eligible_room_ids.sort();
@@ -2553,6 +2559,48 @@ mod tests {
     }
 
     #[test]
+    fn periodic_dispatch_skips_unreviewed_hue_rooms_until_rhythm_is_selected() {
+        let mut state = crate::state::AppState::default();
+        let room_id = state.topology.create_room("Office");
+        let hub_key = crate::canonical::identity::HubKey::new(
+            crate::hub::HubType::new(crate::hub::HubType::HUE),
+            "bridge.local",
+        );
+        state
+            .topology
+            .get_mut(&room_id)
+            .unwrap()
+            .upsert_hub_room_binding(crate::topology::HubRoomBinding {
+                hub_key: hub_key.clone(),
+                hub_room_id: "hue-office".to_string(),
+                control_id: "hue-office-group".to_string(),
+                light_device_ids: Vec::new(),
+            });
+        let snapshots = vec![make_room(&room_id, 0.0)];
+
+        assert!(periodic_dispatch_nodes_from_state(&state, &snapshots).is_empty());
+
+        state
+            .topology
+            .replace_external_room_automation_decisions(
+                &hub_key,
+                &[(
+                    room_id.clone(),
+                    crate::topology::ExternalRoomAutomationOwner::Rhythm,
+                )],
+            )
+            .unwrap();
+        assert_eq!(
+            periodic_dispatch_nodes_from_state(&state, &snapshots),
+            vec![PeriodicDispatchNode {
+                node_id: room_id.clone(),
+                settings_node_id: room_id.clone(),
+                emit_node_id: room_id,
+            }]
+        );
+    }
+
+    #[test]
     fn periodic_dispatch_nodes_skip_previewed_nodes_without_composite() {
         let mut state = crate::state::AppState::default();
         let now = crate::state::current_epoch_ms();
@@ -2583,7 +2631,7 @@ mod tests {
 
         let room_id = state.topology.create_room("Kitchen");
         let hub_key = crate::canonical::identity::HubKey::new(
-            crate::hub::HubType::new("hue"),
+            crate::hub::HubType::new("test"),
             "192.168.1.10",
         );
         attach_test_light(&mut state, &room_id, &hub_key, "hue-light-1");
@@ -2660,7 +2708,7 @@ mod tests {
 
         let room_id = state.topology.create_room("Kitchen");
         let hub_key = crate::canonical::identity::HubKey::new(
-            crate::hub::HubType::new("hue"),
+            crate::hub::HubType::new("test"),
             "192.168.1.10",
         );
         attach_test_light(&mut state, &room_id, &hub_key, "hue-light-1");
@@ -2700,7 +2748,7 @@ mod tests {
 
         let room_id = state.topology.create_room("Kitchen");
         let hub_key = crate::canonical::identity::HubKey::new(
-            crate::hub::HubType::new("hue"),
+            crate::hub::HubType::new("test"),
             "192.168.1.10",
         );
         let light_id = attach_test_light(&mut state, &room_id, &hub_key, "hue-light-1");
@@ -2826,7 +2874,7 @@ mod tests {
             .unwrap()
             .upsert_hub_room_binding(crate::topology::HubRoomBinding {
                 hub_key: crate::canonical::identity::HubKey::new(
-                    crate::hub::HubType::new("hue"),
+                    crate::hub::HubType::new("test"),
                     "192.168.1.10",
                 ),
                 hub_room_id: "hue-room-1".to_string(),

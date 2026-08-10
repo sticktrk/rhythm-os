@@ -5,6 +5,7 @@ import '../json_parsing.dart';
 import '../models/rhythm_curve_config.dart';
 import '../models/rhythm_curve_data.dart';
 import '../models/rhythm_input_binding.dart';
+import '../models/rhythm_hue_authority.dart';
 import '../models/rhythm_pairing.dart';
 import '../models/rhythm_room.dart';
 import '../models/rhythm_scene.dart';
@@ -1180,6 +1181,48 @@ class RhythmServerApi {
       _log.warning('hubCredentials failed', e);
     }
     return false;
+  }
+
+  /// Fetch the explicit per-room Hue automation ownership review.
+  Future<RhythmHueAuthority?> getHueAuthority() async {
+    try {
+      final response = await _dio.get('api/hue/authority');
+      final data = jsonMap(response.data);
+      return data == null ? null : RhythmHueAuthority.fromJson(data);
+    } catch (e) {
+      _log.warning('getHueAuthority failed', e);
+    }
+    return null;
+  }
+
+  /// Replace the complete reviewed room set for one Hue bridge.
+  Future<RhythmHueAuthority?> updateHueAuthority({
+    required RhythmHueBridgeAuthority bridge,
+    required Map<String, RhythmHueRoomAuthorityOwner> owners,
+    required String correlationId,
+  }) async {
+    try {
+      final response = await _dio.put('api/hue/authority', data: {
+        'address': bridge.address,
+        'revision': bridge.revision,
+        'correlation_id': correlationId,
+        'rooms': [
+          for (final room in bridge.rooms)
+            {
+              'room_id': room.roomId,
+              'owner': switch (owners[room.roomId] ?? room.owner) {
+                RhythmHueRoomAuthorityOwner.unreviewed => 'hue',
+                final owner => owner.wireValue,
+              },
+            },
+        ],
+      });
+      final data = jsonMap(response.data);
+      return data == null ? null : RhythmHueAuthority.fromJson(data);
+    } catch (e) {
+      _log.warning('updateHueAuthority failed', e);
+    }
+    return null;
   }
 
   /// Disconnect ALL hubs on the server.

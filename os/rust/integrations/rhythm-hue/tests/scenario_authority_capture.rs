@@ -1,4 +1,4 @@
-//! Scenario coverage for capture-first Hue authority without automatic restore.
+//! Scenario coverage for consented Hue authority with verified restoration.
 
 use rhythm_hue::ownership::{
     acquire_authoritative_control, finalize_released_control, load_controller_ownership,
@@ -309,31 +309,52 @@ fn takeover_only_disables_automatic_lighting_programs_and_preserves_hue_topology
     )));
 
     bridge.reset();
-    let pending = release_authoritative_control(&temp.storage, &key(), &bridge, "user")
+    let restored = release_authoritative_control(&temp.storage, &key(), &bridge, "user")
         .unwrap()
         .unwrap();
-    assert_eq!(pending.phase, HueOwnershipPhase::ReleasePending);
+    assert_eq!(restored.phase, HueOwnershipPhase::Restored);
+    let restored_behaviors = bridge.get_resources("user", "behavior_instance").unwrap();
+    let restored_enabled = |id: &str| {
+        restored_behaviors["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|behavior| behavior["id"] == id)
+            .unwrap()["enabled"]
+            .as_bool()
+            .unwrap()
+    };
+    assert!(restored_enabled("behavior-1"));
+    assert!(restored_enabled("accessory-behavior-1"));
+    assert!(restored_enabled("accessory-target-behavior-1"));
+    assert_eq!(
+        bridge.get_v1("user", "rules").unwrap()["1"]["status"],
+        "enabled"
+    );
+    assert_eq!(
+        bridge.get_v1("user", "schedules").unwrap()["2"]["status"],
+        "enabled"
+    );
     assert!(!bridge.calls().iter().any(|call| matches!(
         call,
         HueTransportCall::CreateResource { .. }
-            | HueTransportCall::UpdateResource { .. }
             | HueTransportCall::DeleteResource { .. }
-            | HueTransportCall::PutV1 { .. }
+            | HueTransportCall::DeleteV1 { .. }
+            | HueTransportCall::UpdateRoomChildren { .. }
+            | HueTransportCall::CreateRoom { .. }
+            | HueTransportCall::UpdateRoom { .. }
+            | HueTransportCall::RenameRoom { .. }
+            | HueTransportCall::DeleteRoom { .. }
     )));
 
     finalize_released_control(&temp.storage, "bridge-1").unwrap();
-    let retained = load_controller_ownership(&temp.storage, "bridge-1")
+    assert!(load_controller_ownership(&temp.storage, "bridge-1")
         .unwrap()
-        .unwrap();
-    assert_eq!(retained.phase, HueOwnershipPhase::SnapshotRetained);
-    assert_eq!(
-        retained.baseline().v2_resource("smart_scene").unwrap()["data"][0]["id"],
-        "smart-scene-1"
-    );
+        .is_none());
 }
 
 #[test]
-fn rejected_takeover_mutation_keeps_controller_active_and_continues_suppression() {
+fn rejected_takeover_mutation_fails_closed_before_later_suppression() {
     let temp = TempStorage::new();
     let bridge = SpyHueTransport::new();
     bridge.set_resource_response(
@@ -376,19 +397,23 @@ fn rejected_takeover_mutation_keeps_controller_active_and_continues_suppression(
     );
     bridge.set_fail_resource_update("behavior_instance", "behavior-1");
 
-    let active = acquire_authoritative_control(&temp.storage, &key(), &bridge, "user").unwrap();
+    acquire_authoritative_control(&temp.storage, &key(), &bridge, "user")
+        .expect_err("a rejected Hue mutation must not grant controller authority");
 
-    assert_eq!(active.phase, HueOwnershipPhase::Active);
-    assert!(active.receipts().any(|receipt| {
+    let incomplete = load_controller_ownership(&temp.storage, "bridge-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(incomplete.phase, HueOwnershipPhase::ClearIncomplete);
+    assert!(incomplete.receipts().any(|receipt| {
         receipt.resource_type == "behavior_instance"
             && receipt.status == rhythm_hue::ownership::HueOwnershipReceiptStatus::Failed
     }));
     assert_eq!(
         bridge.get_v1("user", "rules").unwrap()["1"]["status"],
-        "disabled"
+        "enabled"
     );
     assert_eq!(
         bridge.get_v1("user", "schedules").unwrap()["2"]["status"],
-        "disabled"
+        "enabled"
     );
 }

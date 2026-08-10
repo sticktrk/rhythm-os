@@ -172,9 +172,10 @@ pub fn create_hue_controller(
 
 /// Refuse binary rollback while a bridge is still under Rhythm authority.
 ///
-/// Automatic Hue restoration is intentionally disabled. A snapshot retained
-/// after credential removal is archival and may survive rollback, but this
-/// function never writes captured state back to a bridge.
+/// This offline rollback hook never writes captured state back to a bridge.
+/// The room-authority release path must first perform verified restoration;
+/// any active or incomplete ownership epoch keeps rollback blocked. A legacy
+/// retained snapshot is archival only when its bridge credentials are absent.
 pub fn restore_authoritative_bridges_before_binary_rollback(
     data_dir: &std::path::Path,
 ) -> Result<()> {
@@ -1071,6 +1072,29 @@ impl ExternalLightHubIntegration for HueIntegration {
         state: &SharedState,
         key: &HubKey,
     ) -> Result<()> {
+        let has_full_room_consent = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .topology
+            .external_hub_has_full_rhythm_consent(key);
+        if !has_full_room_consent {
+            // Upgrades can arrive with an ownership manifest created by the
+            // old implicit-takeover behavior. Observe-only must undo that
+            // work before the generic callback publishes this controller as
+            // ready; otherwise Hue would remain silently suppressed even
+            // though every room now fails closed to Hue.
+            self.release_external_controller_authority(
+                state,
+                key,
+                ExternalControllerReleaseReason::RoomAuthorityChanged,
+            )?;
+            log::info!(
+                target: "hue_authority",
+                "Hue bridge {} remains observe-only until every bound room explicitly chooses Rhythm automation",
+                key
+            );
+            return Ok(());
+        }
         let context = hue_authority_context(state, key)?;
         let transport = ReqwestHueTransport::new(&context.bridge_ip)?;
         let bridge_id = crate::ownership::connected_hue_bridge_id(&transport, &context.username)?;
@@ -1092,12 +1116,12 @@ impl ExternalLightHubIntegration for HueIntegration {
         let _operation = operation_lock
             .lock()
             .map_err(|_| anyhow::anyhow!("Failed to lock Hue controller operations"))?;
-        let _ = crate::ownership::acquire_authoritative_control_best_effort(
+        crate::ownership::acquire_authoritative_control(
             context.storage.as_ref(),
             key,
             &transport,
             &context.username,
-        );
+        )?;
         Ok(())
     }
 
@@ -1105,7 +1129,7 @@ impl ExternalLightHubIntegration for HueIntegration {
         &self,
         state: &SharedState,
         key: &HubKey,
-        _reason: ExternalControllerReleaseReason,
+        reason: ExternalControllerReleaseReason,
     ) -> Result<()> {
         let Some(context) = hue_release_context(state, key)? else {
             return Ok(());
@@ -1125,11 +1149,12 @@ impl ExternalLightHubIntegration for HueIntegration {
         else {
             return Ok(());
         };
-        if ownership.phase != crate::ownership::HueOwnershipPhase::ReleasePending {
-            anyhow::bail!("Hue controller release did not retain its captured snapshot");
+        if ownership.phase != crate::ownership::HueOwnershipPhase::Restored {
+            anyhow::bail!("Hue controller release did not verify restored automation state");
         }
-        // The retained snapshot is the release result. The command layer may
-        // now remove credentials without any restoration write to the bridge.
+        if reason == ExternalControllerReleaseReason::RoomAuthorityChanged {
+            crate::ownership::finalize_released_control(context.storage.as_ref(), &bridge_id)?;
+        }
         Ok(())
     }
 
@@ -2873,6 +2898,45 @@ mod tests {
             serde_json::to_value(&app.topology).unwrap()
         };
         assert_eq!(topology_after, topology_before);
+    }
+
+    #[test]
+    fn unreviewed_hue_room_reconciliation_is_observe_only() {
+        let state = shared_state();
+        let key = hue_key("192.0.2.10");
+        {
+            let mut app = state.lock().unwrap();
+            let mut room = rhythm_os::topology::TopologyRoom::new("rhythm-office", "Office");
+            room.hub_room_bindings.push(HubRoomBinding {
+                hub_key: key.clone(),
+                hub_room_id: "hue-office".to_string(),
+                control_id: "hue-office-group".to_string(),
+                light_device_ids: vec!["hue-light-1".to_string()],
+            });
+            app.topology.insert_room(room);
+        }
+
+        // No credentials or transport are installed. Returning successfully
+        // proves the consent guard ran before any bridge authority I/O.
+        INTEGRATION
+            .reconcile_external_controller_authority(&state, &key)
+            .unwrap();
+
+        {
+            let mut app = state.lock().unwrap();
+            app.topology
+                .replace_external_room_automation_decisions(
+                    &key,
+                    &[(
+                        "rhythm-office".to_string(),
+                        rhythm_os::topology::ExternalRoomAutomationOwner::Rhythm,
+                    )],
+                )
+                .unwrap();
+        }
+        assert!(INTEGRATION
+            .reconcile_external_controller_authority(&state, &key)
+            .is_err());
     }
 
     #[test]
