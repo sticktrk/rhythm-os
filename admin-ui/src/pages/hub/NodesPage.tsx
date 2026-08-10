@@ -3,6 +3,7 @@ import {
   CheckCircle2,
   Clock3,
   Lightbulb,
+  Pencil,
   RefreshCw,
   RotateCcw,
   Save,
@@ -18,6 +19,7 @@ import {
 } from '../../components/controls/Slider';
 import { kelvinToRgb } from '../../components/controls/colorMath';
 import { ToggleSwitch } from '../../components/controls/ToggleSwitch';
+import { TextField } from '../../components/controls/fields';
 import { EmptyState, ErrorNotice } from '../../components/ui/bits';
 import { useConfirm } from '../../components/ui/ConfirmDialog';
 import {
@@ -35,6 +37,7 @@ import {
   setNodesOffset,
   type RgbColor
 } from '../../device/nodes';
+import { renameRoomGuarded } from '../../device/topology';
 import { getNodesState, getState } from '../../device/state';
 import {
   asBoolean,
@@ -70,7 +73,13 @@ import {
   type LightProfileOverrideSupport,
   type LightSettingsProfile
 } from './nodeLightSettings';
-import { groupTopologyItems } from './topologyMembership';
+import {
+  buildRoomRenameProposal,
+  createRoomRenameRequestId,
+  roomNameFromTopology,
+  roomRenameConfirmationStatus
+} from './roomRename';
+import { groupTopologyItems, isRoomKind } from './topologyMembership';
 import '../../styles/pages-phase4.css';
 
 type NodeSummary = {
@@ -321,6 +330,10 @@ function NodeDetail({
         />
       </SectionCard>
 
+      {isRoomKind(node.kind) ? (
+        <RoomRenameCard node={node} onWrite={onWrite} />
+      ) : null}
+
       {isLightAddressableKind(node.kind) ? (
         <NodeLightSettingsCard
           node={node}
@@ -426,6 +439,185 @@ function NodeDetail({
   );
 }
 
+type ProxyReceiptSummary = {
+  route?: 'remote' | 'local';
+  completedAt: string;
+  statusCode: number;
+  verifiedServerInstanceId?: string;
+  preconditionBodySha256?: string;
+  responseBodySha256?: string;
+};
+
+type RoomRenameReceipt = {
+  status: 'pending' | 'confirmed' | 'conflict';
+  requestId: string;
+  roomId: string;
+  before: string;
+  candidate: string;
+  after?: string | null;
+  topologyBodySha256: string;
+  proxy: ProxyReceiptSummary;
+};
+
+function RoomRenameCard({
+  node,
+  onWrite
+}: {
+  node: NodeSummary;
+  onWrite: () => Promise<void>;
+}) {
+  const client = useDeviceClient();
+  const confirm = useConfirm();
+  const [baselineName, setBaselineName] = useState(node.name);
+  const [draftName, setDraftName] = useState(node.name);
+  const [busy, setBusy] = useState(false);
+  const [stale, setStale] = useState(false);
+  const [writeError, setWriteError] = useState<string | null>(null);
+  const [receipt, setReceipt] = useState<RoomRenameReceipt | null>(null);
+  const proposal = buildRoomRenameProposal(node.id, baselineName, draftName);
+  const pending = receipt?.status === 'pending';
+
+  function patchDraft(value: string) {
+    setDraftName(value);
+    setStale(false);
+    setWriteError(null);
+    setReceipt(null);
+  }
+
+  async function reviewRename() {
+    if (!proposal || busy || pending) return;
+    const ok = await confirm({
+      title: 'Rename room',
+      message: `Rename room "${proposal.before}" to "${proposal.candidate}"? Room id: ${proposal.roomId}. The request will remain pending until fresh appliance topology confirms the new name.`,
+      confirmLabel: 'Rename room'
+    });
+    if (!ok) return;
+
+    const requestId = createRoomRenameRequestId();
+    setBusy(true);
+    setWriteError(null);
+    try {
+      const snapshot = await client.getReceipt('api/topology/nodes', {
+        requestId
+      });
+      if (!snapshot.bodySha256) {
+        throw new Error(
+          'The admin API did not provide a topology freshness hash; no rename was sent.'
+        );
+      }
+      const liveBefore = roomNameFromTopology(snapshot.body, proposal.roomId);
+      if (liveBefore === null) {
+        setStale(true);
+        throw new Error(
+          'The room is no longer present in appliance topology; no rename was sent.'
+        );
+      }
+      if (liveBefore !== proposal.before) {
+        setStale(true);
+        throw new Error(
+          `The room name changed from "${proposal.before}" to "${liveBefore}" while this proposal was open. Refresh and review before applying.`
+        );
+      }
+
+      const proxy = await renameRoomGuarded(
+        client,
+        proposal.roomId,
+        proposal.candidate,
+        {
+          requestId,
+          resourcePrecondition: {
+            path: 'api/topology/nodes',
+            bodySha256: snapshot.bodySha256
+          }
+        }
+      );
+      const pendingReceipt: RoomRenameReceipt = {
+        status: 'pending',
+        requestId,
+        roomId: proposal.roomId,
+        before: proposal.before,
+        candidate: proposal.candidate,
+        topologyBodySha256: snapshot.bodySha256,
+        proxy: proxyReceiptSummary(proxy)
+      };
+      setReceipt(pendingReceipt);
+
+      const confirmation = await client.getReceipt('api/topology/nodes', {
+        requestId
+      });
+      const after = roomNameFromTopology(confirmation.body, proposal.roomId);
+      const status = roomRenameConfirmationStatus(after, proposal.candidate);
+      setReceipt({ ...pendingReceipt, status, after });
+      if (status === 'confirmed') {
+        setBaselineName(proposal.candidate);
+        setDraftName(proposal.candidate);
+        setStale(false);
+      } else {
+        setStale(true);
+      }
+      await onWrite();
+    } catch (error) {
+      setWriteError(`${errorMessage(error)} Request ${requestId}.`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <SectionCard
+      title="Room name"
+      subtitle={`Rename the canonical room while preserving room id ${node.id}`}
+      busy={busy}
+    >
+      <div className="roomRenameEditor">
+        <div className="buttonRow">
+          <TextField
+            value={draftName}
+            onChange={patchDraft}
+            placeholder="Room name"
+            disabled={busy || pending}
+          />
+          <button
+            className="consoleButton small primary"
+            type="button"
+            disabled={!proposal || busy || stale || pending}
+            onClick={() => void reviewRename()}
+          >
+            <Pencil size={13} />
+            <span>{busy ? 'Renaming…' : 'Review rename'}</span>
+          </button>
+        </div>
+
+        {stale ? (
+          <ErrorNotice message="The authoritative room name changed or could not be confirmed. Refresh before applying another rename." />
+        ) : null}
+        {writeError ? <ErrorNotice message={writeError} /> : null}
+
+        {receipt ? (
+          <div className={`nodeLightReceipt ${receipt.status}`}>
+            <div>
+              {receipt.status === 'confirmed' ? (
+                <CheckCircle2 size={16} />
+              ) : (
+                <Clock3 size={16} />
+              )}
+              <span>
+                {receipt.status === 'pending'
+                  ? 'Accepted; waiting for appliance topology confirmation.'
+                  : receipt.status === 'confirmed'
+                    ? 'Confirmed in canonical appliance topology.'
+                    : 'Canonical topology diverged; refresh and review before retrying.'}
+              </span>
+            </div>
+            <code>{receipt.requestId}</code>
+            <RawPayloadToggle payload={receipt} />
+          </div>
+        ) : null}
+      </div>
+    </SectionCard>
+  );
+}
+
 type SettingsWriteReceipt = {
   status: 'pending' | 'confirmed' | 'conflict';
   operation: 'save_profile' | 'reset_profile' | 'reset_all';
@@ -436,14 +628,7 @@ type SettingsWriteReceipt = {
   before: JsonRecord;
   candidate: JsonRecord;
   after?: JsonRecord;
-  proxy: {
-    route?: 'remote' | 'local';
-    completedAt: string;
-    statusCode: number;
-    verifiedServerInstanceId?: string;
-    preconditionBodySha256?: string;
-    responseBodySha256?: string;
-  };
+  proxy: ProxyReceiptSummary;
 };
 
 function NodeLightSettingsCard({
@@ -1140,7 +1325,7 @@ function ProfileLightSettingsEditor({
 
 function proxyReceiptSummary(
   proxy: DeviceAdminProxyResponse
-): SettingsWriteReceipt['proxy'] {
+): ProxyReceiptSummary {
   return {
     route: proxy.route,
     completedAt: proxy.completedAt,
