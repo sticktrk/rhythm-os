@@ -1,6 +1,8 @@
 import { useCallback, useMemo, useState } from 'react';
 import {
+  AlertTriangle,
   Check,
+  Lightbulb,
   Link2,
   Pencil,
   RefreshCw,
@@ -61,6 +63,8 @@ import { useDeviceClient } from '../../hooks/useDeviceClient';
 import { usePolling } from '../../hooks/usePolling';
 import { prettyJson } from '../../lib/json';
 import { useHub } from '../../state/HubContext';
+
+import { buildTopologyMembership } from './topologyMembership';
 
 import '../../styles/pages-phase6.css';
 
@@ -412,20 +416,18 @@ function RoomsTab({ client }: { client: DeviceClient }) {
     { intervalMs: 0 }
   );
 
-  const rooms = useMemo(() => {
-    const payload = topologyQuery.data;
-    if (Array.isArray(payload)) {
-      return asRecordArray(payload).filter(
-        (node) => (asString(node.kind) ?? asString(node.type)) !== 'device'
-      );
-    }
-    const record = asRecord(payload);
-    if (asArray(record.rooms).length > 0) return asRecordArray(record.rooms);
-    return asRecordArray(record.nodes).filter((node) => {
-      const kind = asString(node.kind) ?? asString(node.type);
-      return kind === 'room' || kind === 'area' || kind === 'zone';
-    });
-  }, [topologyQuery.data]);
+  const membership = useMemo(
+    () => buildTopologyMembership(topologyQuery.data),
+    [topologyQuery.data]
+  );
+  const rooms = useMemo(
+    () => membership.rooms.map(({ room }) => room.raw),
+    [membership.rooms]
+  );
+  const assignedBulbCount = useMemo(
+    () => membership.rooms.reduce((total, room) => total + room.bulbs.length, 0),
+    [membership.rooms]
+  );
 
   const [newRoomName, setNewRoomName] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -458,7 +460,7 @@ function RoomsTab({ client }: { client: DeviceClient }) {
   return (
     <SectionCard
       title="Rooms"
-      subtitle={`${rooms.length} room(s) in topology`}
+      subtitle={`${rooms.length} room(s) · ${assignedBulbCount} assigned bulb(s)`}
       busy={topologyQuery.refreshing || action.busy}
       error={topologyQuery.error ?? action.error}
       rawPayload={topologyQuery.data ?? undefined}
@@ -497,7 +499,7 @@ function RoomsTab({ client }: { client: DeviceClient }) {
               <tr>
                 <th>Name</th>
                 <th>Id</th>
-                <th>Devices</th>
+                <th>Bulbs in room</th>
                 <th>Actions</th>
               </tr>
             </thead>
@@ -506,10 +508,9 @@ function RoomsTab({ client }: { client: DeviceClient }) {
                 const id = roomId(room);
                 const name = roomName(room);
                 const isEditing = editingId === id;
-                const deviceCount =
-                  asArray(room.device_ids).length ||
-                  asArray(room.devices).length ||
-                  undefined;
+                const bulbs =
+                  membership.rooms.find(({ room: memberRoom }) => memberRoom.id === id)
+                    ?.bulbs ?? [];
                 return (
                   <tr key={id || index}>
                     <td>
@@ -553,7 +554,28 @@ function RoomsTab({ client }: { client: DeviceClient }) {
                       )}
                     </td>
                     <td className="mono dim">{id}</td>
-                    <td>{deviceCount ?? '—'}</td>
+                    <td>
+                      <div className="roomMembershipSummary">
+                        <strong>
+                          {bulbs.length} {bulbs.length === 1 ? 'bulb' : 'bulbs'}
+                        </strong>
+                        {bulbs.length > 0 ? (
+                          <ul className="roomBulbList" aria-label={`Bulbs in ${name}`}>
+                            {bulbs.map((bulb) => (
+                              <li className="roomBulbItem" key={bulb.id}>
+                                <Lightbulb size={14} aria-hidden="true" />
+                                <span>{bulb.name}</span>
+                                <span className="roomBulbId mono dim" title={bulb.id}>
+                                  {bulb.id}
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <span className="dim">No bulbs assigned</span>
+                        )}
+                      </div>
+                    </td>
                     <td>
                       <span className="rowActions">
                         <button
@@ -605,6 +627,32 @@ function RoomsTab({ client }: { client: DeviceClient }) {
           </table>
         </div>
       )}
+
+      {membership.unassignedBulbs.length > 0 ? (
+        <div className="unassignedBulbsNotice" role="status">
+          <AlertTriangle size={18} aria-hidden="true" />
+          <div>
+            <strong>
+              Unassigned bulbs ({membership.unassignedBulbs.length})
+            </strong>
+            <p>
+              These bulbs are not attached to a known room and will not inherit
+              room-level behavior.
+            </p>
+            <ul className="roomBulbList" aria-label="Unassigned bulbs">
+              {membership.unassignedBulbs.map((bulb) => (
+                <li className="roomBulbItem" key={bulb.id}>
+                  <Lightbulb size={14} aria-hidden="true" />
+                  <span>{bulb.name}</span>
+                  <span className="roomBulbId mono dim" title={bulb.id}>
+                    {bulb.id}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      ) : null}
 
       {mergeTarget ? (
         <Modal
