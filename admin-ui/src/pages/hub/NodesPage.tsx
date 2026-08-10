@@ -69,6 +69,7 @@ import {
   type LightProfileOverrideSupport,
   type LightSettingsProfile
 } from './nodeLightSettings';
+import { groupTopologyItems } from './topologyMembership';
 import '../../styles/pages-phase4.css';
 
 type NodeSummary = {
@@ -76,7 +77,6 @@ type NodeSummary = {
   name: string;
   kind?: string;
   parentId?: string;
-  room?: string;
   powerOn?: boolean;
   rhythmEnabled?: boolean;
   disabled?: boolean;
@@ -112,11 +112,6 @@ function parseNodes(payload: unknown): NodeSummary[] {
         name: asString(raw.name) ?? asString(raw.label) ?? id,
         kind: asString(raw.kind) ?? asString(raw.node_kind),
         parentId: asString(raw.parent_id),
-        room:
-          asString(raw.room_name) ??
-          asString(raw.room) ??
-          asString(raw.room_id) ??
-          asString(raw.parent_name),
         powerOn:
           asBoolean(raw.power_on) ??
           asBoolean(state.power_on) ??
@@ -160,16 +155,7 @@ export default function NodesPage() {
   const selected =
     nodes.find((node) => node.id === selectedId) ?? nodes[0] ?? null;
 
-  const grouped = useMemo(() => {
-    const groups = new Map<string, NodeSummary[]>();
-    for (const node of nodes) {
-      const key = node.room ?? node.kind ?? 'Ungrouped';
-      const list = groups.get(key) ?? [];
-      list.push(node);
-      groups.set(key, list);
-    }
-    return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b));
-  }, [nodes]);
+  const grouped = useMemo(() => groupTopologyItems(nodes), [nodes]);
 
   return (
     <div className="consolePage wide">
@@ -208,10 +194,10 @@ export default function NodesPage() {
               icon={<Lightbulb size={20} />}
             />
           ) : (
-            grouped.map(([group, members]) => (
-              <div className="nodeGroup" key={group}>
-                <div className="nodeGroupTitle">{group}</div>
-                {members.map((node) => (
+            grouped.map((group) => (
+              <div className="nodeGroup" key={group.id}>
+                <div className="nodeGroupTitle">{group.label}</div>
+                {group.items.map((node) => (
                   <button
                     key={node.id}
                     type="button"

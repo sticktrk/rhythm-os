@@ -5,11 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "npm run check:device-admin-coverage && npm run check:profile-curve-data && npm run check:node-light-settings && tsc --noEmit && vite build",
+    "build": "npm run check:device-admin-coverage && npm run check:profile-curve-data && npm run check:node-light-settings && npm run test:topology-membership && tsc --noEmit && vite build",
     "check:device-admin-coverage": "node scripts/check-device-admin-coverage.mjs",
     "check:profile-curve-data": "node scripts/check-profile-curve-data.mjs",
     "check:node-light-settings": "node scripts/check-node-light-settings.mjs",
     "test:mode-write-payload": "node --experimental-strip-types --test test/modeWritePayload.test.ts",
+    "test:topology-membership": "node --experimental-strip-types --test test/topologyMembership.test.ts",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
