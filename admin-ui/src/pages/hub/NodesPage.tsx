@@ -25,6 +25,7 @@ import {
   SectionCard
 } from '../../components/ui/SectionCard';
 import {
+  NODE_ACTIONS,
   sendNodeAction,
   setNodeBrightness,
   setNodeColor,
@@ -85,17 +86,6 @@ type NodeSummary = {
   profileOverrides: JsonRecord;
   raw: Record<string, unknown>;
 };
-
-const NODE_ACTIONS: Array<{ id: string; label: string }> = [
-  { id: 'on_press', label: 'On' },
-  { id: 'off_press', label: 'Off' },
-  { id: 'toggle', label: 'Toggle' },
-  { id: 'reset', label: 'Reset' },
-  { id: 'step_up', label: 'Step up' },
-  { id: 'step_down', label: 'Step down' },
-  { id: 'rhythm_on', label: 'Rhythm on' },
-  { id: 'rhythm_off', label: 'Rhythm off' }
-];
 
 function parseNodes(payload: unknown): NodeSummary[] {
   const record = asRecord(payload);

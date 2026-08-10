@@ -404,10 +404,10 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     id: 'node-action',
     category: 'Node Runtime',
     label: 'Run node action',
-    description: 'Run lights_on, lights_off, toggle, or reset on a node.',
+    description: 'Run on, off, toggle, or reset on a node.',
     method: 'PUT',
     path: 'api/nodes/action',
-    body: { node_id: '{node_id}', action: 'lights_on' }
+    body: { node_id: '{node_id}', action: 'on' }
   },
   {
     id: 'node-brightness',
