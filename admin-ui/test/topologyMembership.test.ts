@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   buildTopologyMembership,
   groupTopologyItems,
+  topologyKindLabel,
   topologyItemsFromPayload
 } from '../src/pages/hub/topologyMembership.ts';
 
@@ -42,6 +43,13 @@ test('surfaces roomless bulbs and bulbs with unknown parents as unassigned', () 
     membership.unassignedBulbs.map((bulb) => bulb.name).sort(),
     ['Loose Bulb', 'Orphan Bulb']
   );
+});
+
+test('uses explicit node kinds for readable device labels', () => {
+  assert.equal(topologyKindLabel('light_device'), 'Bulb');
+  assert.equal(topologyKindLabel('motion_sensor'), 'Motion sensor');
+  assert.equal(topologyKindLabel('new_additive_kind'), 'New additive kind');
+  assert.equal(topologyKindLabel(undefined), 'Device');
 });
 
 test('accepts both direct arrays and nodes wrappers', () => {

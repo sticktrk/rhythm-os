@@ -1,11 +1,16 @@
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState, type DragEvent } from 'react';
 import {
   AlertTriangle,
+  ArrowRight,
   Check,
+  CheckCircle2,
+  Clock3,
+  GripVertical,
   Lightbulb,
   Link2,
   Pencil,
   RefreshCw,
+  ShieldCheck,
   Trash2,
   Wifi,
   X,
@@ -37,7 +42,6 @@ import {
   listMatterCaptures,
   listTriage,
   mergeRooms,
-  moveDeviceToRoom,
   pairDevice,
   putHubCredentials,
   renameCanonicalDevice,
@@ -61,10 +65,22 @@ import {
 import { useDeviceCall } from '../../hooks/useDeviceCall';
 import { useDeviceClient } from '../../hooks/useDeviceClient';
 import { usePolling } from '../../hooks/usePolling';
+import { errorMessage } from '../../lib/format';
 import { prettyJson } from '../../lib/json';
 import { useHub } from '../../state/HubContext';
 
-import { buildTopologyMembership } from './topologyMembership';
+import {
+  buildRoomMoveProposal,
+  createRoomMoveRequestId,
+  moveDeviceBetweenRoomsVerified,
+  type RoomMoveProposal,
+  type RoomMoveReceipt
+} from './roomAssignment';
+import {
+  buildTopologyMembership,
+  topologyKindLabel,
+  type TopologyItem
+} from './topologyMembership';
 
 import '../../styles/pages-phase6.css';
 
@@ -407,10 +423,6 @@ function DevicesTab({ client }: { client: DeviceClient }) {
 
 function RoomsTab({ client }: { client: DeviceClient }) {
   const confirm = useConfirm();
-  const query = usePolling(
-    useCallback(() => listCanonicalDevices(client), [client]),
-    { intervalMs: 0 }
-  );
   const topologyQuery = usePolling(
     useCallback(() => getTopologyNodes(client), [client]),
     { intervalMs: 0 }
@@ -428,14 +440,22 @@ function RoomsTab({ client }: { client: DeviceClient }) {
     () => membership.rooms.reduce((total, room) => total + room.bulbs.length, 0),
     [membership.rooms]
   );
+  const assignedDeviceCount = useMemo(
+    () =>
+      membership.rooms.reduce((total, room) => total + room.children.length, 0),
+    [membership.rooms]
+  );
 
   const [newRoomName, setNewRoomName] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draftName, setDraftName] = useState('');
   const [mergeTarget, setMergeTarget] = useState<Record<string, unknown> | null>(null);
   const [mergeSourceId, setMergeSourceId] = useState('');
-  const [moveTarget, setMoveTarget] = useState<Record<string, unknown> | null>(null);
-  const [moveDeviceId, setMoveDeviceId] = useState('');
+  const [draggedDeviceId, setDraggedDeviceId] = useState<string | null>(null);
+  const [dragOverRoomId, setDragOverRoomId] = useState<string | null>(null);
+  const [movePickerDevice, setMovePickerDevice] = useState<TopologyItem | null>(null);
+  const [movePickerTargetId, setMovePickerTargetId] = useState('');
+  const [moveReceipt, setMoveReceipt] = useState<RoomMoveReceipt | null>(null);
 
   const refreshTopology = topologyQuery.refresh;
   const action = useDeviceCall(
@@ -447,6 +467,24 @@ function RoomsTab({ client }: { client: DeviceClient }) {
       [refreshTopology]
     )
   );
+  const moveAction = useDeviceCall(
+    useCallback(
+      async (proposal: RoomMoveProposal, requestId: string) => {
+        try {
+          const receipt = await moveDeviceBetweenRoomsVerified(client, proposal, {
+            requestId,
+            onAccepted: setMoveReceipt
+          });
+          setMoveReceipt(receipt);
+          await refreshTopology();
+          return receipt;
+        } catch (error) {
+          throw new Error(`${errorMessage(error)} Request ${requestId}.`);
+        }
+      },
+      [client, refreshTopology]
+    )
+  );
 
   function roomId(room: Record<string, unknown>): string {
     return asString(room.id) ?? asString(room.room_id) ?? asString(room.node_id) ?? '';
@@ -455,203 +493,382 @@ function RoomsTab({ client }: { client: DeviceClient }) {
     return asString(room.name) ?? asString(room.label) ?? roomId(room);
   }
 
-  const devices = devicesFromPayload(query.data);
+  async function reviewMove(proposal: RoomMoveProposal) {
+    const ok = await confirm({
+      title: `Move ${proposal.deviceName}`,
+      message: `Move ${proposal.deviceName} from ${proposal.fromRoomName} to ${proposal.toRoomName}? The card will stay in ${proposal.fromRoomName} until the appliance acknowledges the request and fresh topology confirms the new room.`,
+      confirmLabel: 'Apply verified move'
+    });
+    if (!ok) return;
+    const requestId = createRoomMoveRequestId();
+    setMoveReceipt(null);
+    await moveAction.run(proposal, requestId);
+  }
+
+  function proposeMove(deviceId: string, toRoomId: string) {
+    const proposal = buildRoomMoveProposal(membership, deviceId, toRoomId);
+    setDraggedDeviceId(null);
+    setDragOverRoomId(null);
+    if (proposal) void reviewMove(proposal);
+  }
+
+  function startDrag(event: DragEvent<HTMLElement>, device: TopologyItem) {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('text/plain', device.id);
+    setDraggedDeviceId(device.id);
+  }
+
+  function allowRoomDrop(event: DragEvent<HTMLElement>, roomId: string) {
+    if (!draggedDeviceId) return;
+    if (!buildRoomMoveProposal(membership, draggedDeviceId, roomId)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'move';
+    setDragOverRoomId(roomId);
+  }
+
+  function dropInRoom(event: DragEvent<HTMLElement>, roomId: string) {
+    event.preventDefault();
+    const deviceId = event.dataTransfer.getData('text/plain') || draggedDeviceId;
+    if (deviceId) proposeMove(deviceId, roomId);
+  }
+
+  function openMovePicker(device: TopologyItem) {
+    setMovePickerDevice(device);
+    setMovePickerTargetId('');
+  }
+
+  function closeMovePicker() {
+    setMovePickerDevice(null);
+    setMovePickerTargetId('');
+  }
+
+  function reviewPickedMove() {
+    if (!movePickerDevice || !movePickerTargetId) return;
+    const proposal = buildRoomMoveProposal(
+      membership,
+      movePickerDevice.id,
+      movePickerTargetId
+    );
+    closeMovePicker();
+    if (proposal) void reviewMove(proposal);
+  }
 
   return (
-    <SectionCard
-      title="Rooms"
-      subtitle={`${rooms.length} room(s) · ${assignedBulbCount} assigned bulb(s)`}
-      busy={topologyQuery.refreshing || action.busy}
-      error={topologyQuery.error ?? action.error}
-      rawPayload={topologyQuery.data ?? undefined}
-      actions={
-        <button className="consoleButton small" type="button" onClick={() => void topologyQuery.refresh()}>
-          <RefreshCw size={14} />
-          <span>Reload</span>
-        </button>
-      }
-    >
-      <div className="buttonRow">
-        <TextField
-          value={newRoomName}
-          onChange={setNewRoomName}
-          placeholder="New room name"
-        />
-        <button
-          className="consoleButton"
-          type="button"
-          disabled={newRoomName.trim() === '' || action.busy}
-          onClick={() => {
-            void action.run(() => createRoom(client, newRoomName.trim()));
-            setNewRoomName('');
-          }}
-        >
-          Create room
-        </button>
-      </div>
-
-      {rooms.length === 0 ? (
-        <EmptyState message="No rooms found in the topology payload — check Raw JSON." />
-      ) : (
-        <div className="dataTableWrap">
-          <table className="dataTable">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Id</th>
-                <th>Bulbs in room</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rooms.map((room, index) => {
-                const id = roomId(room);
-                const name = roomName(room);
-                const isEditing = editingId === id;
-                const bulbs =
-                  membership.rooms.find(({ room: memberRoom }) => memberRoom.id === id)
-                    ?.bulbs ?? [];
-                return (
-                  <tr key={id || index}>
-                    <td>
-                      {isEditing ? (
-                        <span className="inlineEdit">
-                          <TextField value={draftName} onChange={setDraftName} />
-                          <button
-                            className="iconOnlyButton"
-                            type="button"
-                            aria-label="Save room name"
-                            onClick={() => {
-                              setEditingId(null);
-                              if (draftName.trim() && draftName !== name) {
-                                void action.run(() => renameRoom(client, id, draftName.trim()));
-                              }
-                            }}
-                          >
-                            <Check size={14} />
-                          </button>
-                          <button
-                            className="iconOnlyButton"
-                            type="button"
-                            aria-label="Cancel"
-                            onClick={() => setEditingId(null)}
-                          >
-                            <X size={14} />
-                          </button>
-                        </span>
-                      ) : (
-                        <button
-                          className="inlineEditName"
-                          type="button"
-                          onClick={() => {
-                            setEditingId(id);
-                            setDraftName(name);
-                          }}
-                        >
-                          {name}
-                          <Pencil size={12} />
-                        </button>
-                      )}
-                    </td>
-                    <td className="mono dim">{id}</td>
-                    <td>
-                      <div className="roomMembershipSummary">
-                        <strong>
-                          {bulbs.length} {bulbs.length === 1 ? 'bulb' : 'bulbs'}
-                        </strong>
-                        {bulbs.length > 0 ? (
-                          <ul className="roomBulbList" aria-label={`Bulbs in ${name}`}>
-                            {bulbs.map((bulb) => (
-                              <li className="roomBulbItem" key={bulb.id}>
-                                <Lightbulb size={14} aria-hidden="true" />
-                                <span>{bulb.name}</span>
-                                <span className="roomBulbId mono dim" title={bulb.id}>
-                                  {bulb.id}
-                                </span>
-                              </li>
-                            ))}
-                          </ul>
-                        ) : (
-                          <span className="dim">No bulbs assigned</span>
-                        )}
-                      </div>
-                    </td>
-                    <td>
-                      <span className="rowActions">
-                        <button
-                          className="consoleButton small"
-                          type="button"
-                          onClick={() => {
-                            setMergeTarget(room);
-                            setMergeSourceId('');
-                          }}
-                        >
-                          Merge into
-                        </button>
-                        <button
-                          className="consoleButton small"
-                          type="button"
-                          onClick={() => {
-                            setMoveTarget(room);
-                            setMoveDeviceId('');
-                          }}
-                        >
-                          Move device here
-                        </button>
-                        <button
-                          className="consoleButton small danger"
-                          type="button"
-                          onClick={() => {
-                            void (async () => {
-                              const ok = await confirm({
-                                title: 'Delete room',
-                                message: `Delete room "${name}"? Devices in it become roomless / go to triage.`,
-                                confirmLabel: 'Delete room',
-                                danger: true
-                              });
-                              if (ok) {
-                                await action.run(() => deleteRoom(client, id));
-                              }
-                            })();
-                          }}
-                        >
-                          <Trash2 size={13} />
-                          <span>Delete</span>
-                        </button>
-                      </span>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {membership.unassignedBulbs.length > 0 ? (
-        <div className="unassignedBulbsNotice" role="status">
-          <AlertTriangle size={18} aria-hidden="true" />
+    <div className="roomManagementStack">
+      <SectionCard
+        title="Room assignment"
+        subtitle={`${rooms.length} room(s) · ${assignedDeviceCount} assigned device(s) · ${assignedBulbCount} bulb(s)`}
+        busy={topologyQuery.refreshing || moveAction.busy}
+        error={topologyQuery.error ?? moveAction.error}
+        rawPayload={topologyQuery.data ?? undefined}
+        actions={
+          <button
+            className="consoleButton small"
+            type="button"
+            onClick={() => void topologyQuery.refresh()}
+          >
+            <RefreshCw size={14} />
+            <span>Reload</span>
+          </button>
+        }
+      >
+        <div className="roomAssignmentTrust">
+          <ShieldCheck size={18} aria-hidden="true" />
           <div>
-            <strong>
-              Unassigned bulbs ({membership.unassignedBulbs.length})
-            </strong>
+            <strong>Verified moves only</strong>
             <p>
-              These bulbs are not attached to a known room and will not inherit
-              room-level behavior.
+              Drag a card or use Move. Every change is reviewed, checked against
+              its current room on the appliance, and shown as complete only after
+              fresh topology confirms it.
             </p>
-            <ul className="roomBulbList" aria-label="Unassigned bulbs">
-              {membership.unassignedBulbs.map((bulb) => (
-                <li className="roomBulbItem" key={bulb.id}>
-                  <Lightbulb size={14} aria-hidden="true" />
-                  <span>{bulb.name}</span>
-                  <span className="roomBulbId mono dim" title={bulb.id}>
-                    {bulb.id}
-                  </span>
-                </li>
-              ))}
-            </ul>
           </div>
         </div>
+
+        {membership.rooms.length === 0 ? (
+          <EmptyState message="No rooms found in the topology payload — check Raw JSON." />
+        ) : (
+          <div className="roomAssignmentBoard" aria-label="Room assignment board">
+            {membership.rooms.map(({ room, children }) => (
+              <section
+                className={`roomAssignmentLane${dragOverRoomId === room.id ? ' dropTarget' : ''}`}
+                key={room.id}
+                aria-label={`${room.name} room, ${children.length} assigned device${children.length === 1 ? '' : 's'}`}
+                onDragEnter={(event) => allowRoomDrop(event, room.id)}
+                onDragOver={(event) => allowRoomDrop(event, room.id)}
+                onDragLeave={(event) => {
+                  if (!event.currentTarget.contains(event.relatedTarget as Node)) {
+                    setDragOverRoomId(null);
+                  }
+                }}
+                onDrop={(event) => dropInRoom(event, room.id)}
+              >
+                <header className="roomAssignmentLaneHeader">
+                  <div>
+                    <strong>{room.name}</strong>
+                    <span className="mono" title={room.id}>{room.id}</span>
+                  </div>
+                  <span className="roomAssignmentCount">{children.length}</span>
+                </header>
+                <div className="roomAssignmentCards">
+                  {children.length === 0 ? (
+                    <div className="roomAssignmentEmpty">Drop a device here</div>
+                  ) : (
+                    children.map((device) => (
+                      <article
+                        className={`roomAssignmentDevice${draggedDeviceId === device.id ? ' dragging' : ''}`}
+                        draggable={!moveAction.busy && membership.rooms.length > 1}
+                        key={device.id}
+                        onDragStart={(event) => startDrag(event, device)}
+                        onDragEnd={() => {
+                          setDraggedDeviceId(null);
+                          setDragOverRoomId(null);
+                        }}
+                      >
+                        <GripVertical className="roomAssignmentGrip" size={16} aria-hidden="true" />
+                        <div className="roomAssignmentDeviceIdentity">
+                          <strong>{device.name}</strong>
+                          <span>
+                            {topologyKindLabel(device.kind)} · <code>{device.id}</code>
+                          </span>
+                        </div>
+                        <button
+                          className="consoleButton small"
+                          type="button"
+                          disabled={moveAction.busy || membership.rooms.length < 2}
+                          aria-label={`Move ${device.name} to another room`}
+                          onClick={() => openMovePicker(device)}
+                        >
+                          <ArrowRight size={13} />
+                          <span>Move</span>
+                        </button>
+                      </article>
+                    ))
+                  )}
+                </div>
+              </section>
+            ))}
+
+            {membership.unassigned.length > 0 ? (
+              <section
+                className="roomAssignmentLane readonly"
+                aria-label={`Unassigned devices, ${membership.unassigned.length}`}
+              >
+                <header className="roomAssignmentLaneHeader">
+                  <div>
+                    <strong>Unassigned</strong>
+                    <span>Read-only until guarded assignment is supported</span>
+                  </div>
+                  <span className="roomAssignmentCount">{membership.unassigned.length}</span>
+                </header>
+                <div className="roomAssignmentCards">
+                  {membership.unassigned.map((device) => (
+                    <article className="roomAssignmentDevice readonly" key={device.id}>
+                      <AlertTriangle className="roomAssignmentWarning" size={15} aria-hidden="true" />
+                      <div className="roomAssignmentDeviceIdentity">
+                        <strong>{device.name}</strong>
+                        <span>
+                          {topologyKindLabel(device.kind)} · <code>{device.id}</code>
+                        </span>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              </section>
+            ) : null}
+          </div>
+        )}
+
+        {moveReceipt ? (
+          <div className={`roomMoveReceipt ${moveReceipt.status}`}>
+            <div>
+              {moveReceipt.status === 'confirmed' ? (
+                <CheckCircle2 size={17} aria-hidden="true" />
+              ) : moveReceipt.status === 'pending' ? (
+                <Clock3 size={17} aria-hidden="true" />
+              ) : (
+                <AlertTriangle size={17} aria-hidden="true" />
+              )}
+              <span>
+                {moveReceipt.status === 'confirmed'
+                  ? `Confirmed: ${moveReceipt.candidate.deviceName} is in ${moveReceipt.candidate.roomName}.`
+                  : moveReceipt.status === 'pending'
+                    ? 'Accepted; waiting for authoritative topology confirmation.'
+                    : 'The server read-back diverged from the proposed room. Review current topology before retrying.'}
+              </span>
+            </div>
+            <code>{moveReceipt.requestId}</code>
+            <RawPayloadToggle payload={moveReceipt} />
+          </div>
+        ) : null}
+      </SectionCard>
+
+      <SectionCard
+        title="Room administration"
+        subtitle="Create, rename, merge, and delete topology rooms"
+        busy={action.busy}
+        error={action.error}
+      >
+        <div className="buttonRow">
+          <TextField
+            value={newRoomName}
+            onChange={setNewRoomName}
+            placeholder="New room name"
+          />
+          <button
+            className="consoleButton"
+            type="button"
+            disabled={newRoomName.trim() === '' || action.busy}
+            onClick={() => {
+              void action.run(() => createRoom(client, newRoomName.trim()));
+              setNewRoomName('');
+            }}
+          >
+            Create room
+          </button>
+        </div>
+
+        {rooms.length === 0 ? (
+          <EmptyState message="No rooms available." />
+        ) : (
+          <div className="dataTableWrap">
+            <table className="dataTable">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Id</th>
+                  <th>Assigned</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rooms.map((room, index) => {
+                  const id = roomId(room);
+                  const name = roomName(room);
+                  const isEditing = editingId === id;
+                  const roomMembership = membership.rooms.find(
+                    ({ room: memberRoom }) => memberRoom.id === id
+                  );
+                  const deviceCount = roomMembership?.children.length ?? 0;
+                  const bulbCount = roomMembership?.bulbs.length ?? 0;
+                  return (
+                    <tr key={id || index}>
+                      <td>
+                        {isEditing ? (
+                          <span className="inlineEdit">
+                            <TextField value={draftName} onChange={setDraftName} />
+                            <button
+                              className="iconOnlyButton"
+                              type="button"
+                              aria-label="Save room name"
+                              onClick={() => {
+                                setEditingId(null);
+                                if (draftName.trim() && draftName !== name) {
+                                  void action.run(() => renameRoom(client, id, draftName.trim()));
+                                }
+                              }}
+                            >
+                              <Check size={14} />
+                            </button>
+                            <button
+                              className="iconOnlyButton"
+                              type="button"
+                              aria-label="Cancel"
+                              onClick={() => setEditingId(null)}
+                            >
+                              <X size={14} />
+                            </button>
+                          </span>
+                        ) : (
+                          <button
+                            className="inlineEditName"
+                            type="button"
+                            onClick={() => {
+                              setEditingId(id);
+                              setDraftName(name);
+                            }}
+                          >
+                            {name}
+                            <Pencil size={12} />
+                          </button>
+                        )}
+                      </td>
+                      <td className="mono dim">{id}</td>
+                      <td>
+                        {deviceCount} device{deviceCount === 1 ? '' : 's'} · {bulbCount}{' '}
+                        bulb{bulbCount === 1 ? '' : 's'}
+                      </td>
+                      <td>
+                        <span className="rowActions">
+                          <button
+                            className="consoleButton small"
+                            type="button"
+                            onClick={() => {
+                              setMergeTarget(room);
+                              setMergeSourceId('');
+                            }}
+                          >
+                            Merge into
+                          </button>
+                          <button
+                            className="consoleButton small danger"
+                            type="button"
+                            onClick={() => {
+                              void (async () => {
+                                const ok = await confirm({
+                                  title: 'Delete room',
+                                  message: `Delete room "${name}"? Devices in it become roomless / go to triage.`,
+                                  confirmLabel: 'Delete room',
+                                  danger: true
+                                });
+                                if (ok) {
+                                  await action.run(() => deleteRoom(client, id));
+                                }
+                              })();
+                            }}
+                          >
+                            <Trash2 size={13} />
+                            <span>Delete</span>
+                          </button>
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </SectionCard>
+
+      {movePickerDevice ? (
+        <Modal title={`Move ${movePickerDevice.name}`} onClose={closeMovePicker}>
+          <FormRow
+            label="Destination room"
+            hint="The next step reviews the current and proposed room before writing"
+          >
+            <SelectField
+              value={movePickerTargetId}
+              onChange={setMovePickerTargetId}
+              placeholder="Pick a different room"
+              options={membership.rooms
+                .filter(({ room }) => room.id !== movePickerDevice.parentId)
+                .map(({ room }) => ({ value: room.id, label: room.name }))}
+            />
+          </FormRow>
+          <div className="confirmActions">
+            <button className="consoleButton" type="button" onClick={closeMovePicker}>
+              Cancel
+            </button>
+            <button
+              className="consoleButton primary"
+              type="button"
+              disabled={!movePickerTargetId}
+              onClick={reviewPickedMove}
+            >
+              Review move
+            </button>
+          </div>
+        </Modal>
       ) : null}
 
       {mergeTarget ? (
@@ -687,48 +904,7 @@ function RoomsTab({ client }: { client: DeviceClient }) {
           </div>
         </Modal>
       ) : null}
-
-      {moveTarget ? (
-        <Modal
-          title={`Move a device to ${roomName(moveTarget)}`}
-          onClose={() => setMoveTarget(null)}
-        >
-          <FormRow label="Device">
-            {devices.length > 0 ? (
-              <SelectField
-                value={moveDeviceId}
-                onChange={setMoveDeviceId}
-                placeholder="Pick a device"
-                options={devices.map((device) => ({
-                  value: deviceId(device),
-                  label: asString(device.name) ?? deviceId(device)
-                }))}
-              />
-            ) : (
-              <TextField value={moveDeviceId} onChange={setMoveDeviceId} mono placeholder="device id" />
-            )}
-          </FormRow>
-          <div className="confirmActions">
-            <button className="consoleButton" type="button" onClick={() => setMoveTarget(null)}>
-              Cancel
-            </button>
-            <button
-              className="consoleButton primary"
-              type="button"
-              disabled={moveDeviceId === ''}
-              onClick={() => {
-                void action.run(() =>
-                  moveDeviceToRoom(client, roomId(moveTarget), moveDeviceId)
-                );
-                setMoveTarget(null);
-              }}
-            >
-              Move device
-            </button>
-          </div>
-        </Modal>
-      ) : null}
-    </SectionCard>
+    </div>
   );
 }
 

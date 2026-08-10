@@ -87,6 +87,28 @@ export function renameRoom(
   });
 }
 
+export function renameRoomGuarded(
+  client: DeviceClient,
+  roomId: string,
+  name: string,
+  options: {
+    requestId: string;
+    resourcePrecondition: {
+      path: string;
+      bodySha256: string;
+    };
+  }
+) {
+  return client.putReceipt(
+    `api/topology/rooms/${encodeURIComponent(roomId)}`,
+    {
+      body: { name, correlation_id: options.requestId },
+      requestId: options.requestId,
+      resourcePrecondition: options.resourcePrecondition
+    }
+  );
+}
+
 export function deleteRoom(client: DeviceClient, roomId: string) {
   return client.delete(`api/topology/rooms/${encodeURIComponent(roomId)}`);
 }
@@ -106,14 +128,14 @@ export function moveDeviceToRoom(
   client: DeviceClient,
   toRoomId: string,
   deviceId: string,
-  fromRoom?: string
+  fromRoom: string
 ) {
   return client.put(
     `api/topology/rooms/${encodeURIComponent(toRoomId)}/devices/move`,
     {
       body: {
         device_id: deviceId,
-        ...(fromRoom ? { from_room: fromRoom } : {})
+        from_room: fromRoom
       }
     }
   );

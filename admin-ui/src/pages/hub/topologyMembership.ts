@@ -59,6 +59,31 @@ export function isBulbKind(kind: string | undefined): boolean {
   return ['light_device', 'light', 'bulb'].includes(normalizedKind(kind) ?? '');
 }
 
+export function topologyKindLabel(kind: string | undefined): string {
+  const normalized = normalizedKind(kind);
+  switch (normalized) {
+    case 'light_device':
+    case 'light':
+    case 'bulb':
+      return 'Bulb';
+    case 'button':
+      return 'Button';
+    case 'motion_sensor':
+      return 'Motion sensor';
+    case 'switch_device':
+    case 'switch':
+      return 'Switch';
+    case 'sensor':
+      return 'Sensor';
+    case 'other_device':
+      return 'Other device';
+    default:
+      return normalized
+        ? normalized.replaceAll('_', ' ').replace(/^./, (letter) => letter.toUpperCase())
+        : 'Device';
+  }
+}
+
 function rawNodesFromPayload(payload: unknown): Array<{
   raw: Record<string, unknown>;
   fallbackKind?: string;
