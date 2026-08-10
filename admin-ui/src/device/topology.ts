@@ -106,14 +106,14 @@ export function moveDeviceToRoom(
   client: DeviceClient,
   toRoomId: string,
   deviceId: string,
-  fromRoom?: string
+  fromRoom: string
 ) {
   return client.put(
     `api/topology/rooms/${encodeURIComponent(toRoomId)}/devices/move`,
     {
       body: {
         device_id: deviceId,
-        ...(fromRoom ? { from_room: fromRoom } : {})
+        from_room: fromRoom
       }
     }
   );
