@@ -14391,14 +14391,8 @@ pub fn do_canonical_assign_room(
     let was_topology_standalone = s.topology.device_parent_room_id(device_id).is_none();
     let assigning_standalone_light_child =
         room_id.is_some() && was_topology_standalone && matches!(&device_type, DeviceType::Light);
-    let sleep_default_node_to_seed = if matches!(&device_type, DeviceType::Light) {
-        room_id
-            .filter(|_| assigning_standalone_light_child)
-            .or_else(|| room_id.is_none().then_some(device_id))
-            .map(str::to_string)
-    } else {
-        None
-    };
+    let sleep_default_node_to_seed =
+        matches!(&device_type, DeviceType::Light).then(|| room_id.unwrap_or(device_id).to_string());
     let old_room_id = s
         .topology
         .device_parent_room_id(device_id)
@@ -15324,6 +15318,7 @@ pub fn do_topology_create_room(state: &SharedState, name: &str) -> Result<String
     let id = s.topology.create_room(name);
     persist_topology(&s);
     drop(s);
+    ensure_sleep_mode_hard_off_default(state, &id);
     reconcile_runtime_from_state(state)?;
     Ok(format!(r#"{{"id":"{}","name":"{}"}}"#, id, name))
 }
