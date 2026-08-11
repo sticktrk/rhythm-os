@@ -16,7 +16,7 @@ use rhythm_runtime_api::{
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
@@ -495,11 +495,26 @@ pub fn run_light_runtime_event(
     event: RuntimeEvent,
 ) -> Result<RuntimePlanApplyReport> {
     validate_runtime_selection(runtime_id, light_runtime, &event)?;
+    let activate_direct_children =
+        runtime_id == RHYTHM_ADAPTIVE_RUNTIME_ID && runtime_event_activates_direct_children(&event);
     let snapshot = build_runtime_snapshot_from_state(state, runtime_id)?;
     let plan = light_runtime
         .handle_event(&snapshot, event)
         .map_err(|error| anyhow::anyhow!("{} runtime failed: {}", light_runtime.name(), error))?;
-    apply_runtime_plan(state, runtime_id, &plan)
+    let runtime = {
+        let s = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+        s.hub_runtime()
+            .ok_or_else(|| anyhow::anyhow!("no runtime is available"))?
+    };
+    apply_runtime_plan_to_handle_with_child_activation(
+        state,
+        runtime_id,
+        runtime.as_ref(),
+        &plan,
+        activate_direct_children,
+    )
 }
 
 pub fn apply_runtime_plan_to_handle(
@@ -508,23 +523,84 @@ pub fn apply_runtime_plan_to_handle(
     runtime: &dyn RuntimeHandle,
     plan: &RuntimePlan,
 ) -> Result<RuntimePlanApplyReport> {
+    apply_runtime_plan_to_handle_with_child_activation(state, runtime_id, runtime, plan, false)
+}
+
+pub(crate) fn apply_runtime_plan_to_handle_with_child_activation(
+    state: &SharedState,
+    runtime_id: &str,
+    runtime: &dyn RuntimeHandle,
+    plan: &RuntimePlan,
+    activate_direct_children: bool,
+) -> Result<RuntimePlanApplyReport> {
     emit_diagnostics(runtime_id, &plan.diagnostics);
 
     let mut dispatch_count = 0;
     for command in &plan.dispatch {
         if let Some((expanded, dispatch_records)) =
-            expand_route_aware_room_turn_on(state, runtime, command)?
+            expand_route_aware_room_turn_on(state, runtime, command, activate_direct_children)?
         {
+            let mut accepted_commands = Vec::new();
+            let mut accepted_node_ids = HashSet::new();
+            let mut first_error = None;
             for expanded_command in &expanded {
-                apply_dispatch_command(runtime, expanded_command)?;
-                update_host_state_after_dispatch(state, runtime, expanded_command);
+                match apply_dispatch_command(runtime, expanded_command) {
+                    Ok(()) => {
+                        if let DispatchCommand::TurnOn {
+                            target: DispatchTarget::Node { node_id },
+                            ..
+                        }
+                        | DispatchCommand::TurnOff {
+                            target: DispatchTarget::Node { node_id },
+                            ..
+                        } = expanded_command
+                        {
+                            accepted_node_ids.insert(node_id.clone());
+                        }
+                        accepted_commands.push(expanded_command);
+                    }
+                    Err(error) => {
+                        log::warn!(
+                            target: "light_runtime",
+                            "route_aware_room_dispatch: sibling route failed for room={} command={:?}: {}",
+                            dispatch_node_id(command).unwrap_or("unknown"),
+                            expanded_command,
+                            error,
+                        );
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
+                }
+            }
+
+            // All sibling mailboxes are attempted before any observed-state
+            // refresh. A slow Matter read must never delay a healthy Hue
+            // enqueue, and one rejected route must not suppress its siblings.
+            for accepted_command in &accepted_commands {
+                update_host_state_after_expanded_dispatch(state, accepted_command);
                 dispatch_count += 1;
             }
-            runtime.record_rhythm_dispatches(&dispatch_records)?;
-            // Synthetic group route IDs are intentionally hidden, while
-            // direct children update their own cache. Also update the public
-            // parent whose room action produced this fan-out.
-            update_host_state_after_dispatch(state, runtime, command);
+
+            let accepted_records = dispatch_records
+                .iter()
+                .filter(|record| accepted_node_ids.contains(&record.target_node_id))
+                .cloned()
+                .collect::<Vec<_>>();
+            runtime.record_rhythm_dispatches(&accepted_records)?;
+
+            if accepted_commands.is_empty() {
+                if !expanded.is_empty() {
+                    return Err(first_error.unwrap_or_else(|| {
+                        anyhow::anyhow!("all expanded routes rejected the room command")
+                    }));
+                }
+            } else {
+                // Synthetic group route IDs are intentionally hidden, while
+                // direct children update their own cache. Also update the
+                // public parent whose room action produced this fan-out.
+                update_host_state_after_dispatch(state, runtime, command);
+            }
         } else {
             apply_dispatch_command(runtime, command)?;
             update_host_state_after_dispatch(state, runtime, command);
@@ -545,6 +621,7 @@ fn expand_route_aware_room_turn_on(
     state: &SharedState,
     runtime: &dyn RuntimeHandle,
     command: &DispatchCommand,
+    activate_direct_children: bool,
 ) -> Result<Option<(Vec<DispatchCommand>, Vec<RhythmDispatchRecord>)>> {
     let DispatchCommand::TurnOn {
         target: DispatchTarget::Node { node_id: room_id },
@@ -560,20 +637,59 @@ fn expand_route_aware_room_turn_on(
         return Ok(None);
     }
 
-    let mut routes = {
+    let (mut routes, composite) = {
         let app = state
             .lock()
             .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
-        let Some(composite) = app.composite_controller.as_ref() else {
-            return Ok(None);
-        };
-        app.topology
-            .periodic_light_nodes(&app.canonical_registry)
-            .into_iter()
-            .filter(|node| node.emit_node_id == *room_id && composite.has_active_route(&node.id))
-            .collect::<Vec<_>>()
+        (
+            app.topology
+                .periodic_light_nodes(&app.canonical_registry)
+                .into_iter()
+                .filter(|node| node.emit_node_id == *room_id)
+                .collect::<Vec<_>>(),
+            app.composite_controller.clone(),
+        )
     };
-    routes.sort_by(|left, right| left.id.cmp(&right.id));
+
+    let parent_is_active = activate_direct_children
+        && runtime
+            .engine_effective_node_snapshot(room_id)
+            .is_some_and(|room| !room.soft_off && !room.mood_active && !room.hard_off);
+    if parent_is_active {
+        let direct_source_ids = routes
+            .iter()
+            .filter(|route| route.source_node_id != *room_id)
+            .map(|route| route.source_node_id.clone())
+            .collect::<BTreeSet<_>>();
+        for source_node_id in direct_source_ids {
+            if let Err(error) = runtime.prepare_node_for_parent_activation(&source_node_id) {
+                // Desired-state repair for one child is isolated just like
+                // physical dispatch: it must not suppress healthy Hue output.
+                log::warn!(
+                    target: "light_runtime",
+                    "route_aware_room_dispatch: failed to prepare child={} for room={}: {}",
+                    source_node_id,
+                    room_id,
+                    error,
+                );
+            }
+        }
+    }
+
+    let Some(composite) = composite else {
+        return Ok(None);
+    };
+    routes.retain(|node| composite.has_active_route(&node.id));
+    // Grouped routes are enqueued first. Best-effort application below also
+    // continues after failures, but prioritizing groups ensures an unhealthy
+    // direct integration cannot delay established Hue room control.
+    routes.sort_by(|left, right| {
+        let left_is_direct = left.source_node_id != *room_id;
+        let right_is_direct = right.source_node_id != *room_id;
+        left_is_direct
+            .cmp(&right_is_direct)
+            .then_with(|| left.id.cmp(&right.id))
+    });
 
     let direct_route_count = routes
         .iter()
@@ -593,6 +709,7 @@ fn expand_route_aware_room_turn_on(
 
     let mut expanded = Vec::with_capacity(routes.len());
     let mut dispatch_records = Vec::new();
+    let mut first_planning_error = None;
     for route in routes {
         if route.source_node_id == *room_id {
             expanded.push(DispatchCommand::TurnOn {
@@ -602,29 +719,125 @@ fn expand_route_aware_room_turn_on(
             continue;
         }
 
+        if runtime
+            .engine_node_snapshot(&route.source_node_id)
+            .is_none()
+        {
+            let error = anyhow::anyhow!(
+                "direct route source '{}' is missing from the runtime engine",
+                route.source_node_id
+            );
+            log::warn!(
+                target: "light_runtime",
+                "route_aware_room_dispatch: sibling route planning failed for room={} child={}: {}",
+                room_id,
+                route.source_node_id,
+                error,
+            );
+            if first_planning_error.is_none() {
+                first_planning_error = Some(error);
+            }
+            continue;
+        }
+
         let tick = TickContext {
             node_id: route.id,
             hour: runtime.current_hour() as f64,
             epoch_ms: Some(chrono::Utc::now().timestamp_millis()),
             metadata: BTreeMap::from([("reason".to_string(), json!("manual_room_route_refresh"))]),
         };
-        match runtime.plan_forced_node_refresh(&tick, &route.source_node_id)? {
-            RhythmPeriodicPlanOutcome::RequiresLightCheck => {
-                return Err(anyhow::anyhow!(
-                    "forced route refresh unexpectedly required a light-state check"
-                ));
+        match runtime.plan_forced_node_refresh(&tick, &route.source_node_id) {
+            Err(error) => {
+                log::warn!(
+                    target: "light_runtime",
+                    "route_aware_room_dispatch: sibling route planning failed for room={} child={}: {}",
+                    room_id,
+                    route.source_node_id,
+                    error,
+                );
+                if first_planning_error.is_none() {
+                    first_planning_error = Some(error);
+                }
             }
-            RhythmPeriodicPlanOutcome::Plan {
+            Ok(RhythmPeriodicPlanOutcome::RequiresLightCheck) => {
+                let error = anyhow::anyhow!(
+                    "forced route refresh unexpectedly required a light-state check"
+                );
+                log::warn!(
+                    target: "light_runtime",
+                    "route_aware_room_dispatch: sibling route planning failed for room={} child={}: {}",
+                    room_id,
+                    route.source_node_id,
+                    error,
+                );
+                if first_planning_error.is_none() {
+                    first_planning_error = Some(error);
+                }
+            }
+            Ok(RhythmPeriodicPlanOutcome::Plan {
                 plan,
                 dispatch_records: records,
-            } => {
+            }) => {
                 expanded.extend(plan.dispatch);
                 dispatch_records.extend(records);
             }
         }
     }
 
+    if expanded.is_empty() {
+        if let Some(error) = first_planning_error {
+            return Err(error);
+        }
+    }
+
     Ok(Some((expanded, dispatch_records)))
+}
+
+fn dispatch_node_id(command: &DispatchCommand) -> Option<&str> {
+    match command {
+        DispatchCommand::TurnOn {
+            target: DispatchTarget::Node { node_id },
+            ..
+        }
+        | DispatchCommand::TurnOff {
+            target: DispatchTarget::Node { node_id },
+            ..
+        } => Some(node_id),
+        DispatchCommand::TurnOn { .. } | DispatchCommand::TurnOff { .. } => None,
+    }
+}
+
+fn runtime_event_activates_direct_children(event: &RuntimeEvent) -> bool {
+    let RuntimeEvent::Input(input) = event else {
+        return false;
+    };
+    matches!(
+        &input.action,
+        rhythm_runtime_api::InputAction::On
+            | rhythm_runtime_api::InputAction::Toggle
+            | rhythm_runtime_api::InputAction::Reset
+            | rhythm_runtime_api::InputAction::BrightnessUp
+            | rhythm_runtime_api::InputAction::BrightnessDown
+            | rhythm_runtime_api::InputAction::StepUp
+            | rhythm_runtime_api::InputAction::StepDown
+    ) || matches!(
+        &input.action,
+        rhythm_runtime_api::InputAction::Named(name) if name == "sleep_off"
+    )
+}
+
+pub(crate) fn button_action_activates_direct_children(action: rhythm_core::ButtonAction) -> bool {
+    matches!(
+        action,
+        rhythm_core::ButtonAction::OnPress
+            | rhythm_core::ButtonAction::Toggle
+            | rhythm_core::ButtonAction::Reset
+            | rhythm_core::ButtonAction::UpPress
+            | rhythm_core::ButtonAction::DownPress
+            | rhythm_core::ButtonAction::UpHold
+            | rhythm_core::ButtonAction::DownHold
+            | rhythm_core::ButtonAction::SleepOff
+    )
 }
 
 pub fn run_selected_light_runtime_event(
@@ -660,6 +873,8 @@ pub fn run_light_runtime_event_with_handle(
     event: RuntimeEvent,
 ) -> Result<RuntimePlanApplyReport> {
     validate_runtime_selection(runtime_id, light_runtime, &event)?;
+    let activate_direct_children =
+        runtime_id == RHYTHM_ADAPTIVE_RUNTIME_ID && runtime_event_activates_direct_children(&event);
     let node_action_lock = match &event {
         RuntimeEvent::Input(input) => {
             let mut s = state
@@ -688,7 +903,13 @@ pub fn run_light_runtime_event_with_handle(
     let plan = light_runtime
         .handle_event(&snapshot, event)
         .map_err(|error| anyhow::anyhow!("{} runtime failed: {}", light_runtime.name(), error))?;
-    apply_runtime_plan_to_handle(state, runtime_id, host_runtime, &plan)
+    apply_runtime_plan_to_handle_with_child_activation(
+        state,
+        runtime_id,
+        host_runtime,
+        &plan,
+        activate_direct_children,
+    )
 }
 
 fn validate_runtime_selection(
@@ -772,6 +993,34 @@ fn update_host_state_after_dispatch(
     }
 }
 
+fn update_host_state_after_expanded_dispatch(state: &SharedState, command: &DispatchCommand) {
+    let (node_id, lights_on) = match command {
+        DispatchCommand::TurnOn {
+            target: DispatchTarget::Node { node_id },
+            ..
+        } => (node_id, true),
+        DispatchCommand::TurnOff {
+            target: DispatchTarget::Node { node_id },
+            ..
+        } => (node_id, false),
+        DispatchCommand::TurnOn { .. } | DispatchCommand::TurnOff { .. } => return,
+    };
+    if crate::topology::is_internal_light_node_id(node_id) {
+        return;
+    }
+    let runtime = state
+        .lock()
+        .ok()
+        .and_then(|s| s.hub_runtime())
+        .filter(|candidate| candidate.engine_node_snapshot(node_id).is_some());
+    if let Some(runtime) = runtime {
+        crate::commands::update_lights_on_cache_for_runtime_node_without_parent_refresh(
+            state, &runtime, node_id, lights_on,
+        );
+        crate::commands::emit_node_state_event_after_apply(state, &runtime, node_id);
+    }
+}
+
 fn update_host_node_after_dispatch(
     state: &SharedState,
     _runtime: &dyn RuntimeHandle,
@@ -851,21 +1100,36 @@ mod tests {
     use super::*;
     use crate::canonical::identity::HubKey;
     use crate::hub::{ActiveHub, HubType};
+    use crate::storage::{FileStorage, Storage};
     use async_trait::async_trait;
     use rhythm_core::{
-        HubDispatchTarget, HubLightController, LightControlResult, LightProfileNodeOverride,
-        RestoredNodeState, Room, RoomProfileSettings,
+        CompositeController, HubDispatchPolicy, HubDispatchTarget, HubLightController,
+        LightControlResult, LightProfileNodeOverride, RestoredNodeState, RestoredRoomState,
+        RhythmRuntime, Room, RoomProfileSettings, RuntimeConfig,
     };
     use rhythm_runtime_api::{
         DiagnosticLevel, InputAction, LightingCommand, RuntimeDiagnostic, RuntimeError,
         RuntimeHttpMethod, RuntimeInputEvent,
     };
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
 
-    #[derive(Default)]
     struct RecordingHubController {
         turn_on_calls: Mutex<Vec<(String, rhythm_core::LightingCommand)>>,
+        turn_on_delay_ms: AtomicU64,
+        query_delay_ms: AtomicU64,
+        query_lights_on: AtomicBool,
+    }
+
+    impl Default for RecordingHubController {
+        fn default() -> Self {
+            Self {
+                turn_on_calls: Mutex::new(Vec::new()),
+                turn_on_delay_ms: AtomicU64::new(0),
+                query_delay_ms: AtomicU64::new(0),
+                query_lights_on: AtomicBool::new(true),
+            }
+        }
     }
 
     impl RecordingHubController {
@@ -882,6 +1146,21 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
         }
+
+        fn turn_on_calls(&self) -> Vec<(String, rhythm_core::LightingCommand)> {
+            self.turn_on_calls.lock().unwrap().clone()
+        }
+
+        fn set_turn_on_delay(&self, delay: std::time::Duration) {
+            self.turn_on_delay_ms
+                .store(delay.as_millis() as u64, Ordering::SeqCst);
+        }
+
+        fn set_query_behavior(&self, lights_on: bool, delay: std::time::Duration) {
+            self.query_lights_on.store(lights_on, Ordering::SeqCst);
+            self.query_delay_ms
+                .store(delay.as_millis() as u64, Ordering::SeqCst);
+        }
     }
 
     #[async_trait]
@@ -895,6 +1174,10 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((target.label(), command));
+            let delay_ms = self.turn_on_delay_ms.load(Ordering::SeqCst);
+            if delay_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
             Ok(())
         }
 
@@ -918,11 +1201,164 @@ mod tests {
             &self,
             _target: &HubDispatchTarget,
         ) -> LightControlResult<bool> {
-            Ok(true)
+            let delay_ms = self.query_delay_ms.load(Ordering::SeqCst);
+            if delay_ms > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
+            Ok(self.query_lights_on.load(Ordering::SeqCst))
         }
 
         fn name(&self) -> &str {
             "RecordingHub"
+        }
+    }
+
+    type MixedTestRuntime = RhythmRuntime<
+        CompositeController,
+        rhythm_core::runtime::time::MockTimeProvider,
+        rhythm_core::runtime::scheduler::NoOpScheduler,
+        rhythm_core::runtime::registry::SimpleDeviceRegistry,
+    >;
+
+    struct MixedHueMatterFixture {
+        state: SharedState,
+        runtime: Arc<MixedTestRuntime>,
+        composite: Arc<CompositeController>,
+        group_controller: Arc<RecordingHubController>,
+        matter_controller: Arc<RecordingHubController>,
+        matter_key: HubKey,
+        matter_light_id: String,
+    }
+
+    fn mixed_hue_matter_fixture(register_matter: bool) -> MixedHueMatterFixture {
+        use rhythm_core::runtime::registry::SimpleDeviceRegistry;
+        use rhythm_core::runtime::scheduler::NoOpScheduler;
+        use rhythm_core::runtime::time::MockTimeProvider;
+
+        let group_key = HubKey::new(HubType::new("hue"), "bridge");
+        let matter_key = HubKey::new(HubType::new("matter"), "local");
+        let group_controller = Arc::new(RecordingHubController::default());
+        let matter_controller = Arc::new(RecordingHubController::default());
+        let composite = Arc::new(CompositeController::new());
+        composite.register_controller(&group_key.to_string(), group_controller.clone());
+        if register_matter {
+            composite.register_controller(&matter_key.to_string(), matter_controller.clone());
+        }
+
+        let runtime = Arc::new(RhythmRuntime::new(
+            composite.clone(),
+            MockTimeProvider::new(12.0, 172, 2024),
+            NoOpScheduler::new(),
+            SimpleDeviceRegistry::new(),
+            RuntimeConfig::default(),
+        ));
+        runtime.add_node("hallway", "Hallway", rhythm_core::LightNodeKind::Room, None);
+
+        let state = make_state_with_runtime(runtime.clone());
+        let (group_light_id, matter_light_id, routing) = {
+            let mut app = state.lock().unwrap();
+            let group_identity = crate::canonical::identity::DiscoveredIdentity {
+                native_id: "hue-group-light".to_string(),
+                room_id: Some("hue-hallway".to_string()),
+                room_name: Some("Hallway".to_string()),
+                name: "Grouped lamp".to_string(),
+                device_type: rhythm_core::runtime::hub_registry::DeviceType::Light,
+                hardware_ids: Vec::new(),
+                manufacturer: None,
+                model: None,
+            };
+            let matter_identity = crate::canonical::identity::DiscoveredIdentity {
+                native_id: "matter-112".to_string(),
+                room_id: None,
+                room_name: None,
+                name: "MOES".to_string(),
+                device_type: rhythm_core::runtime::hub_registry::DeviceType::Light,
+                hardware_ids: Vec::new(),
+                manufacturer: None,
+                model: None,
+            };
+            let resolve_id = |result| match result {
+                crate::canonical::registry::ResolveResult::Created { canonical_id }
+                | crate::canonical::registry::ResolveResult::AlreadyKnown { canonical_id }
+                | crate::canonical::registry::ResolveResult::ReApproved { canonical_id } => {
+                    canonical_id
+                }
+                other => panic!("unexpected identity resolution: {other:?}"),
+            };
+            let group_light_id = resolve_id(app.canonical_registry.resolve(
+                &group_identity,
+                &group_key,
+                1_000,
+            ));
+            let matter_light_id = resolve_id(app.canonical_registry.resolve(
+                &matter_identity,
+                &matter_key,
+                1_000,
+            ));
+
+            let mut room = crate::topology::TopologyRoom::new("hallway", "Hallway");
+            room.upsert_hub_room_binding(crate::topology::HubRoomBinding {
+                hub_key: group_key.clone(),
+                hub_room_id: "hue-hallway".to_string(),
+                control_id: "grouped-light-hallway".to_string(),
+                light_device_ids: vec!["hue-group-light".to_string()],
+            });
+            app.topology.insert_room(room);
+            assert!(app
+                .topology
+                .attach_device_user_override("hallway", &group_light_id));
+            assert!(app
+                .topology
+                .attach_device_user_override("hallway", &matter_light_id));
+            app.composite_controller = Some(composite.clone());
+            let routing = app.topology.composite_routing(&app.canonical_registry);
+            (group_light_id, matter_light_id, routing)
+        };
+        composite.update_routing(routing);
+
+        runtime.add_node(
+            &group_light_id,
+            "Grouped lamp",
+            rhythm_core::LightNodeKind::LightDevice,
+            Some("hallway".to_string()),
+        );
+        runtime.add_node(
+            &matter_light_id,
+            "MOES",
+            rhythm_core::LightNodeKind::LightDevice,
+            Some("hallway".to_string()),
+        );
+        let mut profile_settings = RoomProfileSettings::default();
+        profile_settings.profile_overrides.insert(
+            rhythm_core::RHYTHM_PROFILE_ID.to_string(),
+            LightProfileNodeOverride {
+                max_brightness: Some(31),
+                ..Default::default()
+            },
+        );
+        runtime.restore_node_state(
+            &matter_light_id,
+            RestoredNodeState {
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: false,
+                mood_active: false,
+                standby_enabled: false,
+                hard_off: true,
+                profile_settings,
+            },
+        );
+
+        MixedHueMatterFixture {
+            state,
+            runtime,
+            composite,
+            group_controller,
+            matter_controller,
+            matter_key,
+            matter_light_id,
         }
     }
 
@@ -1188,128 +1624,219 @@ mod tests {
     }
 
     #[test]
-    fn direct_bulb_profile_override_survives_manual_room_fanout() {
-        use rhythm_core::runtime::registry::SimpleDeviceRegistry;
-        use rhythm_core::runtime::scheduler::NoOpScheduler;
-        use rhythm_core::runtime::time::MockTimeProvider;
-        use rhythm_core::{CompositeController, RhythmRuntime, RuntimeConfig};
+    fn app_room_reset_activates_hard_off_direct_child_with_profile_override() {
+        let fixture = mixed_hue_matter_fixture(true);
+        let state = fixture.state;
+        let runtime = fixture.runtime;
+        let group_controller = fixture.group_controller;
+        let matter_controller = fixture.matter_controller;
+        let matter_light_id = fixture.matter_light_id;
 
-        let group_key = HubKey::new(HubType::new("hue"), "bridge");
-        let direct_key = HubKey::new(HubType::new("hue_ble"), "local");
-        let group_controller = Arc::new(RecordingHubController::default());
-        let direct_controller = Arc::new(RecordingHubController::default());
-        let composite = Arc::new(CompositeController::new());
-        composite.register_controller(&group_key.to_string(), group_controller.clone());
-        composite.register_controller(&direct_key.to_string(), direct_controller.clone());
-
-        let runtime = Arc::new(RhythmRuntime::new(
-            composite.clone(),
-            MockTimeProvider::new(12.0, 172, 2024),
-            NoOpScheduler::new(),
-            SimpleDeviceRegistry::new(),
-            RuntimeConfig::default(),
+        let data_dir = std::env::temp_dir().join(format!(
+            "rhythm-direct-child-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
-        runtime.add_node("hallway", "Hallway", rhythm_core::LightNodeKind::Room, None);
+        let storage = Arc::new(FileStorage::new(data_dir.to_str().unwrap()).unwrap());
+        state.lock().unwrap().storage = Some(storage.clone());
 
-        let state = make_state_with_runtime(runtime.clone());
-        let (group_light_id, direct_light_id, routing) = {
-            let mut app = state.lock().unwrap();
-            let group_identity = crate::canonical::identity::DiscoveredIdentity {
-                native_id: "hue-group-light".to_string(),
-                room_id: Some("hue-hallway".to_string()),
-                room_name: Some("Hallway".to_string()),
-                name: "Grouped lamp".to_string(),
-                device_type: rhythm_core::runtime::hub_registry::DeviceType::Light,
-                hardware_ids: Vec::new(),
-                manufacturer: None,
-                model: None,
-            };
-            let direct_identity = crate::canonical::identity::DiscoveredIdentity {
-                native_id: "hue-ble-direct".to_string(),
-                room_id: None,
-                room_name: None,
-                name: "Direct lamp".to_string(),
-                device_type: rhythm_core::runtime::hub_registry::DeviceType::Light,
-                hardware_ids: Vec::new(),
-                manufacturer: None,
-                model: None,
-            };
-            let resolve_id = |result| match result {
-                crate::canonical::registry::ResolveResult::Created { canonical_id }
-                | crate::canonical::registry::ResolveResult::AlreadyKnown { canonical_id }
-                | crate::canonical::registry::ResolveResult::ReApproved { canonical_id } => {
-                    canonical_id
-                }
-                other => panic!("unexpected identity resolution: {other:?}"),
-            };
-            let group_light_id = resolve_id(app.canonical_registry.resolve(
-                &group_identity,
-                &group_key,
-                1_000,
-            ));
-            let direct_light_id = resolve_id(app.canonical_registry.resolve(
-                &direct_identity,
-                &direct_key,
-                1_000,
-            ));
+        crate::commands::do_node_action(&state, "hallway", "reset", true).unwrap();
 
-            let mut room = crate::topology::TopologyRoom::new("hallway", "Hallway");
-            room.upsert_hub_room_binding(crate::topology::HubRoomBinding {
-                hub_key: group_key.clone(),
-                hub_room_id: "hue-hallway".to_string(),
-                control_id: "grouped-light-hallway".to_string(),
-                light_device_ids: vec!["hue-group-light".to_string()],
-            });
-            app.topology.insert_room(room);
-            assert!(app
-                .topology
-                .attach_device_user_override("hallway", &group_light_id));
-            assert!(app
-                .topology
-                .attach_device_user_override("hallway", &direct_light_id));
-            app.composite_controller = Some(composite.clone());
-            let routing = app.topology.composite_routing(&app.canonical_registry);
-            (group_light_id, direct_light_id, routing)
-        };
-        composite.update_routing(routing);
+        let group_calls = group_controller.wait_for_turn_on_calls(1);
+        let direct_calls = matter_controller.wait_for_turn_on_calls(1);
+        assert_eq!(group_calls.len(), 1);
+        assert_eq!(group_calls[0].0, "hue-hallway (grouped-light-hallway)");
+        assert!(group_calls[0].1.brightness > 31);
+        assert_eq!(direct_calls.len(), 1);
+        assert_eq!(direct_calls[0].0, "matter-112");
+        assert_eq!(direct_calls[0].1.brightness, 31);
+        assert!(
+            !runtime
+                .engine_node_snapshot(&matter_light_id)
+                .expect("direct child should remain addressable")
+                .hard_off
+        );
+        let persisted_rooms = storage.load_rooms().unwrap();
+        let persisted_child = persisted_rooms
+            .get(&matter_light_id)
+            .expect("direct child activation should be persisted");
+        assert!(!persisted_child.hard_off);
+        assert_eq!(
+            persisted_child
+                .profile_settings
+                .profile_overrides
+                .get(rhythm_core::RHYTHM_PROFILE_ID)
+                .and_then(|settings| settings.max_brightness),
+            Some(31)
+        );
+        state.lock().unwrap().storage = None;
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
 
-        runtime.add_node(
-            &group_light_id,
-            "Grouped lamp",
-            rhythm_core::LightNodeKind::LightDevice,
-            Some("hallway".to_string()),
-        );
-        runtime.add_node(
-            &direct_light_id,
-            "Direct lamp",
-            rhythm_core::LightNodeKind::LightDevice,
-            Some("hallway".to_string()),
-        );
-        let mut profile_settings = RoomProfileSettings::default();
-        profile_settings.profile_overrides.insert(
-            rhythm_core::RHYTHM_PROFILE_ID.to_string(),
-            LightProfileNodeOverride {
-                max_brightness: Some(31),
-                ..Default::default()
-            },
-        );
-        runtime.restore_node_state(
-            &direct_light_id,
-            RestoredNodeState {
+    #[test]
+    fn app_room_standby_keeps_direct_matter_child_on_idle_profile() {
+        let fixture = mixed_hue_matter_fixture(true);
+        let child_snapshot = fixture
+            .runtime
+            .engine_node_snapshot(&fixture.matter_light_id)
+            .unwrap();
+        let mut child_state = RestoredNodeState::from(&child_snapshot);
+        child_state.hard_off = false;
+        fixture
+            .runtime
+            .restore_node_state(&fixture.matter_light_id, child_state);
+        fixture.runtime.restore_room_state(
+            "hallway",
+            RestoredRoomState {
                 rhythm_enabled: true,
                 disabled: false,
                 time_offset_minutes: 0.0,
                 brightness_offset: 0.0,
                 soft_off: false,
                 mood_active: false,
-                standby_enabled: false,
+                standby_enabled: true,
                 hard_off: false,
-                profile_settings,
+                profile_settings: RoomProfileSettings::default(),
             },
         );
 
+        crate::commands::do_node_action(&fixture.state, "hallway", "off", false).unwrap();
+
+        let group_calls = fixture.group_controller.wait_for_turn_on_calls(1);
+        let matter_calls = fixture.matter_controller.wait_for_turn_on_calls(1);
+        assert_eq!(group_calls.len(), 1);
+        assert_eq!(matter_calls.len(), 1);
+        assert_eq!(matter_calls[0].1.brightness, group_calls[0].1.brightness);
+        assert!(matter_calls[0].1.brightness < 31);
+        let child = fixture
+            .runtime
+            .engine_node_snapshot(&fixture.matter_light_id)
+            .unwrap();
+        let effective_child = fixture
+            .runtime
+            .engine_effective_node_snapshot(&fixture.matter_light_id)
+            .unwrap();
+        assert!(!child.soft_off, "child should inherit parent standby");
+        assert!(effective_child.soft_off);
+        assert!(!effective_child.hard_off);
+    }
+
+    #[test]
+    fn offline_direct_matter_child_activation_is_persisted_and_dispatches_after_reconnect() {
+        let fixture = mixed_hue_matter_fixture(false);
+        let data_dir = std::env::temp_dir().join(format!(
+            "rhythm-offline-direct-child-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let storage = Arc::new(FileStorage::new(data_dir.to_str().unwrap()).unwrap());
+        fixture.state.lock().unwrap().storage = Some(storage.clone());
+
+        crate::commands::do_node_action(&fixture.state, "hallway", "reset", true).unwrap();
+
+        assert_eq!(fixture.group_controller.wait_for_turn_on_calls(1).len(), 1);
+        assert!(fixture.matter_controller.turn_on_calls().is_empty());
+        assert!(
+            !fixture
+                .runtime
+                .engine_node_snapshot(&fixture.matter_light_id)
+                .unwrap()
+                .hard_off
+        );
+        assert!(
+            !storage
+                .load_rooms()
+                .unwrap()
+                .get(&fixture.matter_light_id)
+                .unwrap()
+                .hard_off
+        );
+
+        fixture.composite.register_controller(
+            &fixture.matter_key.to_string(),
+            fixture.matter_controller.clone(),
+        );
         let report = run_selected_light_runtime_event(
-            &state,
+            &fixture.state,
+            RuntimeEvent::PeriodicTick(TickContext {
+                node_id: fixture.matter_light_id.clone(),
+                hour: 12.0,
+                epoch_ms: None,
+                metadata: BTreeMap::from([(
+                    "source_node_id".to_string(),
+                    json!(fixture.matter_light_id),
+                )]),
+            }),
+        )
+        .unwrap();
+        assert_eq!(report.dispatch_count, 1);
+        assert_eq!(fixture.matter_controller.wait_for_turn_on_calls(1).len(), 1);
+
+        fixture.state.lock().unwrap().storage = None;
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[test]
+    fn room_activation_preserves_direct_child_rhythm_opt_out() {
+        let fixture = mixed_hue_matter_fixture(true);
+        let child_snapshot = fixture
+            .runtime
+            .engine_node_snapshot(&fixture.matter_light_id)
+            .unwrap();
+        let mut child_state = RestoredNodeState::from(&child_snapshot);
+        child_state.rhythm_enabled = false;
+        fixture
+            .runtime
+            .restore_node_state(&fixture.matter_light_id, child_state);
+
+        crate::commands::do_node_action(&fixture.state, "hallway", "reset", false).unwrap();
+
+        assert_eq!(fixture.group_controller.wait_for_turn_on_calls(1).len(), 1);
+        assert!(fixture.matter_controller.turn_on_calls().is_empty());
+        let child = fixture
+            .runtime
+            .engine_node_snapshot(&fixture.matter_light_id)
+            .unwrap();
+        assert!(!child.rhythm_enabled);
+        assert!(!child.hard_off);
+    }
+
+    #[test]
+    fn matter_cooldown_rejection_does_not_block_hue_group_dispatch() {
+        let fixture = mixed_hue_matter_fixture(true);
+        fixture
+            .composite
+            .remove_controller(&fixture.matter_key.to_string());
+        fixture
+            .matter_controller
+            .set_turn_on_delay(std::time::Duration::from_millis(200));
+        let mut matter_policy = HubDispatchPolicy::for_hub_key(&fixture.matter_key.to_string());
+        matter_policy.dispatch_timeout = std::time::Duration::from_millis(25);
+        matter_policy.timeout_cooldown = std::time::Duration::from_secs(2);
+        fixture.composite.register_controller_with_policy(
+            &fixture.matter_key.to_string(),
+            fixture.matter_controller.clone(),
+            matter_policy,
+        );
+
+        fixture
+            .runtime
+            .apply_room_command(
+                &fixture.matter_light_id,
+                rhythm_core::LightingCommand::new(10, 2700),
+            )
+            .unwrap();
+        assert_eq!(fixture.matter_controller.wait_for_turn_on_calls(1).len(), 1);
+        std::thread::sleep(std::time::Duration::from_millis(75));
+
+        let report = run_selected_light_runtime_event(
+            &fixture.state,
             RuntimeEvent::Input(RuntimeInputEvent {
                 source_id: "app".to_string(),
                 target_id: "hallway".to_string(),
@@ -1320,15 +1847,42 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report.dispatch_count, 2);
-        let group_calls = group_controller.wait_for_turn_on_calls(1);
-        let direct_calls = direct_controller.wait_for_turn_on_calls(1);
-        assert_eq!(group_calls.len(), 1);
-        assert_eq!(group_calls[0].0, "hue-hallway (grouped-light-hallway)");
-        assert!(group_calls[0].1.brightness > 31);
-        assert_eq!(direct_calls.len(), 1);
-        assert_eq!(direct_calls[0].0, "hue-ble-direct");
-        assert_eq!(direct_calls[0].1.brightness, 31);
+        assert_eq!(report.dispatch_count, 1);
+        assert_eq!(fixture.group_controller.wait_for_turn_on_calls(1).len(), 1);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert_eq!(
+            fixture.matter_controller.turn_on_calls().len(),
+            1,
+            "cooling Matter route should reject synchronously, without suppressing Hue"
+        );
+    }
+
+    #[test]
+    fn slow_matter_state_query_does_not_delay_async_room_fanout() {
+        let fixture = mixed_hue_matter_fixture(true);
+        fixture
+            .group_controller
+            .set_query_behavior(false, std::time::Duration::ZERO);
+        fixture
+            .matter_controller
+            .set_query_behavior(true, std::time::Duration::from_millis(600));
+        let action_state = fixture.state.clone();
+        let started = std::time::Instant::now();
+        let action = std::thread::spawn(move || {
+            crate::commands::do_node_action(&action_state, "hallway", "reset", false)
+        });
+
+        assert_eq!(fixture.group_controller.wait_for_turn_on_calls(1).len(), 1);
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(300),
+            "Hue must be enqueued before the slow Matter observation refresh"
+        );
+        action.join().unwrap().unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(300),
+            "accepted async dispatch must not wait for a Matter state query"
+        );
+        assert_eq!(fixture.matter_controller.wait_for_turn_on_calls(1).len(), 1);
     }
 
     #[test]

@@ -1441,6 +1441,37 @@ pub(crate) fn update_lights_on_cache_for_runtime_node(
     );
 }
 
+/// Record an accepted asynchronous command for one runtime node without
+/// synchronously querying its parent. Mixed-route fan-out has already queued
+/// every sibling and records the public parent separately; a Matter read here
+/// would only delay the app response and cannot prove physical completion.
+pub(crate) fn update_lights_on_cache_for_runtime_node_without_parent_refresh(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    node_id: &str,
+    lights_on: bool,
+) {
+    if let Some(snap) = runtime.engine_effective_node_snapshot(node_id) {
+        update_lights_on_cache_for_node_with_source(
+            state,
+            &snap.id,
+            snap.kind,
+            snap.parent_id.as_deref(),
+            lights_on,
+            ObservedPowerSource::Command,
+        );
+    } else {
+        update_lights_on_cache_for_node_with_source(
+            state,
+            node_id,
+            LightNodeKind::Room,
+            None,
+            lights_on,
+            ObservedPowerSource::Command,
+        );
+    }
+}
+
 pub(crate) fn update_lights_on_cache_for_runtime_node_with_source(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
@@ -10397,6 +10428,9 @@ pub fn do_node_action(
         .lock()
         .map_err(|_| anyhow::anyhow!("node action lock"))?;
 
+    let activate_direct_children =
+        crate::light_runtime::button_action_activates_direct_children(action);
+
     info!(target: "cmd", "node_action: {} -> {:?}", node_id, action);
 
     let runtime = {
@@ -10438,11 +10472,12 @@ pub fn do_node_action(
             "node action still required a light-state check after retry"
         ));
     };
-    crate::light_runtime::apply_runtime_plan_to_handle(
+    crate::light_runtime::apply_runtime_plan_to_handle_with_child_activation(
         state,
         crate::light_runtime::RHYTHM_ADAPTIVE_RUNTIME_ID,
         runtime.as_ref(),
         &plan,
+        activate_direct_children,
     )?;
     runtime.record_rhythm_dispatches(&dispatch_records)?;
     sync_active_mode_from_runtime(state, &runtime);
