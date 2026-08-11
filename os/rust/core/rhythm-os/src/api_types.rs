@@ -492,13 +492,12 @@ pub struct LightColorTemperatureCapabilitiesDto {
     pub max_kelvin: u16,
 }
 
-/// Extensible, normalized light-control capabilities for a node.
+/// Extensible, normalized light-control capabilities for a device node.
 ///
-/// Room color capabilities describe the safe intersection across members that
-/// can render the curve's white point. Brightness-only members do not disable
-/// room-level curve control; their device adapter simply omits color. The
-/// object can still contain route-level capabilities when the hardware color
-/// envelope is unknown.
+/// Room curve controls are transport-agnostic and do not use this device
+/// capability object. Each endpoint adapter decides whether the rendered room
+/// command becomes native color temperature, XY, hue/saturation, or brightness
+/// only.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LightCapabilitiesDto {
     #[serde(skip_serializing_if = "Option::is_none")]

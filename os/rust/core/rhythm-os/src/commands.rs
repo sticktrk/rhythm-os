@@ -1910,52 +1910,11 @@ fn light_capabilities_for_node(
             )
         }
         LightNodeKind::Room => {
-            let room = s.topology.get(node_id)?;
-            let mut intersection: Option<LightColorTemperatureCapabilitiesDto> = None;
-            let mut saw_light = false;
-            let mut saw_unknown = false;
-            let mut saw_explicit_non_color = false;
-
-            for member in &room.devices {
-                let device = s.canonical_registry.get(&member.device_id)?;
-                if device.is_removed() || device.device_type != DeviceType::Light {
-                    continue;
-                }
-                saw_light = true;
-                match known_light_capabilities_for_device(device) {
-                    Some(capabilities) => {
-                        if let Some(member_range) = capabilities.color_temperature {
-                            intersection = Some(match intersection {
-                                Some(current) => LightColorTemperatureCapabilitiesDto {
-                                    min_kelvin: current.min_kelvin.max(member_range.min_kelvin),
-                                    max_kelvin: current.max_kelvin.min(member_range.max_kelvin),
-                                },
-                                None => member_range,
-                            });
-                        } else {
-                            saw_explicit_non_color = true;
-                        }
-                    }
-                    None => {
-                        saw_unknown = true;
-                    }
-                }
-            }
-
-            if let Some(range) = intersection {
-                return (range.min_kelvin <= range.max_kelvin).then_some(LightCapabilitiesDto {
-                    color_temperature: Some(range),
-                    individual_profile_overrides: Some(true),
-                });
-            }
-            // `None` is the wire-level compatibility value for "unknown".
-            // Previous apps intentionally keep their legacy CCT control when
-            // this object is absent. Only a room made entirely of devices that
-            // explicitly cannot render a color point becomes brightness-only.
-            if saw_unknown {
-                return None;
-            }
-            (None, saw_light && saw_explicit_non_color)
+            // A room slider changes the room's curve position. It is not a
+            // request for a particular wire-level color command, so member
+            // transport capabilities must not gate the control. The rendered
+            // LightingCommand is adapted independently for every endpoint.
+            return None;
         }
         _ => return None,
     };
@@ -26537,7 +26496,7 @@ mod tests {
     }
 
     #[test]
-    fn node_light_capabilities_use_model_range_and_room_intersection() {
+    fn device_capabilities_use_model_range_while_room_curve_stays_transport_agnostic() {
         let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
         let hub_key = HubKey::new(HubType::new("mock"), "mock");
         let wide_id = insert_known_canonical_light(
@@ -26587,12 +26546,13 @@ mod tests {
         assert_eq!(event_range.min_kelvin, 1_000);
         assert_eq!(event_range.max_kelvin, 20_000);
 
-        let room = build_node_state(&state, "room1").unwrap();
-        let room_capabilities = room.light_capabilities.unwrap();
-        assert_eq!(room_capabilities.individual_profile_overrides, Some(true));
-        let room_range = room_capabilities.color_temperature.unwrap();
-        assert_eq!(room_range.min_kelvin, 2_000);
-        assert_eq!(room_range.max_kelvin, 6_500);
+        assert!(
+            build_node_state(&state, "room1")
+                .unwrap()
+                .light_capabilities
+                .is_none(),
+            "room curve intent must not be gated by member transport ranges"
+        );
     }
 
     #[test]
@@ -26670,7 +26630,7 @@ mod tests {
     }
 
     #[test]
-    fn room_light_capabilities_keep_curve_control_with_non_ct_or_unknown_companions() {
+    fn room_curve_control_ignores_non_ct_and_unknown_companion_capabilities() {
         let (state, runtime) = setup_state(vec![
             make_snapshot("non-ct-room", false, false),
             make_snapshot("unknown-room", false, false),
@@ -26734,22 +26694,14 @@ mod tests {
             make_light_child_snapshot(&unknown_id, "unknown-room"),
         ]);
 
-        let mixed_range = build_node_state(&state, "non-ct-room")
+        assert!(build_node_state(&state, "non-ct-room")
             .unwrap()
             .light_capabilities
-            .expect("the color-capable member keeps room curve control")
-            .color_temperature
-            .expect("the room should expose the capable member range");
-        assert_eq!(mixed_range.min_kelvin, 1_000);
-        assert_eq!(mixed_range.max_kelvin, 20_000);
-        let unknown_companion_range = build_node_state(&state, "unknown-room")
+            .is_none());
+        assert!(build_node_state(&state, "unknown-room")
             .unwrap()
             .light_capabilities
-            .expect("a known color member should keep room curve control")
-            .color_temperature
-            .expect("unknown companions must not erase the known color range");
-        assert_eq!(unknown_companion_range.min_kelvin, 1_000);
-        assert_eq!(unknown_companion_range.max_kelvin, 20_000);
+            .is_none());
         assert!(build_node_state(&state, &dimmable_id)
             .unwrap()
             .light_capabilities
@@ -26768,7 +26720,7 @@ mod tests {
     }
 
     #[test]
-    fn room_light_capabilities_hide_only_proven_non_color_rooms() {
+    fn room_curve_control_does_not_depend_on_member_capability_proof() {
         let (state, runtime) = setup_state(vec![
             make_snapshot("white-room", false, false),
             make_snapshot("unknown-room", false, false),
@@ -26817,16 +26769,11 @@ mod tests {
         assert!(build_node_state(&state, "white-room")
             .unwrap()
             .light_capabilities
-            .expect("known brightness-only room should advertise capabilities")
-            .color_temperature
             .is_none());
-        assert!(
-            build_node_state(&state, "unknown-room")
-                .unwrap()
-                .light_capabilities
-                .is_none(),
-            "unknown must remain distinct from proven brightness-only"
-        );
+        assert!(build_node_state(&state, "unknown-room")
+            .unwrap()
+            .light_capabilities
+            .is_none());
     }
 
     #[test]

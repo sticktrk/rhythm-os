@@ -1030,11 +1030,10 @@ class ServerSyncProvider extends ChangeNotifier {
   RhythmRoom? nodeById(String nodeId) =>
       _helloNodes.where((node) => node.id == nodeId).firstOrNull;
 
-  /// Hardware-safe color-temperature envelope advertised for this node.
+  /// Hardware-safe color-temperature envelope advertised for a device node.
   ///
-  /// Room nodes carry the server-computed intersection across their member
-  /// lights. A null result means the server did not prove a compatible range,
-  /// so callers must retain their legacy conservative bounds.
+  /// Room curve controls are transport-agnostic; their endpoint adapters own
+  /// any native color-range clamping or representation fallback.
   RhythmColorTemperatureCapabilities? colorTemperatureCapabilitiesForNode(
     String nodeId,
   ) =>
