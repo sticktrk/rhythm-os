@@ -36,6 +36,24 @@ fn synced_new_room_defaults_to_hard_off_in_sleep_mode() {
 }
 
 #[test]
+fn manually_created_room_defaults_to_hard_off_in_sleep_mode() {
+    let harness = TestHarness::new();
+    let created: serde_json::Value = serde_json::from_str(
+        &commands::do_topology_create_room(&harness.state, "Guest Bath Sink")
+            .expect("room creation should succeed"),
+    )
+    .expect("room response should be valid JSON");
+    let room_id = created["id"]
+        .as_str()
+        .expect("room response should include an id");
+
+    assert_eq!(
+        sleep_default_state(&harness, room_id),
+        Some(RoomModeState::HardOff)
+    );
+}
+
+#[test]
 fn new_synced_light_in_existing_room_seeds_parent_sleep_default() {
     let harness = TestHarness::new().with_discovery(vec![room("studio", "Studio")], vec![]);
     harness.sync();
@@ -131,6 +149,97 @@ fn new_synced_light_preserves_existing_parent_sleep_default() {
 
     assert_eq!(
         sleep_default_state(&harness, &den_id),
+        Some(RoomModeState::Active)
+    );
+}
+
+#[test]
+fn moving_room_backed_light_seeds_destination_sleep_default() {
+    let harness = TestHarness::new().with_discovery(
+        vec![room("matter-100", "Matter Bulb")],
+        vec![light("matter-100", "matter-100")],
+    );
+    harness.sync();
+
+    let source_room_id = harness.resolve("matter-100");
+    let canonical_id = harness
+        .state
+        .lock()
+        .unwrap()
+        .canonical_registry
+        .find_by_native_id(&harness.hub_key, "matter-100")
+        .expect("light should be canonical-registered")
+        .id
+        .clone();
+    let created: serde_json::Value = serde_json::from_str(
+        &commands::do_topology_create_room(&harness.state, "Guest Bath Sink")
+            .expect("room creation should succeed"),
+    )
+    .expect("room response should be valid JSON");
+    let destination_room_id = created["id"]
+        .as_str()
+        .expect("room response should include an id")
+        .to_string();
+
+    let mut sleep = ModeConfig::default_for_mode(RhythmMode::Sleep);
+    sleep.room_defaults = vec![RoomModeDefault {
+        room_id: source_room_id,
+        state: RoomModeState::HardOff,
+    }];
+    harness.set_mode_configs(vec![sleep]);
+    assert_eq!(
+        sleep_default_state(&harness, &destination_room_id),
+        None,
+        "pre-fix persisted rooms can be missing the destination default"
+    );
+
+    commands::do_canonical_assign_room(&harness.state, &canonical_id, Some(&destination_room_id))
+        .expect("room assignment should succeed");
+
+    assert_eq!(
+        sleep_default_state(&harness, &destination_room_id),
+        Some(RoomModeState::HardOff)
+    );
+}
+
+#[test]
+fn moving_room_backed_light_preserves_destination_sleep_choice() {
+    let harness = TestHarness::new().with_discovery(
+        vec![room("matter-100", "Matter Bulb")],
+        vec![light("matter-100", "matter-100")],
+    );
+    harness.sync();
+
+    let canonical_id = harness
+        .state
+        .lock()
+        .unwrap()
+        .canonical_registry
+        .find_by_native_id(&harness.hub_key, "matter-100")
+        .expect("light should be canonical-registered")
+        .id
+        .clone();
+    let created: serde_json::Value = serde_json::from_str(
+        &commands::do_topology_create_room(&harness.state, "Night Light")
+            .expect("room creation should succeed"),
+    )
+    .expect("room response should be valid JSON");
+    let destination_room_id = created["id"]
+        .as_str()
+        .expect("room response should include an id")
+        .to_string();
+    let mut sleep = ModeConfig::default_for_mode(RhythmMode::Sleep);
+    sleep.room_defaults = vec![RoomModeDefault {
+        room_id: destination_room_id.clone(),
+        state: RoomModeState::Active,
+    }];
+    harness.set_mode_configs(vec![sleep]);
+
+    commands::do_canonical_assign_room(&harness.state, &canonical_id, Some(&destination_room_id))
+        .expect("room assignment should succeed");
+
+    assert_eq!(
+        sleep_default_state(&harness, &destination_room_id),
         Some(RoomModeState::Active)
     );
 }
