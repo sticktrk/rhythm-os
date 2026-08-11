@@ -7231,6 +7231,7 @@ fn apply_room_mode_defaults(
     let mut changed_room_ids = Vec::new();
     let mut non_hard_off_changed_room_ids = Vec::new();
     let mut hard_off_rooms = Vec::new();
+    let mut attached_hard_off_node_ids = Vec::new();
     let mut empty_hard_off_room_ids = Vec::new();
     let mut lights_on_updates = Vec::new();
     let mut missing_rooms = 0usize;
@@ -7245,16 +7246,29 @@ fn apply_room_mode_defaults(
             let target_state = defaults_by_room
                 .get(snap.id.as_str())
                 .copied()
+                .or_else(|| {
+                    snap.parent_id
+                        .as_deref()
+                        .and_then(|parent_id| defaults_by_room.get(parent_id).copied())
+                })
                 .unwrap_or(RoomModeState::Active);
             target_rooms.push((snap, target_state));
         }
     } else {
         for room_default in &mode_config.room_defaults {
-            let Some(snap) = snapshots_by_id.get(room_default.room_id.as_str()).copied() else {
+            if !snapshots_by_id.contains_key(room_default.room_id.as_str()) {
                 missing_rooms += 1;
-                continue;
-            };
-            target_rooms.push((snap, room_default.state));
+            }
+        }
+        for snap in snapshots {
+            let target_state = defaults_by_room.get(snap.id.as_str()).copied().or_else(|| {
+                snap.parent_id
+                    .as_deref()
+                    .and_then(|parent_id| defaults_by_room.get(parent_id).copied())
+            });
+            if let Some(target_state) = target_state {
+                target_rooms.push((snap, target_state));
+            }
         }
     }
 
@@ -7325,6 +7339,11 @@ fn apply_room_mode_defaults(
             }
             RoomModeState::HardOff => {
                 lights_on_updates.push((snap.id.clone(), false));
+                if snap.parent_id.is_some() {
+                    attached_hard_off_node_ids.push(snap.id.clone());
+                    changed_room_ids.push(snap.id.clone());
+                    continue;
+                }
                 let transition_ms = ctx
                     .transition
                     .and_then(|config| {
@@ -7368,6 +7387,11 @@ fn apply_room_mode_defaults(
     // until that worker finally fires.
     for room_id in &non_hard_off_changed_room_ids {
         emit_node_state_event_after_apply(state, runtime, room_id);
+    }
+
+    for node_id in &attached_hard_off_node_ids {
+        queue_motion_timer_clear(state, node_id);
+        emit_node_state_event_after_apply(state, runtime, node_id);
     }
 
     for room_id in &empty_hard_off_room_ids {
@@ -8458,6 +8482,29 @@ fn addressable_root_snapshots(runtime: &Arc<dyn RuntimeHandle>) -> Vec<rhythm_co
         .collect()
 }
 
+fn addressable_node_snapshots(runtime: &Arc<dyn RuntimeHandle>) -> Vec<rhythm_core::RoomSnapshot> {
+    runtime
+        .engine_all_node_snapshots()
+        .into_iter()
+        .filter(|node| node.kind.is_light_addressable())
+        .map(|node| rhythm_core::RoomSnapshot {
+            id: node.id,
+            name: node.name,
+            kind: node.kind,
+            parent_id: node.parent_id,
+            rhythm_enabled: node.rhythm_enabled,
+            disabled: node.disabled,
+            time_offset_minutes: node.time_offset_minutes,
+            brightness_offset: node.brightness_offset,
+            soft_off: node.soft_off,
+            mood_active: node.mood_active,
+            standby_enabled: node.standby_enabled,
+            hard_off: node.hard_off,
+            profile_settings: node.profile_settings,
+        })
+        .collect()
+}
+
 struct ActiveModeOutputApply {
     previous_mode: RhythmMode,
     target_mode: RhythmMode,
@@ -8546,7 +8593,7 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
         timezone_name: timezone_name.as_deref(),
         utc_offset,
     };
-    let snapshots = addressable_root_snapshots(&runtime);
+    let default_snapshots = addressable_node_snapshots(&runtime);
     let room_defaults_changed = apply_room_mode_defaults(
         state,
         &runtime,
@@ -8560,18 +8607,14 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
             reset_all_room_defaults,
             reassert_hard_off_defaults,
         },
-        &snapshots,
+        &default_snapshots,
     );
     if room_defaults_changed {
         if let Ok(s) = state.lock() {
             room_observed_power = s.room_observed_power.clone();
         }
     }
-    let snapshots = if room_defaults_changed {
-        addressable_root_snapshots(&runtime)
-    } else {
-        snapshots
-    };
+    let snapshots = addressable_root_snapshots(&runtime);
     let mut room_commands = Vec::new();
     let mut dispatch_snapshots = Vec::new();
     let mut transitioned_rooms = Vec::new();
@@ -28505,6 +28548,50 @@ mod tests {
             assert!(!restored_room.mood_active);
             assert!(!restored_room.hard_off);
         }
+    }
+
+    #[test]
+    fn mode_change_parent_default_clears_attached_light_stale_hard_off() {
+        let parent = make_snapshot("hallway", false, false);
+        let mut child = make_light_child_snapshot("matter-light", "hallway");
+        child.hard_off = true;
+        child.profile_settings.profile_overrides.insert(
+            rhythm_core::RHYTHM_PROFILE_ID.into(),
+            LightProfileNodeOverride {
+                max_brightness: Some(20),
+                ..Default::default()
+            },
+        );
+        let (state, runtime) = setup_state(vec![parent, child]);
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = RhythmMode::Sleep;
+            s.set_mode_configs(vec![ModeConfig {
+                mode: RhythmMode::Day,
+                active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+                idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![rhythm_core::RoomModeDefault {
+                    room_id: "hallway".into(),
+                    state: RoomModeState::Active,
+                }],
+            }]);
+        }
+
+        do_set_active_mode(&state, RhythmMode::Day).unwrap();
+
+        let child = runtime.engine_node_snapshot("matter-light").unwrap();
+        assert!(!child.hard_off);
+        assert!(!child.soft_off);
+        assert_eq!(
+            child.profile_settings.profile_overrides[rhythm_core::RHYTHM_PROFILE_ID].max_brightness,
+            Some(20)
+        );
+        assert_eq!(
+            runtime.restore_calls(),
+            vec![("matter-light".into(), false, false)]
+        );
     }
 
     #[test]
