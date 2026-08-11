@@ -6,6 +6,7 @@ import 'package:rhythm_app/providers/home_provider.dart';
 import 'package:rhythm_app/providers/room_provider.dart';
 import 'package:rhythm_app/providers/server_sync_provider.dart';
 import 'package:rhythm_app/screens/hubs/rhythmserver_settings_screen.dart';
+import 'package:rhythm_app/screens/settings/sections/lights_devices_section.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 class _SummaryApi extends RhythmServerApi {
@@ -48,6 +49,9 @@ class _MutableHubProvider extends ServerSyncProvider {
 
   List<Map<String, dynamic>> _hubs;
   RhythmHubCapabilities? hueCapabilitiesForTest;
+  bool hueAuthorityConsentSupportedForTest = false;
+  RhythmHueAuthority? hueAuthorityForTest;
+  int hueAuthorityFetches = 0;
 
   @override
   List<Map<String, dynamic>> get serverHubInfos => _hubs;
@@ -65,6 +69,16 @@ class _MutableHubProvider extends ServerSyncProvider {
   RhythmHubCapabilities? hubCapabilities(String hubType) {
     if (hubType == 'hue') return hueCapabilitiesForTest;
     return super.hubCapabilities(hubType);
+  }
+
+  @override
+  bool get hueRoomAuthorityConsentSupported =>
+      hueAuthorityConsentSupportedForTest;
+
+  @override
+  Future<RhythmHueAuthority?> fetchHueAuthority() async {
+    hueAuthorityFetches += 1;
+    return hueAuthorityForTest;
   }
 
   void replaceHubs(List<Map<String, dynamic>> hubs) {
@@ -136,6 +150,16 @@ void main() {
           ),
         ),
       ),
+    );
+  }
+
+  Widget buildDevicesList() {
+    return MultiProvider(
+      providers: [
+        Provider<RhythmConnection>.value(value: connection),
+        ChangeNotifierProvider<ServerSyncProvider>.value(value: syncProvider),
+      ],
+      child: const MaterialApp(home: DevicesListScreen()),
     );
   }
 
@@ -237,5 +261,44 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Pair button or switch'), findsNothing);
+  });
+
+  testWidgets('Settings Devices opens automation review for existing Hue hub',
+      (tester) async {
+    syncProvider.replaceHubs(const [_localBleHub, _hueHub]);
+    syncProvider.hueAuthorityConsentSupportedForTest = true;
+    syncProvider.hueAuthorityForTest = const RhythmHueAuthority(
+      schemaVersion: 1,
+      bridges: [
+        RhythmHueBridgeAuthority(
+          address: '192.0.2.25:443',
+          revision: '0123456789abcdef',
+          takeoverScope: 'bridge',
+          bridgeTakeoverRequested: false,
+          rooms: [
+            RhythmHueRoomAuthority(
+              roomId: 'office',
+              name: 'Office',
+              owner: RhythmHueRoomAuthorityOwner.unreviewed,
+              rhythmAutomationEnabled: false,
+            ),
+          ],
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(buildDevicesList());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Philips Hue'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Review room automation'), findsOneWidget);
+    await tester.tap(find.text('Review room automation'));
+    await tester.pumpAndSettle();
+
+    expect(syncProvider.hueAuthorityFetches, 1);
+    expect(find.text('Hue room automation'), findsOneWidget);
+    expect(find.text('Office'), findsOneWidget);
+    expect(find.text('Save room choices'), findsOneWidget);
   });
 }

@@ -3,7 +3,11 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show RhythmConnection, RhythmDevice, RhythmDeviceType;
+    show
+        RhythmConnection,
+        RhythmDevice,
+        RhythmDeviceType,
+        RhythmHueBridgeAuthority;
 
 import '../../../providers/server_sync_provider.dart';
 import '../../../services/analytics_service.dart';
@@ -11,6 +15,7 @@ import '../../../widgets/device_detail_sheet.dart';
 import '../../../widgets/room_picker_sheet.dart';
 import '../../../widgets/settings_row.dart';
 import '../../../widgets/solar_orbit.dart';
+import '../../hubs/hue_authority_screen.dart';
 import '../../hubs/rhythmserver_settings_screen.dart';
 
 /// "Add a Device" flow — the pairing/add options only (Rhythm hub, Hue, Home
@@ -113,12 +118,14 @@ class _DeviceEntry {
 /// One configured hub and the devices that live behind it.
 class _HubGroup {
   final String type;
+  final String address;
   final String label;
   final bool connected;
   final List<_DeviceEntry> devices;
 
   const _HubGroup({
     required this.type,
+    required this.address,
     required this.label,
     required this.connected,
     required this.devices,
@@ -127,6 +134,7 @@ class _HubGroup {
 
 class _DevicesListScreenState extends State<DevicesListScreen> {
   bool _loading = true;
+  bool _reviewingHueAutomation = false;
   List<_HubGroup> _hubs = const [];
   // Accordion: one hub open at a time. Defaults to the first hub.
   String? _expandedType;
@@ -200,6 +208,7 @@ class _DevicesListScreenState extends State<DevicesListScreen> {
       _sortEntries(entries);
       hubs.add(_HubGroup(
         type: type,
+        address: h['address'] as String? ?? '',
         label: _hubLabel(type),
         connected: connected,
         devices: entries,
@@ -229,6 +238,41 @@ class _DevicesListScreenState extends State<DevicesListScreen> {
     if (!mounted) return;
     // A rename / room move in the sheet may change what we show.
     await _load();
+  }
+
+  Future<void> _reviewHueRoomAutomation(_HubGroup hub) async {
+    if (_reviewingHueAutomation) return;
+    setState(() => _reviewingHueAutomation = true);
+
+    final authority =
+        await context.read<ServerSyncProvider>().fetchHueAuthority();
+    if (!mounted) return;
+
+    final matchingBridges = authority?.bridges.where((bridge) {
+          return bridge.address == hub.address ||
+              bridge.address.startsWith('${hub.address}:') ||
+              hub.address.startsWith('${bridge.address}:');
+        }).toList(growable: false) ??
+        const <RhythmHueBridgeAuthority>[];
+    final bridge = matchingBridges.isEmpty ? null : matchingBridges.first;
+
+    setState(() => _reviewingHueAutomation = false);
+    if (bridge == null || bridge.rooms.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Hue rooms are not ready for automation review. Re-sync and try again.',
+          ),
+        ),
+      );
+      return;
+    }
+
+    await HueAuthorityScreen.show(
+      context,
+      bridge,
+      source: 'settings_devices',
+    );
   }
 
   @override
@@ -265,6 +309,9 @@ class _DevicesListScreenState extends State<DevicesListScreen> {
       );
     }
 
+    final canReviewHueAutomation =
+        context.watch<ServerSyncProvider>().hueRoomAuthorityConsentSupported;
+
     return RefreshIndicator(
       onRefresh: _load,
       color: CelestialColors.accentBlue,
@@ -280,6 +327,10 @@ class _DevicesListScreenState extends State<DevicesListScreen> {
                 _expandedType = _expandedType == hub.type ? null : hub.type;
               }),
               onDeviceTap: _openDevice,
+              onReviewAutomation: hub.type == 'hue' && canReviewHueAutomation
+                  ? () => _reviewHueRoomAutomation(hub)
+                  : null,
+              reviewingAutomation: _reviewingHueAutomation,
             ),
         ],
       ),
@@ -295,12 +346,16 @@ class _HubAccordionTile extends StatelessWidget {
     required this.expanded,
     required this.onToggle,
     required this.onDeviceTap,
+    required this.onReviewAutomation,
+    required this.reviewingAutomation,
   });
 
   final _HubGroup hub;
   final bool expanded;
   final VoidCallback onToggle;
   final ValueChanged<_DeviceEntry> onDeviceTap;
+  final VoidCallback? onReviewAutomation;
+  final bool reviewingAutomation;
 
   static const _accent = Color(0xFF00BCD4);
 
@@ -406,29 +461,6 @@ class _HubAccordionTile extends StatelessWidget {
   }
 
   Widget _buildDeviceList() {
-    if (hub.devices.isEmpty) {
-      return Padding(
-        padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-        child: Row(
-          children: [
-            Icon(
-              Icons.info_outline_rounded,
-              size: 15,
-              color: CelestialColors.textSecondary.withValues(alpha: 0.5),
-            ),
-            const SizedBox(width: 8),
-            Text(
-              'No devices on this hub yet.',
-              style: TextStyle(
-                color: CelestialColors.textSecondary.withValues(alpha: 0.6),
-                fontSize: 13,
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-
     return Column(
       children: [
         Divider(
@@ -436,8 +468,81 @@ class _HubAccordionTile extends StatelessWidget {
           thickness: 0.5,
           color: CelestialColors.orbitRing.withValues(alpha: 0.25),
         ),
-        for (final entry in hub.devices)
-          _DeviceRow(entry: entry, onTap: onDeviceTap),
+        if (hub.devices.isEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+            child: Row(
+              children: [
+                Icon(
+                  Icons.info_outline_rounded,
+                  size: 15,
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.5),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  'No devices on this hub yet.',
+                  style: TextStyle(
+                    color: CelestialColors.textSecondary.withValues(alpha: 0.6),
+                    fontSize: 13,
+                  ),
+                ),
+              ],
+            ),
+          )
+        else
+          for (final entry in hub.devices)
+            _DeviceRow(entry: entry, onTap: onDeviceTap),
+        if (onReviewAutomation != null) ...[
+          Divider(
+            height: 1,
+            thickness: 0.5,
+            color: CelestialColors.orbitRing.withValues(alpha: 0.25),
+          ),
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: reviewingAutomation ? null : onReviewAutomation,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 13, 14, 13),
+              child: Row(
+                children: [
+                  if (reviewingAutomation)
+                    const SizedBox(
+                      width: 19,
+                      height: 19,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Color(0xFFFFB900),
+                      ),
+                    )
+                  else
+                    const Icon(
+                      Icons.admin_panel_settings_outlined,
+                      color: Color(0xFFFFB900),
+                      size: 19,
+                    ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      reviewingAutomation
+                          ? 'Loading room choices...'
+                          : 'Review room automation',
+                      style: const TextStyle(
+                        color: Color(0xFFFFB900),
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  Icon(
+                    Icons.chevron_right,
+                    color: const Color(0xFFFFB900).withValues(alpha: 0.65),
+                    size: 20,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
         const SizedBox(height: 6),
       ],
     );
