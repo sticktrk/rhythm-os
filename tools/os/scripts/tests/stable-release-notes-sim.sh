@@ -8,6 +8,13 @@ GENERATOR="$SCRIPT_DIR/../generate-stable-release-notes.sh"
 TEST_ROOT="$(mktemp -d)"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
+# Git exports repository-local environment variables to hooks. Clear them
+# before initializing the disposable repository so this simulation cannot
+# write its fixture commits or tags into the caller's worktree.
+while IFS= read -r git_local_env_var; do
+    unset "$git_local_env_var"
+done < <(git rev-parse --local-env-vars)
+
 REPO="$TEST_ROOT/repo"
 BIN="$TEST_ROOT/bin"
 GH_ARGS="$TEST_ROOT/gh-args"
