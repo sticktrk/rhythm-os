@@ -1790,20 +1790,35 @@ fn known_light_capabilities_for_device(
     let entry = rhythm_devices::builtin_db()
         .lookup(device.manufacturer.as_deref()?, device.model.as_deref()?)?;
     let capabilities = entry.capabilities();
-    if !capabilities.supports_color_temp() {
-        return Some(LightCapabilitiesDto {
-            color_temperature: None,
-            individual_profile_overrides: None,
-        });
+    let color_temperature = if capabilities.supports_color_temp() {
+        let min_kelvin = capabilities.min_kelvin?;
+        let max_kelvin = capabilities.max_kelvin?;
+        (min_kelvin > 0 && min_kelvin <= max_kelvin).then_some(
+            LightColorTemperatureCapabilitiesDto {
+                min_kelvin,
+                max_kelvin,
+            },
+        )
+    } else if capabilities.supports_xy_color() || capabilities.supports_hue_saturation() {
+        // The room curve is a white-point request, not a requirement to use a
+        // native CT cluster. Color-capable lights can render the same target
+        // through the command adapter's XY / hue-saturation fallback.
+        Some(LightColorTemperatureCapabilitiesDto {
+            min_kelvin: 2_000,
+            max_kelvin: 6_500,
+        })
+    } else {
+        None
+    };
+    if color_temperature.is_none()
+        && (capabilities.supports_color_temp()
+            || capabilities.supports_xy_color()
+            || capabilities.supports_hue_saturation())
+    {
+        return None;
     }
-
-    let min_kelvin = capabilities.min_kelvin?;
-    let max_kelvin = capabilities.max_kelvin?;
-    (min_kelvin > 0 && min_kelvin <= max_kelvin).then_some(LightCapabilitiesDto {
-        color_temperature: Some(LightColorTemperatureCapabilitiesDto {
-            min_kelvin,
-            max_kelvin,
-        }),
+    Some(LightCapabilitiesDto {
+        color_temperature,
         individual_profile_overrides: None,
     })
 }
@@ -1833,7 +1848,19 @@ fn live_endpoint_light_capabilities(
         };
         let valid_range = capabilities
             .color_temperature
-            .filter(|range| range.min_kelvin > 0 && range.min_kelvin <= range.max_kelvin);
+            .filter(|range| range.min_kelvin > 0 && range.min_kelvin <= range.max_kelvin)
+            .or_else(|| {
+                (endpoint
+                    .capabilities
+                    .as_ref()
+                    .and_then(|value| value.pointer("/automatic_naming/color_kind"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("color"))
+                .then_some(LightColorTemperatureCapabilitiesDto {
+                    min_kelvin: 2_000,
+                    max_kelvin: 6_500,
+                })
+            });
         saw_normalized = true;
         match valid_range {
             Some(range) if all_support_color_temperature => {
@@ -1886,7 +1913,8 @@ fn light_capabilities_for_node(
             let room = s.topology.get(node_id)?;
             let mut intersection: Option<LightColorTemperatureCapabilitiesDto> = None;
             let mut saw_light = false;
-            let mut all_support_color_temperature = true;
+            let mut saw_unknown = false;
+            let mut saw_explicit_non_color = false;
 
             for member in &room.devices {
                 let device = s.canonical_registry.get(&member.device_id)?;
@@ -1894,30 +1922,40 @@ fn light_capabilities_for_node(
                     continue;
                 }
                 saw_light = true;
-                if let Some(member_range) = known_light_capabilities_for_device(device)
-                    .and_then(|capabilities| capabilities.color_temperature)
-                {
-                    if all_support_color_temperature {
-                        intersection = Some(match intersection {
-                            Some(current) => LightColorTemperatureCapabilitiesDto {
-                                min_kelvin: current.min_kelvin.max(member_range.min_kelvin),
-                                max_kelvin: current.max_kelvin.min(member_range.max_kelvin),
-                            },
-                            None => member_range,
-                        });
+                match known_light_capabilities_for_device(device) {
+                    Some(capabilities) => {
+                        if let Some(member_range) = capabilities.color_temperature {
+                            intersection = Some(match intersection {
+                                Some(current) => LightColorTemperatureCapabilitiesDto {
+                                    min_kelvin: current.min_kelvin.max(member_range.min_kelvin),
+                                    max_kelvin: current.max_kelvin.min(member_range.max_kelvin),
+                                },
+                                None => member_range,
+                            });
+                        } else {
+                            saw_explicit_non_color = true;
+                        }
                     }
-                } else {
-                    all_support_color_temperature = false;
-                    intersection = None;
+                    None => {
+                        saw_unknown = true;
+                    }
                 }
             }
 
-            let color_temperature = if saw_light && all_support_color_temperature {
-                intersection.filter(|range| range.min_kelvin <= range.max_kelvin)
-            } else {
-                None
-            };
-            (color_temperature, true)
+            if let Some(range) = intersection {
+                return (range.min_kelvin <= range.max_kelvin).then_some(LightCapabilitiesDto {
+                    color_temperature: Some(range),
+                    individual_profile_overrides: Some(true),
+                });
+            }
+            // `None` is the wire-level compatibility value for "unknown".
+            // Previous apps intentionally keep their legacy CCT control when
+            // this object is absent. Only a room made entirely of devices that
+            // explicitly cannot render a color point becomes brightness-only.
+            if saw_unknown {
+                return None;
+            }
+            (None, saw_light && saw_explicit_non_color)
         }
         _ => return None,
     };
@@ -26632,7 +26670,7 @@ mod tests {
     }
 
     #[test]
-    fn room_light_capabilities_distinguish_non_ct_from_unknown_members() {
+    fn room_light_capabilities_keep_curve_control_with_non_ct_or_unknown_companions() {
         let (state, runtime) = setup_state(vec![
             make_snapshot("non-ct-room", false, false),
             make_snapshot("unknown-room", false, false),
@@ -26696,21 +26734,22 @@ mod tests {
             make_light_child_snapshot(&unknown_id, "unknown-room"),
         ]);
 
-        assert!(build_node_state(&state, "non-ct-room")
+        let mixed_range = build_node_state(&state, "non-ct-room")
             .unwrap()
             .light_capabilities
-            .expect("all members are known")
+            .expect("the color-capable member keeps room curve control")
             .color_temperature
-            .is_none());
-        let unknown_room_capabilities = build_node_state(&state, "unknown-room")
+            .expect("the room should expose the capable member range");
+        assert_eq!(mixed_range.min_kelvin, 1_000);
+        assert_eq!(mixed_range.max_kelvin, 20_000);
+        let unknown_companion_range = build_node_state(&state, "unknown-room")
             .unwrap()
             .light_capabilities
-            .expect("room route capability is known");
-        assert!(unknown_room_capabilities.color_temperature.is_none());
-        assert_eq!(
-            unknown_room_capabilities.individual_profile_overrides,
-            Some(true)
-        );
+            .expect("a known color member should keep room curve control")
+            .color_temperature
+            .expect("unknown companions must not erase the known color range");
+        assert_eq!(unknown_companion_range.min_kelvin, 1_000);
+        assert_eq!(unknown_companion_range.max_kelvin, 20_000);
         assert!(build_node_state(&state, &dimmable_id)
             .unwrap()
             .light_capabilities
@@ -26720,12 +26759,122 @@ mod tests {
         let unknown_light_capabilities = build_node_state(&state, &unknown_id)
             .unwrap()
             .light_capabilities
-            .expect("device route capability is known");
+            .expect("device routing capability remains available for unknown models");
         assert!(unknown_light_capabilities.color_temperature.is_none());
         assert_eq!(
             unknown_light_capabilities.individual_profile_overrides,
             Some(true)
         );
+    }
+
+    #[test]
+    fn room_light_capabilities_hide_only_proven_non_color_rooms() {
+        let (state, runtime) = setup_state(vec![
+            make_snapshot("white-room", false, false),
+            make_snapshot("unknown-room", false, false),
+        ]);
+        let hub_key = HubKey::new(HubType::new("mock"), "mock");
+        let white_id = insert_known_canonical_light(
+            &state,
+            hub_key.clone(),
+            "white-only",
+            "Signify Netherlands B.V.",
+            "LWA003",
+        );
+        let unknown_id = insert_known_canonical_light(
+            &state,
+            hub_key,
+            "future-light",
+            "Example Manufacturer",
+            "FUTURE-1",
+        );
+        {
+            let mut state = state.lock().unwrap();
+            state
+                .topology
+                .insert_room(crate::topology::TopologyRoom::new(
+                    "white-room",
+                    "White Room",
+                ));
+            state
+                .topology
+                .insert_room(crate::topology::TopologyRoom::new(
+                    "unknown-room",
+                    "Unknown Room",
+                ));
+            assert!(state
+                .topology
+                .attach_device_user_override("white-room", &white_id));
+            assert!(state
+                .topology
+                .attach_device_user_override("unknown-room", &unknown_id));
+        }
+        runtime.snapshots.lock().unwrap().extend([
+            make_light_child_snapshot(&white_id, "white-room"),
+            make_light_child_snapshot(&unknown_id, "unknown-room"),
+        ]);
+
+        assert!(build_node_state(&state, "white-room")
+            .unwrap()
+            .light_capabilities
+            .expect("known brightness-only room should advertise capabilities")
+            .color_temperature
+            .is_none());
+        assert!(
+            build_node_state(&state, "unknown-room")
+                .unwrap()
+                .light_capabilities
+                .is_none(),
+            "unknown must remain distinct from proven brightness-only"
+        );
+    }
+
+    #[test]
+    fn live_color_endpoint_can_render_the_cct_curve_without_native_ct() {
+        let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        let hub_key = HubKey::new(HubType::new("matter"), "local");
+        let device_id = insert_known_canonical_light(
+            &state,
+            hub_key.clone(),
+            "future-rgb",
+            "Example Manufacturer",
+            "FUTURE-RGB",
+        );
+        {
+            let mut state = state.lock().unwrap();
+            state
+                .canonical_registry
+                .get_mut(&device_id)
+                .unwrap()
+                .endpoints
+                .iter_mut()
+                .find(|endpoint| endpoint.hub_key == hub_key)
+                .unwrap()
+                .capabilities = Some(serde_json::json!({
+                "light_capabilities": {},
+                "automatic_naming": {"color_kind": "color"}
+            }));
+            state
+                .topology
+                .insert_room(crate::topology::TopologyRoom::new("room1", "Room 1"));
+            assert!(state
+                .topology
+                .attach_device_user_override("room1", &device_id));
+        }
+        runtime
+            .snapshots
+            .lock()
+            .unwrap()
+            .push(make_light_child_snapshot(&device_id, "room1"));
+
+        let range = build_node_state(&state, &device_id)
+            .unwrap()
+            .light_capabilities
+            .expect("normalized color metadata should be understood")
+            .color_temperature
+            .expect("XY/HS fallback can render the curve's white point");
+        assert_eq!(range.min_kelvin, 2_000);
+        assert_eq!(range.max_kelvin, 6_500);
     }
 
     #[test]

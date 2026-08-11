@@ -494,9 +494,11 @@ pub struct LightColorTemperatureCapabilitiesDto {
 
 /// Extensible, normalized light-control capabilities for a node.
 ///
-/// Room color capabilities describe the intersection supported by every
-/// member light, not the union. The object can still contain route-level
-/// capabilities when the hardware color envelope is unknown.
+/// Room color capabilities describe the safe intersection across members that
+/// can render the curve's white point. Brightness-only members do not disable
+/// room-level curve control; their device adapter simply omits color. The
+/// object can still contain route-level capabilities when the hardware color
+/// envelope is unknown.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LightCapabilitiesDto {
     #[serde(skip_serializing_if = "Option::is_none")]

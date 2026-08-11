@@ -1706,6 +1706,41 @@ mod tests {
         }
     }
 
+    struct CapabilityIdentityDiscovery {
+        rooms: Vec<DiscoveredRoom>,
+        identities: Vec<crate::canonical::identity::DiscoveredIdentity>,
+        endpoint_capabilities: HashMap<String, serde_json::Value>,
+    }
+
+    impl HubDiscovery for CapabilityIdentityDiscovery {
+        fn discover_rooms(&self) -> Result<Vec<DiscoveredRoom>> {
+            Ok(self
+                .rooms
+                .iter()
+                .map(|room| DiscoveredRoom {
+                    id: room.id.clone(),
+                    name: room.name.clone(),
+                    grouped_light_id: room.grouped_light_id.clone(),
+                    device_ids: room.device_ids.clone(),
+                })
+                .collect())
+        }
+
+        fn discover_devices(&self) -> Result<Vec<DiscoveredDevice>> {
+            Ok(Vec::new())
+        }
+
+        fn discover_identities(
+            &self,
+        ) -> Result<Vec<crate::canonical::identity::DiscoveredIdentity>> {
+            Ok(self.identities.clone())
+        }
+
+        fn endpoint_capabilities(&self, native_id: &str) -> Option<serde_json::Value> {
+            self.endpoint_capabilities.get(native_id).cloned()
+        }
+    }
+
     fn make_identity(
         native_id: &str,
         hub_room_id: &str,
@@ -1747,6 +1782,90 @@ mod tests {
         );
         let state: SharedState = Arc::new(Mutex::new(app));
         (hub_key, state)
+    }
+
+    #[test]
+    fn sync_persists_normalized_endpoint_capabilities_with_canonical_identity() {
+        let (hub_key, state) = install_test_hub();
+        let discovery = CapabilityIdentityDiscovery {
+            rooms: vec![DiscoveredRoom {
+                id: "future-room".to_string(),
+                name: "Future Room".to_string(),
+                grouped_light_id: "future-group".to_string(),
+                device_ids: vec!["future-light".to_string()],
+            }],
+            identities: vec![make_identity(
+                "future-light",
+                "future-room",
+                "Future Room",
+                "Future Hue light",
+                DeviceType::Light,
+            )],
+            endpoint_capabilities: HashMap::from([(
+                "future-light".to_string(),
+                serde_json::json!({
+                    "light_capabilities": {
+                        "color_temperature": {
+                            "min_kelvin": 2000,
+                            "max_kelvin": 6536
+                        }
+                    }
+                }),
+            )]),
+        };
+
+        sync_with_discovery(
+            &state,
+            &hub_key,
+            &discovery,
+            true,
+            SyncFailurePolicy::BestEffort,
+        )
+        .unwrap();
+
+        let state = state.lock().unwrap();
+        let device = state
+            .canonical_registry
+            .find_by_native_id(&hub_key, "future-light")
+            .expect("identity should resolve");
+        let endpoint = device
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.hub_key == hub_key)
+            .expect("Hue endpoint should be retained");
+        assert_eq!(
+            endpoint
+                .capabilities
+                .as_ref()
+                .and_then(|value| value.pointer("/light_capabilities/color_temperature")),
+            Some(&serde_json::json!({
+                "min_kelvin": 2000,
+                "max_kelvin": 6536
+            }))
+        );
+        let serialized = serde_json::to_string(&state.canonical_registry).unwrap();
+        drop(state);
+
+        let mut restored: crate::canonical::registry::CanonicalRegistry =
+            serde_json::from_str(&serialized).unwrap();
+        restored.rebuild_indices();
+        assert_eq!(
+            restored
+                .find_by_native_id(&hub_key, "future-light")
+                .and_then(|device| {
+                    device
+                        .endpoints
+                        .iter()
+                        .find(|endpoint| endpoint.hub_key == hub_key)
+                })
+                .and_then(|endpoint| endpoint.capabilities.as_ref())
+                .and_then(|value| value.pointer("/light_capabilities/color_temperature")),
+            Some(&serde_json::json!({
+                "min_kelvin": 2000,
+                "max_kelvin": 6536
+            })),
+            "normalized Hue capabilities must survive authority-state restart"
+        );
     }
 
     #[test]
