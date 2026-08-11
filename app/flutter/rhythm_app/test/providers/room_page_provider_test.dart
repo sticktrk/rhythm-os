@@ -91,6 +91,50 @@ void main() {
       );
     });
 
+    test('keeps the local layout scope stable when a server endpoint changes',
+        () {
+      final local = Hub.server(
+        id: 'server-1',
+        homeId: 'home-1',
+        name: 'RhythmServer',
+        host: '10.0.0.15',
+        port: 54448,
+        serverInstanceId: 'box-instance-1',
+      );
+      final refreshed = Hub.create(
+        id: 'server-1',
+        homeId: 'home-1',
+        type: HubType.server,
+        name: 'RhythmServer',
+        endpoint: const HubEndpoint(
+          host: 'rhythm-box.local',
+          port: 54448,
+          useSsl: true,
+        ),
+        serverInstanceId: 'box-instance-1',
+      );
+
+      final localScope = RoomPageProvider.layoutScopeFor(
+        home: null,
+        hubs: [local],
+      );
+      final refreshedScope = RoomPageProvider.layoutScopeFor(
+        home: null,
+        hubs: [refreshed],
+      );
+
+      expect(localScope, 'server:server_instance:box-instance-1');
+      expect(refreshedScope, localScope);
+      expect(
+        RoomPageProvider.layoutScopeAliasesFor(home: null, hubs: [local]),
+        ['server:server:10.0.0.15:54448:plain'],
+      );
+      expect(
+        RoomPageProvider.layoutScopeAliasesFor(home: null, hubs: [refreshed]),
+        ['server:server:rhythm-box.local:54448:ssl'],
+      );
+    });
+
     test('keys direct layouts by enabled hub set regardless of order', () {
       final home = Home.create(id: 'home-1', name: 'Home', ownerId: 'user-1');
       final hue = Hub.hue(
@@ -170,6 +214,76 @@ void main() {
       expect(store.scopedLayouts['scope-b'], [
         ['new-room']
       ]);
+    });
+
+    test('copies an endpoint-keyed layout into its durable server scope',
+        () async {
+      final store = _FakeRoomPageLayoutStore(
+        scopedLayouts: {
+          'server:server:10.0.0.15:54448:plain': [
+            ['saved-room']
+          ],
+        },
+      );
+      final provider = RoomPageProvider(layoutStore: store);
+
+      provider.setLayoutScope(
+        'server:server_instance:box-instance-1',
+        scopeKeyAliases: const [
+          'server:server:10.0.0.15:54448:plain',
+        ],
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(
+        provider.getRoomsForPage(0, [_room('saved-room')]),
+        [_room('saved-room')],
+      );
+      expect(
+        store.scopedLayouts['server:server_instance:box-instance-1'],
+        [
+          ['saved-room']
+        ],
+      );
+
+      provider.setLayoutScope(
+        'server:server_instance:box-instance-1',
+        scopeKeyAliases: const [
+          'server:server:rhythm-box.local:54448:ssl',
+        ],
+      );
+      expect(
+        provider.getRoomsForPage(0, [_room('saved-room')]),
+        [_room('saved-room')],
+      );
+    });
+
+    test('recovers when a later endpoint alias contains the saved layout', () {
+      final store = _FakeRoomPageLayoutStore(
+        scopedLayouts: {
+          'server:server:rhythm-box.local:54448:ssl': [
+            ['other-room'],
+            ['saved-room']
+          ],
+        },
+      );
+      final provider = RoomPageProvider(layoutStore: store);
+
+      provider.setLayoutScope(
+        'server:server_instance:box-instance-1',
+        scopeKeyAliases: const [
+          'server:server:10.0.0.15:54448:plain',
+        ],
+      );
+      expect(provider.getPage('saved-room'), 0);
+
+      provider.setLayoutScope(
+        'server:server_instance:box-instance-1',
+        scopeKeyAliases: const [
+          'server:server:rhythm-box.local:54448:ssl',
+        ],
+      );
+      expect(provider.getPage('saved-room'), 1);
     });
 
     test(

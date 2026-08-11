@@ -975,6 +975,42 @@ class SettingsService {
         true;
   }
 
+  /// Move a pending cloud-sync marker from an endpoint-keyed layout scope to
+  /// its durable server scope before cloud restore can overwrite local edits.
+  Future<bool> migrateRoomPageLayoutCloudDirty({
+    required String userId,
+    required String? scopeKey,
+    Iterable<String> scopeKeyAliases = const <String>[],
+  }) async {
+    if (isRoomPageLayoutCloudDirty(userId: userId, scopeKey: scopeKey)) {
+      return true;
+    }
+
+    final dirtyAliases = scopeKeyAliases
+        .where(
+          (alias) => isRoomPageLayoutCloudDirty(
+            userId: userId,
+            scopeKey: alias,
+          ),
+        )
+        .toList(growable: false);
+    if (dirtyAliases.isEmpty) return false;
+
+    await setRoomPageLayoutCloudDirty(
+      userId: userId,
+      scopeKey: scopeKey,
+      dirty: true,
+    );
+    for (final alias in dirtyAliases) {
+      await setRoomPageLayoutCloudDirty(
+        userId: userId,
+        scopeKey: alias,
+        dirty: false,
+      );
+    }
+    return true;
+  }
+
   /// Keep failed layout uploads authoritative across restart without changing
   /// the existing page-layout or cloud-bundle schema.
   Future<void> setRoomPageLayoutCloudDirty({

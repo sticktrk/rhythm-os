@@ -536,15 +536,24 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen> {
         home: homeProvider.currentHome,
         hubs: homeProvider.currentHomeHubs,
       );
+      final scopeKeyAliases = RoomPageProvider.layoutScopeAliasesFor(
+        home: homeProvider.currentHome,
+        hubs: homeProvider.currentHomeHubs,
+      );
       final restoredLayout =
           await SettingsService.instance.applyCloudSettingsBundle(
         snapshot.appSettingsBundle,
         roomLayoutScopeKey: scopeKey,
         roomLayoutHubKey: RoomPageProvider.hubLayoutKey(serverHub),
+        roomLayoutHubKeyAliases:
+            RoomPageProvider.hubLayoutKeyAliases(serverHub),
       );
       if (restoredLayout && context.mounted) {
         final roomPages = context.read<RoomPageProvider>();
-        roomPages.setLayoutScope(scopeKey);
+        roomPages.setLayoutScope(
+          scopeKey,
+          scopeKeyAliases: scopeKeyAliases,
+        );
         roomPages.reloadLayout();
       }
       await serverSync.fullRefresh();
