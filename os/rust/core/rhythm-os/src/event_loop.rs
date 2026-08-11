@@ -2162,7 +2162,96 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
     }
 }
 
-/// Check motion timers and turn off lights in expired motion-owned targets.
+fn motion_timeout_mode_default(
+    state: &SharedState,
+    target_node_id: &str,
+) -> Option<rhythm_core::RoomModeState> {
+    let s = state.lock().ok()?;
+    let active_mode = s.active_mode;
+    s.mode_configs()
+        .into_iter()
+        .find(|config| config.mode == active_mode)?
+        .room_defaults
+        .into_iter()
+        .find(|default| default.room_id == target_node_id)
+        .map(|default| default.state)
+}
+
+fn run_motion_timeout_restore(
+    state: &SharedState,
+    target_node_id: &str,
+    mode_default: Option<rhythm_core::RoomModeState>,
+    command_id: &str,
+) {
+    let Some(mode_default) = mode_default else {
+        let _ = process_button_inline(
+            state,
+            target_node_id,
+            ButtonAction::OffPress,
+            None,
+            command_id,
+        );
+        return;
+    };
+
+    match commands::do_node_preferences_set(
+        state,
+        target_node_id,
+        None,
+        None,
+        None,
+        Some(mode_default),
+        None,
+        false,
+    ) {
+        Ok(_) => info!(
+            target: "evt",
+            "Motion: restored mode default {:?} for node {}",
+            mode_default,
+            target_node_id
+        ),
+        Err(error) => warn!(
+            target: "evt",
+            "Motion: failed to restore mode default {:?} for node {}: {}",
+            mode_default,
+            target_node_id,
+            error
+        ),
+    }
+}
+
+fn spawn_motion_timeout_restore(
+    state: &SharedState,
+    target_node_id: String,
+    mode_default: Option<rhythm_core::RoomModeState>,
+    command_id: String,
+) {
+    let state_clone = state.clone();
+    let node_id_clone = target_node_id.clone();
+    let command_id_clone = command_id.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name("motion-timeout".to_string())
+        .spawn(move || {
+            run_motion_timeout_restore(
+                &state_clone,
+                &node_id_clone,
+                mode_default,
+                &command_id_clone,
+            );
+        })
+    {
+        warn!(
+            target: "evt",
+            "Failed to spawn motion-timeout restore thread: {}",
+            error
+        );
+        run_motion_timeout_restore(state, &target_node_id, mode_default, &command_id);
+    }
+}
+
+/// Check motion timers and restore expired motion-owned targets to their
+/// active-mode defaults. Targets without an explicit default retain the legacy
+/// OffPress behavior.
 ///
 /// Groups sources by target node. For each target, countdown only starts when
 /// ALL sources have cleared. Uses the latest source stop time as the countdown
@@ -2290,10 +2379,12 @@ pub fn check_motion_timers(state: &SharedState, motion: &mut MotionTimerState) {
         motion.motion_turn_on_requested.remove(target_node_id);
 
         if motion.motion_owned.remove(target_node_id) {
+            let mode_default = motion_timeout_mode_default(state, target_node_id);
             info!(
                 target: "evt",
-                "Motion: timeout expired for node {} - sending OffPress",
-                target_node_id
+                "Motion: timeout expired for node {} - restoring {:?}",
+                target_node_id,
+                mode_default.unwrap_or(rhythm_core::RoomModeState::Standby)
             );
 
             let work_tx = {
@@ -2302,22 +2393,14 @@ pub fn check_motion_timers(state: &SharedState, motion: &mut MotionTimerState) {
             };
             let command_id = logging::next_command_id("motion-timeout");
             if work_tx.is_some() {
-                spawn_button_ingress_action(
+                spawn_motion_timeout_restore(
                     state,
                     target_node_id.clone(),
-                    ButtonAction::OffPress,
-                    None,
+                    mode_default,
                     command_id,
-                    false,
                 );
             } else {
-                let _ = process_button_inline(
-                    state,
-                    target_node_id,
-                    ButtonAction::OffPress,
-                    None,
-                    &command_id,
-                );
+                run_motion_timeout_restore(state, target_node_id, mode_default, &command_id);
             }
         } else {
             info!(
@@ -7865,6 +7948,81 @@ mod tests {
         // Sensor should be removed and motion_owned cleared
         assert!(motion.sensors.is_empty());
         assert!(!motion.motion_owned.contains("room_a"));
+    }
+
+    #[test]
+    fn motion_timeout_restores_active_mode_hard_off_default() {
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![
+            room_snapshot_with_flags("room_a", false, false),
+        ]));
+        let button_events = runtime.events.clone();
+        let state = make_state_with_runtime(runtime);
+        {
+            let mut s = state.lock().unwrap();
+            s.light_breaker_enabled = true;
+            s.active_mode = rhythm_core::RhythmMode::Sleep;
+            s.default_motion_timeout_secs = 120;
+            s.set_mode_configs(vec![rhythm_core::ModeConfig {
+                mode: rhythm_core::RhythmMode::Sleep,
+                active_profile_id: Some(rhythm_core::SLEEP_PROFILE_ID.into()),
+                idle_profile_id: Some(rhythm_core::SLEEP_IDLE_PROFILE_ID.into()),
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![rhythm_core::RoomModeDefault {
+                    room_id: "room_a".into(),
+                    state: rhythm_core::RoomModeState::HardOff,
+                }],
+            }]);
+        }
+
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            "s1".into(),
+            motion_source(
+                "s1",
+                "room_a",
+                Some(Instant::now() - Duration::from_secs(2_000)),
+            ),
+        );
+        motion.motion_owned.insert("room_a".into());
+
+        check_motion_timers(&state, &mut motion);
+
+        let events = button_events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].room_id, "room_a");
+        assert_eq!(
+            events[0].action,
+            ButtonAction::LightsOff,
+            "an explicit HardOff default must not degrade to OffPress/standby"
+        );
+    }
+
+    #[test]
+    fn motion_timeout_without_mode_default_keeps_off_press_fallback() {
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![
+            room_snapshot_with_flags("room_a", false, false),
+        ]));
+        let button_events = runtime.events.clone();
+        let state = make_state_with_runtime(runtime);
+        state.lock().unwrap().light_breaker_enabled = true;
+
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            "s1".into(),
+            motion_source(
+                "s1",
+                "room_a",
+                Some(Instant::now() - Duration::from_secs(2_000)),
+            ),
+        );
+        motion.motion_owned.insert("room_a".into());
+
+        check_motion_timers(&state, &mut motion);
+
+        let events = button_events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, ButtonAction::OffPress);
     }
 
     #[test]
