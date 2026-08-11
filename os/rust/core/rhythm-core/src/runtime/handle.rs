@@ -60,6 +60,19 @@ pub trait RuntimeHandle: Send + Sync {
         })
     }
 
+    /// Clear a routed child's local off-state flags before an active parent
+    /// room action is rendered.
+    ///
+    /// This is deliberately separate from route availability: desired state
+    /// must survive an integration disconnect so the child becomes eligible
+    /// again when its route reconnects. Implementations must preserve local
+    /// profile settings, offsets, and an explicit Rhythm opt-out. Missing
+    /// nodes are a safe no-op because stale topology must not block healthy
+    /// sibling routes.
+    fn prepare_node_for_parent_activation(&self, _node_id: &str) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Plan an immediate refresh for a routed node without periodic de-dupe.
     ///
     /// Room-level manual actions use this for direct child routes so each
@@ -516,6 +529,12 @@ where
             self,
             tick,
             source_node_id,
+        )?)
+    }
+
+    fn prepare_node_for_parent_activation(&self, node_id: &str) -> Result<bool> {
+        Ok(RhythmRuntime::prepare_node_for_parent_activation(
+            self, node_id,
         )?)
     }
 

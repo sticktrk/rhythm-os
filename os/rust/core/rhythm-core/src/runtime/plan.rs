@@ -279,6 +279,25 @@ where
         }
     }
 
+    /// Clear a routed child's local off-state flags before an active parent
+    /// room action is rendered.
+    ///
+    /// Preserve the child's explicit Rhythm opt-out, offsets, and profile
+    /// overrides. A missing node is intentionally a safe no-op: stale
+    /// topology for one integration must not block healthy sibling lights.
+    pub fn prepare_node_for_parent_activation(&self, node_id: &str) -> RuntimeResult<bool> {
+        let mut engine = self
+            .engine()
+            .write()
+            .map_err(|e| RuntimeError::Internal(format!("Failed to lock engine: {}", e)))?;
+        let Some(node) = engine.rooms_mut().get_mut(node_id) else {
+            return Ok(false);
+        };
+        node.clear_off_states();
+        engine.invalidate_periodic_cache_for_room(node_id);
+        Ok(true)
+    }
+
     /// Plan a non-deduplicated render of a routed node's current effective
     /// settings. This is used when a manual room action fans out across a mix
     /// of grouped routes and independently addressable child lights.
