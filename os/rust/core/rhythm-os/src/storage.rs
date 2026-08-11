@@ -3568,7 +3568,7 @@ mod tests {
     }
 
     #[test]
-    fn load_persisted_state_migrates_legacy_hue_room_light_bindings() {
+    fn load_persisted_state_preserves_user_light_move_while_filtering_legacy_bindings() {
         use crate::canonical::identity::{DiscoveredIdentity, HardwareId};
         use crate::canonical::registry::{CanonicalRegistry, ResolveResult};
         use crate::hub::HubType;
@@ -3668,14 +3668,15 @@ mod tests {
 
         assert_eq!(
             app.topology.device_parent_room_id(&drop_zone_light_id),
-            Some(drop_zone_room_id.as_str())
+            Some(stairwell_room_id.as_str()),
+            "startup migration must not replace an explicit user room move with the Hue default"
         );
         assert_eq!(
             app.topology
                 .get_device_node(&drop_zone_light_id)
                 .unwrap()
                 .placement,
-            DevicePlacement::HubDefault
+            DevicePlacement::UserOverride
         );
         assert_eq!(
             app.canonical_registry
@@ -3683,7 +3684,8 @@ mod tests {
                 .unwrap()
                 .room_id
                 .as_deref(),
-            Some(drop_zone_room_id.as_str())
+            Some(stairwell_room_id.as_str()),
+            "canonical room authority must survive the same restart boundary as topology"
         );
 
         let stairwell_room = app

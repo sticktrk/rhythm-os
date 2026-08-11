@@ -1159,8 +1159,12 @@ impl RoomTopologyStore {
     }
 
     /// Repair persisted state from versions that copied every hub room child
-    /// into `light_device_ids` and could preserve hub-default light placement
-    /// as a user override.
+    /// into `light_device_ids`.
+    ///
+    /// A `UserOverride` is durable user intent, even when the integration's
+    /// source-room binding points somewhere else. Legacy state cannot be
+    /// distinguished safely from a legitimate move once it carries that
+    /// marker, so this migration may only realign `HubDefault` devices.
     pub fn migrate_legacy_light_room_bindings(
         &mut self,
         canonical_registry: &mut crate::canonical::registry::CanonicalRegistry,
@@ -1233,6 +1237,9 @@ impl RoomTopologyStore {
             let Some(node) = self.device_nodes.get(&node_id) else {
                 continue;
             };
+            if node.placement != DevicePlacement::HubDefault {
+                continue;
+            }
             let Some(current_parent_id) = node.parent_id.as_deref() else {
                 continue;
             };
@@ -3401,6 +3408,50 @@ mod tests {
         let hue_binding = room.binding_for_hub(&hue_key()).unwrap();
         assert_eq!(hue_binding.control_id, "gl-2");
         assert_eq!(hue_binding.light_device_ids, vec!["hue-light-1"]);
+    }
+
+    #[test]
+    fn legacy_light_binding_migration_repairs_only_hub_default_drift() {
+        let mut store = RoomTopologyStore::new();
+        let mut registry = CanonicalRegistry::new();
+        let light_id = register_identity(
+            &mut registry,
+            &hue_key(),
+            make_identity(
+                "hue-light-1",
+                "hue-room-1",
+                "Kitchen",
+                "Lamp",
+                DeviceType::Light,
+            ),
+        );
+        let mut discovered = make_discovered("hue-room-1", "Kitchen", "gl-1");
+        discovered.light_device_ids = vec!["hue-light-1".to_string()];
+        discovered.canonical_device_ids = vec![light_id.clone()];
+        let source_room_id = store
+            .sync_hub_room_with_registry(&hue_key(), &discovered, &registry)
+            .rhythm_room_id()
+            .to_string();
+        registry.assign_room(&light_id, Some(&source_room_id));
+
+        let drifted_room_id = store.create_room("Drifted room");
+        assert!(store.assign_device(
+            &light_id,
+            Some(&drifted_room_id),
+            DevicePlacement::HubDefault,
+        ));
+        registry.assign_room(&light_id, Some(&drifted_room_id));
+
+        let report = store.migrate_legacy_light_room_bindings(&mut registry);
+
+        assert_eq!(report.moved_light_devices, 1);
+        let repaired = store.get_device_node(&light_id).unwrap();
+        assert_eq!(repaired.parent_id.as_deref(), Some(source_room_id.as_str()));
+        assert_eq!(repaired.placement, DevicePlacement::HubDefault);
+        assert_eq!(
+            registry.get(&light_id).unwrap().room_id.as_deref(),
+            Some(source_room_id.as_str())
+        );
     }
 
     #[test]
