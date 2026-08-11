@@ -12721,6 +12721,11 @@ fn disconnect_hubs_after_external_controller_release(state: &SharedState) -> Res
         for key in old_hubs.keys() {
             topology_changed |= !s.topology.remove_stale_bindings(key, &[]).is_empty();
         }
+        for key in &release_keys {
+            topology_changed |= s
+                .topology
+                .forget_external_room_automation_policy_for_hub(key);
+        }
         s.hub_connection_status.clear();
         s.external_controller_authority_required.clear();
         s.hub_seen_connected_once.clear();
@@ -12842,7 +12847,11 @@ pub fn do_hub_disconnect_one(state: &SharedState, hub_type_str: &str, address: &
             hub.shutdown
                 .store(true, std::sync::atomic::Ordering::SeqCst);
         }
-        topology_changed = !s.topology.remove_stale_bindings(&key, &[]).is_empty();
+        let bindings_changed = !s.topology.remove_stale_bindings(&key, &[]).is_empty();
+        let authority_changed = s
+            .topology
+            .forget_external_room_automation_policy_for_hub(&key);
+        topology_changed = bindings_changed || authority_changed;
         s.clear_hub_connected(&key);
         s.set_external_controller_authority_required(&key, false);
         s.clear_hub_startup_retry(&key);

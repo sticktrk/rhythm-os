@@ -12,6 +12,7 @@ import '../widgets/room_picker_sheet.dart';
 import '../widgets/settings_row.dart';
 import '../widgets/solar_orbit.dart'; // For CelestialColors
 import 'hubs/device_pairing_flow.dart';
+import 'hubs/hue_authority_screen.dart';
 import 'hubs/rhythmserver_settings_screen.dart';
 
 enum _TriageFilter { all, devices, rooms }
@@ -49,6 +50,8 @@ class _TriageScreenState extends State<TriageScreen> {
   bool _loading = true;
   bool _busy = false;
   bool _connectionError = false;
+  RhythmHueAuthority? _hueAuthority;
+  String? _reviewingHueBridgeAddress;
   _TriageFilter _filter = _TriageFilter.all;
 
   @override
@@ -103,6 +106,16 @@ class _TriageScreenState extends State<TriageScreen> {
 
   int get _roomCount => _entries.where(_isRoomEntry).length;
 
+  List<RhythmHueBridgeAuthority> get _hueBridgesNeedingReview =>
+      _hueAuthority?.bridges
+          .where(
+            (bridge) => bridge.rooms.any(
+              (room) => room.owner == RhythmHueRoomAuthorityOwner.unreviewed,
+            ),
+          )
+          .toList(growable: false) ??
+      const <RhythmHueBridgeAuthority>[];
+
   List<Map<String, dynamic>> get _filteredEntries {
     if (_filter == _TriageFilter.all) return _entries;
     final matches =
@@ -124,6 +137,16 @@ class _TriageScreenState extends State<TriageScreen> {
         debugPrint('TriageScreen: sync complete');
       }
       final entries = await http.getTriageEntries();
+      RhythmHueAuthority? hueAuthority;
+      if (syncProvider.hueRoomAuthorityConsentSupported) {
+        try {
+          hueAuthority = await syncProvider.fetchHueAuthority();
+        } catch (error, stackTrace) {
+          debugPrint(
+            'TriageScreen: Hue authority load failed: $error\n$stackTrace',
+          );
+        }
+      }
       debugPrint('TriageScreen: got ${entries?.length ?? 'null'} entries');
       if (entries != null && entries.isNotEmpty) {
         debugPrint(
@@ -133,6 +156,7 @@ class _TriageScreenState extends State<TriageScreen> {
         setState(() {
           _connectionError = entries == null;
           _entries = entries ?? [];
+          _hueAuthority = hueAuthority;
           _loading = false;
         });
       }
@@ -294,6 +318,7 @@ class _TriageScreenState extends State<TriageScreen> {
   Widget _buildEntryList(ServerSyncProvider serverSync) {
     final filtered = _filteredEntries;
     final hasBothKinds = _deviceCount > 0 && _roomCount > 0;
+    final hueBridgesNeedingReview = _hueBridgesNeedingReview;
 
     return ListView(
       padding: const EdgeInsets.all(20),
@@ -335,6 +360,31 @@ class _TriageScreenState extends State<TriageScreen> {
         ),
         const SizedBox(height: 30),
         // ── Review ──────────────────────────────────────────────────────
+        if (hueBridgesNeedingReview.isNotEmpty) ...[
+          _sectionHeading(
+            'Automation Review',
+            subtitle:
+                'Choose who controls rooms on newly connected Hue bridges.',
+          ),
+          const SizedBox(height: 10),
+          SettingsGroup(
+            children: [
+              for (final bridge in hueBridgesNeedingReview)
+                SettingsRow(
+                  icon: Icons.admin_panel_settings_outlined,
+                  iconColor: const Color(0xFFFFB900),
+                  label: _reviewingHueBridgeAddress == bridge.address
+                      ? 'Loading Hue room automation…'
+                      : 'Review Hue room automation',
+                  value: _hueReviewSummary(bridge),
+                  onTap: _reviewingHueBridgeAddress == null
+                      ? () => _reviewHueAutomation(bridge)
+                      : null,
+                ),
+            ],
+          ),
+          const SizedBox(height: 30),
+        ],
         _sectionLabel('Device Review'),
         const SizedBox(height: 12),
         if (hasBothKinds) ...[
@@ -354,6 +404,30 @@ class _TriageScreenState extends State<TriageScreen> {
         for (final entry in filtered) _entryCard(entry, serverSync),
       ],
     );
+  }
+
+  String _hueReviewSummary(RhythmHueBridgeAuthority bridge) {
+    final roomCount = bridge.rooms
+        .where(
+          (room) => room.owner == RhythmHueRoomAuthorityOwner.unreviewed,
+        )
+        .length;
+    return '$roomCount ${roomCount == 1 ? 'room needs' : 'rooms need'} review';
+  }
+
+  Future<void> _reviewHueAutomation(RhythmHueBridgeAuthority bridge) async {
+    if (_reviewingHueBridgeAddress != null) return;
+    setState(() => _reviewingHueBridgeAddress = bridge.address);
+    final reviewed = await HueAuthorityScreen.show(
+      context,
+      bridge,
+      source: 'add_review',
+    );
+    if (!mounted) return;
+    setState(() => _reviewingHueBridgeAddress = null);
+    if (reviewed == true) {
+      await _loadEntries();
+    }
   }
 
   Widget _sectionLabel(String text) => Padding(

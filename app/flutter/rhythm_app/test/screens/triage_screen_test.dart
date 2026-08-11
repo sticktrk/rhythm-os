@@ -114,6 +114,9 @@ class _TestServerSyncProvider extends ServerSyncProvider {
 
   bool matterPairingEnabled = false;
   bool hueBlePairingEnabled = false;
+  bool hueAuthorityConsentSupportedForTest = false;
+  RhythmHueAuthority? hueAuthorityForTest;
+  int hueAuthorityFetches = 0;
 
   @override
   bool get canAddMatterDevice =>
@@ -122,6 +125,16 @@ class _TestServerSyncProvider extends ServerSyncProvider {
   @override
   bool get canAddHueBleDevice =>
       hueBlePairingEnabled || super.canAddHueBleDevice;
+
+  @override
+  bool get hueRoomAuthorityConsentSupported =>
+      hueAuthorityConsentSupportedForTest;
+
+  @override
+  Future<RhythmHueAuthority?> fetchHueAuthority() async {
+    hueAuthorityFetches += 1;
+    return hueAuthorityForTest;
+  }
 }
 
 Widget _buildTestApp({
@@ -310,6 +323,87 @@ void main() {
         tester.getTopLeft(find.text('SYNC FROM A HUB')).dy,
         lessThan(tester.getTopLeft(find.text('CREATE A ROOM')).dy),
       );
+    });
+
+    testWidgets('offers new Hue bridge automation review in Add & Review',
+        (tester) async {
+      serverSyncProvider.hueAuthorityConsentSupportedForTest = true;
+      serverSyncProvider.hueAuthorityForTest = const RhythmHueAuthority(
+        schemaVersion: 1,
+        bridges: [
+          RhythmHueBridgeAuthority(
+            address: '192.0.2.25:443',
+            revision: '0123456789abcdef',
+            takeoverScope: 'bridge',
+            bridgeTakeoverRequested: false,
+            rooms: [
+              RhythmHueRoomAuthority(
+                roomId: 'office',
+                name: 'Office',
+                owner: RhythmHueRoomAuthorityOwner.unreviewed,
+                rhythmAutomationEnabled: false,
+              ),
+            ],
+          ),
+        ],
+      );
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          connection: connection,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(serverSyncProvider.hueAuthorityFetches, 1);
+      await _scrollTo(tester, find.text('Review Hue room automation'));
+      expect(find.text('AUTOMATION REVIEW'), findsOneWidget);
+      expect(find.text('1 room needs review'), findsOneWidget);
+
+      await _tapVisible(tester, find.text('Review Hue room automation'));
+
+      expect(find.text('Hue room automation'), findsOneWidget);
+      expect(find.text('Office'), findsOneWidget);
+      expect(find.text('Save room choices'), findsOneWidget);
+    });
+
+    testWidgets('does not offer automation review for an approved Hue bridge',
+        (tester) async {
+      serverSyncProvider.hueAuthorityConsentSupportedForTest = true;
+      serverSyncProvider.hueAuthorityForTest = const RhythmHueAuthority(
+        schemaVersion: 1,
+        bridges: [
+          RhythmHueBridgeAuthority(
+            address: '192.0.2.25:443',
+            revision: '0123456789abcdef',
+            takeoverScope: 'bridge',
+            bridgeTakeoverRequested: true,
+            rooms: [
+              RhythmHueRoomAuthority(
+                roomId: 'office',
+                name: 'Office',
+                owner: RhythmHueRoomAuthorityOwner.rhythm,
+                rhythmAutomationEnabled: true,
+              ),
+            ],
+          ),
+        ],
+      );
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          connection: connection,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(serverSyncProvider.hueAuthorityFetches, 1);
+      expect(find.text('AUTOMATION REVIEW'), findsNothing);
+      expect(find.text('Review Hue room automation'), findsNothing);
     });
 
     testWidgets('offers a phone-discovered Hue bulb on Add & Review', (

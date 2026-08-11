@@ -2521,6 +2521,18 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
         }
     }
 
+    let configured_hub_keys = s.hub_credentials.keys().cloned().collect::<Vec<_>>();
+    let external_automation_migration = s
+        .topology
+        .migrate_legacy_external_room_automation_policy(&configured_hub_keys);
+    if external_automation_migration.changed() {
+        info!(
+            target: "sys",
+            "Migrated legacy Hue room automation policy: grandfathered_hue_rooms={}",
+            external_automation_migration.grandfathered_hue_rooms
+        );
+    }
+
     let topology_migration = s
         .topology
         .migrate_legacy_light_room_bindings(&mut s.canonical_registry);
@@ -2538,8 +2550,9 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
     // migration of a valid combined snapshot is committed as one new record.
     // If every source was absent/invalid, leave the evidence untouched rather
     // than replacing it with defaults.
-    let should_persist_authority_migration =
-        loaded_legacy_authority || (loaded_authority_snapshot && topology_migration.changed());
+    let should_persist_authority_migration = loaded_legacy_authority
+        || (loaded_authority_snapshot
+            && (topology_migration.changed() || external_automation_migration.changed()));
     if should_persist_authority_migration {
         if let Some(storage) = authority_storage.as_ref() {
             let migration_commit = (|| -> Result<()> {
@@ -2753,6 +2766,7 @@ mod tests {
         saved_canonical_registry: Arc<Mutex<Vec<Value>>>,
         topology: Option<Value>,
         saved_topology: Arc<Mutex<Vec<Value>>>,
+        hub_credentials: Vec<HubCredentials>,
         authority_state_absent: bool,
         fail_save_authority_state: bool,
     }
@@ -2798,7 +2812,7 @@ mod tests {
         }
 
         fn load_all_hub_credentials(&self) -> Result<Vec<HubCredentials>> {
-            Ok(Vec::new())
+            Ok(self.hub_credentials.clone())
         }
 
         fn save_all_hub_credentials(&self, _creds: &[HubCredentials]) -> Result<()> {
@@ -3410,6 +3424,61 @@ mod tests {
             pending[0].canonical_id.as_deref(),
             Some(canonical_id.as_str())
         );
+    }
+
+    #[test]
+    fn load_persisted_state_grandfathers_hue_bridge_configured_before_consent() {
+        use crate::topology::{DiscoveredTopologyRoom, ExternalRoomAutomationOwner, SyncAction};
+
+        let address = "192.168.1.10";
+        let hub_key = HubKey::new(crate::hub::HubType::new(crate::hub::HubType::HUE), address);
+        let credentials = HubCredentials::new(
+            crate::hub::HubType::HUE,
+            address,
+            serde_json::json!({"username": "existing-user"}),
+        );
+        let mut legacy_topology =
+            serde_json::to_value(crate::topology::RoomTopologyStore::new()).unwrap();
+        legacy_topology
+            .as_object_mut()
+            .unwrap()
+            .remove("external_room_automation_policy_version");
+        let storage = TestStorage {
+            canonical_registry: Some(
+                serde_json::to_value(crate::canonical::registry::CanonicalRegistry::new()).unwrap(),
+            ),
+            topology: Some(legacy_topology),
+            hub_credentials: vec![credentials],
+            ..Default::default()
+        };
+        let mut app = crate::state::AppState {
+            storage: Some(Arc::new(storage)),
+            ..Default::default()
+        };
+
+        load_persisted_state(&mut app);
+
+        let action = app.topology.sync_hub_room(
+            &hub_key,
+            &DiscoveredTopologyRoom {
+                hub_room_id: "hue-office".to_string(),
+                name: "Office".to_string(),
+                control_id: "grouped-office".to_string(),
+                light_device_ids: Vec::new(),
+                canonical_device_ids: Vec::new(),
+                source_name_authoritative: true,
+            },
+        );
+        let room_id = match action {
+            SyncAction::Created { rhythm_room_id } => rhythm_room_id,
+            other => panic!("unexpected sync action: {other:?}"),
+        };
+        assert_eq!(
+            app.topology
+                .external_room_automation_owner(&room_id, &hub_key),
+            Some(ExternalRoomAutomationOwner::Rhythm)
+        );
+        assert!(app.topology.rhythm_automation_allowed_for_node(&room_id));
     }
 
     #[test]
