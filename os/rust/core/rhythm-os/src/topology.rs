@@ -856,6 +856,16 @@ impl RoomTopologyStore {
         }
     }
 
+    /// Construct an empty topology that came from a pre-policy persistence
+    /// source. Fresh installations must use [`Self::new`]; legacy loaders use
+    /// this value so configured Hue bridges still cross the one-time authority
+    /// migration even when the older installation had no topology half.
+    pub fn legacy_empty() -> Self {
+        let mut store = Self::new();
+        store.external_room_automation_policy_version = 0;
+        store
+    }
+
     /// Migrate pre-consent topology exactly once. Explicit choices are never
     /// overwritten; only rooms that previously relied on Rhythm's implicit
     /// Hue authority are grandfathered.
@@ -919,9 +929,11 @@ impl RoomTopologyStore {
             .contains(&hub_key.to_string())
     }
 
-    /// Return whether persisted topology or the live grouping policy still
-    /// names this address-scoped hub key.
-    pub fn references_hub_key(&self, hub_key: &HubKey) -> bool {
+    /// Return whether the topology graph or live grouped-routing policy names
+    /// this address-scoped hub key. A migration-only grandfather marker is not
+    /// structural identity: pending Hue address migration may legitimately
+    /// carry the marker at both its old and new address until remap commits.
+    pub fn structurally_references_hub_key(&self, hub_key: &HubKey) -> bool {
         self.rooms.values().any(|room| {
             room.hub_room_bindings
                 .iter()
@@ -938,10 +950,16 @@ impl RoomTopologyStore {
                 .external_room_automation_decisions
                 .iter()
                 .any(|decision| decision.hub_key == *hub_key)
+            || self.grouped_room_control_is_required(hub_key)
+    }
+
+    /// Return whether persisted topology, a migration policy marker, or the
+    /// live grouping policy still names this address-scoped hub key.
+    pub fn references_hub_key(&self, hub_key: &HubKey) -> bool {
+        self.structurally_references_hub_key(hub_key)
             || self
                 .external_room_automation_grandfathered_hubs
                 .contains(hub_key)
-            || self.grouped_room_control_is_required(hub_key)
     }
 
     /// Return every structured hub key retained by room topology.
@@ -1974,6 +1992,60 @@ impl RoomTopologyStore {
             })
     }
 
+    /// Finish the one-time legacy bridge bootstrap after complete room
+    /// discovery. Current undecided rooms receive durable explicit Rhythm
+    /// ownership, while every prior explicit choice is preserved. Removing
+    /// the bridge marker makes rooms discovered in later epochs unreviewed.
+    pub fn materialize_grandfathered_external_room_automation_decisions(
+        &mut self,
+        hub_key: &HubKey,
+    ) -> bool {
+        if !self
+            .external_room_automation_grandfathered_hubs
+            .contains(hub_key)
+        {
+            return false;
+        }
+
+        let explicitly_decided = self
+            .external_room_automation_decisions
+            .iter()
+            .filter(|decision| decision.hub_key == *hub_key)
+            .map(|decision| decision.rhythm_room_id.clone())
+            .collect::<HashSet<_>>();
+        let mut undecided_room_ids = self
+            .rooms
+            .values()
+            .filter(|room| {
+                room.hub_room_bindings
+                    .iter()
+                    .any(|binding| binding.hub_key == *hub_key)
+                    && !explicitly_decided.contains(&room.id)
+            })
+            .map(|room| room.id.clone())
+            .collect::<Vec<_>>();
+        undecided_room_ids.sort();
+
+        self.external_room_automation_decisions
+            .extend(undecided_room_ids.into_iter().map(|rhythm_room_id| {
+                ExternalRoomAutomationDecision {
+                    rhythm_room_id,
+                    hub_key: hub_key.clone(),
+                    owner: ExternalRoomAutomationOwner::Rhythm,
+                }
+            }));
+        self.external_room_automation_decisions
+            .sort_by(|left, right| {
+                left.hub_key
+                    .to_string()
+                    .cmp(&right.hub_key.to_string())
+                    .then_with(|| left.rhythm_room_id.cmp(&right.rhythm_room_id))
+            });
+        self.external_room_automation_grandfathered_hubs
+            .remove(hub_key);
+        true
+    }
+
     /// Forget all retained authority for a hub that the user disconnected.
     /// Pairing the same address again is a new hub review journey.
     pub fn forget_external_room_automation_policy_for_hub(&mut self, hub_key: &HubKey) -> bool {
@@ -2082,13 +2154,20 @@ impl RoomTopologyStore {
         self.external_room_automation_decisions
             .sort_by(|left, right| left.rhythm_room_id.cmp(&right.rhythm_room_id));
 
+        // A complete explicit review supersedes the migration-only bridge
+        // fallback. Future rooms must be reviewed instead of inheriting the
+        // pre-policy approval.
+        let grandfathering_cleared = self
+            .external_room_automation_grandfathered_hubs
+            .remove(hub_key);
+
         let after = self
             .external_room_automation_decisions
             .iter()
             .filter(|decision| decision.hub_key == *hub_key)
             .cloned()
             .collect::<Vec<_>>();
-        Ok(before != after)
+        Ok(before != after || grandfathering_cleared)
     }
 
     /// Bridge-wide Hue automation suppression is permitted only after every
@@ -4718,6 +4797,16 @@ mod tests {
             restored.external_room_automation_owner(&bedroom_id, &key),
             Some(ExternalRoomAutomationOwner::Rhythm)
         );
+        assert!(restored.materialize_grandfathered_external_room_automation_decisions(&key));
+        assert_eq!(
+            restored.external_room_automation_owner(&office_id, &key),
+            Some(ExternalRoomAutomationOwner::External),
+            "materialization must preserve an explicit Hue-owned choice"
+        );
+        assert_eq!(
+            restored.external_room_automation_owner(&bedroom_id, &key),
+            Some(ExternalRoomAutomationOwner::Rhythm)
+        );
         assert!(!restored
             .migrate_legacy_external_room_automation_policy(std::slice::from_ref(&key))
             .changed());
@@ -4784,6 +4873,170 @@ mod tests {
             restored.external_room_automation_owner(&room_id, &key),
             None
         );
+    }
+
+    #[test]
+    fn legacy_first_discovery_materializes_decisions_and_retires_hub_fallback() {
+        let key = hue_key();
+        let mut store = RoomTopologyStore::legacy_empty();
+        assert!(store
+            .migrate_legacy_external_room_automation_policy(std::slice::from_ref(&key))
+            .changed());
+
+        let first_action = store.sync_hub_room(
+            &key,
+            &DiscoveredTopologyRoom {
+                hub_room_id: "hue-office".to_string(),
+                name: "Office".to_string(),
+                control_id: "grouped-office".to_string(),
+                light_device_ids: Vec::new(),
+                canonical_device_ids: Vec::new(),
+                source_name_authoritative: true,
+            },
+        );
+        let first_room_id = first_action.rhythm_room_id().to_string();
+        assert_eq!(
+            store.external_room_automation_owner(&first_room_id, &key),
+            Some(ExternalRoomAutomationOwner::Rhythm)
+        );
+
+        assert!(store.materialize_grandfathered_external_room_automation_decisions(&key));
+        assert!(!store
+            .external_room_automation_grandfathered_hubs
+            .contains(&key));
+        assert_eq!(
+            store.external_room_automation_owner(&first_room_id, &key),
+            Some(ExternalRoomAutomationOwner::Rhythm),
+            "the current legacy room should retain explicit Rhythm ownership"
+        );
+
+        let later_action = store.sync_hub_room(
+            &key,
+            &DiscoveredTopologyRoom {
+                hub_room_id: "hue-later".to_string(),
+                name: "Later".to_string(),
+                control_id: "grouped-later".to_string(),
+                light_device_ids: Vec::new(),
+                canonical_device_ids: Vec::new(),
+                source_name_authoritative: true,
+            },
+        );
+        assert_eq!(
+            store.external_room_automation_owner(later_action.rhythm_room_id(), &key),
+            None,
+            "rooms discovered after the bootstrap epoch must be reviewed"
+        );
+        assert!(!store.materialize_grandfathered_external_room_automation_decisions(&key));
+    }
+
+    #[test]
+    fn explicit_hue_review_clears_fallback_and_rediscovery_stays_unreviewed() {
+        let key = hue_key();
+        let mut store = RoomTopologyStore::legacy_empty();
+        store.migrate_legacy_external_room_automation_policy(std::slice::from_ref(&key));
+        let action = store.sync_hub_room(
+            &key,
+            &DiscoveredTopologyRoom {
+                hub_room_id: "hue-office".to_string(),
+                name: "Office".to_string(),
+                control_id: "grouped-office".to_string(),
+                light_device_ids: Vec::new(),
+                canonical_device_ids: Vec::new(),
+                source_name_authoritative: true,
+            },
+        );
+        let room_id = action.rhythm_room_id().to_string();
+
+        assert!(store
+            .replace_external_room_automation_decisions(
+                &key,
+                &[(room_id, ExternalRoomAutomationOwner::External)],
+            )
+            .unwrap());
+        assert!(!store
+            .external_room_automation_grandfathered_hubs
+            .contains(&key));
+
+        assert_eq!(store.remove_stale_bindings(&key, &[]).len(), 1);
+        let rediscovered = store.sync_hub_room(
+            &key,
+            &DiscoveredTopologyRoom {
+                hub_room_id: "hue-office".to_string(),
+                name: "Office".to_string(),
+                control_id: "grouped-office-new".to_string(),
+                light_device_ids: Vec::new(),
+                canonical_device_ids: Vec::new(),
+                source_name_authoritative: true,
+            },
+        );
+        assert_eq!(
+            store.external_room_automation_owner(rediscovered.rhythm_room_id(), &key),
+            None,
+            "a stale Hue-owned room must never return as implicitly Rhythm-owned"
+        );
+        assert!(!store.external_hub_has_full_rhythm_consent(&key));
+    }
+
+    #[test]
+    fn repeated_full_review_reports_grandfather_marker_clear() {
+        let key = hue_key();
+        let mut store = RoomTopologyStore::new();
+        let room_id = store.create_room("Office");
+        assert!(store.upsert_room_binding(
+            &room_id,
+            HubRoomBinding {
+                hub_key: key.clone(),
+                hub_room_id: "hue-office".to_string(),
+                control_id: "grouped-office".to_string(),
+                light_device_ids: Vec::new(),
+            },
+        ));
+        let decisions = vec![(room_id, ExternalRoomAutomationOwner::External)];
+        assert!(store
+            .replace_external_room_automation_decisions(&key, &decisions)
+            .unwrap());
+
+        let mut legacy_json = serde_json::to_value(store).unwrap();
+        legacy_json
+            .as_object_mut()
+            .unwrap()
+            .remove("external_room_automation_policy_version");
+        let mut restored: RoomTopologyStore = serde_json::from_value(legacy_json).unwrap();
+        assert!(restored
+            .migrate_legacy_external_room_automation_policy(std::slice::from_ref(&key))
+            .changed());
+        assert!(restored
+            .external_room_automation_grandfathered_hubs
+            .contains(&key));
+
+        assert!(restored
+            .replace_external_room_automation_decisions(&key, &decisions)
+            .unwrap());
+        assert!(!restored
+            .external_room_automation_grandfathered_hubs
+            .contains(&key));
+    }
+
+    #[test]
+    fn grandfather_marker_is_not_a_structural_hub_reference() {
+        let key = hue_key();
+        let mut store = RoomTopologyStore::legacy_empty();
+        store.migrate_legacy_external_room_automation_policy(std::slice::from_ref(&key));
+
+        assert!(store.references_hub_key(&key));
+        assert!(!store.structurally_references_hub_key(&key));
+
+        let room_id = store.create_room("Office");
+        assert!(store.upsert_room_binding(
+            &room_id,
+            HubRoomBinding {
+                hub_key: key.clone(),
+                hub_room_id: "hue-office".to_string(),
+                control_id: "grouped-office".to_string(),
+                light_device_ids: Vec::new(),
+            },
+        ));
+        assert!(store.structurally_references_hub_key(&key));
     }
 
     #[test]

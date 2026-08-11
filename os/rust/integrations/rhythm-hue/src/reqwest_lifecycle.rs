@@ -642,8 +642,14 @@ fn complete_pending_hue_address_migration(
 
     let canonical_old = state.canonical_registry.references_hub_key(&old_key);
     let canonical_new = state.canonical_registry.references_hub_key(new_key);
-    let topology_old = state.topology.references_hub_key(&old_key);
-    let topology_new = state.topology.references_hub_key(new_key);
+    // Policy-only grandfather markers are address-scoped admission metadata,
+    // not competing controller graphs. During a crash-resumed address change
+    // the legacy-policy migration can legitimately retain a marker for both
+    // the staged new credential and the still-bound old topology. Only real
+    // graph references are identity conflicts here; remap_hub_key coalesces
+    // the markers after the proven bridge identity is committed.
+    let topology_old = state.topology.structurally_references_hub_key(&old_key);
+    let topology_new = state.topology.structurally_references_hub_key(new_key);
     if (canonical_old && canonical_new) || (topology_old && topology_new) {
         anyhow::bail!("Hue address migration found conflicting old and new controller references");
     }
@@ -3381,7 +3387,36 @@ mod tests {
             Some(old_key.address.as_str())
         );
 
+        // Simulate the first candidate startup after the failed authority
+        // commit. Pre-policy topology still names the old address while the
+        // crash-resumable credential already names the new one. The legacy
+        // policy migration therefore retains admission markers for both
+        // aliases; those markers must not manufacture a graph conflict.
+        {
+            let mut state = state.lock().unwrap();
+            let mut legacy_topology = serde_json::to_value(&state.topology).unwrap();
+            legacy_topology
+                .as_object_mut()
+                .unwrap()
+                .remove("external_room_automation_policy_version");
+            let mut legacy_topology: rhythm_os::topology::RoomTopologyStore =
+                serde_json::from_value(legacy_topology).unwrap();
+            legacy_topology.rebuild_indices();
+            let migration = legacy_topology
+                .migrate_legacy_external_room_automation_policy(std::slice::from_ref(&new_key));
+            assert!(migration.changed());
+            assert!(legacy_topology.references_hub_key(&old_key));
+            assert!(legacy_topology.references_hub_key(&new_key));
+            assert!(legacy_topology.structurally_references_hub_key(&old_key));
+            assert!(!legacy_topology.structurally_references_hub_key(&new_key));
+            state.topology = legacy_topology;
+        }
+
         storage.set_fail_authority_save(false);
+        {
+            let state = state.lock().unwrap();
+            rhythm_os::commands::save_authority_state(&state).unwrap();
+        }
         configure_authenticated_hue_hub(
             &new_key.address,
             r#"{"username":"new-user"}"#,

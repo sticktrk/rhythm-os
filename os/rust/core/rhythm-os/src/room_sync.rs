@@ -346,16 +346,19 @@ fn sync_with_discovery(
     // Phase 2: Diff and apply source rooms into registry + topology only.
     // Runtime materialization is an explicit final sync phase.
     // ========================================================================
-    let current_room_ids = {
-        let registry = extract_registry_for(state, hub_key);
-        let room_ids: HashSet<String> = registry
-            .and_then(|r| {
-                r.lock()
-                    .ok()
-                    .map(|reg| reg.rooms().into_iter().map(|r| r.id).collect())
-            })
-            .unwrap_or_default();
-        room_ids
+    let mut complete_room_graph_applied = true;
+    let current_room_ids = match extract_registry_for(state, hub_key) {
+        Some(registry) => match registry.lock() {
+            Ok(registry) => registry.rooms().into_iter().map(|room| room.id).collect(),
+            Err(_) => {
+                complete_room_graph_applied = false;
+                HashSet::new()
+            }
+        },
+        None => {
+            complete_room_graph_applied = false;
+            HashSet::new()
+        }
     };
 
     let discovered_ids: HashSet<String> = discovered_rooms.iter().map(|r| r.id.clone()).collect();
@@ -395,6 +398,7 @@ fn sync_with_discovery(
                         format!("Failed to apply discovered room on {}", hub_key)
                     });
                 }
+                complete_room_graph_applied = false;
                 warn!(target: "room_sync", "Failed to set room '{}': {}", room.name, e);
             }
         }
@@ -426,6 +430,7 @@ fn sync_with_discovery(
                         hub_key
                     );
                 }
+                complete_room_graph_applied = false;
                 warn!(target: "room_sync", "No hub registry available for stale room '{}'", room_id);
                 continue;
             };
@@ -438,6 +443,7 @@ fn sync_with_discovery(
                     if failure_policy.fail_closed() {
                         anyhow::bail!("Failed to apply stale-room removal on {}", hub_key);
                     }
+                    complete_room_graph_applied = false;
                     warn!(target: "room_sync", "Failed to lock hub registry for stale room '{}'", room_id);
                 }
             }
@@ -465,6 +471,44 @@ fn sync_with_discovery(
                 target: "room_sync",
                 "Removed stale source bindings for {} topology rooms on {}",
                 removed_bindings.len(),
+                hub_key
+            );
+        }
+    }
+
+    if complete_room_graph_applied && !discovered_rooms.is_empty() {
+        let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        complete_room_graph_applied = discovered_rooms
+            .iter()
+            .all(|room| state.topology.find_by_hub_room(hub_key, &room.id).is_some());
+    }
+
+    // A legacy bridge marker exists only to carry pre-policy approval through
+    // its first complete room discovery. Convert that temporary approval into
+    // explicit per-room decisions before controller reconciliation, then
+    // commit the marker retirement with the ordinary authority-state writer.
+    // Any best-effort room apply failure retains the marker for a later retry.
+    if complete_room_graph_applied {
+        let materialized = {
+            let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            let topology_before = s.topology.clone();
+            if !s
+                .topology
+                .materialize_grandfathered_external_room_automation_decisions(hub_key)
+            {
+                false
+            } else if let Err(error) = commands::save_topology(&s) {
+                s.topology = topology_before;
+                return Err(error)
+                    .context("Failed to durably materialize legacy Hue room automation authority");
+            } else {
+                true
+            }
+        };
+        if materialized {
+            info!(
+                target: "room_sync",
+                "Materialized legacy Hue room automation authority for {}",
                 hub_key
             );
         }
@@ -1703,6 +1747,115 @@ mod tests {
         );
         let state: SharedState = Arc::new(Mutex::new(app));
         (hub_key, state)
+    }
+
+    #[test]
+    fn complete_room_discovery_materializes_legacy_hue_authority_without_device_discovery() {
+        let (hub_key, state) = install_test_hub();
+        {
+            let mut state = state.lock().unwrap();
+            state.topology = crate::topology::RoomTopologyStore::legacy_empty();
+            state
+                .topology
+                .migrate_legacy_external_room_automation_policy(std::slice::from_ref(&hub_key));
+        }
+        let discovery = MockDiscovery {
+            rooms: vec![DiscoveredRoom {
+                id: "hue-office".to_string(),
+                name: "Office".to_string(),
+                grouped_light_id: "grouped-office".to_string(),
+                device_ids: Vec::new(),
+            }],
+            devices: Vec::new(),
+        };
+
+        sync_with_discovery(
+            &state,
+            &hub_key,
+            &discovery,
+            false,
+            SyncFailurePolicy::BestEffort,
+        )
+        .unwrap();
+
+        let mut state = state.lock().unwrap();
+        let room_id = state
+            .topology
+            .find_by_hub_room(&hub_key, "hue-office")
+            .expect("discovered Hue room should be bound")
+            .id
+            .clone();
+        assert_eq!(
+            state
+                .topology
+                .external_room_automation_owner(&room_id, &hub_key),
+            Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+        );
+        assert!(state
+            .topology
+            .external_hub_has_full_rhythm_consent(&hub_key));
+        assert!(
+            !state
+                .topology
+                .materialize_grandfathered_external_room_automation_decisions(&hub_key),
+            "the sync should already have retired the bootstrap marker"
+        );
+
+        let later = state.topology.sync_hub_room(
+            &hub_key,
+            &DiscoveredTopologyRoom {
+                hub_room_id: "hue-later".to_string(),
+                name: "Later".to_string(),
+                control_id: "grouped-later".to_string(),
+                light_device_ids: Vec::new(),
+                canonical_device_ids: Vec::new(),
+                source_name_authoritative: true,
+            },
+        );
+        assert_eq!(
+            state
+                .topology
+                .external_room_automation_owner(later.rhythm_room_id(), &hub_key),
+            None
+        );
+    }
+
+    #[test]
+    fn failed_best_effort_room_apply_retains_legacy_hue_marker() {
+        let hub_key = HubKey::new(HubType::new(HubType::HUE), "missing-hub");
+        let mut app = AppState {
+            topology: crate::topology::RoomTopologyStore::legacy_empty(),
+            ..Default::default()
+        };
+        app.topology
+            .migrate_legacy_external_room_automation_policy(std::slice::from_ref(&hub_key));
+        let state: SharedState = Arc::new(Mutex::new(app));
+        let discovery = MockDiscovery {
+            rooms: vec![DiscoveredRoom {
+                id: "hue-office".to_string(),
+                name: "Office".to_string(),
+                grouped_light_id: "grouped-office".to_string(),
+                device_ids: Vec::new(),
+            }],
+            devices: Vec::new(),
+        };
+
+        sync_with_discovery(
+            &state,
+            &hub_key,
+            &discovery,
+            false,
+            SyncFailurePolicy::BestEffort,
+        )
+        .unwrap();
+
+        let state = state.lock().unwrap();
+        assert!(state.topology.references_hub_key(&hub_key));
+        assert!(!state.topology.structurally_references_hub_key(&hub_key));
+        assert!(state
+            .topology
+            .find_by_hub_room(&hub_key, "hue-office")
+            .is_none());
     }
 
     /// Issue #302 field reproducer: legacy Hue authority takeover can leave
