@@ -99,9 +99,22 @@
   font-size: 12.5px;
 }
 
+.roomBoardToolbar {
+  display: grid;
+  grid-template-columns: minmax(190px, 320px) auto minmax(180px, 1fr);
+  gap: 8px;
+  align-items: center;
+}
+
+.roomBoardLocalNote {
+  color: var(--dim);
+  font-size: 11.5px;
+  text-align: right;
+}
+
 .roomAssignmentBoard {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
   gap: 12px;
   align-items: start;
 }
@@ -124,22 +137,31 @@
   transform: translateY(-2px);
 }
 
+.roomAssignmentLane.dragging {
+  opacity: 0.55;
+}
+
 .roomAssignmentLane.readonly {
   border-style: dashed;
   border-color: var(--amber);
 }
 
 .roomAssignmentLaneHeader {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
   border-bottom: 1px solid var(--border);
   background: var(--surface-muted);
+  padding: 8px;
+}
+
+.roomAssignmentLane.readonly .roomAssignmentLaneHeader {
+  grid-template-columns: minmax(0, 1fr) auto;
   padding: 10px 11px;
 }
 
-.roomAssignmentLaneHeader > div {
+.roomAssignmentLane.readonly .roomAssignmentLaneHeader > div {
   display: grid;
   min-width: 0;
   gap: 2px;
@@ -150,12 +172,76 @@
   font-size: 14px;
 }
 
-.roomAssignmentLaneHeader span:not(.roomAssignmentCount) {
+.roomAssignmentLane.readonly .roomAssignmentLaneHeader span:not(.roomAssignmentCount) {
   overflow: hidden;
   color: var(--dim);
   font-size: 10.5px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.roomAssignmentOrderControls,
+.roomAssignmentLaneActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.roomAssignmentLaneActions .iconOnlyButton.danger {
+  color: var(--red);
+}
+
+.roomAssignmentLaneActions .iconOnlyButton:hover:not(:disabled),
+.roomAssignmentDeviceActions .iconOnlyButton:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.roomAssignmentLaneActions .iconOnlyButton.danger:hover:not(:disabled) {
+  color: var(--red);
+}
+
+.roomAssignmentRoomGrip {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 28px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dim);
+  cursor: grab;
+}
+
+.roomAssignmentRoomGrip:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.roomAssignmentRoomIdentity {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px 5px;
+  text-align: left;
+}
+
+.roomAssignmentRoomIdentity:hover {
+  background: var(--surface);
+}
+
+.roomAssignmentRoomIdentity strong,
+.roomAssignmentRoomIdentity span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.roomAssignmentRoomIdentity span {
+  color: var(--dim);
+  font-size: 10.5px;
 }
 
 .roomAssignmentCount {
@@ -176,6 +262,35 @@
   align-content: start;
   gap: 7px;
   padding: 9px;
+}
+
+.roomAssignmentDeviceSection {
+  display: grid;
+  gap: 5px;
+}
+
+.roomAssignmentDeviceSection + .roomAssignmentDeviceSection {
+  margin-top: 3px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.roomAssignmentDeviceSection > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px;
+  color: var(--dim);
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+
+.roomAssignmentDeviceSection > div {
+  display: grid;
+  gap: 6px;
 }
 
 .roomAssignmentDevice {
@@ -201,7 +316,6 @@
 }
 
 .roomAssignmentDevice.readonly {
-  grid-template-columns: auto minmax(0, 1fr);
   cursor: default;
 }
 
@@ -217,6 +331,23 @@
   display: grid;
   min-width: 0;
   gap: 2px;
+}
+
+.roomAssignmentDeviceIdentity.actionable {
+  width: 100%;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  padding: 4px;
+  text-align: left;
+}
+
+.roomAssignmentDeviceIdentity.actionable:hover {
+  background: var(--surface-muted);
+}
+
+.roomAssignmentDeviceIdentity.actionable.identify:hover strong {
+  color: var(--green);
 }
 
 .roomAssignmentDeviceIdentity strong {
@@ -238,6 +369,12 @@
 .roomAssignmentDeviceIdentity code {
   color: var(--dim);
   font-size: 10px;
+}
+
+.roomAssignmentDeviceActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .roomAssignmentEmpty {
@@ -281,6 +418,36 @@
 .roomMoveReceipt > code {
   color: var(--dim);
   font-size: 10.5px;
+}
+
+.roomIdentifyReceipt {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid var(--amber);
+  border-radius: 8px;
+  background: var(--amber-soft);
+  padding: 9px 11px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.roomIdentifyReceipt.confirmed {
+  border-color: var(--green);
+  background: var(--green-soft);
+}
+
+.roomIdentifyReceipt.failed {
+  border-color: var(--red);
+  background: var(--red-soft);
+}
+
+.roomIdentifyReceipt code {
+  margin-left: auto;
+  color: var(--dim);
+  font-size: 10px;
+  font-weight: 500;
 }
 
 /* ---- Inline rename ---- */
@@ -349,4 +516,28 @@
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
+}
+
+@media (max-width: 720px) {
+  .roomBoardToolbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .roomBoardLocalNote {
+    grid-column: 1 / -1;
+    text-align: left;
+  }
+
+  .roomAssignmentBoard {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .roomAssignmentDevice {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .roomAssignmentDeviceActions {
+    grid-column: 2;
+    justify-self: start;
+  }
 }

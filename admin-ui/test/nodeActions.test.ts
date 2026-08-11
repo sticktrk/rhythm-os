@@ -6,6 +6,7 @@ import {
   sendNodeAction,
   type NodeAction
 } from '../src/device/nodes.ts';
+import { flashCanonicalDevice } from '../src/device/topology.ts';
 
 test('On and Off controls send canonical node action service names', async () => {
   const requests: Array<{ path: string; body: unknown }> = [];
@@ -47,4 +48,26 @@ test('button-event action names are not exposed as node controls', () => {
 
   assert.equal(actionIds.has('on_press'), false);
   assert.equal(actionIds.has('off_press'), false);
+});
+
+test('bulb Identify uses the canonical flash endpoint', async () => {
+  const requests: Array<{
+    path: string;
+    options: { timeoutSeconds?: number } | undefined;
+  }> = [];
+  const client = {
+    post(path: string, options?: { timeoutSeconds?: number }) {
+      requests.push({ path, options });
+      return Promise.resolve();
+    }
+  };
+
+  await flashCanonicalDevice(client as never, 'bulb/desk');
+
+  assert.deepEqual(requests, [
+    {
+      path: 'api/devices/canonical/bulb%2Fdesk/flash',
+      options: { timeoutSeconds: 30 }
+    }
+  ]);
 });

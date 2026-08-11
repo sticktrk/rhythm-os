@@ -1,6 +1,13 @@
-import { useCallback, useMemo, useState, type DragEvent } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type DragEvent
+} from 'react';
 import {
   AlertTriangle,
+  ArrowLeft,
   ArrowRight,
   Check,
   CheckCircle2,
@@ -10,6 +17,8 @@ import {
   Link2,
   Pencil,
   RefreshCw,
+  RotateCcw,
+  Settings,
   ShieldCheck,
   Trash2,
   Wifi,
@@ -45,7 +54,6 @@ import {
   pairDevice,
   putHubCredentials,
   renameCanonicalDevice,
-  renameRoom,
   resetWifi,
   resolveTriage,
   retryHub,
@@ -55,6 +63,7 @@ import {
   syncAll,
   unpairDevice
 } from '../../device/topology';
+import { getNodesState, getState } from '../../device/state';
 import {
   asArray,
   asBoolean,
@@ -70,6 +79,19 @@ import { prettyJson } from '../../lib/json';
 import { useHub } from '../../state/HubContext';
 
 import {
+  lightProfileOverrideSupport,
+  lightSettingsProfilesFromState
+} from './nodeLightSettings';
+import { NodeDetail, parseNodes } from './NodesPage';
+import {
+  moveRoomBefore,
+  moveRoomByOffset,
+  parseStoredRoomOrder,
+  reconcileRoomOrder,
+  roomOrderStorageKey,
+  segmentRoomDevices
+} from './roomBoardLayout';
+import {
   buildRoomMoveProposal,
   createRoomMoveRequestId,
   moveDeviceBetweenRoomsVerified,
@@ -78,6 +100,7 @@ import {
 } from './roomAssignment';
 import {
   buildTopologyMembership,
+  isBulbKind,
   topologyKindLabel,
   type TopologyItem
 } from './topologyMembership';
@@ -88,7 +111,7 @@ type Tab = 'devices' | 'rooms' | 'triage' | 'pairing' | 'hub' | 'wifi';
 
 export default function TopologyPage() {
   const client = useDeviceClient();
-  const { hub } = useHub();
+  const { hub, hubId } = useHub();
   const [tab, setTab] = useState<Tab>('devices');
 
   const triageCountQuery = usePolling(
@@ -132,7 +155,7 @@ export default function TopologyPage() {
       </div>
 
       {tab === 'devices' ? <DevicesTab client={client} /> : null}
-      {tab === 'rooms' ? <RoomsTab client={client} /> : null}
+      {tab === 'rooms' ? <RoomsTab key={hubId} client={client} /> : null}
       {tab === 'triage' ? (
         <TriageTab
           client={client}
@@ -423,6 +446,7 @@ function DevicesTab({ client }: { client: DeviceClient }) {
 
 function RoomsTab({ client }: { client: DeviceClient }) {
   const confirm = useConfirm();
+  const { hubId } = useHub();
   const topologyQuery = usePolling(
     useCallback(() => getTopologyNodes(client), [client]),
     { intervalMs: 0 }
@@ -432,10 +456,11 @@ function RoomsTab({ client }: { client: DeviceClient }) {
     () => buildTopologyMembership(topologyQuery.data),
     [topologyQuery.data]
   );
-  const rooms = useMemo(
-    () => membership.rooms.map(({ room }) => room.raw),
+  const roomIds = useMemo(
+    () => membership.rooms.map(({ room }) => room.id),
     [membership.rooms]
   );
+  const roomIdsKey = roomIds.join('\u0000');
   const assignedBulbCount = useMemo(
     () => membership.rooms.reduce((total, room) => total + room.bulbs.length, 0),
     [membership.rooms]
@@ -447,15 +472,77 @@ function RoomsTab({ client }: { client: DeviceClient }) {
   );
 
   const [newRoomName, setNewRoomName] = useState('');
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [draftName, setDraftName] = useState('');
-  const [mergeTarget, setMergeTarget] = useState<Record<string, unknown> | null>(null);
+  const [mergeTarget, setMergeTarget] = useState<TopologyItem | null>(null);
   const [mergeSourceId, setMergeSourceId] = useState('');
+  const [draggedRoomId, setDraggedRoomId] = useState<string | null>(null);
   const [draggedDeviceId, setDraggedDeviceId] = useState<string | null>(null);
   const [dragOverRoomId, setDragOverRoomId] = useState<string | null>(null);
   const [movePickerDevice, setMovePickerDevice] = useState<TopologyItem | null>(null);
   const [movePickerTargetId, setMovePickerTargetId] = useState('');
   const [moveReceipt, setMoveReceipt] = useState<RoomMoveReceipt | null>(null);
+  const [settingsTargetId, setSettingsTargetId] = useState<string | null>(null);
+  const [identifyReceipt, setIdentifyReceipt] = useState<{
+    deviceId: string;
+    deviceName: string;
+    status: 'pending' | 'confirmed' | 'failed';
+    error?: string;
+  } | null>(null);
+
+  const storageKey = roomOrderStorageKey(hubId);
+  const [roomOrder, setRoomOrder] = useState<string[]>(() => {
+    try {
+      return parseStoredRoomOrder(window.localStorage.getItem(storageKey));
+    } catch {
+      return [];
+    }
+  });
+
+  useEffect(() => {
+    const authoritativeIds = roomIdsKey === '' ? [] : roomIdsKey.split('\u0000');
+    setRoomOrder((current) => {
+      const next = reconcileRoomOrder(authoritativeIds, current);
+      try {
+        window.localStorage.setItem(storageKey, JSON.stringify(next));
+      } catch {
+        // The board remains usable when browser storage is disabled.
+      }
+      return next.join('\u0000') === current.join('\u0000') ? current : next;
+    });
+  }, [roomIdsKey, storageKey]);
+
+  const orderedRooms = useMemo(() => {
+    const byId = new Map(
+      membership.rooms.map((roomMembership) => [
+        roomMembership.room.id,
+        roomMembership
+      ])
+    );
+    return reconcileRoomOrder(roomIds, roomOrder)
+      .map((roomId) => byId.get(roomId))
+      .filter((room): room is (typeof membership.rooms)[number] => Boolean(room));
+  }, [membership.rooms, roomIds, roomOrder]);
+
+  const settingsOpen = settingsTargetId !== null;
+  const nodesQuery = usePolling(
+    useCallback(() => getNodesState(client), [client]),
+    { intervalMs: 5_000, enabled: settingsOpen }
+  );
+  const stateQuery = usePolling(
+    useCallback(() => getState(client), [client]),
+    { intervalMs: 0, enabled: settingsOpen }
+  );
+  const liveNodes = useMemo(() => parseNodes(nodesQuery.data), [nodesQuery.data]);
+  const settingsNode = settingsTargetId
+    ? liveNodes.find((node) => node.id === settingsTargetId) ?? null
+    : null;
+  const lightSettingsProfiles = useMemo(
+    () => lightSettingsProfilesFromState(stateQuery.data),
+    [stateQuery.data]
+  );
+  const lightSettingsSupport = useMemo(
+    () => lightProfileOverrideSupport(stateQuery.data),
+    [stateQuery.data]
+  );
 
   const refreshTopology = topologyQuery.refresh;
   const action = useDeviceCall(
@@ -485,12 +572,50 @@ function RoomsTab({ client }: { client: DeviceClient }) {
       [client, refreshTopology]
     )
   );
+  const identifyAction = useDeviceCall(
+    useCallback(
+      async (device: TopologyItem) => {
+        setIdentifyReceipt({
+          deviceId: device.id,
+          deviceName: device.name,
+          status: 'pending'
+        });
+        try {
+          await flashCanonicalDevice(client, device.id);
+          setIdentifyReceipt({
+            deviceId: device.id,
+            deviceName: device.name,
+            status: 'confirmed'
+          });
+        } catch (error) {
+          setIdentifyReceipt({
+            deviceId: device.id,
+            deviceName: device.name,
+            status: 'failed',
+            error: errorMessage(error)
+          });
+          throw error;
+        }
+      },
+      [client]
+    )
+  );
 
-  function roomId(room: Record<string, unknown>): string {
-    return asString(room.id) ?? asString(room.room_id) ?? asString(room.node_id) ?? '';
+  function saveRoomOrder(next: string[]) {
+    setRoomOrder(next);
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify(next));
+    } catch {
+      // Browser storage is optional; keep the in-memory visual order.
+    }
   }
-  function roomName(room: Record<string, unknown>): string {
-    return asString(room.name) ?? asString(room.label) ?? roomId(room);
+
+  async function refreshSettings() {
+    await Promise.all([
+      nodesQuery.refresh(),
+      stateQuery.refresh(),
+      refreshTopology()
+    ]);
   }
 
   async function reviewMove(proposal: RoomMoveProposal) {
@@ -514,11 +639,28 @@ function RoomsTab({ client }: { client: DeviceClient }) {
 
   function startDrag(event: DragEvent<HTMLElement>, device: TopologyItem) {
     event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('application/x-rhythm-device', device.id);
     event.dataTransfer.setData('text/plain', device.id);
+    setDraggedRoomId(null);
     setDraggedDeviceId(device.id);
   }
 
+  function startRoomDrag(event: DragEvent<HTMLElement>, roomId: string) {
+    event.stopPropagation();
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('application/x-rhythm-room', roomId);
+    event.dataTransfer.setData('text/plain', roomId);
+    setDraggedDeviceId(null);
+    setDraggedRoomId(roomId);
+  }
+
   function allowRoomDrop(event: DragEvent<HTMLElement>, roomId: string) {
+    if (draggedRoomId && draggedRoomId !== roomId) {
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+      setDragOverRoomId(roomId);
+      return;
+    }
     if (!draggedDeviceId) return;
     if (!buildRoomMoveProposal(membership, draggedDeviceId, roomId)) return;
     event.preventDefault();
@@ -528,8 +670,109 @@ function RoomsTab({ client }: { client: DeviceClient }) {
 
   function dropInRoom(event: DragEvent<HTMLElement>, roomId: string) {
     event.preventDefault();
-    const deviceId = event.dataTransfer.getData('text/plain') || draggedDeviceId;
+    const roomIdFromDrag =
+      event.dataTransfer.getData('application/x-rhythm-room') || draggedRoomId;
+    if (roomIdFromDrag) {
+      saveRoomOrder(moveRoomBefore(roomOrder, roomIdFromDrag, roomId));
+      setDraggedRoomId(null);
+      setDragOverRoomId(null);
+      return;
+    }
+    const deviceId =
+      event.dataTransfer.getData('application/x-rhythm-device') ||
+      draggedDeviceId;
     if (deviceId) proposeMove(deviceId, roomId);
+  }
+
+  async function reviewDeleteRoom(room: TopologyItem, childCount: number) {
+    const ok = await confirm({
+      title: 'Delete room',
+      message: `Delete room "${room.name}"? ${childCount} assigned device${childCount === 1 ? '' : 's'} will become unassigned. If this room is backed by one authoritative integration room, that linked native room may also be deleted; a later integration sync may recreate rooms it still owns.`,
+      confirmLabel: 'Delete room',
+      danger: true
+    });
+    if (!ok) return;
+    if (settingsTargetId === room.id) setSettingsTargetId(null);
+    await action.run(() => deleteRoom(client, room.id));
+  }
+
+  function renderDeviceCard(device: TopologyItem, readonly = false) {
+    const bulb = isBulbKind(device.kind);
+    return (
+      <article
+        className={`roomAssignmentDevice${readonly ? ' readonly' : ''}${draggedDeviceId === device.id ? ' dragging' : ''}`}
+        draggable={!readonly && !moveAction.busy && membership.rooms.length > 1}
+        key={device.id}
+        onDragStart={
+          readonly ? undefined : (event) => startDrag(event, device)
+        }
+        onDragEnd={() => {
+          setDraggedDeviceId(null);
+          setDragOverRoomId(null);
+        }}
+      >
+        {readonly ? (
+          <AlertTriangle
+            className="roomAssignmentWarning"
+            size={15}
+            aria-hidden="true"
+          />
+        ) : (
+          <GripVertical
+            className="roomAssignmentGrip"
+            size={16}
+            aria-hidden="true"
+          />
+        )}
+        <button
+          className={`roomAssignmentDeviceIdentity actionable${bulb ? ' identify' : ''}`}
+          type="button"
+          disabled={bulb && identifyAction.busy}
+          aria-label={
+            bulb
+              ? `Identify ${device.name}`
+              : `Open settings for ${device.name}`
+          }
+          onClick={() => {
+            if (bulb) {
+              void identifyAction.run(device);
+            } else {
+              setSettingsTargetId(device.id);
+            }
+          }}
+        >
+          <strong>{device.name}</strong>
+          <span>
+            {topologyKindLabel(device.kind)} ·{' '}
+            {bulb ? 'Tap to identify' : 'Tap for settings'} ·{' '}
+            <code>{device.id}</code>
+          </span>
+        </button>
+        <span className="roomAssignmentDeviceActions">
+          <button
+            className="iconOnlyButton"
+            type="button"
+            aria-label={`Open settings for ${device.name}`}
+            title="Settings"
+            onClick={() => setSettingsTargetId(device.id)}
+          >
+            <Settings size={14} />
+          </button>
+          {!readonly ? (
+            <button
+              className="consoleButton small"
+              type="button"
+              disabled={moveAction.busy || membership.rooms.length < 2}
+              aria-label={`Move ${device.name} to another room`}
+              onClick={() => openMovePicker(device)}
+            >
+              <ArrowRight size={13} />
+              <span>Move</span>
+            </button>
+          ) : null}
+        </span>
+      </article>
+    );
   }
 
   function openMovePicker(device: TopologyItem) {
@@ -556,97 +799,207 @@ function RoomsTab({ client }: { client: DeviceClient }) {
   return (
     <div className="roomManagementStack">
       <SectionCard
-        title="Room assignment"
-        subtitle={`${rooms.length} room(s) · ${assignedDeviceCount} assigned device(s) · ${assignedBulbCount} bulb(s)`}
-        busy={topologyQuery.refreshing || moveAction.busy}
-        error={topologyQuery.error ?? moveAction.error}
+        title="Rooms"
+        subtitle={`${membership.rooms.length} room(s) · ${assignedDeviceCount} assigned device(s) · ${assignedBulbCount} bulb(s)`}
+        busy={
+          topologyQuery.refreshing ||
+          moveAction.busy ||
+          action.busy ||
+          identifyAction.busy
+        }
+        error={
+          topologyQuery.error ??
+          moveAction.error ??
+          action.error ??
+          identifyAction.error
+        }
         rawPayload={topologyQuery.data ?? undefined}
         actions={
-          <button
-            className="consoleButton small"
-            type="button"
-            onClick={() => void topologyQuery.refresh()}
-          >
-            <RefreshCw size={14} />
-            <span>Reload</span>
-          </button>
+          <span className="rowActions">
+            <button
+              className="consoleButton small"
+              type="button"
+              disabled={roomOrder.join('\u0000') === roomIds.join('\u0000')}
+              title="Reset the browser-only visual room order"
+              onClick={() => saveRoomOrder(roomIds)}
+            >
+              <RotateCcw size={13} />
+              <span>Reset order</span>
+            </button>
+            <button
+              className="consoleButton small"
+              type="button"
+              onClick={() => void topologyQuery.refresh()}
+            >
+              <RefreshCw size={14} />
+              <span>Reload</span>
+            </button>
+          </span>
         }
       >
         <div className="roomAssignmentTrust">
           <ShieldCheck size={18} aria-hidden="true" />
           <div>
-            <strong>Verified moves only</strong>
+            <strong>Topology-backed, locally arranged</strong>
             <p>
-              Drag a card or use Move. Every change is reviewed, checked against
-              its current room on the appliance, and shown as complete only after
-              fresh topology confirms it.
+              Drag room handles to arrange this browser only. Drag devices or use
+              Move for distant rooms; every membership change is reviewed and
+              confirmed from fresh appliance topology.
             </p>
           </div>
+        </div>
+
+        <div className="roomBoardToolbar">
+          <TextField
+            value={newRoomName}
+            onChange={setNewRoomName}
+            placeholder="New room name"
+          />
+          <button
+            className="consoleButton"
+            type="button"
+            disabled={newRoomName.trim() === '' || action.busy}
+            onClick={() => {
+              void action.run(() => createRoom(client, newRoomName.trim()));
+              setNewRoomName('');
+            }}
+          >
+            Create room
+          </button>
+          <span className="roomBoardLocalNote">
+            Room order is saved only in this browser.
+          </span>
         </div>
 
         {membership.rooms.length === 0 ? (
           <EmptyState message="No rooms found in the topology payload — check Raw JSON." />
         ) : (
           <div className="roomAssignmentBoard" aria-label="Room assignment board">
-            {membership.rooms.map(({ room, children }) => (
-              <section
-                className={`roomAssignmentLane${dragOverRoomId === room.id ? ' dropTarget' : ''}`}
-                key={room.id}
-                aria-label={`${room.name} room, ${children.length} assigned device${children.length === 1 ? '' : 's'}`}
-                onDragEnter={(event) => allowRoomDrop(event, room.id)}
-                onDragOver={(event) => allowRoomDrop(event, room.id)}
-                onDragLeave={(event) => {
-                  if (!event.currentTarget.contains(event.relatedTarget as Node)) {
-                    setDragOverRoomId(null);
-                  }
-                }}
-                onDrop={(event) => dropInRoom(event, room.id)}
-              >
+            {orderedRooms.map(({ room, children }) => {
+              const roomIndex = roomOrder.indexOf(room.id);
+              const sections = segmentRoomDevices(children);
+              const bulbCount = children.filter((device) =>
+                isBulbKind(device.kind)
+              ).length;
+              return (
+                <section
+                  className={`roomAssignmentLane${dragOverRoomId === room.id ? ' dropTarget' : ''}${draggedRoomId === room.id ? ' dragging' : ''}`}
+                  key={room.id}
+                  aria-label={`${room.name} room, ${children.length} assigned device${children.length === 1 ? '' : 's'}`}
+                  onDragEnter={(event) => allowRoomDrop(event, room.id)}
+                  onDragOver={(event) => allowRoomDrop(event, room.id)}
+                  onDragLeave={(event) => {
+                    if (!event.currentTarget.contains(event.relatedTarget as Node)) {
+                      setDragOverRoomId(null);
+                    }
+                  }}
+                  onDrop={(event) => dropInRoom(event, room.id)}
+                >
                 <header className="roomAssignmentLaneHeader">
-                  <div>
-                    <strong>{room.name}</strong>
-                    <span className="mono" title={room.id}>{room.id}</span>
+                  <div className="roomAssignmentOrderControls">
+                    <button
+                      className="roomAssignmentRoomGrip"
+                      type="button"
+                      draggable
+                      aria-label={`Drag to reorder ${room.name}`}
+                      title="Drag to reorder this room visually"
+                      onDragStart={(event) => startRoomDrag(event, room.id)}
+                      onDragEnd={() => {
+                        setDraggedRoomId(null);
+                        setDragOverRoomId(null);
+                      }}
+                    >
+                      <GripVertical size={16} />
+                    </button>
+                    <button
+                      className="iconOnlyButton"
+                      type="button"
+                      disabled={roomIndex <= 0}
+                      aria-label={`Move ${room.name} earlier`}
+                      onClick={() =>
+                        saveRoomOrder(moveRoomByOffset(roomOrder, room.id, -1))
+                      }
+                    >
+                      <ArrowLeft size={13} />
+                    </button>
+                    <button
+                      className="iconOnlyButton"
+                      type="button"
+                      disabled={roomIndex < 0 || roomIndex >= roomOrder.length - 1}
+                      aria-label={`Move ${room.name} later`}
+                      onClick={() =>
+                        saveRoomOrder(moveRoomByOffset(roomOrder, room.id, 1))
+                      }
+                    >
+                      <ArrowRight size={13} />
+                    </button>
                   </div>
-                  <span className="roomAssignmentCount">{children.length}</span>
+                  <button
+                    className="roomAssignmentRoomIdentity"
+                    type="button"
+                    aria-label={`Edit ${room.name} room and settings`}
+                    onClick={() => setSettingsTargetId(room.id)}
+                  >
+                    <strong>{room.name}</strong>
+                    <span className="mono" title={room.id}>
+                      {room.id} · {bulbCount} bulb{bulbCount === 1 ? '' : 's'}
+                    </span>
+                  </button>
+                  <span className="roomAssignmentLaneActions">
+                    <span className="roomAssignmentCount">{children.length}</span>
+                    <button
+                      className="iconOnlyButton"
+                      type="button"
+                      title="Edit room and settings"
+                      aria-label={`Edit ${room.name} room and settings`}
+                      onClick={() => setSettingsTargetId(room.id)}
+                    >
+                      <Pencil size={13} />
+                    </button>
+                    <button
+                      className="iconOnlyButton"
+                      type="button"
+                      title="Merge another room into this room"
+                      aria-label={`Merge another room into ${room.name}`}
+                      disabled={membership.rooms.length < 2}
+                      onClick={() => {
+                        setMergeTarget(room);
+                        setMergeSourceId('');
+                      }}
+                    >
+                      <Link2 size={13} />
+                    </button>
+                    <button
+                      className="iconOnlyButton danger"
+                      type="button"
+                      title="Delete room"
+                      aria-label={`Delete ${room.name} room`}
+                      onClick={() => void reviewDeleteRoom(room, children.length)}
+                    >
+                      <Trash2 size={13} />
+                    </button>
+                  </span>
                 </header>
                 <div className="roomAssignmentCards">
                   {children.length === 0 ? (
                     <div className="roomAssignmentEmpty">Drop a device here</div>
                   ) : (
-                    children.map((device) => (
-                      <article
-                        className={`roomAssignmentDevice${draggedDeviceId === device.id ? ' dragging' : ''}`}
-                        draggable={!moveAction.busy && membership.rooms.length > 1}
-                        key={device.id}
-                        onDragStart={(event) => startDrag(event, device)}
-                        onDragEnd={() => {
-                          setDraggedDeviceId(null);
-                          setDragOverRoomId(null);
-                        }}
-                      >
-                        <GripVertical className="roomAssignmentGrip" size={16} aria-hidden="true" />
-                        <div className="roomAssignmentDeviceIdentity">
-                          <strong>{device.name}</strong>
-                          <span>
-                            {topologyKindLabel(device.kind)} · <code>{device.id}</code>
-                          </span>
+                    sections.map((section) => (
+                      <section className="roomAssignmentDeviceSection" key={section.id}>
+                        <header>
+                          <span>{section.label}</span>
+                          <span>{section.items.length}</span>
+                        </header>
+                        <div>
+                          {section.items.map((device) => renderDeviceCard(device))}
                         </div>
-                        <button
-                          className="consoleButton small"
-                          type="button"
-                          disabled={moveAction.busy || membership.rooms.length < 2}
-                          aria-label={`Move ${device.name} to another room`}
-                          onClick={() => openMovePicker(device)}
-                        >
-                          <ArrowRight size={13} />
-                          <span>Move</span>
-                        </button>
-                      </article>
+                      </section>
                     ))
                   )}
                 </div>
-              </section>
-            ))}
+                </section>
+              );
+            })}
 
             {membership.unassigned.length > 0 ? (
               <section
@@ -661,16 +1014,16 @@ function RoomsTab({ client }: { client: DeviceClient }) {
                   <span className="roomAssignmentCount">{membership.unassigned.length}</span>
                 </header>
                 <div className="roomAssignmentCards">
-                  {membership.unassigned.map((device) => (
-                    <article className="roomAssignmentDevice readonly" key={device.id}>
-                      <AlertTriangle className="roomAssignmentWarning" size={15} aria-hidden="true" />
-                      <div className="roomAssignmentDeviceIdentity">
-                        <strong>{device.name}</strong>
-                        <span>
-                          {topologyKindLabel(device.kind)} · <code>{device.id}</code>
-                        </span>
+                  {segmentRoomDevices(membership.unassigned).map((section) => (
+                    <section className="roomAssignmentDeviceSection" key={section.id}>
+                      <header>
+                        <span>{section.label}</span>
+                        <span>{section.items.length}</span>
+                      </header>
+                      <div>
+                        {section.items.map((device) => renderDeviceCard(device, true))}
                       </div>
-                    </article>
+                    </section>
                   ))}
                 </div>
               </section>
@@ -700,144 +1053,26 @@ function RoomsTab({ client }: { client: DeviceClient }) {
             <RawPayloadToggle payload={moveReceipt} />
           </div>
         ) : null}
-      </SectionCard>
 
-      <SectionCard
-        title="Room administration"
-        subtitle="Create, rename, merge, and delete topology rooms"
-        busy={action.busy}
-        error={action.error}
-      >
-        <div className="buttonRow">
-          <TextField
-            value={newRoomName}
-            onChange={setNewRoomName}
-            placeholder="New room name"
-          />
-          <button
-            className="consoleButton"
-            type="button"
-            disabled={newRoomName.trim() === '' || action.busy}
-            onClick={() => {
-              void action.run(() => createRoom(client, newRoomName.trim()));
-              setNewRoomName('');
-            }}
-          >
-            Create room
-          </button>
-        </div>
-
-        {rooms.length === 0 ? (
-          <EmptyState message="No rooms available." />
-        ) : (
-          <div className="dataTableWrap">
-            <table className="dataTable">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Id</th>
-                  <th>Assigned</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {rooms.map((room, index) => {
-                  const id = roomId(room);
-                  const name = roomName(room);
-                  const isEditing = editingId === id;
-                  const roomMembership = membership.rooms.find(
-                    ({ room: memberRoom }) => memberRoom.id === id
-                  );
-                  const deviceCount = roomMembership?.children.length ?? 0;
-                  const bulbCount = roomMembership?.bulbs.length ?? 0;
-                  return (
-                    <tr key={id || index}>
-                      <td>
-                        {isEditing ? (
-                          <span className="inlineEdit">
-                            <TextField value={draftName} onChange={setDraftName} />
-                            <button
-                              className="iconOnlyButton"
-                              type="button"
-                              aria-label="Save room name"
-                              onClick={() => {
-                                setEditingId(null);
-                                if (draftName.trim() && draftName !== name) {
-                                  void action.run(() => renameRoom(client, id, draftName.trim()));
-                                }
-                              }}
-                            >
-                              <Check size={14} />
-                            </button>
-                            <button
-                              className="iconOnlyButton"
-                              type="button"
-                              aria-label="Cancel"
-                              onClick={() => setEditingId(null)}
-                            >
-                              <X size={14} />
-                            </button>
-                          </span>
-                        ) : (
-                          <button
-                            className="inlineEditName"
-                            type="button"
-                            onClick={() => {
-                              setEditingId(id);
-                              setDraftName(name);
-                            }}
-                          >
-                            {name}
-                            <Pencil size={12} />
-                          </button>
-                        )}
-                      </td>
-                      <td className="mono dim">{id}</td>
-                      <td>
-                        {deviceCount} device{deviceCount === 1 ? '' : 's'} · {bulbCount}{' '}
-                        bulb{bulbCount === 1 ? '' : 's'}
-                      </td>
-                      <td>
-                        <span className="rowActions">
-                          <button
-                            className="consoleButton small"
-                            type="button"
-                            onClick={() => {
-                              setMergeTarget(room);
-                              setMergeSourceId('');
-                            }}
-                          >
-                            Merge into
-                          </button>
-                          <button
-                            className="consoleButton small danger"
-                            type="button"
-                            onClick={() => {
-                              void (async () => {
-                                const ok = await confirm({
-                                  title: 'Delete room',
-                                  message: `Delete room "${name}"? Devices in it become roomless / go to triage.`,
-                                  confirmLabel: 'Delete room',
-                                  danger: true
-                                });
-                                if (ok) {
-                                  await action.run(() => deleteRoom(client, id));
-                                }
-                              })();
-                            }}
-                          >
-                            <Trash2 size={13} />
-                            <span>Delete</span>
-                          </button>
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+        {identifyReceipt ? (
+          <div className={`roomIdentifyReceipt ${identifyReceipt.status}`}>
+            {identifyReceipt.status === 'pending' ? (
+              <Clock3 size={16} aria-hidden="true" />
+            ) : identifyReceipt.status === 'failed' ? (
+              <AlertTriangle size={16} aria-hidden="true" />
+            ) : (
+              <Zap size={16} aria-hidden="true" />
+            )}
+            <span>
+              {identifyReceipt.status === 'pending'
+                ? `Identifying ${identifyReceipt.deviceName}…`
+                : identifyReceipt.status === 'failed'
+                  ? `Identify failed for ${identifyReceipt.deviceName}: ${identifyReceipt.error ?? 'unknown error'}`
+                  : `Identify command sent to ${identifyReceipt.deviceName}.`}
+            </span>
+            <code>{identifyReceipt.deviceId}</code>
           </div>
-        )}
+        ) : null}
       </SectionCard>
 
       {movePickerDevice ? (
@@ -873,7 +1108,7 @@ function RoomsTab({ client }: { client: DeviceClient }) {
 
       {mergeTarget ? (
         <Modal
-          title={`Merge a room into ${roomName(mergeTarget)}`}
+          title={`Merge a room into ${mergeTarget.name}`}
           onClose={() => setMergeTarget(null)}
         >
           <FormRow label="Source room" hint="Its devices move here; the source room is removed">
@@ -881,9 +1116,10 @@ function RoomsTab({ client }: { client: DeviceClient }) {
               value={mergeSourceId}
               onChange={setMergeSourceId}
               placeholder="Pick a room"
-              options={rooms
-                .filter((room) => roomId(room) !== roomId(mergeTarget))
-                .map((room) => ({ value: roomId(room), label: roomName(room) }))}
+              options={membership.rooms
+                .map(({ room }) => room)
+                .filter((room) => room.id !== mergeTarget.id)
+                .map((room) => ({ value: room.id, label: room.name }))}
             />
           </FormRow>
           <div className="confirmActions">
@@ -895,13 +1131,51 @@ function RoomsTab({ client }: { client: DeviceClient }) {
               type="button"
               disabled={mergeSourceId === ''}
               onClick={() => {
-                void action.run(() => mergeRooms(client, roomId(mergeTarget), mergeSourceId));
+                void action.run(() => mergeRooms(client, mergeTarget.id, mergeSourceId));
                 setMergeTarget(null);
               }}
             >
               Merge
             </button>
           </div>
+        </Modal>
+      ) : null}
+
+      {settingsTargetId ? (
+        <Modal
+          title={`Settings · ${settingsNode?.name ?? settingsTargetId}`}
+          onClose={() => setSettingsTargetId(null)}
+          wide
+        >
+          {settingsNode ? (
+            <NodeDetail
+              key={settingsNode.id}
+              node={settingsNode}
+              parentProfileOverrides={
+                liveNodes.find((node) => node.id === settingsNode.parentId)
+                  ?.profileOverrides ?? {}
+              }
+              onWrite={refreshSettings}
+              lightSettingsProfiles={lightSettingsProfiles}
+              lightSettingsSupport={lightSettingsSupport}
+              lightSettingsLoading={
+                stateQuery.loading ||
+                (stateQuery.refreshing && stateQuery.data === null)
+              }
+              lightSettingsError={stateQuery.error}
+            />
+          ) : (
+            <EmptyState
+              message={
+                nodesQuery.error ??
+                (nodesQuery.loading ||
+                (nodesQuery.refreshing && nodesQuery.data === null)
+                  ? 'Loading live device settings…'
+                  : 'This topology item is not present in live node state.')
+              }
+              icon={<Settings size={20} />}
+            />
+          )}
         </Modal>
       ) : null}
     </div>

@@ -82,7 +82,7 @@ import {
 import { groupTopologyItems, isRoomKind } from './topologyMembership';
 import '../../styles/pages-phase4.css';
 
-type NodeSummary = {
+export type NodeSummary = {
   id: string;
   name: string;
   kind?: string;
@@ -96,7 +96,7 @@ type NodeSummary = {
   raw: Record<string, unknown>;
 };
 
-function parseNodes(payload: unknown): NodeSummary[] {
+export function parseNodes(payload: unknown): NodeSummary[] {
   const record = asRecord(payload);
   const rawNodes = Array.isArray(payload)
     ? asRecordArray(payload)
@@ -242,7 +242,7 @@ export default function NodesPage() {
   );
 }
 
-function NodeDetail({
+export function NodeDetail({
   node,
   parentProfileOverrides,
   onWrite,
@@ -260,6 +260,7 @@ function NodeDetail({
   lightSettingsError: string | null;
 }) {
   const client = useDeviceClient();
+  const lightAddressable = isLightAddressableKind(node.kind);
 
   const [colorScope, setColorScope] = useState<'preview' | 'mood' | 'auto'>('auto');
   const [wheelRgb, setWheelRgb] = useState<RgbColor>({ r: 255, g: 180, b: 120 });
@@ -289,52 +290,61 @@ function NodeDetail({
           </span>
         }
       >
-        <div className="actionRow">
-          {NODE_ACTIONS.map((action) => (
-            <button
-              key={action.id}
-              className="consoleButton small"
-              type="button"
-              disabled={write.busy}
-              onClick={() =>
-                void write.run(() => sendNodeAction(client, node.id, action.id))
-              }
-            >
-              {action.label}
-            </button>
-          ))}
-        </div>
+        {lightAddressable ? (
+          <>
+            <div className="actionRow">
+              {NODE_ACTIONS.map((action) => (
+                <button
+                  key={action.id}
+                  className="consoleButton small"
+                  type="button"
+                  disabled={write.busy}
+                  onClick={() =>
+                    void write.run(() => sendNodeAction(client, node.id, action.id))
+                  }
+                >
+                  {action.label}
+                </button>
+              ))}
+            </div>
 
-        <Slider
-          label="Brightness"
-          value={node.brightness ?? 50}
-          min={1}
-          max={100}
-          format={(value) => `${Math.round(value)}%`}
-          disabled={write.busy}
-          onCommit={(value) =>
-            void write.run(() => setNodeBrightness(client, node.id, value))
-          }
-        />
-        <KelvinSlider
-          label="Color temp"
-          value={node.kelvin ?? 3000}
-          min={500}
-          max={6500}
-          disabled={write.busy}
-          onCommit={(value) =>
-            void write.run(() =>
-              setNodeCurveColorTemperature(client, node.id, value, true)
-            )
-          }
-        />
+            <Slider
+              label="Brightness"
+              value={node.brightness ?? 50}
+              min={1}
+              max={100}
+              format={(value) => `${Math.round(value)}%`}
+              disabled={write.busy}
+              onCommit={(value) =>
+                void write.run(() => setNodeBrightness(client, node.id, value))
+              }
+            />
+            <KelvinSlider
+              label="Color temp"
+              value={node.kelvin ?? 3000}
+              min={500}
+              max={6500}
+              disabled={write.busy}
+              onCommit={(value) =>
+                void write.run(() =>
+                  setNodeCurveColorTemperature(client, node.id, value, true)
+                )
+              }
+            />
+          </>
+        ) : (
+          <p className="cardNote">
+            This device does not advertise light controls. Runtime preferences
+            and raw device state remain available below.
+          </p>
+        )}
       </SectionCard>
 
       {isRoomKind(node.kind) ? (
         <RoomRenameCard node={node} onWrite={onWrite} />
       ) : null}
 
-      {isLightAddressableKind(node.kind) ? (
+      {lightAddressable ? (
         <NodeLightSettingsCard
           node={node}
           parentProfileOverrides={parentProfileOverrides}
@@ -346,39 +356,41 @@ function NodeDetail({
         />
       ) : null}
 
-      <div className="cardGrid two">
-        <SectionCard title="Color" subtitle="Direct RGB with scope">
-          <div className="colorRow">
-            <ColorWheel
-              rgb={wheelRgb}
-              size={180}
-              onChange={setWheelRgb}
-              onCommit={(rgb) => {
-                setWheelRgb(rgb);
-                void write.run(() =>
-                  setNodeColor(client, node.id, { rgb, scope: colorScope })
-                );
-              }}
-            />
-            <div className="colorControls">
-              <SegmentedControl
-                value={colorScope}
-                onChange={(value) =>
-                  setColorScope(value as 'preview' | 'mood' | 'auto')
-                }
-                options={[
-                  { value: 'auto', label: 'Auto' },
-                  { value: 'mood', label: 'Mood' },
-                  { value: 'preview', label: 'Preview' }
-                ]}
+      <div className={`cardGrid${lightAddressable ? ' two' : ''}`}>
+        {lightAddressable ? (
+          <SectionCard title="Color" subtitle="Direct RGB with scope">
+            <div className="colorRow">
+              <ColorWheel
+                rgb={wheelRgb}
+                size={180}
+                onChange={setWheelRgb}
+                onCommit={(rgb) => {
+                  setWheelRgb(rgb);
+                  void write.run(() =>
+                    setNodeColor(client, node.id, { rgb, scope: colorScope })
+                  );
+                }}
               />
-              <p className="cardNote">
-                Preview is temporary, mood persists as an override, auto lets
-                the device decide.
-              </p>
+              <div className="colorControls">
+                <SegmentedControl
+                  value={colorScope}
+                  onChange={(value) =>
+                    setColorScope(value as 'preview' | 'mood' | 'auto')
+                  }
+                  options={[
+                    { value: 'auto', label: 'Auto' },
+                    { value: 'mood', label: 'Mood' },
+                    { value: 'preview', label: 'Preview' }
+                  ]}
+                />
+                <p className="cardNote">
+                  Preview is temporary, mood persists as an override, auto lets
+                  the device decide.
+                </p>
+              </div>
             </div>
-          </div>
-        </SectionCard>
+          </SectionCard>
+        ) : null}
 
         <SectionCard title="Preferences" subtitle="Per-node runtime flags">
           <ToggleSwitch
