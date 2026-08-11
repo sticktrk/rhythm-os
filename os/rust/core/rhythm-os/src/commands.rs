@@ -5698,6 +5698,29 @@ fn sanitize_nonportable_backup_installation(installation: &mut BackupInstallatio
         .retain(|file| !file.path.starts_with("hue_ble/") && !file.path.starts_with("local_ble/"));
 }
 
+fn migrate_legacy_backup_external_room_automation_policy(installation: &mut BackupInstallation) {
+    let configured_hub_keys = installation
+        .hub_credentials
+        .iter()
+        .filter_map(|credential| {
+            credential
+                .hub_type
+                .as_ref()
+                .map(|hub_type| HubKey::new(hub_type.clone(), credential.address.clone()))
+        })
+        .collect::<Vec<_>>();
+    let migration = installation
+        .topology
+        .migrate_legacy_external_room_automation_policy(&configured_hub_keys);
+    if migration.changed() {
+        info!(
+            target: "cmd",
+            "Migrated legacy backup Hue room automation policy: grandfathered_hue_rooms={}",
+            migration.grandfathered_hue_rooms
+        );
+    }
+}
+
 pub fn build_profile_bundle_dto(state: &SharedState) -> Result<ProfileBundle> {
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
@@ -5810,8 +5833,9 @@ pub fn do_factory_reset(state: &SharedState) -> Result<String> {
         .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
     // Releasing an authoritative external controller is itself a safety
     // prerequisite for reset. The platform barrier may scrub peripheral
-    // trust or stage other irreversible local work, so a Hue snapshot-retention
-    // failure must abort while credentials and local state are still intact.
+    // trust or stage other irreversible local work, so Hue recovery preflight,
+    // controller release, and the fail-closed policy tombstone must all
+    // complete while credentials and controller recovery material are intact.
     preflight_current_hue_recovery_state(state, HueRecoveryPreflightMode::ControllerRelease)
         .context("factory reset Hue recovery preflight failed")?;
     let release_keys = configured_or_active_hub_keys(state)?;
@@ -5821,6 +5845,12 @@ pub fn do_factory_reset(state: &SharedState) -> Result<String> {
         crate::hub::ExternalControllerReleaseReason::FactoryReset,
     )
     .context("releasing external controller authority before factory reset")?;
+    let policy_keys = external_room_automation_policy_keys_for_disconnect(state, &release_keys)?;
+    durably_forget_external_room_automation_policy(
+        state,
+        &policy_keys,
+        crate::hub::ExternalControllerReleaseReason::FactoryReset,
+    )?;
 
     if let Some(callback) = state
         .lock()
@@ -5830,10 +5860,11 @@ pub fn do_factory_reset(state: &SharedState) -> Result<String> {
     {
         callback(state).context("preparing platform for factory reset")?;
     }
-    // The platform safety barrier runs before any shared state is destroyed.
-    // In particular, an appliance may need live hub metadata and credentials
-    // to release peripheral-held Bluetooth trust. A failed barrier therefore
-    // leaves the current local installation intact and retryable.
+    // The platform safety barrier runs before credentials or hub state are
+    // destroyed. In particular, an appliance may need live hub metadata and
+    // credentials to release peripheral-held Bluetooth trust. A failed barrier
+    // therefore remains retryable, with room automation intentionally kept
+    // fail-closed after the external controller was restored.
     (|| {
         disconnect_hubs_after_external_controller_release(state)?;
         clear_factory_reset_storage(state)?;
@@ -6373,18 +6404,21 @@ enum HueRecoveryPreflightMode {
 
 /// Refuse to cross a destructive local-state boundary if persisted Hue
 /// recovery material has become orphaned from the one credential that can
-/// restore its physical bridge. This check intentionally runs before the
+/// restore its physical bridge, or when the runtime cannot execute the full
+/// release/finalization lifecycle. This check intentionally runs before the
 /// integration release callback, platform reset barrier, or backup
 /// replacement writes anything.
 fn preflight_current_hue_recovery_state(
     state: &SharedState,
     mode: HueRecoveryPreflightMode,
 ) -> Result<Vec<BackupIntegrationFile>> {
-    let (storage, credentials) = {
+    let (storage, credentials, release_callback_available, finalize_callback_available) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         (
             s.storage.clone(),
             s.hub_credentials.values().cloned().collect::<Vec<_>>(),
+            s.release_external_controller_authority_fn.is_some(),
+            s.finalize_external_controller_release_fn.is_some(),
         )
     };
     let Some(storage) = storage else {
@@ -6441,13 +6475,17 @@ fn preflight_current_hue_recovery_state(
                 "Persisted state contains Hue controller recovery state that cannot be transferred during controller release"
             );
         }
-        if hue_ownership_phase_is_archival(&phase)
-            && (matching_credentials.is_empty()
-                || (matching_credentials.len() == 1 && matching_usable_credentials == 1))
-        {
+        if hue_ownership_phase_is_archival(&phase) && matching_credentials.is_empty() {
             continue;
         }
         if matching_credentials.len() == 1 && matching_usable_credentials == 1 {
+            if mode == HueRecoveryPreflightMode::ControllerRelease
+                && (!release_callback_available || !finalize_callback_available)
+            {
+                anyhow::bail!(
+                    "Persisted Hue controller recovery cannot be released because its lifecycle callbacks are unavailable"
+                );
+            }
             continue;
         }
         anyhow::bail!(
@@ -9910,6 +9948,11 @@ pub fn do_backup_restore(state: &SharedState, bundle: BackupBundle) -> Result<St
     validate_imported_backup_configuration(&bundle.configuration)?;
     let mut installation = bundle.installation.clone();
     sanitize_nonportable_backup_installation(&mut installation);
+    // Backup restore bypasses startup's persisted-state migration and commits
+    // the imported topology directly. Migrate the imported graph while its
+    // original configured-hub set is still available, before either the
+    // authority-state commit or stored-hub bootstrap can observe it.
+    migrate_legacy_backup_external_room_automation_policy(&mut installation);
     let valid_profile_ids = valid_import_profile_ids(&bundle.configuration.profiles);
     let scene_ids =
         valid_scene_ids_from_map(&normalized_scene_map(bundle.configuration.scenes.clone())?);
@@ -10134,7 +10177,18 @@ pub fn do_room_set(
             (room_unchanged, room_has_new_light_device_ids)
         })
         .unwrap_or((false, false));
-    if room_unchanged {
+    // A restored per-hub registry can already contain this native room while
+    // the canonical topology is absent (for example, a credentials/registry-
+    // only legacy backup). Treat it as unchanged only after the topology
+    // binding also exists; otherwise this sync is the one chance to recreate
+    // the room and make its migrated automation policy effective.
+    let topology_binding_exists = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .topology
+        .find_by_hub_room(hub_key, &params.id)
+        .is_some();
+    if room_unchanged && topology_binding_exists {
         if apply_runtime {
             if let Ok(room_state) = build_room_rhythm_state(state, &params.id) {
                 info!(target: "cmd", "room_set: {} unchanged, skipping persist", params.id);
@@ -12599,7 +12653,29 @@ fn configured_or_active_hub_keys(state: &SharedState) -> Result<Vec<HubKey>> {
         .chain(state.hubs.keys())
         .cloned()
         .collect::<Vec<_>>();
-    keys.sort_by(|left, right| left.to_string().cmp(&right.to_string()));
+    keys.sort_by_key(|key| key.to_string());
+    keys.dedup();
+    Ok(keys)
+}
+
+/// Include Hue keys retained only by topology policy in the durable tombstone
+/// set. They are intentionally not returned from `configured_or_active_hub_keys`:
+/// a marker-only key has no live controller to release or finalize.
+fn external_room_automation_policy_keys_for_disconnect(
+    state: &SharedState,
+    release_keys: &[HubKey],
+) -> Result<Vec<HubKey>> {
+    let mut keys = release_keys.to_vec();
+    keys.extend(
+        state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .topology
+            .referenced_hub_keys()
+            .into_iter()
+            .filter(|key| key.hub_type.as_str() == crate::hub::HubType::HUE),
+    );
+    keys.sort_by_key(|key| key.to_string());
     keys.dedup();
     Ok(keys)
 }
@@ -12631,6 +12707,50 @@ fn stage_hub_credential_deletion(
     storage
         .save_all_hub_credentials(&remaining)
         .context("Failed to durably delete hub credentials")?;
+    Ok(())
+}
+
+/// Durably clear retained room-automation authority after successful controller
+/// release and before credential removal or finalization becomes irreversible.
+///
+/// A failed coupled authority-state commit restores the exact in-memory
+/// topology and leaves credentials untouched so the disconnect can be retried.
+/// The integration's already-durable released phase continues to fence a new
+/// takeover until that retry completes.
+fn durably_forget_external_room_automation_policy(
+    state: &SharedState,
+    hub_keys: &[HubKey],
+    reason: crate::hub::ExternalControllerReleaseReason,
+) -> Result<()> {
+    let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let topology_before = s.topology.clone();
+    let mut changed = false;
+    for key in hub_keys {
+        changed |= s
+            .topology
+            .forget_external_room_automation_policy_for_hub(key);
+    }
+    if !changed {
+        return Ok(());
+    }
+    // Backup restore and factory reset are the two explicit replacement
+    // operations allowed to recover a corrupt combined authority snapshot.
+    // Their intermediate tombstone must cross the same durability boundary,
+    // but it deliberately leaves the recovery fence raised until the complete
+    // replacement installation is committed below. Ordinary disconnects must
+    // preserve corrupt evidence and therefore use the checked save path.
+    let save_result = match reason {
+        crate::hub::ExternalControllerReleaseReason::BackupRestore
+        | crate::hub::ExternalControllerReleaseReason::FactoryReset => {
+            save_authority_state_unchecked(&s)
+        }
+        _ => save_authority_state(&s),
+    };
+    if let Err(error) = save_result {
+        s.topology = topology_before;
+        return Err(error.context("Failed to durably forget external room automation policy"));
+    }
+    s.invalidate_queued_light_dispatches();
     Ok(())
 }
 
@@ -12671,6 +12791,8 @@ fn disconnect_hubs_with_reason_under_transaction(
         .context("hub disconnect Hue recovery preflight failed")?;
     let release_keys = configured_or_active_hub_keys(state)?;
     prepare_external_controller_release(state, &release_keys, reason)?;
+    let policy_keys = external_room_automation_policy_keys_for_disconnect(state, &release_keys)?;
+    durably_forget_external_room_automation_policy(state, &policy_keys, reason)?;
 
     disconnect_hubs_after_external_controller_release(state)
 }
@@ -12684,22 +12806,22 @@ fn disconnect_hubs_with_reason_under_transaction(
 /// before entering this local teardown.
 fn disconnect_hubs_after_external_controller_release(state: &SharedState) -> Result<()> {
     let release_keys = configured_or_active_hub_keys(state)?;
-    let hub_keys: Vec<HubKey> = state
+    let hub_keys = state
         .lock()
         .map_err(|_| anyhow::anyhow!("lock"))?
         .hubs
         .keys()
         .cloned()
-        .collect();
+        .collect::<Vec<_>>();
     let discovered_native_ids = HashSet::new();
     for hub_key in &hub_keys {
         let _ = reconcile_hub_endpoint_visibility(state, hub_key, &discovered_native_ids)?;
     }
 
     // Finish every fallible local visibility update before crossing the
-    // credential/finalization boundary. Once release becomes archival, no
-    // ordinary error may leave a live pending hub able to begin a new
-    // acquisition epoch.
+    // credential/finalization boundary. The authority-policy tombstone became
+    // durable after controller release, so any failure here remains fail-closed
+    // while credentials stay retryable.
     stage_hub_credential_deletion(state, None)?;
     finalize_external_controller_release(state, &release_keys)?;
 
@@ -12821,6 +12943,11 @@ pub fn do_hub_disconnect_one(state: &SharedState, hub_type_str: &str, address: &
     preflight_current_hue_recovery_state(state, HueRecoveryPreflightMode::ControllerRelease)
         .context("hub disconnect Hue recovery preflight failed")?;
     prepare_external_controller_release(
+        state,
+        std::slice::from_ref(&key),
+        crate::hub::ExternalControllerReleaseReason::UserDisconnect,
+    )?;
+    durably_forget_external_room_automation_policy(
         state,
         std::slice::from_ref(&key),
         crate::hub::ExternalControllerReleaseReason::UserDisconnect,
@@ -18798,7 +18925,7 @@ mod tests {
     }
 
     #[test]
-    fn room_set_unchanged_skips_registry_write_when_syncing_without_runtime_apply() {
+    fn room_set_registry_match_without_topology_recreates_binding_during_sync() {
         let (state, runtime) = setup_state_with_registry(vec![make_snapshot("r1", false, false)]);
         let hub_key = state.lock().unwrap().hubs.keys().next().cloned().unwrap();
         let params = RoomParams {
@@ -18816,6 +18943,12 @@ mod tests {
         assert_eq!(result, "");
         assert!(runtime.restore_calls().is_empty());
         assert_eq!(runtime.engine_all_room_snapshots().len(), 1);
+        assert!(state
+            .lock()
+            .unwrap()
+            .topology
+            .find_by_hub_room(&hub_key, "r1")
+            .is_some());
     }
 
     #[test]
@@ -21971,6 +22104,94 @@ mod tests {
         key
     }
 
+    fn legacy_hue_topology(
+        key: &HubKey,
+        include_room: bool,
+    ) -> (crate::topology::RoomTopologyStore, Option<String>) {
+        let mut topology = crate::topology::RoomTopologyStore::new();
+        let room_id = include_room.then(|| {
+            let room_id = topology.create_room("Office");
+            assert!(topology.upsert_room_binding(
+                &room_id,
+                crate::topology::HubRoomBinding {
+                    hub_key: key.clone(),
+                    hub_room_id: "hue-office".to_string(),
+                    control_id: "grouped-office".to_string(),
+                    light_device_ids: Vec::new(),
+                },
+            ));
+            room_id
+        });
+        let mut value = serde_json::to_value(topology).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("external_room_automation_policy_version");
+        let mut topology: crate::topology::RoomTopologyStore =
+            serde_json::from_value(value).unwrap();
+        topology.rebuild_indices();
+        (topology, room_id)
+    }
+
+    fn hue_disconnect_policy_fixture() -> (SharedState, TestStorage, HubKey, String) {
+        let storage = TestStorage::default();
+        let key = HubKey::new(HubType::new(HubType::HUE), "bridge.local");
+        let credential = HubCredentials::new(
+            HubType::HUE,
+            &key.address,
+            serde_json::json!({"username": "persisted-secret"}),
+        );
+        let (mut topology, room_id) = legacy_hue_topology(&key, true);
+        assert!(topology
+            .migrate_legacy_external_room_automation_policy(std::slice::from_ref(&key))
+            .changed());
+        let room_id = room_id.unwrap();
+        let state = Arc::new(Mutex::new(AppState {
+            storage: Some(Arc::new(storage.clone())),
+            topology,
+            ..Default::default()
+        }));
+        {
+            let mut s = state.lock().unwrap();
+            s.hub_credentials.insert(key.clone(), credential.clone());
+            save_authority_state(&s).unwrap();
+        }
+        storage.inner.lock().unwrap().hub_credentials = vec![credential];
+        (state, storage, key, room_id)
+    }
+
+    fn legacy_hue_backup(
+        topology: crate::topology::RoomTopologyStore,
+        key: &HubKey,
+    ) -> BackupBundle {
+        BackupBundle {
+            schema_version: crate::bundle::LEGACY_BACKUP_SCHEMA_VERSION,
+            kind: BundleKind::BackupBundle,
+            created_at: "2026-08-11T00:00:00Z".into(),
+            secrets_included: true,
+            configuration: BackupConfiguration::default(),
+            installation: BackupInstallation {
+                location: None,
+                rooms: rhythm_core::RoomManager::new(),
+                topology,
+                canonical_registry: crate::canonical::registry::CanonicalRegistry::new(),
+                hub_credentials: vec![BackupHubCredentials {
+                    hub_type: Some(key.hub_type.clone()),
+                    address: key.address.clone(),
+                    data: Some(serde_json::json!({"username": "restored-secret"})),
+                }],
+                hub_registries: Vec::new(),
+                integration_files: Vec::new(),
+            },
+            runtime_state: BackupRuntimeState {
+                active_mode: RhythmMode::Day,
+                last_change_cause: ModeChangeCause::Manual,
+                last_change_transition_id: None,
+                last_change_epoch_ms: None,
+            },
+        }
+    }
+
     fn install_mock_hub_provider(state: &SharedState) {
         let mut app = state.lock().unwrap();
         app.get_hub_provider_fn = Some(Arc::new(|_| &MOCK_BACKUP_HUB_PROVIDER));
@@ -23700,6 +23921,8 @@ mod tests {
             app.hub_capabilities
                 .push(crate::hub::HubIntegrationCapability::new(HubType::HUE));
             app.get_hub_provider_fn = Some(Arc::new(|_| &ACCEPTING_HUE_BACKUP_HUB_PROVIDER));
+            app.release_external_controller_authority_fn = Some(Arc::new(|_, _, _| Ok(())));
+            app.finalize_external_controller_release_fn = Some(Arc::new(|_, _| Ok(())));
         }
         let bundle = hue_authority_backup_bundle(&state, "bridge-1");
         let bootstrap_calls = Arc::new(AtomicUsize::new(0));
@@ -23974,6 +24197,145 @@ mod tests {
             bundle.installation.rooms.get("stale-node").is_none(),
             "stale runtime node should not leak into backup export"
         );
+    }
+
+    #[test]
+    fn legacy_hue_backup_restore_grandfathers_bound_rooms_before_bootstrap_and_restart() {
+        let storage = TestStorage::default();
+        let key = HubKey::new(HubType::new(HubType::HUE), "bridge.local");
+        let (topology, room_id) = legacy_hue_topology(&key, true);
+        let room_id = room_id.unwrap();
+        let bootstrap_observed_admission = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(Mutex::new(AppState {
+            storage: Some(Arc::new(storage.clone())),
+            hub_capabilities: vec![HubIntegrationCapability::new(HubType::HUE)],
+            get_hub_provider_fn: Some(Arc::new(|_| &ACCEPTING_HUE_BACKUP_HUB_PROVIDER)),
+            ..Default::default()
+        }));
+        {
+            let room_id = room_id.clone();
+            let key = key.clone();
+            let observed = bootstrap_observed_admission.clone();
+            state.lock().unwrap().request_hub_bootstrap_fn = Some(Arc::new(move |state| {
+                let s = state.lock().unwrap();
+                assert_eq!(
+                    s.topology.external_room_automation_owner(&room_id, &key),
+                    Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+                );
+                assert!(s.rhythm_automation_allowed_for_node(&room_id));
+                observed.store(true, Ordering::SeqCst);
+            }));
+        }
+
+        do_backup_restore(&state, legacy_hue_backup(topology, &key)).unwrap();
+
+        assert!(bootstrap_observed_admission.load(Ordering::SeqCst));
+        {
+            let s = state.lock().unwrap();
+            assert_eq!(
+                s.topology.external_room_automation_owner(&room_id, &key),
+                Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+            );
+            assert!(s.rhythm_automation_allowed_for_node(&room_id));
+        }
+
+        let mut restarted = AppState {
+            storage: Some(Arc::new(storage)),
+            ..Default::default()
+        };
+        crate::storage::load_persisted_state(&mut restarted);
+        assert_eq!(
+            restarted
+                .topology
+                .external_room_automation_owner(&room_id, &key),
+            Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+        );
+        assert!(restarted.rhythm_automation_allowed_for_node(&room_id));
+    }
+
+    #[test]
+    fn legacy_hue_backup_restore_grandfathers_rooms_discovered_by_immediate_bootstrap() {
+        let storage = TestStorage::default();
+        let key = HubKey::new(HubType::new(HubType::HUE), "bridge.local");
+        let (topology, _) = legacy_hue_topology(&key, false);
+        let discovered_room_id = Arc::new(Mutex::new(None::<String>));
+        let state = Arc::new(Mutex::new(AppState {
+            storage: Some(Arc::new(storage.clone())),
+            hub_capabilities: vec![HubIntegrationCapability::new(HubType::HUE)],
+            get_hub_provider_fn: Some(Arc::new(|_| &ACCEPTING_HUE_BACKUP_HUB_PROVIDER)),
+            ..Default::default()
+        }));
+        {
+            let key = key.clone();
+            let discovered_room_id = discovered_room_id.clone();
+            state.lock().unwrap().request_hub_bootstrap_fn = Some(Arc::new(move |state| {
+                let mut s = state.lock().unwrap();
+                let action = s.topology.sync_hub_room(
+                    &key,
+                    &crate::topology::DiscoveredTopologyRoom {
+                        hub_room_id: "hue-office".to_string(),
+                        name: "Office".to_string(),
+                        control_id: "grouped-office".to_string(),
+                        light_device_ids: Vec::new(),
+                        canonical_device_ids: Vec::new(),
+                        source_name_authoritative: true,
+                    },
+                );
+                let room_id = action.rhythm_room_id().to_string();
+                assert_eq!(
+                    s.topology.external_room_automation_owner(&room_id, &key),
+                    Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+                );
+                assert!(s.rhythm_automation_allowed_for_node(&room_id));
+                save_authority_state(&s).unwrap();
+                *discovered_room_id.lock().unwrap() = Some(room_id);
+            }));
+        }
+
+        do_backup_restore(&state, legacy_hue_backup(topology, &key)).unwrap();
+
+        let room_id = discovered_room_id
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("bootstrap should discover the Hue room");
+        let mut restarted = AppState {
+            storage: Some(Arc::new(storage)),
+            ..Default::default()
+        };
+        crate::storage::load_persisted_state(&mut restarted);
+        assert_eq!(
+            restarted
+                .topology
+                .external_room_automation_owner(&room_id, &key),
+            Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+        );
+        assert!(restarted.rhythm_automation_allowed_for_node(&room_id));
+    }
+
+    #[test]
+    fn backup_restore_recovery_path_can_replace_fenced_grandfathered_policy() {
+        let (state, storage, key, room_id) = hue_disconnect_policy_fixture();
+        state.lock().unwrap().authority_state_recovery_required = true;
+        let mut bundle = legacy_hue_backup(crate::topology::RoomTopologyStore::new(), &key);
+        bundle.installation.hub_credentials.clear();
+
+        do_backup_restore(&state, bundle).unwrap();
+
+        let s = state.lock().unwrap();
+        assert!(!s.authority_state_recovery_required);
+        assert!(s.hub_credentials.is_empty());
+        assert_eq!(
+            s.topology.external_room_automation_owner(&room_id, &key),
+            None
+        );
+        drop(s);
+        let saved = storage.inner.lock().unwrap();
+        assert!(saved.hub_credentials.is_empty());
+        let mut topology: crate::topology::RoomTopologyStore =
+            serde_json::from_value(saved.topology.clone().unwrap()).unwrap();
+        topology.rebuild_indices();
+        assert!(!topology.references_hub_key(&key));
     }
 
     #[test]
@@ -25068,6 +25430,208 @@ mod tests {
     }
 
     #[test]
+    fn disconnect_all_authority_commit_failure_after_release_keeps_credentials() {
+        let (state, storage, key, room_id) = hue_disconnect_policy_fixture();
+        let released = Arc::new(AtomicBool::new(false));
+        let finalized = Arc::new(AtomicBool::new(false));
+        {
+            let mut s = state.lock().unwrap();
+            let released = released.clone();
+            s.release_external_controller_authority_fn = Some(Arc::new(move |_, _, _| {
+                released.store(true, Ordering::SeqCst);
+                Ok(())
+            }));
+            let finalized = finalized.clone();
+            s.finalize_external_controller_release_fn = Some(Arc::new(move |_, _| {
+                finalized.store(true, Ordering::SeqCst);
+                Ok(())
+            }));
+        }
+        storage.inner.lock().unwrap().fail_save_authority_state = true;
+
+        let error = do_hub_disconnect(&state).unwrap_err();
+
+        assert!(format!("{error:#}")
+            .contains("Failed to durably forget external room automation policy"));
+        assert!(released.load(Ordering::SeqCst));
+        assert!(!finalized.load(Ordering::SeqCst));
+        {
+            let s = state.lock().unwrap();
+            assert!(s.hub_credentials.contains_key(&key));
+            assert_eq!(
+                s.topology.external_room_automation_owner(&room_id, &key),
+                Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+            );
+        }
+        let saved = storage.inner.lock().unwrap();
+        assert_eq!(saved.hub_credentials.len(), 1);
+        let mut topology: crate::topology::RoomTopologyStore =
+            serde_json::from_value(saved.topology.clone().unwrap()).unwrap();
+        topology.rebuild_indices();
+        assert_eq!(
+            topology.external_room_automation_owner(&room_id, &key),
+            Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+        );
+    }
+
+    #[test]
+    fn disconnect_one_authority_commit_failure_after_release_keeps_credentials() {
+        let (state, storage, key, room_id) = hue_disconnect_policy_fixture();
+        let released = Arc::new(AtomicBool::new(false));
+        let finalized = Arc::new(AtomicBool::new(false));
+        {
+            let mut s = state.lock().unwrap();
+            let released = released.clone();
+            s.release_external_controller_authority_fn = Some(Arc::new(move |_, _, _| {
+                released.store(true, Ordering::SeqCst);
+                Ok(())
+            }));
+            let finalized = finalized.clone();
+            s.finalize_external_controller_release_fn = Some(Arc::new(move |_, _| {
+                finalized.store(true, Ordering::SeqCst);
+                Ok(())
+            }));
+        }
+        storage.inner.lock().unwrap().fail_save_authority_state = true;
+
+        let error = do_hub_disconnect_one(&state, key.hub_type.as_str(), &key.address).unwrap_err();
+
+        assert!(format!("{error:#}")
+            .contains("Failed to durably forget external room automation policy"));
+        assert!(released.load(Ordering::SeqCst));
+        assert!(!finalized.load(Ordering::SeqCst));
+        {
+            let s = state.lock().unwrap();
+            assert!(s.hub_credentials.contains_key(&key));
+            assert_eq!(
+                s.topology.external_room_automation_owner(&room_id, &key),
+                Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+            );
+        }
+        assert_eq!(storage.inner.lock().unwrap().hub_credentials.len(), 1);
+    }
+
+    #[test]
+    fn successful_disconnects_durably_clear_grandfathering_before_same_address_repair() {
+        for disconnect_one in [false, true] {
+            let (state, storage, key, room_id) = hue_disconnect_policy_fixture();
+
+            if disconnect_one {
+                do_hub_disconnect_one(&state, key.hub_type.as_str(), &key.address).unwrap();
+            } else {
+                do_hub_disconnect(&state).unwrap();
+            }
+
+            assert!(!state.lock().unwrap().hub_credentials.contains_key(&key));
+            let saved = storage.inner.lock().unwrap();
+            assert!(saved.hub_credentials.is_empty());
+            let mut topology: crate::topology::RoomTopologyStore =
+                serde_json::from_value(saved.topology.clone().unwrap()).unwrap();
+            drop(saved);
+            topology.rebuild_indices();
+            assert!(topology.upsert_room_binding(
+                &room_id,
+                crate::topology::HubRoomBinding {
+                    hub_key: key.clone(),
+                    hub_room_id: "hue-office-repaired".to_string(),
+                    control_id: "grouped-office-repaired".to_string(),
+                    light_device_ids: Vec::new(),
+                },
+            ));
+            assert_eq!(
+                topology.external_room_automation_owner(&room_id, &key),
+                None
+            );
+            assert!(!topology.rhythm_automation_allowed_for_node(&room_id));
+        }
+    }
+
+    #[test]
+    fn disconnect_all_clears_marker_only_hue_policy_before_same_address_repair() {
+        let storage = TestStorage::default();
+        let key = HubKey::new(HubType::new(HubType::HUE), "forgotten-bridge.local");
+        let (mut topology, room_id) = legacy_hue_topology(&key, true);
+        assert!(topology
+            .migrate_legacy_external_room_automation_policy(std::slice::from_ref(&key))
+            .changed());
+        let room_id = room_id.unwrap();
+        assert_eq!(
+            topology.remove_stale_bindings(&key, &[]),
+            vec![room_id.clone()]
+        );
+        assert!(topology.references_hub_key(&key));
+        let state = Arc::new(Mutex::new(AppState {
+            storage: Some(Arc::new(storage.clone())),
+            topology,
+            ..Default::default()
+        }));
+        save_authority_state(&state.lock().unwrap()).unwrap();
+
+        do_hub_disconnect(&state).unwrap();
+
+        let saved = storage.inner.lock().unwrap();
+        let mut topology: crate::topology::RoomTopologyStore =
+            serde_json::from_value(saved.topology.clone().unwrap()).unwrap();
+        drop(saved);
+        topology.rebuild_indices();
+        assert!(!topology.references_hub_key(&key));
+        assert!(topology.upsert_room_binding(
+            &room_id,
+            crate::topology::HubRoomBinding {
+                hub_key: key.clone(),
+                hub_room_id: "hue-office-repaired".to_string(),
+                control_id: "grouped-office-repaired".to_string(),
+                light_device_ids: Vec::new(),
+            },
+        ));
+        assert_eq!(
+            topology.external_room_automation_owner(&room_id, &key),
+            None
+        );
+        assert!(!topology.rhythm_automation_allowed_for_node(&room_id));
+    }
+
+    #[test]
+    fn disconnect_and_factory_release_failures_keep_credentials_and_existing_policy() {
+        for factory_reset in [false, true] {
+            let (state, storage, key, room_id) = hue_disconnect_policy_fixture();
+            state
+                .lock()
+                .unwrap()
+                .release_external_controller_authority_fn = Some(Arc::new(|_, _, _| {
+                anyhow::bail!("injected controller release failure")
+            }));
+
+            let error = if factory_reset {
+                do_factory_reset(&state).unwrap_err()
+            } else {
+                do_hub_disconnect(&state).unwrap_err()
+            };
+
+            assert!(format!("{error:#}").contains("injected controller release failure"));
+            assert!(!factory_reset_error_is_post_barrier(&error));
+            {
+                let s = state.lock().unwrap();
+                assert!(s.hub_credentials.contains_key(&key));
+                assert_eq!(
+                    s.topology.external_room_automation_owner(&room_id, &key),
+                    Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+                );
+                assert!(s.rhythm_automation_allowed_for_node(&room_id));
+            }
+            let saved = storage.inner.lock().unwrap();
+            assert_eq!(saved.hub_credentials.len(), 1);
+            let mut topology: crate::topology::RoomTopologyStore =
+                serde_json::from_value(saved.topology.clone().unwrap()).unwrap();
+            topology.rebuild_indices();
+            assert_eq!(
+                topology.external_room_automation_owner(&room_id, &key),
+                Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+            );
+        }
+    }
+
+    #[test]
     fn release_preparation_does_not_fence_non_authoritative_hubs() {
         let (state, _runtime) = setup_state(Vec::new());
         let key = state.lock().unwrap().hubs.keys().next().unwrap().clone();
@@ -25379,18 +25943,131 @@ mod tests {
     }
 
     #[test]
+    fn active_hue_recovery_without_lifecycle_callbacks_blocks_destructive_release() {
+        for (release_callback_available, finalize_callback_available) in
+            [(false, false), (false, true), (true, false)]
+        {
+            for factory_reset in [false, true] {
+                let (state, storage, key, room_id) = hue_disconnect_policy_fixture();
+                let bridge_id = "physical-bridge-id";
+                let credential = HubCredentials::new(
+                    HubType::HUE,
+                    &key.address,
+                    serde_json::json!({
+                        "username": "persisted-secret",
+                        "bridge_id": bridge_id,
+                    }),
+                );
+                let manifest = hue_ownership_manifest_file(bridge_id);
+                {
+                    let mut inner = storage.inner.lock().unwrap();
+                    inner.hub_credentials = vec![credential.clone()];
+                    inner.integration_files = vec![manifest.clone()];
+                }
+                let barrier_called = Arc::new(AtomicBool::new(false));
+                let release_called = Arc::new(AtomicBool::new(false));
+                let finalize_called = Arc::new(AtomicBool::new(false));
+                {
+                    let mut app = state.lock().unwrap();
+                    app.hub_credentials.insert(key.clone(), credential);
+                    if release_callback_available {
+                        let release_called = release_called.clone();
+                        app.release_external_controller_authority_fn =
+                            Some(Arc::new(move |_, _, _| {
+                                release_called.store(true, Ordering::SeqCst);
+                                Ok(())
+                            }));
+                    }
+                    if finalize_callback_available {
+                        let finalize_called = finalize_called.clone();
+                        app.finalize_external_controller_release_fn =
+                            Some(Arc::new(move |_, _| {
+                                finalize_called.store(true, Ordering::SeqCst);
+                                Ok(())
+                            }));
+                    }
+                    let barrier_called = barrier_called.clone();
+                    app.before_factory_reset_fn = Some(Arc::new(move |_| {
+                        barrier_called.store(true, Ordering::SeqCst);
+                        Ok(())
+                    }));
+                }
+
+                let error = if factory_reset {
+                    do_factory_reset(&state).unwrap_err()
+                } else {
+                    do_hub_disconnect(&state).unwrap_err()
+                };
+
+                assert!(format!("{error:#}").contains("lifecycle callbacks are unavailable"));
+                assert!(!factory_reset_error_is_post_barrier(&error));
+                assert!(!barrier_called.load(Ordering::SeqCst));
+                assert!(!release_called.load(Ordering::SeqCst));
+                assert!(!finalize_called.load(Ordering::SeqCst));
+                {
+                    let app = state.lock().unwrap();
+                    assert_eq!(
+                        app.hub_credentials
+                            .get(&key)
+                            .and_then(|credential| credential.get_str("bridge_id")),
+                        Some(bridge_id)
+                    );
+                    assert_eq!(
+                        app.topology.external_room_automation_owner(&room_id, &key),
+                        Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+                    );
+                }
+                let inner = storage.inner.lock().unwrap();
+                assert_eq!(inner.hub_credential_save_calls, 0);
+                assert_eq!(inner.hub_credentials.len(), 1);
+                assert_eq!(
+                    inner.hub_credentials[0].get_str("bridge_id"),
+                    Some(bridge_id)
+                );
+                assert_eq!(inner.integration_files, vec![manifest]);
+                let mut persisted_topology: crate::topology::RoomTopologyStore =
+                    serde_json::from_value(inner.topology.clone().unwrap()).unwrap();
+                persisted_topology.rebuild_indices();
+                assert_eq!(
+                    persisted_topology.external_room_automation_owner(&room_id, &key),
+                    Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn corrupt_authority_state_blocks_ordinary_save_but_factory_reset_recovers_it() {
         let (state, _runtime) = setup_state(Vec::new());
         let storage = TestStorage::default();
+        let hue_key = HubKey::new(HubType::new(HubType::HUE), "bridge.local");
+        let hue_credential = HubCredentials::new(
+            HubType::HUE,
+            &hue_key.address,
+            serde_json::json!({"username": "persisted-secret"}),
+        );
+        let (mut topology, room_id) = legacy_hue_topology(&hue_key, true);
+        assert!(topology
+            .migrate_legacy_external_room_automation_policy(std::slice::from_ref(&hue_key))
+            .changed());
+        let room_id = room_id.unwrap();
         {
             let mut inner = storage.inner.lock().unwrap();
             inner.canonical_registry = Some(serde_json::json!({"sentinel": "canonical"}));
             inner.topology = Some(serde_json::json!({"sentinel": "topology"}));
+            inner.hub_credentials = vec![hue_credential.clone()];
         }
         {
             let mut s = state.lock().unwrap();
             s.storage = Some(Arc::new(storage.clone()));
+            s.topology = topology;
+            s.hub_credentials.insert(hue_key.clone(), hue_credential);
             s.authority_state_recovery_required = true;
+            assert_eq!(
+                s.topology
+                    .external_room_automation_owner(&room_id, &hue_key),
+                Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+            );
         }
 
         let error = {

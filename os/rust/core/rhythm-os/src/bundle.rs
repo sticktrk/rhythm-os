@@ -51,6 +51,14 @@ fn default_backup_bundle_kind() -> BundleKind {
     BundleKind::BackupBundle
 }
 
+fn default_legacy_backup_topology() -> RoomTopologyStore {
+    // Current backup generation always writes `installation.topology`. Its
+    // absence therefore identifies an older compatibility payload rather than
+    // a newly created topology, and must cross the one-time Hue policy
+    // migration when restored.
+    RoomTopologyStore::legacy_empty()
+}
+
 /// Portable lighting behavior captured in the profile bundle.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ProfileBundleData {
@@ -209,7 +217,7 @@ pub struct BackupInstallation {
     pub location: Option<StoredLocation>,
     #[serde(default)]
     pub rooms: RoomManager,
-    #[serde(default)]
+    #[serde(default = "default_legacy_backup_topology")]
     pub topology: RoomTopologyStore,
     #[serde(default)]
     pub canonical_registry: CanonicalRegistry,
@@ -247,4 +255,29 @@ pub struct BackupBundle {
     pub configuration: BackupConfiguration,
     pub installation: BackupInstallation,
     pub runtime_state: BackupRuntimeState,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::topology::ExternalRoomAutomationOwner;
+
+    #[test]
+    fn omitted_backup_topology_defaults_to_legacy_hue_policy() {
+        let mut installation: BackupInstallation = serde_json::from_value(serde_json::json!({}))
+            .expect("legacy installation should deserialize without topology");
+        let hub_key = HubKey::new(HubType::new(HubType::HUE), "192.0.2.30");
+
+        let migration = installation
+            .topology
+            .migrate_legacy_external_room_automation_policy(std::slice::from_ref(&hub_key));
+
+        assert!(migration.external_automation_policy_version_advanced);
+        assert_eq!(
+            installation
+                .topology
+                .external_room_automation_owner("future-room", &hub_key),
+            Some(ExternalRoomAutomationOwner::Rhythm)
+        );
+    }
 }
