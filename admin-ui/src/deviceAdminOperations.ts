@@ -787,6 +787,29 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     }
   },
   {
+    id: 'hue-authority-get',
+    category: 'Devices & Topology',
+    label: 'Read Hue room authority',
+    description: 'Fetch reviewed Hue automation ownership for each room.',
+    method: 'GET',
+    path: 'api/hue/authority'
+  },
+  {
+    id: 'hue-authority-set',
+    category: 'Devices & Topology',
+    label: 'Set Hue room authority',
+    description: 'Replace the reviewed room ownership for one Hue bridge.',
+    method: 'PUT',
+    path: 'api/hue/authority',
+    body: {
+      address: '{bridge_address}',
+      revision: '{authority_revision}',
+      correlation_id: '{correlation_id}',
+      rooms: [{ room_id: '{room_id}', owner: 'hue' }]
+    },
+    danger: true
+  },
+  {
     id: 'hub-disconnect-one',
     category: 'Devices & Topology',
     label: 'Disconnect hub',

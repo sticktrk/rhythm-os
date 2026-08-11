@@ -8627,9 +8627,9 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
         }
     }
     let snapshots = addressable_root_snapshots(&runtime)
-    .into_iter()
-    .filter(|snapshot| rhythm_automation_allowed_for_node(state, &snapshot.id))
-    .collect::<Vec<_>>();
+        .into_iter()
+        .filter(|snapshot| rhythm_automation_allowed_for_node(state, &snapshot.id))
+        .collect::<Vec<_>>();
     let mut room_commands = Vec::new();
     let mut dispatch_snapshots = Vec::new();
     let mut transitioned_rooms = Vec::new();

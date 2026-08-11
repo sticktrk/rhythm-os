@@ -271,21 +271,25 @@ class _RoomAuthorityCard extends StatelessWidget {
     required String subtitle,
   }) {
     final selected = owner == value;
-    return ListTile(
-      enabled: onChanged != null,
-      onTap: onChanged == null ? null : () => onChanged!(value),
-      leading: Icon(
-        selected ? Icons.radio_button_checked : Icons.radio_button_unchecked,
-        color:
-            selected ? const Color(0xFFFFB900) : CelestialColors.textSecondary,
-      ),
-      title: Text(
-        title,
-        style: const TextStyle(color: CelestialColors.textPrimary),
-      ),
-      subtitle: Text(
-        subtitle,
-        style: const TextStyle(color: CelestialColors.textSecondary),
+    return Material(
+      color: Colors.transparent,
+      child: ListTile(
+        enabled: onChanged != null,
+        onTap: onChanged == null ? null : () => onChanged!(value),
+        leading: Icon(
+          selected ? Icons.radio_button_checked : Icons.radio_button_unchecked,
+          color: selected
+              ? const Color(0xFFFFB900)
+              : CelestialColors.textSecondary,
+        ),
+        title: Text(
+          title,
+          style: const TextStyle(color: CelestialColors.textPrimary),
+        ),
+        subtitle: Text(
+          subtitle,
+          style: const TextStyle(color: CelestialColors.textSecondary),
+        ),
       ),
     );
   }
