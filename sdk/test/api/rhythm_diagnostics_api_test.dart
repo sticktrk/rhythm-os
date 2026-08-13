@@ -118,6 +118,30 @@ void main() {
       );
     });
 
+    test('queueDebugBundle uses its extended receive timeout', () async {
+      server = await _FakeDiagnosticsServer.start(
+        supportsAsyncQueue: true,
+        debugBundleDelay: const Duration(milliseconds: 60),
+      );
+      final api = RhythmDiagnosticsApi(
+        host: '127.0.0.1',
+        port: server!.port,
+        receiveTimeout: const Duration(milliseconds: 10),
+        debugBundleReceiveTimeout: const Duration(seconds: 1),
+      );
+
+      final result = await api.queueDebugBundle(
+        submissionId: '27a2e5e2-7d5b-4b4a-9666-c8896bfc6732',
+        uploadUrl: 'https://storage.example.com/signed-upload',
+        completionUrl: 'https://cloud.example.com/functions/v1/complete',
+        completionToken: 'one-time-completion-token',
+        appLog: 'bounded app log',
+      );
+
+      expect(result.submissionId, '27a2e5e2-7d5b-4b4a-9666-c8896bfc6732');
+      expect(server!.debugBundleBodies, hasLength(1));
+    });
+
     test('downloadDebugBundle posts bundle route and returns attachment',
         () async {
       server = await _FakeDiagnosticsServer.start();

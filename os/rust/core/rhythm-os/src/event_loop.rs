@@ -2299,40 +2299,56 @@ fn run_motion_timeout_restore(
     mode_default: Option<rhythm_core::RoomModeState>,
     command_id: &str,
 ) {
-    let Some(mode_default) = mode_default else {
-        let _ = process_button_inline(
+    let restored = if let Some(mode_default) = mode_default {
+        match commands::do_node_preferences_set(
+            state,
+            target_node_id,
+            None,
+            None,
+            None,
+            Some(mode_default),
+            None,
+            false,
+        ) {
+            Ok(_) => {
+                info!(
+                    target: "evt",
+                    "Motion: restored mode default {:?} for node {}",
+                    mode_default,
+                    target_node_id
+                );
+                true
+            }
+            Err(error) => {
+                warn!(
+                    target: "evt",
+                    "Motion: failed to restore mode default {:?} for node {}: {}",
+                    mode_default,
+                    target_node_id,
+                    error
+                );
+                false
+            }
+        }
+    } else {
+        process_button_inline(
             state,
             target_node_id,
             ButtonAction::OffPress,
             None,
             command_id,
-        );
-        return;
+        )
     };
 
-    match commands::do_node_preferences_set(
-        state,
-        target_node_id,
-        None,
-        None,
-        None,
-        Some(mode_default),
-        None,
-        false,
-    ) {
-        Ok(_) => info!(
-            target: "evt",
-            "Motion: restored mode default {:?} for node {}",
-            mode_default,
-            target_node_id
-        ),
-        Err(error) => warn!(
-            target: "evt",
-            "Motion: failed to restore mode default {:?} for node {}: {}",
-            mode_default,
-            target_node_id,
-            error
-        ),
+    if restored {
+        if let Err(error) = commands::do_reset_node_curve_modifiers(state, target_node_id, true) {
+            warn!(
+                target: "evt",
+                "Motion: restored node {} but failed to reset its curve modifiers: {}",
+                target_node_id,
+                error
+            );
+        }
     }
 }
 
@@ -4576,7 +4592,7 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingRuntime {
-        snapshots: Vec<RoomSnapshot>,
+        snapshots: Arc<Mutex<Vec<RoomSnapshot>>>,
         events: Arc<Mutex<Vec<InputEvent>>>,
         dim_calls: Arc<Mutex<Vec<(String, f32)>>>,
         turn_on_calls: Arc<Mutex<Vec<String>>>,
@@ -4595,7 +4611,7 @@ mod tests {
     impl RecordingRuntime {
         fn with_snapshots(snapshots: Vec<RoomSnapshot>) -> Self {
             Self {
-                snapshots,
+                snapshots: Arc::new(Mutex::new(snapshots)),
                 ..Default::default()
             }
         }
@@ -4632,16 +4648,36 @@ mod tests {
 
         fn engine_room_snapshot(&self, room_id: &str) -> Option<RoomSnapshot> {
             self.snapshots
+                .lock()
+                .unwrap()
                 .iter()
                 .find(|snap| snap.id == room_id)
                 .cloned()
         }
 
         fn engine_all_room_snapshots(&self) -> Vec<RoomSnapshot> {
-            self.snapshots.clone()
+            self.snapshots.lock().unwrap().clone()
         }
 
-        fn restore_room_state(&self, _: &str, _: rhythm_core::RestoredRoomState) {}
+        fn restore_room_state(&self, room_id: &str, state: rhythm_core::RestoredRoomState) {
+            if let Some(snapshot) = self
+                .snapshots
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|snapshot| snapshot.id == room_id)
+            {
+                snapshot.rhythm_enabled = state.rhythm_enabled;
+                snapshot.disabled = state.disabled;
+                snapshot.time_offset_minutes = state.time_offset_minutes;
+                snapshot.brightness_offset = state.brightness_offset;
+                snapshot.soft_off = state.soft_off;
+                snapshot.mood_active = state.mood_active;
+                snapshot.standby_enabled = state.standby_enabled;
+                snapshot.hard_off = state.hard_off;
+                snapshot.profile_settings = state.profile_settings;
+            }
+        }
 
         fn add_room(&self, _: &str, _: &str) {}
 
@@ -8133,6 +8169,55 @@ mod tests {
             events[0].action,
             ButtonAction::LightsOff,
             "an explicit HardOff default must not degrade to OffPress/standby"
+        );
+    }
+
+    #[test]
+    fn motion_timeout_clears_manual_curve_modifiers_after_standby_restore() {
+        let mut snapshot = room_snapshot_with_flags("room_a", false, false);
+        snapshot.time_offset_minutes = -215.0;
+        snapshot.brightness_offset = 37.0;
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![snapshot]));
+        let button_events = runtime.events.clone();
+        let state = make_state_with_runtime(runtime.clone());
+        {
+            let mut s = state.lock().unwrap();
+            s.light_breaker_enabled = true;
+            s.active_mode = rhythm_core::RhythmMode::Day;
+            s.default_motion_timeout_secs = 120;
+            s.set_mode_configs(vec![rhythm_core::ModeConfig {
+                mode: rhythm_core::RhythmMode::Day,
+                active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+                idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![rhythm_core::RoomModeDefault {
+                    room_id: "room_a".into(),
+                    state: rhythm_core::RoomModeState::Standby,
+                }],
+            }]);
+        }
+
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            "s1".into(),
+            motion_source(
+                "s1",
+                "room_a",
+                Some(Instant::now() - Duration::from_secs(2_000)),
+            ),
+        );
+        motion.motion_owned.insert("room_a".into());
+
+        check_motion_timers(&state, &mut motion);
+
+        let restored = runtime.engine_room_snapshot("room_a").unwrap();
+        assert!(restored.soft_off, "the configured Standby state must win");
+        assert_eq!(restored.time_offset_minutes, 0.0);
+        assert_eq!(restored.brightness_offset, 0.0);
+        assert!(
+            button_events.lock().unwrap().is_empty(),
+            "clearing modifiers must not dispatch Reset and flash the lights on"
         );
     }
 

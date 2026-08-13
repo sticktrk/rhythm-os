@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use axum::body::Body;
 use axum::extract::{Path as AxumPath, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use serde::Deserialize;
 use serde::Serialize;
@@ -256,9 +256,23 @@ fn upload_url_is_acceptable(url: &str) -> bool {
 
 async fn debug_bundle(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     body: Option<Json<DebugBundleRequest>>,
 ) -> Response {
     let started_at = std::time::Instant::now();
+    if body.is_none() && request_declares_debug_bundle_body(&headers) {
+        log::warn!(
+            target: "support_bundle",
+            "Rejected an unreadable debug bundle request body before collection"
+        );
+        return json_status(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({
+                "status": "error",
+                "message": "debug bundle request body was incomplete or invalid JSON",
+            }),
+        );
+    }
     let request = body.map(|Json(request)| request).unwrap_or_default();
 
     if let Some(upload_url) = request.upload_url.as_deref() {
@@ -416,6 +430,20 @@ async fn debug_bundle(
             )
         }
     }
+}
+
+fn request_declares_debug_bundle_body(headers: &HeaderMap) -> bool {
+    let json_content_type = headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().starts_with("application/json"));
+    let nonempty_content_length = headers
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+        .is_some_and(|length| length > 0);
+    let chunked = headers.contains_key(axum::http::header::TRANSFER_ENCODING);
+    json_content_type || nonempty_content_length || chunked
 }
 
 async fn list_logs(State(state): State<SharedState>) -> Response {
@@ -1651,7 +1679,7 @@ mod tests {
             state.data_dir = data_dir.display().to_string();
         }
 
-        let response = debug_bundle(State(state), None).await;
+        let response = debug_bundle(State(state), HeaderMap::new(), None).await;
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
@@ -1758,7 +1786,7 @@ mod tests {
             })),
             async_submission: None,
         };
-        let response = debug_bundle(State(state), Some(Json(request))).await;
+        let response = debug_bundle(State(state), HeaderMap::new(), Some(Json(request))).await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1857,7 +1885,7 @@ mod tests {
 
         let response = tokio::time::timeout(
             Duration::from_secs(1),
-            debug_bundle(State(state), Some(Json(request))),
+            debug_bundle(State(state), HeaderMap::new(), Some(Json(request))),
         )
         .await
         .expect("queue acknowledgement must not wait for bundle generation");
@@ -1883,8 +1911,31 @@ mod tests {
             app_metadata: None,
             async_submission: None,
         };
-        let response = debug_bundle(State(state), Some(Json(request))).await;
+        let response = debug_bundle(State(state), HeaderMap::new(), Some(Json(request))).await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn debug_bundle_handler_rejects_a_dropped_json_body() {
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::CONTENT_TYPE,
+            "application/json".parse().unwrap(),
+        );
+        headers.insert(
+            axum::http::header::CONTENT_LENGTH,
+            "512000".parse().unwrap(),
+        );
+
+        let response = debug_bundle(State(state), headers, None).await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await;
+        assert_eq!(
+            body["message"],
+            "debug bundle request body was incomplete or invalid JSON"
+        );
     }
 
     #[test]

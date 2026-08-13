@@ -307,7 +307,14 @@ class RhythmDiagnosticsApi {
             'completion_token': completionToken,
           },
         },
-        options: Options(validateStatus: (_) => true),
+        options: Options(
+          // The queue acknowledgement is small, but the request carries the
+          // bounded app log. Uploading that JSON through a remote tunnel can
+          // exceed the ordinary five-second API timeout before the server has
+          // enough body bytes to durably accept the job.
+          receiveTimeout: _debugBundleReceiveTimeout,
+          validateStatus: (_) => true,
+        ),
       );
       if (response.statusCode != 202) {
         throw RhythmApiException(

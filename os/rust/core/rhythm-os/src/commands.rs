@@ -10777,6 +10777,54 @@ pub fn do_set_node_curve_modifier(
     })
 }
 
+/// Clear a node's local curve position and brightness modifiers without
+/// dispatching a new lighting command.
+///
+/// Motion-owned timeout uses this after it has successfully restored the
+/// room's configured off state. Keeping this separate from `Reset` avoids a
+/// visible turn-on flash while ensuring the next activation starts from the
+/// current adaptive curve rather than a stale manual adjustment.
+pub fn do_reset_node_curve_modifiers(
+    state: &SharedState,
+    node_id: &str,
+    persist: bool,
+) -> Result<bool> {
+    let runtime = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.hub_runtime()
+    };
+    let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+    let snapshot = runtime
+        .engine_node_snapshot(node_id)
+        .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
+    if !snapshot.kind.is_light_addressable() {
+        return Err(anyhow::anyhow!(
+            "Curve modifiers can only be reset on light-addressable nodes"
+        ));
+    }
+    if snapshot.time_offset_minutes.abs() <= f32::EPSILON
+        && snapshot.brightness_offset.abs() <= f32::EPSILON
+    {
+        return Ok(false);
+    }
+
+    let mut restored = RestoredNodeState::from(&snapshot);
+    restored.time_offset_minutes = 0.0;
+    restored.brightness_offset = 0.0;
+    runtime.restore_node_state(node_id, restored);
+    clear_room_mode_transition(state, node_id);
+    emit_node_state_event_after_apply(state, &runtime, node_id);
+    if persist {
+        persist_rooms(state);
+    }
+    info!(
+        target: "cmd",
+        "reset_node_curve_modifiers: {} cleared time and brightness offsets",
+        node_id
+    );
+    Ok(true)
+}
+
 pub fn queue_set_node_curve_modifier(
     state: &SharedState,
     node_id: &str,
