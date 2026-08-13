@@ -67,6 +67,7 @@ import {
   profileOverridesForNode,
   profileOverridesFromNode,
   recordOf,
+  serverInstanceIdFromState,
   withDirectColor,
   withSelectedProfileOverride,
   type JsonRecord,
@@ -968,12 +969,21 @@ function ProfileLightSettingsEditor({
         requestId
       });
       const latestSupport = lightProfileOverrideSupport(latestState);
-      if (latestSupport !== 'guarded') {
+      if (
+        latestSupport !== 'guarded' &&
+        latestSupport !== 'target_guarded'
+      ) {
         setStale(true);
         throw new Error(
           latestSupport === 'unguarded'
             ? 'The appliance no longer advertises guarded light-setting writes; no write was sent.'
             : 'The appliance no longer supports per-room light settings; no write was sent.'
+        );
+      }
+      const expectedServerInstanceId = serverInstanceIdFromState(latestState);
+      if (!expectedServerInstanceId) {
+        throw new Error(
+          'The appliance did not report a durable server identity; no write was sent.'
         );
       }
       const latestProfile = lightSettingsProfilesFromState(latestState).find(
@@ -1017,10 +1027,15 @@ function ProfileLightSettingsEditor({
         replace: true,
         correlationId: requestId,
         expectedProfileOverrides: baselineOverrides,
-        resourcePrecondition: {
-          path: 'api/nodes/state',
-          bodySha256: snapshot.bodySha256
-        }
+        expectedServerInstanceId,
+        ...(latestSupport === 'guarded'
+          ? {
+              resourcePrecondition: {
+                path: 'api/nodes/state',
+                bodySha256: snapshot.bodySha256
+              }
+            }
+          : {})
       });
       setReceipt({
         status: 'pending',

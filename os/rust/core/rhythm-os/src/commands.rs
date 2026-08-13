@@ -3451,6 +3451,25 @@ pub fn nodes_state_resource_sha256(state: &SharedState) -> Result<String> {
     Ok(canonical_json_sha256(&resource))
 }
 
+/// Return only the effective profile overrides used by the guarded node write.
+///
+/// Unlike `/api/nodes/state`, this value excludes motion, observed-power, and
+/// transition fields that can change while an admin proposal is being sent.
+pub fn effective_node_profile_overrides(
+    state: &SharedState,
+    node_id: &str,
+) -> Result<BTreeMap<String, LightProfileNodeOverride>> {
+    let runtime = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .hub_runtime()
+        .ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+    let current = runtime
+        .engine_effective_node_snapshot(node_id)
+        .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
+    Ok(current.profile_settings.profile_overrides)
+}
+
 /// Build a lightweight rooms-state snapshot for polling.
 pub fn build_rooms_state(state: &SharedState) -> Result<String> {
     let (

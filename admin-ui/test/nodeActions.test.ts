@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   NODE_ACTIONS,
   sendNodeAction,
+  setNodeProfileOverrides,
   type NodeAction
 } from '../src/device/nodes.ts';
 import { flashCanonicalDevice } from '../src/device/topology.ts';
@@ -68,6 +69,45 @@ test('bulb Identify uses the canonical flash endpoint', async () => {
     {
       path: 'api/devices/canonical/bulb%2Fdesk/flash',
       options: { timeoutSeconds: 30 }
+    }
+  ]);
+});
+
+test('profile override writes forward the reviewed identity and target state', async () => {
+  const requests: Array<{ path: string; options: unknown }> = [];
+  const client = {
+    putReceipt(path: string, options: unknown) {
+      requests.push({ path, options });
+      return Promise.resolve();
+    }
+  };
+
+  await setNodeProfileOverrides(
+    client as never,
+    'room-1',
+    { rhythm: { min_brightness: 8 } },
+    {
+      replace: true,
+      correlationId: 'admin-light-settings:test-request',
+      expectedServerInstanceId: 'server-1',
+      expectedProfileOverrides: {}
+    }
+  );
+
+  assert.deepEqual(requests, [
+    {
+      path: 'api/nodes/profile-overrides',
+      options: {
+        body: {
+          node_id: 'room-1',
+          profile_overrides: { rhythm: { min_brightness: 8 } },
+          expected_profile_overrides: {},
+          replace: true,
+          correlation_id: 'admin-light-settings:test-request'
+        },
+        requestId: 'admin-light-settings:test-request',
+        expectedServerInstanceId: 'server-1'
+      }
     }
   ]);
 });

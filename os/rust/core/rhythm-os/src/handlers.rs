@@ -2961,10 +2961,22 @@ pub fn handle_put_node_profile_overrides_with_precondition(
             }
             true
         }
+        (Some(server_instance_id), None) => {
+            let live_server_instance_id = match state.lock() {
+                Ok(locked) => locked.server_instance_id.clone(),
+                Err(_) => return ApiResponse::server_error("lock"),
+            };
+            if live_server_instance_id != server_instance_id {
+                return ApiResponse::conflict(
+                    "node profile override precondition failed: live server identity changed",
+                );
+            }
+            true
+        }
         (None, None) => false,
-        _ => {
+        (None, Some(_)) => {
             return ApiResponse::bad_request(
-                "Guarded node profile override writes require both expected server identity and resource hash",
+                "Guarded node profile override writes require expected server identity",
             )
         }
     };
@@ -3022,6 +3034,29 @@ pub fn handle_put_node_profile_overrides_with_precondition(
                 ..Default::default()
             }),
         });
+    }
+
+    if guarded {
+        for update in &updates {
+            let Some(expected) = update
+                .room_profile
+                .as_ref()
+                .and_then(|profile| profile.expected_effective_profile_overrides.as_ref())
+            else {
+                return ApiResponse::bad_request(
+                    "Guarded node profile override writes require expected_profile_overrides",
+                );
+            };
+            let current = match commands::effective_node_profile_overrides(state, &update.node_id) {
+                Ok(current) => current,
+                Err(error) => return ApiResponse::server_error(error),
+            };
+            if current != *expected {
+                return ApiResponse::conflict(
+                    "node profile override precondition failed: live effective overrides changed",
+                );
+            }
+        }
     }
 
     let node_ids: Vec<String> = updates
@@ -7430,6 +7465,69 @@ mod tests {
             rx.recv_timeout(Duration::from_secs(1)).unwrap(),
             WorkItem::SetNodePreferences { .. }
         ));
+    }
+
+    #[test]
+    fn target_guarded_node_profile_override_ignores_unrelated_nodes_state_changes() {
+        let state = handler_state_with_runtime();
+        let rx = attach_work_queue(&state);
+        let server_instance_id = state.lock().unwrap().server_instance_id.clone();
+        let stale_resource_sha256 = commands::nodes_state_resource_sha256(&state).unwrap();
+        state.lock().unwrap().room_observed_power.insert(
+            "standalone-light".to_string(),
+            ObservedPowerState::new(true, ObservedPowerSource::Command),
+        );
+        assert_ne!(
+            commands::nodes_state_resource_sha256(&state).unwrap(),
+            stale_resource_sha256,
+        );
+
+        let response = handle_put_node_profile_overrides_with_precondition(
+            &state,
+            &json!({
+                "node_id": "standalone-light",
+                "replace": true,
+                "expected_profile_overrides": {},
+                "profile_overrides": {
+                    "rhythm": {"min_brightness": 8}
+                }
+            }),
+            false,
+            Some(&server_instance_id),
+            None,
+        );
+
+        assert_eq!(response.status, 200);
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            WorkItem::SetNodePreferences { .. }
+        ));
+    }
+
+    #[test]
+    fn target_guarded_node_profile_override_rejects_stale_target_state() {
+        let state = handler_state_with_runtime();
+        let server_instance_id = state.lock().unwrap().server_instance_id.clone();
+
+        let response = handle_put_node_profile_overrides_with_precondition(
+            &state,
+            &json!({
+                "node_id": "standalone-light",
+                "replace": true,
+                "expected_profile_overrides": {
+                    "rhythm": {"min_brightness": 22}
+                },
+                "profile_overrides": {
+                    "rhythm": {"min_brightness": 8}
+                }
+            }),
+            false,
+            Some(&server_instance_id),
+            None,
+        );
+
+        assert_eq!(response.status, 409);
+        assert!(response.body.contains("live effective overrides changed"));
     }
 
     #[test]

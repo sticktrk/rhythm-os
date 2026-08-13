@@ -275,6 +275,8 @@ pub const FEATURE_MOTION_ACTIVATION_TOGGLE: &str = "motion_activation_toggle";
 pub const FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES: &str = "room_light_profile_overrides";
 pub const FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES: &str =
     "guarded_room_light_profile_overrides";
+pub const FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES: &str =
+    "target_guarded_room_light_profile_overrides";
 pub const FEATURE_HUE_ROOM_AUTHORITY_CONSENT: &str = "hue_room_authority_consent_v1";
 
 #[derive(Clone, Debug)]
@@ -296,6 +298,7 @@ impl Serialize for ApiCapabilitiesDto {
                 FEATURE_MOTION_ACTIVATION_TOGGLE,
                 FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES,
                 FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
+                FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
                 FEATURE_HUE_ROOM_AUTHORITY_CONSENT,
             ],
         )?;
@@ -1557,6 +1560,10 @@ mod tests {
         assert_eq!(
             json["capabilities"]["features"][3],
             FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES
+        );
+        assert_eq!(
+            json["capabilities"]["features"][4],
+            FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES
         );
         assert_eq!(
             json["capabilities"]["hubs"][0]["device_onboarding_methods"][0],

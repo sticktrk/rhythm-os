@@ -129,6 +129,7 @@ export function setNodeProfileOverrides(
     replace?: boolean;
     correlationId?: string;
     expectedProfileOverrides?: Record<string, unknown>;
+    expectedServerInstanceId?: string;
     resourcePrecondition?: {
       path: string;
       query?: Record<string, string>;
@@ -149,6 +150,9 @@ export function setNodeProfileOverrides(
         : {})
     },
     ...(options.correlationId ? { requestId: options.correlationId } : {}),
+    ...(options.expectedServerInstanceId
+      ? { expectedServerInstanceId: options.expectedServerInstanceId }
+      : {}),
     ...(options.resourcePrecondition
       ? { resourcePrecondition: options.resourcePrecondition }
       : {})
