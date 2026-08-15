@@ -7266,13 +7266,13 @@ fn send_work_item_with_pending(
     }
 }
 
-/// Persisted user-managed rooms that definitively have no physical target.
+/// Persisted topology rooms that definitively have no physical target.
 ///
 /// Missing routes alone are not enough to skip work: an integration/controller
-/// failure must remain visible, and empty bootstrap rooms may still be backed by
-/// a legacy runtime route. A user-customized room with neither device membership
-/// nor a source-room binding is a semantic settings container with nothing to
-/// dispatch.
+/// failure must remain visible. Topology membership is the source of truth for
+/// composite routing, so any room with neither device membership nor a
+/// source-room binding is a semantic settings container with nothing to
+/// dispatch, regardless of whether the user has customized it.
 #[derive(Default)]
 struct EmptyTopologyRooms {
     room_ids: HashSet<String>,
@@ -7286,7 +7286,7 @@ impl EmptyTopologyRooms {
         let room_ids = s
             .topology
             .rooms()
-            .filter(|room| room.user_customized && !room.has_devices() && !room.has_bindings())
+            .filter(|room| !room.has_devices() && !room.has_bindings())
             .map(|room| room.id.clone())
             .collect();
         Self { room_ids }
@@ -8740,7 +8740,7 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
             continue;
         }
 
-        // Empty user-managed rooms retain their semantic mode/default state,
+        // Empty topology rooms retain their semantic mode/default state,
         // but have no physical route. The defaults pass above already applies
         // and persists that state; do not enqueue the subsequent lighting
         // command for a controller that cannot exist.
@@ -29843,6 +29843,39 @@ mod tests {
     }
 
     #[test]
+    fn mode_change_skips_physical_hard_off_for_empty_bootstrap_room() {
+        let (state, runtime) =
+            setup_state(vec![make_snapshot("empty-bootstrap-room", false, false)]);
+        add_topology_room(&state, "empty-bootstrap-room", &[]);
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = RhythmMode::Day;
+            set_observed_lights_on_in_app(&mut s, "empty-bootstrap-room", true);
+            s.set_mode_configs(vec![ModeConfig {
+                mode: RhythmMode::Sleep,
+                active_profile_id: Some(rhythm_core::SLEEP_PROFILE_ID.into()),
+                idle_profile_id: Some(rhythm_core::SLEEP_IDLE_PROFILE_ID.into()),
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![rhythm_core::RoomModeDefault {
+                    room_id: "empty-bootstrap-room".into(),
+                    state: RoomModeState::HardOff,
+                }],
+            }]);
+        }
+
+        do_set_active_mode(&state, RhythmMode::Sleep).unwrap();
+
+        assert!(runtime.lights_off_calls().is_empty());
+        assert!(
+            runtime
+                .engine_room_snapshot("empty-bootstrap-room")
+                .unwrap()
+                .hard_off
+        );
+    }
+
+    #[test]
     fn mode_change_skips_active_dispatch_for_empty_topology_room() {
         let mut room = make_snapshot("empty-room", false, false);
         room.hard_off = true;
@@ -29873,7 +29906,41 @@ mod tests {
     }
 
     #[test]
-    fn empty_topology_rooms_exclude_bootstrap_and_routable_rooms() {
+    fn mode_change_skips_active_dispatch_for_empty_bootstrap_room() {
+        let mut room = make_snapshot("empty-bootstrap-room", false, false);
+        room.hard_off = true;
+        let (state, runtime) = setup_state(vec![room]);
+        add_topology_room(&state, "empty-bootstrap-room", &[]);
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = RhythmMode::Sleep;
+            set_observed_lights_on_in_app(&mut s, "empty-bootstrap-room", false);
+            s.set_mode_configs(vec![ModeConfig {
+                mode: RhythmMode::Day,
+                active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+                idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![rhythm_core::RoomModeDefault {
+                    room_id: "empty-bootstrap-room".into(),
+                    state: RoomModeState::Active,
+                }],
+            }]);
+        }
+
+        do_set_active_mode(&state, RhythmMode::Day).unwrap();
+
+        assert!(runtime.applied_commands().is_empty());
+        assert!(
+            !runtime
+                .engine_room_snapshot("empty-bootstrap-room")
+                .unwrap()
+                .hard_off
+        );
+    }
+
+    #[test]
+    fn empty_topology_rooms_include_bootstrap_but_exclude_routable_rooms() {
         let (state, _) = setup_state(Vec::new());
         add_topology_room(&state, "empty-custom-room", &[]);
         add_topology_room(&state, "empty-bootstrap-room", &[]);
@@ -29900,7 +29967,7 @@ mod tests {
         let empty_rooms = EmptyTopologyRooms::from_state(&state);
 
         assert!(empty_rooms.contains("empty-custom-room"));
-        assert!(!empty_rooms.contains("empty-bootstrap-room"));
+        assert!(empty_rooms.contains("empty-bootstrap-room"));
         assert!(!empty_rooms.contains("bound-custom-room"));
         assert!(!empty_rooms.contains("device-custom-room"));
     }
@@ -30116,8 +30183,8 @@ mod tests {
             rhythm_core::ModeTransitionConfig::new(RhythmMode::Sleep, RhythmMode::Day, 4_321)
                 .with_trigger(ModeTransitionTrigger::Sunrise);
 
-        add_topology_room(&state, "active-room", &[]);
-        add_topology_room(&state, "hard-off-room", &[]);
+        add_topology_room(&state, "active-room", &["matter"]);
+        add_topology_room(&state, "hard-off-room", &["matter"]);
 
         {
             let mut s = state.lock().unwrap();
