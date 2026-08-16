@@ -15,6 +15,7 @@ import '../../providers/subscription_provider.dart';
 import '../../services/analytics_service.dart';
 import '../../utils/app_color_temperature.dart';
 import '../../widgets/auto_slider_setting_row.dart';
+import '../../widgets/color_wheel_picker.dart';
 import '../../widgets/info_tooltip.dart';
 import '../../widgets/pro_lock.dart';
 
@@ -147,6 +148,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
   RoomDayColorMode _roomDayColorMode = RoomDayColorMode.natural;
   double _roomDayWhiteKelvin = 3500;
   double _roomDayHue = 35;
+  double _roomDaySaturation = 0.85;
 
   // Interval auto mode (null = server decides).
   bool _intervalAuto = false;
@@ -617,9 +619,11 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
           : fallbackWhite;
       if (directColor != null) {
         final rgb = directColor.rgb;
-        _roomDayHue = HSVColor.fromColor(
+        final hsv = HSVColor.fromColor(
           Color.fromARGB(255, rgb.r, rgb.g, rgb.b),
-        ).hue;
+        );
+        _roomDayHue = hsv.hue;
+        _roomDaySaturation = hsv.saturation;
       }
     }
 
@@ -1772,14 +1776,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
   }
 
   Color get _roomDaySelectedColor =>
-      HSVColor.fromAHSV(1, _roomDayHue, 0.85, 1).toColor();
-
-  bool _isRoomDayPresetSelected(Color presetColor) {
-    final selected = _roomDaySelectedColor;
-    return (selected.r - presetColor.r).abs() < 0.04 &&
-        (selected.g - presetColor.g).abs() < 0.04 &&
-        (selected.b - presetColor.b).abs() < 0.04;
-  }
+      HSVColor.fromAHSV(1, _roomDayHue, _roomDaySaturation, 1).toColor();
 
   bool _isSleepPresetSelected(Color presetColor) {
     final selected = _sleepSelectedColor;
@@ -2212,11 +2209,21 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
       RoomDayColorMode.color => Padding(
           key: const ValueKey('room-day-color-color-detail'),
           padding: const EdgeInsets.only(top: 16),
-          child: _buildFixedColorPicker(
-            hue: _roomDayHue,
-            selectedColor: _roomDaySelectedColor,
-            isPresetSelected: _isRoomDayPresetSelected,
-            onHueChanged: (hue) => _onCurveChanged(() => _roomDayHue = hue),
+          child: ColorWheelPicker(
+            value: HSVColor.fromAHSV(
+              1,
+              _roomDayHue,
+              _roomDaySaturation,
+              1,
+            ),
+            maxSide: 252,
+            semanticsLabel: 'Fixed daytime color wheel',
+            interactionKey: const ValueKey('room-day-color-spectrum'),
+            wheelKey: const ValueKey('room-day-color-wheel'),
+            onChanged: (color, {required commit}) => _onCurveChanged(() {
+              _roomDayHue = color.hue;
+              _roomDaySaturation = color.saturation;
+            }),
           ),
         ),
     };

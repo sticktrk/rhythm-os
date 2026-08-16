@@ -3,6 +3,7 @@ import 'dart:ui' show SemanticsAction;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/screens/settings/light_profile_screen.dart';
+import 'package:rhythm_app/widgets/color_wheel_picker.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 void main() {
@@ -216,5 +217,66 @@ void main() {
     );
     await tester.pump();
     expect(mode, RoomDayColorMode.natural);
+  });
+
+  testWidgets('fixed Color uses the large hue and saturation wheel',
+      (tester) async {
+    var selected = const HSVColor.fromAHSV(1, 35, 0.85, 1);
+    final commits = <bool>[];
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Center(
+            child: SizedBox(
+              width: 300,
+              child: StatefulBuilder(
+                builder: (context, setState) => ColorWheelPicker(
+                  value: selected,
+                  maxSide: 252,
+                  semanticsLabel: 'Fixed daytime color wheel',
+                  interactionKey: const ValueKey('room-day-color-spectrum'),
+                  wheelKey: const ValueKey('room-day-color-wheel'),
+                  onChanged: (color, {required commit}) {
+                    setState(() => selected = color);
+                    commits.add(commit);
+                  },
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final wheel = find.byKey(const ValueKey('room-day-color-wheel'));
+    final wheelRect = tester.getRect(wheel);
+    expect(wheelRect.width, 252);
+    expect(wheelRect.height, 252);
+    expect(
+      tester
+          .getSemantics(
+            find.byKey(const ValueKey('room-day-color-spectrum')),
+          )
+          .label,
+      'Fixed daytime color wheel',
+    );
+
+    await tester.tapAt(wheelRect.center + const Offset(112, 0));
+    await tester.pump();
+
+    expect(selected.hue, closeTo(0, 0.1));
+    expect(selected.saturation, greaterThan(0.85));
+    expect(commits.last, isTrue);
+
+    final gesture = await tester.startGesture(wheelRect.center);
+    await gesture.moveTo(wheelRect.center + const Offset(0, -100));
+    await gesture.up();
+    await tester.pump();
+
+    expect(selected.hue, closeTo(270, 0.1));
+    expect(selected.saturation, greaterThan(0.75));
+    expect(commits, contains(false));
+    expect(commits.last, isTrue);
   });
 }
