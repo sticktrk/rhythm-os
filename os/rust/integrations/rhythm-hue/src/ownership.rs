@@ -80,6 +80,19 @@ pub enum HueOwnershipReceiptStatus {
     Unsupported,
 }
 
+/// Durable reason class for a controller release.
+///
+/// Room-policy releases intentionally keep credentials connected and may
+/// resume through ordinary bootstrap after an interruption. Local teardown
+/// releases must remain start-fenced until the disconnect/reset transaction
+/// finishes removing credentials and recovery material.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HueOwnershipReleaseIntent {
+    RoomAuthorityChanged,
+    LocalTeardown,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HueOwnershipReceipt {
     pub operation_id: String,
@@ -162,6 +175,8 @@ pub struct HueControllerOwnership {
     managed_scenes: BTreeMap<String, HueManagedScene>,
     #[serde(default)]
     receipts: BTreeMap<String, HueOwnershipReceipt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    release_intent: Option<HueOwnershipReleaseIntent>,
 }
 
 /// Privacy-bounded ownership summary suitable for support bundles. It never
@@ -255,6 +270,7 @@ impl HueControllerOwnership {
             managed_rooms: BTreeMap::new(),
             managed_scenes: BTreeMap::new(),
             receipts: BTreeMap::new(),
+            release_intent: None,
         }
     }
 
@@ -288,6 +304,10 @@ impl HueControllerOwnership {
 
     pub fn receipts(&self) -> impl Iterator<Item = &HueOwnershipReceipt> {
         self.receipts.values()
+    }
+
+    pub fn release_intent(&self) -> Option<HueOwnershipReleaseIntent> {
+        self.release_intent
     }
 
     pub fn record_managed_room(&mut self, room: HueManagedRoom) -> Result<()> {
@@ -1395,22 +1415,50 @@ pub fn reconcile_authoritative_control<H: HueTransport + ?Sized>(
 /// resumable and refuses to overwrite later Hue/user edits.
 pub fn release_authoritative_control<H: HueTransport + ?Sized>(
     storage: &dyn Storage,
-    _key: &HubKey,
+    key: &HubKey,
     transport: &H,
     username: &str,
+) -> Result<Option<HueControllerOwnership>> {
+    release_authoritative_control_with_intent(
+        storage,
+        key,
+        transport,
+        username,
+        HueOwnershipReleaseIntent::LocalTeardown,
+    )
+}
+
+/// Release controller authority while durably recording whether startup may
+/// resume the release with the existing credentials.
+pub fn release_authoritative_control_with_intent<H: HueTransport + ?Sized>(
+    storage: &dyn Storage,
+    key: &HubKey,
+    transport: &H,
+    username: &str,
+    requested_intent: HueOwnershipReleaseIntent,
 ) -> Result<Option<HueControllerOwnership>> {
     let connected_id = connected_hue_bridge_id(transport, username)?;
     let Some(mut state) = load_controller_ownership(storage, &connected_id)? else {
         return Ok(None);
     };
     state.ensure_bridge_id(&connected_id)?;
+    let release_intent = match (state.release_intent, requested_intent) {
+        (Some(HueOwnershipReleaseIntent::LocalTeardown), _)
+        | (_, HueOwnershipReleaseIntent::LocalTeardown) => HueOwnershipReleaseIntent::LocalTeardown,
+        _ => HueOwnershipReleaseIntent::RoomAuthorityChanged,
+    };
+    let intent_changed = state.release_intent != Some(release_intent);
+    state.release_intent = Some(release_intent);
     if state.phase == HueOwnershipPhase::Restored {
+        if intent_changed {
+            persist_controller_ownership(storage, &state)?;
+        }
         return Ok(Some(state));
     }
     state.phase = HueOwnershipPhase::Restoring;
     persist_controller_ownership(storage, &state)?;
     while let Some(operation) = next_restore_operation(&state)? {
-        run_restore_operation(storage, _key, &mut state, transport, username, &operation)?;
+        run_restore_operation(storage, key, &mut state, transport, username, &operation)?;
     }
     state.phase = HueOwnershipPhase::Restored;
     persist_controller_ownership(storage, &state)?;
