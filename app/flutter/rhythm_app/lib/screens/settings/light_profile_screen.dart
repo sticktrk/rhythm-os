@@ -2273,10 +2273,10 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
                       const SizedBox(width: 4),
                       InfoTooltip(
                         accentColor: selectedColor,
-                        message: 'Natural warms and cools through the day. '
-                            'White holds one color temperature. Color holds '
-                            'one selected color while brightness still follows '
-                            'the daytime curve.',
+                        message: 'Auto warms and cools through the day. White '
+                            'holds one color temperature. Color holds one '
+                            'selected color while brightness still follows the '
+                            'daytime curve.',
                       ),
                     ],
                   ),
@@ -3208,7 +3208,7 @@ class RoomDayColorModeSelector extends StatelessWidget {
             final selected = candidate == mode;
             final enabled = candidate != RoomDayColorMode.color || colorEnabled;
             final label = switch (candidate) {
-              RoomDayColorMode.natural => 'Natural',
+              RoomDayColorMode.natural => 'Auto',
               RoomDayColorMode.white => 'White',
               RoomDayColorMode.color => 'Color',
             };

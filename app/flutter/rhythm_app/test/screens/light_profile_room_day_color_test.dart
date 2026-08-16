@@ -147,7 +147,7 @@ void main() {
       ),
     );
 
-    expect(find.text('Natural'), findsOneWidget);
+    expect(find.text('Auto'), findsOneWidget);
     expect(find.text('White'), findsOneWidget);
     expect(find.text('Color'), findsOneWidget);
 
@@ -170,7 +170,7 @@ void main() {
     final naturalSemantics = tester.getSemantics(
       find.byKey(const ValueKey('room-day-color-mode-natural')),
     );
-    expect(naturalSemantics.label, 'Natural');
+    expect(naturalSemantics.label, 'Auto');
     expect(
       naturalSemantics.getSemanticsData().hasAction(SemanticsAction.tap),
       isTrue,
