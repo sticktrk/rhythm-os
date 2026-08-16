@@ -64,6 +64,7 @@ class _HueAuthorityScreenState extends State<HueAuthorityScreen> {
     AnalyticsService().logHueAuthorityReviewOpened(
       journeyId: _journeyId,
       source: widget.source,
+      authorityScope: widget.bridge.takeoverScope,
       roomCount: widget.bridge.rooms.length,
       hadPriorReview: widget.bridge.rooms.every(
         (room) => room.owner != RhythmHueRoomAuthorityOwner.unreviewed,
@@ -80,6 +81,10 @@ class _HueAuthorityScreenState extends State<HueAuthorityScreen> {
   bool get _someRhythm => _owners.values.any(
         (owner) => owner == RhythmHueRoomAuthorityOwner.rhythm,
       );
+
+  bool get _roomScoped => widget.bridge.takeoverScope == 'room';
+
+  bool get _takeoverRequested => _roomScoped ? _someRhythm : _allRhythm;
 
   String get _topologySyncPreview {
     final rooms = widget.bridge.topologySyncRoomCount;
@@ -105,7 +110,8 @@ class _HueAuthorityScreenState extends State<HueAuthorityScreen> {
       roomCount: _owners.length,
       hueRoomCount: hueRoomCount,
       rhythmRoomCount: rhythmRoomCount,
-      bridgeTakeoverRequested: _allRhythm,
+      bridgeTakeoverRequested: _takeoverRequested,
+      authorityScope: widget.bridge.takeoverScope,
     );
     final updated = await context.read<ServerSyncProvider>().updateHueAuthority(
           bridge: widget.bridge,
@@ -120,7 +126,8 @@ class _HueAuthorityScreenState extends State<HueAuthorityScreen> {
         journeyId: _journeyId,
         source: widget.source,
         outcome: 'failed',
-        bridgeTakeoverRequested: _allRhythm,
+        bridgeTakeoverRequested: _takeoverRequested,
+        authorityScope: widget.bridge.takeoverScope,
         failureStage: 'server_update',
       );
       setState(() {
@@ -134,7 +141,8 @@ class _HueAuthorityScreenState extends State<HueAuthorityScreen> {
       journeyId: _journeyId,
       source: widget.source,
       outcome: 'succeeded',
-      bridgeTakeoverRequested: _allRhythm,
+      bridgeTakeoverRequested: _takeoverRequested,
+      authorityScope: widget.bridge.takeoverScope,
     );
     Navigator.of(context).pop(true);
   }
@@ -198,19 +206,23 @@ class _HueAuthorityScreenState extends State<HueAuthorityScreen> {
                 ),
               ),
               child: Text(
-                _allRhythm
-                    ? 'All rooms chose Rhythm. Continuing may pause Hue '
-                        'automations across this bridge after Rhythm saves a '
-                        'recovery record. Returning any room to Hue restores '
-                        'only unchanged fields that Rhythm paused.'
-                    : _someRhythm
-                        ? 'Mixed choices keep Hue automations unchanged. Hue '
-                            'automations can span rooms, so Rhythm automation '
-                            'stays paused for this bridge in this safety '
-                            'release. Manual app controls still work.'
-                        : 'Hue bridge changes stay off. Rhythm observes these '
-                            'rooms and accepts manual app controls, but does '
-                            'not run unattended automation.',
+                _roomScoped && _someRhythm
+                    ? _allRhythm
+                        ? 'Rhythm will automate every room. It will try to pause compatible Hue lighting behavior, but Rhythm stays active even when Hue keeps running a conflicting behavior.'
+                        : 'Rhythm will automate the selected rooms. Hue-owned rooms and their behaviors stay untouched. Cross-room or rejected Hue behavior may keep running and can conflict with Rhythm by design.'
+                    : _allRhythm
+                        ? 'All rooms chose Rhythm. Continuing may pause Hue '
+                            'automations across this bridge after Rhythm saves a '
+                            'recovery record. Returning any room to Hue restores '
+                            'only unchanged fields that Rhythm paused.'
+                        : _someRhythm
+                            ? 'Mixed choices keep Hue automations unchanged. Hue '
+                                'automations can span rooms, so Rhythm automation '
+                                'stays paused for this bridge in this safety '
+                                'release. Manual app controls still work.'
+                            : 'Hue bridge changes stay off. Rhythm observes these '
+                                'rooms and accepts manual app controls, but does '
+                                'not run unattended automation.',
                 style: const TextStyle(
                   color: CelestialColors.textSecondary,
                   height: 1.4,

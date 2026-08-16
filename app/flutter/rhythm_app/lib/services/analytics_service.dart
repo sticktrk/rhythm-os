@@ -260,12 +260,14 @@ class AnalyticsService {
   Future<void> logHueAuthorityReviewOpened({
     required String journeyId,
     required String source,
+    required String authorityScope,
     required int roomCount,
     required bool hadPriorReview,
   }) async {
     await logEvent('hue_authority_review_opened', {
       'journey_id': journeyId,
       'source': source,
+      'authority_scope': authorityScope,
       'affected_room_count_bucket': _layoutCountBucket(roomCount),
       'had_prior_review': hadPriorReview ? 1 : 0,
     });
@@ -278,6 +280,7 @@ class AnalyticsService {
     required int hueRoomCount,
     required int rhythmRoomCount,
     required bool bridgeTakeoverRequested,
+    required String authorityScope,
   }) async {
     final choice = hueRoomCount == roomCount
         ? 'all_hue'
@@ -287,6 +290,7 @@ class AnalyticsService {
     await logEvent('hue_room_control_choice_submitted', {
       'journey_id': journeyId,
       'source': source,
+      'authority_scope': authorityScope,
       'choice': choice,
       'affected_room_count_bucket': _layoutCountBucket(roomCount),
       'conflict_count_bucket': 'unknown',
@@ -299,11 +303,13 @@ class AnalyticsService {
     required String source,
     required String outcome,
     required bool bridgeTakeoverRequested,
+    required String authorityScope,
     String? failureStage,
   }) async {
     await logEvent('hue_room_control_transition_completed', {
       'journey_id': journeyId,
       'source': source,
+      'authority_scope': authorityScope,
       'outcome': outcome,
       'bridge_takeover_requested': bridgeTakeoverRequested ? 1 : 0,
       if (failureStage != null) 'failure_stage': failureStage,

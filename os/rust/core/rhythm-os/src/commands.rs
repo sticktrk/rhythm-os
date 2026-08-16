@@ -12437,8 +12437,8 @@ pub fn build_hue_authority(state: &SharedState) -> Result<crate::api_types::HueA
             Some(HueBridgeAuthorityDto {
                 address: key.address.clone(),
                 revision: s.topology.external_automation_revision(&key),
-                takeover_scope: "bridge",
-                bridge_takeover_requested: s.topology.external_hub_has_full_rhythm_consent(&key),
+                takeover_scope: "room",
+                bridge_takeover_requested: s.topology.external_hub_has_rhythm_consent(&key),
                 topology_sync_enabled: s.topology.external_room_topology_sync_is_enabled(&key),
                 topology_sync_status: if !s.topology.external_room_topology_sync_is_enabled(&key) {
                     "disabled"
@@ -12478,9 +12478,51 @@ pub fn build_hue_authority(state: &SharedState) -> Result<crate::api_types::HueA
     })
 }
 
-/// Atomically persist one complete Hue room review. A full-Rhythm review may
-/// acquire the existing bridge-wide handoff; every other review freezes
-/// unattended Rhythm output first and restores any prior handoff.
+/// Durably return every currently bound room on one external controller to
+/// its native automation owner.
+///
+/// Callers hold the external-topology transaction while an authority handoff
+/// is fenced. Persisting this fail-closed policy before restoring a partial
+/// controller epoch makes recovery restart-safe: a later bootstrap resumes
+/// release instead of attempting the rejected takeover again.
+pub fn fail_closed_external_room_automation_policy(
+    state: &SharedState,
+    key: &HubKey,
+) -> Result<bool> {
+    let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let fail_closed_decisions = state
+        .topology
+        .external_automation_rooms_for_hub(key)
+        .into_iter()
+        .map(|(room_id, _, _)| {
+            (
+                room_id,
+                crate::topology::ExternalRoomAutomationOwner::External,
+            )
+        })
+        .collect::<Vec<_>>();
+    if fail_closed_decisions.is_empty() {
+        return Ok(false);
+    }
+
+    let topology_before = state.topology.clone();
+    let changed = state
+        .topology
+        .replace_external_room_automation_decisions(key, &fail_closed_decisions)
+        .map_err(anyhow::Error::msg)?;
+    if !changed {
+        return Ok(false);
+    }
+    if let Err(error) = save_authority_state(&state) {
+        state.topology = topology_before;
+        return Err(error);
+    }
+    state.invalidate_queued_light_dispatches();
+    Ok(true)
+}
+
+/// Atomically persist one complete Hue room review. Any Rhythm-owned room
+/// acquires a selective suppression scope; Hue-owned rooms remain untouched.
 pub fn do_hue_authority_update(
     state: &SharedState,
     request: crate::api_types::HueAuthorityUpdateRequest,
@@ -12523,7 +12565,7 @@ pub fn do_hue_authority_update(
     let _policy_transaction = policy_transaction_lock
         .lock()
         .map_err(|_| anyhow::anyhow!("External controller policy lock poisoned"))?;
-    let full_rhythm_consent = {
+    let (rhythm_consent, full_rhythm_consent, authority_changed) = {
         let _topology_transaction = topology_transaction_lock
             .lock()
             .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
@@ -12555,10 +12597,11 @@ pub fn do_hue_authority_update(
             })
             .collect::<Vec<_>>();
         let topology_before = s.topology.clone();
-        let mut changed = s
+        let authority_changed = s
             .topology
             .replace_external_room_automation_decisions(&key, &decisions)
             .map_err(anyhow::Error::msg)?;
+        let mut changed = authority_changed;
         if let Some(enabled) = request.topology_sync_enabled {
             changed |= s
                 .topology
@@ -12573,17 +12616,36 @@ pub fn do_hue_authority_update(
             // fail its final generation check before it can reach a light.
             s.invalidate_queued_light_dispatches();
         }
+        let rhythm_consent = s.topology.external_hub_has_rhythm_consent(&key);
         let full_rhythm_consent = s.topology.external_hub_has_full_rhythm_consent(&key);
-        if full_rhythm_consent {
+        if rhythm_consent {
             // Publish the transition fence in the same state-lock epoch as
             // the desired policy, leaving no window where periodic work can
             // observe consent before controller suppression begins.
             s.mark_external_controller_authority_pending(&key);
         }
-        full_rhythm_consent
+        (rhythm_consent, full_rhythm_consent, authority_changed)
     };
 
-    if full_rhythm_consent {
+    if rhythm_consent {
+        if authority_changed {
+            // Restore the previous selective epoch before deriving a new one.
+            // This prevents a room returned to Hue from inheriting a behavior
+            // that Rhythm disabled under the prior policy.
+            let _topology_transaction = topology_transaction_lock
+                .lock()
+                .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
+            prepare_external_controller_release(
+                state,
+                std::slice::from_ref(&key),
+                crate::hub::ExternalControllerReleaseReason::RoomAuthorityChanged,
+            )
+            .context("Failed to restore the prior Hue room authority scope")?;
+            state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("lock"))?
+                .mark_external_controller_authority_pending(&key);
+        }
         if let Err(acquire_error) = reconcile_external_controller_authority(state, &key) {
             // Never publish a Rhythm-owned policy after an incomplete bridge
             // handoff. Restore the previous fail-closed policy, then ask Hue
@@ -12591,23 +12653,8 @@ pub fn do_hue_authority_update(
             let _topology_transaction = topology_transaction_lock
                 .lock()
                 .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
-            {
-                let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-                let fail_closed_decisions = s
-                    .topology
-                    .external_automation_rooms_for_hub(&key)
-                    .into_iter()
-                    .map(|(room_id, _, _)| (room_id, ExternalRoomAutomationOwner::External))
-                    .collect::<Vec<_>>();
-                if !fail_closed_decisions.is_empty() {
-                    s.topology
-                        .replace_external_room_automation_decisions(&key, &fail_closed_decisions)
-                        .map_err(anyhow::Error::msg)?;
-                }
-                save_authority_state(&s)
-                    .context("Failed to roll back Hue room choices after takeover failure")?;
-                s.invalidate_queued_light_dispatches();
-            }
+            fail_closed_external_room_automation_policy(state, &key)
+                .context("Failed to roll back Hue room choices after takeover failure")?;
             prepare_external_controller_release(
                 state,
                 std::slice::from_ref(&key),
@@ -12642,8 +12689,9 @@ pub fn do_hue_authority_update(
     }
     info!(
         target: "hue_authority",
-        "event=hue_room_authority_transition_completed correlation_id={} outcome=succeeded bridge_takeover={}",
+        "event=hue_room_authority_transition_completed correlation_id={} outcome=succeeded room_takeover={} full_rhythm={}",
         correlation_id,
+        rhythm_consent,
         full_rhythm_consent
     );
     let topology_sync_requested = state
@@ -22310,6 +22358,60 @@ mod tests {
         }
         storage.inner.lock().unwrap().hub_credentials = vec![credential];
         (state, storage, key, room_id)
+    }
+
+    #[test]
+    fn fail_closed_external_policy_retires_grandfathered_rhythm_authority_durably() {
+        let (state, storage, key, room_id) = hue_disconnect_policy_fixture();
+        let transaction_lock = state
+            .lock()
+            .unwrap()
+            .external_topology_transaction_lock
+            .clone();
+        let _transaction = transaction_lock.lock().unwrap();
+
+        assert!(fail_closed_external_room_automation_policy(&state, &key).unwrap());
+
+        let app = state.lock().unwrap();
+        assert_eq!(app.light_dispatch_generation, 1);
+        assert_eq!(
+            app.topology.external_room_automation_owner(&room_id, &key),
+            Some(crate::topology::ExternalRoomAutomationOwner::External)
+        );
+        assert!(!app.rhythm_automation_allowed_for_node(&room_id));
+        drop(app);
+
+        let saved = storage.inner.lock().unwrap();
+        let mut topology: crate::topology::RoomTopologyStore =
+            serde_json::from_value(saved.topology.clone().unwrap()).unwrap();
+        topology.rebuild_indices();
+        assert_eq!(
+            topology.external_room_automation_owner(&room_id, &key),
+            Some(crate::topology::ExternalRoomAutomationOwner::External)
+        );
+        assert!(!topology.rhythm_automation_allowed_for_node(&room_id));
+    }
+
+    #[test]
+    fn fail_closed_external_policy_restores_memory_when_persistence_fails() {
+        let (state, storage, key, room_id) = hue_disconnect_policy_fixture();
+        storage.inner.lock().unwrap().fail_save_authority_state = true;
+        let transaction_lock = state
+            .lock()
+            .unwrap()
+            .external_topology_transaction_lock
+            .clone();
+        let _transaction = transaction_lock.lock().unwrap();
+
+        fail_closed_external_room_automation_policy(&state, &key)
+            .expect_err("a non-durable fail-closed policy must not publish in memory");
+
+        let app = state.lock().unwrap();
+        assert_eq!(app.light_dispatch_generation, 0);
+        assert_eq!(
+            app.topology.external_room_automation_owner(&room_id, &key),
+            Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+        );
     }
 
     fn legacy_hue_backup(

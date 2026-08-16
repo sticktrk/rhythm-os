@@ -2,7 +2,8 @@
 
 use rhythm_hue::ownership::{
     acquire_authoritative_control, finalize_released_control, load_controller_ownership,
-    release_authoritative_control, HueBaselineCaptureScope, HueOwnershipPhase,
+    release_authoritative_control, release_authoritative_control_with_intent,
+    HueBaselineCaptureScope, HueOwnershipPhase, HueOwnershipReleaseIntent,
 };
 use rhythm_hue::test_support::{HueTransportCall, SpyHueTransport};
 use rhythm_hue::transport::HueTransport;
@@ -39,6 +40,47 @@ impl Drop for TempStorage {
 
 fn key() -> HubKey {
     HubKey::new(HubType::new(HubType::HUE), "192.0.2.10")
+}
+
+fn seed_single_automation_bridge(bridge: &SpyHueTransport) {
+    bridge.set_resource_response(
+        "bridge",
+        serde_json::json!({"data": [{"id": "bridge-1"}], "errors": []}),
+    );
+    bridge.set_resource_response(
+        "device",
+        serde_json::json!({"data": [{"id": "device-1"}], "errors": []}),
+    );
+    bridge.set_resource_response(
+        "light",
+        serde_json::json!({"data": [{"id": "light-1"}], "errors": []}),
+    );
+    bridge.set_resource_response(
+        "behavior_instance",
+        serde_json::json!({"data": [{
+            "id": "behavior-1",
+            "script_id": "automation-script-1",
+            "enabled": true
+        }], "errors": []}),
+    );
+    bridge.set_resource_response(
+        "behavior_script",
+        serde_json::json!({"data": [{
+            "id": "automation-script-1",
+            "metadata": {"name": "Automation", "category": "automation"}
+        }], "errors": []}),
+    );
+    for resource_type in ["room", "zone", "scene", "smart_scene"] {
+        bridge.set_resource_response(resource_type, serde_json::json!({"data": [], "errors": []}));
+    }
+    bridge.set_v1_response(
+        "rules",
+        serde_json::json!({"1": {"name": "Rule", "status": "enabled"}}),
+    );
+    bridge.set_v1_response(
+        "schedules",
+        serde_json::json!({"2": {"name": "Schedule", "status": "enabled"}}),
+    );
 }
 
 #[test]
@@ -357,44 +399,7 @@ fn takeover_only_disables_automatic_lighting_programs_and_preserves_hue_topology
 fn rejected_takeover_mutation_fails_closed_before_later_suppression() {
     let temp = TempStorage::new();
     let bridge = SpyHueTransport::new();
-    bridge.set_resource_response(
-        "bridge",
-        serde_json::json!({"data": [{"id": "bridge-1"}], "errors": []}),
-    );
-    bridge.set_resource_response(
-        "device",
-        serde_json::json!({"data": [{"id": "device-1"}], "errors": []}),
-    );
-    bridge.set_resource_response(
-        "light",
-        serde_json::json!({"data": [{"id": "light-1"}], "errors": []}),
-    );
-    bridge.set_resource_response(
-        "behavior_instance",
-        serde_json::json!({"data": [{
-            "id": "behavior-1",
-            "script_id": "automation-script-1",
-            "enabled": true
-        }], "errors": []}),
-    );
-    bridge.set_resource_response(
-        "behavior_script",
-        serde_json::json!({"data": [{
-            "id": "automation-script-1",
-            "metadata": {"name": "Automation", "category": "automation"}
-        }], "errors": []}),
-    );
-    for resource_type in ["room", "zone", "scene", "smart_scene"] {
-        bridge.set_resource_response(resource_type, serde_json::json!({"data": [], "errors": []}));
-    }
-    bridge.set_v1_response(
-        "rules",
-        serde_json::json!({"1": {"name": "Rule", "status": "enabled"}}),
-    );
-    bridge.set_v1_response(
-        "schedules",
-        serde_json::json!({"2": {"name": "Schedule", "status": "enabled"}}),
-    );
+    seed_single_automation_bridge(&bridge);
     bridge.set_fail_resource_update("behavior_instance", "behavior-1");
 
     acquire_authoritative_control(&temp.storage, &key(), &bridge, "user")
@@ -416,4 +421,63 @@ fn rejected_takeover_mutation_fails_closed_before_later_suppression() {
         bridge.get_v1("user", "schedules").unwrap()["2"]["status"],
         "enabled"
     );
+}
+
+#[test]
+fn interrupted_room_policy_release_resumes_after_restart() {
+    let temp = TempStorage::new();
+    let bridge = SpyHueTransport::new();
+    seed_single_automation_bridge(&bridge);
+
+    let active = acquire_authoritative_control(&temp.storage, &key(), &bridge, "user").unwrap();
+    assert_eq!(active.phase, HueOwnershipPhase::Active);
+    assert_eq!(
+        bridge.get_resources("user", "behavior_instance").unwrap()["data"][0]["enabled"],
+        false
+    );
+
+    bridge.set_fail_resource_update("behavior_instance", "behavior-1");
+    release_authoritative_control_with_intent(
+        &temp.storage,
+        &key(),
+        &bridge,
+        "user",
+        HueOwnershipReleaseIntent::RoomAuthorityChanged,
+    )
+    .expect_err("an interrupted room-policy release must remain durable and retryable");
+
+    let interrupted = load_controller_ownership(&temp.storage, "bridge-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(interrupted.phase, HueOwnershipPhase::RestoreIncomplete);
+    assert_eq!(
+        interrupted.release_intent(),
+        Some(HueOwnershipReleaseIntent::RoomAuthorityChanged)
+    );
+
+    let restarted_storage = FileStorage::new(temp.path.to_str().unwrap()).unwrap();
+    bridge.set_fail_resource_update("behavior_instance", "not-a-real-resource");
+    let restored = release_authoritative_control_with_intent(
+        &restarted_storage,
+        &key(),
+        &bridge,
+        "user",
+        HueOwnershipReleaseIntent::RoomAuthorityChanged,
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(restored.phase, HueOwnershipPhase::Restored);
+    assert_eq!(
+        restored.release_intent(),
+        Some(HueOwnershipReleaseIntent::RoomAuthorityChanged)
+    );
+    assert_eq!(
+        bridge.get_resources("user", "behavior_instance").unwrap()["data"][0]["enabled"],
+        true
+    );
+    finalize_released_control(&restarted_storage, "bridge-1").unwrap();
+    assert!(load_controller_ownership(&restarted_storage, "bridge-1")
+        .unwrap()
+        .is_none());
 }
