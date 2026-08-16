@@ -51,6 +51,34 @@ void main() {
     expect(bridge.topologySyncStatus, 'disabled');
   });
 
+  test('parses additive room-scoped mixed authority', () {
+    final bridge = RhythmHueBridgeAuthority.fromJson({
+      'address': 'bridge.local',
+      'revision': '0123456789abcdef',
+      'takeover_scope': 'room',
+      'bridge_takeover_requested': true,
+      'rooms': [
+        {
+          'room_id': 'office',
+          'name': 'Office',
+          'owner': 'rhythm',
+          'rhythm_automation_enabled': true,
+        },
+        {
+          'room_id': 'dust-collector',
+          'name': 'Dust Collector',
+          'owner': 'hue',
+          'rhythm_automation_enabled': false,
+        },
+      ],
+    });
+
+    expect(bridge.takeoverScope, 'room');
+    expect(bridge.bridgeTakeoverRequested, isTrue);
+    expect(bridge.rooms.first.rhythmAutomationEnabled, isTrue);
+    expect(bridge.rooms.last.rhythmAutomationEnabled, isFalse);
+  });
+
   test('unknown owner values remain fail closed', () {
     final room = RhythmHueRoomAuthority.fromJson({
       'room_id': 'office',

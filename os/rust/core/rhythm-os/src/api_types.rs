@@ -691,9 +691,12 @@ pub struct HueRoomAuthorityDto {
 pub struct HueBridgeAuthorityDto {
     pub address: String,
     pub revision: String,
-    /// Hue control-plane suppression is still bridge-scoped. It is attempted
-    /// only when every listed room explicitly chooses Rhythm.
+    /// `room` when Hue suppression and Rhythm admission honor each room's
+    /// explicit owner independently; older appliances report `bridge`.
     pub takeover_scope: &'static str,
+    /// Whether the reported scope contains at least one explicit Rhythm
+    /// choice. Under legacy `bridge` scope this becomes true only for the
+    /// all-Rhythm choice.
     pub bridge_takeover_requested: bool,
     /// Whether Rhythm should mirror canonical light membership into explicit,
     /// Rhythm-owned Hue rooms.

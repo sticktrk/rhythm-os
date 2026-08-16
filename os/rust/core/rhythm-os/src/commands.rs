@@ -12437,8 +12437,8 @@ pub fn build_hue_authority(state: &SharedState) -> Result<crate::api_types::HueA
             Some(HueBridgeAuthorityDto {
                 address: key.address.clone(),
                 revision: s.topology.external_automation_revision(&key),
-                takeover_scope: "bridge",
-                bridge_takeover_requested: s.topology.external_hub_has_full_rhythm_consent(&key),
+                takeover_scope: "room",
+                bridge_takeover_requested: s.topology.external_hub_has_rhythm_consent(&key),
                 topology_sync_enabled: s.topology.external_room_topology_sync_is_enabled(&key),
                 topology_sync_status: if !s.topology.external_room_topology_sync_is_enabled(&key) {
                     "disabled"
@@ -12521,9 +12521,8 @@ pub fn fail_closed_external_room_automation_policy(
     Ok(true)
 }
 
-/// Atomically persist one complete Hue room review. A full-Rhythm review may
-/// acquire the existing bridge-wide handoff; every other review freezes
-/// unattended Rhythm output first and restores any prior handoff.
+/// Atomically persist one complete Hue room review. Any Rhythm-owned room
+/// acquires a selective suppression scope; Hue-owned rooms remain untouched.
 pub fn do_hue_authority_update(
     state: &SharedState,
     request: crate::api_types::HueAuthorityUpdateRequest,
@@ -12566,7 +12565,7 @@ pub fn do_hue_authority_update(
     let _policy_transaction = policy_transaction_lock
         .lock()
         .map_err(|_| anyhow::anyhow!("External controller policy lock poisoned"))?;
-    let full_rhythm_consent = {
+    let (rhythm_consent, full_rhythm_consent, authority_changed) = {
         let _topology_transaction = topology_transaction_lock
             .lock()
             .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
@@ -12598,10 +12597,11 @@ pub fn do_hue_authority_update(
             })
             .collect::<Vec<_>>();
         let topology_before = s.topology.clone();
-        let mut changed = s
+        let authority_changed = s
             .topology
             .replace_external_room_automation_decisions(&key, &decisions)
             .map_err(anyhow::Error::msg)?;
+        let mut changed = authority_changed;
         if let Some(enabled) = request.topology_sync_enabled {
             changed |= s
                 .topology
@@ -12616,17 +12616,36 @@ pub fn do_hue_authority_update(
             // fail its final generation check before it can reach a light.
             s.invalidate_queued_light_dispatches();
         }
+        let rhythm_consent = s.topology.external_hub_has_rhythm_consent(&key);
         let full_rhythm_consent = s.topology.external_hub_has_full_rhythm_consent(&key);
-        if full_rhythm_consent {
+        if rhythm_consent {
             // Publish the transition fence in the same state-lock epoch as
             // the desired policy, leaving no window where periodic work can
             // observe consent before controller suppression begins.
             s.mark_external_controller_authority_pending(&key);
         }
-        full_rhythm_consent
+        (rhythm_consent, full_rhythm_consent, authority_changed)
     };
 
-    if full_rhythm_consent {
+    if rhythm_consent {
+        if authority_changed {
+            // Restore the previous selective epoch before deriving a new one.
+            // This prevents a room returned to Hue from inheriting a behavior
+            // that Rhythm disabled under the prior policy.
+            let _topology_transaction = topology_transaction_lock
+                .lock()
+                .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
+            prepare_external_controller_release(
+                state,
+                std::slice::from_ref(&key),
+                crate::hub::ExternalControllerReleaseReason::RoomAuthorityChanged,
+            )
+            .context("Failed to restore the prior Hue room authority scope")?;
+            state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("lock"))?
+                .mark_external_controller_authority_pending(&key);
+        }
         if let Err(acquire_error) = reconcile_external_controller_authority(state, &key) {
             // Never publish a Rhythm-owned policy after an incomplete bridge
             // handoff. Restore the previous fail-closed policy, then ask Hue
@@ -12670,8 +12689,9 @@ pub fn do_hue_authority_update(
     }
     info!(
         target: "hue_authority",
-        "event=hue_room_authority_transition_completed correlation_id={} outcome=succeeded bridge_takeover={}",
+        "event=hue_room_authority_transition_completed correlation_id={} outcome=succeeded room_takeover={} full_rhythm={}",
         correlation_id,
+        rhythm_consent,
         full_rhythm_consent
     );
     let topology_sync_requested = state

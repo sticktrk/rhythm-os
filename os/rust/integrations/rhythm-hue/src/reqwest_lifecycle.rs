@@ -829,6 +829,39 @@ fn hue_authority_context(state: &SharedState, key: &HubKey) -> Result<HueAuthori
     })
 }
 
+fn hue_automation_suppression_scope(
+    state: &SharedState,
+    key: &HubKey,
+) -> Result<crate::ownership::HueAutomationSuppressionScope> {
+    let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let mut scope = crate::ownership::HueAutomationSuppressionScope::default();
+    for (room_id, _, owner) in state.topology.external_automation_rooms_for_hub(key) {
+        let room = state.topology.get(&room_id).ok_or_else(|| {
+            anyhow::anyhow!("Hue authority room disappeared during reconciliation")
+        })?;
+        for binding in room
+            .hub_room_bindings
+            .iter()
+            .filter(|binding| binding.hub_key == *key)
+        {
+            if owner == Some(rhythm_os::topology::ExternalRoomAutomationOwner::Rhythm) {
+                scope.include_rhythm_room(
+                    &binding.hub_room_id,
+                    &binding.control_id,
+                    &binding.light_device_ids,
+                );
+            } else {
+                scope.include_external_room(
+                    &binding.hub_room_id,
+                    &binding.control_id,
+                    &binding.light_device_ids,
+                );
+            }
+        }
+    }
+    Ok(scope)
+}
+
 fn hue_release_context(state: &SharedState, key: &HubKey) -> Result<Option<HueAuthorityContext>> {
     let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let Some(storage) = state.storage.clone() else {
@@ -1421,12 +1454,12 @@ impl ExternalLightHubIntegration for HueIntegration {
         state: &SharedState,
         key: &HubKey,
     ) -> Result<()> {
-        let has_full_room_consent = state
+        let has_rhythm_room_consent = state
             .lock()
             .map_err(|_| anyhow::anyhow!("lock"))?
             .topology
-            .external_hub_has_full_rhythm_consent(key);
-        if !has_full_room_consent {
+            .external_hub_has_rhythm_consent(key);
+        if !has_rhythm_room_consent {
             // Upgrades can arrive with an ownership manifest created by the
             // old implicit-takeover behavior. Observe-only must undo that
             // work before the generic callback publishes this controller as
@@ -1439,11 +1472,12 @@ impl ExternalLightHubIntegration for HueIntegration {
             )?;
             log::info!(
                 target: "hue_authority",
-                "Hue bridge {} remains observe-only until every bound room explicitly chooses Rhythm automation",
+                "Hue bridge {} remains observe-only until at least one bound room explicitly chooses Rhythm automation",
                 key
             );
             return Ok(());
         }
+        let suppression_scope = hue_automation_suppression_scope(state, key)?;
         let context = hue_authority_context(state, key)?;
         let transport = ReqwestHueTransport::new(&context.bridge_ip)?;
         let bridge_id = crate::ownership::connected_hue_bridge_id(&transport, &context.username)?;
@@ -1486,11 +1520,12 @@ impl ExternalLightHubIntegration for HueIntegration {
         let _operation = operation_lock
             .lock()
             .map_err(|_| anyhow::anyhow!("Failed to lock Hue controller operations"))?;
-        crate::ownership::acquire_authoritative_control(
+        crate::ownership::acquire_authoritative_control_in_scope(
             context.storage.as_ref(),
             key,
             &transport,
             &context.username,
+            &suppression_scope,
         )?;
         Ok(())
     }

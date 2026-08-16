@@ -34,6 +34,98 @@ const REQUIRED_V2_BASELINE_RESOURCES: &[&str] = &[
 ];
 const REQUIRED_V1_BASELINE_RESOURCES: &[&str] = &["rules", "schedules"];
 
+/// Native Hue targets partitioned by the persisted room-automation owner.
+///
+/// This value is derived from topology on every reconciliation and is never
+/// exposed through diagnostics. The integration expands device ownership to
+/// service and scene resources before classifying behavior targets.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct HueAutomationSuppressionScope {
+    rhythm_targets: BTreeSet<String>,
+    external_targets: BTreeSet<String>,
+}
+
+impl HueAutomationSuppressionScope {
+    pub fn include_rhythm_room<I, S>(
+        &mut self,
+        room_id: &str,
+        grouped_light_id: &str,
+        device_ids: I,
+    ) where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.include_room(true, room_id, grouped_light_id, device_ids);
+    }
+
+    pub fn include_external_room<I, S>(
+        &mut self,
+        room_id: &str,
+        grouped_light_id: &str,
+        device_ids: I,
+    ) where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.include_room(false, room_id, grouped_light_id, device_ids);
+    }
+
+    fn include_room<I, S>(
+        &mut self,
+        rhythm_owned: bool,
+        room_id: &str,
+        grouped_light_id: &str,
+        device_ids: I,
+    ) where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let targets = if rhythm_owned {
+            &mut self.rhythm_targets
+        } else {
+            &mut self.external_targets
+        };
+        insert_resource_target(targets, "room", room_id);
+        insert_resource_target(targets, "grouped_light", grouped_light_id);
+        for device_id in device_ids {
+            insert_resource_target(targets, "device", device_id.as_ref());
+        }
+    }
+
+    pub fn has_rhythm_rooms(&self) -> bool {
+        !self.rhythm_targets.is_empty()
+    }
+}
+
+fn resource_target_key(resource_type: &str, resource_id: &str) -> String {
+    format!("{}:{resource_type}{resource_id}", resource_type.len())
+}
+
+fn insert_resource_target(targets: &mut BTreeSet<String>, resource_type: &str, resource_id: &str) {
+    if !resource_id.trim().is_empty() {
+        targets.insert(resource_target_key(resource_type, resource_id));
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct HueTargetOwnership {
+    rhythm: bool,
+    external: bool,
+    unknown: bool,
+}
+
+impl HueTargetOwnership {
+    fn exclusively_rhythm(self) -> bool {
+        self.rhythm && !self.external && !self.unknown
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedHueAutomationSuppressionScope {
+    rhythm_targets: BTreeSet<String>,
+    external_targets: BTreeSet<String>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HueOwnershipPhase {
@@ -193,6 +285,8 @@ pub struct HueControllerAuthorityDiagnostics {
     pub captured_v2_resource_type_count: usize,
     pub captured_v2_resource_count: usize,
     pub captured_v1_automation_count: usize,
+    pub suppressed_behavior_count: usize,
+    pub coexistence_gap_count: usize,
     pub phases: BTreeMap<String, usize>,
     pub receipt_statuses: BTreeMap<String, usize>,
 }
@@ -246,6 +340,17 @@ pub fn controller_authority_diagnostics(
         };
         *diagnostics.phases.entry(phase.to_string()).or_default() += 1;
         for receipt in ownership.receipts.values() {
+            if receipt.resource_type == "behavior_instance" {
+                match receipt.status {
+                    HueOwnershipReceiptStatus::Succeeded => {
+                        diagnostics.suppressed_behavior_count += 1;
+                    }
+                    HueOwnershipReceiptStatus::Unsupported => {
+                        diagnostics.coexistence_gap_count += 1;
+                    }
+                    _ => {}
+                }
+            }
             let status = match receipt.status {
                 HueOwnershipReceiptStatus::Pending => "pending",
                 HueOwnershipReceiptStatus::Succeeded => "succeeded",
@@ -711,6 +816,31 @@ pub fn acquire_authoritative_control<H: HueTransport + ?Sized>(
     transport: &H,
     username: &str,
 ) -> Result<HueControllerOwnership> {
+    acquire_authoritative_control_with_scope(storage, key, transport, username, None)
+}
+
+/// Acquire Hue authority for only the native targets belonging to rooms that
+/// explicitly chose Rhythm. Hue-owned and unresolved targets remain enabled.
+pub fn acquire_authoritative_control_in_scope<H: HueTransport + ?Sized>(
+    storage: &dyn Storage,
+    key: &HubKey,
+    transport: &H,
+    username: &str,
+    scope: &HueAutomationSuppressionScope,
+) -> Result<HueControllerOwnership> {
+    if !scope.has_rhythm_rooms() {
+        anyhow::bail!("A scoped Hue takeover requires at least one Rhythm-owned room");
+    }
+    acquire_authoritative_control_with_scope(storage, key, transport, username, Some(scope))
+}
+
+fn acquire_authoritative_control_with_scope<H: HueTransport + ?Sized>(
+    storage: &dyn Storage,
+    key: &HubKey,
+    transport: &H,
+    username: &str,
+    scope: Option<&HueAutomationSuppressionScope>,
+) -> Result<HueControllerOwnership> {
     let connected_id = connected_hue_bridge_id(transport, username)?;
     let state = match load_controller_ownership(storage, &connected_id)? {
         Some(state)
@@ -732,7 +862,7 @@ pub fn acquire_authoritative_control<H: HueTransport + ?Sized>(
         None => capture_and_persist_new_epoch(storage, transport, username, &connected_id)?,
     };
     let state = upgrade_uncleared_baseline(storage, transport, username, &connected_id, state)?;
-    reconcile_authoritative_control(storage, key, transport, username, state)
+    reconcile_authoritative_control_with_scope(storage, key, transport, username, state, scope)
 }
 
 fn references_lighting_target(value: &Value, source_device_id: Option<&str>) -> bool {
@@ -805,74 +935,340 @@ fn accessory_behavior_targets_lighting(behavior: &Value, resource_id: &str) -> R
         || references_lighting_target(dependees, source_device_id))
 }
 
+impl ResolvedHueAutomationSuppressionScope {
+    fn direct(scope: &HueAutomationSuppressionScope) -> Self {
+        Self {
+            rhythm_targets: scope.rhythm_targets.clone(),
+            external_targets: scope.external_targets.clone(),
+        }
+    }
+
+    fn from_transport<H: HueTransport + ?Sized>(
+        scope: &HueAutomationSuppressionScope,
+        transport: &H,
+        username: &str,
+    ) -> Result<Self> {
+        let mut resolved = Self::direct(scope);
+
+        // Topology bindings deliberately persist only light device IDs. Use
+        // the captured native room membership to include switches, sensors,
+        // and other source devices when enforcing a Hue-owned room boundary.
+        let rooms = transport.get_resources(username, "room")?;
+        for room in data_array("room", &rooms)? {
+            let Some(room_id) = room.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let room_key = resource_target_key("room", room_id);
+            let rhythm_owned = resolved.rhythm_targets.contains(&room_key);
+            let external_owned = resolved.external_targets.contains(&room_key);
+            if !rhythm_owned && !external_owned {
+                continue;
+            }
+            for child in room
+                .get("children")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let Some(resource_type) = child.get("rtype").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Some(resource_id) = child.get("rid").and_then(Value::as_str) else {
+                    continue;
+                };
+                if rhythm_owned {
+                    insert_resource_target(
+                        &mut resolved.rhythm_targets,
+                        resource_type,
+                        resource_id,
+                    );
+                }
+                if external_owned {
+                    insert_resource_target(
+                        &mut resolved.external_targets,
+                        resource_type,
+                        resource_id,
+                    );
+                }
+            }
+        }
+
+        let devices = transport.get_resources(username, "device")?;
+        for device in data_array("device", &devices)? {
+            let Some(device_id) = device.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let device_key = resource_target_key("device", device_id);
+            let rhythm_owned = resolved.rhythm_targets.contains(&device_key);
+            let external_owned = resolved.external_targets.contains(&device_key);
+            if !rhythm_owned && !external_owned {
+                continue;
+            }
+            for service in device
+                .get("services")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let Some(resource_type) = service.get("rtype").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Some(resource_id) = service.get("rid").and_then(Value::as_str) else {
+                    continue;
+                };
+                if rhythm_owned {
+                    insert_resource_target(
+                        &mut resolved.rhythm_targets,
+                        resource_type,
+                        resource_id,
+                    );
+                }
+                if external_owned {
+                    insert_resource_target(
+                        &mut resolved.external_targets,
+                        resource_type,
+                        resource_id,
+                    );
+                }
+            }
+        }
+
+        for resource_type in ["scene", "smart_scene"] {
+            let resources = transport.get_resources(username, resource_type)?;
+            for resource in data_array(resource_type, &resources)? {
+                let Some(resource_id) = resource.get("id").and_then(Value::as_str) else {
+                    continue;
+                };
+                let Some(group_type) = resource.pointer("/group/rtype").and_then(Value::as_str)
+                else {
+                    continue;
+                };
+                let Some(group_id) = resource.pointer("/group/rid").and_then(Value::as_str) else {
+                    continue;
+                };
+                let group_key = resource_target_key(group_type, group_id);
+                if resolved.rhythm_targets.contains(&group_key) {
+                    insert_resource_target(
+                        &mut resolved.rhythm_targets,
+                        resource_type,
+                        resource_id,
+                    );
+                }
+                if resolved.external_targets.contains(&group_key) {
+                    insert_resource_target(
+                        &mut resolved.external_targets,
+                        resource_type,
+                        resource_id,
+                    );
+                }
+            }
+        }
+        Ok(resolved)
+    }
+
+    fn classify_behavior(&self, behavior: &Value) -> HueTargetOwnership {
+        let configuration = behavior.get("configuration").unwrap_or(&Value::Null);
+        let dependees = behavior.get("dependees").unwrap_or(&Value::Null);
+        let source_device_id = accessory_source_device_id(configuration, dependees);
+        let mut ownership = HueTargetOwnership::default();
+        if let Some(source_device_id) = source_device_id {
+            let source_key = resource_target_key("device", source_device_id);
+            ownership.rhythm |= self.rhythm_targets.contains(&source_key);
+            // A behavior originating in a Hue-owned room is preserved even
+            // when it reaches into a Rhythm room. The explicit Hue boundary
+            // owns the complete behavior, not only its eventual light target.
+            ownership.external |= self.external_targets.contains(&source_key);
+        }
+        self.classify_value(configuration, source_device_id, &mut ownership);
+        self.classify_value(dependees, source_device_id, &mut ownership);
+        ownership
+    }
+
+    fn classify_value(
+        &self,
+        value: &Value,
+        source_device_id: Option<&str>,
+        ownership: &mut HueTargetOwnership,
+    ) {
+        match value {
+            Value::Array(values) => {
+                for value in values {
+                    self.classify_value(value, source_device_id, ownership);
+                }
+            }
+            Value::Object(object) => {
+                if let Some((resource_id, resource_type)) = object
+                    .get("rid")
+                    .and_then(Value::as_str)
+                    .filter(|rid| !rid.trim().is_empty())
+                    .zip(object.get("rtype").and_then(Value::as_str))
+                {
+                    let is_lighting_target = matches!(
+                        resource_type,
+                        "bridge_home"
+                            | "device"
+                            | "grouped_light"
+                            | "light"
+                            | "room"
+                            | "scene"
+                            | "service_group"
+                            | "smart_scene"
+                            | "zone"
+                    );
+                    if is_lighting_target
+                        && !(resource_type == "device" && source_device_id == Some(resource_id))
+                    {
+                        let key = resource_target_key(resource_type, resource_id);
+                        let rhythm = self.rhythm_targets.contains(&key);
+                        let external = self.external_targets.contains(&key);
+                        ownership.rhythm |= rhythm;
+                        ownership.external |= external;
+                        ownership.unknown |= !rhythm && !external;
+                    }
+                }
+                for value in object.values() {
+                    self.classify_value(value, source_device_id, ownership);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 fn next_clear_operation<H: HueTransport + ?Sized>(
     transport: &H,
     username: &str,
     skipped_operation_ids: &BTreeSet<String>,
+    scope: Option<&ResolvedHueAutomationSuppressionScope>,
 ) -> Result<Option<ControlPlaneOperation>> {
     let behavior_payload = transport.get_resources(username, "behavior_instance")?;
     let script_payload = transport.get_resources(username, "behavior_script")?;
     let behaviors = data_array("behavior_instance", &behavior_payload)?;
     let scripts = data_array("behavior_script", &script_payload)?;
     let mut behavior_ids = Vec::new();
-    // Validate the complete live enabled set before selecting the first write.
-    // This prevents a malformed or future Hue behavior from being discovered
-    // only after Rhythm has partially suppressed otherwise-known automations.
+    let coexistence_allowed = scope.is_some();
     for behavior in behaviors {
-        let enabled = behavior
-            .get("enabled")
-            .and_then(Value::as_bool)
-            .ok_or_else(|| anyhow::anyhow!("Hue behavior instance has no boolean enabled state"))?;
+        let enabled = match behavior.get("enabled").and_then(Value::as_bool) {
+            Some(enabled) => enabled,
+            None if coexistence_allowed => {
+                warn!(
+                    target: "hue_authority",
+                    "Preserving a Hue behavior with no boolean enabled state during forced per-room coexistence"
+                );
+                continue;
+            }
+            None => anyhow::bail!("Hue behavior instance has no boolean enabled state"),
+        };
         if !enabled {
             continue;
         }
-        let resource_id = behavior
+        let resource_id = match behavior
             .get("id")
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| anyhow::anyhow!("Enabled Hue behavior instance has no ID"))?;
-        let script_id = behavior
+        {
+            Some(resource_id) => resource_id,
+            None if coexistence_allowed => {
+                warn!(
+                    target: "hue_authority",
+                    "Preserving an enabled Hue behavior with no identity during forced per-room coexistence"
+                );
+                continue;
+            }
+            None => anyhow::bail!("Enabled Hue behavior instance has no ID"),
+        };
+        let script_id = match behavior
             .get("script_id")
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| anyhow::anyhow!("Enabled Hue behavior instance has no script ID"))?;
+        {
+            Some(script_id) => script_id,
+            None if coexistence_allowed => {
+                warn!(
+                    target: "hue_authority",
+                    "Preserving an enabled Hue behavior with no script identity during forced per-room coexistence"
+                );
+                continue;
+            }
+            None => anyhow::bail!("Enabled Hue behavior instance has no script ID"),
+        };
         let matching_scripts = scripts
             .iter()
             .filter(|script| script.get("id").and_then(Value::as_str) == Some(script_id))
             .collect::<Vec<_>>();
         let [script] = matching_scripts.as_slice() else {
+            if coexistence_allowed {
+                warn!(
+                    target: "hue_authority",
+                    "Preserving a Hue behavior whose script could not be resolved during forced per-room coexistence"
+                );
+                continue;
+            }
             anyhow::bail!(
                 "Enabled Hue behavior instance {resource_id} did not resolve to exactly one script"
             );
         };
-        let category = script
-            .pointer("/metadata/category")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                anyhow::anyhow!("Hue behavior script {script_id} has no string metadata category")
-            })?;
+        let category = match script.pointer("/metadata/category").and_then(Value::as_str) {
+            Some(category) => category,
+            None if coexistence_allowed => {
+                warn!(
+                    target: "hue_authority",
+                    "Preserving a Hue behavior with no recognized script category during forced per-room coexistence"
+                );
+                continue;
+            }
+            None => {
+                anyhow::bail!("Hue behavior script {script_id} has no string metadata category")
+            }
+        };
+        let target_is_in_scope = scope
+            .map(|scope| scope.classify_behavior(behavior).exclusively_rhythm())
+            .unwrap_or(true);
         match category {
             "automation"
-                if !skipped_operation_ids
-                    .contains(&format!("clear:v2:behavior_instance:{resource_id}")) =>
+                if target_is_in_scope
+                    && !skipped_operation_ids
+                        .contains(&format!("clear:v2:behavior_instance:{resource_id}")) =>
             {
                 behavior_ids.push(resource_id.to_string());
             }
             "automation" => {}
             // Accessory scripts include both source-only device plumbing and
             // button/sensor programs that target lights or groups. Suppress
-            // only the latter. A rejected target suppression fences the
-            // complete bridge takeover.
-            "accessory"
-                if accessory_behavior_targets_lighting(behavior, resource_id)?
+            // only the latter. Forced per-room authority preserves malformed
+            // or rejected accessory behavior and allows it to coexist.
+            "accessory" => {
+                let targets_lighting = match accessory_behavior_targets_lighting(
+                    behavior,
+                    resource_id,
+                ) {
+                    Ok(targets_lighting) => targets_lighting,
+                    Err(_) if coexistence_allowed => {
+                        warn!(
+                            target: "hue_authority",
+                            "Preserving an unclassified Hue accessory behavior during forced per-room coexistence"
+                        );
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
+                if targets_lighting
+                    && target_is_in_scope
                     && !skipped_operation_ids
-                        .contains(&format!("clear:v2:behavior_instance:{resource_id}")) =>
-            {
-                behavior_ids.push(resource_id.to_string());
+                        .contains(&format!("clear:v2:behavior_instance:{resource_id}"))
+                {
+                    behavior_ids.push(resource_id.to_string());
+                }
             }
             // Entertainment playback and source-only/internal behavior
             // instances are not unattended lighting automations.
-            "accessory" | "entertainment" | "other" => {}
+            "entertainment" | "other" => {}
+            _ if coexistence_allowed => {
+                warn!(
+                    target: "hue_authority",
+                    "Preserving a Hue behavior with an unknown script category during forced per-room coexistence"
+                );
+            }
             _ => anyhow::bail!("Hue behavior script {script_id} has unknown category '{category}'"),
         }
     }
@@ -888,28 +1284,34 @@ fn next_clear_operation<H: HueTransport + ?Sized>(
         }));
     }
 
-    for resource_type in REQUIRED_V1_BASELINE_RESOURCES {
-        let payload = transport.get_v1(username, resource_type)?;
-        let mut ids = object_resource(resource_type, &payload)?
-            .iter()
-            .filter(|(_, resource)| {
-                resource.get("status").and_then(Value::as_str) != Some("disabled")
-            })
-            .filter(|(resource_id, _)| {
-                !skipped_operation_ids.contains(&format!("clear:v1:{resource_type}:{resource_id}"))
-            })
-            .map(|(id, _)| id.clone())
-            .collect::<Vec<_>>();
-        ids.sort();
-        if let Some(resource_id) = ids.into_iter().next() {
-            return Ok(Some(ControlPlaneOperation {
-                operation_id: format!("clear:v1:{resource_type}:{resource_id}"),
-                api: "v1",
-                action: "disable",
-                resource_type,
-                resource_id,
-                body: Some(json!({"status": "disabled"})),
-            }));
+    // Legacy V1 rules and schedules have no complete room-target graph. A
+    // room-bounded takeover preserves them and relies on explicit coexistence
+    // consent instead of risking a bridge-wide mutation.
+    if scope.is_none() {
+        for resource_type in REQUIRED_V1_BASELINE_RESOURCES {
+            let payload = transport.get_v1(username, resource_type)?;
+            let mut ids = object_resource(resource_type, &payload)?
+                .iter()
+                .filter(|(_, resource)| {
+                    resource.get("status").and_then(Value::as_str) != Some("disabled")
+                })
+                .filter(|(resource_id, _)| {
+                    !skipped_operation_ids
+                        .contains(&format!("clear:v1:{resource_type}:{resource_id}"))
+                })
+                .map(|(id, _)| id.clone())
+                .collect::<Vec<_>>();
+            ids.sort();
+            if let Some(resource_id) = ids.into_iter().next() {
+                return Ok(Some(ControlPlaneOperation {
+                    operation_id: format!("clear:v1:{resource_type}:{resource_id}"),
+                    api: "v1",
+                    action: "disable",
+                    resource_type,
+                    resource_id,
+                    body: Some(json!({"status": "disabled"})),
+                }));
+            }
         }
     }
 
@@ -1349,7 +1751,7 @@ fn run_journaled_operation<H: HueTransport + ?Sized>(
             }
             warn!(
                 target: "hue_authority",
-                "Hue {} {} could not be suppressed; controller takeover remains fenced: {}",
+                "Hue {} {} could not be suppressed: {}",
                 operation.api,
                 operation.resource_type,
                 error
@@ -1366,7 +1768,18 @@ pub fn reconcile_authoritative_control<H: HueTransport + ?Sized>(
     key: &HubKey,
     transport: &H,
     username: &str,
+    state: HueControllerOwnership,
+) -> Result<HueControllerOwnership> {
+    reconcile_authoritative_control_with_scope(storage, key, transport, username, state, None)
+}
+
+fn reconcile_authoritative_control_with_scope<H: HueTransport + ?Sized>(
+    storage: &dyn Storage,
+    key: &HubKey,
+    transport: &H,
+    username: &str,
     mut state: HueControllerOwnership,
+    scope: Option<&HueAutomationSuppressionScope>,
 ) -> Result<HueControllerOwnership> {
     if matches!(
         state.phase,
@@ -1378,12 +1791,36 @@ pub fn reconcile_authoritative_control<H: HueTransport + ?Sized>(
         anyhow::bail!("Hue bridge release has started; takeover cannot be resumed");
     }
     state.ensure_bridge_id(&connected_hue_bridge_id(transport, username)?)?;
+    let resolved_scope = scope.map(|scope| {
+        ResolvedHueAutomationSuppressionScope::from_transport(scope, transport, username)
+            .unwrap_or_else(|_| {
+                warn!(
+                    target: "hue_authority",
+                    "Hue target expansion was incomplete; preserving unresolved behavior during forced per-room coexistence"
+                );
+                ResolvedHueAutomationSuppressionScope::direct(scope)
+            })
+    });
     state.phase = HueOwnershipPhase::Clearing;
     persist_controller_ownership(storage, &state)?;
 
-    let skipped_operation_ids = BTreeSet::new();
+    let mut skipped_operation_ids = if resolved_scope.is_some() {
+        state
+            .receipts
+            .values()
+            .filter(|receipt| receipt.status == HueOwnershipReceiptStatus::Unsupported)
+            .map(|receipt| receipt.operation_id.clone())
+            .collect::<BTreeSet<_>>()
+    } else {
+        BTreeSet::new()
+    };
     loop {
-        let operation = match next_clear_operation(transport, username, &skipped_operation_ids) {
+        let operation = match next_clear_operation(
+            transport,
+            username,
+            &skipped_operation_ids,
+            resolved_scope.as_ref(),
+        ) {
             Ok(operation) => operation,
             Err(error) => {
                 state.phase = HueOwnershipPhase::ClearIncomplete;
@@ -1399,6 +1836,16 @@ pub fn reconcile_authoritative_control<H: HueTransport + ?Sized>(
         if run_journaled_operation(storage, key, &mut state, transport, username, &operation)?
             == JournaledOperationOutcome::Failed
         {
+            if resolved_scope.is_some() {
+                state.set_receipt(&operation, HueOwnershipReceiptStatus::Unsupported, None);
+                persist_controller_ownership(storage, &state)?;
+                warn!(
+                    target: "hue_authority",
+                    "Hue behavior suppression was rejected; preserving the behavior and continuing with explicit per-room coexistence"
+                );
+                skipped_operation_ids.insert(operation.operation_id);
+                continue;
+            }
             state.phase = HueOwnershipPhase::ClearIncomplete;
             persist_controller_ownership(storage, &state)?;
             anyhow::bail!("Hue automation suppression was incomplete; controller takeover refused");
@@ -1627,6 +2074,263 @@ mod tests {
             "schedules",
             json!({"2": {"name": "schedule", "status": "enabled"}}),
         );
+    }
+
+    fn seed_scoped_bridge(spy: &SpyHueTransport) {
+        seed_bridge(spy, json!([]));
+        spy.set_resource_response(
+            "device",
+            json!({"data": [
+                {"id": "rhythm-device", "services": [
+                    {"rid": "rhythm-light", "rtype": "light"}
+                ]},
+                {"id": "external-device", "services": [
+                    {"rid": "external-light", "rtype": "light"}
+                ]},
+                {"id": "power-device", "services": [
+                    {"rid": "power-service", "rtype": "device_power"}
+                ]}
+            ], "errors": []}),
+        );
+        spy.set_resource_response(
+            "light",
+            json!({"data": [
+                {"id": "rhythm-light"},
+                {"id": "external-light"}
+            ], "errors": []}),
+        );
+        spy.set_resource_response(
+            "room",
+            json!({"data": [
+                {"id": "rhythm-room", "children": [
+                    {"rid": "rhythm-device", "rtype": "device"}
+                ], "services": [
+                    {"rid": "rhythm-group", "rtype": "grouped_light"}
+                ]},
+                {"id": "external-room", "children": [
+                    {"rid": "external-device", "rtype": "device"},
+                    {"rid": "power-device", "rtype": "device"}
+                ], "services": [
+                    {"rid": "external-group", "rtype": "grouped_light"}
+                ]}
+            ], "errors": []}),
+        );
+        spy.set_resource_response("scene", json!({"data": [], "errors": []}));
+        spy.set_resource_response(
+            "behavior_instance",
+            json!({"data": [
+                {
+                    "id": "rhythm-behavior",
+                    "script_id": "automation-script-1",
+                    "enabled": true,
+                    "configuration": {
+                        "target": {"rid": "rhythm-light", "rtype": "light"}
+                    },
+                    "dependees": []
+                },
+                {
+                    "id": "external-behavior",
+                    "script_id": "automation-script-1",
+                    "enabled": true,
+                    "configuration": {
+                        "target": {"rid": "external-device", "rtype": "device"}
+                    },
+                    "dependees": []
+                },
+                {
+                    "id": "external-source-behavior",
+                    "script_id": "automation-script-1",
+                    "enabled": true,
+                    "configuration": {
+                        "device": {"rid": "external-device", "rtype": "device"},
+                        "target": {"rid": "rhythm-group", "rtype": "grouped_light"}
+                    },
+                    "dependees": []
+                },
+                {
+                    "id": "power-source-behavior",
+                    "script_id": "automation-script-1",
+                    "enabled": true,
+                    "configuration": {
+                        "device": {"rid": "power-device", "rtype": "device"},
+                        "target": {"rid": "rhythm-group", "rtype": "grouped_light"}
+                    },
+                    "dependees": []
+                },
+                {
+                    "id": "cross-room-behavior",
+                    "script_id": "automation-script-1",
+                    "enabled": true,
+                    "configuration": {
+                        "targets": [
+                            {"rid": "rhythm-group", "rtype": "grouped_light"},
+                            {"rid": "external-group", "rtype": "grouped_light"}
+                        ]
+                    },
+                    "dependees": []
+                }
+            ], "errors": []}),
+        );
+    }
+
+    fn mixed_scope() -> HueAutomationSuppressionScope {
+        let mut scope = HueAutomationSuppressionScope::default();
+        scope.include_rhythm_room("rhythm-room", "rhythm-group", ["rhythm-device"]);
+        scope.include_external_room("external-room", "external-group", ["external-device"]);
+        scope
+    }
+
+    #[test]
+    fn scoped_takeover_suppresses_only_exclusive_rhythm_room_behavior() {
+        let temp = TempStorage::new("room-scope");
+        let spy = SpyHueTransport::new();
+        seed_scoped_bridge(&spy);
+
+        let active = acquire_authoritative_control_in_scope(
+            &temp.storage,
+            &key(),
+            &spy,
+            "user",
+            &mixed_scope(),
+        )
+        .unwrap();
+
+        assert_eq!(active.phase, HueOwnershipPhase::Active);
+        let behaviors = spy.get_resources("user", "behavior_instance").unwrap();
+        let enabled = |id: &str| {
+            behaviors["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|behavior| behavior["id"] == id)
+                .unwrap()["enabled"]
+                .as_bool()
+                .unwrap()
+        };
+        assert!(!enabled("rhythm-behavior"));
+        assert!(enabled("external-behavior"));
+        assert!(enabled("external-source-behavior"));
+        assert!(enabled("power-source-behavior"));
+        assert!(enabled("cross-room-behavior"));
+        assert_eq!(
+            spy.get_v1("user", "rules").unwrap()["1"]["status"],
+            "enabled"
+        );
+        assert_eq!(
+            spy.get_v1("user", "schedules").unwrap()["2"]["status"],
+            "enabled"
+        );
+    }
+
+    #[test]
+    fn scoped_takeover_forces_rhythm_after_hue_rejects_suppression() {
+        let temp = TempStorage::new("room-scope-rejection");
+        let spy = SpyHueTransport::new();
+        seed_scoped_bridge(&spy);
+        spy.set_fail_resource_update("behavior_instance", "rhythm-behavior");
+
+        let active = acquire_authoritative_control_in_scope(
+            &temp.storage,
+            &key(),
+            &spy,
+            "user",
+            &mixed_scope(),
+        )
+        .unwrap();
+
+        assert_eq!(active.phase, HueOwnershipPhase::Active);
+        assert!(active.receipts().any(|receipt| {
+            receipt.original_resource_id == "rhythm-behavior"
+                && receipt.status == HueOwnershipReceiptStatus::Unsupported
+        }));
+        assert_eq!(
+            spy.get_resources("user", "behavior_instance").unwrap()["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|behavior| behavior["id"] == "rhythm-behavior")
+                .unwrap()["enabled"],
+            true
+        );
+    }
+
+    #[test]
+    fn scoped_takeover_forces_rhythm_past_unclassified_hue_behavior() {
+        let temp = TempStorage::new("room-scope-unclassified");
+        let spy = SpyHueTransport::new();
+        seed_scoped_bridge(&spy);
+        spy.set_resource_response(
+            "behavior_instance",
+            json!({"data": [{
+                "id": "future-behavior",
+                "enabled": true,
+                "configuration": {
+                    "target": {"rid": "rhythm-group", "rtype": "grouped_light"}
+                }
+            }], "errors": []}),
+        );
+
+        let active = acquire_authoritative_control_in_scope(
+            &temp.storage,
+            &key(),
+            &spy,
+            "user",
+            &mixed_scope(),
+        )
+        .unwrap();
+
+        assert_eq!(active.phase, HueOwnershipPhase::Active);
+        assert!(!spy.calls().iter().any(|call| matches!(
+            call,
+            HueTransportCall::UpdateResource {
+                resource_type,
+                ..
+            } if resource_type == "behavior_instance"
+        )));
+    }
+
+    #[test]
+    fn scoped_policy_change_restores_old_room_before_suppressing_new_room() {
+        let temp = TempStorage::new("room-scope-change");
+        let spy = SpyHueTransport::new();
+        seed_scoped_bridge(&spy);
+
+        acquire_authoritative_control_in_scope(&temp.storage, &key(), &spy, "user", &mixed_scope())
+            .unwrap();
+        let restored = release_authoritative_control_with_intent(
+            &temp.storage,
+            &key(),
+            &spy,
+            "user",
+            HueOwnershipReleaseIntent::RoomAuthorityChanged,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(restored.phase, HueOwnershipPhase::Restored);
+        finalize_released_control(&temp.storage, "bridge-1").unwrap();
+
+        let mut reversed = HueAutomationSuppressionScope::default();
+        reversed.include_external_room("rhythm-room", "rhythm-group", ["rhythm-device"]);
+        reversed.include_rhythm_room("external-room", "external-group", ["external-device"]);
+        acquire_authoritative_control_in_scope(&temp.storage, &key(), &spy, "user", &reversed)
+            .unwrap();
+
+        let behaviors = spy.get_resources("user", "behavior_instance").unwrap();
+        let enabled = |id: &str| {
+            behaviors["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|behavior| behavior["id"] == id)
+                .unwrap()["enabled"]
+                .as_bool()
+                .unwrap()
+        };
+        assert!(enabled("rhythm-behavior"));
+        assert!(!enabled("external-behavior"));
+        assert!(enabled("external-source-behavior"));
+        assert!(enabled("power-source-behavior"));
+        assert!(enabled("cross-room-behavior"));
     }
 
     #[test]
