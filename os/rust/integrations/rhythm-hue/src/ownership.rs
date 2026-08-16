@@ -39,7 +39,7 @@ const REQUIRED_V1_BASELINE_RESOURCES: &[&str] = &["rules", "schedules"];
 /// This value is derived from topology on every reconciliation and is never
 /// exposed through diagnostics. The integration expands device ownership to
 /// service and scene resources before classifying behavior targets.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HueAutomationSuppressionScope {
     rhythm_targets: BTreeSet<String>,
     external_targets: BTreeSet<String>,
@@ -124,6 +124,7 @@ impl HueTargetOwnership {
 struct ResolvedHueAutomationSuppressionScope {
     rhythm_targets: BTreeSet<String>,
     external_targets: BTreeSet<String>,
+    expansion_complete: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,6 +268,11 @@ pub struct HueControllerOwnership {
     managed_scenes: BTreeMap<String, HueManagedScene>,
     #[serde(default)]
     receipts: BTreeMap<String, HueOwnershipReceipt>,
+    /// Exact topology-derived scope that owns this suppression epoch. `None`
+    /// is the legacy bridge-wide scope and is also the safe default for
+    /// manifests written before room scopes became durable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    suppression_scope: Option<HueAutomationSuppressionScope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     release_intent: Option<HueOwnershipReleaseIntent>,
 }
@@ -375,6 +381,7 @@ impl HueControllerOwnership {
             managed_rooms: BTreeMap::new(),
             managed_scenes: BTreeMap::new(),
             receipts: BTreeMap::new(),
+            suppression_scope: None,
             release_intent: None,
         }
     }
@@ -618,6 +625,9 @@ pub fn persist_controller_ownership(
     state: &HueControllerOwnership,
 ) -> Result<()> {
     if let Some(existing) = load_controller_ownership(storage, state.baseline.bridge_id())? {
+        if existing.suppression_scope != state.suppression_scope {
+            anyhow::bail!("Refusing to replace the immutable Hue suppression scope");
+        }
         if existing.baseline != state.baseline && !baseline_can_be_safely_upgraded(&existing, state)
         {
             anyhow::bail!("Refusing to replace the immutable Hue ownership baseline");
@@ -761,12 +771,14 @@ fn capture_and_persist_new_epoch<H: HueTransport + ?Sized>(
     transport: &H,
     username: &str,
     connected_id: &str,
+    suppression_scope: Option<&HueAutomationSuppressionScope>,
 ) -> Result<HueControllerOwnership> {
     let baseline = capture_baseline(transport, username, new_capture_id())?;
     if baseline.bridge_id() != connected_id {
         anyhow::bail!("Hue bridge identity changed while capturing ownership baseline");
     }
-    let state = HueControllerOwnership::captured(baseline);
+    let mut state = HueControllerOwnership::captured(baseline);
+    state.suppression_scope = suppression_scope.cloned();
     // This is the required durability barrier before the first bridge write.
     persist_controller_ownership(storage, &state)?;
     let persisted = load_controller_ownership(storage, connected_id)?.ok_or_else(|| {
@@ -793,8 +805,9 @@ fn upgrade_uncleared_baseline<H: HueTransport + ?Sized>(
     {
         return Ok(state);
     }
-    let replacement =
+    let mut replacement =
         HueControllerOwnership::captured(capture_baseline(transport, username, new_capture_id())?);
+    replacement.suppression_scope = state.suppression_scope;
     replacement.ensure_bridge_id(connected_id)?;
     persist_controller_ownership(storage, &replacement)?;
     let persisted = load_controller_ownership(storage, connected_id)?.ok_or_else(|| {
@@ -842,24 +855,48 @@ fn acquire_authoritative_control_with_scope<H: HueTransport + ?Sized>(
     scope: Option<&HueAutomationSuppressionScope>,
 ) -> Result<HueControllerOwnership> {
     let connected_id = connected_hue_bridge_id(transport, username)?;
-    let state = match load_controller_ownership(storage, &connected_id)? {
-        Some(state)
-            if matches!(
-                state.phase,
-                HueOwnershipPhase::Restoring
-                    | HueOwnershipPhase::RestoreIncomplete
-                    | HueOwnershipPhase::Restored
-                    | HueOwnershipPhase::ReleasePending
-                    | HueOwnershipPhase::SnapshotRetained
-            ) =>
-        {
+    let mut existing = load_controller_ownership(storage, &connected_id)?;
+    if let Some(state) = existing.as_ref() {
+        if matches!(
+            state.phase,
+            HueOwnershipPhase::Restoring
+                | HueOwnershipPhase::RestoreIncomplete
+                | HueOwnershipPhase::Restored
+                | HueOwnershipPhase::ReleasePending
+                | HueOwnershipPhase::SnapshotRetained
+        ) {
             state.ensure_bridge_id(&connected_id)?;
             anyhow::bail!(
                 "Hue controller release is awaiting durable local credential finalization"
             );
         }
+    }
+
+    if existing
+        .as_ref()
+        .is_some_and(|state| state.suppression_scope.as_ref() != scope)
+    {
+        // A room-policy write can be interrupted after canonical state is
+        // durable but before the previous Hue epoch is restored. The epoch's
+        // exact scope is therefore part of the durable recovery contract.
+        let restored = release_authoritative_control_with_intent(
+            storage,
+            key,
+            transport,
+            username,
+            HueOwnershipReleaseIntent::RoomAuthorityChanged,
+        )?
+        .ok_or_else(|| anyhow::anyhow!("Hue scope changed without an ownership epoch"))?;
+        if restored.phase != HueOwnershipPhase::Restored {
+            anyhow::bail!("Previous Hue room authority scope was not fully restored");
+        }
+        finalize_released_control(storage, &connected_id)?;
+        existing = None;
+    }
+
+    let state = match existing {
         Some(state) => state,
-        None => capture_and_persist_new_epoch(storage, transport, username, &connected_id)?,
+        None => capture_and_persist_new_epoch(storage, transport, username, &connected_id, scope)?,
     };
     let state = upgrade_uncleared_baseline(storage, transport, username, &connected_id, state)?;
     reconcile_authoritative_control_with_scope(storage, key, transport, username, state, scope)
@@ -940,6 +977,19 @@ impl ResolvedHueAutomationSuppressionScope {
         Self {
             rhythm_targets: scope.rhythm_targets.clone(),
             external_targets: scope.external_targets.clone(),
+            expansion_complete: true,
+        }
+    }
+
+    /// Preserve every behavior when native room/device expansion is partial.
+    /// The direct topology still identifies the desired scope for diagnostics
+    /// and retry, but it is not sufficient to prove exclusive ownership of a
+    /// switch, sensor, or other non-light behavior source.
+    fn incomplete(scope: &HueAutomationSuppressionScope) -> Self {
+        Self {
+            rhythm_targets: scope.rhythm_targets.clone(),
+            external_targets: scope.external_targets.clone(),
+            expansion_complete: false,
         }
     }
 
@@ -954,6 +1004,14 @@ impl ResolvedHueAutomationSuppressionScope {
         // the captured native room membership to include switches, sensors,
         // and other source devices when enforcing a Hue-owned room boundary.
         let rooms = transport.get_resources(username, "room")?;
+        let expected_room_targets = resolved
+            .rhythm_targets
+            .iter()
+            .chain(resolved.external_targets.iter())
+            .filter(|target| target.starts_with("4:room"))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut observed_room_targets = BTreeSet::new();
         for room in data_array("room", &rooms)? {
             let Some(room_id) = room.get("id").and_then(Value::as_str) else {
                 continue;
@@ -964,12 +1022,12 @@ impl ResolvedHueAutomationSuppressionScope {
             if !rhythm_owned && !external_owned {
                 continue;
             }
-            for child in room
+            observed_room_targets.insert(room_key);
+            let children = room
                 .get("children")
                 .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-            {
+                .ok_or_else(|| anyhow::anyhow!("Hue room response has no child array"))?;
+            for child in children {
                 let Some(resource_type) = child.get("rtype").and_then(Value::as_str) else {
                     continue;
                 };
@@ -991,6 +1049,9 @@ impl ResolvedHueAutomationSuppressionScope {
                     );
                 }
             }
+        }
+        if observed_room_targets != expected_room_targets {
+            anyhow::bail!("Hue room response did not cover the complete authority scope");
         }
 
         let devices = transport.get_resources(username, "device")?;
@@ -1070,7 +1131,10 @@ impl ResolvedHueAutomationSuppressionScope {
         let configuration = behavior.get("configuration").unwrap_or(&Value::Null);
         let dependees = behavior.get("dependees").unwrap_or(&Value::Null);
         let source_device_id = accessory_source_device_id(configuration, dependees);
-        let mut ownership = HueTargetOwnership::default();
+        let mut ownership = HueTargetOwnership {
+            unknown: !self.expansion_complete,
+            ..HueTargetOwnership::default()
+        };
         if let Some(source_device_id) = source_device_id {
             let source_key = resource_target_key("device", source_device_id);
             ownership.rhythm |= self.rhythm_targets.contains(&source_key);
@@ -1716,7 +1780,24 @@ fn run_restore_operation<H: HueTransport + ?Sized>(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum JournaledOperationOutcome {
     Succeeded,
-    Failed,
+    /// The write returned an error and an authoritative read proved the
+    /// complete resource still matches the immutable pre-write baseline.
+    Rejected,
+    /// The write may have reached Hue, but its effect could not be proven.
+    /// This must remain fenced and restorable rather than becoming a durable
+    /// coexistence exception.
+    Indeterminate,
+}
+
+fn failed_suppression_is_confirmed_unchanged<H: HueTransport + ?Sized>(
+    state: &HueControllerOwnership,
+    transport: &H,
+    username: &str,
+    operation: &ControlPlaneOperation,
+) -> Result<bool> {
+    let baseline = baseline_resource_for_operation(state, operation)?;
+    let live = live_resource_for_operation(transport, username, operation)?;
+    Ok(restore_resources_equivalent(operation.api, &live, baseline))
 }
 
 fn run_journaled_operation<H: HueTransport + ?Sized>(
@@ -1729,34 +1810,74 @@ fn run_journaled_operation<H: HueTransport + ?Sized>(
 ) -> Result<JournaledOperationOutcome> {
     state.set_receipt(operation, HueOwnershipReceiptStatus::Pending, None);
     persist_controller_ownership(storage, state)?;
-    match execute_operation(transport, username, operation).and_then(|replacement_id| {
-        verify_operation(transport, username, operation)?;
-        Ok(replacement_id)
-    }) {
-        Ok(replacement_id) => {
-            state.set_receipt(
-                operation,
-                HueOwnershipReceiptStatus::Succeeded,
-                replacement_id.clone(),
-            );
-            persist_controller_ownership(storage, state)?;
-            Ok(JournaledOperationOutcome::Succeeded)
-        }
-        Err(error) => {
-            state.set_receipt(operation, HueOwnershipReceiptStatus::Failed, None);
-            if let Err(persist_error) = persist_controller_ownership(storage, state) {
-                let _ = persist_error;
-                return Err(error)
-                    .context("Hue automation suppression failed and its receipt was not durable");
+    match execute_operation(transport, username, operation) {
+        Ok(replacement_id) => match verify_operation(transport, username, operation) {
+            Ok(()) => {
+                state.set_receipt(
+                    operation,
+                    HueOwnershipReceiptStatus::Succeeded,
+                    replacement_id,
+                );
+                persist_controller_ownership(storage, state)?;
+                Ok(JournaledOperationOutcome::Succeeded)
             }
-            warn!(
-                target: "hue_authority",
-                "Hue {} {} could not be suppressed: {}",
-                operation.api,
-                operation.resource_type,
-                error
-            );
-            Ok(JournaledOperationOutcome::Failed)
+            Err(error) => {
+                // Hue acknowledged the mutation, so a failed read-back is an
+                // indeterminate physical outcome. Keep the failed receipt: a
+                // subsequent release will compare-and-set it back to baseline
+                // if the disable actually landed.
+                state.set_receipt(operation, HueOwnershipReceiptStatus::Failed, None);
+                persist_controller_ownership(storage, state)
+                    .context("Indeterminate Hue suppression receipt was not durable")?;
+                warn!(
+                    target: "hue_authority",
+                    "Hue {} {} acknowledged suppression but read-back was indeterminate: {}",
+                    operation.api,
+                    operation.resource_type,
+                    error
+                );
+                Ok(JournaledOperationOutcome::Indeterminate)
+            }
+        },
+        Err(error) => {
+            let confirmed_unchanged =
+                failed_suppression_is_confirmed_unchanged(state, transport, username, operation);
+            state.set_receipt(operation, HueOwnershipReceiptStatus::Failed, None);
+            persist_controller_ownership(storage, state)
+                .context("Failed Hue suppression receipt was not durable")?;
+            match confirmed_unchanged {
+                Ok(true) => {
+                    warn!(
+                        target: "hue_authority",
+                        "Hue {} {} rejected suppression and remained unchanged: {}",
+                        operation.api,
+                        operation.resource_type,
+                        error
+                    );
+                    Ok(JournaledOperationOutcome::Rejected)
+                }
+                Ok(false) => {
+                    warn!(
+                        target: "hue_authority",
+                        "Hue {} {} suppression failed with an indeterminate observed state: {}",
+                        operation.api,
+                        operation.resource_type,
+                        error
+                    );
+                    Ok(JournaledOperationOutcome::Indeterminate)
+                }
+                Err(read_error) => {
+                    warn!(
+                        target: "hue_authority",
+                        "Hue {} {} suppression failed and authoritative read-back was unavailable: {}; {}",
+                        operation.api,
+                        operation.resource_type,
+                        error,
+                        read_error
+                    );
+                    Ok(JournaledOperationOutcome::Indeterminate)
+                }
+            }
         }
     }
 }
@@ -1798,7 +1919,7 @@ fn reconcile_authoritative_control_with_scope<H: HueTransport + ?Sized>(
                     target: "hue_authority",
                     "Hue target expansion was incomplete; preserving unresolved behavior during forced per-room coexistence"
                 );
-                ResolvedHueAutomationSuppressionScope::direct(scope)
+                ResolvedHueAutomationSuppressionScope::incomplete(scope)
             })
     });
     state.phase = HueOwnershipPhase::Clearing;
@@ -1833,10 +1954,9 @@ fn reconcile_authoritative_control_with_scope<H: HueTransport + ?Sized>(
         let Some(operation) = operation else {
             break;
         };
-        if run_journaled_operation(storage, key, &mut state, transport, username, &operation)?
-            == JournaledOperationOutcome::Failed
-        {
-            if resolved_scope.is_some() {
+        match run_journaled_operation(storage, key, &mut state, transport, username, &operation)? {
+            JournaledOperationOutcome::Succeeded => {}
+            JournaledOperationOutcome::Rejected if resolved_scope.is_some() => {
                 state.set_receipt(&operation, HueOwnershipReceiptStatus::Unsupported, None);
                 persist_controller_ownership(storage, &state)?;
                 warn!(
@@ -1846,9 +1966,20 @@ fn reconcile_authoritative_control_with_scope<H: HueTransport + ?Sized>(
                 skipped_operation_ids.insert(operation.operation_id);
                 continue;
             }
-            state.phase = HueOwnershipPhase::ClearIncomplete;
-            persist_controller_ownership(storage, &state)?;
-            anyhow::bail!("Hue automation suppression was incomplete; controller takeover refused");
+            JournaledOperationOutcome::Rejected => {
+                state.phase = HueOwnershipPhase::ClearIncomplete;
+                persist_controller_ownership(storage, &state)?;
+                anyhow::bail!(
+                    "Hue automation suppression was incomplete; controller takeover refused"
+                );
+            }
+            JournaledOperationOutcome::Indeterminate => {
+                state.phase = HueOwnershipPhase::ClearIncomplete;
+                persist_controller_ownership(storage, &state)?;
+                anyhow::bail!(
+                    "Hue automation suppression outcome was indeterminate; controller takeover refused"
+                );
+            }
         }
     }
 
@@ -2331,6 +2462,131 @@ mod tests {
         assert!(enabled("external-source-behavior"));
         assert!(enabled("power-source-behavior"));
         assert!(enabled("cross-room-behavior"));
+    }
+
+    #[test]
+    fn incomplete_scope_expansion_preserves_hue_owned_non_light_behavior() {
+        let temp = TempStorage::new("room-scope-incomplete-expansion");
+        let spy = SpyHueTransport::new();
+        seed_scoped_bridge(&spy);
+        // The aggregate capture remains available, but the typed device read
+        // cannot prove ownership of the Hue-owned power device.
+        spy.set_resource_response("device", json!({"data": {}}));
+
+        let active = acquire_authoritative_control_in_scope(
+            &temp.storage,
+            &key(),
+            &spy,
+            "user",
+            &mixed_scope(),
+        )
+        .unwrap();
+
+        assert_eq!(active.phase, HueOwnershipPhase::Active);
+        let behaviors = spy.get_resources("user", "behavior_instance").unwrap();
+        assert!(behaviors["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|behavior| { behavior.get("enabled").and_then(Value::as_bool) == Some(true) }));
+        assert!(!spy.calls().iter().any(|call| matches!(
+            call,
+            HueTransportCall::UpdateResource {
+                resource_type,
+                ..
+            } if resource_type == "behavior_instance"
+        )));
+    }
+
+    #[test]
+    fn scoped_restart_restores_changed_epoch_before_new_suppression() {
+        let temp = TempStorage::new("room-scope-restart-change");
+        let spy = SpyHueTransport::new();
+        seed_scoped_bridge(&spy);
+
+        acquire_authoritative_control_in_scope(&temp.storage, &key(), &spy, "user", &mixed_scope())
+            .unwrap();
+
+        // Simulate restart after a new canonical room policy became durable
+        // but before the command path released the old Hue epoch.
+        let mut reversed = HueAutomationSuppressionScope::default();
+        reversed.include_external_room("rhythm-room", "rhythm-group", ["rhythm-device"]);
+        reversed.include_rhythm_room("external-room", "external-group", ["external-device"]);
+        let second =
+            acquire_authoritative_control_in_scope(&temp.storage, &key(), &spy, "user", &reversed)
+                .unwrap();
+
+        assert_eq!(second.suppression_scope.as_ref(), Some(&reversed));
+        let behaviors = spy.get_resources("user", "behavior_instance").unwrap();
+        let enabled = |id: &str| {
+            behaviors["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|behavior| behavior["id"] == id)
+                .unwrap()["enabled"]
+                .as_bool()
+                .unwrap()
+        };
+        assert!(enabled("rhythm-behavior"));
+        assert!(!enabled("external-behavior"));
+        assert!(enabled("power-source-behavior"));
+    }
+
+    #[test]
+    fn acknowledged_suppression_with_lost_readback_remains_restorable() {
+        let temp = TempStorage::new("room-scope-indeterminate-write");
+        let spy = SpyHueTransport::new();
+        seed_scoped_bridge(&spy);
+        spy.set_fail_next_resource_read_after_update(true);
+
+        let error = acquire_authoritative_control_in_scope(
+            &temp.storage,
+            &key(),
+            &spy,
+            "user",
+            &mixed_scope(),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("outcome was indeterminate"));
+
+        let incomplete = load_controller_ownership(&temp.storage, "bridge-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(incomplete.phase, HueOwnershipPhase::ClearIncomplete);
+        assert!(incomplete.receipts().any(|receipt| {
+            receipt.original_resource_id == "rhythm-behavior"
+                && receipt.status == HueOwnershipReceiptStatus::Failed
+        }));
+        assert_eq!(
+            spy.get_resources("user", "behavior_instance").unwrap()["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|behavior| behavior["id"] == "rhythm-behavior")
+                .unwrap()["enabled"],
+            false
+        );
+
+        let restored = release_authoritative_control_with_intent(
+            &temp.storage,
+            &key(),
+            &spy,
+            "user",
+            HueOwnershipReleaseIntent::RoomAuthorityChanged,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(restored.phase, HueOwnershipPhase::Restored);
+        assert_eq!(
+            spy.get_resources("user", "behavior_instance").unwrap()["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|behavior| behavior["id"] == "rhythm-behavior")
+                .unwrap()["enabled"],
+            true
+        );
     }
 
     #[test]
