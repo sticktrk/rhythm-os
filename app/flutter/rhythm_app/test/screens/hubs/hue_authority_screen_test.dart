@@ -52,4 +52,42 @@ void main() {
     expect(find.text('Sync Rhythm rooms to Hue'), findsOneWidget);
     expect(find.byType(SwitchListTile), findsOneWidget);
   });
+
+  testWidgets('room scope explains forced mixed coexistence', (tester) async {
+    const bridge = RhythmHueBridgeAuthority(
+      address: 'bridge.local',
+      revision: '0123456789abcdef',
+      takeoverScope: 'room',
+      bridgeTakeoverRequested: false,
+      rooms: [
+        RhythmHueRoomAuthority(
+          roomId: 'lights',
+          name: 'Living room',
+          owner: RhythmHueRoomAuthorityOwner.hue,
+          rhythmAutomationEnabled: false,
+        ),
+        RhythmHueRoomAuthority(
+          roomId: 'power',
+          name: 'Dust Collector',
+          owner: RhythmHueRoomAuthorityOwner.hue,
+          rhythmAutomationEnabled: false,
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(
+      const MaterialApp(home: HueAuthorityScreen(bridge: bridge)),
+    );
+    await tester.tap(find.text('Rhythm').first);
+    await tester.pump();
+    await tester.drag(find.byType(ListView), const Offset(0, -300));
+    await tester.pump();
+
+    expect(
+      find.textContaining('Rhythm will automate the selected rooms'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('Hue-owned rooms'), findsOneWidget);
+    expect(find.textContaining('can conflict with Rhythm'), findsOneWidget);
+  });
 }

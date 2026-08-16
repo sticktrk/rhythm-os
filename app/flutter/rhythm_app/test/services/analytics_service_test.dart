@@ -317,6 +317,54 @@ void main() {
     }
   });
 
+  test('Hue room authority analytics record room scope without identities',
+      () async {
+    await analytics.logHueAuthorityReviewOpened(
+      journeyId: 'hue-authority-journey',
+      source: 'settings',
+      authorityScope: 'room',
+      roomCount: 2,
+      hadPriorReview: true,
+    );
+    await analytics.logHueAuthorityReviewSubmitted(
+      journeyId: 'hue-authority-journey',
+      source: 'settings',
+      authorityScope: 'room',
+      roomCount: 2,
+      hueRoomCount: 1,
+      rhythmRoomCount: 1,
+      bridgeTakeoverRequested: true,
+    );
+    await analytics.logHueAuthorityReviewCompleted(
+      journeyId: 'hue-authority-journey',
+      source: 'settings',
+      authorityScope: 'room',
+      outcome: 'succeeded',
+      bridgeTakeoverRequested: true,
+    );
+
+    expect(
+      backend.events.map((event) => event.properties['authority_scope']),
+      everyElement('room'),
+    );
+    expect(
+      backend.events[1].properties,
+      containsPair('bridge_takeover_requested', 1),
+    );
+    final serialized = backend.events
+        .map((event) => '${event.name}:${event.properties}')
+        .join('\n');
+    for (final forbidden in [
+      'room_id',
+      'room_name',
+      'hub_address',
+      'resource_id',
+      'error',
+    ]) {
+      expect(serialized, isNot(contains(forbidden)));
+    }
+  });
+
   test('Mood picker analytics use privacy-bounded categories', () async {
     await analytics.logMoodPickerOpened(
       roomSource: 'matter',

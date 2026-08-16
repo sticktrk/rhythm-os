@@ -6357,7 +6357,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_hue_authority_stays_effectively_hue_and_releases_prior_takeover() {
+    fn mixed_hue_authority_reconciles_and_applies_effective_owner_per_room() {
         let state = test_state();
         let key = HubKey::new(HubType::new(HubType::HUE), "bridge.local");
         let reconcile_calls = Arc::new(AtomicUsize::new(0));
@@ -6405,13 +6405,18 @@ mod tests {
         );
         assert_eq!(mixed.status, 200);
         let mixed: Value = serde_json::from_str(&mixed.body).unwrap();
-        assert_eq!(reconcile_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(reconcile_calls.load(Ordering::SeqCst), 1);
         assert_eq!(release_calls.load(Ordering::SeqCst), 1);
-        assert!(mixed["bridges"][0]["rooms"]
-            .as_array()
-            .unwrap()
+        assert_eq!(mixed["bridges"][0]["takeover_scope"], "room");
+        let mixed_rooms = mixed["bridges"][0]["rooms"].as_array().unwrap();
+        assert!(mixed_rooms
             .iter()
-            .all(|room| room["rhythm_automation_enabled"] == false));
+            .find(|room| room["room_id"] == "room-office")
+            .is_some_and(|room| room["rhythm_automation_enabled"] == true));
+        assert!(mixed_rooms
+            .iter()
+            .find(|room| room["room_id"] == "room-hall")
+            .is_some_and(|room| room["rhythm_automation_enabled"] == false));
 
         let all_rhythm = handle_put_hue_authority(
             &state,
@@ -6426,7 +6431,7 @@ mod tests {
             }),
         );
         assert_eq!(all_rhythm.status, 200);
-        assert_eq!(reconcile_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(reconcile_calls.load(Ordering::SeqCst), 2);
 
         let all_rhythm: Value = serde_json::from_str(&all_rhythm.body).unwrap();
         let back_to_hue = handle_put_hue_authority(
@@ -6442,7 +6447,7 @@ mod tests {
             }),
         );
         assert_eq!(back_to_hue.status, 200);
-        assert_eq!(release_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(release_calls.load(Ordering::SeqCst), 3);
     }
 
     #[test]
