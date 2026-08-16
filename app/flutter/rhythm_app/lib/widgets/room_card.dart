@@ -19,6 +19,7 @@ import 'first_run_explainer.dart';
 import 'low_glow_switch.dart';
 import 'mood_sheet.dart';
 import 'room_settings_sheet.dart';
+import 'room_schedule_behavior_control.dart';
 import 'solar_orbit.dart'; // For CelestialColors
 
 /// Light mode for a room card.
@@ -1421,6 +1422,11 @@ class _RoomCardState extends State<RoomCard> {
                                             ),
                                         },
                                       ),
+                              ),
+                              RoomScheduleBehaviorControl(
+                                roomId: widget.roomId,
+                                foregroundColor: iconColor,
+                                enabled: controlInteractionEnabled,
                               ),
                             ],
                           ),

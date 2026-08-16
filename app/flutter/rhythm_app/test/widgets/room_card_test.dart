@@ -2021,6 +2021,19 @@ void main() {
     expect(_roomSegment('Color'), findsOneWidget);
     expect(find.byType(Slider), findsNothing);
 
+    final schedule = find.byKey(
+      const ValueKey('room-card-schedule-room-1'),
+    );
+    expect(schedule, findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('room-card-schedule-day-room-1')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('room-card-schedule-night-room-1')),
+      findsOneWidget,
+    );
+
     final powerRect = tester.getRect(_powerToggle());
     final scenesRect = tester.getRect(_scenesControl());
     final brightnessRect = tester.getRect(_brightnessControl());
@@ -2028,6 +2041,7 @@ void main() {
     final scenesLabelRect = tester.getRect(_jewelLabel('scenes'));
     final brightnessLabelRect = tester.getRect(_jewelLabel('brightness'));
     final colorLabelRect = tester.getRect(_jewelLabel('color'));
+    final scheduleRect = tester.getRect(schedule);
     expect(
       tester.widget<AnimatedAlign>(_powerThumb()).alignment,
       Alignment.centerRight,
@@ -2075,6 +2089,11 @@ void main() {
     expect(scenesLabelRect.top, greaterThan(scenesRect.bottom));
     expect(brightnessLabelRect.top, greaterThan(brightnessRect.bottom));
     expect(colorLabelRect.top, greaterThan(colorRect.bottom));
+    expect(
+      scheduleRect.top,
+      greaterThanOrEqualTo(colorLabelRect.bottom),
+      reason: 'Schedule behavior belongs below the immediate light controls.',
+    );
     expect(scenesLabelRect.center.dx, closeTo(scenesRect.center.dx, 0.1));
     expect(
       brightnessLabelRect.center.dx,

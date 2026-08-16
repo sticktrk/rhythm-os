@@ -751,10 +751,12 @@ class AnalyticsService {
   Future<void> logLightProfileRoomDefaultChanged({
     required String profile,
     required bool cleared,
+    String source = 'automations',
   }) async {
     await logEvent('light_profile_room_default_changed', {
       'profile': profile,
       'cleared': cleared ? 1 : 0,
+      'source': source,
     });
   }
 

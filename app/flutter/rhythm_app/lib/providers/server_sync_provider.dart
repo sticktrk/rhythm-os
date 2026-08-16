@@ -306,6 +306,10 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Mode configs from the server (profile routing per mode).
   List<RhythmModeConfig> _modeConfigs = const [];
+  Timer? _roomModeDefaultsSaveDebounce;
+  List<RhythmModeConfig>? _roomModeDefaultsRollback;
+  int _roomModeDefaultsEditGeneration = 0;
+  bool _roomModeDefaultsSaveInFlight = false;
 
   /// Profile configs from the server hello.
   List<RhythmCurveConfig> _profiles = const [];
@@ -669,6 +673,113 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Mode configs (profile routing per mode).
   List<RhythmModeConfig> get modeConfigs => _modeConfigs;
+
+  /// The configured state for [roomId] when [mode] engages.
+  ///
+  /// A null state means the room follows the automatic lighting behavior.
+  String? roomDefaultStateForMode(String roomId, RhythmMode mode) {
+    for (final config in _modeConfigs) {
+      if (config.mode != mode) continue;
+      for (final roomDefault in config.roomDefaults) {
+        if (roomDefault.roomId == roomId) return roomDefault.state;
+      }
+    }
+    return null;
+  }
+
+  /// Optimistically update one room's Day/Night behavior and coalesce rapid
+  /// edits into the existing mode-config write.
+  ///
+  /// Both the room card and Automations editor call this method so neither UI
+  /// owns a private copy that can drift from the other.
+  void updateRoomDefaultForMode({
+    required String roomId,
+    required RhythmMode mode,
+    required String? state,
+  }) {
+    if (roomDefaultStateForMode(roomId, mode) == state) return;
+
+    _roomModeDefaultsRollback ??= _modeConfigs;
+    final defaults = <String, String>{};
+    RhythmModeConfig? existing;
+    for (final config in _modeConfigs) {
+      if (config.mode != mode) continue;
+      existing = config;
+      for (final roomDefault in config.roomDefaults) {
+        defaults[roomDefault.roomId] = roomDefault.state;
+      }
+      break;
+    }
+    if (state == null) {
+      defaults.remove(roomId);
+    } else {
+      defaults[roomId] = state;
+    }
+    final updatedDefaults = [
+      for (final entry in defaults.entries)
+        RoomDefault(roomId: entry.key, state: entry.value),
+    ];
+    final updatedConfig = existing?.copyWith(roomDefaults: updatedDefaults) ??
+        RhythmModeConfig(
+          mode: mode,
+          activeProfileId: '',
+          roomDefaults: updatedDefaults,
+        );
+    _modeConfigs = List<RhythmModeConfig>.unmodifiable([
+      for (final config in _modeConfigs)
+        if (config.mode == mode) updatedConfig else config,
+      if (existing == null) updatedConfig,
+    ]);
+    _roomModeDefaultsEditGeneration++;
+    notifyListeners();
+    _scheduleRoomModeDefaultsSave();
+  }
+
+  void _scheduleRoomModeDefaultsSave() {
+    _roomModeDefaultsSaveDebounce?.cancel();
+    _roomModeDefaultsSaveDebounce = Timer(
+      const Duration(milliseconds: 800),
+      () => unawaited(_persistRoomModeDefaults()),
+    );
+  }
+
+  Future<void> _persistRoomModeDefaults() async {
+    if (_roomModeDefaultsSaveInFlight) {
+      _scheduleRoomModeDefaultsSave();
+      return;
+    }
+    final generation = _roomModeDefaultsEditGeneration;
+    final configs = _modeConfigs;
+    final rollback = _roomModeDefaultsRollback;
+    _roomModeDefaultsSaveInFlight = true;
+    var success = false;
+    try {
+      success = await api.modeSet(configs: configs);
+    } catch (error) {
+      debugPrint('ServerSync: room mode defaults save failed: $error');
+    } finally {
+      _roomModeDefaultsSaveInFlight = false;
+    }
+
+    if (success) {
+      if (generation == _roomModeDefaultsEditGeneration) {
+        _roomModeDefaultsRollback = null;
+      } else {
+        // This snapshot is now the authoritative fallback for a newer edit.
+        _roomModeDefaultsRollback = configs;
+        _scheduleRoomModeDefaultsSave();
+      }
+      return;
+    }
+
+    if (generation == _roomModeDefaultsEditGeneration && rollback != null) {
+      _modeConfigs = rollback;
+      _roomModeDefaultsRollback = null;
+      notifyListeners();
+    } else if (generation != _roomModeDefaultsEditGeneration) {
+      _scheduleRoomModeDefaultsSave();
+    }
+  }
 
   /// Profile configs from the server.
   List<RhythmCurveConfig> get profiles => _profiles;
@@ -2652,7 +2763,12 @@ class ServerSyncProvider extends ChangeNotifier {
     }
     _optimisticMoodSceneIds.clear();
     _moodSceneApplyGenerations.clear();
-    _modeConfigs = [...?hello.mode?.configs];
+    // Do not let a reconnect snapshot erase a local Day/Night behavior edit
+    // while its coalesced write is still pending. The write result either
+    // adopts that optimistic cache or rolls it back explicitly.
+    if (_roomModeDefaultsRollback == null) {
+      _modeConfigs = [...?hello.mode?.configs];
+    }
     _profiles = [...hello.profiles];
     _activeProfileId = hello.activeProfile['id'] as String? ??
         hello.mode?.activeConfig?.activeProfileId;
@@ -3026,14 +3142,18 @@ class ServerSyncProvider extends ChangeNotifier {
     final previousLightRuntime = _lightRuntime;
     _activeMode = mode.active;
     _lightRuntime = _authoritativeLightRuntimeFromMode(mode) ?? _lightRuntime;
-    if (mode.configs.isNotEmpty) {
+    final acceptedConfigs =
+        mode.configs.isNotEmpty && _roomModeDefaultsRollback == null;
+    if (acceptedConfigs) {
       _modeConfigs = [...mode.configs];
       _activeProfileId = mode.activeConfig?.activeProfileId;
     }
     _modeChangeGeneration++;
     debugPrint(
         'ServerSync: mode_changed active=${mode.active.wireValue} cause=${mode.lastChange?.cause ?? ''} transition=${mode.lastChange?.transitionId ?? ''}');
-    if (previous != _activeMode || previousLightRuntime != _lightRuntime) {
+    if (previous != _activeMode ||
+        previousLightRuntime != _lightRuntime ||
+        acceptedConfigs) {
       notifyListeners();
     }
   }
@@ -4723,7 +4843,9 @@ class ServerSyncProvider extends ChangeNotifier {
     _activeProfileId = mode?.activeConfig?.activeProfileId;
     _modeTransitions = await DemoServerApi.instance.getTransitions();
     _inputBindings = await DemoServerApi.instance.getInputBindings();
-    _modeConfigs = [...?mode?.configs];
+    if (_roomModeDefaultsRollback == null) {
+      _modeConfigs = [...?mode?.configs];
+    }
     _profiles = const [];
     _rhythmIntervalSecs = 60;
     _effectiveFadeMs = 1800;
@@ -5134,6 +5256,7 @@ class ServerSyncProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+    _roomModeDefaultsSaveDebounce?.cancel();
     _roomReadinessGraceTimer?.cancel();
     _helloSub?.cancel();
     _rhythmStateSub?.cancel();
