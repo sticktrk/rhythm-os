@@ -326,6 +326,12 @@ impl LightUsageLedger {
             wall_delta_ms.abs_diff(elapsed_ms) > LIGHT_USAGE_CLOCK_TOLERANCE_MS
         });
         if elapsed > continuity_budget || wall_discontinuous {
+            log::debug!(
+                target: "cmd",
+                "light_usage stage=gap_discarded reason={} subject_kind={:?}",
+                if wall_discontinuous { "wall_clock" } else { "stale" },
+                subject_kind
+            );
             if wall_discontinuous {
                 self.clock_discontinuity_count = self.clock_discontinuity_count.saturating_add(1);
             }
@@ -370,6 +376,15 @@ impl LightUsageLedger {
                     segment_id: previous.segment_id,
                 },
             );
+            if changed {
+                log::debug!(
+                    target: "cmd",
+                    "light_usage stage=interval_accrued subject_kind={:?} transition=true covered_ms={} uncertainty_ms={}",
+                    subject_kind,
+                    elapsed_ms,
+                    uncertainty_ms
+                );
+            }
         } else {
             let wall_total = wall_delta_ms.unwrap_or(elapsed_ms).max(1);
             let boundary = next_utc_midnight_epoch_ms(previous.observed_at_epoch_ms)
@@ -534,8 +549,19 @@ impl LightUsageLedger {
             );
             self.pending_batch_id = None;
             self.force_cloud = self.segments.values().any(LightUsageSegment::is_dirty);
+            log::debug!(
+                target: "cmd",
+                "light_usage stage=batch_acked segment_count={} backlog_capped={}",
+                batch.segments.len(),
+                batch.backlog_capped
+            );
         } else {
             self.cloud_status = Some("schema_unacknowledged".to_string());
+            log::debug!(
+                target: "cmd",
+                "light_usage stage=batch_retained reason=schema_unacknowledged segment_count={}",
+                batch.segments.len()
+            );
         }
         self.mark_dirty(now);
     }
@@ -549,6 +575,11 @@ impl LightUsageLedger {
                 _ => "failed",
             }
             .to_string(),
+        );
+        log::debug!(
+            target: "cmd",
+            "light_usage stage=batch_retained reason={}",
+            self.cloud_status.as_deref().unwrap_or("failed")
         );
         self.mark_dirty(now);
     }
@@ -698,6 +729,12 @@ impl LightUsageLedger {
                 observed_at_instant,
                 segment_id,
             },
+        );
+        log::debug!(
+            target: "cmd",
+            "light_usage stage=baseline_started subject_kind={:?} source={:?}",
+            subject_kind,
+            source
         );
         self.mark_dirty(observed_at_instant);
     }
@@ -972,6 +1009,11 @@ fn enqueue_due_checkpoint(state: &SharedState) {
             let result = storage.save_light_usage_ledger(&snapshot);
             if let Err(error) = &result {
                 log::warn!(target: "cmd", "Failed to checkpoint light usage ledger: {error:#}");
+            } else {
+                log::debug!(
+                    target: "cmd",
+                    "light_usage stage=checkpointed checkpoint_epoch_ms={checkpoint_epoch_ms}"
+                );
             }
             if let Ok(mut state) = state_for_result.lock() {
                 state.light_usage.complete_checkpoint(
@@ -1191,6 +1233,37 @@ mod tests {
                 .sum::<u64>(),
             0
         );
+    }
+
+    #[test]
+    fn backwards_wall_clock_jump_starts_a_new_baseline() {
+        let mut ledger = LightUsageLedger::default();
+        let start = Instant::now();
+        record(
+            &mut ledger,
+            "bulb-1",
+            LightUsageSubjectKind::Bulb,
+            true,
+            LightUsageObservationSource::Periodic,
+            start,
+            1_700_000_000_000,
+        );
+        record(
+            &mut ledger,
+            "bulb-1",
+            LightUsageSubjectKind::Bulb,
+            true,
+            LightUsageObservationSource::Periodic,
+            start + Duration::from_secs(10),
+            1_699_999_990_000,
+        );
+
+        assert_eq!(ledger.clock_discontinuity_count, 1);
+        assert_eq!(ledger.segments.len(), 2);
+        assert!(ledger
+            .segments
+            .values()
+            .all(|segment| segment.covered_ms == 0));
     }
 
     #[test]
