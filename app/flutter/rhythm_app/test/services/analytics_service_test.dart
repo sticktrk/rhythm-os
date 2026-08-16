@@ -73,6 +73,7 @@ void main() {
       outcome: 'succeeded',
       changedFieldCount: 2,
       dayColorMode: 'static_temperature',
+      dayBrightnessMode: 'fixed',
     );
     await analytics.logRoomLightSettingsResetCompleted(
       journeyId: 'room-light-settings-456',
@@ -155,6 +156,10 @@ void main() {
     expect(
       backend.events[8].properties,
       containsPair('day_color_mode', 'static_temperature'),
+    );
+    expect(
+      backend.events[8].properties,
+      containsPair('day_brightness_mode', 'fixed'),
     );
     expect(
       backend.events[9].properties,

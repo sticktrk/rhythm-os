@@ -1,4 +1,4 @@
-import 'dart:ui' show SemanticsAction;
+import 'dart:ui' show SemanticsAction, Tristate;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -124,6 +124,126 @@ void main() {
       );
       expect(colorOverride.applyTo(global), fixedColor);
     });
+  });
+
+  group('room Day brightness contract', () {
+    test('equal endpoints reopen as Fixed and a range reopens as Auto', () {
+      expect(
+        roomDayBrightnessModeForConfig(
+          const RhythmCurveConfig(
+            id: 'rhythm',
+            minBrightness: 42,
+            maxBrightness: 42,
+          ),
+        ),
+        RoomDayBrightnessMode.fixed,
+      );
+      expect(
+        roomDayBrightnessModeForConfig(
+          const RhythmCurveConfig(
+            id: 'rhythm',
+            minBrightness: 8,
+            maxBrightness: 82,
+          ),
+        ),
+        RoomDayBrightnessMode.automatic,
+      );
+    });
+
+    test('fixed brightness saves through existing additive override fields',
+        () {
+      const global = RhythmCurveConfig(
+        id: 'rhythm',
+        minBrightness: 8,
+        maxBrightness: 82,
+      );
+      final endpoints = roomDayBrightnessEndpointsForMode(
+        mode: RoomDayBrightnessMode.fixed,
+        automaticMinBrightness: global.minBrightness.toDouble(),
+        automaticMaxBrightness: global.maxBrightness.toDouble(),
+        fixedBrightness: 42,
+      );
+      final fixed = global.copyWith(
+        minBrightness: endpoints.minBrightness,
+        maxBrightness: endpoints.maxBrightness,
+      );
+      final override = RhythmLightProfileNodeOverride.between(global, fixed);
+      final reopened = override.applyTo(global);
+
+      expect(override.toJson(), {
+        'min_brightness': 42,
+        'max_brightness': 42,
+      });
+      expect(reopened, fixed);
+      expect(
+        roomDayBrightnessModeForConfig(reopened),
+        RoomDayBrightnessMode.fixed,
+      );
+    });
+
+    test('switching back to Auto restores its range without stale endpoints',
+        () {
+      final endpoints = roomDayBrightnessEndpointsForMode(
+        mode: RoomDayBrightnessMode.automatic,
+        automaticMinBrightness: 8,
+        automaticMaxBrightness: 82,
+        fixedBrightness: 42,
+      );
+
+      expect(endpoints.minBrightness, 8);
+      expect(endpoints.maxBrightness, 82);
+      expect(endpoints.minBrightness, isNot(endpoints.maxBrightness));
+    });
+  });
+
+  testWidgets('brightness selector is accessible and switches modes',
+      (tester) async {
+    var mode = RoomDayBrightnessMode.automatic;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Center(
+            child: SizedBox(
+              width: 300,
+              child: StatefulBuilder(
+                builder: (context, setState) =>
+                    RoomDayBrightnessModeSelector(
+                  mode: mode,
+                  onChanged: (value) => setState(() => mode = value),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final automatic = find.byKey(
+      const ValueKey('room-day-brightness-mode-automatic'),
+    );
+    final fixed = find.byKey(
+      const ValueKey('room-day-brightness-mode-fixed'),
+    );
+    expect(find.text('Auto'), findsOneWidget);
+    expect(find.text('Fixed'), findsOneWidget);
+    expect(tester.getRect(automatic).left, lessThan(tester.getRect(fixed).left));
+    expect(tester.getSemantics(automatic).label, 'Auto');
+    expect(
+      tester
+          .getSemantics(automatic)
+          .getSemanticsData()
+          .hasAction(SemanticsAction.tap),
+      isTrue,
+    );
+
+    await tester.tap(fixed);
+    await tester.pumpAndSettle();
+    expect(mode, RoomDayBrightnessMode.fixed);
+    expect(
+      tester.getSemantics(fixed).getSemanticsData().flagsCollection.isSelected,
+      Tristate.isTrue,
+    );
   });
 
   testWidgets('selector activates White and Color on a compact room card',

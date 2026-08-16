@@ -779,6 +779,7 @@ class AnalyticsService {
     required String outcome,
     required int changedFieldCount,
     String? dayColorMode,
+    String? dayBrightnessMode,
     String? failureStage,
     String scope = 'room',
   }) async {
@@ -788,6 +789,8 @@ class AnalyticsService {
       'outcome': outcome,
       'changed_field_count': changedFieldCount,
       if (dayColorMode != null) 'day_color_mode': dayColorMode,
+      if (dayBrightnessMode != null)
+        'day_brightness_mode': dayBrightnessMode,
       if (failureStage != null) 'failure_stage': failureStage,
     });
   }
