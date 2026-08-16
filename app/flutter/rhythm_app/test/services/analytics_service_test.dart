@@ -72,6 +72,7 @@ void main() {
       profile: 'rhythm',
       outcome: 'succeeded',
       changedFieldCount: 2,
+      dayColorMode: 'static_temperature',
     );
     await analytics.logRoomLightSettingsResetCompleted(
       journeyId: 'room-light-settings-456',
@@ -152,6 +153,10 @@ void main() {
       containsPair('changed_field_count', 2),
     );
     expect(
+      backend.events[8].properties,
+      containsPair('day_color_mode', 'static_temperature'),
+    );
+    expect(
       backend.events[9].properties,
       containsPair('failure_stage', 'request'),
     );
@@ -182,6 +187,10 @@ void main() {
       'scene_id',
       'room_id',
       'device_id',
+      'kelvin',
+      'rgb',
+      'xy',
+      '3500',
       'error',
       'MT:RECOVERY-SECRET',
     ]) {
