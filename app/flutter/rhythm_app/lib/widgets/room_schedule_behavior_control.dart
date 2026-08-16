@@ -51,11 +51,17 @@ class RoomScheduleBehaviorControl extends StatelessWidget {
     required this.roomId,
     required this.foregroundColor,
     this.enabled = true,
+    this.showTopDivider = true,
+    this.keyPrefix = 'room-card-schedule',
+    this.analyticsSource = 'room_card',
   });
 
   final String roomId;
   final Color foregroundColor;
   final bool enabled;
+  final bool showTopDivider;
+  final String keyPrefix;
+  final String analyticsSource;
 
   @override
   Widget build(BuildContext context) {
@@ -66,25 +72,19 @@ class RoomScheduleBehaviorControl extends StatelessWidget {
       ),
       builder: (context, defaults, _) {
         return Container(
-          key: ValueKey('room-card-schedule-$roomId'),
-          padding: const EdgeInsets.only(top: 8),
-          decoration: BoxDecoration(
-            border: Border(
-              top: BorderSide(
-                color: foregroundColor.withValues(alpha: 0.10),
-              ),
-            ),
-          ),
+          key: ValueKey('$keyPrefix-$roomId'),
+          padding: EdgeInsets.only(top: showTopDivider ? 8 : 0),
+          decoration: showTopDivider
+              ? BoxDecoration(
+                  border: Border(
+                    top: BorderSide(
+                      color: foregroundColor.withValues(alpha: 0.10),
+                    ),
+                  ),
+                )
+              : null,
           child: Row(
             children: [
-              Padding(
-                padding: const EdgeInsets.only(left: 2, right: 8),
-                child: Icon(
-                  Icons.schedule_rounded,
-                  size: 16,
-                  color: foregroundColor.withValues(alpha: 0.62),
-                ),
-              ),
               Expanded(
                 child: _ScheduleModeMenu(
                   roomId: roomId,
@@ -95,6 +95,8 @@ class RoomScheduleBehaviorControl extends StatelessWidget {
                   accent: const Color(0xFFF9A825),
                   foregroundColor: foregroundColor,
                   enabled: enabled,
+                  keyPrefix: keyPrefix,
+                  analyticsSource: analyticsSource,
                 ),
               ),
               const SizedBox(width: 8),
@@ -108,6 +110,8 @@ class RoomScheduleBehaviorControl extends StatelessWidget {
                   accent: const Color(0xFF7C83FF),
                   foregroundColor: foregroundColor,
                   enabled: enabled,
+                  keyPrefix: keyPrefix,
+                  analyticsSource: analyticsSource,
                 ),
               ),
             ],
@@ -128,6 +132,8 @@ class _ScheduleModeMenu extends StatelessWidget {
     required this.accent,
     required this.foregroundColor,
     required this.enabled,
+    required this.keyPrefix,
+    required this.analyticsSource,
   });
 
   final String roomId;
@@ -138,6 +144,8 @@ class _ScheduleModeMenu extends StatelessWidget {
   final Color accent;
   final Color foregroundColor;
   final bool enabled;
+  final String keyPrefix;
+  final String analyticsSource;
 
   @override
   Widget build(BuildContext context) {
@@ -153,7 +161,7 @@ class _ScheduleModeMenu extends StatelessWidget {
       hint: 'Choose Auto, Standby, Off, or On',
       excludeSemantics: true,
       child: PopupMenuButton<RoomScheduleBehavior>(
-        key: ValueKey('room-card-schedule-$modeKey-$roomId'),
+        key: ValueKey('$keyPrefix-$modeKey-$roomId'),
         enabled: enabled,
         initialValue: behavior,
         tooltip: '$title schedule behavior: $label',
@@ -168,7 +176,7 @@ class _ScheduleModeMenu extends StatelessWidget {
           AnalyticsService().logLightProfileRoomDefaultChanged(
             profile: mode == RhythmMode.sleep ? 'sleep' : 'rhythm',
             cleared: selected == RoomScheduleBehavior.automatic,
-            source: 'room_card',
+            source: analyticsSource,
           );
         },
         itemBuilder: (_) => [
@@ -211,10 +219,11 @@ class _ScheduleModeMenu extends StatelessWidget {
                   fontWeight: FontWeight.w600,
                 ),
               ),
-              const Spacer(),
-              Flexible(
+              const SizedBox(width: 8),
+              Expanded(
                 child: Text(
                   label,
+                  textAlign: TextAlign.end,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(

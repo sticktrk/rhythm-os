@@ -507,6 +507,10 @@ void main() {
       'Custom light profile: brightness range and color temperature range',
     );
     expect(find.text('Light settings'), findsNothing);
+    expect(
+      find.byKey(const ValueKey('room-card-schedule-room-1')),
+      findsNothing,
+    );
     expect(serverSync.hasNodeLightProfileOverrides('room-1'), isTrue);
 
     await tester.pumpWidget(
@@ -534,6 +538,18 @@ void main() {
       const ValueKey('room-settings-light-settings-room-1'),
     );
     expect(button, findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('room-settings-schedule-room-1')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('room-settings-schedule-day-room-1')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('room-settings-schedule-night-room-1')),
+      findsOneWidget,
+    );
     expect(find.text('Lighting'), findsOneWidget);
     expect(
       tester
@@ -2021,17 +2037,9 @@ void main() {
     expect(_roomSegment('Color'), findsOneWidget);
     expect(find.byType(Slider), findsNothing);
 
-    final schedule = find.byKey(
-      const ValueKey('room-card-schedule-room-1'),
-    );
-    expect(schedule, findsOneWidget);
     expect(
-      find.byKey(const ValueKey('room-card-schedule-day-room-1')),
-      findsOneWidget,
-    );
-    expect(
-      find.byKey(const ValueKey('room-card-schedule-night-room-1')),
-      findsOneWidget,
+      find.byKey(const ValueKey('room-card-schedule-room-1')),
+      findsNothing,
     );
 
     final powerRect = tester.getRect(_powerToggle());
@@ -2041,7 +2049,6 @@ void main() {
     final scenesLabelRect = tester.getRect(_jewelLabel('scenes'));
     final brightnessLabelRect = tester.getRect(_jewelLabel('brightness'));
     final colorLabelRect = tester.getRect(_jewelLabel('color'));
-    final scheduleRect = tester.getRect(schedule);
     expect(
       tester.widget<AnimatedAlign>(_powerThumb()).alignment,
       Alignment.centerRight,
@@ -2089,11 +2096,6 @@ void main() {
     expect(scenesLabelRect.top, greaterThan(scenesRect.bottom));
     expect(brightnessLabelRect.top, greaterThan(brightnessRect.bottom));
     expect(colorLabelRect.top, greaterThan(colorRect.bottom));
-    expect(
-      scheduleRect.top,
-      greaterThanOrEqualTo(colorLabelRect.bottom),
-      reason: 'Schedule behavior belongs below the immediate light controls.',
-    );
     expect(scenesLabelRect.center.dx, closeTo(scenesRect.center.dx, 0.1));
     expect(
       brightnessLabelRect.center.dx,
