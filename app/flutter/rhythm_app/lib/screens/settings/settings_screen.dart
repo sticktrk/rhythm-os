@@ -12,7 +12,6 @@ import '../../services/auth_service.dart';
 import '../../widgets/settings_row.dart';
 import '../power_usage_screen.dart';
 import 'sections/account_section.dart';
-import 'sections/lights_devices_section.dart';
 // import 'sections/sleep_section.dart'; // TODO: Re-enable when sleep schedule is implemented
 import 'sections/rhythm_server_section.dart';
 import 'sections/rhythm_app_section.dart';
@@ -95,7 +94,6 @@ class SettingsScreen extends StatelessWidget {
         ),
         SettingsGroup(
           children: [
-            _buildDevicesRow(context),
             _buildRhythmOsServerRow(),
           ],
         ),
@@ -193,15 +191,6 @@ class SettingsScreen extends StatelessWidget {
           onTap: () => RhythmServerDetailScreen.show(context),
         );
       },
-    );
-  }
-
-  Widget _buildDevicesRow(BuildContext context) {
-    return SettingsRow(
-      icon: Icons.lightbulb_rounded,
-      iconColor: const Color(0xFFFFB300),
-      label: 'Devices',
-      onTap: () => DevicesListScreen.show(context),
     );
   }
 

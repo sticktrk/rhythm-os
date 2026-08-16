@@ -1197,11 +1197,16 @@ void main() {
       connection.emitHello(RhythmHello.fromJson({
         'capabilities': {
           'api_schema_version': 2,
-          'features': const [RhythmFeature.hueRoomAuthorityConsent],
+          'features': const [
+            RhythmFeature.hueRoomAuthorityConsent,
+            RhythmFeature.hueRoomTopologySync,
+          ],
           'hubs': const <dynamic>[],
         },
       }));
       await Future<void>.delayed(Duration.zero);
+
+      expect(provider.hueRoomTopologySyncSupported, isTrue);
 
       final hubConnected = await provider.pushHubCredentials(RoomSourceDto.hue);
 

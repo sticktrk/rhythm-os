@@ -11,6 +11,10 @@ void main() {
           'revision': '0123456789abcdef',
           'takeover_scope': 'bridge',
           'bridge_takeover_requested': false,
+          'topology_sync_enabled': true,
+          'topology_sync_status': 'pending',
+          'topology_sync_room_count': 1,
+          'topology_sync_light_count': 4,
           'rooms': [
             {
               'room_id': 'office',
@@ -26,10 +30,25 @@ void main() {
 
     expect(authority.schemaVersion, 1);
     expect(authority.bridges, hasLength(1));
+    expect(authority.bridges.single.topologySyncEnabled, isTrue);
+    expect(authority.bridges.single.topologySyncStatus, 'pending');
+    expect(authority.bridges.single.topologySyncRoomCount, 1);
+    expect(authority.bridges.single.topologySyncLightCount, 4);
     expect(authority.bridges.single.rooms.single.owner,
         RhythmHueRoomAuthorityOwner.unreviewed);
     expect(
         authority.bridges.single.rooms.single.rhythmAutomationEnabled, isFalse);
+  });
+
+  test('older servers default room topology sync off', () {
+    final bridge = RhythmHueBridgeAuthority.fromJson({
+      'address': 'bridge.local',
+      'revision': '0123456789abcdef',
+      'rooms': const [],
+    });
+
+    expect(bridge.topologySyncEnabled, isFalse);
+    expect(bridge.topologySyncStatus, 'disabled');
   });
 
   test('unknown owner values remain fail closed', () {

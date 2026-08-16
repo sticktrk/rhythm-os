@@ -6299,6 +6299,8 @@ mod tests {
         let initial = handle_get_hue_authority(&state);
         assert_eq!(initial.status, 200);
         let initial: Value = serde_json::from_str(&initial.body).unwrap();
+        assert_eq!(initial["bridges"][0]["topology_sync_enabled"], false);
+        assert_eq!(initial["bridges"][0]["topology_sync_status"], "disabled");
         assert_eq!(initial["bridges"][0]["rooms"][0]["owner"], "unreviewed");
         let revision = initial["bridges"][0]["revision"]
             .as_str()
@@ -6311,10 +6313,14 @@ mod tests {
                 "address": "bridge.local",
                 "revision": revision,
                 "correlation_id": "hue-authority-test-1",
+                "topology_sync_enabled": true,
                 "rooms": [{"room_id": "room-office", "owner": "hue"}]
             }),
         );
         assert_eq!(hue_owned.status, 200);
+        let hue_owned: Value = serde_json::from_str(&hue_owned.body).unwrap();
+        assert_eq!(hue_owned["bridges"][0]["topology_sync_enabled"], true);
+        assert_eq!(hue_owned["bridges"][0]["topology_sync_status"], "blocked");
         assert_eq!(reconcile_calls.load(Ordering::SeqCst), 0);
 
         let stale = handle_put_hue_authority(
@@ -6341,6 +6347,12 @@ mod tests {
             }),
         );
         assert_eq!(rhythm_owned.status, 200);
+        let rhythm_owned: Value = serde_json::from_str(&rhythm_owned.body).unwrap();
+        assert_eq!(rhythm_owned["bridges"][0]["topology_sync_enabled"], true);
+        assert_eq!(
+            rhythm_owned["bridges"][0]["topology_sync_status"],
+            "pending"
+        );
         assert_eq!(reconcile_calls.load(Ordering::SeqCst), 1);
     }
 

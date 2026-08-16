@@ -1201,12 +1201,15 @@ class RhythmServerApi {
     required RhythmHueBridgeAuthority bridge,
     required Map<String, RhythmHueRoomAuthorityOwner> owners,
     required String correlationId,
+    bool? topologySyncEnabled,
   }) async {
     try {
       final response = await _dio.put('api/hue/authority', data: {
         'address': bridge.address,
         'revision': bridge.revision,
         'correlation_id': correlationId,
+        if (topologySyncEnabled != null)
+          'topology_sync_enabled': topologySyncEnabled,
         'rooms': [
           for (final room in bridge.rooms)
             {

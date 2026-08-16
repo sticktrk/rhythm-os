@@ -12,6 +12,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RhythmDevice,
         RhythmDeviceType,
         RhythmDiagnosticsApi,
+        RhythmHueBridgeAuthority,
         RhythmHubInfo,
         RhythmHubStartupRetry,
         RhythmHubStartupRetryStatus,
@@ -29,8 +30,8 @@ import '../../widgets/beta_badge.dart';
 import '../../widgets/device_detail_sheet.dart';
 import '../../widgets/info_tooltip.dart';
 import '../../widgets/report_bug_flow.dart';
-import '../settings/sections/lights_devices_section.dart';
 import 'device_pairing_flow.dart';
+import 'hue_authority_screen.dart';
 import 'hue_bridge_button_add_screen.dart';
 import 'matter_pairing_flow.dart';
 import 'ota_update_overlay.dart';
@@ -1749,27 +1750,36 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   static String _hubLabel(String type) => switch (type) {
         'hue' => 'Philips Hue',
         'hue_ble' => 'Hue Bluetooth',
-        'homeassistant' || 'home_assistant' => 'Home Assistant',
+        'local_ble' => 'Local Bluetooth',
+        'homeassistant' || 'home_assistant' || 'ha' => 'Home Assistant',
         'matter' => 'Matter',
-        _ => type,
+        'zigbee' => 'Zigbee',
+        _ when type.isEmpty => 'Hub',
+        _ => type
+            .split('_')
+            .where((part) => part.isNotEmpty)
+            .map((part) => '${part[0].toUpperCase()}${part.substring(1)}')
+            .join(' '),
       };
 
   static Color _hubColor(String type) => switch (type) {
         'hue' || 'hue_ble' => const Color(0xFFFFB900),
-        'homeassistant' || 'home_assistant' => const Color(0xFF42A5F5),
+        'homeassistant' || 'home_assistant' || 'ha' => const Color(0xFF42A5F5),
         'matter' => const Color(0xFF26A69A),
         _ => _teal,
       };
 
   static IconData _hubIcon(String type) => switch (type) {
-        'hue' || 'hue_ble' => Icons.lightbulb_outline,
-        'homeassistant' || 'home_assistant' => Icons.home_outlined,
+        'hue' => Icons.lightbulb_outline,
+        'hue_ble' || 'local_ble' => Icons.bluetooth_rounded,
+        'homeassistant' || 'home_assistant' || 'ha' => Icons.home_outlined,
         'matter' => Icons.memory_outlined,
+        'zigbee' => Icons.hub_outlined,
         _ => Icons.hub_outlined,
       };
 
   static bool _hubHasBetaBadge(String type) => switch (type) {
-        'homeassistant' || 'home_assistant' || 'matter' => true,
+        'homeassistant' || 'home_assistant' || 'ha' || 'matter' => true,
         _ => false,
       };
 
@@ -2792,16 +2802,13 @@ class RhythmServerHubManagementSection extends StatefulWidget {
     this.onResynced,
   });
 
-  /// Render the list of already-paired hubs (and their devices).
+  /// Render every configured hub as a link to its dedicated settings page.
   final bool showConfigured;
 
-  /// Render the "add a hub / pair a device" options. Splitting these two lets
-  /// the same capability-aware section back both the Settings → Devices list
-  /// (configured only) and the "+" Add Device flow (add options only).
+  /// Render capability-aware add/sync actions beneath the configured hubs.
   final bool showAddOptions;
 
-  /// Render the direct Matter pairing row. Add & Review owns its universal
-  /// device-scanning card, while Devices settings keeps the direct option.
+  /// Render an explicit Matter pairing row in addition to universal scanning.
   final bool showMatterAddOption;
 
   /// Render direct Philips Hue Bluetooth pairing when the appliance
@@ -2917,13 +2924,15 @@ class _RhythmServerHubManagementSectionState
   }
 
   String _hubSummaryScope(List<Map<String, dynamic>> configuredHubs) {
-    final identities = configuredHubs.map((hub) {
-      final type = hub['type']?.toString() ?? '';
-      final address = hub['address']?.toString() ?? '';
-      return '${type.length}:$type|${address.length}:$address';
-    }).toList(growable: false)
+    final identities = configuredHubs.map(_hubIdentity).toList(growable: false)
       ..sort();
     return identities.join(';');
+  }
+
+  String _hubIdentity(Map<String, dynamic> hub) {
+    final type = hub['type']?.toString().trim().toLowerCase() ?? '';
+    final address = hub['address']?.toString().trim().toLowerCase() ?? '';
+    return '${type.length}:$type|${address.length}:$address';
   }
 
   Future<void> _fetchHubSummaries(
@@ -2935,10 +2944,9 @@ class _RhythmServerHubManagementSectionState
     if (generation == null) {
       _requestedHubSummaryScope = _hubSummaryScope(configuredHubs);
     }
-    final configuredTypes = configuredHubs
-        .map((hub) => hub['type']?.toString())
-        .nonNulls
-        .where((type) => type.isNotEmpty)
+    final configuredIdentities = configuredHubs
+        .map(_hubIdentity)
+        .where((identity) => identity.isNotEmpty)
         .toSet();
     try {
       final http = context.read<RhythmConnection>();
@@ -2950,7 +2958,7 @@ class _RhythmServerHubManagementSectionState
       }
 
       if (devices == null) {
-        setState(() => _hubSummaryFailures.addAll(configuredTypes));
+        setState(() => _hubSummaryFailures.addAll(configuredIdentities));
         return;
       }
 
@@ -2958,16 +2966,21 @@ class _RhythmServerHubManagementSectionState
       for (final d in devices) {
         final dtype = d['device_type'] as String? ?? 'light';
         final endpoints = d['endpoints'] as List<dynamic>? ?? [];
-        final hubTypes = <String>{};
+        final hubIdentities = <String>{};
         for (final ep in endpoints) {
           final hubKey = (ep as Map<String, dynamic>)['hub_key']
                   as Map<String, dynamic>? ??
               {};
-          final ht = hubKey['hub_type']?.toString();
-          if (ht != null) hubTypes.add(ht);
+          final type = hubKey['hub_type']?.toString().trim().toLowerCase();
+          if (type == null || type.isEmpty) continue;
+          final address =
+              hubKey['address']?.toString().trim().toLowerCase() ?? '';
+          hubIdentities.add(
+            '${type.length}:$type|${address.length}:$address',
+          );
         }
-        for (final ht in hubTypes) {
-          final countsForHub = counts[ht] ??= _DeviceCounts();
+        for (final identity in hubIdentities) {
+          final countsForHub = counts[identity] ??= _DeviceCounts();
           if (dtype == 'light') {
             countsForHub.lights++;
           } else if (dtype == 'button') {
@@ -2979,7 +2992,7 @@ class _RhythmServerHubManagementSectionState
       }
 
       final summaries = <String, String>{
-        for (final type in configuredTypes) type: 'No devices',
+        for (final identity in configuredIdentities) identity: 'No devices',
       };
       for (final entry in counts.entries) {
         final countsForHub = entry.value;
@@ -3001,7 +3014,7 @@ class _RhythmServerHubManagementSectionState
 
       setState(() {
         _hubSummaries = summaries;
-        _hubSummaryFailures.removeAll(configuredTypes);
+        _hubSummaryFailures.removeAll(configuredIdentities);
       });
     } catch (error, stackTrace) {
       if (!mounted ||
@@ -3013,7 +3026,7 @@ class _RhythmServerHubManagementSectionState
         'RhythmServerHubManagementSection: summary refresh failed: '
         '$error\n$stackTrace',
       );
-      setState(() => _hubSummaryFailures.addAll(configuredTypes));
+      setState(() => _hubSummaryFailures.addAll(configuredIdentities));
     }
   }
 
@@ -3032,7 +3045,8 @@ class _RhythmServerHubManagementSectionState
     if (configuredHubs.isEmpty) return null;
 
     return _buildSection(
-      title: configuredHubs.length > 1 ? 'LIGHT HUBS' : 'LIGHT HUB',
+      title: configuredHubs.length > 1 ? 'HUBS' : 'HUB',
+      subtitle: 'Open a hub to manage its connection and devices.',
       children: [
         Container(
           decoration: BoxDecoration(
@@ -3078,11 +3092,6 @@ class _RhythmServerHubManagementSectionState
         ..._buildMatterAddOptionRows(syncProvider),
     ];
 
-    Widget divider() => Divider(
-          height: 1,
-          color: CelestialColors.orbitRing.withValues(alpha: 0.3),
-        );
-
     Container card(List<Widget> children) => Container(
           decoration: BoxDecoration(
             color: CelestialColors.backgroundCard,
@@ -3094,37 +3103,23 @@ class _RhythmServerHubManagementSectionState
           child: Column(children: children),
         );
 
-    // Bridge-backed Hue and Home Assistant devices are synced from their hubs.
-    // Direct Hue Bluetooth and Matter pairing sit in a separate capability-
-    // gated card because Re-Sync does not commission either one.
+    if (directPairingOptions.isEmpty && configuredHubs.isEmpty) return null;
+
+    // The configured-hub rows above are the only settings jump-off. This card
+    // contains actions, not duplicate pseudo-hub links.
     return _buildSection(
       title: widget.addOptionsTitle,
       subtitle: widget.addOptionsSubtitle,
       children: [
         card([
-          _buildHubOptionRow(
-            icon: Icons.home_outlined,
-            label: 'Home Assistant',
-            color: const Color(0xFF42A5F5),
-            showBetaBadge: true,
-            trailingLabel: 'Devices',
-            onTap: () => DevicesListScreen.show(context),
-          ),
-          divider(),
-          _buildHubOptionRow(
-            icon: Icons.lightbulb_outline,
-            label: 'Philips Hue',
-            color: const Color(0xFFFFB900),
-            trailingLabel: 'Devices',
-            onTap: () => DevicesListScreen.show(context),
-          ),
-          divider(),
-          _buildResyncRow(),
+          ...directPairingOptions,
+          if (directPairingOptions.isNotEmpty && configuredHubs.isNotEmpty)
+            Divider(
+              height: 1,
+              color: CelestialColors.orbitRing.withValues(alpha: 0.3),
+            ),
+          if (configuredHubs.isNotEmpty) _buildResyncRow(),
         ]),
-        if (directPairingOptions.isNotEmpty) ...[
-          const SizedBox(height: 12),
-          card(directPairingOptions),
-        ],
       ],
     );
   }
@@ -3237,13 +3232,14 @@ class _RhythmServerHubManagementSectionState
 
   Widget _buildHubRow(Map<String, dynamic> hubInfo) {
     final type = hubInfo['type'] as String;
+    final identity = _hubIdentity(hubInfo);
     final label = _RhythmServerSettingsScreenState._hubLabel(type);
     final hubColor = _RhythmServerSettingsScreenState._hubColor(type);
     final connected = hubInfo['connected'] as bool? ?? false;
     final statusColor =
         _RhythmServerSettingsScreenState._hubConnectionColor(hubInfo);
-    final deviceSummary = _hubSummaries[type] ??
-        (_hubSummaryFailures.contains(type)
+    final deviceSummary = _hubSummaries[identity] ??
+        (_hubSummaryFailures.contains(identity)
             ? 'Devices unavailable'
             : 'Loading...');
     final subtitle = _RhythmServerSettingsScreenState._hubRowSubtitle(
@@ -4192,6 +4188,7 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
   List<RhythmRoom>? _canonicalRooms;
   String? _canonicalSummary;
   bool _canonicalLoading = false;
+  bool _reviewingHueAutomation = false;
 
   @override
   void initState() {
@@ -4214,14 +4211,20 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
       return;
     }
 
-    // Filter to devices that have an endpoint matching this hub type.
+    // Filter to the exact configured hub. A type-only filter would combine
+    // devices from two Hue Bridges (or any future repeated integration).
     final hubDevices = devices.where((d) {
       final endpoints = d['endpoints'] as List<dynamic>? ?? [];
       return endpoints.any((ep) {
         final hubKey =
             (ep as Map<String, dynamic>)['hub_key'] as Map<String, dynamic>? ??
                 {};
-        return hubKey['hub_type']?.toString() == _type;
+        final endpointType = hubKey['hub_type']?.toString();
+        if (endpointType != _type) return false;
+        final address = _address?.trim();
+        if (address == null || address.isEmpty) return true;
+        return hubKey['address']?.toString().trim().toLowerCase() ==
+            address.toLowerCase();
       });
     }).toList();
 
@@ -4336,6 +4339,8 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
         syncProvider.canAddHueBridgeDeviceBySerial;
     final canAddHueBridgeButton =
         connected && _type == 'hue' && syncProvider.canAddHueBridgeButton;
+    final canReviewHueAutomation =
+        _type == 'hue' && syncProvider.hueRoomAuthorityConsentSupported;
     const matterActionLabel = 'Add Matter Device';
 
     return Scaffold(
@@ -4504,6 +4509,19 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                     _buildSectionHeader('DEVICES'),
                     const SizedBox(height: 8),
                     _buildDevicesCard(rooms),
+                    if (canReviewHueAutomation) ...[
+                      const SizedBox(height: 10),
+                      _buildActionButton(
+                        icon: Icons.admin_panel_settings_outlined,
+                        label: _reviewingHueAutomation
+                            ? 'Loading Hue room automation…'
+                            : 'Hue room automation',
+                        color: const Color(0xFFFFB900),
+                        onTap: _reviewingHueAutomation
+                            ? null
+                            : _reviewHueAutomation,
+                      ),
+                    ],
                     if (_type == 'matter' && canAddMatter) ...[
                       const SizedBox(height: 10),
                       _buildActionButton(
@@ -4857,6 +4875,63 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
       if (hubInfo['address'] == address) return hubInfo;
     }
     return widget.hubInfo;
+  }
+
+  Future<void> _reviewHueAutomation() async {
+    if (_reviewingHueAutomation) return;
+    setState(() => _reviewingHueAutomation = true);
+    try {
+      final authority =
+          await context.read<ServerSyncProvider>().fetchHueAuthority();
+      if (!mounted) return;
+      final bridge = _matchingHueBridge(authority?.bridges ?? const []);
+      if (bridge == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Hue rooms are not ready yet. Sync the hub and try again.',
+            ),
+          ),
+        );
+        return;
+      }
+      await HueAuthorityScreen.show(
+        context,
+        bridge,
+        source: 'hub_settings',
+      );
+    } catch (error, stackTrace) {
+      debugPrint(
+        'HubDetailScreen: Hue authority load failed: $error\n$stackTrace',
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Could not load Hue room automation.'),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _reviewingHueAutomation = false);
+    }
+  }
+
+  RhythmHueBridgeAuthority? _matchingHueBridge(
+    List<RhythmHueBridgeAuthority> bridges,
+  ) {
+    final address = _address?.trim().toLowerCase();
+    if (address == null || address.isEmpty) {
+      return bridges.length == 1 ? bridges.single : null;
+    }
+    for (final bridge in bridges) {
+      final candidate = bridge.address.trim().toLowerCase();
+      if (candidate == address ||
+          candidate.startsWith('$address:') ||
+          address.startsWith('$candidate:')) {
+        return bridge;
+      }
+    }
+    return null;
   }
 
   Future<void> _retryHub(Map<String, dynamic> hubInfo) async {

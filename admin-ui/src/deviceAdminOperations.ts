@@ -805,6 +805,7 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
       address: '{bridge_address}',
       revision: '{authority_revision}',
       correlation_id: '{correlation_id}',
+      topology_sync_enabled: false,
       rooms: [{ room_id: '{room_id}', owner: 'hue' }]
     },
     danger: true

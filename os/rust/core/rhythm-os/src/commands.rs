@@ -12409,11 +12409,51 @@ pub fn build_hue_authority(state: &SharedState) -> Result<crate::api_types::HueA
             if rooms.is_empty() {
                 return None;
             }
+            let mut topology_sync_room_ids = HashSet::new();
+            let topology_sync_light_count = s
+                .canonical_registry
+                .devices()
+                .filter(|device| {
+                    if !matches!(device.device_type, DeviceType::Light)
+                        || !device
+                            .active_endpoints()
+                            .any(|endpoint| endpoint.hub_key == key)
+                    {
+                        return false;
+                    }
+                    let room_id = s
+                        .topology
+                        .device_parent_room_id(&device.id)
+                        .map(str::to_string)
+                        .or_else(|| device.room_id.clone());
+                    if let Some(room_id) = room_id {
+                        topology_sync_room_ids.insert(room_id);
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .count();
             Some(HueBridgeAuthorityDto {
                 address: key.address.clone(),
                 revision: s.topology.external_automation_revision(&key),
                 takeover_scope: "bridge",
                 bridge_takeover_requested: s.topology.external_hub_has_full_rhythm_consent(&key),
+                topology_sync_enabled: s.topology.external_room_topology_sync_is_enabled(&key),
+                topology_sync_status: if !s.topology.external_room_topology_sync_is_enabled(&key) {
+                    "disabled"
+                } else if !s.topology.external_hub_has_full_rhythm_consent(&key) {
+                    "blocked"
+                } else if s.topology.external_room_topology_sync_needs_attention(&key) {
+                    "attention"
+                } else if s.topology.external_grouped_dispatch_is_suspended(&key) {
+                    "pending"
+                } else {
+                    "synced"
+                }
+                .to_string(),
+                topology_sync_room_count: topology_sync_room_ids.len(),
+                topology_sync_light_count,
                 rooms: rooms
                     .into_iter()
                     .map(|(room_id, name, owner)| HueRoomAuthorityDto {
@@ -12515,10 +12555,15 @@ pub fn do_hue_authority_update(
             })
             .collect::<Vec<_>>();
         let topology_before = s.topology.clone();
-        let changed = s
+        let mut changed = s
             .topology
             .replace_external_room_automation_decisions(&key, &decisions)
             .map_err(anyhow::Error::msg)?;
+        if let Some(enabled) = request.topology_sync_enabled {
+            changed |= s
+                .topology
+                .set_external_room_topology_sync_enabled(&key, enabled);
+        }
         if changed {
             if let Err(error) = save_authority_state(&s) {
                 s.topology = topology_before;
@@ -12601,6 +12646,14 @@ pub fn do_hue_authority_update(
         correlation_id,
         full_rhythm_consent
     );
+    let topology_sync_requested = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .topology
+        .external_room_topology_sync_is_enabled(&key);
+    if full_rhythm_consent && topology_sync_requested {
+        schedule_topology_group_sync_for_integrations(state);
+    }
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
     build_hue_authority(state)
 }

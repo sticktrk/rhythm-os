@@ -28,7 +28,12 @@ void main() {
     );
 
     await tester.pumpWidget(
-      const MaterialApp(home: HueAuthorityScreen(bridge: bridge)),
+      const MaterialApp(
+        home: HueAuthorityScreen(
+          bridge: bridge,
+          topologySyncSupported: true,
+        ),
+      ),
     );
 
     expect(find.text('Keep existing Hue automations'), findsNWidgets(2));
@@ -44,5 +49,7 @@ void main() {
     await tester.drag(find.byType(ListView), const Offset(0, -400));
     await tester.pump();
     expect(find.textContaining('All rooms chose Rhythm'), findsOneWidget);
+    expect(find.text('Sync Rhythm rooms to Hue'), findsOneWidget);
+    expect(find.byType(SwitchListTile), findsOneWidget);
   });
 }

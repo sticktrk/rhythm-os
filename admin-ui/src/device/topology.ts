@@ -177,6 +177,17 @@ export function syncAll(client: DeviceClient) {
   return client.post('api/sync', { timeoutSeconds: 60 });
 }
 
+export function getHueAuthority(client: DeviceClient) {
+  return client.get<Record<string, unknown>>('api/hue/authority');
+}
+
+export function updateHueAuthority(
+  client: DeviceClient,
+  body: Record<string, unknown>
+) {
+  return client.put<Record<string, unknown>>('api/hue/authority', { body });
+}
+
 export function listMatterCaptures(client: DeviceClient) {
   return client.get<Record<string, unknown>>('api/matter/captures');
 }

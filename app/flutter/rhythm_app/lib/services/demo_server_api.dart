@@ -58,6 +58,7 @@ class DemoServerApi extends RhythmServerApi {
   RhythmMode _activeMode = RhythmMode.day;
   RhythmLightRuntime _lightRuntime = RhythmLightRuntime.rhythmAdaptive;
   int _hueAuthorityRevision = 1;
+  bool _hueTopologySyncEnabled = false;
   final Map<String, RhythmHueRoomAuthorityOwner> _hueRoomOwners = {};
 
   Stream<void> get changes => _changes.stream;
@@ -128,6 +129,12 @@ class DemoServerApi extends RhythmServerApi {
           revision: _hueAuthorityRevision.toRadixString(16).padLeft(16, '0'),
           takeoverScope: 'bridge',
           bridgeTakeoverRequested: allRhythm,
+          topologySyncEnabled: _hueTopologySyncEnabled,
+          topologySyncStatus: !_hueTopologySyncEnabled
+              ? 'disabled'
+              : allRhythm
+                  ? 'synced'
+                  : 'blocked',
           rooms: rooms,
         ),
       ],
@@ -139,6 +146,7 @@ class DemoServerApi extends RhythmServerApi {
     required RhythmHueBridgeAuthority bridge,
     required Map<String, RhythmHueRoomAuthorityOwner> owners,
     required String correlationId,
+    bool? topologySyncEnabled,
   }) async {
     final current = await getHueAuthority();
     if (current == null || current.bridges.isEmpty) return null;
@@ -152,6 +160,9 @@ class DemoServerApi extends RhythmServerApi {
     _hueRoomOwners
       ..clear()
       ..addAll(owners);
+    if (topologySyncEnabled != null) {
+      _hueTopologySyncEnabled = topologySyncEnabled;
+    }
     _hueAuthorityRevision++;
     _changes.add(null);
     return getHueAuthority();
@@ -170,6 +181,7 @@ class DemoServerApi extends RhythmServerApi {
     _activeMode = RhythmMode.day;
     _lightRuntime = RhythmLightRuntime.rhythmAdaptive;
     _hueAuthorityRevision = 1;
+    _hueTopologySyncEnabled = false;
     _hueRoomOwners.clear();
     _nextRoomOrdinal = 5;
     _nodeStates.clear();

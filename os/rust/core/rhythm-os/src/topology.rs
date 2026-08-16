@@ -600,6 +600,7 @@ impl TopologyRoom {
         canonical_registry: &crate::canonical::registry::CanonicalRegistry,
         grouped_room_control_required: &HashSet<String>,
         rhythm_managed_bindings: &[RhythmManagedHubRoomBinding],
+        grouped_dispatch_suspended_hubs: &HashSet<HubKey>,
     ) -> DispatchPlan {
         let mut plan = DispatchPlan::default();
         let preferred_light_endpoints =
@@ -644,9 +645,15 @@ impl TopologyRoom {
             }
 
             let assigned_native_ids = remaining_ids.keys().cloned().collect::<HashSet<_>>();
-            if let Some(target) =
-                self.exact_native_grouped_dispatch_target_for_hub(&hub_key, &assigned_native_ids)
-            {
+            let exact_grouped_target = (!grouped_dispatch_suspended_hubs.contains(&hub_key))
+                .then(|| {
+                    self.exact_native_grouped_dispatch_target_for_hub(
+                        &hub_key,
+                        &assigned_native_ids,
+                    )
+                })
+                .flatten();
+            if let Some(target) = exact_grouped_target {
                 let HubDispatchTarget::Group {
                     room_id: hub_room_id,
                     ..
@@ -823,6 +830,21 @@ pub struct RoomTopologyStore {
     /// hubs added after the migration remain unreviewed.
     #[serde(default)]
     external_room_automation_policy_version: u8,
+    /// Hue bridges whose light membership should mirror Rhythm's canonical
+    /// room assignments. This is deliberately independent from automation
+    /// suppression consent and defaults off for mixed-version safety.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    external_room_topology_sync_hubs: HashSet<HubKey>,
+    /// Bridges whose grouped-light readback is not currently authoritative.
+    /// While fenced, routing fans out to individual devices until a complete
+    /// reconciliation publishes exact room membership.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    external_grouped_dispatch_suspended_hubs: HashSet<HubKey>,
+    /// Bridges whose last topology projection failed or found ambiguous
+    /// native state. This is a privacy-bounded status marker; detailed errors
+    /// remain in server logs while the app can explain the safe fallback.
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    external_room_topology_sync_attention_hubs: HashSet<HubKey>,
     /// Index: (hub_key display, hub_room_id) → Rhythm room ID.
     #[serde(skip)]
     hub_room_index: HashMap<(String, String), String>,
@@ -851,6 +873,9 @@ impl RoomTopologyStore {
             external_room_automation_decisions: Vec::new(),
             external_room_automation_grandfathered_hubs: HashSet::new(),
             external_room_automation_policy_version: 1,
+            external_room_topology_sync_hubs: HashSet::new(),
+            external_grouped_dispatch_suspended_hubs: HashSet::new(),
+            external_room_topology_sync_attention_hubs: HashSet::new(),
             hub_room_index: HashMap::new(),
             grouped_room_control_required: HashSet::new(),
         }
@@ -929,6 +954,80 @@ impl RoomTopologyStore {
             .contains(&hub_key.to_string())
     }
 
+    /// Enable or disable canonical Rhythm room membership projection for one
+    /// external hub. Enabling immediately fences grouped dispatch until the
+    /// integration completes an exact read-back reconciliation.
+    pub fn set_external_room_topology_sync_enabled(
+        &mut self,
+        hub_key: &HubKey,
+        enabled: bool,
+    ) -> bool {
+        if enabled {
+            let enabled_changed = self
+                .external_room_topology_sync_hubs
+                .insert(hub_key.clone());
+            let fence_changed = self
+                .external_grouped_dispatch_suspended_hubs
+                .insert(hub_key.clone());
+            let attention_changed = self
+                .external_room_topology_sync_attention_hubs
+                .remove(hub_key);
+            enabled_changed || fence_changed || attention_changed
+        } else {
+            let enabled_changed = self.external_room_topology_sync_hubs.remove(hub_key);
+            // Never lower a grouped-dispatch fence merely because the user
+            // disabled future reconciliation. A failed/partial bridge write
+            // may have made the last local binding stale; only exact readback
+            // or hub removal may prove it safe again.
+            let attention_changed = self
+                .external_room_topology_sync_attention_hubs
+                .remove(hub_key);
+            enabled_changed || attention_changed
+        }
+    }
+
+    pub fn external_room_topology_sync_is_enabled(&self, hub_key: &HubKey) -> bool {
+        self.external_room_topology_sync_hubs.contains(hub_key)
+    }
+
+    pub fn set_external_grouped_dispatch_suspended(
+        &mut self,
+        hub_key: &HubKey,
+        suspended: bool,
+    ) -> bool {
+        if suspended {
+            self.external_grouped_dispatch_suspended_hubs
+                .insert(hub_key.clone())
+        } else {
+            self.external_grouped_dispatch_suspended_hubs
+                .remove(hub_key)
+        }
+    }
+
+    pub fn external_grouped_dispatch_is_suspended(&self, hub_key: &HubKey) -> bool {
+        self.external_grouped_dispatch_suspended_hubs
+            .contains(hub_key)
+    }
+
+    pub fn set_external_room_topology_sync_attention(
+        &mut self,
+        hub_key: &HubKey,
+        attention: bool,
+    ) -> bool {
+        if attention {
+            self.external_room_topology_sync_attention_hubs
+                .insert(hub_key.clone())
+        } else {
+            self.external_room_topology_sync_attention_hubs
+                .remove(hub_key)
+        }
+    }
+
+    pub fn external_room_topology_sync_needs_attention(&self, hub_key: &HubKey) -> bool {
+        self.external_room_topology_sync_attention_hubs
+            .contains(hub_key)
+    }
+
     /// Return whether the topology graph or live grouped-routing policy names
     /// this address-scoped hub key. A migration-only grandfather marker is not
     /// structural identity: pending Hue address migration may legitimately
@@ -950,6 +1049,13 @@ impl RoomTopologyStore {
                 .external_room_automation_decisions
                 .iter()
                 .any(|decision| decision.hub_key == *hub_key)
+            || self.external_room_topology_sync_hubs.contains(hub_key)
+            || self
+                .external_grouped_dispatch_suspended_hubs
+                .contains(hub_key)
+            || self
+                .external_room_topology_sync_attention_hubs
+                .contains(hub_key)
             || self.grouped_room_control_is_required(hub_key)
     }
 
@@ -991,6 +1097,17 @@ impl RoomTopologyStore {
             self.rhythm_managed_bindings
                 .iter()
                 .map(|binding| binding.hub_key.clone()),
+        );
+        keys.extend(self.external_room_topology_sync_hubs.iter().cloned());
+        keys.extend(
+            self.external_grouped_dispatch_suspended_hubs
+                .iter()
+                .cloned(),
+        );
+        keys.extend(
+            self.external_room_topology_sync_attention_hubs
+                .iter()
+                .cloned(),
         );
         keys
     }
@@ -1037,6 +1154,27 @@ impl RoomTopologyStore {
             .remove(old_key)
         {
             self.external_room_automation_grandfathered_hubs
+                .insert(new_key.clone());
+            changed = true;
+        }
+        if self.external_room_topology_sync_hubs.remove(old_key) {
+            self.external_room_topology_sync_hubs
+                .insert(new_key.clone());
+            changed = true;
+        }
+        if self
+            .external_grouped_dispatch_suspended_hubs
+            .remove(old_key)
+        {
+            self.external_grouped_dispatch_suspended_hubs
+                .insert(new_key.clone());
+            changed = true;
+        }
+        if self
+            .external_room_topology_sync_attention_hubs
+            .remove(old_key)
+        {
+            self.external_room_topology_sync_attention_hubs
                 .insert(new_key.clone());
             changed = true;
         }
@@ -2059,8 +2197,20 @@ impl RoomTopologyStore {
         let before = self.external_room_automation_decisions.len();
         self.external_room_automation_decisions
             .retain(|decision| decision.hub_key != *hub_key);
-        self.external_room_automation_grandfathered_hubs
-            .remove(hub_key)
+        let grandfathered = self
+            .external_room_automation_grandfathered_hubs
+            .remove(hub_key);
+        let topology_sync = self.external_room_topology_sync_hubs.remove(hub_key);
+        let grouped_fence = self
+            .external_grouped_dispatch_suspended_hubs
+            .remove(hub_key);
+        let topology_attention = self
+            .external_room_topology_sync_attention_hubs
+            .remove(hub_key);
+        grandfathered
+            || topology_sync
+            || grouped_fence
+            || topology_attention
             || self.external_room_automation_decisions.len() != before
     }
 
@@ -3001,6 +3151,8 @@ impl RoomTopologyStore {
                 &assigned_native_ids,
                 &self.rhythm_managed_bindings,
             )
+        } else if self.external_grouped_dispatch_is_suspended(&hub_key) {
+            None
         } else {
             room.exact_native_grouped_dispatch_target_for_hub(&hub_key, &assigned_native_ids)
         };
@@ -3062,6 +3214,7 @@ impl RoomTopologyStore {
                 canonical_registry,
                 &self.grouped_room_control_required,
                 &self.rhythm_managed_bindings,
+                &self.external_grouped_dispatch_suspended_hubs,
             );
             let targets: Vec<_> = plan
                 .room_targets
@@ -3130,6 +3283,7 @@ impl RoomTopologyStore {
                     canonical_registry,
                     &self.grouped_room_control_required,
                     &self.rhythm_managed_bindings,
+                    &self.external_grouped_dispatch_suspended_hubs,
                 )
                 .node_routes
                 .into_iter()
@@ -3988,6 +4142,73 @@ mod tests {
                 emit_node_id: room_id.clone(),
             }]
         );
+    }
+
+    #[test]
+    fn topology_sync_fence_persists_and_forces_individual_hue_dispatch() {
+        let key = hue_key();
+        let mut store = RoomTopologyStore::new();
+        let room_id = store.translate_or_create(
+            &key,
+            "hue-room-1",
+            "Kitchen",
+            "gl-kitchen",
+            &["hue-light-1".to_string()],
+        );
+        let mut registry = CanonicalRegistry::new();
+        let light_id = register_identity(
+            &mut registry,
+            &key,
+            make_identity(
+                "hue-light-1",
+                "hue-room-1",
+                "Kitchen",
+                "Counter Light",
+                DeviceType::Light,
+            ),
+        );
+        assert!(store.attach_device_user_override(&room_id, &light_id));
+        assert!(matches!(
+            &store.composite_routing(&registry)[&room_id][0].1,
+            HubDispatchTarget::Group { .. }
+        ));
+
+        assert!(store.set_external_room_topology_sync_enabled(&key, true));
+        assert!(store.set_external_room_topology_sync_attention(&key, true));
+        assert_eq!(
+            store.composite_routing(&registry).get(&room_id),
+            Some(&vec![(
+                key.to_string(),
+                HubDispatchTarget::Devices {
+                    native_ids: vec!["hue-light-1".to_string()],
+                },
+            )])
+        );
+
+        let mut restored: RoomTopologyStore =
+            serde_json::from_value(serde_json::to_value(&store).unwrap()).unwrap();
+        restored.rebuild_indices();
+        assert!(restored.external_room_topology_sync_is_enabled(&key));
+        assert!(restored.external_grouped_dispatch_is_suspended(&key));
+        assert!(restored.external_room_topology_sync_needs_attention(&key));
+        assert!(matches!(
+            &restored.composite_routing(&registry)[&room_id][0].1,
+            HubDispatchTarget::Devices { .. }
+        ));
+
+        assert!(restored.set_external_room_topology_sync_enabled(&key, false));
+        assert!(restored.external_grouped_dispatch_is_suspended(&key));
+        assert!(matches!(
+            &restored.composite_routing(&registry)[&room_id][0].1,
+            HubDispatchTarget::Devices { .. }
+        ));
+        assert!(restored.set_external_room_topology_sync_enabled(&key, true));
+
+        assert!(restored.set_external_grouped_dispatch_suspended(&key, false));
+        assert!(matches!(
+            &restored.composite_routing(&registry)[&room_id][0].1,
+            HubDispatchTarget::Group { .. }
+        ));
     }
 
     #[test]

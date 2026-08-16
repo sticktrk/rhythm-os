@@ -2282,15 +2282,29 @@ fn motion_timeout_mode_default(
     state: &SharedState,
     target_node_id: &str,
 ) -> Option<rhythm_core::RoomModeState> {
-    let s = state.lock().ok()?;
-    let active_mode = s.active_mode;
-    s.mode_configs()
-        .into_iter()
-        .find(|config| config.mode == active_mode)?
-        .room_defaults
-        .into_iter()
-        .find(|default| default.room_id == target_node_id)
-        .map(|default| default.state)
+    let (mode_default, runtime) = {
+        let s = state.lock().ok()?;
+        let active_mode = s.active_mode;
+        let mode_default = s
+            .mode_configs()
+            .into_iter()
+            .find(|config| config.mode == active_mode)?
+            .room_defaults
+            .into_iter()
+            .find(|default| default.room_id == target_node_id)
+            .map(|default| default.state);
+        (mode_default, s.hub_runtime())
+    };
+
+    if matches!(mode_default, Some(rhythm_core::RoomModeState::Standby))
+        && runtime
+            .and_then(|runtime| runtime.engine_node_snapshot(target_node_id))
+            .is_some_and(|snapshot| !snapshot.standby_enabled)
+    {
+        return Some(rhythm_core::RoomModeState::HardOff);
+    }
+
+    mode_default
 }
 
 fn run_motion_timeout_restore(
@@ -8175,6 +8189,7 @@ mod tests {
     #[test]
     fn motion_timeout_clears_manual_curve_modifiers_after_standby_restore() {
         let mut snapshot = room_snapshot_with_flags("room_a", false, false);
+        snapshot.standby_enabled = true;
         snapshot.time_offset_minutes = -215.0;
         snapshot.brightness_offset = 37.0;
         let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![snapshot]));
@@ -8219,6 +8234,50 @@ mod tests {
             button_events.lock().unwrap().is_empty(),
             "clearing modifiers must not dispatch Reset and flash the lights on"
         );
+    }
+
+    #[test]
+    fn motion_timeout_hard_offs_when_mode_default_is_standby_but_low_glow_is_disabled() {
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![
+            room_snapshot_with_flags("room_a", false, false),
+        ]));
+        let button_events = runtime.events.clone();
+        let state = make_state_with_runtime(runtime);
+        {
+            let mut s = state.lock().unwrap();
+            s.light_breaker_enabled = true;
+            s.active_mode = rhythm_core::RhythmMode::Day;
+            s.default_motion_timeout_secs = 120;
+            s.set_mode_configs(vec![rhythm_core::ModeConfig {
+                mode: rhythm_core::RhythmMode::Day,
+                active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+                idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![rhythm_core::RoomModeDefault {
+                    room_id: "room_a".into(),
+                    state: rhythm_core::RoomModeState::Standby,
+                }],
+            }]);
+        }
+
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            "s1".into(),
+            motion_source(
+                "s1",
+                "room_a",
+                Some(Instant::now() - Duration::from_secs(2_000)),
+            ),
+        );
+        motion.motion_owned.insert("room_a".into());
+
+        check_motion_timers(&state, &mut motion);
+
+        let events = button_events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].room_id, "room_a");
+        assert_eq!(events[0].action, ButtonAction::LightsOff);
     }
 
     #[test]

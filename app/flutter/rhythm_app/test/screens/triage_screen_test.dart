@@ -85,6 +85,9 @@ class _FakeTriageServerApi extends RhythmServerApi {
       'name': name,
     };
   }
+
+  @override
+  Future<List<Map<String, dynamic>>?> getCanonicalDevices() async => const [];
 }
 
 class _FakeRhythmConnection extends RhythmConnection {
@@ -117,6 +120,13 @@ class _TestServerSyncProvider extends ServerSyncProvider {
   bool hueAuthorityConsentSupportedForTest = false;
   RhythmHueAuthority? hueAuthorityForTest;
   int hueAuthorityFetches = 0;
+  List<Map<String, dynamic>> hubs = const [];
+
+  @override
+  List<Map<String, dynamic>> get serverHubInfos => hubs;
+
+  @override
+  RhythmConnectionState get connectionState => RhythmConnectionState.connected;
 
   @override
   bool get canAddMatterDevice =>
@@ -273,6 +283,33 @@ void main() {
     testWidgets('makes device scanning primary and separates sync from rooms',
         (tester) async {
       serverSyncProvider.matterPairingEnabled = true;
+      serverSyncProvider.hubs = const [
+        {
+          'type': 'hue',
+          'address': '192.0.2.25',
+          'connected': true,
+        },
+        {
+          'type': 'hue_ble',
+          'address': 'local',
+          'connected': true,
+        },
+        {
+          'type': 'local_ble',
+          'address': 'default',
+          'connected': true,
+        },
+        {
+          'type': 'matter',
+          'address': 'local',
+          'connected': true,
+        },
+        {
+          'type': 'homeassistant',
+          'address': 'ha.local',
+          'connected': true,
+        },
+      ];
 
       await tester.pumpWidget(
         _buildTestApp(
@@ -287,19 +324,21 @@ void main() {
       expect(find.text('Add a Device'), findsOneWidget);
       expect(find.text('NEW HARDWARE'), findsOneWidget);
       expect(find.text('Add Bulb'), findsNothing);
-      expect(find.text('SYNC FROM A HUB'), findsOneWidget);
+      expect(find.text('HUBS'), findsOneWidget);
       expect(
         find.text(
-          'Bring in devices already paired with Home Assistant or Philips Hue.',
+          'Open a hub to manage its connection and devices.',
         ),
         findsOneWidget,
       );
-      expect(find.text('Sync Devices'), findsOneWidget);
-      expect(find.text('CREATE A ROOM'), findsOneWidget);
-      expect(
-        find.text('Create a Rhythm room for organizing your devices.'),
-        findsOneWidget,
-      );
+      expect(find.text('Philips Hue'), findsOneWidget);
+      expect(find.text('Hue Bluetooth'), findsOneWidget);
+      expect(find.text('Local Bluetooth'), findsOneWidget);
+      expect(find.text('Matter'), findsOneWidget);
+      expect(find.text('Home Assistant'), findsOneWidget);
+      expect(find.text('DEVICE ACTIONS'), findsOneWidget);
+      expect(find.text('Add Matter Device'), findsOneWidget);
+      expect(find.text('Sync All Hubs'), findsOneWidget);
       expect(find.text('No hardware'), findsNothing);
       expect(find.text('Scan a code or find nearby bulbs'), findsOneWidget);
       expect(find.text('Add nearby Hue Bluetooth bulbs'), findsNothing);
@@ -307,20 +346,29 @@ void main() {
       final scanCardSize = tester.getSize(
         find.byKey(const ValueKey('add-review-scan-device')),
       );
-      final addRoomSize = tester.getSize(
-        find.widgetWithText(SettingsRow, 'Add a Room'),
-      );
-      expect(scanCardSize.height, greaterThan(addRoomSize.height));
+      expect(scanCardSize.height, greaterThan(80));
       expect(
         tester
             .getTopLeft(
               find.byKey(const ValueKey('add-review-scan-device')),
             )
             .dy,
-        lessThan(tester.getTopLeft(find.text('SYNC FROM A HUB')).dy),
+        lessThan(tester.getTopLeft(find.text('HUBS')).dy),
       );
       expect(
-        tester.getTopLeft(find.text('SYNC FROM A HUB')).dy,
+        tester.getTopLeft(find.text('HUBS')).dy,
+        lessThan(tester.getTopLeft(find.text('DEVICE ACTIONS')).dy),
+      );
+
+      await _scrollTo(tester, find.text('CREATE A ROOM'));
+      expect(find.text('CREATE A ROOM'), findsOneWidget);
+      expect(
+        find.text('Create a Rhythm room for organizing your devices.'),
+        findsOneWidget,
+      );
+      expect(find.widgetWithText(SettingsRow, 'Add a Room'), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.text('DEVICE ACTIONS')).dy,
         lessThan(tester.getTopLeft(find.text('CREATE A ROOM')).dy),
       );
     });

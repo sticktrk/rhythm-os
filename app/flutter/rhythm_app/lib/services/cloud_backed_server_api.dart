@@ -420,11 +420,13 @@ class CloudBackedServerApi {
     required RhythmHueBridgeAuthority bridge,
     required Map<String, RhythmHueRoomAuthorityOwner> owners,
     required String correlationId,
+    bool? topologySyncEnabled,
   }) {
     return _delegate.updateHueAuthority(
       bridge: bridge,
       owners: owners,
       correlationId: correlationId,
+      topologySyncEnabled: topologySyncEnabled,
     );
   }
 

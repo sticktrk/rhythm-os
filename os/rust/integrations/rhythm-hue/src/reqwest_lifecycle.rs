@@ -31,7 +31,7 @@ use rhythm_os::hub::{
 use rhythm_os::pairing::{
     PairedDeviceInfo, PairingSession, PairingStage, PairingStatus, UnpairingResult,
 };
-use rhythm_os::state::SharedState;
+use rhythm_os::state::{AppState, SharedState};
 use rhythm_os::storage::Storage;
 
 const HUE_ADDRESS_MIGRATION_FROM_FIELD: &str = "address_migration_from";
@@ -995,6 +995,236 @@ fn start_hue_after_release_fence<T>(
     start()
 }
 
+#[derive(Clone, Debug)]
+struct HueDesiredTopology {
+    rooms: Vec<crate::managed_rooms::DesiredHueRoom>,
+    controlled_device_ids: BTreeSet<String>,
+}
+
+/// Project only canonical Hue lights. Other Hue room children are deliberately
+/// outside this ownership boundary and the managed-room reconciler preserves
+/// them verbatim.
+fn desired_hue_topology_locked(state: &AppState, key: &HubKey) -> Result<HueDesiredTopology> {
+    let mut controlled_device_ids = BTreeSet::new();
+    let mut rooms = BTreeMap::<String, (String, Vec<String>)>::new();
+
+    for device in state.canonical_registry.devices() {
+        if device.device_type != rhythm_core::runtime::hub_registry::DeviceType::Light {
+            continue;
+        }
+        let Some(endpoint) = device
+            .active_endpoints()
+            .find(|endpoint| endpoint.hub_key == *key)
+        else {
+            continue;
+        };
+        controlled_device_ids.insert(endpoint.native_id.clone());
+        let Some(room_id) = state
+            .topology
+            .device_parent_room_id(&device.id)
+            .map(str::to_string)
+            .or_else(|| device.room_id.clone())
+        else {
+            continue;
+        };
+        let room = state
+            .topology
+            .get(&room_id)
+            .ok_or_else(|| anyhow::anyhow!("A Hue light references a missing Rhythm room"))?;
+        rooms
+            .entry(room_id)
+            .or_insert_with(|| {
+                (
+                    crate::managed_rooms::managed_room_projection_name(&room.name),
+                    Vec::new(),
+                )
+            })
+            .1
+            .push(endpoint.native_id.clone());
+    }
+
+    let rooms = rooms
+        .into_iter()
+        .map(|(rhythm_room_id, (name, mut device_ids))| {
+            device_ids.sort();
+            device_ids.dedup();
+            crate::managed_rooms::DesiredHueRoom::new(rhythm_room_id, name, device_ids)
+        })
+        .collect();
+    Ok(HueDesiredTopology {
+        rooms,
+        controlled_device_ids,
+    })
+}
+
+fn desired_hue_topology(state: &SharedState, key: &HubKey) -> Result<HueDesiredTopology> {
+    let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    desired_hue_topology_locked(&state, key)
+}
+
+fn exact_managed_room_bindings<H: HueTransport + ?Sized>(
+    key: &HubKey,
+    transport: &H,
+    username: &str,
+    ownership: &crate::ownership::HueControllerOwnership,
+    desired: &HueDesiredTopology,
+) -> Result<Vec<(String, String, rhythm_os::topology::HubRoomBinding)>> {
+    let observed = crate::managed_rooms::observe_hue_rooms(transport, username)?;
+    let observed_by_id = observed
+        .iter()
+        .map(|room| (room.hue_room_id.as_str(), room))
+        .collect::<BTreeMap<_, _>>();
+    let mut bindings = Vec::with_capacity(desired.rooms.len());
+
+    for desired_room in &desired.rooms {
+        let managed = ownership
+            .managed_rooms()
+            .get(&desired_room.rhythm_room_id)
+            .ok_or_else(|| anyhow::anyhow!("Hue managed-room reconciliation is incomplete"))?;
+        let observed = observed_by_id
+            .get(managed.hue_room_id.as_str())
+            .ok_or_else(|| anyhow::anyhow!("A managed Hue room is not observable"))?;
+        let mut expected_device_ids = desired_room.device_ids.clone();
+        expected_device_ids.sort();
+        expected_device_ids.dedup();
+        let observed_controlled_device_ids = observed
+            .device_ids
+            .iter()
+            .filter(|device_id| desired.controlled_device_ids.contains(*device_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if observed_controlled_device_ids != expected_device_ids
+            || observed.grouped_light_id.as_deref() != Some(managed.grouped_light_id.as_str())
+        {
+            anyhow::bail!("A managed Hue room failed exact membership verification");
+        }
+        bindings.push((
+            desired_room.rhythm_room_id.clone(),
+            desired_room.name.clone(),
+            rhythm_os::topology::HubRoomBinding {
+                hub_key: key.clone(),
+                hub_room_id: managed.hue_room_id.clone(),
+                control_id: managed.grouped_light_id.clone(),
+                light_device_ids: expected_device_ids,
+            },
+        ));
+    }
+    if ownership.managed_rooms().len() != bindings.len() {
+        anyhow::bail!("Hue ownership contains stale managed-room mappings");
+    }
+    Ok(bindings)
+}
+
+fn set_hue_topology_sync_state(
+    state: &SharedState,
+    key: &HubKey,
+    suspended: bool,
+    attention: bool,
+) -> Result<()> {
+    let changed = {
+        let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let before = state.topology.clone();
+        let changed = state
+            .topology
+            .set_external_grouped_dispatch_suspended(key, suspended);
+        let changed = state
+            .topology
+            .set_external_room_topology_sync_attention(key, attention)
+            || changed;
+        if !changed {
+            return Ok(());
+        }
+        if let Err(error) = rhythm_os::commands::save_authority_state(&state) {
+            state.topology = before;
+            return Err(error.context("Failed to persist the Hue grouped-dispatch fence"));
+        }
+        true
+    };
+    if changed {
+        rhythm_os::commands::rebuild_composite_routing(state);
+    }
+    Ok(())
+}
+
+fn publish_managed_room_bindings(
+    state: &SharedState,
+    key: &HubKey,
+    bindings: &[(String, String, rhythm_os::topology::HubRoomBinding)],
+) -> Result<()> {
+    let mut state_guard = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let topology_before = state_guard.topology.clone();
+    let mut stale_room_ids = BTreeSet::new();
+    for (rhythm_room_id, _, _) in bindings {
+        if let Some(room) = state_guard.topology.get(rhythm_room_id) {
+            stale_room_ids.extend(
+                room.hub_room_bindings
+                    .iter()
+                    .filter(|binding| binding.hub_key == *key)
+                    .map(|binding| binding.hub_room_id.clone()),
+            );
+        }
+    }
+    for (rhythm_room_id, _, binding) in bindings {
+        if !state_guard
+            .topology
+            .upsert_managed_room_binding(rhythm_room_id, binding.clone())
+        {
+            state_guard.topology = topology_before;
+            anyhow::bail!("Failed to publish an exact managed Hue room binding");
+        }
+        stale_room_ids.remove(&binding.hub_room_id);
+    }
+    state_guard
+        .topology
+        .set_external_grouped_dispatch_suspended(key, false);
+    state_guard
+        .topology
+        .set_external_room_topology_sync_attention(key, false);
+
+    if let Err(error) = rhythm_os::commands::save_authority_state(&state_guard) {
+        state_guard.topology = topology_before;
+        return Err(error.context("Failed to durably publish managed Hue room bindings"));
+    }
+
+    if let Some(registry) = state_guard
+        .hubs
+        .get(key)
+        .and_then(|hub| hub.registry.as_ref())
+        .cloned()
+    {
+        let mut registry = registry
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Failed to lock Hue registry"))?;
+        for room_id in stale_room_ids {
+            registry.remove_room(&room_id);
+        }
+        for (_, name, binding) in bindings {
+            registry.upsert_room(
+                &binding.hub_room_id,
+                name,
+                &binding.control_id,
+                &binding.light_device_ids,
+            );
+        }
+    }
+    drop(state_guard);
+    rhythm_os::commands::persist_registry(state);
+    rhythm_os::commands::rebuild_composite_routing(state);
+    Ok(())
+}
+
+fn active_ownership_for_topology_sync(
+    storage: &dyn Storage,
+    bridge_id: &str,
+) -> Result<crate::ownership::HueControllerOwnership> {
+    let ownership = crate::ownership::load_controller_ownership(storage, bridge_id)?
+        .ok_or_else(|| anyhow::anyhow!("Hue automation handoff is required before room sync"))?;
+    if ownership.phase != crate::ownership::HueOwnershipPhase::Active {
+        anyhow::bail!("Hue automation handoff is required before room sync");
+    }
+    Ok(ownership)
+}
+
 /// Static integration instance for platform crate registries.
 pub static INTEGRATION: HueIntegration = HueIntegration;
 
@@ -1030,10 +1260,68 @@ impl ExternalLightHubIntegration for HueIntegration {
         true
     }
 
-    fn sync_topology_groups(&self, _state: &SharedState, _key: &HubKey) -> Result<()> {
-        // Hue discovery remains authoritative. Ordinary sync never infers
-        // native room identity from a local name; explicit user mutations use
-        // the dedicated source-room lifecycle hooks below.
+    fn sync_topology_groups(&self, state: &SharedState, key: &HubKey) -> Result<()> {
+        let enabled = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .topology
+            .external_room_topology_sync_is_enabled(key);
+        if !enabled {
+            return Ok(());
+        }
+
+        // Publish the individual-device fallback before the first bridge
+        // mutation. If Hue goes offline or readback is partial, this durable
+        // fence survives restart and prevents a stale grouped target.
+        set_hue_topology_sync_state(state, key, true, false)?;
+        let result = (|| {
+            let desired = desired_hue_topology(state, key)?;
+            let context = hue_authority_context(state, key)?;
+            let transport = ReqwestHueTransport::new(&context.bridge_ip)?;
+            let bridge_id =
+                crate::ownership::connected_hue_bridge_id(&transport, &context.username)?;
+            persist_connected_bridge_identity(state, key, &bridge_id)?;
+            let operation_lock = crate::ownership::controller_operation_lock(&bridge_id);
+            let _operation = operation_lock
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Failed to lock Hue controller operations"))?;
+            let mut ownership =
+                active_ownership_for_topology_sync(context.storage.as_ref(), &bridge_id)?;
+
+            crate::managed_rooms::reconcile_managed_rooms(
+                context.storage.as_ref(),
+                key,
+                &mut ownership,
+                &transport,
+                &context.username,
+                &desired.rooms,
+                &desired.controlled_device_ids,
+            )?;
+            let bindings = exact_managed_room_bindings(
+                key,
+                &transport,
+                &context.username,
+                &ownership,
+                &desired,
+            )?;
+            publish_managed_room_bindings(state, key, &bindings)
+        })();
+        if let Err(error) = result {
+            if let Err(status_error) = set_hue_topology_sync_state(state, key, true, true) {
+                warn!(
+                    "Failed to persist Hue topology attention status: {:#}",
+                    status_error
+                );
+            }
+            // Hue has an explicit per-device fallback, so an optional mirror
+            // failure must not trip the platform-wide required-group fence
+            // used by Matter-like integrations. The durable attention marker
+            // keeps this bridge individually routed until a later retry.
+            warn!(
+                "Hue room topology sync deferred; individual-light routing remains active: {:#}",
+                error
+            );
+        }
         Ok(())
     }
 
@@ -2904,6 +3192,138 @@ mod tests {
             serde_json::to_value(&app.topology).unwrap()
         };
         assert_eq!(topology_after, topology_before);
+    }
+
+    #[test]
+    fn desired_topology_uses_canonical_rhythm_room_membership() {
+        let state = shared_state();
+        let key = hue_key("192.0.2.10");
+        let light_id = add_hue_light_endpoint(&state, &key, "hue-light-1");
+        let room_id = {
+            let mut app = state.lock().unwrap();
+            let room_id = app.topology.create_room("Diane Sink");
+            assert!(app
+                .topology
+                .attach_device_user_override(&room_id, &light_id));
+            assert!(app
+                .canonical_registry
+                .assign_room(&light_id, Some(&room_id)));
+            room_id
+        };
+
+        let desired = {
+            let app = state.lock().unwrap();
+            desired_hue_topology_locked(&app, &key).unwrap()
+        };
+        assert_eq!(desired.rooms.len(), 1);
+        assert_eq!(desired.rooms[0].rhythm_room_id, room_id);
+        assert_eq!(desired.rooms[0].name, "Rhythm · Diane Sink");
+        assert_eq!(desired.rooms[0].device_ids, vec!["hue-light-1"]);
+    }
+
+    #[test]
+    fn exact_binding_publication_preserves_consent_and_releases_fallback_fence() {
+        static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "rhythm-hue-topology-publish-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let storage = Arc::new(FileStorage::new(path.to_str().unwrap()).unwrap());
+        let state = shared_state();
+        let key = hue_key("192.0.2.10");
+        {
+            let mut app = state.lock().unwrap();
+            app.storage = Some(storage.clone());
+            let mut room = rhythm_os::topology::TopologyRoom::new("rhythm-office", "Office");
+            room.upsert_hub_room_binding(HubRoomBinding {
+                hub_key: key.clone(),
+                hub_room_id: "source-office".to_string(),
+                control_id: "source-office-group".to_string(),
+                light_device_ids: vec!["hue-light-1".to_string()],
+            });
+            app.topology.insert_room(room);
+            app.topology
+                .replace_external_room_automation_decisions(
+                    &key,
+                    &[(
+                        "rhythm-office".to_string(),
+                        rhythm_os::topology::ExternalRoomAutomationOwner::Rhythm,
+                    )],
+                )
+                .unwrap();
+            app.topology
+                .set_external_room_topology_sync_enabled(&key, true);
+            rhythm_os::commands::save_authority_state(&app).unwrap();
+        }
+
+        publish_managed_room_bindings(
+            &state,
+            &key,
+            &[(
+                "rhythm-office".to_string(),
+                "Rhythm · Office".to_string(),
+                HubRoomBinding {
+                    hub_key: key.clone(),
+                    hub_room_id: "managed-office".to_string(),
+                    control_id: "managed-office-group".to_string(),
+                    light_device_ids: vec!["hue-light-1".to_string()],
+                },
+            )],
+        )
+        .unwrap();
+
+        let app = state.lock().unwrap();
+        assert!(app.topology.external_hub_has_full_rhythm_consent(&key));
+        assert!(app.topology.external_room_topology_sync_is_enabled(&key));
+        assert!(!app.topology.external_grouped_dispatch_is_suspended(&key));
+        assert!(app
+            .topology
+            .room_binding_is_managed("rhythm-office", &key, "managed-office"));
+        drop(app);
+        drop(state);
+        drop(storage);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn offline_topology_sync_keeps_individual_fallback_and_records_attention() {
+        static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "rhythm-hue-topology-offline-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let storage = Arc::new(FileStorage::new(path.to_str().unwrap()).unwrap());
+        let state = shared_state();
+        let key = hue_key("192.0.2.10");
+        {
+            let mut app = state.lock().unwrap();
+            app.storage = Some(storage.clone());
+            app.topology
+                .set_external_room_topology_sync_enabled(&key, true);
+            rhythm_os::commands::save_authority_state(&app).unwrap();
+        }
+
+        // No active Hue hub is installed. Optional topology sync absorbs the
+        // transport/context failure because the durable device fallback is
+        // already authoritative.
+        INTEGRATION.sync_topology_groups(&state, &key).unwrap();
+
+        let app = state.lock().unwrap();
+        assert!(app.topology.external_grouped_dispatch_is_suspended(&key));
+        assert!(app
+            .topology
+            .external_room_topology_sync_needs_attention(&key));
+        drop(app);
+        let durable = storage.load_authority_state().unwrap().unwrap();
+        let mut durable_topology: rhythm_os::topology::RoomTopologyStore =
+            serde_json::from_value(durable.topology).unwrap();
+        durable_topology.rebuild_indices();
+        assert!(durable_topology.external_room_topology_sync_needs_attention(&key));
+        drop(state);
+        drop(storage);
+        let _ = std::fs::remove_dir_all(path);
     }
 
     #[test]

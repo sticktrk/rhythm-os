@@ -780,6 +780,10 @@ class ServerSyncProvider extends ChangeNotifier {
           ) ==
           true;
 
+  bool get hueRoomTopologySyncSupported =>
+      HueServiceLocator.isDemoMode ||
+      _capabilities?.supportsFeature(RhythmFeature.hueRoomTopologySync) == true;
+
   /// Whether the host explicitly advertised supported hub types.
   bool get hasExplicitHubCapabilities => _capabilities != null;
 
@@ -4344,6 +4348,7 @@ class ServerSyncProvider extends ChangeNotifier {
     required RhythmHueBridgeAuthority bridge,
     required Map<String, RhythmHueRoomAuthorityOwner> owners,
     required String correlationId,
+    bool? topologySyncEnabled,
   }) async {
     if ((!HueServiceLocator.isDemoMode && !_connection.connected) ||
         !hueRoomAuthorityConsentSupported) {
@@ -4353,6 +4358,7 @@ class ServerSyncProvider extends ChangeNotifier {
       bridge: bridge,
       owners: owners,
       correlationId: correlationId,
+      topologySyncEnabled: topologySyncEnabled,
     );
     if (updated != null && !HueServiceLocator.isDemoMode) {
       await _connection.reconnect();

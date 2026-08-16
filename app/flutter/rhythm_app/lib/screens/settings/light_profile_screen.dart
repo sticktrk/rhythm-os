@@ -2010,14 +2010,6 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
     final coolColor = AppColorTemperature.curveColor(maxValue.round());
     final span = hardMax - hardMin;
     final divisions = (span / 100).round().clamp(1, 190);
-    final minThumbMax = math
-        .min(4000, hardMax - _DualRangeBar.minSeparation)
-        .clamp(hardMin, hardMax)
-        .toDouble();
-    final maxThumbMin = math
-        .max(2000, hardMin + _DualRangeBar.minSeparation)
-        .clamp(hardMin, hardMax)
-        .toDouble();
     final hardwareRange = _nodeLightCapabilities?.colorTemperature;
     final tooltipSuffix = hardwareRange == null
         ? ''
@@ -2136,13 +2128,11 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(2, 10, 2, 4),
-              child: _DualRangeBar(
+              child: LightProfileColorTemperatureRangeBar(
                 minValue: minValue,
                 maxValue: maxValue,
                 hardMin: hardMin,
                 hardMax: hardMax,
-                minThumbMax: minThumbMax,
-                maxThumbMin: maxThumbMin,
                 tint: warmColor,
                 minThumbColor: warmColor,
                 maxThumbColor: coolColor,
@@ -2965,6 +2955,60 @@ class LightProfileBrightnessRangeBar extends StatelessWidget {
   }
 }
 
+/// Color-temperature range editor used by room and bulb light settings.
+///
+/// Unlike brightness, a color-temperature range may intentionally collapse to
+/// one fixed value. Both thumbs can therefore traverse the full supported
+/// hardware range and meet at the same Kelvin value.
+class LightProfileColorTemperatureRangeBar extends StatelessWidget {
+  const LightProfileColorTemperatureRangeBar({
+    super.key,
+    required this.minValue,
+    required this.maxValue,
+    required this.hardMin,
+    required this.hardMax,
+    required this.tint,
+    required this.onMinChanged,
+    required this.onMaxChanged,
+    this.minThumbColor,
+    this.maxThumbColor,
+    this.gradient,
+    this.divisions,
+  });
+
+  final double minValue;
+  final double maxValue;
+  final double hardMin;
+  final double hardMax;
+  final Color tint;
+  final ValueChanged<double> onMinChanged;
+  final ValueChanged<double> onMaxChanged;
+  final Color? minThumbColor;
+  final Color? maxThumbColor;
+  final Gradient? gradient;
+  final int? divisions;
+
+  @override
+  Widget build(BuildContext context) {
+    return _DualRangeBar(
+      minValue: minValue,
+      maxValue: maxValue,
+      hardMin: hardMin,
+      hardMax: hardMax,
+      minThumbMax: hardMax,
+      maxThumbMin: hardMin,
+      minSeparation: 0,
+      tint: tint,
+      minThumbColor: minThumbColor,
+      maxThumbColor: maxThumbColor,
+      gradient: gradient,
+      divisions: divisions,
+      onMinChanged: onMinChanged,
+      onMaxChanged: onMaxChanged,
+    );
+  }
+}
+
 class _DualRangeBar extends StatefulWidget {
   const _DualRangeBar({
     required this.minValue,
@@ -2980,10 +3024,8 @@ class _DualRangeBar extends StatefulWidget {
     this.maxThumbColor,
     this.gradient,
     this.divisions,
+    this.minSeparation = 1.0,
   });
-
-  /// Smallest allowed gap (in value units) between the two thumbs.
-  static const double minSeparation = 1.0;
 
   final double minValue;
   final double maxValue;
@@ -3010,6 +3052,9 @@ class _DualRangeBar extends StatefulWidget {
 
   /// Snap to this many equally-spaced divisions across [hardMin, hardMax].
   final int? divisions;
+
+  /// Smallest allowed gap (in value units) between the two thumbs.
+  final double minSeparation;
 
   final ValueChanged<double> onMinChanged;
   final ValueChanged<double> onMaxChanged;
@@ -3053,15 +3098,15 @@ class _DualRangeBarState extends State<_DualRangeBar> {
     final snapped = _snap(_denormalize(frac));
 
     if (_active == _DualRangeThumb.min) {
-      final cap = math.min(
-          widget.minThumbMax, widget.maxValue - _DualRangeBar.minSeparation);
+      final cap =
+          math.min(widget.minThumbMax, widget.maxValue - widget.minSeparation);
       final clamped = snapped
           .clamp(widget.hardMin, math.max(widget.hardMin, cap))
           .toDouble();
       if (clamped != widget.minValue) widget.onMinChanged(clamped);
     } else if (_active == _DualRangeThumb.max) {
-      final floor = math.max(
-          widget.maxThumbMin, widget.minValue + _DualRangeBar.minSeparation);
+      final floor =
+          math.max(widget.maxThumbMin, widget.minValue + widget.minSeparation);
       final clamped = snapped
           .clamp(math.min(widget.hardMax, floor), widget.hardMax)
           .toDouble();

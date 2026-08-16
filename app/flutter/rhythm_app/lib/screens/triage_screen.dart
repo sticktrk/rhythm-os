@@ -330,16 +330,15 @@ class _TriageScreenState extends State<TriageScreen> {
         ],
         // Third-party hubs bring in devices that are already paired elsewhere.
         RhythmServerHubManagementSection(
-          showConfigured: false,
-          showMatterAddOption: false,
+          showConfigured: true,
+          showMatterAddOption: true,
           showHueBleAddOption: false,
-          addOptionsTitle: 'SYNC FROM A HUB',
+          addOptionsTitle: 'DEVICE ACTIONS',
           addOptionsSubtitle:
-              'Bring in devices already paired with Home Assistant or '
-              'Philips Hue.',
-          resyncLabel: 'Sync Devices',
+              'Add Matter hardware or refresh devices from every connected hub.',
+          resyncLabel: 'Sync All Hubs',
           resyncBusyLabel: 'Syncing…',
-          resyncTrailingLabel: 'Pull in paired hardware',
+          resyncTrailingLabel: 'Refresh paired hardware',
           onResynced: () => _loadEntries(),
         ),
         const SizedBox(height: 30),

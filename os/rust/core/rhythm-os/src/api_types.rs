@@ -279,6 +279,7 @@ pub const FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES: &str =
     "target_guarded_room_light_profile_overrides";
 pub const FEATURE_HUE_ROOM_AUTHORITY_CONSENT: &str = "hue_room_authority_consent_v1";
 pub const FEATURE_MATTER_SETUP_CODE_RECOVERY: &str = "matter_setup_code_recovery_v1";
+pub const FEATURE_HUE_ROOM_TOPOLOGY_SYNC: &str = "hue_room_topology_sync_v1";
 
 #[derive(Clone, Debug)]
 pub struct ApiCapabilitiesDto {
@@ -302,6 +303,7 @@ impl Serialize for ApiCapabilitiesDto {
                 FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
                 FEATURE_HUE_ROOM_AUTHORITY_CONSENT,
                 FEATURE_MATTER_SETUP_CODE_RECOVERY,
+                FEATURE_HUE_ROOM_TOPOLOGY_SYNC,
             ],
         )?;
         state.serialize_field("hubs", &self.hubs)?;
@@ -670,6 +672,9 @@ pub struct HueAuthorityUpdateRequest {
     pub address: String,
     pub revision: String,
     pub correlation_id: String,
+    /// Additive opt-in. Older clients omit it and preserve the current value.
+    #[serde(default)]
+    pub topology_sync_enabled: Option<bool>,
     pub rooms: Vec<HueRoomAuthorityDecisionRequest>,
 }
 
@@ -690,6 +695,15 @@ pub struct HueBridgeAuthorityDto {
     /// only when every listed room explicitly chooses Rhythm.
     pub takeover_scope: &'static str,
     pub bridge_takeover_requested: bool,
+    /// Whether Rhythm should mirror canonical light membership into explicit,
+    /// Rhythm-owned Hue rooms.
+    pub topology_sync_enabled: bool,
+    /// `disabled`, `blocked`, `pending`, `attention`, or `synced`.
+    pub topology_sync_status: String,
+    /// Privacy-bounded local preview of the desired projection. No bridge
+    /// identifiers are exposed and no Hue mutation is needed to compute it.
+    pub topology_sync_room_count: usize,
+    pub topology_sync_light_count: usize,
     pub rooms: Vec<HueRoomAuthorityDto>,
 }
 
@@ -1568,8 +1582,16 @@ mod tests {
             FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES
         );
         assert_eq!(
+            json["capabilities"]["features"][5],
+            FEATURE_HUE_ROOM_AUTHORITY_CONSENT
+        );
+        assert_eq!(
             json["capabilities"]["features"][6],
             FEATURE_MATTER_SETUP_CODE_RECOVERY
+        );
+        assert_eq!(
+            json["capabilities"]["features"][7],
+            FEATURE_HUE_ROOM_TOPOLOGY_SYNC
         );
         assert_eq!(
             json["capabilities"]["hubs"][0]["device_onboarding_methods"][0],

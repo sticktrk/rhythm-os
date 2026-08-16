@@ -45,6 +45,10 @@ class RhythmHueBridgeAuthority {
   final String revision;
   final String takeoverScope;
   final bool bridgeTakeoverRequested;
+  final bool topologySyncEnabled;
+  final String topologySyncStatus;
+  final int topologySyncRoomCount;
+  final int topologySyncLightCount;
   final List<RhythmHueRoomAuthority> rooms;
 
   const RhythmHueBridgeAuthority({
@@ -52,6 +56,10 @@ class RhythmHueBridgeAuthority {
     required this.revision,
     required this.takeoverScope,
     required this.bridgeTakeoverRequested,
+    this.topologySyncEnabled = false,
+    this.topologySyncStatus = 'disabled',
+    this.topologySyncRoomCount = 0,
+    this.topologySyncLightCount = 0,
     required this.rooms,
   });
 
@@ -62,6 +70,19 @@ class RhythmHueBridgeAuthority {
       takeoverScope: json['takeover_scope'] as String? ?? 'bridge',
       bridgeTakeoverRequested:
           json['bridge_takeover_requested'] as bool? ?? false,
+      topologySyncEnabled: json['topology_sync_enabled'] as bool? ?? false,
+      topologySyncStatus:
+          json['topology_sync_status'] as String? ?? 'disabled',
+      topologySyncRoomCount: jsonInt(
+            json['topology_sync_room_count'],
+            preferredKeys: const ['topology_sync_room_count'],
+          ) ??
+          0,
+      topologySyncLightCount: jsonInt(
+            json['topology_sync_light_count'],
+            preferredKeys: const ['topology_sync_light_count'],
+          ) ??
+          0,
       rooms: ((json['rooms'] as List<dynamic>?) ?? const [])
           .map(jsonMap)
           .nonNulls

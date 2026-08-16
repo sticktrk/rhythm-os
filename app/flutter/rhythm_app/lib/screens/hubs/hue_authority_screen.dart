@@ -14,19 +14,27 @@ class HueAuthorityScreen extends StatefulWidget {
     super.key,
     required this.bridge,
     this.source = 'settings',
+    this.topologySyncSupported = false,
   });
 
   final RhythmHueBridgeAuthority bridge;
   final String source;
+  final bool topologySyncSupported;
 
   static Future<bool?> show(
     BuildContext context,
     RhythmHueBridgeAuthority bridge, {
     required String source,
   }) {
+    final topologySyncSupported =
+        context.read<ServerSyncProvider>().hueRoomTopologySyncSupported;
     return Navigator.of(context).push<bool>(
       MaterialPageRoute(
-        builder: (_) => HueAuthorityScreen(bridge: bridge, source: source),
+        builder: (_) => HueAuthorityScreen(
+          bridge: bridge,
+          source: source,
+          topologySyncSupported: topologySyncSupported,
+        ),
       ),
     );
   }
@@ -40,11 +48,13 @@ class _HueAuthorityScreenState extends State<HueAuthorityScreen> {
   bool _saving = false;
   String? _error;
   late final String _journeyId;
+  late bool _topologySyncEnabled;
 
   @override
   void initState() {
     super.initState();
     _journeyId = 'hue-authority-${const Uuid().v4()}';
+    _topologySyncEnabled = widget.bridge.topologySyncEnabled;
     _owners = {
       for (final room in widget.bridge.rooms)
         room.roomId: room.owner == RhythmHueRoomAuthorityOwner.rhythm
@@ -71,6 +81,14 @@ class _HueAuthorityScreenState extends State<HueAuthorityScreen> {
         (owner) => owner == RhythmHueRoomAuthorityOwner.rhythm,
       );
 
+  String get _topologySyncPreview {
+    final rooms = widget.bridge.topologySyncRoomCount;
+    final lights = widget.bridge.topologySyncLightCount;
+    if (rooms == 0 || lights == 0) return '';
+    return 'Preview: $lights Hue ${lights == 1 ? 'light' : 'lights'} across '
+        '$rooms Rhythm ${rooms == 1 ? 'room' : 'rooms'}. ';
+  }
+
   Future<void> _save() async {
     if (_saving) return;
     setState(() {
@@ -93,6 +111,8 @@ class _HueAuthorityScreenState extends State<HueAuthorityScreen> {
           bridge: widget.bridge,
           owners: _owners,
           correlationId: _journeyId,
+          topologySyncEnabled:
+              widget.topologySyncSupported ? _topologySyncEnabled : null,
         );
     if (!mounted) return;
     if (updated == null) {
@@ -197,6 +217,62 @@ class _HueAuthorityScreenState extends State<HueAuthorityScreen> {
                 ),
               ),
             ),
+            if (widget.topologySyncSupported) ...[
+              const SizedBox(height: 14),
+              Material(
+                color: CelestialColors.backgroundCard,
+                clipBehavior: Clip.antiAlias,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                  side: BorderSide(
+                    color: CelestialColors.textSecondary.withValues(alpha: 0.2),
+                  ),
+                ),
+                child: SwitchListTile.adaptive(
+                  value: _topologySyncEnabled,
+                  onChanged: _saving
+                      ? null
+                      : (enabled) => setState(() {
+                            _topologySyncEnabled = enabled;
+                          }),
+                  activeTrackColor: const Color(0xFFFFB900),
+                  title: const Text(
+                    'Sync Rhythm rooms to Hue',
+                    style: TextStyle(color: CelestialColors.textPrimary),
+                  ),
+                  subtitle: Text(
+                    _topologySyncPreview +
+                        (_allRhythm
+                            ? 'Creates explicitly owned Hue mirror rooms and moves only Hue lights. '
+                                'Hue zones, scenes, accessories, and user rooms are preserved.'
+                            : 'You can save this preference now, but syncing waits until every room '
+                                'uses Rhythm automation. Lights keep working individually meanwhile.'),
+                    style: const TextStyle(
+                      color: CelestialColors.textSecondary,
+                      height: 1.35,
+                    ),
+                  ),
+                ),
+              ),
+              if (_topologySyncEnabled &&
+                  widget.bridge.topologySyncStatus == 'attention') ...[
+                const SizedBox(height: 8),
+                const Text(
+                  'Hue room sync needs attention. Rhythm is keeping individual bulb commands '
+                  'active so lighting still works. Reconnect Hue or save again to retry; '
+                  'ambiguous Hue rooms are never selected automatically.',
+                  style: TextStyle(color: Colors.orangeAccent),
+                ),
+              ] else if (_topologySyncEnabled &&
+                  widget.bridge.topologySyncStatus == 'pending') ...[
+                const SizedBox(height: 8),
+                const Text(
+                  'Hue verification is pending. Rhythm is using individual bulb commands until '
+                  'the bridge reports an exact room match.',
+                  style: TextStyle(color: CelestialColors.textSecondary),
+                ),
+              ],
+            ],
             if (_error != null) ...[
               const SizedBox(height: 14),
               Text(_error!, style: const TextStyle(color: Colors.redAccent)),

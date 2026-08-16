@@ -2803,6 +2803,7 @@ void main() {
         bridge: bridge,
         owners: const {},
         correlationId: 'hue-authority-test',
+        topologySyncEnabled: true,
       );
 
       expect(result, isNotNull);
@@ -2810,6 +2811,7 @@ void main() {
             'address': 'bridge.local',
             'revision': '0123456789abcdef',
             'correlation_id': 'hue-authority-test',
+            'topology_sync_enabled': true,
             'rooms': [
               {'room_id': 'office', 'owner': 'hue'},
             ],
