@@ -7,6 +7,7 @@ import '../models/rhythm_curve_data.dart';
 import '../models/rhythm_input_binding.dart';
 import '../models/rhythm_hue_authority.dart';
 import '../models/rhythm_pairing.dart';
+import '../models/rhythm_pairing_recovery.dart';
 import '../models/rhythm_room.dart';
 import '../models/rhythm_scene.dart';
 import '../models/rhythm_settings.dart';
@@ -1441,6 +1442,30 @@ class RhythmServerApi {
       _log.warning('getCanonicalDevice failed', e);
     }
     return null;
+  }
+
+  /// Fetch the setup payload retained for one currently registered Matter endpoint.
+  ///
+  /// Returns `null` when this endpoint has no saved recovery material. Other
+  /// response failures throw without logging the secret-bearing body.
+  Future<RhythmPairingRecoverySecret?> getMatterSetupCode(
+    String nativeDeviceId,
+  ) async {
+    final encodedId = Uri.encodeComponent(nativeDeviceId);
+    final response = await _dio.get(
+      'api/matter/setup-code/$encodedId',
+      options:
+          Options(validateStatus: (status) => status == 200 || status == 404),
+    );
+    if (response.statusCode == 404) return null;
+    if (response.statusCode != 200) {
+      throw StateError('Matter setup code recovery failed');
+    }
+    final data = response.data;
+    if (data is! Map<String, dynamic>) {
+      throw const FormatException('Invalid pairing recovery response');
+    }
+    return RhythmPairingRecoverySecret.fromJson(data);
   }
 
   /// Fetch all canonical devices.

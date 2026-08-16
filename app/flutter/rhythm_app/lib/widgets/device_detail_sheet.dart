@@ -3,7 +3,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDevice, RhythmDeviceType;
+import 'package:rhythm_sdk/rhythm_sdk.dart'
+    show RhythmDevice, RhythmDeviceType, RhythmPairingRecoverySecret;
 import 'package:uuid/uuid.dart';
 import '../providers/server_sync_provider.dart';
 import '../screens/hubs/matter_bulb_tester_screen.dart';
@@ -11,6 +12,7 @@ import '../screens/settings/light_screen.dart';
 import '../services/analytics_service.dart';
 import '../services/matter_removal_flow.dart';
 import 'low_glow_switch.dart';
+import 'matter_setup_code_dialog.dart';
 import 'room_picker_sheet.dart';
 import 'segmented_tab_bar.dart';
 import 'solar_orbit.dart'; // For CelestialColors
@@ -486,6 +488,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   Map<String, dynamic>? _canonicalData;
   bool _loading = true;
   bool _moving = false;
+  bool _loadingMatterSetupCode = false;
   _DeviceEndpoint? _removingEndpoint;
   _DeviceTab _selectedTab = _DeviceTab.settings;
 
@@ -522,6 +525,9 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     final (icon, iconColor) = _iconForType(device.type);
     final canUnpairMatter = context.select<ServerSyncProvider, bool>(
       (sync) => sync.canUnpairMatterDevices,
+    );
+    final canRecoverMatterSetupCode = context.select<ServerSyncProvider, bool>(
+      (sync) => sync.canRecoverMatterSetupCode,
     );
     final canUnpairHueBle = context.select<ServerSyncProvider, bool>(
       (sync) => sync.canUnpairHueBleDevices,
@@ -660,6 +666,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                         context,
                         device,
                         canUnpairMatter,
+                        canRecoverMatterSetupCode,
                         canUnpairHueBle,
                         canUnpairLocalBle,
                         canUnpairHueBridge,
@@ -828,6 +835,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     BuildContext context,
     RhythmDevice device,
     bool canUnpairMatter,
+    bool canRecoverMatterSetupCode,
     bool canUnpairHueBle,
     bool canUnpairLocalBle,
     bool canUnpairHueBridge,
@@ -853,6 +861,10 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
           _buildConnectionsSection(),
           if (isLight && _matterNativeId != null) ...[
             const SizedBox(height: 12),
+            if (canRecoverMatterSetupCode) ...[
+              _buildMatterSetupCodeButton(context, _matterNativeId!),
+              const SizedBox(height: 12),
+            ],
             _buildMatterTesterButton(context, _matterNativeId!),
           ],
           if (isLight) ...[
@@ -1232,6 +1244,123 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
               size: 20,
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMatterSetupCodeButton(BuildContext context, String nativeId) {
+    return GestureDetector(
+      key: const ValueKey('matter-setup-code-recovery'),
+      onTap: _loadingMatterSetupCode
+          ? null
+          : () => _showMatterSetupCode(context, nativeId),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(
+          color: CelestialColors.backgroundDark.withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: CelestialColors.orbitRing.withValues(alpha: 0.3),
+          ),
+        ),
+        child: Row(
+          children: [
+            if (_loadingMatterSetupCode)
+              const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            else
+              Icon(
+                Icons.key_outlined,
+                color: CelestialColors.sunWarm.withValues(alpha: 0.9),
+                size: 20,
+              ),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Text(
+                'Matter setup code',
+                style: TextStyle(
+                  color: CelestialColors.textPrimary,
+                  fontSize: 15,
+                ),
+              ),
+            ),
+            const Icon(
+              Icons.chevron_right,
+              color: CelestialColors.textSecondary,
+              size: 20,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showMatterSetupCode(
+    BuildContext context,
+    String nativeId,
+  ) async {
+    const source = 'device_network';
+    setState(() => _loadingMatterSetupCode = true);
+    unawaited(
+      AnalyticsService().logMatterSetupCodeRecoveryAttempted(source: source),
+    );
+
+    RhythmPairingRecoverySecret? secret;
+    String? failureStage;
+    try {
+      secret = await context
+          .read<ServerSyncProvider>()
+          .api
+          .getMatterSetupCode(nativeId);
+      if (secret == null) failureStage = 'not_available';
+    } catch (_) {
+      failureStage = 'request';
+    } finally {
+      if (mounted) setState(() => _loadingMatterSetupCode = false);
+    }
+    if (!context.mounted) return;
+
+    if (secret == null) {
+      unawaited(
+        AnalyticsService().logMatterSetupCodeRecoveryCompleted(
+          source: source,
+          outcome: 'failed',
+          failureStage: failureStage,
+        ),
+      );
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content:
+              Text('No saved Matter setup code is available for this device.'),
+        ),
+      );
+      return;
+    }
+
+    unawaited(
+      AnalyticsService().logMatterSetupCodeRecoveryCompleted(
+        source: source,
+        outcome: 'succeeded',
+      ),
+    );
+    await _showMatterSetupCodeDialog(context, secret);
+  }
+
+  Future<void> _showMatterSetupCodeDialog(
+    BuildContext context,
+    RhythmPairingRecoverySecret secret,
+  ) async {
+    final messenger = ScaffoldMessenger.of(context);
+    await showDialog<void>(
+      context: context,
+      builder: (_) => MatterSetupCodeDialog(
+        secret: secret,
+        onCopied: () => messenger.showSnackBar(
+          const SnackBar(content: Text('Matter setup code copied')),
         ),
       ),
     );

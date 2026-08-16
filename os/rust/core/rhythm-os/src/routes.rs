@@ -247,6 +247,10 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["GET"],
     },
     SharedRoute {
+        path: "/api/matter/setup-code/:id",
+        methods: &["GET"],
+    },
+    SharedRoute {
         path: "/api/matter/bulb-test/run",
         methods: &["POST"],
     },

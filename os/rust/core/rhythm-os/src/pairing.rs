@@ -58,6 +58,17 @@ const DEFAULT_PENDING_RESULT_TTL_MS: u64 = 60 * 60 * 1_000;
 static PAIRING_DOCUMENT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static ACTIVE_PAIRING_RESULTS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
+/// Owner-visible secret recovery material retained by a pairing integration.
+///
+/// The shared layer transports this value but must never persist it in pairing
+/// history, logs, analytics, or ordinary diagnostics.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairingRecoverySecret {
+    pub payload_kind: String,
+    pub setup_payload: String,
+    pub captured_at: String,
+}
+
 /// Validate a client-generated pairing correlation ID.
 pub fn validate_pairing_session_id(session_id: &str) -> Result<(), &'static str> {
     if session_id.is_empty() {
@@ -416,8 +427,9 @@ pub struct PairingResultStatus {
 }
 
 /// A bounded durable reconciliation record. It intentionally contains no
-/// request parameters or integration-specific `details`; setup payloads and
-/// hardware identities must never enter this document.
+/// request parameters or private integration details; setup payloads and
+/// hardware identities must never enter this document. The Matter pairing
+/// path may retain one explicitly allowlisted low-cardinality recovery action.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PairingResultRecord {
     pub session_id: String,
@@ -812,7 +824,7 @@ fn validate_pairing_document(document: &PairingHistory) -> anyhow::Result<()> {
 
 fn validate_terminal_session(session: &PairingSession, hub_type: &str) -> anyhow::Result<()> {
     validate_terminal_session_input(session, hub_type)?;
-    if session.details.is_some() {
+    if session.details != sanitized_terminal_details(session) {
         anyhow::bail!("durable pairing results cannot contain private details");
     }
     Ok(())
@@ -1074,14 +1086,35 @@ fn sanitized_terminal_session(session: &PairingSession) -> PairingSession {
             .map(|warning| bounded_pairing_text(warning, 512))
             .collect(),
         // Details may contain candidate addresses or protocol setup fields.
-        details: None,
+        // Preserve only the explicit Matter recovery enum used to explain a
+        // repeat-pair outcome to the initiating app.
+        details: sanitized_terminal_details(session),
     }
+}
+
+fn sanitized_terminal_details(session: &PairingSession) -> Option<serde_json::Value> {
+    if session.hub_type != "matter" {
+        return None;
+    }
+    let recovery_action = session.details.as_ref()?.get("recovery_action")?.as_str()?;
+    if !matches!(
+        recovery_action,
+        "existing_connection_recovered"
+            | "existing_node_recommissioned"
+            | "existing_node_recommission_failed"
+    ) {
+        return None;
+    }
+    Some(serde_json::json!({
+        "recovery_action": recovery_action,
+    }))
 }
 
 /// Validate an integration terminal before producing the bounded, privacy-safe
 /// representation suitable for durable storage, HTTP, SSE, and app recovery.
-/// Public device identity fields remain exact; private `details` are removed
-/// and human diagnostic text has recognizable setup/address tokens redacted.
+/// Public device identity fields remain exact; private `details` are removed,
+/// the bounded Matter recovery outcome is retained, and human diagnostic text
+/// has recognizable setup/address tokens redacted.
 pub fn sanitized_terminal_session_for_delivery(
     session: &PairingSession,
     hub_type: &str,
@@ -2416,6 +2449,52 @@ mod tests {
         assert!(!persisted.contains("0A0B0C0D0E0F"));
         assert!(!persisted.contains("EA:84:C2:50:A8:65"));
         std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn matter_terminal_result_keeps_only_allowlisted_recovery_action() {
+        let session = PairingSession {
+            hub_type: "matter".to_string(),
+            status: PairingStatus::Complete,
+            device: Some(PairedDeviceInfo {
+                device_id: "matter-42".to_string(),
+                name: "Light".to_string(),
+                device_type: DeviceType::Light,
+                manufacturer: None,
+                model: None,
+            }),
+            devices: Vec::new(),
+            error: None,
+            failure_stage: None,
+            warnings: Vec::new(),
+            details: Some(serde_json::json!({
+                "recovery_action": "existing_connection_recovered",
+                "setup_payload": "MT:PAIRING-SECRET",
+                "node_id": 42,
+            })),
+        };
+
+        let result = sanitized_terminal_session_for_delivery(&session, "matter").unwrap();
+        assert_eq!(
+            result.details,
+            Some(serde_json::json!({
+                "recovery_action": "existing_connection_recovered",
+            }))
+        );
+        let serialized = serde_json::to_string(&result).unwrap();
+        assert!(!serialized.contains("PAIRING-SECRET"));
+        assert!(!serialized.contains("node_id"));
+
+        let mut unknown = session;
+        unknown.details = Some(serde_json::json!({
+            "recovery_action": "future_recovery_action",
+        }));
+        assert_eq!(
+            sanitized_terminal_session_for_delivery(&unknown, "matter")
+                .unwrap()
+                .details,
+            None
+        );
     }
 
     #[test]

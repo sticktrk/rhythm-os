@@ -518,6 +518,12 @@ class CloudBackedServerApi {
     return _delegate.getCanonicalDevice(id);
   }
 
+  Future<RhythmPairingRecoverySecret?> getMatterSetupCode(
+    String nativeDeviceId,
+  ) {
+    return _delegate.getMatterSetupCode(nativeDeviceId);
+  }
+
   Future<List<Map<String, dynamic>>?> getCanonicalDevices() {
     return _delegate.getCanonicalDevices();
   }

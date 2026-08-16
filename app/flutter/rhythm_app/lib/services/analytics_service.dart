@@ -229,6 +229,26 @@ class AnalyticsService {
     await logEvent('hub_disconnected', {'hub_type': hubType});
   }
 
+  Future<void> logMatterSetupCodeRecoveryAttempted({
+    required String source,
+  }) async {
+    await logEvent('matter_setup_code_recovery_attempted', {
+      'source': source,
+    });
+  }
+
+  Future<void> logMatterSetupCodeRecoveryCompleted({
+    required String source,
+    required String outcome,
+    String? failureStage,
+  }) async {
+    await logEvent('matter_setup_code_recovery_completed', {
+      'source': source,
+      'outcome': outcome,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
   /// Track room sync from a hub.
   Future<void> logRoomSync(int roomCount, String hubType) async {
     await logEvent('room_sync', {
@@ -888,7 +908,15 @@ class AnalyticsService {
     required int attemptNumber,
     required String outcome,
     String? failureStage,
+    String? recoveryAction,
   }) async {
+    final boundedRecoveryAction = switch (recoveryAction) {
+      'existing_connection_recovered' => 'existing_connection_recovered',
+      'existing_node_recommissioned' => 'existing_node_recommissioned',
+      'existing_node_recommission_failed' =>
+        'existing_node_recommission_failed',
+      _ => null,
+    };
     await logEvent('matter_pairing_completed', {
       'journey_id': journeyId,
       'source': source,
@@ -897,6 +925,8 @@ class AnalyticsService {
       'attempt_number': attemptNumber,
       'outcome': outcome,
       if (failureStage != null) 'failure_stage': failureStage,
+      if (boundedRecoveryAction != null)
+        'recovery_action': boundedRecoveryAction,
     });
   }
 

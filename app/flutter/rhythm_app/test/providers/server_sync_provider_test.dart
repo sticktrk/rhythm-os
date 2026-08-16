@@ -1940,6 +1940,7 @@ void main() {
           'rooms': const <Map<String, dynamic>>[],
           'location': const <String, dynamic>{},
           'capabilities': {
+            'features': [RhythmFeature.matterSetupCodeRecovery],
             'hubs': [
               {
                 'type': 'matter',
@@ -1961,6 +1962,7 @@ void main() {
       expect(provider.canAddMatterOnNetworkDevice, isTrue);
       expect(provider.canCommissionMatterBleWifi, isFalse);
       expect(provider.canUnpairMatterDevices, isTrue);
+      expect(provider.canRecoverMatterSetupCode, isTrue);
       expect(provider.supportsMatterRoomlessDevices, isTrue);
     });
 
@@ -1994,6 +1996,8 @@ void main() {
       );
 
       await Future<void>.delayed(Duration.zero);
+
+      expect(provider.canRecoverMatterSetupCode, isFalse);
 
       expect(provider.canConfigureHub('hue'), isTrue);
       expect(provider.canConfigureHub('homeassistant'), isFalse);

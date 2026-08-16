@@ -2816,4 +2816,46 @@ void main() {
           })).called(1);
     });
   });
+
+  group('Matter setup code recovery', () {
+    test('parses a secret-bearing response without transforming the payload',
+        () async {
+      when(() => dio.get(
+            any(),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions:
+                RequestOptions(path: 'api/matter/setup-code/matter-42-2'),
+            statusCode: 200,
+            data: {
+              'payload_kind': 'qr_code',
+              'setup_payload': 'MT:RECOVERY-SECRET',
+              'captured_at': '2026-08-11T12:00:00Z',
+            },
+          ));
+
+      final result = await api.getMatterSetupCode('matter-42-2');
+
+      expect(result?.payloadKind, RhythmPairingRecoveryPayloadKind.qrCode);
+      expect(result?.setupPayload, 'MT:RECOVERY-SECRET');
+      expect(result?.capturedAt.toUtc(), DateTime.utc(2026, 8, 11, 12));
+      verify(() => dio.get(
+            'api/matter/setup-code/matter-42-2',
+            options: any(named: 'options'),
+          )).called(1);
+    });
+
+    test('returns null when the appliance has no saved code', () async {
+      when(() => dio.get(
+            any(),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions:
+                RequestOptions(path: 'api/matter/setup-code/matter-42'),
+            statusCode: 404,
+          ));
+
+      expect(await api.getMatterSetupCode('matter-42'), isNull);
+    });
+  });
 }

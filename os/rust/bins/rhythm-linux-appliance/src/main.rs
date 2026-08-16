@@ -239,6 +239,7 @@ fn main() -> Result<()> {
         s.start_pairing_fn = Some(callbacks.start_pairing_fn);
         s.reconcile_pairing_results_fn = Some(callbacks.reconcile_pairing_results_fn);
         s.start_unpairing_fn = Some(callbacks.start_unpairing_fn);
+        s.load_pairing_recovery_fn = Some(callbacks.load_pairing_recovery_fn);
         #[cfg(target_os = "linux")]
         {
             s.pairing_resource_activity_fn = Some(Arc::new(|hub_type, slot, active| {

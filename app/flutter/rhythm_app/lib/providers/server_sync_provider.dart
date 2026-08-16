@@ -833,6 +833,13 @@ class ServerSyncProvider extends ChangeNotifier {
   bool get canUnpairMatterDevices =>
       matterCapabilities?.supportsUnpairing ?? !hasExplicitHubCapabilities;
 
+  /// Whether the appliance can return an owner-saved Matter setup payload.
+  bool get canRecoverMatterSetupCode =>
+      _capabilities?.supportsFeature(
+        RhythmFeature.matterSetupCodeRecovery,
+      ) ??
+      false;
+
   /// Whether a Matter device may exist before room assignment.
   bool get supportsMatterRoomlessDevices =>
       matterCapabilities?.supportsRoomlessDevices ??

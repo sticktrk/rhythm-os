@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/screens/hubs/device_pairing_flow.dart';
 import 'package:rhythm_app/screens/hubs/device_pairing_scanner_screen.dart';
+import 'package:rhythm_app/screens/hubs/matter_device_add_screen.dart';
+import 'package:rhythm_app/screens/hubs/matter_pairing_flow.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 void main() {
@@ -18,6 +20,40 @@ void main() {
         fallbackPrefix: 'hue-ble-pair',
       ),
       'device-pair-camera',
+    );
+  });
+
+  test('Matter persistence warnings preserve success without retrying pairing',
+      () {
+    const result = MatterDevicePairingResult(
+      nativeDeviceId: 'matter-42',
+      name: 'Desk bulb',
+      deviceType: 'light',
+      warnings: [
+        'The setup code could not be saved. Keep using the light normally. '
+            'Do not reset or pair it again; contact Rhythm Support if its '
+            'connection needs recovery.',
+      ],
+    );
+
+    final warning = matterPairingWarningMessage(result);
+    expect(
+      warning,
+      'Desk bulb was added, but recovery needs attention. '
+      'The setup code could not be saved. Keep using the light normally. '
+      'Do not reset or pair it again; contact Rhythm Support if its '
+      'connection needs recovery.',
+    );
+    expect(warning, isNot(contains('Pair it again')));
+    expect(
+      matterPairingWarningMessage(
+        const MatterDevicePairingResult(
+          nativeDeviceId: 'matter-43',
+          name: 'Floor lamp',
+          deviceType: 'light',
+        ),
+      ),
+      isNull,
     );
   });
 

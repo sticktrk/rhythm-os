@@ -90,6 +90,16 @@ Future<void> startMatterPairingFlow(
   }
   if (!context.mounted) return;
 
+  final warningMessage = matterPairingWarningMessage(pairingResult);
+  if (warningMessage != null) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(warningMessage),
+        duration: const Duration(seconds: 8),
+      ),
+    );
+  }
+
   if (HueServiceLocator.isDemoMode) {
     await syncProvider.fullRefresh();
   } else {
@@ -146,6 +156,20 @@ Future<void> startMatterPairingFlow(
     allowNoRoom: syncProvider.supportsMatterRoomlessDevices,
     analyticsSource: analyticsSource,
   );
+}
+
+@visibleForTesting
+String? matterPairingWarningMessage(MatterDevicePairingResult result) {
+  final warnings = result.warnings
+      .map((warning) => warning.trim())
+      .where((warning) => warning.isNotEmpty)
+      .toList(growable: false);
+  if (warnings.isEmpty) return null;
+  final additional = warnings.length == 1
+      ? ''
+      : ' ${warnings.length - 1} additional warning(s) were reported.';
+  return '${result.name} was added, but recovery needs attention. '
+      '${warnings.first}$additional';
 }
 
 String _matterDeviceTypeLabel(RhythmDeviceType type) => switch (type) {

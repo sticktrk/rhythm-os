@@ -165,6 +165,7 @@ fn main() -> Result<()> {
         s.start_pairing_fn = Some(callbacks.start_pairing_fn);
         s.reconcile_pairing_results_fn = Some(callbacks.reconcile_pairing_results_fn);
         s.start_unpairing_fn = Some(callbacks.start_unpairing_fn);
+        s.load_pairing_recovery_fn = Some(callbacks.load_pairing_recovery_fn);
         s.run_device_test_fn = Some(callbacks.run_device_test_fn);
         s.save_device_test_report_fn = Some(callbacks.save_device_test_report_fn);
         s.hub_capabilities = callbacks.hub_capabilities.clone();

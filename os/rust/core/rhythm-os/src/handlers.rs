@@ -543,6 +543,24 @@ pub fn handle_matter_bulb_test_report(state: &SharedState, body: &Value) -> ApiR
     }
 }
 
+pub fn handle_get_matter_setup_code(state: &SharedState, device_id: &str) -> ApiResponse {
+    let loader = match state.lock() {
+        Ok(state) => state.load_pairing_recovery_fn.clone(),
+        Err(_) => return ApiResponse::server_error("lock"),
+    };
+    let Some(loader) = loader else {
+        return ApiResponse::server_error("Matter setup code recovery is unavailable");
+    };
+    match loader(state, "matter", device_id) {
+        Ok(Some(secret)) => match serde_json::to_string(&secret) {
+            Ok(json) => ApiResponse::json_ok(json),
+            Err(error) => ApiResponse::server_error(error),
+        },
+        Ok(None) => ApiResponse::not_found("No saved Matter setup code is available"),
+        Err(error) => ApiResponse::server_error(error),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -4040,8 +4058,8 @@ mod tests {
     };
     use crate::hub::{ActiveHub, HubType};
     use crate::pairing::{
-        PairedDeviceInfo, PairingRequest, PairingSession, PairingStage, PairingStatus,
-        UnpairingRequest, UnpairingResult,
+        PairedDeviceInfo, PairingRecoverySecret, PairingRequest, PairingSession, PairingStage,
+        PairingStatus, UnpairingRequest, UnpairingResult,
     };
     use crate::registry::HubDeviceRegistry;
     use crate::state::{AppState, ObservedPowerSource, ObservedPowerState, WorkItem};
@@ -4082,6 +4100,36 @@ mod tests {
         let r = ApiResponse::json_ok("{}".to_string());
         assert_eq!(r.status, 200);
         assert_eq!(r.content_type, "application/json");
+    }
+
+    #[test]
+    fn matter_setup_code_handler_returns_only_integration_owned_secret() {
+        let state = test_state();
+        state.lock().unwrap().load_pairing_recovery_fn =
+            Some(Arc::new(|_, hub_type, native_device_id| {
+                assert_eq!(hub_type, "matter");
+                assert_eq!(native_device_id, "matter-42-2");
+                Ok(Some(PairingRecoverySecret {
+                    payload_kind: "qr_code".to_string(),
+                    setup_payload: "MT:HANDLER-SECRET".to_string(),
+                    captured_at: "2026-08-11T12:00:00Z".to_string(),
+                }))
+            }));
+
+        let response = handle_get_matter_setup_code(&state, "matter-42-2");
+
+        assert_eq!(response.status, 200);
+        let json: Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(json["payload_kind"], "qr_code");
+        assert_eq!(json["setup_payload"], "MT:HANDLER-SECRET");
+        assert_eq!(json["captured_at"], "2026-08-11T12:00:00Z");
+    }
+
+    #[test]
+    fn matter_setup_code_handler_fails_closed_without_integration_callback() {
+        let response = handle_get_matter_setup_code(&test_state(), "matter-42");
+        assert_eq!(response.status, 500);
+        assert!(!response.body.contains("MT:"));
     }
 
     #[test]

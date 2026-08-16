@@ -812,6 +812,13 @@ class DemoServerApi extends RhythmServerApi {
   }
 
   @override
+  Future<RhythmPairingRecoverySecret?> getMatterSetupCode(
+    String nativeDeviceId,
+  ) async {
+    return null;
+  }
+
+  @override
   Future<List<Map<String, dynamic>>?> getCanonicalDevices() async {
     ensureSeeded();
     return _canonicalDevices.values

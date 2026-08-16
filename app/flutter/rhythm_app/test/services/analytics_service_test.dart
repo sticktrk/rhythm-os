@@ -90,6 +90,14 @@ void main() {
       outcome: 'partial',
       failureStage: 'authoritative_refresh',
     );
+    await analytics.logMatterSetupCodeRecoveryAttempted(
+      source: 'device_network',
+    );
+    await analytics.logMatterSetupCodeRecoveryCompleted(
+      source: 'device_network',
+      outcome: 'failed',
+      failureStage: 'not_available',
+    );
 
     expect(
       backend.events.map((event) => event.name),
@@ -106,6 +114,8 @@ void main() {
         'room_light_settings_reset_completed',
         'bulb_identify_completed',
         'device_room_move_completed',
+        'matter_setup_code_recovery_attempted',
+        'matter_setup_code_recovery_completed',
       ],
     );
     expect(backend.events.first.properties, {
@@ -156,6 +166,12 @@ void main() {
       backend.events[11].properties,
       containsPair('failure_stage', 'authoritative_refresh'),
     );
+    expect(backend.events[12].properties, {'source': 'device_network'});
+    expect(backend.events[13].properties, {
+      'source': 'device_network',
+      'outcome': 'failed',
+      'failure_stage': 'not_available',
+    });
 
     final serialized = backend.events
         .map((event) => '${event.name}:${event.properties}')
@@ -167,9 +183,47 @@ void main() {
       'room_id',
       'device_id',
       'error',
+      'MT:RECOVERY-SECRET',
     ]) {
       expect(serialized, isNot(contains(forbidden)));
     }
+  });
+
+  test('Matter pairing analytics allowlist repeat-pair recovery actions',
+      () async {
+    await analytics.logMatterPairingCompleted(
+      journeyId: 'matter-recovery-1',
+      source: 'scanner',
+      inputMethod: 'camera',
+      addMethod: 'automatic',
+      attemptNumber: 1,
+      outcome: 'succeeded',
+      recoveryAction: 'existing_connection_recovered',
+    );
+    await analytics.logMatterPairingCompleted(
+      journeyId: 'matter-recovery-2',
+      source: 'scanner',
+      inputMethod: 'camera',
+      addMethod: 'automatic',
+      attemptNumber: 1,
+      outcome: 'succeeded',
+      recoveryAction: 'MT:RECOVERY-SECRET',
+    );
+
+    expect(
+      backend.events.first.properties['recovery_action'],
+      'existing_connection_recovered',
+    );
+    expect(
+      backend.events.last.properties.containsKey('recovery_action'),
+      isFalse,
+    );
+    expect(
+      backend.events
+          .map((event) => event.properties.values.join(':'))
+          .join('\n'),
+      isNot(contains('MT:RECOVERY-SECRET')),
+    );
   });
 
   test('support report analytics correlate privacy-safe outcomes', () async {

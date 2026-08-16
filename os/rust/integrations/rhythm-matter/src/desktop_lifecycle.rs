@@ -498,6 +498,7 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
                 }
             }
 
+            let warning = delete_setup_recovery_for_node(state, node_id);
             return Ok(UnpairingResult {
                 hub_type: "matter".to_string(),
                 hub_address: Some("local".to_string()),
@@ -505,7 +506,7 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
                 device_id: Some(device_id.to_string()),
                 error: None,
                 completion_scope: None,
-                warning: None,
+                warning,
             });
         }
 
@@ -518,6 +519,7 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
                 "Matter: node {} was already decommissioned recently",
                 node_id
             );
+            let warning = delete_setup_recovery_for_node(state, node_id);
             return Ok(UnpairingResult {
                 hub_type: "matter".to_string(),
                 hub_address: Some("local".to_string()),
@@ -525,7 +527,7 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
                 device_id: Some(device_id.to_string()),
                 error: None,
                 completion_scope: None,
-                warning: None,
+                warning,
             });
         }
 
@@ -549,6 +551,7 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
                 info!(target: "sys", "Matter: decommissioned node {}", node_id);
                 hub_data.finish_decommission(node_id, true);
 
+                let warning = delete_setup_recovery_for_node(state, node_id);
                 Ok(UnpairingResult {
                     hub_type: "matter".to_string(),
                     hub_address: Some("local".to_string()),
@@ -556,7 +559,7 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
                     device_id: Some(device_id.to_string()),
                     error: None,
                     completion_scope: None,
-                    warning: None,
+                    warning,
                 })
             }
             Err(e) => {
@@ -573,6 +576,32 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
                 })
             }
         }
+    }
+
+    fn load_pairing_recovery(
+        &self,
+        state: &SharedState,
+        native_device_id: &str,
+    ) -> Result<Option<rhythm_os::pairing::PairingRecoverySecret>> {
+        let matter_hub_key = HubKey::new(HubType::new("matter"), "local");
+        let is_registered = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .canonical_registry
+            .devices()
+            .any(|device| {
+                device.endpoints.iter().any(|endpoint| {
+                    endpoint.hub_key == matter_hub_key && endpoint.native_id == native_device_id
+                })
+            });
+        if !is_registered {
+            return Ok(None);
+        }
+        crate::setup_recovery::load_setup_payload(
+            state,
+            &configured_fabric_id(state),
+            native_device_id,
+        )
     }
 
     fn run_device_test(
@@ -593,6 +622,27 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
 }
 
 pub static INTEGRATION: MatterIntegration = MatterIntegration;
+
+fn delete_setup_recovery_for_node(state: &SharedState, node_id: u64) -> Option<String> {
+    match crate::setup_recovery::delete_setup_payloads_for_node(
+        state,
+        &configured_fabric_id(state),
+        node_id,
+    ) {
+        Ok(()) => None,
+        Err(error) => {
+            warn!(
+                target: "pair",
+                "Matter setup recovery material could not be deleted: {}",
+                error
+            );
+            Some(
+                "The device was removed, but its saved Matter setup code could not be deleted."
+                    .to_string(),
+            )
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1312,6 +1362,11 @@ mod tests {
     fn forced_unpair_removes_persisted_device_without_connected_hub() {
         let state = state();
         let data_dir = set_data_dir(&state, "force-persistent-remove");
+        state.lock().unwrap().storage = Some(Arc::new(
+            rhythm_os::storage::FileStorage::new(data_dir.to_str().unwrap()).unwrap(),
+        ));
+        crate::setup_recovery::save_setup_payload(&state, "default", 102, 1, "MT:UNPAIR-SECRET")
+            .unwrap();
         let matter_dir = data_dir.join("matter");
         let devices_path = matter_dir.join("chip").join("devices.json");
         std::fs::create_dir_all(devices_path.parent().unwrap()).unwrap();
@@ -1338,6 +1393,11 @@ mod tests {
         let devices = persisted["devices"].as_array().unwrap();
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0]["node_id"], 103);
+        assert!(
+            crate::setup_recovery::load_setup_payload(&state, "default", "matter-102",)
+                .unwrap()
+                .is_none()
+        );
 
         let _ = std::fs::remove_dir_all(data_dir);
     }

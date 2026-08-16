@@ -4218,6 +4218,11 @@ mod tests {
             b"devices",
         )
         .unwrap();
+        fs::write(
+            data_dir.join("matter").join("setup-payloads.json"),
+            br#"{"schema_version":1,"entries":[{"setup_payload":"MT:DEBUG-BUNDLE-SECRET"}]}"#,
+        )
+        .unwrap();
         fs::create_dir_all(data_dir.join("cloudflared")).unwrap();
         fs::write(
             data_dir.join("cloudflared").join("hostname"),
@@ -4310,6 +4315,10 @@ mod tests {
         assert!(bundle.file_name.ends_with(".tar.gz"));
 
         let files = unpack_bundle(&bundle.bytes);
+        assert!(!files.contains_key("persisted/matter/setup-payloads.json"));
+        assert!(!files.values().any(|content| {
+            String::from_utf8_lossy(content).contains("MT:DEBUG-BUNDLE-SECRET")
+        }));
         assert_eq!(
             files.get("logs/rhythm-server.log").map(Vec::as_slice),
             Some(b"server-log".as_slice())

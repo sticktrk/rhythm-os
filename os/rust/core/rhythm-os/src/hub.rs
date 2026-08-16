@@ -812,6 +812,18 @@ pub trait ExternalLightHubIntegration: Send + Sync {
         ))
     }
 
+    /// Load owner-visible recovery material for a native paired device.
+    ///
+    /// Integrations that do not retain pairing secrets return `None`. Callers
+    /// must keep the returned value out of logs and diagnostics.
+    fn load_pairing_recovery(
+        &self,
+        _state: &SharedState,
+        _native_device_id: &str,
+    ) -> Result<Option<crate::pairing::PairingRecoverySecret>> {
+        Ok(None)
+    }
+
     /// Run a hub-specific device diagnostic/test command.
     ///
     /// Direct-connection integrations can use this to exercise raw protocol
@@ -1730,6 +1742,12 @@ pub struct IntegrationCallbacks {
             + Send
             + Sync,
     >,
+    /// Load secret pairing recovery material through the owning integration.
+    pub load_pairing_recovery_fn: Arc<
+        dyn Fn(&SharedState, &str, &str) -> Result<Option<crate::pairing::PairingRecoverySecret>>
+            + Send
+            + Sync,
+    >,
     /// Run a device diagnostic/test command.
     pub run_device_test_fn: Arc<
         dyn Fn(&SharedState, &str, &serde_json::Value) -> Result<serde_json::Value> + Send + Sync,
@@ -2107,6 +2125,17 @@ pub fn integration_callbacks(
         },
     );
 
+    let load_pairing_recovery_fn = Arc::new(
+        move |state: &SharedState,
+              hub_type: &str,
+              native_device_id: &str|
+              -> Result<Option<crate::pairing::PairingRecoverySecret>> {
+            let integration = find_integration(integrations, hub_type)
+                .ok_or_else(|| anyhow::anyhow!("No integration for hub type '{}'", hub_type))?;
+            integration.load_pairing_recovery(state, native_device_id)
+        },
+    );
+
     let run_device_test_fn = Arc::new(
         move |state: &SharedState,
               hub_type: &str,
@@ -2144,6 +2173,7 @@ pub fn integration_callbacks(
         start_pairing_fn,
         reconcile_pairing_results_fn,
         start_unpairing_fn,
+        load_pairing_recovery_fn,
         run_device_test_fn,
         save_device_test_report_fn,
         hub_capabilities,

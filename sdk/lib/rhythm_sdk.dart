@@ -24,6 +24,7 @@ export 'src/models/rhythm_input_binding.dart';
 export 'src/models/rhythm_input_event.dart';
 export 'src/models/rhythm_environment.dart';
 export 'src/models/rhythm_pairing.dart';
+export 'src/models/rhythm_pairing_recovery.dart';
 export 'src/models/rhythm_review.dart';
 export 'src/models/rhythm_room.dart';
 export 'src/models/rhythm_runtime.dart';

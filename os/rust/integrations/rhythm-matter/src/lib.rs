@@ -26,6 +26,7 @@ pub mod hub_state;
 pub mod lifecycle;
 pub mod local_quirks;
 pub mod provider;
+pub mod setup_recovery;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub mod transport;

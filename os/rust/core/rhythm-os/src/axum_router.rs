@@ -7,7 +7,8 @@ use std::convert::Infallible;
 
 use axum::body::Bytes;
 use axum::extract::{Extension, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::header::CACHE_CONTROL;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
@@ -239,6 +240,7 @@ fn shared_routes() -> Router<SharedState> {
         .route("/api/devices/unpair", post(post_unpair_device))
         .route("/api/matter/captures", get(get_matter_captures))
         .route("/api/matter/captures/:id", get(get_matter_capture))
+        .route("/api/matter/setup-code/:id", get(get_matter_setup_code))
         .route("/api/matter/bulb-test/run", post(post_matter_bulb_test_run))
         .route(
             "/api/matter/bulb-test/report",
@@ -1182,6 +1184,19 @@ pub async fn get_matter_capture(
     handlers::handle_get_matter_capture(&state, &id)
 }
 
+pub async fn get_matter_setup_code(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> Response {
+    let mut response = run_blocking(move || handlers::handle_get_matter_setup_code(&state, &id))
+        .await
+        .into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
 pub async fn post_matter_bulb_test_run(
     State(state): State<SharedState>,
     Json(body): Json<Value>,
@@ -1490,6 +1505,23 @@ mod tests {
             .expect("500 responses should carry trace context");
 
         assert_eq!(context.0, "boom");
+    }
+
+    #[tokio::test]
+    async fn matter_setup_code_response_disables_caching() {
+        let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
+        state.lock().unwrap().load_pairing_recovery_fn = Some(Arc::new(|_, _, _| {
+            Ok(Some(crate::pairing::PairingRecoverySecret {
+                payload_kind: "qr_code".to_string(),
+                setup_payload: "MT:ROUTER-SECRET".to_string(),
+                captured_at: "2026-08-14T12:00:00Z".to_string(),
+            }))
+        }));
+
+        let response = get_matter_setup_code(State(state), Path("matter-42".to_string())).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().get(CACHE_CONTROL).unwrap(), "no-store");
     }
 
     async fn call_json_route(

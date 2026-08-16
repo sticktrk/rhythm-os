@@ -811,6 +811,20 @@ pub struct AppState {
         >,
     >,
 
+    /// Load secret pairing recovery material for one integration-native device.
+    #[allow(clippy::type_complexity)]
+    pub load_pairing_recovery_fn: Option<
+        Arc<
+            dyn Fn(
+                    &SharedState,
+                    &str,
+                    &str,
+                ) -> anyhow::Result<Option<crate::pairing::PairingRecoverySecret>>
+                + Send
+                + Sync,
+        >,
+    >,
+
     /// Run a device diagnostic/test command.
     /// Built from the integration registry by `integration_callbacks`.
     #[allow(clippy::type_complexity)]
@@ -1059,6 +1073,7 @@ impl Default for AppState {
             start_pairing_fn: None,
             reconcile_pairing_results_fn: None,
             start_unpairing_fn: None,
+            load_pairing_recovery_fn: None,
             run_device_test_fn: None,
             save_device_test_report_fn: None,
             hub_credentials_interceptor: None,

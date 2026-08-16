@@ -278,6 +278,7 @@ pub const FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES: &str =
 pub const FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES: &str =
     "target_guarded_room_light_profile_overrides";
 pub const FEATURE_HUE_ROOM_AUTHORITY_CONSENT: &str = "hue_room_authority_consent_v1";
+pub const FEATURE_MATTER_SETUP_CODE_RECOVERY: &str = "matter_setup_code_recovery_v1";
 
 #[derive(Clone, Debug)]
 pub struct ApiCapabilitiesDto {
@@ -300,6 +301,7 @@ impl Serialize for ApiCapabilitiesDto {
                 FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
                 FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
                 FEATURE_HUE_ROOM_AUTHORITY_CONSENT,
+                FEATURE_MATTER_SETUP_CODE_RECOVERY,
             ],
         )?;
         state.serialize_field("hubs", &self.hubs)?;
@@ -1564,6 +1566,10 @@ mod tests {
         assert_eq!(
             json["capabilities"]["features"][4],
             FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES
+        );
+        assert_eq!(
+            json["capabilities"]["features"][6],
+            FEATURE_MATTER_SETUP_CODE_RECOVERY
         );
         assert_eq!(
             json["capabilities"]["hubs"][0]["device_onboarding_methods"][0],
