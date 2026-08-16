@@ -183,6 +183,18 @@ pub trait Storage: Send + Sync {
     ) -> Result<()> {
         Ok(())
     }
+    fn load_light_usage_ledger(&self) -> Result<Option<crate::light_usage::LightUsageLedger>> {
+        Ok(None)
+    }
+    fn save_light_usage_ledger(
+        &self,
+        _ledger: &crate::light_usage::LightUsageLedger,
+    ) -> Result<()> {
+        Ok(())
+    }
+    fn clear_light_usage_ledger(&self) -> Result<()> {
+        Ok(())
+    }
     fn load_activity_cloud_config(
         &self,
     ) -> Result<Option<crate::activity_cloud::StoredActivityCloudConfig>> {
@@ -420,6 +432,7 @@ pub trait Storage: Send + Sync {
         self.clear_commissioning_wifi_credentials()?;
         self.clear_api_auth()?;
         self.clear_activity_cloud_config()?;
+        self.clear_light_usage_ledger()?;
         self.clear_remote_access_config()
     }
 }
@@ -1396,6 +1409,41 @@ impl Storage for FileStorage {
         self.write_atomic("activity_history.json", data.as_bytes())
     }
 
+    fn load_light_usage_ledger(&self) -> Result<Option<crate::light_usage::LightUsageLedger>> {
+        let path = self.file_path("light_usage_ledger.json");
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = std::fs::metadata(&path)
+            .with_context(|| format!("Failed to inspect {}", path.display()))?
+            .len();
+        if bytes > crate::light_usage::LIGHT_USAGE_LEDGER_BYTES_LIMIT {
+            anyhow::bail!(
+                "light usage ledger exceeds the {} byte limit at {}",
+                crate::light_usage::LIGHT_USAGE_LEDGER_BYTES_LIMIT,
+                path.display()
+            );
+        }
+        self.read_json::<crate::light_usage::LightUsageLedger>("light_usage_ledger.json")
+            .map(Some)
+            .with_context(|| format!("Failed to load light usage ledger at {}", path.display()))
+    }
+
+    fn save_light_usage_ledger(&self, ledger: &crate::light_usage::LightUsageLedger) -> Result<()> {
+        let data = serde_json::to_vec_pretty(ledger)?;
+        if data.len() as u64 > crate::light_usage::LIGHT_USAGE_LEDGER_BYTES_LIMIT {
+            anyhow::bail!(
+                "light usage ledger would exceed the {} byte limit",
+                crate::light_usage::LIGHT_USAGE_LEDGER_BYTES_LIMIT
+            );
+        }
+        self.write_atomic_durable("light_usage_ledger.json", &data)
+    }
+
+    fn clear_light_usage_ledger(&self) -> Result<()> {
+        self.remove_if_exists_durable("light_usage_ledger.json")
+    }
+
     fn load_pairing_history(&self) -> Result<Option<crate::pairing::PairingHistory>> {
         let path = self.file_path("pairing_history.json");
         if path.exists()
@@ -2045,6 +2093,7 @@ impl Storage for FileStorage {
             "motion_timers.json",
             "light_runtime_state.json",
             "activity_history.json",
+            "light_usage_ledger.json",
             "pairing_history.json",
             "pairing_history.json.tmp",
             "activity_cloud.json",
@@ -2318,6 +2367,32 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
                 debug!(target: "sys", "No persisted light activity history loaded: {}", e);
             }
         }
+    }
+
+    if let Some(storage) = s.storage.clone() {
+        match storage.load_light_usage_ledger() {
+            Ok(Some(ledger)) => match ledger.normalized(crate::state::current_epoch_ms()) {
+                Ok(ledger) => {
+                    let segment_count = ledger.segments.len();
+                    s.light_usage = ledger;
+                    info!(
+                        target: "sys",
+                        "Loaded light usage ledger: {} segments",
+                        segment_count
+                    );
+                }
+                Err(error) => warn!(
+                    target: "sys",
+                    "Rejected persisted light usage ledger: {error:#}"
+                ),
+            },
+            Ok(None) => {}
+            Err(error) => warn!(
+                target: "sys",
+                "Failed to load persisted light usage ledger: {error:#}"
+            ),
+        }
+        s.light_usage.configure_shutdown_flush(storage);
     }
 
     if let Some(storage) = s.storage.as_ref() {
@@ -5578,6 +5653,24 @@ mod tests {
         }
 
         #[test]
+        fn light_usage_ledger_save_load_and_clear_roundtrip() {
+            let (storage, path) = temp_storage();
+            let ledger = crate::light_usage::LightUsageLedger::default();
+
+            storage.save_light_usage_ledger(&ledger).unwrap();
+            let loaded = storage.load_light_usage_ledger().unwrap().unwrap();
+            assert_eq!(
+                loaded.schema_version,
+                crate::light_usage::LIGHT_USAGE_SCHEMA_VERSION
+            );
+            assert!(loaded.segments.is_empty());
+
+            storage.clear_light_usage_ledger().unwrap();
+            assert!(storage.load_light_usage_ledger().unwrap().is_none());
+            cleanup(&path);
+        }
+
+        #[test]
         fn clear_factory_reset_state_removes_persisted_files() {
             let (storage, path) = temp_storage();
             storage
@@ -5636,6 +5729,9 @@ mod tests {
             storage.save_light_runtime_state(&runtime_state).unwrap();
             storage
                 .save_light_activity_history(&crate::activity::LightActivityHistory::default())
+                .unwrap();
+            storage
+                .save_light_usage_ledger(&crate::light_usage::LightUsageLedger::default())
                 .unwrap();
             storage
                 .save_all_hub_credentials(&[HubCredentials::new(
@@ -5756,6 +5852,7 @@ mod tests {
                 "motion_timers.json",
                 "light_runtime_state.json",
                 "activity_history.json",
+                "light_usage_ledger.json",
                 "pairing_history.json",
                 "pairing_metadata.json",
                 "hub_credentials.json",
