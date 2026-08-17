@@ -240,6 +240,46 @@ void main() {
     );
   });
 
+  test('room schedule analytics exclude identity and exact times', () async {
+    await analytics.logRoomScheduleOpened(source: 'room_settings');
+    await analytics.logRoomScheduleSaveAttempted(
+      changeKind: 'times',
+      source: 'follow_time',
+    );
+    await analytics.logRoomScheduleSaveCompleted(
+      changeKind: 'times',
+      source: 'follow_time',
+      outcome: 'failure',
+      failureStage: 'appliance_ack',
+    );
+    await analytics.logRoomScheduleTestCompleted(
+      action: 'wake',
+      outcome: 'success',
+    );
+
+    expect(backend.events.map((event) => event.name), [
+      'room_schedule_opened',
+      'room_schedule_save_attempted',
+      'room_schedule_save_completed',
+      'room_schedule_test_completed',
+    ]);
+    final serialized = backend.events
+        .map((event) => '${event.name}:${event.properties}')
+        .join('\n');
+    for (final forbidden in [
+      'room_id',
+      'room_name',
+      'device_id',
+      'wake_time',
+      'sleep_time',
+      '07:15',
+      '23:45',
+      'error',
+    ]) {
+      expect(serialized, isNot(contains(forbidden)));
+    }
+  });
+
   test('support report analytics correlate privacy-safe outcomes', () async {
     await analytics.logSupportReportAttempted(
       journeyId: 'support-report-123',

@@ -7,7 +7,7 @@
 use rhythm_core::{
     runtime::hub_registry::DeviceType, LightNodeKind, LightProfileConfig, LightProfileNodeOverride,
     ModeChangeCause, ModeConfig, ModeTransitionConfig, RhythmMode, RoomModeState,
-    RoomProfileSettings, TimerSetting,
+    RoomProfileSettings, RoomScheduleConfig, TimerSetting,
 };
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
@@ -49,6 +49,8 @@ pub struct RoomProfileSettingsDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub motion_timeout_secs: Option<TimerSetting>,
     pub motion_activation_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub room_schedule: Option<RoomScheduleConfig>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub profile_overrides: BTreeMap<String, LightProfileNodeOverride>,
 }
@@ -63,6 +65,7 @@ impl RoomProfileSettingsDto {
             fade_ms: settings.fade_ms.clone(),
             motion_timeout_secs: settings.motion_timeout_secs.clone(),
             motion_activation_enabled: settings.motion_activation_enabled(),
+            room_schedule: settings.room_schedule,
             profile_overrides: settings.profile_overrides.clone(),
         }
     }
@@ -272,6 +275,7 @@ pub struct HubStartupRetryDto {
 pub const API_SCHEMA_VERSION: u32 = 2;
 pub const FEATURE_ASYNC_DEBUG_BUNDLE_UPLOAD: &str = "async_debug_bundle_upload";
 pub const FEATURE_MOTION_ACTIVATION_TOGGLE: &str = "motion_activation_toggle";
+pub const FEATURE_ROOM_SCHEDULE_V1: &str = "room_schedule_v1";
 pub const FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES: &str = "room_light_profile_overrides";
 pub const FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES: &str =
     "guarded_room_light_profile_overrides";
@@ -298,6 +302,7 @@ impl Serialize for ApiCapabilitiesDto {
             &[
                 FEATURE_ASYNC_DEBUG_BUNDLE_UPLOAD,
                 FEATURE_MOTION_ACTIVATION_TOGGLE,
+                FEATURE_ROOM_SCHEDULE_V1,
                 FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES,
                 FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
                 FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,

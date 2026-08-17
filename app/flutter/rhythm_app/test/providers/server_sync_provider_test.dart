@@ -1,10 +1,13 @@
 import 'dart:async';
+import 'dart:io';
+import 'dart:ui' as ui;
 import 'dart:ui' show Tristate;
 
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:dio/dio.dart';
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_app/providers/home_provider.dart';
@@ -235,6 +238,9 @@ class _FakeRhythmServerApi extends RhythmServerApi {
       motionActivationCalls = [];
   Completer<RhythmRoomState?>? motionActivationCompleter;
   bool motionActivationSucceeds = true;
+  Completer<bool>? roomScheduleTestCompleter;
+  bool roomScheduleTestSucceeds = true;
+  bool roomScheduleSetSucceeds = true;
   final List<
       ({
         String nodeId,
@@ -322,6 +328,30 @@ class _FakeRhythmServerApi extends RhythmServerApi {
       'state': 'active',
       'profile_settings': {'motion_activation_enabled': enabled},
     });
+  }
+
+  @override
+  Future<RhythmRoomState?> roomScheduleSet({
+    required String roomId,
+    required RhythmRoomSchedule schedule,
+    required String requestId,
+  }) async =>
+      roomScheduleSetSucceeds
+          ? RhythmRoomState.fromJson({
+              'node_id': roomId,
+              'state': 'active',
+              'profile_settings': {'room_schedule': schedule.toJson()},
+            })
+          : null;
+
+  @override
+  Future<bool> roomScheduleTest({
+    required String roomId,
+    required RhythmMode mode,
+    required String requestId,
+  }) async {
+    final pending = roomScheduleTestCompleter;
+    return pending == null ? roomScheduleTestSucceeds : pending.future;
   }
 
   @override
@@ -980,6 +1010,29 @@ void _registerWidgetCleanup(WidgetTester tester) {
   addTearDown(() async {
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
+  });
+}
+
+Future<void> _captureRoomScheduleEvidence(
+  WidgetTester tester,
+  GlobalKey boundaryKey,
+  String fileName,
+) async {
+  final outputDir = Platform.environment['CODEX_UI_SCREENSHOT_DIR'];
+  if (outputDir == null || outputDir.isEmpty) return;
+  final boundary = tester.renderObject<RenderRepaintBoundary>(
+    find.byKey(boundaryKey),
+  );
+  boundary.markNeedsPaint();
+  await tester.pump();
+  await tester.runAsync(() async {
+    final image = await boundary.toImage(pixelRatio: 2);
+    final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+    await Directory(outputDir).create(recursive: true);
+    await File('$outputDir/$fileName').writeAsBytes(
+      bytes!.buffer.asUint8List(),
+      flush: true,
+    );
   });
 }
 
@@ -5266,7 +5319,10 @@ void main() {
       RhythmHello.fromJson({
         'capabilities': {
           'api_schema_version': 2,
-          'features': [RhythmFeature.roomLightProfileOverrides],
+          'features': [
+            RhythmFeature.roomLightProfileOverrides,
+            RhythmFeature.roomScheduleV1,
+          ],
           'hubs': const <dynamic>[],
         },
         'nodes': [
@@ -5316,6 +5372,7 @@ void main() {
     expect(find.text('Light'), findsNWidgets(2));
     expect(find.text('Motion'), findsOneWidget);
     expect(find.text('Buttons'), findsOneWidget);
+    expect(find.text('Schedule'), findsOneWidget);
     expect(find.text('Info'), findsNothing);
     expect(
       find.byKey(const ValueKey('room-settings-rename')),
@@ -5478,6 +5535,27 @@ void main() {
       findsNothing,
     );
 
+    await _selectRoomSettingsTab(tester, 'Schedule');
+    expect(find.byKey(const ValueKey('schedule')), findsOneWidget);
+
+    expect(find.byKey(const ValueKey('schedule')), findsOneWidget);
+    expect(find.text('ALARM / SCHEDULE SOURCE'), findsOneWidget);
+    expect(find.text('WAKE / SLEEP PRESETS'), findsOneWidget);
+    expect(find.text('TEST'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('room-schedule-source-presets')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('room-schedule-time-dial')),
+      findsOneWidget,
+    );
+    expect(
+        find.byKey(const ValueKey('room-schedule-test-wake')), findsOneWidget);
+    expect(
+        find.byKey(const ValueKey('room-schedule-test-sleep')), findsOneWidget);
+    expect(find.text('SCHEDULE BEHAVIOR'), findsNothing);
+
     connection.helloOnReconnect = RhythmHello.fromJson({
       'nodes': [
         {
@@ -5539,6 +5617,150 @@ void main() {
       'Dining Room',
     );
     semantics.dispose();
+  });
+
+  testWidgets('room schedule renders deterministic visual evidence states',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 1200));
+
+    Map<String, dynamic> hello({bool followTime = false}) => {
+          'capabilities': {
+            'api_schema_version': 2,
+            'features': [RhythmFeature.roomScheduleV1],
+            'hubs': const <dynamic>[],
+          },
+          'nodes': [
+            {
+              'id': 'mock-room',
+              'name': 'Sample Room',
+              'kind': 'room',
+              'state': 'active',
+              'rhythm_enabled': true,
+              'disabled': false,
+              'standby_enabled': true,
+              'time_offset': 0.0,
+              'brightness_offset': 0.0,
+              'lights_on': true,
+              'profile_settings': {
+                'room_schedule': {
+                  'source': followTime ? 'follow_time' : 'wake_sleep_presets',
+                  'wake_time': '06:30',
+                  'sleep_time': '22:30',
+                },
+              },
+            },
+          ],
+          'location': const <String, dynamic>{},
+        };
+
+    connection.emitHello(RhythmHello.fromJson(hello()));
+    await tester.pump(const Duration(milliseconds: 10));
+    const room = RoomDto(
+      id: 'mock-room',
+      name: 'Sample Room',
+      source: RoomSourceDto.matter,
+      deviceIds: [],
+      rhythmEnabled: true,
+      disabled: false,
+      lightsOn: true,
+      timeOffsetMinutes: 0,
+      brightnessOffset: 0,
+    );
+    await roomProvider.addRoom(room);
+    final boundaryKey = GlobalKey();
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: RepaintBoundary(
+          key: boundaryKey,
+          child: const RoomSettingsSheet(
+            room: room,
+            enableLivePreview: false,
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+    await _selectRoomSettingsTab(tester, 'Schedule');
+    await _captureRoomScheduleEvidence(
+      tester,
+      boundaryKey,
+      '01-wake-sleep-presets.png',
+    );
+
+    connection.emitHello(RhythmHello.fromJson(hello(followTime: true)));
+    await tester.pump(const Duration(milliseconds: 20));
+    expect(
+      find.byKey(const ValueKey('room-schedule-presets-disabled')),
+      findsOneWidget,
+    );
+    await _captureRoomScheduleEvidence(
+      tester,
+      boundaryKey,
+      '02-follow-time.png',
+    );
+
+    await tester.drag(
+      find.byKey(const ValueKey('schedule')),
+      const Offset(0, -180),
+    );
+    await tester.pump();
+    await _captureRoomScheduleEvidence(
+      tester,
+      boundaryKey,
+      '03-disabled-inline-presets.png',
+    );
+
+    api.roomScheduleTestCompleter = Completer<bool>();
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('room-schedule-test-wake')),
+    );
+    await tester.tap(find.byKey(const ValueKey('room-schedule-test-wake')));
+    await tester.pump();
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('room-schedule-test-wake')),
+        matching: find.byType(CircularProgressIndicator),
+      ),
+      findsOneWidget,
+    );
+    await _captureRoomScheduleEvidence(
+      tester,
+      boundaryKey,
+      '04-test-pending.png',
+    );
+
+    api.roomScheduleTestCompleter!.complete(true);
+    await tester.pump();
+    api.roomScheduleTestCompleter = null;
+    api.roomScheduleSetSucceeds = false;
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('room-schedule-source-presets')),
+    );
+    await tester.tap(
+      find.byKey(const ValueKey('room-schedule-source-presets')),
+    );
+    await tester.pump();
+    await _captureRoomScheduleEvidence(
+      tester,
+      boundaryKey,
+      '05-save-failure-retry.png',
+    );
+    expect(find.byKey(const ValueKey('room-schedule-failure')), findsOneWidget);
   });
 
   testWidgets('room tabs show Scan above the inline existing-device list',

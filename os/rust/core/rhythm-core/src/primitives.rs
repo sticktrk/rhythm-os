@@ -928,7 +928,13 @@ impl<C: LightController> RhythmEngine<C> {
         let brightness_offset = effective.brightness_offset;
         let profile_settings = effective.profile_settings.clone();
         let ctx = self.create_context(current_hour);
-        let module = self.active_profile_for_settings(Some(&profile_settings));
+        let effective_mode =
+            profile_settings.schedule_mode(self.profile_registry.active_mode(), current_hour);
+        let module = self.profile_registry.profile_for_room_state(
+            effective_mode,
+            RoomModeState::Active,
+            Some(&profile_settings),
+        );
         let values = module.calculate_with_offset(&ctx, offset_minutes);
         let brightness = (values.brightness as f32 + brightness_offset).clamp(1.0, 100.0) as u8;
         let command = Self::build_command(&values, brightness);
@@ -939,7 +945,7 @@ impl<C: LightController> RhythmEngine<C> {
         let profile_id = self
             .profile_registry
             .profile_for_room_state(
-                self.profile_registry.active_mode(),
+                effective_mode,
                 RoomModeState::Active,
                 Some(&profile_settings),
             )
@@ -1087,8 +1093,13 @@ impl<C: LightController> RhythmEngine<C> {
         time_offset_minutes: f32,
     ) -> LightingValues {
         let ctx = self.create_context(current_hour);
+        let mode = settings
+            .map(|settings| {
+                settings.schedule_mode(self.profile_registry.active_mode(), current_hour)
+            })
+            .unwrap_or_else(|| self.profile_registry.active_mode());
         self.profile_registry
-            .profile_for_room_state(self.profile_registry.active_mode(), state, settings)
+            .profile_for_room_state(mode, state, settings)
             .calculate_with_offset(&ctx, time_offset_minutes)
     }
 

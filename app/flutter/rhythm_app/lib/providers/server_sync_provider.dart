@@ -213,6 +213,8 @@ class ServerSyncProvider extends ChangeNotifier {
   /// one request in flight per node so rapid taps cannot reorder the final
   /// persisted value.
   final Set<String> _motionActivationPending = {};
+  final Set<String> _roomSchedulePending = {};
+  final Set<String> _roomScheduleTestPending = {};
   final Set<String> _lightProfileOverridePending = {};
   static const Uuid _uuid = Uuid();
 
@@ -1177,6 +1179,105 @@ class ServerSyncProvider extends ChangeNotifier {
         node?.profileSettings?.motionActivationEnabled != null;
   }
 
+  bool roomScheduleSupportedForNode(String nodeId) {
+    if (HueServiceLocator.isDemoMode) return true;
+    return nodeById(nodeId)?.kind == RhythmNodeKind.room &&
+        _capabilities?.supportsFeature(RhythmFeature.roomScheduleV1) == true;
+  }
+
+  RhythmRoomSchedule scheduleForRoom(String roomId) =>
+      nodeById(roomId)?.profileSettings?.roomSchedule ??
+      const RhythmRoomSchedule();
+
+  bool roomSchedulePendingForRoom(String roomId) =>
+      _roomSchedulePending.contains(roomId);
+
+  bool roomScheduleTestPendingForRoom(String roomId) =>
+      _roomScheduleTestPending.contains(roomId);
+
+  Future<bool> setRoomSchedule(
+    String roomId,
+    RhythmRoomSchedule schedule,
+  ) async {
+    final index = _helloNodes.indexWhere((node) => node.id == roomId);
+    if (index == -1 ||
+        !roomScheduleSupportedForNode(roomId) ||
+        _roomSchedulePending.contains(roomId) ||
+        (!HueServiceLocator.isDemoMode && !_connection.connected)) {
+      return false;
+    }
+    final previous = _helloNodes[index];
+    final previousSettings =
+        previous.profileSettings ?? const RhythmNodeProfileSettings();
+    final nextSettings = _settingsWithSchedule(previousSettings, schedule);
+    _helloNodes[index] = _copyNodeWithProfileSettings(previous, nextSettings);
+    _helloRooms = _buildRoomSummaries();
+    _roomSchedulePending.add(roomId);
+    notifyListeners();
+
+    var accepted = HueServiceLocator.isDemoMode;
+    if (!accepted) {
+      final authoritative = await api.roomScheduleSet(
+        roomId: roomId,
+        schedule: schedule,
+        requestId: _uuid.v4(),
+      );
+      final applied = authoritative?.profileSettings?.roomSchedule;
+      accepted = applied?.source == schedule.source &&
+          applied?.wakeTime == schedule.wakeTime &&
+          applied?.sleepTime == schedule.sleepTime;
+    }
+    _roomSchedulePending.remove(roomId);
+    if (!accepted) {
+      final current = _helloNodes.indexWhere((node) => node.id == roomId);
+      if (current != -1) {
+        _helloNodes[current] = _copyNodeWithProfileSettings(
+          _helloNodes[current],
+          previousSettings,
+        );
+        _helloRooms = _buildRoomSummaries();
+      }
+    }
+    notifyListeners();
+    return accepted;
+  }
+
+  Future<bool> testRoomSchedule(String roomId, RhythmMode mode) async {
+    if (!roomScheduleSupportedForNode(roomId) ||
+        _roomScheduleTestPending.contains(roomId) ||
+        (!HueServiceLocator.isDemoMode && !_connection.connected)) {
+      return false;
+    }
+    _roomScheduleTestPending.add(roomId);
+    notifyListeners();
+    final accepted = HueServiceLocator.isDemoMode ||
+        await api.roomScheduleTest(
+          roomId: roomId,
+          mode: mode,
+          requestId: _uuid.v4(),
+        );
+    _roomScheduleTestPending.remove(roomId);
+    notifyListeners();
+    return accepted;
+  }
+
+  RhythmNodeProfileSettings _settingsWithSchedule(
+    RhythmNodeProfileSettings previous,
+    RhythmRoomSchedule schedule,
+  ) =>
+      RhythmNodeProfileSettings(
+        profileId: previous.profileId,
+        moodEnabled: previous.moodEnabled,
+        moodProfileId: previous.moodProfileId,
+        moodSceneId: previous.moodSceneId,
+        fadeSetting: previous.fadeSetting,
+        motionTimeoutSetting: previous.motionTimeoutSetting,
+        motionActivationEnabled: previous.motionActivationEnabled,
+        roomSchedule: schedule,
+        profileOverrides: previous.profileOverrides,
+        raw: previous.raw,
+      );
+
   bool lightProfileOverridesSupportedForNode(String nodeId) {
     if (HueServiceLocator.isDemoMode) return true;
     final featureSupported = _capabilities?.supportsFeature(
@@ -1326,6 +1427,7 @@ class ServerSyncProvider extends ChangeNotifier {
         fadeSetting: previousSettings.fadeSetting,
         motionTimeoutSetting: previousSettings.motionTimeoutSetting,
         motionActivationEnabled: enabled,
+        roomSchedule: previousSettings.roomSchedule,
         profileOverrides: previousSettings.profileOverrides,
         raw: previousSettings.raw,
       ),
@@ -1393,6 +1495,7 @@ class ServerSyncProvider extends ChangeNotifier {
       fadeSetting: previousSettings.fadeSetting,
       motionTimeoutSetting: previousSettings.motionTimeoutSetting,
       motionActivationEnabled: previousSettings.motionActivationEnabled,
+      roomSchedule: previousSettings.roomSchedule,
       profileOverrides: _withMotionTimeoutProfileOverride(
         previousSettings.profileOverrides,
         profileId: profileId,
@@ -3838,6 +3941,7 @@ class ServerSyncProvider extends ChangeNotifier {
       fadeSetting: previousSettings.fadeSetting,
       motionTimeoutSetting: previousSettings.motionTimeoutSetting,
       motionActivationEnabled: previousSettings.motionActivationEnabled,
+      roomSchedule: previousSettings.roomSchedule,
       profileOverrides: Map.unmodifiable(nextOverrides),
       raw: previousSettings.raw,
     );
@@ -3910,6 +4014,7 @@ class ServerSyncProvider extends ChangeNotifier {
       fadeSetting: previousSettings.fadeSetting,
       motionTimeoutSetting: previousSettings.motionTimeoutSetting,
       motionActivationEnabled: previousSettings.motionActivationEnabled,
+      roomSchedule: previousSettings.roomSchedule,
       raw: previousSettings.raw,
     );
     _helloNodes[index] = _copyNodeWithProfileSettings(previous, nextSettings);

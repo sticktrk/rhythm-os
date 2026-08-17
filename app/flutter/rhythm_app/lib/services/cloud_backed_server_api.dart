@@ -277,6 +277,28 @@ class CloudBackedServerApi {
     );
   }
 
+  Future<RhythmRoomState?> roomScheduleSet({
+    required String roomId,
+    required RhythmRoomSchedule schedule,
+    required String requestId,
+  }) =>
+      _delegate.roomScheduleSet(
+        roomId: roomId,
+        schedule: schedule,
+        requestId: requestId,
+      );
+
+  Future<bool> roomScheduleTest({
+    required String roomId,
+    required RhythmMode mode,
+    required String requestId,
+  }) =>
+      _delegate.roomScheduleTest(
+        roomId: roomId,
+        mode: mode,
+        requestId: requestId,
+      );
+
   Future<bool> nodeProfileOverridesSet({
     required String nodeId,
     required Map<String, dynamic>? profileOverrides,

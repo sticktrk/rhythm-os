@@ -1122,6 +1122,21 @@ fn parse_profile_settings_patch(
         })?)),
     };
 
+    let room_schedule = match body.get("room_schedule") {
+        None => None,
+        Some(v) if v.is_null() => Some(None),
+        Some(v) => {
+            let schedule: rhythm_core::RoomScheduleConfig = serde_json::from_value(v.clone())
+                .map_err(|e| format!("Invalid {field_name}.room_schedule: {e}"))?;
+            if schedule.wake_time == schedule.sleep_time {
+                return Err(format!(
+                    "{field_name}.room_schedule wake_time and sleep_time must differ"
+                ));
+            }
+            Some(Some(schedule))
+        }
+    };
+
     Ok(Some(commands::RoomProfileSettingsPatch {
         clear_all: false,
         profile_id,
@@ -1131,6 +1146,7 @@ fn parse_profile_settings_patch(
         fade_ms: parse_timer_patch_value(body, "fade_ms")?,
         motion_timeout_secs: parse_timer_patch_value(body, "motion_timeout_secs")?,
         motion_activation_enabled,
+        room_schedule,
         profile_overrides: parse_profile_overrides_patch_value(body, field_name)?,
         expected_effective_profile_overrides: None,
         replace_profile_overrides: body
@@ -2847,6 +2863,116 @@ pub fn handle_put_node_preferences(
         Err(e) => return ApiResponse::bad_request(&e),
     };
 
+    if items.len() == 1 {
+        if let Some(mode_value) = items[0].get("schedule_test") {
+            let mode = match serde_json::from_value::<rhythm_core::RhythmMode>(mode_value.clone()) {
+                Ok(mode) => mode,
+                Err(_) => return ApiResponse::bad_request("schedule_test must be day or sleep"),
+            };
+            let Some(raw_node_id) = items[0].get("node_id").and_then(Value::as_str) else {
+                return ApiResponse::bad_request("Missing node_id");
+            };
+            let node_id = commands::resolve_node_id(state, raw_node_id);
+            let request_id = items[0]
+                .get("request_id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty() && value.len() <= 128)
+                .map(str::to_string)
+                .unwrap_or_else(|| crate::logging::next_command_id("room-schedule-test"));
+            let result = commands::do_room_schedule_test(state, &node_id, mode);
+            let mut record = crate::activity::LightActivityRecord::app(
+                &node_id,
+                if mode == rhythm_core::RhythmMode::Day {
+                    "room_schedule_test_wake"
+                } else {
+                    "room_schedule_test_sleep"
+                },
+            );
+            record.correlation_id = Some(request_id);
+            record.payload = Some(json!({
+                "status": if result.is_ok() { "applied" } else { "failed" },
+                "failure_stage": result.as_ref().err().map(|_| "output_apply"),
+            }));
+            crate::activity::record_light_activity(state, record);
+            return match result {
+                Ok(node) => ApiResponse::json_ok(format!(r#"{{"nodes":[{}]}}"#, node)),
+                Err(error) => ApiResponse::server_error(error),
+            };
+        }
+    }
+
+    // Room schedules require an authoritative acknowledgement. Keep this
+    // additive shape on the SDK-owned preferences route, but apply it
+    // synchronously so a 2xx response means the canonical room state was
+    // persisted rather than merely admitted to the dispatch queue.
+    if items.len() == 1
+        && items[0]
+            .get("profile_settings")
+            .and_then(Value::as_object)
+            .is_some_and(|settings| settings.contains_key("room_schedule"))
+    {
+        let Some(raw_node_id) = items[0].get("node_id").and_then(Value::as_str) else {
+            return ApiResponse::bad_request("Missing node_id");
+        };
+        let node_id = commands::resolve_node_id(state, raw_node_id);
+        let patch = match parse_profile_settings_patch(
+            items[0].get("profile_settings"),
+            "profile_settings",
+        ) {
+            Ok(Some(patch)) => patch,
+            Ok(None) => return ApiResponse::bad_request("Missing room schedule"),
+            Err(error) => return ApiResponse::bad_request(&error),
+        };
+        let source = patch
+            .room_schedule
+            .as_ref()
+            .and_then(Option::as_ref)
+            .map(|schedule| {
+                if schedule.follows_time() {
+                    "follow_time"
+                } else {
+                    "wake_sleep_presets"
+                }
+            });
+        let result = commands::do_node_preferences_set(
+            state,
+            &node_id,
+            None,
+            None,
+            None,
+            None,
+            Some(&patch),
+            persist,
+        );
+        let output_applied = result.is_ok()
+            && state
+                .lock()
+                .ok()
+                .and_then(|locked| locked.hub_runtime())
+                .is_some_and(|runtime| {
+                    runtime
+                        .periodic_tick_room(&node_id, runtime.current_hour())
+                        .is_ok()
+                });
+        let mut record =
+            crate::activity::LightActivityRecord::app(&node_id, "room_schedule_config_updated");
+        record.correlation_id = items[0]
+            .get("request_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        record.payload = Some(json!({
+            "source": source,
+            "status": if result.is_err() { "failed" } else if output_applied { "applied" } else { "accepted" },
+            "failure_stage": result.as_ref().err().map(|_| "persistence")
+                .or_else(|| (!output_applied).then_some("output_apply")),
+        }));
+        crate::activity::record_light_activity(state, record);
+        return match result {
+            Ok(node) => ApiResponse::json_ok(format!(r#"{{"nodes":[{}]}}"#, node)),
+            Err(error) => ApiResponse::server_error(error),
+        };
+    }
+
     let mut updates = Vec::with_capacity(items.len());
 
     for item in &items {
@@ -2911,16 +3037,23 @@ pub fn handle_put_node_preferences(
             || update.room_profile.is_some()
         {
             let action_id = update
-                .target_state
-                .map(|_| "set_room_state".to_string())
+                .room_profile
+                .as_ref()
+                .filter(|patch| patch.room_schedule.is_some())
+                .map(|_| "room_schedule_config_updated".to_string())
                 .or_else(|| {
-                    update.rhythm_enabled.map(|enabled| {
-                        if enabled {
-                            "circadian_on".to_string()
-                        } else {
-                            "circadian_off".to_string()
-                        }
-                    })
+                    update
+                        .target_state
+                        .map(|_| "set_room_state".to_string())
+                        .or_else(|| {
+                            update.rhythm_enabled.map(|enabled| {
+                                if enabled {
+                                    "circadian_on".to_string()
+                                } else {
+                                    "circadian_off".to_string()
+                                }
+                            })
+                        })
                 })
                 .unwrap_or_else(|| "set_light_preferences".to_string());
             let mut record = crate::activity::LightActivityRecord::app(&update.node_id, action_id);
@@ -2929,6 +3062,11 @@ pub fn handle_put_node_preferences(
                 "standby_enabled": update.standby_enabled,
                 "state": update.target_state.map(|state| state.as_api_str()),
                 "profile_settings_touched": update.room_profile.is_some(),
+                "room_schedule_source": update.room_profile.as_ref()
+                    .and_then(|patch| patch.room_schedule.as_ref())
+                    .and_then(|schedule| schedule.as_ref())
+                    .map(|schedule| if schedule.follows_time() { "follow_time" } else { "wake_sleep_presets" }),
+                "status": "accepted",
             }));
             crate::activity::record_light_activity(state, record);
         }
@@ -5309,6 +5447,11 @@ mod tests {
                 "fade_ms": {"mode": "fixed", "value": 250},
                 "motion_timeout_secs": null,
                 "motion_activation_enabled": false,
+                "room_schedule": {
+                    "source": "follow_time",
+                    "wake_time": "07:15",
+                    "sleep_time": "23:45"
+                },
                 "profile_overrides": {
                     "rhythm": {
                         "motion_timeout_secs": {"mode": "fixed", "value": 300}
@@ -5330,6 +5473,14 @@ mod tests {
         );
         assert_eq!(patch.motion_timeout_secs, Some(None));
         assert_eq!(patch.motion_activation_enabled, Some(Some(false)));
+        assert_eq!(
+            patch.room_schedule.unwrap().unwrap(),
+            rhythm_core::RoomScheduleConfig {
+                source: rhythm_core::RoomScheduleSource::FollowTime,
+                wake_time: rhythm_core::ModeTransitionTime::parse("07:15").unwrap(),
+                sleep_time: rhythm_core::ModeTransitionTime::parse("23:45").unwrap(),
+            }
+        );
         let profile_overrides = patch.profile_overrides.unwrap().unwrap();
         assert_eq!(
             profile_overrides
@@ -5338,6 +5489,18 @@ mod tests {
                 .and_then(|override_patch| override_patch.motion_timeout_secs.as_ref()),
             Some(&rhythm_core::TimerSetting::Fixed { value: 300 })
         );
+        assert!(parse_profile_settings_patch(
+            Some(&json!({
+                "room_schedule": {
+                    "source": "follow_time",
+                    "wake_time": "07:15",
+                    "sleep_time": "07:15"
+                }
+            })),
+            "room_profile"
+        )
+        .unwrap_err()
+        .contains("must differ"));
         assert!(matches!(profile_overrides.get("sleep"), Some(None)));
 
         assert_eq!(
@@ -6139,6 +6302,35 @@ mod tests {
             } => assert_eq!(dispatch_spacing, Duration::ZERO),
             other => panic!("unexpected work item: {:?}", std::mem::discriminant(&other)),
         }
+    }
+
+    #[test]
+    fn room_schedule_preference_returns_authoritative_state_without_queue() {
+        let state = handler_state_with_runtime();
+        let rx = attach_work_queue(&state);
+        let response = handle_put_node_preferences(
+            &state,
+            &json!({
+                "node_id": "room1",
+                "profile_settings": {
+                    "room_schedule": {
+                        "source": "follow_time",
+                        "wake_time": "07:15",
+                        "sleep_time": "23:45"
+                    }
+                },
+                "request_id": "schedule-request-1"
+            }),
+            false,
+        );
+
+        assert_eq!(response.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(
+            parsed["nodes"][0]["profile_settings"]["room_schedule"]["source"],
+            "follow_time"
+        );
+        assert!(rx.recv_timeout(Duration::from_millis(25)).is_err());
     }
 
     #[test]

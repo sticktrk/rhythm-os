@@ -1031,6 +1031,7 @@ pub struct RoomProfileSettingsPatch {
     pub fade_ms: Option<Option<TimerSetting>>,
     pub motion_timeout_secs: Option<Option<TimerSetting>>,
     pub motion_activation_enabled: Option<Option<bool>>,
+    pub room_schedule: Option<Option<rhythm_core::RoomScheduleConfig>>,
     pub profile_overrides: Option<Option<BTreeMap<String, Option<LightProfileNodeOverride>>>>,
     /// Effective override map reviewed by the caller. The dispatch worker
     /// rejects the queued mutation if this node changed before worker
@@ -1068,6 +1069,9 @@ impl RoomProfileSettingsPatch {
         }
         if let Some(motion_activation_enabled) = self.motion_activation_enabled {
             settings.motion_activation_enabled = motion_activation_enabled;
+        }
+        if let Some(room_schedule) = self.room_schedule {
+            settings.room_schedule = room_schedule;
         }
         if let Some(profile_overrides) = &self.profile_overrides {
             match profile_overrides {
@@ -1124,6 +1128,7 @@ impl RoomProfileSettingsPatch {
             || self.fade_ms.is_some()
             || self.motion_timeout_secs.is_some()
             || self.motion_activation_enabled.is_some()
+            || self.room_schedule.is_some()
             || self.profile_overrides.is_some()
     }
 
@@ -1134,6 +1139,7 @@ impl RoomProfileSettingsPatch {
             || self.mood_profile_id.is_some()
             || self.mood_scene_id.is_some()
             || self.fade_ms.is_some()
+            || self.room_schedule.is_some()
             || self.profile_overrides.is_some()
     }
 
@@ -1146,6 +1152,7 @@ impl RoomProfileSettingsPatch {
             || self.mood_profile_id.as_ref().is_some_and(Option::is_some)
             || self.mood_scene_id.as_ref().is_some_and(Option::is_some)
             || self.fade_ms.as_ref().is_some_and(Option::is_some)
+            || self.room_schedule.as_ref().is_some_and(Option::is_some)
             || self.profile_overrides.as_ref().is_some_and(|overrides| {
                 overrides.as_ref().is_some_and(|overrides| {
                     overrides.values().any(|profile_override| {
@@ -7337,6 +7344,13 @@ fn apply_room_mode_defaults(
             }
         }
         for snap in snapshots {
+            if snap
+                .profile_settings
+                .room_schedule
+                .is_some_and(|schedule| schedule.follows_time())
+            {
+                continue;
+            }
             let target_state = defaults_by_room
                 .get(snap.id.as_str())
                 .copied()
@@ -7355,6 +7369,13 @@ fn apply_room_mode_defaults(
             }
         }
         for snap in snapshots {
+            if snap
+                .profile_settings
+                .room_schedule
+                .is_some_and(|schedule| schedule.follows_time())
+            {
+                continue;
+            }
             let target_state = defaults_by_room.get(snap.id.as_str()).copied().or_else(|| {
                 snap.parent_id
                     .as_deref()
@@ -8548,6 +8569,96 @@ fn resolve_room_command_for_state_at_from_parts(
     ))
 }
 
+/// Preview one room's configured behavior for [mode] without changing global mode.
+pub fn do_room_schedule_test(
+    state: &SharedState,
+    room_id: &str,
+    mode: RhythmMode,
+) -> Result<String> {
+    let (
+        runtime,
+        light_profile_configs,
+        mode_configs,
+        solar_noon,
+        latitude,
+        longitude,
+        timezone_name,
+        utc_offset,
+    ) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        (
+            s.hub_runtime(),
+            s.light_profile_configs.clone(),
+            s.mode_configs(),
+            s.solar_noon_hour(),
+            s.latitude,
+            s.longitude,
+            s.timezone_name.clone(),
+            s.utc_offset_hours,
+        )
+    };
+    let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+    let snapshot = runtime
+        .engine_room_snapshot(room_id)
+        .ok_or_else(|| anyhow::anyhow!("Room '{}' not found in engine", room_id))?;
+    let target_state = mode_config_for_mode(&mode_configs, mode)
+        .and_then(|config| {
+            config
+                .room_defaults
+                .iter()
+                .find(|default| default.room_id == room_id)
+                .map(|default| default.state)
+        })
+        .unwrap_or(RoomModeState::Active);
+    let (soft_off, mood_active, hard_off) = room_flags_for_target_state(target_state)?;
+
+    runtime.restore_node_state(
+        room_id,
+        RestoredNodeState {
+            rhythm_enabled: true,
+            disabled: snapshot.disabled,
+            time_offset_minutes: snapshot.time_offset_minutes,
+            brightness_offset: snapshot.brightness_offset,
+            soft_off,
+            mood_active,
+            standby_enabled: snapshot.standby_enabled,
+            hard_off,
+            profile_settings: snapshot.profile_settings.clone(),
+        },
+    );
+    clear_room_mode_transition(state, room_id);
+    queue_motion_timer_clear(state, room_id);
+
+    if hard_off {
+        runtime.lights_off_room(room_id, None)?;
+        update_lights_on_cache_for_runtime_node(state, &runtime, room_id, false);
+    } else {
+        let lighting = RoomLightingContext {
+            light_profile_configs: &light_profile_configs,
+            mode_configs: &mode_configs,
+            mode,
+            solar_noon,
+            latitude,
+            longitude,
+            timezone_name: timezone_name.as_deref(),
+            utc_offset,
+        };
+        let command = resolve_room_command_for_state_at_from_parts(
+            lighting,
+            RoomLightingInput::from_snapshot(&snapshot, target_state),
+            current_local_datetime(utc_offset),
+            Some(0),
+        )
+        .ok_or_else(|| anyhow::anyhow!("Room schedule test output unavailable"))?;
+        runtime.apply_room_command(room_id, command)?;
+        update_lights_on_cache_for_runtime_node(state, &runtime, room_id, true);
+    }
+    emit_node_state_event_after_apply(state, &runtime, room_id);
+    build_node_state(state, room_id).and_then(|node_state| {
+        serde_json::to_string(&node_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+    })
+}
+
 /// Snapshots every addressable settings node: rooms plus standalone light
 /// devices (e.g. a roomless Matter bulb). The mode-apply path used to consult
 /// `engine_all_room_snapshots`, which filters to `kind.is_room()` in production
@@ -8713,6 +8824,12 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
     }
     let snapshots = addressable_root_snapshots(&runtime)
         .into_iter()
+        .filter(|snapshot| {
+            !snapshot
+                .profile_settings
+                .room_schedule
+                .is_some_and(|schedule| schedule.follows_time())
+        })
         .filter(|snapshot| rhythm_automation_allowed_for_node(state, &snapshot.id))
         .collect::<Vec<_>>();
     let mut room_commands = Vec::new();
@@ -9724,6 +9841,7 @@ fn imported_room_profile_patch(room: &BackupConfigurationRoom) -> RoomProfileSet
         fade_ms: Some(room.room_profile.fade_ms.clone()),
         motion_timeout_secs: Some(room.room_profile.motion_timeout_secs.clone()),
         motion_activation_enabled: Some(room.room_profile.motion_activation_enabled),
+        room_schedule: Some(room.room_profile.room_schedule),
         profile_overrides: Some(Some(
             room.room_profile
                 .profile_overrides
@@ -18670,6 +18788,7 @@ mod tests {
             fade_ms: Some(TimerSetting::Fixed { value: 100 }),
             motion_timeout_secs: Some(TimerSetting::Fixed { value: 20 }),
             motion_activation_enabled: Some(false),
+            room_schedule: None,
             profile_overrides: BTreeMap::from([(
                 "custom".to_string(),
                 LightProfileNodeOverride {
@@ -29206,6 +29325,23 @@ mod tests {
     }
 
     #[test]
+    fn room_schedule_test_dispatches_only_target_without_global_mode_change() {
+        let (state, runtime) = setup_state(vec![
+            make_snapshot("r1", false, false),
+            make_snapshot("r2", false, false),
+        ]);
+        assert_eq!(state.lock().unwrap().active_mode, RhythmMode::Day);
+
+        do_room_schedule_test(&state, "r1", RhythmMode::Sleep).unwrap();
+
+        assert_eq!(state.lock().unwrap().active_mode, RhythmMode::Day);
+        let applied = runtime.applied_commands();
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].0, "r1");
+        assert!(runtime.engine_room_snapshot("r2").is_some());
+    }
+
+    #[test]
     fn active_profile_config_save_without_apply_does_not_dispatch() {
         let (state, runtime) = setup_state(vec![make_snapshot("r1", false, false)]);
         let mut rhythm = rhythm_core::default_rhythm_profile();
@@ -29863,6 +29999,48 @@ mod tests {
         let snap = runtime.engine_room_snapshot("r1").unwrap();
         assert!(!snap.soft_off);
         assert!(snap.hard_off);
+    }
+
+    #[test]
+    fn global_mode_change_skips_follow_time_room_defaults_and_outputs() {
+        let mut follow_time = make_snapshot("follow", false, false);
+        follow_time.profile_settings.room_schedule = Some(rhythm_core::RoomScheduleConfig {
+            source: rhythm_core::RoomScheduleSource::FollowTime,
+            wake_time: rhythm_core::ModeTransitionTime::parse("06:30").unwrap(),
+            sleep_time: rhythm_core::ModeTransitionTime::parse("22:30").unwrap(),
+        });
+        let (state, runtime) =
+            setup_state(vec![follow_time, make_snapshot("ordinary", false, false)]);
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = RhythmMode::Day;
+            set_observed_lights_on_in_app(&mut s, "follow", true);
+            set_observed_lights_on_in_app(&mut s, "ordinary", true);
+            s.set_mode_configs(vec![ModeConfig {
+                mode: RhythmMode::Sleep,
+                active_profile_id: Some(rhythm_core::SLEEP_PROFILE_ID.into()),
+                idle_profile_id: Some(rhythm_core::SLEEP_IDLE_PROFILE_ID.into()),
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![rhythm_core::RoomModeDefault {
+                    room_id: "follow".into(),
+                    state: RoomModeState::HardOff,
+                }],
+            }]);
+        }
+
+        do_set_active_mode(&state, RhythmMode::Sleep).unwrap();
+
+        assert_eq!(state.lock().unwrap().active_mode, RhythmMode::Sleep);
+        assert!(!runtime.engine_room_snapshot("follow").unwrap().hard_off);
+        assert!(runtime
+            .restore_calls()
+            .iter()
+            .all(|(room_id, _, _)| room_id != "follow"));
+        assert!(runtime
+            .applied_commands()
+            .iter()
+            .all(|(room_id, _)| room_id != "follow"));
     }
 
     #[test]

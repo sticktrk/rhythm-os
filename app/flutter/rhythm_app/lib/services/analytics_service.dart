@@ -766,6 +766,47 @@ class AnalyticsService {
     });
   }
 
+  /// Track room Schedule-tab entry without room identity or saved times.
+  Future<void> logRoomScheduleOpened({required String source}) async {
+    await logEvent('room_schedule_opened', {'source': source});
+  }
+
+  Future<void> logRoomScheduleSaveAttempted({
+    required String changeKind,
+    required String source,
+  }) async {
+    await logEvent('room_schedule_save_attempted', {
+      'change_kind': changeKind,
+      'source': source,
+    });
+  }
+
+  Future<void> logRoomScheduleSaveCompleted({
+    required String changeKind,
+    required String source,
+    required String outcome,
+    String? failureStage,
+  }) async {
+    await logEvent('room_schedule_save_completed', {
+      'change_kind': changeKind,
+      'source': source,
+      'outcome': outcome,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
+  Future<void> logRoomScheduleTestCompleted({
+    required String action,
+    required String outcome,
+    String? failureStage,
+  }) async {
+    await logEvent('room_schedule_test_completed', {
+      'action': action,
+      'outcome': outcome,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
   /// Track discovery of room-scoped Light settings without room identifiers.
   Future<void> logRoomLightSettingsOpened({
     required bool hasOverrides,
@@ -795,8 +836,7 @@ class AnalyticsService {
       'outcome': outcome,
       'changed_field_count': changedFieldCount,
       if (dayColorMode != null) 'day_color_mode': dayColorMode,
-      if (dayBrightnessMode != null)
-        'day_brightness_mode': dayBrightnessMode,
+      if (dayBrightnessMode != null) 'day_brightness_mode': dayBrightnessMode,
       if (failureStage != null) 'failure_stage': failureStage,
     });
   }

@@ -335,12 +335,11 @@ pub(crate) fn effective_cycle_duration(
             continue;
         };
         let room_ctx = ctx.with_offset(room.time_offset_minutes);
+        let effective_mode = room
+            .profile_settings
+            .schedule_mode(profile_registry.active_mode(), room_ctx.current_hour);
         let suggested_secs = profile_registry
-            .profile_for_room_state(
-                profile_registry.active_mode(),
-                room_state,
-                Some(&room.profile_settings),
-            )
+            .profile_for_room_state(effective_mode, room_state, Some(&room.profile_settings))
             .calculate(&room_ctx)
             .suggested_tick_interval_secs
             .map(u64::from);

@@ -188,6 +188,7 @@ class RhythmNodeProfileSettings {
   final RhythmTimerSetting? fadeSetting;
   final RhythmTimerSetting? motionTimeoutSetting;
   final bool? motionActivationEnabled;
+  final RhythmRoomSchedule? roomSchedule;
   final Map<String, RhythmLightProfileNodeOverride> profileOverrides;
   final Map<String, dynamic> raw;
 
@@ -199,6 +200,7 @@ class RhythmNodeProfileSettings {
     this.fadeSetting,
     this.motionTimeoutSetting,
     this.motionActivationEnabled,
+    this.roomSchedule,
     this.profileOverrides = const {},
     this.raw = const <String, dynamic>{},
   });
@@ -215,6 +217,7 @@ class RhythmNodeProfileSettings {
       fadeSetting == null &&
       motionTimeoutSetting == null &&
       motionActivationEnabled == null &&
+      roomSchedule == null &&
       profileOverrides.isEmpty &&
       raw.isEmpty;
 
@@ -229,6 +232,7 @@ class RhythmNodeProfileSettings {
       ..remove('fade_ms')
       ..remove('motion_timeout_secs')
       ..remove('motion_activation_enabled')
+      ..remove('room_schedule')
       ..remove('profile_overrides');
     final moodProfileId = json['mood_profile_id'] as String? ??
         json['idle_profile_id'] as String?;
@@ -244,6 +248,9 @@ class RhythmNodeProfileSettings {
       fadeSetting: _timerSettingFromJson(json, 'fade_ms'),
       motionTimeoutSetting: _timerSettingFromJson(json, 'motion_timeout_secs'),
       motionActivationEnabled: json['motion_activation_enabled'] as bool?,
+      roomSchedule: jsonMap(json['room_schedule']) == null
+          ? null
+          : RhythmRoomSchedule.fromJson(jsonMap(json['room_schedule'])!),
       profileOverrides: _profileOverridesFromJson(json['profile_overrides']),
       raw: raw,
     );
@@ -260,12 +267,63 @@ class RhythmNodeProfileSettings {
           'motion_timeout_secs': motionTimeoutSetting!.toJson(),
         if (motionActivationEnabled != null)
           'motion_activation_enabled': motionActivationEnabled,
+        if (roomSchedule != null) 'room_schedule': roomSchedule!.toJson(),
         if (profileOverrides.isNotEmpty)
           'profile_overrides': {
             for (final entry in profileOverrides.entries)
               entry.key: entry.value.toJson(),
           },
       };
+}
+
+enum RhythmRoomScheduleSource {
+  wakeSleepPresets('wake_sleep_presets'),
+  followTime('follow_time');
+
+  const RhythmRoomScheduleSource(this.wireValue);
+  final String wireValue;
+
+  static RhythmRoomScheduleSource fromWire(String? value) => values.firstWhere(
+        (source) => source.wireValue == value,
+        orElse: () => wakeSleepPresets,
+      );
+}
+
+/// Appliance-authoritative local schedule for one stable room ID.
+class RhythmRoomSchedule {
+  final RhythmRoomScheduleSource source;
+  final String wakeTime;
+  final String sleepTime;
+
+  const RhythmRoomSchedule({
+    this.source = RhythmRoomScheduleSource.wakeSleepPresets,
+    this.wakeTime = '06:30',
+    this.sleepTime = '22:30',
+  });
+
+  factory RhythmRoomSchedule.fromJson(Map<String, dynamic> json) =>
+      RhythmRoomSchedule(
+        source: RhythmRoomScheduleSource.fromWire(json['source'] as String?),
+        wakeTime: json['wake_time'] as String? ?? '06:30',
+        sleepTime: json['sleep_time'] as String? ?? '22:30',
+      );
+
+  Map<String, dynamic> toJson() => {
+        'source': source.wireValue,
+        'wake_time': wakeTime,
+        'sleep_time': sleepTime,
+      };
+
+  RhythmRoomSchedule copyWith({
+    RhythmRoomScheduleSource? source,
+    String? wakeTime,
+    String? sleepTime,
+  }) =>
+      RhythmRoomSchedule(
+        source: source ?? this.source,
+        wakeTime: wakeTime ?? this.wakeTime,
+        sleepTime: sleepTime ?? this.sleepTime,
+      );
 }
 
 class RhythmLightProfileNodeOverride {
