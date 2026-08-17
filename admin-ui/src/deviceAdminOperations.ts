@@ -603,6 +603,55 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     path: 'api/topology/nodes'
   },
   {
+    id: 'assistant-contract-get',
+    category: 'Devices & Topology',
+    label: 'Read assistant contract',
+    description: 'Fetch the runtime assistant operation contract.',
+    method: 'GET',
+    path: 'api/assistant/contract'
+  },
+  {
+    id: 'assistant-topology-get',
+    category: 'Devices & Topology',
+    label: 'Read assistant topology',
+    description: 'Fetch a freshness-bound assistant topology snapshot.',
+    method: 'GET',
+    path: 'api/assistant/topology'
+  },
+  {
+    id: 'assistant-device-room-move-plan',
+    category: 'Devices & Topology',
+    label: 'Plan assistant device move',
+    description: 'Prepare a non-mutating reviewed device-to-room move plan.',
+    method: 'POST',
+    path: 'api/assistant/plans/device-room-move',
+    body: {
+      device_id: '{device_id}',
+      to_room_id: '{to_room_id}',
+      correlation_id: 'admin-preview-001'
+    }
+  },
+  {
+    id: 'assistant-device-room-move-apply',
+    category: 'Devices & Topology',
+    label: 'Apply assistant device move',
+    description: 'Apply one explicitly reviewed, freshness-bound device move plan.',
+    method: 'POST',
+    path: 'api/assistant/plans/device-room-move/apply',
+    body: {
+      plan_id: '{plan_id}',
+      correlation_id: 'admin-preview-001',
+      operation: 'apply_move_device_room_plan',
+      contract_sha256: '{contract_sha256}',
+      server_instance_id: '{server_instance_id}',
+      topology_resource_sha256: '{topology_resource_sha256}',
+      device_id: '{device_id}',
+      from_room_id: '{from_room_id}',
+      to_room_id: '{to_room_id}'
+    },
+    danger: true
+  },
+  {
     id: 'topology-room-create',
     category: 'Devices & Topology',
     label: 'Create room',
