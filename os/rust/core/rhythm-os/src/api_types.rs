@@ -295,6 +295,7 @@ pub const FEATURE_HUE_ROOM_TOPOLOGY_SYNC: &str = "hue_room_topology_sync_v1";
 pub const FEATURE_SCENE_MOTION_SUPPRESSION: &str = "scene_motion_suppression_v1";
 pub const FEATURE_BUTTON_MULTI_ROOM_CONTROLS: &str = "button_multi_room_controls_v1";
 pub const FEATURE_RESET_TO_MODE_DEFAULT: &str = "reset_to_mode_default_v1";
+pub const FEATURE_MATTER_UNREACHABLE_DEVICE_TRIAGE: &str = "matter_unreachable_device_triage_v1";
 
 #[derive(Clone, Debug)]
 pub struct ApiCapabilitiesDto {
@@ -328,6 +329,7 @@ impl Serialize for ApiCapabilitiesDto {
                 FEATURE_SCENE_MOTION_SUPPRESSION,
                 FEATURE_BUTTON_MULTI_ROOM_CONTROLS,
                 FEATURE_RESET_TO_MODE_DEFAULT,
+                FEATURE_MATTER_UNREACHABLE_DEVICE_TRIAGE,
             ],
         )?;
         state.serialize_field("hubs", &self.hubs)?;
@@ -1662,6 +1664,10 @@ mod tests {
         ] {
             assert!(features.contains(&serde_json::json!(feature)));
         }
+        assert_eq!(
+            json["capabilities"]["features"][8],
+            FEATURE_MATTER_UNREACHABLE_DEVICE_TRIAGE
+        );
         assert_eq!(
             json["capabilities"]["hubs"][0]["device_onboarding_methods"][0],
             "matter_on_network_setup_code"

@@ -122,6 +122,10 @@ pub enum ServerEvent {
         pending_unassigned: usize,
         /// Pending hub-configured device entries.
         pending_hub_configured: usize,
+        /// Capability-gated unreachable Matter device entries. This is kept
+        /// separate from pending_count so older apps do not badge entries
+        /// they cannot render.
+        pending_unreachable: usize,
     },
     /// Device pairing progress changed.
     PairingProgress {
@@ -614,6 +618,7 @@ mod tests {
             pending_rooms: 1,
             pending_unassigned: 1,
             pending_hub_configured: 1,
+            pending_unreachable: 2,
         };
         let json = serde_json::to_string(&event).unwrap();
         for field in [
@@ -622,6 +627,7 @@ mod tests {
             "pending_rooms",
             "pending_unassigned",
             "pending_hub_configured",
+            "pending_unreachable",
         ] {
             assert!(json.contains(field), "missing {} in {}", field, json);
         }

@@ -55,6 +55,7 @@ const OPTIONAL_PERSISTED_FILES: &[&str] = &[
     "ota_history.json",
     "activity_history.json",
     "light_usage_ledger.json",
+    "device_health.json",
 ];
 const REMOTE_ACCESS_DEBUG_FILES: &[&str] = &["cloudflared/hostname", "cloudflared/status.env"];
 const OTA_DEBUG_FILES: &[&str] = &[crate::auto_update::AUTO_UPDATE_STATE_RELATIVE_PATH];
@@ -4316,6 +4317,11 @@ mod tests {
         )
         .unwrap();
         fs::write(
+            data_dir.join("device_health.json"),
+            br#"{"schema_version":1,"records":{}}"#,
+        )
+        .unwrap();
+        fs::write(
             data_dir.join("canonical_registry.json"),
             br#"{"devices":{},"triage":{"entries":[]}}"#,
         )
@@ -4482,6 +4488,10 @@ mod tests {
                 br#"{"activities":[{"action_id":"set_motion_activation","correlation_id":"motion-test-1","payload":{"requested_enabled":false,"status":"applied"}}]}"#
                     .as_slice()
             )
+        );
+        assert_eq!(
+            files.get("persisted/device_health.json").map(Vec::as_slice),
+            Some(br#"{"schema_version":1,"records":{}}"#.as_slice())
         );
         assert_eq!(
             files

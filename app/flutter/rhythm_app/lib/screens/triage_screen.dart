@@ -3,10 +3,12 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
+import 'package:uuid/uuid.dart';
 import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
 import '../services/analytics_service.dart';
 import '../services/hue_ble_auto_discovery_service.dart';
+import '../services/matter_removal_flow.dart';
 import '../widgets/nearby_hue_ble_prompt.dart';
 import '../widgets/room_picker_sheet.dart';
 import '../widgets/settings_row.dart';
@@ -43,7 +45,11 @@ class TriageScreen extends StatefulWidget {
 }
 
 class _TriageScreenState extends State<TriageScreen> {
-  static const _deviceKinds = <String>{'device_merge', 'unassigned_device'};
+  static const _deviceKinds = <String>{
+    'device_merge',
+    'unassigned_device',
+    'unreachable_device',
+  };
   static const _roomKinds = <String>{'room_binding', 'hub_configured'};
 
   List<Map<String, dynamic>> _entries = [];
@@ -53,6 +59,10 @@ class _TriageScreenState extends State<TriageScreen> {
   RhythmHueAuthority? _hueAuthority;
   String? _reviewingHueBridgeAddress;
   _TriageFilter _filter = _TriageFilter.all;
+  final Set<String> _reportedUnreachableEntries = {};
+  final Set<String> _awaitingRecoveryEntries = {};
+  final Map<String, String> _unreachableJourneyIds = {};
+  Timer? _recoveryRefreshTimer;
 
   @override
   void initState() {
@@ -62,6 +72,12 @@ class _TriageScreenState extends State<TriageScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) unawaited(_discoverNearbyHueBle());
     });
+  }
+
+  @override
+  void dispose() {
+    _recoveryRefreshTimer?.cancel();
+    super.dispose();
   }
 
   Future<void> _discoverNearbyHueBle() async {
@@ -136,7 +152,22 @@ class _TriageScreenState extends State<TriageScreen> {
         await syncProvider.fullRefresh();
         debugPrint('TriageScreen: sync complete');
       }
-      final entries = await http.getTriageEntries();
+      final legacyEntries = await http.getTriageEntries();
+      final List<RhythmDeviceAttention>? typedAttentionEntries;
+      if (syncProvider.matterUnreachableDeviceTriageSupported) {
+        typedAttentionEntries = await http.getDeviceAttentionEntries();
+      } else {
+        typedAttentionEntries = const <RhythmDeviceAttention>[];
+      }
+      final attentionEntries = typedAttentionEntries
+          ?.map((entry) => entry.toJson())
+          .toList(growable: false);
+      final entries = legacyEntries == null || attentionEntries == null
+          ? null
+          : <Map<String, dynamic>>[
+              ...legacyEntries,
+              ...attentionEntries,
+            ];
       RhythmHueAuthority? hueAuthority;
       if (syncProvider.hueRoomAuthorityConsentSupported) {
         try {
@@ -161,6 +192,8 @@ class _TriageScreenState extends State<TriageScreen> {
         });
       }
       if (entries != null) {
+        _recordUnreachableEntryBoundaries(attentionEntries!);
+        _scheduleRecoveryRefresh(attentionEntries);
         final deviceCount = entries.where(_isDeviceEntry).length;
         final roomCount = entries.where(_isRoomEntry).length;
         AnalyticsService().logTriageViewed(
@@ -178,6 +211,64 @@ class _TriageScreenState extends State<TriageScreen> {
         });
       }
     }
+  }
+
+  void _recordUnreachableEntryBoundaries(
+    List<Map<String, dynamic>> entries,
+  ) {
+    final currentIds = entries
+        .map((entry) => entry['id']?.toString() ?? '')
+        .where((id) => id.isNotEmpty)
+        .toSet();
+    for (final entry in entries) {
+      final entryId = entry['id']?.toString() ?? '';
+      if (entryId.isEmpty || !_reportedUnreachableEntries.add(entryId)) {
+        continue;
+      }
+      final journeyId = _journeyIdFor(entryId);
+      unawaited(
+        AnalyticsService().logUnreachableDeviceAttention(
+          journeyId: journeyId,
+          action: 'surfaced',
+          state: entry['status']?.toString() ?? 'pending',
+        ),
+      );
+    }
+    final recovered = _awaitingRecoveryEntries.difference(currentIds).toList();
+    for (final entryId in recovered) {
+      _awaitingRecoveryEntries.remove(entryId);
+      final journeyId = _journeyIdFor(entryId);
+      unawaited(
+        AnalyticsService().logUnreachableDeviceAttention(
+          journeyId: journeyId,
+          action: 'recovery_verified',
+          state: 'recovered',
+        ),
+      );
+      _unreachableJourneyIds.remove(entryId);
+    }
+  }
+
+  String _journeyIdFor(String entryId) => _unreachableJourneyIds.putIfAbsent(
+        entryId,
+        () => 'unreachable-device-${const Uuid().v4()}',
+      );
+
+  void _scheduleRecoveryRefresh(List<Map<String, dynamic>> entries) {
+    final needsRefresh = entries.any(
+      (entry) => entry['status']?.toString() == 'awaiting_recovery',
+    );
+    if (!needsRefresh) {
+      _recoveryRefreshTimer?.cancel();
+      _recoveryRefreshTimer = null;
+      return;
+    }
+    _recoveryRefreshTimer ??= Timer.periodic(
+      const Duration(seconds: 15),
+      (_) {
+        if (mounted && !_busy) unawaited(_loadEntries());
+      },
+    );
   }
 
   @override
@@ -612,6 +703,20 @@ class _TriageScreenState extends State<TriageScreen> {
 
   Widget _entryCard(Map<String, dynamic> entry, ServerSyncProvider serverSync) {
     final kind = _kindForEntry(entry);
+    if (kind == 'unreachable_device') {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 16),
+        child: UnreachableDeviceAttentionCard(
+          key: ValueKey(entry['id']),
+          entry: entry,
+          busy: _busy,
+          onStillInstalled: () => _markDeviceStillInstalled(entry),
+          onRemoved: () => _removeUnreachableDevice(entry),
+          onSnooze: () => _snoozeUnreachableDevice(entry),
+          onRecheck: () => _loadEntries(),
+        ),
+      );
+    }
     if (kind == 'room_binding') {
       return Padding(
         padding: const EdgeInsets.only(bottom: 16),
@@ -905,6 +1010,208 @@ class _TriageScreenState extends State<TriageScreen> {
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  Future<void> _snoozeUnreachableDevice(
+    Map<String, dynamic> entry,
+  ) async {
+    final entryId = entry['id']?.toString() ?? '';
+    if (_busy || entryId.isEmpty) return;
+    final journeyId = _journeyIdFor(entryId);
+    setState(() => _busy = true);
+    try {
+      final success = await context
+          .read<ServerSyncProvider>()
+          .api
+          .snoozeDeviceAttention(entryId, correlationId: journeyId);
+      if (!success) throw StateError('The server did not save the snooze.');
+      _awaitingRecoveryEntries.remove(entryId);
+      await AnalyticsService().logUnreachableDeviceAttention(
+        journeyId: journeyId,
+        action: 'snoozed',
+        state: entry['status']?.toString() ?? 'pending',
+      );
+      if (mounted) await _loadEntries();
+      _unreachableJourneyIds.remove(entryId);
+    } catch (error) {
+      _showAttentionError('Could not snooze this device', error);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _markDeviceStillInstalled(
+    Map<String, dynamic> entry,
+  ) async {
+    final entryId = entry['id']?.toString() ?? '';
+    if (_busy || entryId.isEmpty) return;
+    final journeyId = _journeyIdFor(entryId);
+    setState(() => _busy = true);
+    try {
+      final success = await context
+          .read<ServerSyncProvider>()
+          .api
+          .markDeviceAttentionStillInstalled(
+            entryId,
+            correlationId: journeyId,
+          );
+      if (!success) {
+        throw StateError('The server did not save this recovery step.');
+      }
+      _awaitingRecoveryEntries.add(entryId);
+      await AnalyticsService().logUnreachableDeviceAttention(
+        journeyId: journeyId,
+        action: 'still_installed',
+        state: entry['status']?.toString() ?? 'pending',
+      );
+      if (mounted) await _loadEntries();
+    } catch (error) {
+      _showAttentionError('Could not start recovery', error);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _removeUnreachableDevice(
+    Map<String, dynamic> entry,
+  ) async {
+    if (_busy) return;
+    final entryId = entry['id']?.toString() ?? '';
+    final device = _mapField(entry, 'device');
+    final name = device['name']?.toString() ?? 'this light';
+    final deviceId = device['native_id']?.toString() ?? '';
+    final hubType = device['hub_type']?.toString() ?? '';
+    final hubAddress = device['hub_address']?.toString() ?? '';
+    if (entryId.isEmpty || deviceId.isEmpty || hubType != 'matter') return;
+    final journeyId = _journeyIdFor(entryId);
+    final syncProvider = context.read<ServerSyncProvider>();
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: CelestialColors.backgroundCard,
+        title: const Text(
+          'Remove Matter light?',
+          style: TextStyle(color: CelestialColors.textPrimary),
+        ),
+        content: Text(
+          'Rhythm will first try to remove $name from its Matter fabric. '
+          'If the light cannot be reached, you can separately choose local-only cleanup.',
+          style: const TextStyle(color: CelestialColors.textSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: Text(
+              'Try Graceful Removal',
+              style: TextStyle(color: Colors.red.shade300),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _busy = true);
+    _awaitingRecoveryEntries.remove(entryId);
+    final marked = await syncProvider.api.markDeviceAttentionRemovalSelected(
+      entryId,
+      correlationId: journeyId,
+    );
+    if (!marked) {
+      if (mounted) setState(() => _busy = false);
+      _showAttentionError(
+        'Could not begin removal',
+        StateError('The attention entry is no longer actionable.'),
+      );
+      return;
+    }
+    await AnalyticsService().logUnreachableDeviceAttention(
+      journeyId: journeyId,
+      action: 'removal_selected',
+      state: entry['status']?.toString() ?? 'pending',
+    );
+    try {
+      Map<String, dynamic>? completion;
+      final outcome = await runMatterRemovalFlow(
+        unpair: ({required bool force}) => syncProvider.api.unpairDevice(
+          hubType: hubType,
+          deviceId: deviceId,
+          hubAddress: hubAddress.isEmpty ? null : hubAddress,
+          deviceType: 'light',
+          correlationId: journeyId,
+          force: force,
+        ),
+        confirmForceRemove: (error) async {
+          if (!mounted) return false;
+          final force = await showDialog<bool>(
+            context: context,
+            builder: (dialogContext) => AlertDialog(
+              backgroundColor: CelestialColors.backgroundCard,
+              title: const Text(
+                'Matter removal could not finish',
+                style: TextStyle(color: CelestialColors.textPrimary),
+              ),
+              content: Text(
+                '$error\n\nLocal-only cleanup removes this light from Rhythm but cannot remove the Matter fabric credentials stored on the offline light. You may need to factory-reset it before pairing it again.',
+                style: const TextStyle(color: CelestialColors.textSecondary),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(false),
+                  child: const Text('Keep Device'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(true),
+                  child: Text(
+                    'Remove Locally Only',
+                    style: TextStyle(color: Colors.red.shade300),
+                  ),
+                ),
+              ],
+            ),
+          );
+          return force == true && mounted;
+        },
+        onComplete: (result) => completion = result,
+      );
+      if (!mounted) return;
+      if (outcome == MatterRemovalOutcome.removed) {
+        await syncProvider.connection.reconnect();
+        if (mounted) await _loadEntries();
+        final warning = completion?['warning']?.toString().trim();
+        if (mounted && warning != null && warning.isNotEmpty) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(warning)),
+          );
+        }
+      } else {
+        await AnalyticsService().logUnreachableDeviceAttention(
+          journeyId: journeyId,
+          action: 'unresolved',
+          state: entry['status']?.toString() ?? 'pending',
+        );
+      }
+    } catch (error) {
+      _showAttentionError('Could not remove this device', error);
+    } finally {
+      _unreachableJourneyIds.remove(entryId);
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  void _showAttentionError(String message, Object error) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('$message: $error'),
+        backgroundColor: Colors.red.shade800,
+      ),
+    );
   }
 }
 
@@ -1204,6 +1511,194 @@ class _TriageCard extends StatelessWidget {
       'same_room' => 'Same room',
       _ => reason,
     };
+  }
+}
+
+// =============================================================================
+// Unreachable Matter device card
+// =============================================================================
+
+class UnreachableDeviceAttentionCard extends StatelessWidget {
+  const UnreachableDeviceAttentionCard({
+    super.key,
+    required this.entry,
+    required this.busy,
+    required this.onStillInstalled,
+    required this.onRemoved,
+    required this.onSnooze,
+    required this.onRecheck,
+  });
+
+  final Map<String, dynamic> entry;
+  final bool busy;
+  final VoidCallback onStillInstalled;
+  final VoidCallback onRemoved;
+  final VoidCallback onSnooze;
+  final VoidCallback onRecheck;
+
+  static const _warning = Color(0xFFFFB74D);
+
+  @override
+  Widget build(BuildContext context) {
+    final device = _mapField(entry, 'device');
+    final evidence = _mapField(entry, 'evidence');
+    final name = device['name']?.toString() ?? 'Matter light';
+    final status = entry['status']?.toString() ?? 'pending';
+    final awaitingRecovery = status == 'awaiting_recovery';
+    final failureCount = evidence['failure_count'] as int? ?? 0;
+    final guidance = entry['guidance']?.toString() ??
+        'Confirm whether the light is still installed and powered.';
+
+    return RepaintBoundary(
+      key: const ValueKey('unreachable-device-card-screenshot'),
+      child: Semantics(
+        container: true,
+        label: '$name needs attention',
+        child: Container(
+          key: const ValueKey('unreachable-device-card'),
+          decoration: BoxDecoration(
+            color: CelestialColors.backgroundCard,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: _warning.withValues(alpha: 0.38)),
+          ),
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 42,
+                    height: 42,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: _warning.withValues(alpha: 0.16),
+                    ),
+                    child: Icon(
+                      awaitingRecovery
+                          ? Icons.power_settings_new_rounded
+                          : Icons.lightbulb_outline_rounded,
+                      color: _warning,
+                      size: 22,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          awaitingRecovery
+                              ? 'Waiting for $name'
+                              : '$name may be unreachable',
+                          style: const TextStyle(
+                            color: CelestialColors.textPrimary,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        Text(
+                          awaitingRecovery
+                              ? 'Recovery check in progress'
+                              : '$failureCount separate checks failed',
+                          style: TextStyle(
+                            color: CelestialColors.textSecondary
+                                .withValues(alpha: 0.7),
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text(
+                awaitingRecovery
+                    ? guidance
+                    : 'Rhythm has not received a fresh report, read, or acknowledged command from this light while other Matter devices remained healthy.',
+                style: TextStyle(
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.78),
+                  fontSize: 13,
+                  height: 1.4,
+                ),
+              ),
+              if (awaitingRecovery) ...[
+                const SizedBox(height: 10),
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: _warning.withValues(alpha: 0.09),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(Icons.verified_outlined, color: _warning, size: 18),
+                      SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'The card clears only after Rhythm receives fresh proof from the light.',
+                          style: TextStyle(
+                            color: CelestialColors.textSecondary,
+                            fontSize: 12,
+                            height: 1.35,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+              const SizedBox(height: 16),
+              Opacity(
+                opacity: busy ? 0.5 : 1,
+                child: IgnorePointer(
+                  ignoring: busy,
+                  child: Column(
+                    children: [
+                      Row(
+                        children: [
+                          Expanded(
+                            child: _ActionButton(
+                              label: awaitingRecovery
+                                  ? 'Check Again'
+                                  : "It's Still Installed",
+                              color: _warning,
+                              onTap: awaitingRecovery
+                                  ? onRecheck
+                                  : onStillInstalled,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: _ActionButton(
+                              label: 'I Removed It',
+                              color: Colors.redAccent,
+                              onTap: onRemoved,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      SizedBox(
+                        width: double.infinity,
+                        child: _ActionButton(
+                          label: 'Not Now',
+                          color: CelestialColors.textSecondary,
+                          onTap: onSnooze,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 

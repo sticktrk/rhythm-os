@@ -206,6 +206,14 @@ pub trait Storage: Send + Sync {
     ) -> Result<()> {
         Ok(())
     }
+    /// Load derived endpoint-liveness evidence. This file is deliberately not
+    /// part of canonical topology or portable backup state.
+    fn load_device_health(&self) -> Result<Option<crate::device_health::DeviceHealthLedger>> {
+        Ok(None)
+    }
+    fn save_device_health(&self, _health: &crate::device_health::DeviceHealthLedger) -> Result<()> {
+        Ok(())
+    }
     fn load_pairing_history(&self) -> Result<Option<crate::pairing::PairingHistory>> {
         Ok(None)
     }
@@ -1328,6 +1336,28 @@ impl Storage for FileStorage {
         self.write_atomic("motion_timers.json", data.as_bytes())
     }
 
+    fn load_device_health(&self) -> Result<Option<crate::device_health::DeviceHealthLedger>> {
+        let path = self.file_path("device_health.json");
+        match self.read_json::<crate::device_health::DeviceHealthLedger>("device_health.json") {
+            Ok(value) => Ok(Some(value.normalized())),
+            Err(_) if !path.exists() => Ok(None),
+            Err(error) => {
+                warn!(
+                    target: "sys",
+                    "Failed to load device health ledger {}: {}",
+                    path.display(),
+                    error
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    fn save_device_health(&self, health: &crate::device_health::DeviceHealthLedger) -> Result<()> {
+        let data = serde_json::to_string_pretty(health)?;
+        self.write_atomic("device_health.json", data.as_bytes())
+    }
+
     fn load_light_runtime_state(&self) -> Result<Option<StoredLightRuntimeState>> {
         let path = self.file_path("light_runtime_state.json");
         match self.read_json::<StoredLightRuntimeState>("light_runtime_state.json") {
@@ -2099,6 +2129,7 @@ impl Storage for FileStorage {
             "pairing_history.json",
             "pairing_history.json.tmp",
             "activity_cloud.json",
+            "device_health.json",
             "hub_credentials.json",
             "canonical_registry.json",
             "topology.json",
@@ -2206,6 +2237,20 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
     }
 
     ensure_server_instance_id(s);
+
+    if let Some(storage) = s.storage.as_ref() {
+        match storage.load_device_health() {
+            Ok(Some(health)) => {
+                let count = health.records().count();
+                s.device_health = health;
+                info!(target: "sys", "Loaded device health ledger: {} records", count);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                warn!(target: "sys", "Failed to load device health ledger: {error}");
+            }
+        }
+    }
 
     if let Some(storage) = s.storage.as_ref() {
         match storage.load_light_profiles() {
@@ -5867,6 +5912,9 @@ mod tests {
                 .save_light_usage_ledger(&crate::light_usage::LightUsageLedger::default())
                 .unwrap();
             storage
+                .save_device_health(&crate::device_health::DeviceHealthLedger::default())
+                .unwrap();
+            storage
                 .save_all_hub_credentials(&[HubCredentials::new(
                     "hue",
                     "192.168.1.2",
@@ -5988,6 +6036,7 @@ mod tests {
                 "light_usage_ledger.json",
                 "pairing_history.json",
                 "pairing_metadata.json",
+                "device_health.json",
                 "hub_credentials.json",
                 "authority_state.json",
                 "canonical_registry.json",

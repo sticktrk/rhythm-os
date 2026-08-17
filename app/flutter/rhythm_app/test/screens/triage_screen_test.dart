@@ -1,5 +1,8 @@
+import 'dart:io';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_app/providers/home_provider.dart';
@@ -22,7 +25,15 @@ class _FakeTriageServerApi extends RhythmServerApi {
   }) : super(Dio());
 
   List<Map<String, dynamic>> triageEntries;
+  List<Map<String, dynamic>> deviceAttentionEntries = [];
   int getTriageEntriesCalls = 0;
+  int getDeviceAttentionEntriesCalls = 0;
+  int snoozeDeviceAttentionCalls = 0;
+  int stillInstalledCalls = 0;
+  int removalSelectedCalls = 0;
+  final List<bool> unpairForces = [];
+  Map<String, dynamic>? unpairResult = {'status': 'complete'};
+  Map<String, dynamic>? forceUnpairResult = {'status': 'complete'};
   int resolveTriageBindCalls = 0;
   int resolveTriageNewCalls = 0;
   int resolveTriageRoomCalls = 0;
@@ -33,6 +44,62 @@ class _FakeTriageServerApi extends RhythmServerApi {
   Future<List<Map<String, dynamic>>?> getTriageEntries() async {
     getTriageEntriesCalls++;
     return triageEntries;
+  }
+
+  @override
+  Future<List<RhythmDeviceAttention>?> getDeviceAttentionEntries() async {
+    getDeviceAttentionEntriesCalls++;
+    return deviceAttentionEntries
+        .map(RhythmDeviceAttention.fromJson)
+        .toList(growable: false);
+  }
+
+  @override
+  Future<bool> snoozeDeviceAttention(
+    String entryId, {
+    required String correlationId,
+  }) async {
+    snoozeDeviceAttentionCalls++;
+    deviceAttentionEntries = [];
+    return true;
+  }
+
+  @override
+  Future<bool> markDeviceAttentionStillInstalled(
+    String entryId, {
+    required String correlationId,
+  }) async {
+    stillInstalledCalls++;
+    deviceAttentionEntries = [
+      for (final entry in deviceAttentionEntries)
+        {...entry, 'status': 'awaiting_recovery'},
+    ];
+    return true;
+  }
+
+  @override
+  Future<bool> markDeviceAttentionRemovalSelected(
+    String entryId, {
+    required String correlationId,
+  }) async {
+    removalSelectedCalls++;
+    return true;
+  }
+
+  @override
+  Future<Map<String, dynamic>?> unpairDevice({
+    required String hubType,
+    required String deviceId,
+    String? hubAddress,
+    String? deviceType,
+    String? correlationId,
+    bool force = false,
+    Duration receiveTimeout = const Duration(seconds: 90),
+  }) async {
+    unpairForces.add(force);
+    final result = force ? forceUnpairResult : unpairResult;
+    if (result?['status'] == 'complete') deviceAttentionEntries = [];
+    return result;
   }
 
   @override
@@ -118,6 +185,7 @@ class _TestServerSyncProvider extends ServerSyncProvider {
   bool matterPairingEnabled = false;
   bool hueBlePairingEnabled = false;
   bool hueAuthorityConsentSupportedForTest = false;
+  bool matterUnreachableTriageSupportedForTest = false;
   RhythmHueAuthority? hueAuthorityForTest;
   int hueAuthorityFetches = 0;
   List<Map<String, dynamic>> hubs = const [];
@@ -139,6 +207,10 @@ class _TestServerSyncProvider extends ServerSyncProvider {
   @override
   bool get hueRoomAuthorityConsentSupported =>
       hueAuthorityConsentSupportedForTest;
+
+  @override
+  bool get matterUnreachableDeviceTriageSupported =>
+      matterUnreachableTriageSupportedForTest;
 
   @override
   Future<RhythmHueAuthority?> fetchHueAuthority() async {
@@ -186,6 +258,29 @@ Future<void> _tapVisible(WidgetTester tester, Finder finder) async {
   await tester.pumpAndSettle();
 }
 
+Future<void> _loadEvidenceFonts() async {
+  final dartExecutable = File(Platform.resolvedExecutable);
+  var flutterCache = dartExecutable.parent;
+  while (!flutterCache.path.endsWith('${Platform.pathSeparator}cache')) {
+    final parent = flutterCache.parent;
+    if (parent.path == flutterCache.path) {
+      throw StateError('Could not locate the Flutter cache for visual proof');
+    }
+    flutterCache = parent;
+  }
+  Future<void> load(String family, String fileName) async {
+    final bytes = await File(
+      '${flutterCache.path}/artifacts/material_fonts/$fileName',
+    ).readAsBytes();
+    await (FontLoader(family)
+          ..addFont(Future.value(ByteData.sublistView(bytes))))
+        .load();
+  }
+
+  await load('Roboto', 'Roboto-Regular.ttf');
+  await load('MaterialIcons', 'MaterialIcons-Regular.otf');
+}
+
 Map<String, dynamic> _roomBindingEntry() {
   return {
     'id': 'room-entry-1',
@@ -214,6 +309,30 @@ Map<String, dynamic> _unassignedDeviceEntry() {
       'manufacturer': 'Acme',
       'model': 'A19',
     },
+  };
+}
+
+Map<String, dynamic> _unreachableDeviceEntry() {
+  return {
+    'id': 'unreachable-opaque-1',
+    'kind': 'unreachable_device',
+    'status': 'pending',
+    'device': {
+      'name': 'Hall Lamp',
+      'native_id': 'matter-42-1',
+      'hub_type': 'matter',
+      'hub_address': 'local',
+      'device_type': 'light',
+    },
+    'evidence': {
+      'failure_count': 3,
+      'last_proof_at': 100,
+      'first_failure_at': 200,
+      'last_failure_at': 90000,
+      'created_at': 90000,
+    },
+    'guidance':
+        'Turn mains power off for about 10 seconds, turn it back on, then wait for Rhythm to verify a fresh report or read.',
   };
 }
 
@@ -659,6 +778,167 @@ void main() {
         find.text('No devices need your attention right now.'),
         findsOneWidget,
       );
+    });
+
+    testWidgets('does not request device health without the server capability',
+        (tester) async {
+      api.triageEntries = [];
+      api.deviceAttentionEntries = [_unreachableDeviceEntry()];
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          connection: connection,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(api.getDeviceAttentionEntriesCalls, 0);
+      expect(find.text('Hall Lamp may be unreachable'), findsNothing);
+    });
+
+    testWidgets('guides recovery and waits for fresh device proof',
+        (tester) async {
+      api.triageEntries = [];
+      api.deviceAttentionEntries = [_unreachableDeviceEntry()];
+      serverSyncProvider.matterUnreachableTriageSupportedForTest = true;
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          connection: connection,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await _scrollTo(tester, find.text('Hall Lamp may be unreachable'));
+      expect(find.byKey(const ValueKey('unreachable-device-card')),
+          findsOneWidget);
+      expect(find.text('3 separate checks failed'), findsOneWidget);
+
+      await _tapVisible(tester, find.text("It's Still Installed"));
+
+      expect(api.stillInstalledCalls, 1);
+      expect(find.text('Waiting for Hall Lamp'), findsOneWidget);
+      expect(
+        find.textContaining('Turn mains power off for about 10 seconds'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('clears only after Rhythm receives fresh proof'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('renders deterministic unreachable-device review evidence',
+        (tester) async {
+      final compileTimeOutputDir = const String.fromEnvironment(
+        'RHYTHM_UI_EVIDENCE_DIR',
+      );
+      final outputDir = compileTimeOutputDir.isNotEmpty
+          ? compileTimeOutputDir
+          : Platform.environment['RHYTHM_UI_EVIDENCE_DIR'] ?? '';
+      if (outputDir.isNotEmpty) {
+        await tester.runAsync(_loadEvidenceFonts);
+      }
+      await tester.binding.setSurfaceSize(const Size(430, 430));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: outputDir.isEmpty ? null : ThemeData(fontFamily: 'Roboto'),
+          home: Scaffold(
+            key: const ValueKey('unreachable-device-evidence-surface'),
+            backgroundColor: const Color(0xFF11151C),
+            body: Align(
+              alignment: Alignment.topCenter,
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: UnreachableDeviceAttentionCard(
+                  entry: _unreachableDeviceEntry(),
+                  busy: false,
+                  onStillInstalled: () {},
+                  onRemoved: () {},
+                  onSnooze: () {},
+                  onRecheck: () {},
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final screenshotFinder =
+          find.byKey(const ValueKey('unreachable-device-evidence-surface'));
+      expect(screenshotFinder, findsOneWidget);
+
+      if (outputDir.isNotEmpty) {
+        await expectLater(
+          screenshotFinder,
+          matchesGoldenFile(
+            Uri.file('$outputDir/unreachable-device-pending.png'),
+          ),
+        );
+      }
+    });
+
+    testWidgets('durably snoozes the same unreachable-device entry',
+        (tester) async {
+      api.triageEntries = [];
+      api.deviceAttentionEntries = [_unreachableDeviceEntry()];
+      serverSyncProvider.matterUnreachableTriageSupportedForTest = true;
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          connection: connection,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await _tapVisible(tester, find.text('Not Now'));
+
+      expect(api.snoozeDeviceAttentionCalls, 1);
+      expect(find.text('Hall Lamp may be unreachable'), findsNothing);
+    });
+
+    testWidgets('uses graceful Matter removal before local-only cleanup',
+        (tester) async {
+      api.triageEntries = [];
+      api.deviceAttentionEntries = [_unreachableDeviceEntry()];
+      api.unpairResult = {'status': 'failed', 'error': 'Light is offline'};
+      serverSyncProvider.matterUnreachableTriageSupportedForTest = true;
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          connection: connection,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await _tapVisible(tester, find.text('I Removed It'));
+      expect(find.text('Try Graceful Removal'), findsOneWidget);
+      await tester.tap(find.text('Try Graceful Removal'));
+      await tester.pumpAndSettle();
+
+      expect(api.unpairForces, [false]);
+      expect(find.text('Remove Locally Only'), findsOneWidget);
+      expect(
+        find.textContaining('cannot remove the Matter fabric credentials'),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.text('Remove Locally Only'));
+      await tester.pumpAndSettle();
+
+      expect(api.unpairForces, [false, true]);
+      expect(connection.reconnectCalls, 1);
+      expect(find.text('Hall Lamp may be unreachable'), findsNothing);
     });
   });
 }

@@ -353,6 +353,24 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         path: "/api/triage/:id/bind",
         methods: &["PUT"],
     },
+    // Capability-gated Matter endpoint attention. Kept separate from legacy
+    // triage so previous apps never receive an unknown actionable kind.
+    SharedRoute {
+        path: "/api/device-attention",
+        methods: &["GET"],
+    },
+    SharedRoute {
+        path: "/api/device-attention/:id/snooze",
+        methods: &["PUT"],
+    },
+    SharedRoute {
+        path: "/api/device-attention/:id/still-installed",
+        methods: &["PUT"],
+    },
+    SharedRoute {
+        path: "/api/device-attention/:id/removal-selected",
+        methods: &["PUT"],
+    },
     // Topology room management
     SharedRoute {
         path: "/api/topology/rooms",

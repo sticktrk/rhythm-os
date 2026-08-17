@@ -5,6 +5,7 @@ import '../json_parsing.dart';
 import '../models/rhythm_assistant.dart';
 import '../models/rhythm_curve_config.dart';
 import '../models/rhythm_curve_data.dart';
+import '../models/rhythm_device_attention.dart';
 import '../models/rhythm_input_binding.dart';
 import '../models/rhythm_hue_authority.dart';
 import '../models/rhythm_pairing.dart';
@@ -1810,6 +1811,77 @@ class RhythmServerApi {
       _log.warning('getTriageEntries failed', e);
     }
     return null;
+  }
+
+  /// Fetch durable, actionable device-health entries from appliances that
+  /// advertise the matching additive capability.
+  Future<List<RhythmDeviceAttention>?> getDeviceAttentionEntries() async {
+    try {
+      final response = await _dio.get('api/device-attention');
+      return (response.data as List<dynamic>?)
+          ?.map(jsonMap)
+          .nonNulls
+          .map(RhythmDeviceAttention.fromJson)
+          .where((entry) => entry.isActionable)
+          .toList(growable: false);
+    } catch (e) {
+      _log.warning('getDeviceAttentionEntries failed', e);
+    }
+    return null;
+  }
+
+  /// Hide an unreachable-device entry for the appliance-defined snooze
+  /// window without changing canonical device identity or Matter fabric.
+  Future<bool> snoozeDeviceAttention(
+    String entryId, {
+    required String correlationId,
+  }) async {
+    try {
+      await _dio.put(
+        'api/device-attention/${Uri.encodeComponent(entryId)}/snooze',
+        data: {'correlation_id': correlationId},
+      );
+      return true;
+    } catch (e) {
+      _log.warning('snoozeDeviceAttention failed', e);
+    }
+    return false;
+  }
+
+  /// Tell the appliance the device remains installed and begin a bounded
+  /// recovery-observation period.
+  Future<bool> markDeviceAttentionStillInstalled(
+    String entryId, {
+    required String correlationId,
+  }) async {
+    try {
+      await _dio.put(
+        'api/device-attention/${Uri.encodeComponent(entryId)}/still-installed',
+        data: {'correlation_id': correlationId},
+      );
+      return true;
+    } catch (e) {
+      _log.warning('markDeviceAttentionStillInstalled failed', e);
+    }
+    return false;
+  }
+
+  /// Record the explicit removal branch before the ordinary Matter removal
+  /// flow mutates canonical topology.
+  Future<bool> markDeviceAttentionRemovalSelected(
+    String entryId, {
+    required String correlationId,
+  }) async {
+    try {
+      await _dio.put(
+        'api/device-attention/${Uri.encodeComponent(entryId)}/removal-selected',
+        data: {'correlation_id': correlationId},
+      );
+      return true;
+    } catch (e) {
+      _log.warning('markDeviceAttentionRemovalSelected failed', e);
+    }
+    return false;
   }
 
   /// Fetch triage pending counts.

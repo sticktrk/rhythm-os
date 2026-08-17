@@ -3321,4 +3321,93 @@ void main() {
       expect(await api.getMatterSetupCode('matter-42'), isNull);
     });
   });
+
+  group('device attention', () {
+    test('parses actionable typed entries and tolerates additive fields',
+        () async {
+      when(() => dio.get(any())).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/device-attention'),
+            statusCode: 200,
+            data: [
+              {
+                'id': 'unreachable-opaque-1',
+                'kind': 'unreachable_device',
+                'status': 'pending',
+                'device': {
+                  'name': 'Hall Lamp',
+                  'native_id': 'matter-42-1',
+                  'hub_type': 'matter',
+                  'hub_address': 'local',
+                  'device_type': 'light',
+                },
+                'evidence': {'failure_count': 3},
+                'guidance': 'Power cycle the light.',
+                'future_field': true,
+              },
+            ],
+          ));
+
+      final entries = await api.getDeviceAttentionEntries();
+
+      expect(entries, hasLength(1));
+      expect(entries!.single.device.name, 'Hall Lamp');
+      expect(entries.single.evidence.failureCount, 3);
+      verify(() => dio.get('api/device-attention')).called(1);
+    });
+
+    test('uses encoded entry ids and explicit journey correlation', () async {
+      when(() => dio.put(any(), data: any(named: 'data')))
+          .thenAnswer((invocation) async => Response(
+                requestOptions: RequestOptions(
+                  path: invocation.positionalArguments.first as String,
+                ),
+                statusCode: 200,
+              ));
+
+      expect(
+        await api.snoozeDeviceAttention(
+          'opaque/id',
+          correlationId: 'journey-1',
+        ),
+        isTrue,
+      );
+      expect(
+        await api.markDeviceAttentionStillInstalled(
+          'opaque/id',
+          correlationId: 'journey-1',
+        ),
+        isTrue,
+      );
+      expect(
+        await api.markDeviceAttentionRemovalSelected(
+          'opaque/id',
+          correlationId: 'journey-1',
+        ),
+        isTrue,
+      );
+
+      for (final action in [
+        'snooze',
+        'still-installed',
+        'removal-selected',
+      ]) {
+        verify(() => dio.put(
+              'api/device-attention/opaque%2Fid/$action',
+              data: {'correlation_id': 'journey-1'},
+            )).called(1);
+      }
+    });
+
+    test('returns null when the additive route is unavailable', () async {
+      when(() => dio.get(any())).thenThrow(DioException(
+        requestOptions: RequestOptions(path: 'api/device-attention'),
+        response: Response(
+          requestOptions: RequestOptions(path: 'api/device-attention'),
+          statusCode: 404,
+        ),
+      ));
+
+      expect(await api.getDeviceAttentionEntries(), isNull);
+    });
+  });
 }

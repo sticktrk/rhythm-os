@@ -17739,6 +17739,309 @@ pub fn do_canonical_set_preferred(
 // Triage commands
 // ============================================================================
 
+fn active_device_health_identities(
+    registry: &crate::canonical::registry::CanonicalRegistry,
+) -> HashSet<crate::device_health::ActiveDeviceHealthIdentity> {
+    registry
+        .devices()
+        .filter(|device| !device.is_removed() && device.device_type == DeviceType::Light)
+        .flat_map(|device| {
+            device
+                .active_endpoints()
+                .filter(|endpoint| endpoint.hub_key.hub_type.as_str() == HubType::MATTER)
+                .map(
+                    |endpoint| crate::device_health::ActiveDeviceHealthIdentity {
+                        canonical_id: device.id.clone(),
+                        hub_key: endpoint.hub_key.clone(),
+                        native_id: endpoint.native_id.clone(),
+                    },
+                )
+        })
+        .collect()
+}
+
+fn save_device_health_snapshot(state: &SharedState) -> Result<()> {
+    let persist = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.storage
+            .as_ref()
+            .map(|storage| (storage.clone(), s.device_health.clone()))
+    };
+    if let Some((storage, health)) = persist {
+        storage
+            .save_device_health(&health)
+            .context("Failed to persist device health ledger")?;
+    }
+    Ok(())
+}
+
+fn record_device_attention_activity(
+    state: &SharedState,
+    _entry_id: &str,
+    action_id: &str,
+    correlation_id: Option<&str>,
+) {
+    let mut record = crate::activity::LightActivityRecord::app("device_attention", action_id);
+    record.source_kind = "device_attention".to_string();
+    record.source_raw = "triage".to_string();
+    record.marks_touched = false;
+    record.correlation_id = correlation_id
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| Some("unreachable-device-auto".to_string()));
+    record.payload = Some(serde_json::json!({"outcome": action_id}));
+    crate::activity::record_light_activity(state, record);
+}
+
+fn finish_device_health_update(
+    state: &SharedState,
+    update: crate::device_health::DeviceHealthUpdate,
+) {
+    let visibility_changed = !update.transitions.is_empty();
+    if update.persist {
+        if let Err(error) = save_device_health_snapshot(state) {
+            warn!(target: "triage", "Could not persist device health evidence: {error:#}");
+        }
+    }
+    for (entry_id, transition) in update.transitions {
+        let correlation_id = state
+            .lock()
+            .ok()
+            .and_then(|s| s.device_health.recovery_correlation_for_entry(&entry_id));
+        let action = match transition {
+            crate::device_health::DeviceHealthTransition::Admitted => {
+                info!(target: "triage", "Admitted one unreachable-device attention entry");
+                continue;
+            }
+            crate::device_health::DeviceHealthTransition::Recovered => {
+                "unreachable_device_recovery_verified"
+            }
+            crate::device_health::DeviceHealthTransition::Removed => "unreachable_device_removed",
+        };
+        record_device_attention_activity(state, &entry_id, action, correlation_id.as_deref());
+    }
+    if visibility_changed {
+        emit_triage_changed(state);
+    }
+}
+
+pub fn note_device_reachability(
+    state: &SharedState,
+    hub_key: &HubKey,
+    native_id: &str,
+    fabric_id: &str,
+    controller_stream_id: Option<&str>,
+    evidence: crate::hub::DeviceReachabilityEvidence,
+) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let update = {
+        let Ok(mut s) = state.lock() else { return };
+        let Some(device) = s
+            .canonical_registry
+            .find_by_native_id(hub_key, native_id)
+            .filter(|device| {
+                !device.is_removed()
+                    && device.device_type == DeviceType::Light
+                    && device.endpoints.iter().any(|endpoint| {
+                        endpoint.active
+                            && endpoint.hub_key == *hub_key
+                            && endpoint.native_id == native_id
+                    })
+            })
+        else {
+            return;
+        };
+        let canonical_id = device.id.clone();
+        let mut update = match evidence {
+            crate::hub::DeviceReachabilityEvidence::Proof => s.device_health.note_proof(
+                &canonical_id,
+                hub_key,
+                native_id,
+                fabric_id,
+                controller_stream_id,
+                now,
+            ),
+            crate::hub::DeviceReachabilityEvidence::Failure(class) => s.device_health.note_failure(
+                &canonical_id,
+                hub_key,
+                native_id,
+                fabric_id,
+                controller_stream_id,
+                class,
+                now,
+            ),
+        };
+        let evaluated = s.device_health.evaluate(now);
+        update.persist |= evaluated.persist;
+        update.transitions.extend(evaluated.transitions);
+        update
+    };
+    finish_device_health_update(state, update);
+}
+
+pub fn note_device_health_controller_connected(state: &SharedState, hub_key: &HubKey) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if let Ok(mut s) = state.lock() {
+        s.device_health.note_controller_connected(hub_key, now);
+    }
+}
+
+pub fn note_device_health_controller_disconnected(state: &SharedState, hub_key: &HubKey) {
+    if let Ok(mut s) = state.lock() {
+        s.device_health.note_controller_disconnected(hub_key);
+    }
+}
+
+pub fn note_device_health_controller_stream_reset(state: &SharedState, hub_key: &HubKey) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if let Ok(mut s) = state.lock() {
+        s.device_health.note_controller_stream_reset(hub_key, now);
+    }
+}
+
+pub fn reconcile_device_health(state: &SharedState) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let update = {
+        let Ok(mut s) = state.lock() else { return };
+        let active = active_device_health_identities(&s.canonical_registry);
+        let mut update = s.device_health.reconcile_active(&active, now);
+        let evaluated = s.device_health.evaluate(now);
+        update.persist |= evaluated.persist;
+        update.transitions.extend(evaluated.transitions);
+        update
+    };
+    finish_device_health_update(state, update);
+}
+
+pub fn build_device_attention(state: &SharedState) -> Result<String> {
+    reconcile_device_health(state);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let mut entries = Vec::new();
+    for record in s.device_health.visible_records(now) {
+        let Some(device) = s.canonical_registry.get(&record.canonical_id) else {
+            continue;
+        };
+        let Some(entry_id) = record.entry_id.clone() else {
+            continue;
+        };
+        entries.push(crate::device_health::DeviceAttentionEntryDto {
+            id: entry_id,
+            kind: "unreachable_device",
+            status: record.status.as_str(),
+            device: crate::device_health::DeviceAttentionDeviceDto {
+                name: device.name.clone(),
+                native_id: record.native_id.clone(),
+                hub_type: record.hub_key.hub_type.as_str().to_string(),
+                hub_address: record.hub_key.address.clone(),
+                device_type: device.device_type.clone(),
+            },
+            evidence: crate::device_health::DeviceAttentionEvidenceDto {
+                last_proof_at: record.last_proof_at,
+                first_failure_at: record.first_failure_at.unwrap_or(record.last_proof_at),
+                last_failure_at: record.last_failure_at.unwrap_or(record.last_proof_at),
+                failure_count: record.failure_count,
+                failure_classes: record.failure_classes.iter().copied().collect(),
+                created_at: record.created_at.unwrap_or(now),
+                snoozed_until: record.snoozed_until,
+            },
+            guidance: if record.status == crate::device_health::DeviceHealthStatus::AwaitingRecovery {
+                "Turn mains power off for about 10 seconds, turn it back on, then wait for Rhythm to verify a fresh report or read."
+            } else {
+                "Confirm whether the light is still installed and powered."
+            },
+        });
+    }
+    serde_json::to_string(&entries).map_err(Into::into)
+}
+
+fn mutate_device_attention(
+    state: &SharedState,
+    entry_id: &str,
+    action_id: &str,
+    correlation_id: Option<&str>,
+    mutate: impl FnOnce(&mut crate::device_health::DeviceHealthLedger, u64) -> bool,
+) -> Result<String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let before = {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let before = s.device_health.clone();
+        if !mutate(&mut s.device_health, now) {
+            anyhow::bail!("Device attention entry not found or no longer actionable");
+        }
+        before
+    };
+    if let Err(error) = save_device_health_snapshot(state) {
+        if let Ok(mut s) = state.lock() {
+            s.device_health = before;
+        }
+        return Err(error);
+    }
+    record_device_attention_activity(state, entry_id, action_id, correlation_id);
+    emit_triage_changed(state);
+    Ok(format!(r#"{{"status":"{}"}}"#, action_id))
+}
+
+pub fn do_device_attention_snooze(
+    state: &SharedState,
+    entry_id: &str,
+    correlation_id: Option<&str>,
+) -> Result<String> {
+    mutate_device_attention(
+        state,
+        entry_id,
+        "unreachable_device_snoozed",
+        correlation_id,
+        |health, now| health.snooze(entry_id, now),
+    )
+}
+
+pub fn do_device_attention_still_installed(
+    state: &SharedState,
+    entry_id: &str,
+    correlation_id: Option<&str>,
+) -> Result<String> {
+    mutate_device_attention(
+        state,
+        entry_id,
+        "unreachable_device_still_installed",
+        correlation_id,
+        |health, _| health.await_recovery(entry_id, correlation_id),
+    )
+}
+
+pub fn do_device_attention_removal_selected(
+    state: &SharedState,
+    entry_id: &str,
+    correlation_id: Option<&str>,
+) -> Result<String> {
+    mutate_device_attention(
+        state,
+        entry_id,
+        "unreachable_device_removal_selected",
+        correlation_id,
+        |health, _| health.mark_removal_selected(entry_id, correlation_id),
+    )
+}
+
 /// Build JSON for the triage queue (pending entries).
 pub fn build_triage_queue(state: &SharedState) -> Result<String> {
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -18180,12 +18483,18 @@ pub fn do_triage_bind_room_to(
 pub fn build_triage_count(state: &SharedState) -> Result<String> {
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let triage = s.canonical_registry.triage();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let pending_unreachable = s.device_health.visible_records(now).len();
     let json = format!(
-        r#"{{"devices":{},"rooms":{},"unassigned":{},"hub_configured":{},"total":{}}}"#,
+        r#"{{"devices":{},"rooms":{},"unassigned":{},"hub_configured":{},"unreachable":{},"total":{}}}"#,
         triage.pending_device_count(),
         triage.pending_room_count(),
         triage.pending_unassigned_count(),
         triage.pending_hub_configured_count(),
+        pending_unreachable,
         triage.pending_count(),
     );
     Ok(json)
@@ -18196,15 +18505,20 @@ pub fn emit_triage_changed(state: &SharedState) {
     // Read counts under lock, then drop before emitting (emit_server_event locks too)
     let counts = state.lock().ok().map(|s| {
         let triage = s.canonical_registry.triage();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         (
             triage.pending_count(),
             triage.pending_device_count(),
             triage.pending_room_count(),
             triage.pending_unassigned_count(),
             triage.pending_hub_configured_count(),
+            s.device_health.visible_records(now).len(),
         )
     });
-    if let Some((total, devices, rooms, unassigned, hub_configured)) = counts {
+    if let Some((total, devices, rooms, unassigned, hub_configured, unreachable)) = counts {
         crate::state::emit_server_event(
             state,
             crate::server_event::ServerEvent::TriageChanged {
@@ -18213,6 +18527,7 @@ pub fn emit_triage_changed(state: &SharedState) {
                 pending_rooms: rooms,
                 pending_unassigned: unassigned,
                 pending_hub_configured: hub_configured,
+                pending_unreachable: unreachable,
             },
         );
     }

@@ -61,6 +61,8 @@ abstract final class RhythmFeature {
   static const String sceneMotionSuppression = 'scene_motion_suppression_v1';
   static const String buttonMultiRoomControls = 'button_multi_room_controls_v1';
   static const String resetToModeDefault = 'reset_to_mode_default_v1';
+  static const String matterUnreachableDeviceTriage =
+      'matter_unreachable_device_triage_v1';
 }
 
 /// Host capabilities advertised by the Rhythm server.

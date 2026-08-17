@@ -1022,6 +1022,14 @@ class ServerSyncProvider extends ChangeNotifier {
           ) ==
           true;
 
+  /// Device-health review is additive and must fail closed for older
+  /// appliances so the app never probes routes they do not own.
+  bool get matterUnreachableDeviceTriageSupported =>
+      _capabilities?.supportsFeature(
+        RhythmFeature.matterUnreachableDeviceTriage,
+      ) ==
+      true;
+
   /// Whether the host explicitly advertised supported hub types.
   bool get hasExplicitHubCapabilities => _capabilities != null;
 
@@ -3679,11 +3687,17 @@ class ServerSyncProvider extends ChangeNotifier {
         0;
     final pendingHubConfigured =
         (data['pending_hub_configured'] as num?)?.toInt() ?? 0;
-    final devices = pendingDevices + pendingUnassigned;
+    final pendingUnreachable = matterUnreachableDeviceTriageSupported
+        ? ((data['pending_unreachable'] as num?)?.toInt() ??
+            (data['unreachable'] as num?)?.toInt() ??
+            0)
+        : 0;
+    final devices = pendingDevices + pendingUnassigned + pendingUnreachable;
     final rooms = pendingRooms + pendingHubConfigured;
-    final count = (data['total'] as num?)?.toInt() ??
+    final legacyCount = (data['total'] as num?)?.toInt() ??
         (data['pending_count'] as num?)?.toInt() ??
-        (devices + rooms);
+        (pendingDevices + pendingUnassigned + rooms);
+    final count = legacyCount + pendingUnreachable;
     if (_triagePendingCount != count ||
         _triagePendingDevices != devices ||
         _triagePendingRooms != rooms) {

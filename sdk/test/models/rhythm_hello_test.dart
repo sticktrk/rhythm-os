@@ -382,6 +382,7 @@ void main() {
             RhythmFeature.buttonMultiRoomControls,
             RhythmFeature.resetToModeDefault,
             RhythmFeature.removedDeviceArchive,
+            RhythmFeature.matterUnreachableDeviceTriage,
           ],
           'hubs': [
             {
@@ -470,6 +471,12 @@ void main() {
       );
       expect(
         hello.capabilities!.supportsFeature(RhythmFeature.removedDeviceArchive),
+        isTrue,
+      );
+      expect(
+        hello.capabilities!.supportsFeature(
+          RhythmFeature.matterUnreachableDeviceTriage,
+        ),
         isTrue,
       );
       expect(hello.capabilities!.supportsFeature('missing'), isFalse);

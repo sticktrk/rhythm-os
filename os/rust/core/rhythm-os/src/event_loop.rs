@@ -1351,6 +1351,9 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
     match event {
         HubEvent::Connected { .. } => {
             debug!(target: "conn", "Hub connected");
+            if let Some(ref key) = hub_key {
+                commands::note_device_health_controller_connected(state, key);
+            }
             let (
                 app_became_connected,
                 first_connected_event,
@@ -2194,6 +2197,26 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             commands::emit_node_state_event_after_apply(state, &runtime, &node_id);
         }
 
+        HubEvent::DeviceReachability {
+            ref hub_key,
+            ref device_id,
+            ref fabric_id,
+            ref controller_stream_id,
+            evidence,
+        } => {
+            let Some(hub_key) = hub_key.as_ref() else {
+                return;
+            };
+            commands::note_device_reachability(
+                state,
+                hub_key,
+                device_id,
+                fabric_id,
+                controller_stream_id.as_deref(),
+                evidence,
+            );
+        }
+
         HubEvent::CommandOutcome {
             ref hub_key,
             ref controller_stream_id,
@@ -2275,6 +2298,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             let Some(key) = hub_key.as_ref() else {
                 return;
             };
+            commands::note_device_health_controller_stream_reset(state, key);
             let key_string = key.to_string();
             let nodes = commands::reset_integration_dispatches_for_hub(
                 state,
@@ -2316,6 +2340,9 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
 
         HubEvent::Disconnected { reason, .. } => {
             warn!(target: "conn", "Hub disconnected: {}", reason);
+            if let Some(ref key) = hub_key {
+                commands::note_device_health_controller_disconnected(state, key);
+            }
 
             // Motion timers are local state (Instant timestamps) — they keep
             // counting regardless of hub connectivity.  Clearing them here

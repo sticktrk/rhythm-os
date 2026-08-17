@@ -872,6 +872,7 @@ fn perform_unpair_device(
                 );
                 return Err(error);
             }
+            commands::reconcile_device_health(state);
         }
     }
 
@@ -4719,6 +4720,51 @@ pub fn handle_get_triage_count(state: &SharedState) -> ApiResponse {
     match commands::build_triage_count(state) {
         Ok(json) => ApiResponse::json_ok(json),
         Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_get_device_attention(state: &SharedState) -> ApiResponse {
+    match commands::build_device_attention(state) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(error) => ApiResponse::server_error(error),
+    }
+}
+
+pub fn handle_put_device_attention_snooze(
+    state: &SharedState,
+    entry_id: &str,
+    body: &Value,
+) -> ApiResponse {
+    let correlation_id = correlation_id_from_body(body);
+    match commands::do_device_attention_snooze(state, entry_id, correlation_id.as_deref()) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(error) => ApiResponse::bad_request(&error.to_string()),
+    }
+}
+
+pub fn handle_put_device_attention_still_installed(
+    state: &SharedState,
+    entry_id: &str,
+    body: &Value,
+) -> ApiResponse {
+    let correlation_id = correlation_id_from_body(body);
+    match commands::do_device_attention_still_installed(state, entry_id, correlation_id.as_deref())
+    {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(error) => ApiResponse::bad_request(&error.to_string()),
+    }
+}
+
+pub fn handle_put_device_attention_removal_selected(
+    state: &SharedState,
+    entry_id: &str,
+    body: &Value,
+) -> ApiResponse {
+    let correlation_id = correlation_id_from_body(body);
+    match commands::do_device_attention_removal_selected(state, entry_id, correlation_id.as_deref())
+    {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(error) => ApiResponse::bad_request(&error.to_string()),
     }
 }
 

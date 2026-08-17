@@ -1395,6 +1395,22 @@ class AnalyticsService {
     });
   }
 
+  /// Track low-cardinality unreachable-device review boundaries. The random
+  /// journey id is the only correlation key; device identity and network
+  /// details are intentionally excluded.
+  Future<void> logUnreachableDeviceAttention({
+    required String journeyId,
+    required String action,
+    required String state,
+  }) async {
+    await logEvent('unreachable_device_attention', {
+      'journey_id': journeyId,
+      'action': action,
+      'state': state,
+      'source': 'add_review',
+    });
+  }
+
   // ===========================================================================
   // Power Usage Events
   // ===========================================================================
