@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:logging/logging.dart';
 
 import '../json_parsing.dart';
+import '../models/rhythm_assistant.dart';
 import '../models/rhythm_curve_config.dart';
 import '../models/rhythm_curve_data.dart';
 import '../models/rhythm_input_binding.dart';
@@ -1430,6 +1431,81 @@ class RhythmServerApi {
       _log.warning('settingsSet failed', e);
       return false;
     }
+  }
+
+  // =========================================================================
+  // Assistant contract
+  // =========================================================================
+
+  /// Discover the runtime assistant contract advertised by this appliance.
+  ///
+  /// Returns `null` only when the appliance responds with 404, which is the
+  /// compatibility behavior for previous supported appliance versions. Other
+  /// transport failures remain visible to the caller.
+  Future<RhythmAssistantContract?> getAssistantContract() async {
+    try {
+      final response = await _dio.get('api/assistant/contract');
+      final data = jsonMap(response.data);
+      if (data == null) {
+        throw const FormatException(
+          'Assistant contract response must be an object',
+        );
+      }
+      return RhythmAssistantContract.fromJson(data);
+    } on DioException catch (error) {
+      if (error.response?.statusCode == 404) return null;
+      rethrow;
+    }
+  }
+
+  /// Fetch one topology snapshot tied to the current assistant contract.
+  Future<RhythmAssistantTopologySnapshot> getAssistantTopologySnapshot() async {
+    final response = await _dio.get('api/assistant/topology');
+    final data = jsonMap(response.data);
+    if (data == null) {
+      throw const FormatException(
+        'Assistant topology response must be an object',
+      );
+    }
+    return RhythmAssistantTopologySnapshot.fromJson(data);
+  }
+
+  /// Prepare a non-mutating, freshness-bound device-room move plan.
+  Future<RhythmAssistantMovePlan> planAssistantDeviceRoomMove({
+    required String deviceId,
+    required String toRoomId,
+    required String correlationId,
+  }) async {
+    final response = await _dio.post(
+      'api/assistant/plans/device-room-move',
+      data: {
+        'device_id': deviceId,
+        'to_room_id': toRoomId,
+        'correlation_id': correlationId,
+      },
+    );
+    final data = jsonMap(response.data);
+    if (data == null) {
+      throw const FormatException('Assistant move plan must be an object');
+    }
+    return RhythmAssistantMovePlan.fromJson(data);
+  }
+
+  /// Apply an explicitly confirmed move plan and return authoritative readback.
+  Future<RhythmAssistantExecutionReceipt> applyAssistantDeviceRoomMove(
+    RhythmAssistantMovePlan plan,
+  ) async {
+    final response = await _dio.post(
+      'api/assistant/plans/device-room-move/apply',
+      data: plan.toApplyJson(),
+    );
+    final data = jsonMap(response.data);
+    if (data == null) {
+      throw const FormatException(
+        'Assistant execution receipt must be an object',
+      );
+    }
+    return RhythmAssistantExecutionReceipt.fromJson(data);
   }
 
   // =========================================================================

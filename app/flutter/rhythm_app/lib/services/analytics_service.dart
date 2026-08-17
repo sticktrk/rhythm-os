@@ -757,10 +757,12 @@ class AnalyticsService {
   Future<void> logLightProfileRoomDefaultChanged({
     required String profile,
     required bool cleared,
+    String source = 'automations',
   }) async {
     await logEvent('light_profile_room_default_changed', {
       'profile': profile,
       'cleared': cleared ? 1 : 0,
+      'source': source,
     });
   }
 
@@ -782,6 +784,8 @@ class AnalyticsService {
     required String profile,
     required String outcome,
     required int changedFieldCount,
+    String? dayColorMode,
+    String? dayBrightnessMode,
     String? failureStage,
     String scope = 'room',
   }) async {
@@ -790,6 +794,9 @@ class AnalyticsService {
       'profile': profile,
       'outcome': outcome,
       'changed_field_count': changedFieldCount,
+      if (dayColorMode != null) 'day_color_mode': dayColorMode,
+      if (dayBrightnessMode != null)
+        'day_brightness_mode': dayBrightnessMode,
       if (failureStage != null) 'failure_stage': failureStage,
     });
   }

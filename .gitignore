@@ -28,6 +28,8 @@ target/
 !.codex/automations.toml
 !.codex/skills/
 !.codex/skills/**
+.codex/skills/**/__pycache__/
+.codex/skills/**/*.py[cod]
 .release-evidence/
 admin-api/.env
 
