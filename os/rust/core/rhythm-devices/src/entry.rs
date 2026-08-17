@@ -4,6 +4,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::capabilities::{ColorMode, LightCapabilities, LightType};
+use crate::correction::ControlCorrections;
 use crate::gamut::GamutTriangle;
 use crate::quirks::{HueApiData, MatterDeviceData, ZigbeeDeviceData};
 
@@ -27,47 +28,87 @@ pub struct DeviceEntry {
     pub color_modes: Vec<ColorMode>,
 
     /// Minimum color temperature in Kelvin.
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
     pub min_kelvin: Option<u16>,
 
     /// Maximum color temperature in Kelvin.
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
     pub max_kelvin: Option<u16>,
 
     /// Named gamut identifier (e.g., "A", "B", "C") or explicit triangle.
     #[cfg_attr(
         feature = "serde",
-        serde(default, deserialize_with = "deserialize_gamut")
+        serde(
+            default,
+            deserialize_with = "deserialize_gamut",
+            skip_serializing_if = "Option::is_none"
+        )
     )]
     pub gamut: Option<GamutTriangle>,
 
     /// Minimum brightness (1-100).
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
     pub min_brightness: Option<u8>,
 
     /// Whether transitions/dynamics are supported.
-    #[cfg_attr(feature = "serde", serde(default = "default_true"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default = "default_true", skip_serializing_if = "is_true")
+    )]
     pub supports_transition: bool,
 
+    /// Optional Hue-relative mappings from logical Rhythm targets to the
+    /// commands this physical device needs.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "ControlCorrections::is_empty")
+    )]
+    pub control_corrections: ControlCorrections,
+
     /// Alternate model identifiers (Zigbee model strings, EAN codes, etc.).
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Vec::is_empty")
+    )]
     pub aliases: Vec<String>,
 
     /// Zigbee-specific metadata.
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
     pub zigbee: Option<ZigbeeDeviceData>,
 
     /// Hue V2 API specific metadata.
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
     pub hue_api: Option<HueApiData>,
 
     /// Matter-specific metadata.
-    #[cfg_attr(feature = "serde", serde(default))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
     pub matter: Option<MatterDeviceData>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 impl DeviceEntry {
@@ -81,6 +122,7 @@ impl DeviceEntry {
             gamut: self.gamut.clone(),
             min_brightness: self.min_brightness,
             supports_transition: self.supports_transition,
+            control_corrections: self.control_corrections.clone(),
         }
     }
 }
@@ -161,6 +203,7 @@ mod tests {
             gamut: Some(crate::gamut::gamut_c()),
             min_brightness: Some(2),
             supports_transition: true,
+            control_corrections: ControlCorrections::default(),
             aliases: vec![],
             zigbee: None,
             hue_api: None,

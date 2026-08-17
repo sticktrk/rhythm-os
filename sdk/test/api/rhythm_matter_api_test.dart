@@ -56,6 +56,54 @@ void main() {
       );
     });
 
+    test('keeps only bounded repeat-pair recovery actions', () {
+      final recovered = RhythmMatterPairingResponse.fromHttp(
+        statusCode: HttpStatus.ok,
+        data: {
+          'status': 'complete',
+          'details': {
+            'recovery_action': 'existing_connection_recovered',
+            'setup_payload': 'MT:SDK-SECRET',
+            'node_id': 42,
+          },
+        },
+      );
+      final unknown = RhythmMatterPairingResponse.fromHttp(
+        statusCode: HttpStatus.ok,
+        data: {
+          'status': 'complete',
+          'details': {'recovery_action': 'future_recovery_action'},
+        },
+      );
+
+      expect(recovered.recoveryAction, 'existing_connection_recovered');
+      expect(unknown.recoveryAction, isNull);
+      expect(recovered.error, isNull);
+      expect(recovered.device, isNull);
+    });
+
+    test('preserves bounded non-fatal pairing warnings', () {
+      final response = RhythmMatterPairingResponse.fromHttp(
+        statusCode: HttpStatus.ok,
+        data: {
+          'status': 'complete',
+          'warnings': [
+            '  The device was paired, but its recovery code was not saved.  ',
+            '',
+            42,
+            List.filled(600, 'x').join(),
+          ],
+        },
+      );
+
+      expect(response.warnings, hasLength(2));
+      expect(
+        response.warnings.first,
+        'The device was paired, but its recovery code was not saved.',
+      );
+      expect(response.warnings.last.runes, hasLength(512));
+    });
+
     test('forwards sessionId at top level and in params', () async {
       Map<String, dynamic>? capturedBody;
       server = await _FakeMatterServer.start(

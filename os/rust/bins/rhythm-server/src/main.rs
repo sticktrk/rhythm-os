@@ -161,9 +161,11 @@ fn main() -> Result<()> {
         s.prepare_hub_device_room_assignment_fn =
             Some(callbacks.prepare_hub_device_room_assignment_fn);
         s.delete_source_room_fn = Some(callbacks.delete_source_room_fn);
+        s.rename_hub_device_fn = Some(callbacks.rename_hub_device_fn);
         s.start_pairing_fn = Some(callbacks.start_pairing_fn);
         s.reconcile_pairing_results_fn = Some(callbacks.reconcile_pairing_results_fn);
         s.start_unpairing_fn = Some(callbacks.start_unpairing_fn);
+        s.load_pairing_recovery_fn = Some(callbacks.load_pairing_recovery_fn);
         s.run_device_test_fn = Some(callbacks.run_device_test_fn);
         s.save_device_test_report_fn = Some(callbacks.save_device_test_report_fn);
         s.hub_capabilities = callbacks.hub_capabilities.clone();
@@ -291,6 +293,7 @@ fn install_factory_reset_hook(state: &SharedState) -> Result<()> {
 
 async fn run_server(state: SharedState, port: u16) -> Result<()> {
     rhythm_os::state::capture_tokio_runtime_handle(&state);
+    rhythm_server::support_bundle_jobs::resume_pending(state.clone());
 
     // Start HTTP server
     let addr = format!("0.0.0.0:{}", port);

@@ -15,7 +15,7 @@ use rhythm_runtime_api::{RuntimeEvent, RuntimeInputEvent, TickContext};
 
 use crate::canonical::identity::HubKey;
 use crate::commands;
-use crate::hub::HubEvent;
+use crate::hub::{HubEvent, HubType};
 use crate::logging;
 use crate::server_event::{InputEventResource, InputEventRoute, ServerEvent};
 use crate::state::{current_epoch_ms, MotionSeedEntry, MotionSnapshot, SharedState, WorkItem};
@@ -51,6 +51,20 @@ fn runtime_event_for_button(
         epoch_ms: Some(chrono::Utc::now().timestamp_millis()),
         metadata: Default::default(),
     })
+}
+
+/// Resolve the ordinary node-control meaning of an unbound physical press.
+///
+/// The current local-BLE input profile is the one-button Orein OC02001. It
+/// reports its physical gesture as `OnPress` so input bindings can continue to
+/// match the stable event contract, but its product-default behavior is a
+/// power toggle. Configured input bindings are resolved before this fallback.
+fn effective_unbound_button_action(hub_key: &HubKey, action: ButtonAction) -> ButtonAction {
+    if hub_key.hub_type.as_str() == HubType::LOCAL_BLE && action == ButtonAction::OnPress {
+        ButtonAction::Toggle
+    } else {
+        action
+    }
 }
 
 fn runtime_event_for_periodic_tick(
@@ -579,6 +593,17 @@ fn run_button_ingress_action(
     command_id: &str,
     persist_after: bool,
 ) {
+    if !commands::rhythm_automation_allowed_for_node(state, node_id) {
+        tracing::info!(
+            target: "evt",
+            event = "queued_button_automation_suppressed",
+            command_id = %command_id,
+            node_id = %node_id,
+            reason = "external_room_authority",
+            "Queued button action retired after an authority handoff"
+        );
+        return;
+    }
     // Physical button ingress is fast lane: execute inline on the ingress
     // dispatch thread and never enqueue behind paced HTTP/system batches.
     if process_button_inline(state, node_id, action, device_id, command_id) && persist_after {
@@ -654,6 +679,17 @@ fn run_input_binding_action(
     device_id: Option<&str>,
     command_id: &str,
 ) {
+    if !commands::rhythm_automation_allowed_for_node(state, source_node_id) {
+        tracing::info!(
+            target: "evt",
+            event = "queued_input_binding_suppressed",
+            command_id = %command_id,
+            source_node_id = %source_node_id,
+            reason = "external_room_authority",
+            "Queued input binding retired after an authority handoff"
+        );
+        return;
+    }
     let started = Instant::now();
     match crate::commands::do_execute_automation_action(state, &action) {
         Ok(outcome) => {
@@ -774,6 +810,16 @@ fn spawn_input_binding_action(
 }
 
 fn run_motion_turn_on_action(state: &SharedState, node_id: &str) {
+    if !commands::rhythm_automation_allowed_for_node(state, node_id) {
+        tracing::info!(
+            target: "evt",
+            event = "queued_motion_automation_suppressed",
+            node_id = %node_id,
+            reason = "external_room_authority",
+            "Queued motion action retired after an authority handoff"
+        );
+        return;
+    }
     // Motion ingress is fast lane for occupancy responsiveness.
     if !turn_on_node_inline(state, node_id) {
         return;
@@ -811,7 +857,9 @@ fn spawn_motion_dim_action(state: &SharedState, node_id: String, factor: f32) {
     let node_id_clone = node_id.clone();
 
     if let Err(error) = builder.spawn(move || {
-        dim_node_inline(&state_clone, &node_id_clone, factor);
+        if commands::rhythm_automation_allowed_for_node(&state_clone, &node_id_clone) {
+            dim_node_inline(&state_clone, &node_id_clone, factor);
+        }
     }) {
         warn!(
             target: "evt",
@@ -1376,6 +1424,20 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             };
             let command_id = logging::next_command_id("button");
 
+            if !commands::rhythm_automation_allowed_for_node(state, &source_node_id) {
+                tracing::info!(
+                    target: "evt",
+                    event = "button_automation_suppressed",
+                    command_id = %command_id,
+                    action = ?action,
+                    source_node_id = %source_node_id,
+                    source_room_id = %room_id,
+                    reason = "external_room_authority",
+                    "Button automation left to the room's external controller"
+                );
+                return;
+            }
+
             if let Some(binding_action) =
                 commands::matching_button_input_binding_action(state, &source_node_id, action)
             {
@@ -1460,6 +1522,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 );
                 return;
             };
+            let effective_action = effective_unbound_button_action(key, action);
             emit_button_input_event(
                 state,
                 hub_key.as_ref(),
@@ -1476,6 +1539,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 event = "button_ingress",
                 command_id = %command_id,
                 action = ?action,
+                effective_action = ?effective_action,
                 node_id = %node_id,
                 source_node_id = %source_node_id,
                 source_room_id = %room_id,
@@ -1483,12 +1547,26 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 hub_present = hub_key.is_some(),
                 "Button event received"
             );
+            if !commands::rhythm_automation_allowed_for_node(state, &node_id) {
+                tracing::info!(
+                    target: "evt",
+                    event = "button_node_control_suppressed",
+                    command_id = %command_id,
+                    action = ?action,
+                    node_id = %node_id,
+                    source_node_id = %source_node_id,
+                    reason = "external_room_authority",
+                    "Button target left to the room's external controller"
+                );
+                return;
+            }
             if !light_breaker_enabled {
                 tracing::info!(
                     target: "evt",
                     event = "button_node_control_suppressed",
                     command_id = %command_id,
                     action = ?action,
+                    effective_action = ?effective_action,
                     node_id = %node_id,
                     source_node_id = %source_node_id,
                     source_room_id = %room_id,
@@ -1521,7 +1599,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             spawn_button_ingress_action(
                 state,
                 node_id,
-                action,
+                effective_action,
                 device_id.clone(),
                 command_id,
                 true,
@@ -1577,6 +1655,19 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 );
                 return;
             };
+            if !commands::rhythm_automation_allowed_for_node(state, &source_node_id) {
+                tracing::info!(
+                    target: "evt",
+                    event = "motion_node_control_suppressed",
+                    source_node_id = %source_node_id,
+                    source_room_id = %room_id,
+                    native_sensor_id = %sensor_id,
+                    detected,
+                    reason = "external_room_authority",
+                    "Motion automation left to the room's external controller"
+                );
+                return;
+            }
             let target_node_ids = commands::resolve_node_control_targets_for_source(
                 state,
                 &source_node_id,
@@ -1617,6 +1708,20 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                         route: InputEventRoute::NodeControl,
                     },
                 );
+                if !commands::rhythm_automation_allowed_for_node(state, &target_node_id) {
+                    tracing::info!(
+                        target: "evt",
+                        event = "motion_node_control_suppressed",
+                        source_node_id = %source_node_id,
+                        target_node_id = %target_node_id,
+                        source_room_id = %room_id,
+                        native_sensor_id = %sensor_id,
+                        detected,
+                        reason = "external_room_authority",
+                        "Motion target left to the room's external controller"
+                    );
+                    continue;
+                }
                 if !light_breaker_enabled {
                     tracing::info!(
                         target: "evt",
@@ -1791,6 +1896,19 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 );
                 return;
             };
+            if !commands::rhythm_automation_allowed_for_node(state, &source_node_id) {
+                tracing::info!(
+                    target: "evt",
+                    event = "contact_node_control_suppressed",
+                    source_node_id = %source_node_id,
+                    source_room_id = %room_id,
+                    native_sensor_id = %sensor_id,
+                    open,
+                    reason = "external_room_authority",
+                    "Contact automation left to the room's external controller"
+                );
+                return;
+            }
             let Some(target_node_id) = commands::resolve_node_control_target_for_source(
                 state,
                 &source_node_id,
@@ -1838,6 +1956,21 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 open,
                 "Contact event received"
             );
+            if !commands::rhythm_automation_allowed_for_node(state, &target_node_id) {
+                tracing::info!(
+                    target: "evt",
+                    event = "contact_node_control_suppressed",
+                    action = ?action,
+                    source_node_id = %source_node_id,
+                    target_node_id = %target_node_id,
+                    source_room_id = %room_id,
+                    native_sensor_id = %sensor_id,
+                    open,
+                    reason = "external_room_authority",
+                    "Contact target left to the room's external controller"
+                );
+                return;
+            }
             if !light_breaker_enabled {
                 tracing::info!(
                     target: "evt",
@@ -2145,7 +2278,126 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
     }
 }
 
-/// Check motion timers and turn off lights in expired motion-owned targets.
+fn motion_timeout_mode_default(
+    state: &SharedState,
+    target_node_id: &str,
+) -> Option<rhythm_core::RoomModeState> {
+    let (mode_default, runtime) = {
+        let s = state.lock().ok()?;
+        let active_mode = s.active_mode;
+        let mode_default = s
+            .mode_configs()
+            .into_iter()
+            .find(|config| config.mode == active_mode)?
+            .room_defaults
+            .into_iter()
+            .find(|default| default.room_id == target_node_id)
+            .map(|default| default.state);
+        (mode_default, s.hub_runtime())
+    };
+
+    if matches!(mode_default, Some(rhythm_core::RoomModeState::Standby))
+        && runtime
+            .and_then(|runtime| runtime.engine_node_snapshot(target_node_id))
+            .is_some_and(|snapshot| !snapshot.standby_enabled)
+    {
+        return Some(rhythm_core::RoomModeState::HardOff);
+    }
+
+    mode_default
+}
+
+fn run_motion_timeout_restore(
+    state: &SharedState,
+    target_node_id: &str,
+    mode_default: Option<rhythm_core::RoomModeState>,
+    command_id: &str,
+) {
+    let restored = if let Some(mode_default) = mode_default {
+        match commands::do_node_preferences_set(
+            state,
+            target_node_id,
+            None,
+            None,
+            None,
+            Some(mode_default),
+            None,
+            false,
+        ) {
+            Ok(_) => {
+                info!(
+                    target: "evt",
+                    "Motion: restored mode default {:?} for node {}",
+                    mode_default,
+                    target_node_id
+                );
+                true
+            }
+            Err(error) => {
+                warn!(
+                    target: "evt",
+                    "Motion: failed to restore mode default {:?} for node {}: {}",
+                    mode_default,
+                    target_node_id,
+                    error
+                );
+                false
+            }
+        }
+    } else {
+        process_button_inline(
+            state,
+            target_node_id,
+            ButtonAction::OffPress,
+            None,
+            command_id,
+        )
+    };
+
+    if restored {
+        if let Err(error) = commands::do_reset_node_curve_modifiers(state, target_node_id, true) {
+            warn!(
+                target: "evt",
+                "Motion: restored node {} but failed to reset its curve modifiers: {}",
+                target_node_id,
+                error
+            );
+        }
+    }
+}
+
+fn spawn_motion_timeout_restore(
+    state: &SharedState,
+    target_node_id: String,
+    mode_default: Option<rhythm_core::RoomModeState>,
+    command_id: String,
+) {
+    let state_clone = state.clone();
+    let node_id_clone = target_node_id.clone();
+    let command_id_clone = command_id.clone();
+    if let Err(error) = std::thread::Builder::new()
+        .name("motion-timeout".to_string())
+        .spawn(move || {
+            run_motion_timeout_restore(
+                &state_clone,
+                &node_id_clone,
+                mode_default,
+                &command_id_clone,
+            );
+        })
+    {
+        warn!(
+            target: "evt",
+            "Failed to spawn motion-timeout restore thread: {}",
+            error
+        );
+        run_motion_timeout_restore(state, &target_node_id, mode_default, &command_id);
+    }
+}
+
+/// Check motion timers and restore expired motion-owned targets to their
+/// active-mode defaults. Targets without an explicit default retain the legacy
+/// OffPress behavior.
 ///
 /// Groups sources by target node. For each target, countdown only starts when
 /// ALL sources have cleared. Uses the latest source stop time as the countdown
@@ -2177,6 +2429,28 @@ pub fn check_motion_timers(state: &SharedState, motion: &mut MotionTimerState) {
         .ok()
         .map(|s| s.default_motion_timeout_secs)
         .unwrap_or(0);
+
+    // A policy handoff can happen while an old motion countdown is still
+    // armed. Retire that ownership before warning-dim or timeout-off can emit
+    // an unattended command under the previous controller policy.
+    let suppressed_targets = motion
+        .sensors
+        .values()
+        .map(|source| source.target_node_id.clone())
+        .filter(|target_node_id| {
+            !commands::rhythm_automation_allowed_for_node(state, target_node_id)
+        })
+        .collect::<HashSet<_>>();
+    if !suppressed_targets.is_empty() {
+        motion
+            .sensors
+            .retain(|_, source| !suppressed_targets.contains(source.target_node_id.as_str()));
+        for target_node_id in &suppressed_targets {
+            motion.motion_owned.remove(target_node_id);
+            motion.motion_turn_on_requested.remove(target_node_id);
+            motion.warning_active.remove(target_node_id);
+        }
+    }
 
     let mut targets: HashMap<String, Vec<(&String, &MotionSourceState)>> = HashMap::new();
     for (source_key, source) in &motion.sensors {
@@ -2273,10 +2547,12 @@ pub fn check_motion_timers(state: &SharedState, motion: &mut MotionTimerState) {
         motion.motion_turn_on_requested.remove(target_node_id);
 
         if motion.motion_owned.remove(target_node_id) {
+            let mode_default = motion_timeout_mode_default(state, target_node_id);
             info!(
                 target: "evt",
-                "Motion: timeout expired for node {} - sending OffPress",
-                target_node_id
+                "Motion: timeout expired for node {} - restoring {:?}",
+                target_node_id,
+                mode_default.unwrap_or(rhythm_core::RoomModeState::Standby)
             );
 
             let work_tx = {
@@ -2285,22 +2561,14 @@ pub fn check_motion_timers(state: &SharedState, motion: &mut MotionTimerState) {
             };
             let command_id = logging::next_command_id("motion-timeout");
             if work_tx.is_some() {
-                spawn_button_ingress_action(
+                spawn_motion_timeout_restore(
                     state,
                     target_node_id.clone(),
-                    ButtonAction::OffPress,
-                    None,
+                    mode_default,
                     command_id,
-                    false,
                 );
             } else {
-                let _ = process_button_inline(
-                    state,
-                    target_node_id,
-                    ButtonAction::OffPress,
-                    None,
-                    &command_id,
-                );
+                run_motion_timeout_restore(state, target_node_id, mode_default, &command_id);
             }
         } else {
             info!(
@@ -4026,10 +4294,13 @@ mod tests {
         }
     }
 
-    fn make_state_with_runtime(runtime: Arc<dyn RuntimeHandle>) -> SharedState {
+    fn make_state_with_runtime_for_hub_type(
+        runtime: Arc<dyn RuntimeHandle>,
+        hub_type: &str,
+    ) -> SharedState {
         let mut app = crate::state::AppState::default();
         install_test_light_runtime_modules(&mut app);
-        let hub_type = HubType::new("test");
+        let hub_type = HubType::new(hub_type);
         let hub_key = HubKey::new(hub_type.clone(), "hub.local");
         app.hubs.insert(
             hub_key.clone(),
@@ -4044,6 +4315,10 @@ mod tests {
             },
         );
         Arc::new(Mutex::new(app))
+    }
+
+    fn make_state_with_runtime(runtime: Arc<dyn RuntimeHandle>) -> SharedState {
+        make_state_with_runtime_for_hub_type(runtime, "test")
     }
 
     fn install_test_light_runtime_modules(app: &mut crate::state::AppState) {
@@ -4331,7 +4606,7 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingRuntime {
-        snapshots: Vec<RoomSnapshot>,
+        snapshots: Arc<Mutex<Vec<RoomSnapshot>>>,
         events: Arc<Mutex<Vec<InputEvent>>>,
         dim_calls: Arc<Mutex<Vec<(String, f32)>>>,
         turn_on_calls: Arc<Mutex<Vec<String>>>,
@@ -4350,7 +4625,7 @@ mod tests {
     impl RecordingRuntime {
         fn with_snapshots(snapshots: Vec<RoomSnapshot>) -> Self {
             Self {
-                snapshots,
+                snapshots: Arc::new(Mutex::new(snapshots)),
                 ..Default::default()
             }
         }
@@ -4387,16 +4662,36 @@ mod tests {
 
         fn engine_room_snapshot(&self, room_id: &str) -> Option<RoomSnapshot> {
             self.snapshots
+                .lock()
+                .unwrap()
                 .iter()
                 .find(|snap| snap.id == room_id)
                 .cloned()
         }
 
         fn engine_all_room_snapshots(&self) -> Vec<RoomSnapshot> {
-            self.snapshots.clone()
+            self.snapshots.lock().unwrap().clone()
         }
 
-        fn restore_room_state(&self, _: &str, _: rhythm_core::RestoredRoomState) {}
+        fn restore_room_state(&self, room_id: &str, state: rhythm_core::RestoredRoomState) {
+            if let Some(snapshot) = self
+                .snapshots
+                .lock()
+                .unwrap()
+                .iter_mut()
+                .find(|snapshot| snapshot.id == room_id)
+            {
+                snapshot.rhythm_enabled = state.rhythm_enabled;
+                snapshot.disabled = state.disabled;
+                snapshot.time_offset_minutes = state.time_offset_minutes;
+                snapshot.brightness_offset = state.brightness_offset;
+                snapshot.soft_off = state.soft_off;
+                snapshot.mood_active = state.mood_active;
+                snapshot.standby_enabled = state.standby_enabled;
+                snapshot.hard_off = state.hard_off;
+                snapshot.profile_settings = state.profile_settings;
+            }
+        }
 
         fn add_room(&self, _: &str, _: &str) {}
 
@@ -5265,7 +5560,69 @@ mod tests {
     }
 
     #[test]
-    fn button_event_broadcasts_input_binding_route_before_automation_dispatch() {
+    fn unbound_local_ble_on_press_dispatches_toggle_and_reports_physical_press() {
+        let runtime = Arc::new(RecordingRuntime::default());
+        let runtime_events = runtime.events.clone();
+        let state = make_state_with_runtime_for_hub_type(runtime, HubType::LOCAL_BLE);
+        let hub_key = only_hub_key(&state);
+        let source_id = add_canonical_control_source(
+            &state,
+            &hub_key,
+            "orein-button",
+            "room_a",
+            DeviceType::Button,
+        );
+        let mut event_rx = subscribe_events(&state);
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Button {
+                hub_key: Some(hub_key),
+                room_id: "room_a".into(),
+                action: ButtonAction::OnPress,
+                device_id: Some("orein-button".into()),
+            },
+            &mut MotionTimerState::new(),
+        );
+
+        let event = event_rx.try_recv().expect("expected input event broadcast");
+        match event {
+            crate::server_event::ServerEvent::InputEvent(InputEventResource::Button {
+                route,
+                hub_type,
+                source_node_id,
+                target_node_id,
+                button_action,
+                ..
+            }) => {
+                assert_eq!(route, InputEventRoute::NodeControl);
+                assert_eq!(hub_type.as_deref(), Some(HubType::LOCAL_BLE));
+                assert_eq!(source_node_id.as_deref(), Some(source_id.as_str()));
+                assert_eq!(target_node_id.as_deref(), Some("room_a"));
+                assert_eq!(button_action, Some(ButtonAction::OnPress));
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+
+        for _ in 0..30 {
+            if !runtime_events.lock().unwrap().is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let applied = runtime_events.lock().unwrap();
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].action, ButtonAction::Toggle);
+        drop(applied);
+
+        wait_for_light_activity_len(&state, 1);
+        let activity = state.lock().unwrap().light_activity[0].clone();
+        assert_eq!(activity.action_id, "toggle");
+        assert_eq!(activity.node_id, "room_a");
+    }
+
+    #[test]
+    fn local_ble_button_binding_wins_before_default_toggle_dispatch() {
         let handle_event_calls = Arc::new(AtomicUsize::new(0));
         let runtime: Arc<dyn RuntimeHandle> = Arc::new(SlowDispatchRuntime {
             handle_event_delay: Duration::ZERO,
@@ -5273,7 +5630,7 @@ mod tests {
             handle_event_calls: handle_event_calls.clone(),
             turn_on_room_calls: Arc::new(AtomicUsize::new(0)),
         });
-        let state = make_state_with_runtime(runtime);
+        let state = make_state_with_runtime_for_hub_type(runtime, HubType::LOCAL_BLE);
         let hub_key = only_hub_key(&state);
         let source_id = add_canonical_control_source(
             &state,
@@ -5319,7 +5676,7 @@ mod tests {
             }) => {
                 assert!(epoch_ms > 0);
                 assert_eq!(route, InputEventRoute::InputBinding);
-                assert_eq!(hub_type.as_deref(), Some("test"));
+                assert_eq!(hub_type.as_deref(), Some(HubType::LOCAL_BLE));
                 assert_eq!(address.as_deref(), Some("hub.local"));
                 assert_eq!(source_node_id.as_deref(), Some(source_id.as_str()));
                 assert_eq!(target_node_id, None);
@@ -7782,6 +8139,175 @@ mod tests {
     }
 
     #[test]
+    fn motion_timeout_restores_active_mode_hard_off_default() {
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![
+            room_snapshot_with_flags("room_a", false, false),
+        ]));
+        let button_events = runtime.events.clone();
+        let state = make_state_with_runtime(runtime);
+        {
+            let mut s = state.lock().unwrap();
+            s.light_breaker_enabled = true;
+            s.active_mode = rhythm_core::RhythmMode::Sleep;
+            s.default_motion_timeout_secs = 120;
+            s.set_mode_configs(vec![rhythm_core::ModeConfig {
+                mode: rhythm_core::RhythmMode::Sleep,
+                active_profile_id: Some(rhythm_core::SLEEP_PROFILE_ID.into()),
+                idle_profile_id: Some(rhythm_core::SLEEP_IDLE_PROFILE_ID.into()),
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![rhythm_core::RoomModeDefault {
+                    room_id: "room_a".into(),
+                    state: rhythm_core::RoomModeState::HardOff,
+                }],
+            }]);
+        }
+
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            "s1".into(),
+            motion_source(
+                "s1",
+                "room_a",
+                Some(Instant::now() - Duration::from_secs(2_000)),
+            ),
+        );
+        motion.motion_owned.insert("room_a".into());
+
+        check_motion_timers(&state, &mut motion);
+
+        let events = button_events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].room_id, "room_a");
+        assert_eq!(
+            events[0].action,
+            ButtonAction::LightsOff,
+            "an explicit HardOff default must not degrade to OffPress/standby"
+        );
+    }
+
+    #[test]
+    fn motion_timeout_clears_manual_curve_modifiers_after_standby_restore() {
+        let mut snapshot = room_snapshot_with_flags("room_a", false, false);
+        snapshot.standby_enabled = true;
+        snapshot.time_offset_minutes = -215.0;
+        snapshot.brightness_offset = 37.0;
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![snapshot]));
+        let button_events = runtime.events.clone();
+        let state = make_state_with_runtime(runtime.clone());
+        {
+            let mut s = state.lock().unwrap();
+            s.light_breaker_enabled = true;
+            s.active_mode = rhythm_core::RhythmMode::Day;
+            s.default_motion_timeout_secs = 120;
+            s.set_mode_configs(vec![rhythm_core::ModeConfig {
+                mode: rhythm_core::RhythmMode::Day,
+                active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+                idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![rhythm_core::RoomModeDefault {
+                    room_id: "room_a".into(),
+                    state: rhythm_core::RoomModeState::Standby,
+                }],
+            }]);
+        }
+
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            "s1".into(),
+            motion_source(
+                "s1",
+                "room_a",
+                Some(Instant::now() - Duration::from_secs(2_000)),
+            ),
+        );
+        motion.motion_owned.insert("room_a".into());
+
+        check_motion_timers(&state, &mut motion);
+
+        let restored = runtime.engine_room_snapshot("room_a").unwrap();
+        assert!(restored.soft_off, "the configured Standby state must win");
+        assert_eq!(restored.time_offset_minutes, 0.0);
+        assert_eq!(restored.brightness_offset, 0.0);
+        assert!(
+            button_events.lock().unwrap().is_empty(),
+            "clearing modifiers must not dispatch Reset and flash the lights on"
+        );
+    }
+
+    #[test]
+    fn motion_timeout_hard_offs_when_mode_default_is_standby_but_low_glow_is_disabled() {
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![
+            room_snapshot_with_flags("room_a", false, false),
+        ]));
+        let button_events = runtime.events.clone();
+        let state = make_state_with_runtime(runtime);
+        {
+            let mut s = state.lock().unwrap();
+            s.light_breaker_enabled = true;
+            s.active_mode = rhythm_core::RhythmMode::Day;
+            s.default_motion_timeout_secs = 120;
+            s.set_mode_configs(vec![rhythm_core::ModeConfig {
+                mode: rhythm_core::RhythmMode::Day,
+                active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+                idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![rhythm_core::RoomModeDefault {
+                    room_id: "room_a".into(),
+                    state: rhythm_core::RoomModeState::Standby,
+                }],
+            }]);
+        }
+
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            "s1".into(),
+            motion_source(
+                "s1",
+                "room_a",
+                Some(Instant::now() - Duration::from_secs(2_000)),
+            ),
+        );
+        motion.motion_owned.insert("room_a".into());
+
+        check_motion_timers(&state, &mut motion);
+
+        let events = button_events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].room_id, "room_a");
+        assert_eq!(events[0].action, ButtonAction::LightsOff);
+    }
+
+    #[test]
+    fn motion_timeout_without_mode_default_keeps_off_press_fallback() {
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![
+            room_snapshot_with_flags("room_a", false, false),
+        ]));
+        let button_events = runtime.events.clone();
+        let state = make_state_with_runtime(runtime);
+        state.lock().unwrap().light_breaker_enabled = true;
+
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            "s1".into(),
+            motion_source(
+                "s1",
+                "room_a",
+                Some(Instant::now() - Duration::from_secs(2_000)),
+            ),
+        );
+        motion.motion_owned.insert("room_a".into());
+
+        check_motion_timers(&state, &mut motion);
+
+        let events = button_events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].action, ButtonAction::OffPress);
+    }
+
+    #[test]
     fn check_motion_timers_expired_not_owned() {
         let state = make_state();
         state.lock().unwrap().default_motion_timeout_secs = 120;
@@ -7797,6 +8323,42 @@ mod tests {
 
         // Sensors removed but no OffPress sent (not owned)
         assert!(motion.sensors.is_empty());
+    }
+
+    #[test]
+    fn authority_handoff_retires_an_armed_motion_timeout_without_output() {
+        let state = make_state();
+        state.lock().unwrap().default_motion_timeout_secs = 120;
+        {
+            let mut app = state.lock().unwrap();
+            let key = HubKey::new(HubType::new(HubType::HUE), "bridge.local");
+            let mut room = crate::topology::TopologyRoom::new("room_a", "Room A");
+            room.upsert_hub_room_binding(crate::topology::HubRoomBinding {
+                hub_key: key,
+                hub_room_id: "hue-room-a".to_string(),
+                control_id: "hue-group-a".to_string(),
+                light_device_ids: Vec::new(),
+            });
+            app.topology.insert_room(room);
+        }
+
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            "s1".into(),
+            motion_source(
+                "s1",
+                "room_a",
+                Some(Instant::now() - Duration::from_secs(200)),
+            ),
+        );
+        motion.motion_owned.insert("room_a".into());
+        motion.warning_active.insert("room_a".into());
+
+        check_motion_timers(&state, &mut motion);
+
+        assert!(motion.sensors.is_empty());
+        assert!(!motion.motion_owned.contains("room_a"));
+        assert!(!motion.warning_active.contains("room_a"));
     }
 
     #[test]

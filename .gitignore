@@ -25,6 +25,7 @@ target/
 
 # Repo-owned Codex skills are versioned; other Codex state remains local.
 .codex/*
+!.codex/automations.toml
 !.codex/skills/
 !.codex/skills/**
 .release-evidence/
@@ -35,4 +36,6 @@ admin-api/.env
 
 # Local Supabase CLI project metadata.
 tools/app/supabase/.temp/
-supabase/.temp/
+
+# Marketing site: its own repo (sticktrk/rhythm-marketing), worked on in place, deployed standalone to prod.
+/rhythm-marketing/

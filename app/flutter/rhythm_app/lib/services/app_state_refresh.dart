@@ -211,6 +211,10 @@ class AppStateRefresh {
       home: homeProvider.currentHome,
       hubs: homeProvider.currentHomeHubs,
     );
+    final scopeKeyAliases = RoomPageProvider.layoutScopeAliasesFor(
+      home: homeProvider.currentHome,
+      hubs: homeProvider.currentHomeHubs,
+    );
     final hubKey = RoomPageProvider.hubLayoutKey(serverHub);
     final hubKeyAliases = RoomPageProvider.hubLayoutKeyAliases(serverHub);
 
@@ -227,9 +231,10 @@ class AppStateRefresh {
     try {
       final userId = AuthService().currentUserId;
       final hasUnsyncedLocalEdit = userId != null &&
-          SettingsService.instance.isRoomPageLayoutCloudDirty(
+          await SettingsService.instance.migrateRoomPageLayoutCloudDirty(
             userId: userId,
             scopeKey: scopeKey,
+            scopeKeyAliases: scopeKeyAliases,
           );
       if (hasUnsyncedLocalEdit) {
         CloudBackupService.instance.scheduleAppSettingsSync(
@@ -255,7 +260,10 @@ class AppStateRefresh {
       );
       if (!restored) return;
 
-      roomPageProvider?.setLayoutScope(scopeKey);
+      roomPageProvider?.setLayoutScope(
+        scopeKey,
+        scopeKeyAliases: scopeKeyAliases,
+      );
       roomPageProvider?.reloadLayout();
       debugPrint(
         'AppStateRefresh: Restored signed-in All Rooms layout from cloud',

@@ -404,10 +404,10 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     id: 'node-action',
     category: 'Node Runtime',
     label: 'Run node action',
-    description: 'Run lights_on, lights_off, toggle, or reset on a node.',
+    description: 'Run on, off, toggle, or reset on a node.',
     method: 'PUT',
     path: 'api/nodes/action',
-    body: { node_id: '{node_id}', action: 'lights_on' }
+    body: { node_id: '{node_id}', action: 'on' }
   },
   {
     id: 'node-brightness',
@@ -834,6 +834,30 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
       address: '{bridge_address}',
       credentials: {}
     }
+  },
+  {
+    id: 'hue-authority-get',
+    category: 'Devices & Topology',
+    label: 'Read Hue room authority',
+    description: 'Fetch reviewed Hue automation ownership for each room.',
+    method: 'GET',
+    path: 'api/hue/authority'
+  },
+  {
+    id: 'hue-authority-set',
+    category: 'Devices & Topology',
+    label: 'Set Hue room authority',
+    description: 'Replace the reviewed room ownership for one Hue bridge.',
+    method: 'PUT',
+    path: 'api/hue/authority',
+    body: {
+      address: '{bridge_address}',
+      revision: '{authority_revision}',
+      correlation_id: '{correlation_id}',
+      topology_sync_enabled: false,
+      rooms: [{ room_id: '{room_id}', owner: 'hue' }]
+    },
+    danger: true
   },
   {
     id: 'hub-disconnect-one',

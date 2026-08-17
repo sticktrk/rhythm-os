@@ -2652,6 +2652,37 @@ void main() {
       });
     });
 
+    test('passes bounded lifecycle correlation metadata for removal', () async {
+      when(() => dio.post(
+            any(),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/devices/unpair'),
+            statusCode: 200,
+            data: {'status': 'complete'},
+          ));
+
+      await api.unpairDevice(
+        hubType: 'hue',
+        deviceId: 'hue-switch-7',
+        deviceType: ' button ',
+        correlationId: ' hue-bridge-remove-journey ',
+      );
+
+      final data = verify(() => dio.post(
+            'api/devices/unpair',
+            data: captureAny(named: 'data'),
+            options: any(named: 'options'),
+          )).captured.single as Map<String, dynamic>;
+      expect(data['params'], {
+        'device_id': 'hue-switch-7',
+        'device_type': 'button',
+        'correlation_id': 'hue-bridge-remove-journey',
+        'force': false,
+      });
+    });
+
     test('returns actionable timeout details on DioException', () async {
       when(() => dio.post(
             any(),
@@ -2722,6 +2753,111 @@ void main() {
 
       expect(result?['completion_scope'], 'local_bond_retained');
       expect(result?['warning'], 'The retained bond can be re-adopted.');
+    });
+  });
+
+  group('Hue room authority', () {
+    final payload = {
+      'schema_version': 1,
+      'bridges': [
+        {
+          'address': 'bridge.local',
+          'revision': '0123456789abcdef',
+          'takeover_scope': 'bridge',
+          'bridge_takeover_requested': false,
+          'rooms': [
+            {
+              'room_id': 'office',
+              'name': 'Office',
+              'owner': 'unreviewed',
+              'rhythm_automation_enabled': false,
+            },
+          ],
+        },
+      ],
+    };
+
+    test('fetches the complete review', () async {
+      when(() => dio.get(any())).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/hue/authority'),
+            statusCode: 200,
+            data: payload,
+          ));
+
+      final result = await api.getHueAuthority();
+
+      expect(result?.bridges.single.rooms.single.name, 'Office');
+      verify(() => dio.get('api/hue/authority')).called(1);
+    });
+
+    test('submits every room and defaults unreviewed rooms to Hue', () async {
+      when(() => dio.put(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions: RequestOptions(path: 'api/hue/authority'),
+                statusCode: 200,
+                data: payload,
+              ));
+      final bridge = RhythmHueAuthority.fromJson(payload).bridges.single;
+
+      final result = await api.updateHueAuthority(
+        bridge: bridge,
+        owners: const {},
+        correlationId: 'hue-authority-test',
+        topologySyncEnabled: true,
+      );
+
+      expect(result, isNotNull);
+      verify(() => dio.put('api/hue/authority', data: {
+            'address': 'bridge.local',
+            'revision': '0123456789abcdef',
+            'correlation_id': 'hue-authority-test',
+            'topology_sync_enabled': true,
+            'rooms': [
+              {'room_id': 'office', 'owner': 'hue'},
+            ],
+          })).called(1);
+    });
+  });
+
+  group('Matter setup code recovery', () {
+    test('parses a secret-bearing response without transforming the payload',
+        () async {
+      when(() => dio.get(
+            any(),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions:
+                RequestOptions(path: 'api/matter/setup-code/matter-42-2'),
+            statusCode: 200,
+            data: {
+              'payload_kind': 'qr_code',
+              'setup_payload': 'MT:RECOVERY-SECRET',
+              'captured_at': '2026-08-11T12:00:00Z',
+            },
+          ));
+
+      final result = await api.getMatterSetupCode('matter-42-2');
+
+      expect(result?.payloadKind, RhythmPairingRecoveryPayloadKind.qrCode);
+      expect(result?.setupPayload, 'MT:RECOVERY-SECRET');
+      expect(result?.capturedAt.toUtc(), DateTime.utc(2026, 8, 11, 12));
+      verify(() => dio.get(
+            'api/matter/setup-code/matter-42-2',
+            options: any(named: 'options'),
+          )).called(1);
+    });
+
+    test('returns null when the appliance has no saved code', () async {
+      when(() => dio.get(
+            any(),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions:
+                RequestOptions(path: 'api/matter/setup-code/matter-42'),
+            statusCode: 404,
+          ));
+
+      expect(await api.getMatterSetupCode('matter-42'), isNull);
     });
   });
 }

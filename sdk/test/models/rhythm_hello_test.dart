@@ -374,6 +374,9 @@ void main() {
             'legacy_rooms_projection',
             'sse_event_ids',
             'async_dispatch_metadata',
+            RhythmFeature.asyncDebugBundleUpload,
+            RhythmFeature.guardedRoomLightProfileOverrides,
+            RhythmFeature.targetGuardedRoomLightProfileOverrides,
           ],
           'hubs': [
             {
@@ -424,6 +427,22 @@ void main() {
       expect(hello.capabilities, isNotNull);
       expect(hello.capabilities!.apiSchemaVersion, 2);
       expect(hello.capabilities!.supportsFeature('node_state'), isTrue);
+      expect(
+        hello.capabilities!
+            .supportsFeature(RhythmFeature.asyncDebugBundleUpload),
+        isTrue,
+      );
+      expect(
+        hello.capabilities!
+            .supportsFeature(RhythmFeature.guardedRoomLightProfileOverrides),
+        isTrue,
+      );
+      expect(
+        hello.capabilities!.supportsFeature(
+          RhythmFeature.targetGuardedRoomLightProfileOverrides,
+        ),
+        isTrue,
+      );
       expect(hello.capabilities!.supportsFeature('missing'), isFalse);
       expect(hello.capabilities!.hub('matter')?.supportsUnpairing, isTrue);
       expect(
@@ -450,6 +469,35 @@ void main() {
         isTrue,
       );
       expect(hello.powerSchedules.single['node_id'], 'room-1');
+    });
+
+    test('parses typed unpair support and keeps legacy Hue light-only', () {
+      final current = RhythmHubCapabilities.fromJson({
+        'type': 'hue',
+        'configurable': true,
+        'device_onboarding_methods': [
+          RhythmDeviceOnboardingMethod.hueBridgeSerialSearch,
+          RhythmDeviceOnboardingMethod.hueBridgeButtonSearch,
+        ],
+        'supports_unpairing': true,
+        'unpairable_device_types': ['light', 'button', 'motion'],
+      });
+      expect(
+        current.supportsDeviceOnboardingMethod(
+          RhythmDeviceOnboardingMethod.hueBridgeButtonSearch,
+        ),
+        isTrue,
+      );
+      expect(current.supportsUnpairingDeviceType('button'), isTrue);
+
+      final legacy = RhythmHubCapabilities.fromJson({
+        'type': 'hue',
+        'configurable': true,
+        'supports_unpairing': true,
+      });
+      expect(legacy.unpairableDeviceTypes, ['light']);
+      expect(legacy.supportsUnpairingDeviceType('light'), isTrue);
+      expect(legacy.supportsUnpairingDeviceType('button'), isFalse);
     });
 
     test('tolerates absent or malformed local device profile metadata', () {

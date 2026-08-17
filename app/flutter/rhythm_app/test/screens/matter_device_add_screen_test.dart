@@ -110,6 +110,7 @@ void main() {
             httpStatus: 200,
             status: 'failed',
             error: 'test failure',
+            recoveryAction: 'existing_node_recommission_failed',
           );
         },
       );
@@ -149,6 +150,7 @@ void main() {
         'attempt_number': 1,
         'outcome': 'failed',
         'failure_stage': 'commissioning',
+        'recovery_action': 'existing_node_recommission_failed',
       });
       expect(
         completed.properties.values,
@@ -157,6 +159,59 @@ void main() {
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }
+  });
+
+  testWidgets('returns non-fatal recovery warnings after successful pairing',
+      (tester) async {
+    MatterDevicePairingResult? pairingResult;
+    final api = _FakeRhythmMatterApi(
+      onPair: (_) async => const RhythmMatterPairingResponse(
+        httpStatus: 200,
+        status: 'complete',
+        device: {
+          'device_id': 'matter-42',
+          'name': 'Desk bulb',
+          'device_type': 'light',
+        },
+        warnings: [
+          'The light was paired, but its Matter setup code was not saved.',
+        ],
+      ),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => TextButton(
+            onPressed: () async {
+              pairingResult = await Navigator.of(context).push(
+                PageRouteBuilder<MatterDevicePairingResult>(
+                  transitionDuration: Duration.zero,
+                  reverseTransitionDuration: Duration.zero,
+                  pageBuilder: (_, __, ___) => MatterDeviceAddScreen(
+                    endpoint: const HubEndpoint(host: '127.0.0.1', port: 0),
+                    addMethod: MatterAddMethod.automatic,
+                    initialSetupPayload: 'MT:Y.K908OC16750648G00',
+                    pairingApi: api,
+                  ),
+                ),
+              );
+            },
+            child: const Text('PAIR'),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('PAIR'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+
+    expect(pairingResult, isNotNull);
+    expect(pairingResult!.nativeDeviceId, 'matter-42');
+    expect(pairingResult!.warnings, [
+      'The light was paired, but its Matter setup code was not saved.',
+    ]);
   });
 
   testWidgets(

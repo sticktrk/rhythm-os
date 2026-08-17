@@ -314,6 +314,10 @@ pub struct HubIntegrationCapability {
     pub device_onboarding_methods: Vec<String>,
     pub device_profiles: Vec<HubDeviceProfileCapability>,
     pub supports_unpairing: bool,
+    /// Stable device-type labels whose physical/integration-owned resources
+    /// this hub can remove. An empty list means callers must use the legacy
+    /// aggregate flag conservatively.
+    pub unpairable_device_types: Vec<String>,
     pub supports_roomless_devices: bool,
     /// Whether a configured-but-disconnected instance should hold the app's
     /// Rooms startup gate because its control plane must rebuild authoritative
@@ -334,6 +338,9 @@ pub const DEVICE_ONBOARDING_METHOD_LOCAL_BLE_QR: &str = "local_ble_qr";
 /// Ask an already connected Hue Bridge to find one Zigbee light by its
 /// six-character printed serial.
 pub const DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_SERIAL_SEARCH: &str = "hue_bridge_serial_search";
+/// Ask an already connected Hue Bridge to discover a physical button, remote,
+/// or wall switch through its native Zigbee accessory search.
+pub const DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_BUTTON_SEARCH: &str = "hue_bridge_button_search";
 
 impl HubIntegrationCapability {
     pub fn new(hub_type: impl Into<String>) -> Self {
@@ -343,6 +350,7 @@ impl HubIntegrationCapability {
             device_onboarding_methods: Vec::new(),
             device_profiles: Vec::new(),
             supports_unpairing: false,
+            unpairable_device_types: Vec::new(),
             supports_roomless_devices: false,
             blocks_room_readiness: true,
         }
@@ -529,6 +537,9 @@ pub type HubDeviceRoomAssignmentRollback = Box<dyn FnOnce() -> Result<()> + Send
 /// the callback succeeds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExternalControllerReleaseReason {
+    /// A reviewed room policy no longer grants the integration authority.
+    /// Credentials remain connected after the integration restores its work.
+    RoomAuthorityChanged,
     UserDisconnect,
     FactoryReset,
     BackupRestore,
@@ -638,6 +649,21 @@ pub trait ExternalLightHubIntegration: Send + Sync {
         _binding: &crate::topology::HubRoomBinding,
     ) -> Result<()> {
         anyhow::bail!("Source room deletion is not supported by this integration")
+    }
+
+    /// Rename one integration-native device to match its canonical Rhythm name.
+    ///
+    /// Integrations whose source name is not user-visible may keep the default
+    /// no-op. Hue Bridge overrides this because its device name is visible in
+    /// the Hue app and must remain aligned with Rhythm.
+    fn rename_device(
+        &self,
+        _state: &SharedState,
+        _hub_key: &HubKey,
+        _native_device_id: &str,
+        _name: &str,
+    ) -> Result<()> {
+        Ok(())
     }
 
     /// Whether every light attached to a Rhythm room must route through a
@@ -784,6 +810,18 @@ pub trait ExternalLightHubIntegration: Send + Sync {
             "Unpairing not supported for {}",
             self.hub_type()
         ))
+    }
+
+    /// Load owner-visible recovery material for a native paired device.
+    ///
+    /// Integrations that do not retain pairing secrets return `None`. Callers
+    /// must keep the returned value out of logs and diagnostics.
+    fn load_pairing_recovery(
+        &self,
+        _state: &SharedState,
+        _native_device_id: &str,
+    ) -> Result<Option<crate::pairing::PairingRecoverySecret>> {
+        Ok(None)
     }
 
     /// Run a hub-specific device diagnostic/test command.
@@ -1679,6 +1717,9 @@ pub struct IntegrationCallbacks {
     /// Delete a source-owned native room through its owning integration.
     pub delete_source_room_fn:
         Arc<dyn Fn(&SharedState, &crate::topology::HubRoomBinding) -> Result<()> + Send + Sync>,
+    /// Rename one integration-native device through its owning integration.
+    pub rename_hub_device_fn:
+        Arc<dyn Fn(&SharedState, &HubKey, &str, &str) -> Result<()> + Send + Sync>,
     /// Start a device pairing session (delegates to integration's `start_pairing`).
     pub start_pairing_fn: Arc<
         dyn Fn(
@@ -1698,6 +1739,12 @@ pub struct IntegrationCallbacks {
     /// Start a device unpairing session (delegates to integration's `start_unpairing`).
     pub start_unpairing_fn: Arc<
         dyn Fn(&SharedState, &str, &serde_json::Value) -> Result<crate::pairing::UnpairingResult>
+            + Send
+            + Sync,
+    >,
+    /// Load secret pairing recovery material through the owning integration.
+    pub load_pairing_recovery_fn: Arc<
+        dyn Fn(&SharedState, &str, &str) -> Result<Option<crate::pairing::PairingRecoverySecret>>
             + Send
             + Sync,
     >,
@@ -2024,6 +2071,23 @@ pub fn integration_callbacks(
         },
     );
 
+    let rename_hub_device_fn = Arc::new(
+        move |state: &SharedState,
+              hub_key: &HubKey,
+              native_device_id: &str,
+              name: &str|
+              -> Result<()> {
+            let integration = find_integration(integrations, hub_key.hub_type.as_str())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No integration for hub type '{}'",
+                        hub_key.hub_type.as_str()
+                    )
+                })?;
+            integration.rename_device(state, hub_key, native_device_id, name)
+        },
+    );
+
     let start_pairing_fn = Arc::new(
         move |state: &SharedState,
               hub_type: &str,
@@ -2061,6 +2125,17 @@ pub fn integration_callbacks(
         },
     );
 
+    let load_pairing_recovery_fn = Arc::new(
+        move |state: &SharedState,
+              hub_type: &str,
+              native_device_id: &str|
+              -> Result<Option<crate::pairing::PairingRecoverySecret>> {
+            let integration = find_integration(integrations, hub_type)
+                .ok_or_else(|| anyhow::anyhow!("No integration for hub type '{}'", hub_type))?;
+            integration.load_pairing_recovery(state, native_device_id)
+        },
+    );
+
     let run_device_test_fn = Arc::new(
         move |state: &SharedState,
               hub_type: &str,
@@ -2094,9 +2169,11 @@ pub fn integration_callbacks(
         finalize_external_controller_release_fn,
         prepare_hub_device_room_assignment_fn,
         delete_source_room_fn,
+        rename_hub_device_fn,
         start_pairing_fn,
         reconcile_pairing_results_fn,
         start_unpairing_fn,
+        load_pairing_recovery_fn,
         run_device_test_fn,
         save_device_test_report_fn,
         hub_capabilities,

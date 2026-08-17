@@ -169,14 +169,17 @@ export async function runDeviceAdminProxy(
 ): Promise<DeviceAdminProxyResponse> {
   let guardedRequest = request;
   if (isDeviceMutation(request)) {
-    const identity = await runDeviceAdminProxyRaw(accessToken, hubId, {
-      method: 'GET',
-      path: 'api/state'
-    });
-    const identityBody = asRecord(identity.body);
-    const serverInstanceId = asNonEmptyString(
-      identityBody.server_instance_id ?? identityBody.serverInstanceId
-    );
+    let serverInstanceId = request.expectedServerInstanceId;
+    if (!serverInstanceId) {
+      const identity = await runDeviceAdminProxyRaw(accessToken, hubId, {
+        method: 'GET',
+        path: 'api/state'
+      });
+      const identityBody = asRecord(identity.body);
+      serverInstanceId = asNonEmptyString(
+        identityBody.server_instance_id ?? identityBody.serverInstanceId
+      );
+    }
     if (!serverInstanceId) {
       throw new Error(
         'The Light Box did not report a durable server identity; no mutation was sent.'
@@ -209,8 +212,7 @@ export async function runDeviceAdminProxy(
     guardedRequest = {
       ...request,
       requestId: request.requestId ?? newDeviceAdminRequestId(),
-      expectedServerInstanceId:
-        request.expectedServerInstanceId ?? serverInstanceId,
+      expectedServerInstanceId: serverInstanceId,
       ...(resourcePrecondition ? { resourcePrecondition } : {})
     };
   }

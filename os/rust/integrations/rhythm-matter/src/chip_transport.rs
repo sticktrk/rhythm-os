@@ -26,6 +26,7 @@ use crate::transport::{
     MatterControllerEventBatch, MatterControllerEventCursor, MatterDeviceInfo,
     MatterEndpointCommandPlan, MatterGroup, MatterGroupMember, MatterLevelCommandVariant,
     MatterLevelStepMode, MatterSubscriptionTarget, MatterTransport,
+    DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS, DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
 };
 
 const SOCKET_NAME: &str = "chip-controller.sock";
@@ -1166,6 +1167,57 @@ impl MatterTransport for ChipTransport {
         let response: ChipRpcProbeLightResponse =
             self.call(ChipRpcRequest::ProbeLight { node_id })?;
         Ok(response.device)
+    }
+
+    fn recover_light_connection(
+        &self,
+        node_id: u64,
+        expected_endpoint: u16,
+    ) -> Result<CommissionedDevice> {
+        let _guard = self
+            .commissioning_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Matter commissioning lock poisoned"))?;
+
+        let probe: Result<ChipRpcProbeLightResponse> =
+            self.call(ChipRpcRequest::ProbeLight { node_id });
+        let device = match probe {
+            Ok(response) => response.device,
+            Err(error) if is_recoverable_operational_discovery_error(&error) => self
+                .recover_operational_discovery_failure(node_id, &error)?
+                .ok_or_else(|| {
+                    error.context(
+                        "Matter connection recovery reset the controller but did not rediscover the saved node",
+                    )
+                })?,
+            Err(error) => return Err(error),
+        };
+
+        if device.light_endpoint != expected_endpoint {
+            anyhow::bail!(
+                "Matter recovery probe returned endpoint {} instead of expected endpoint {}",
+                device.light_endpoint,
+                expected_endpoint
+            );
+        }
+
+        if let Err(error) = self.subscribe_on_off(
+            &[MatterSubscriptionTarget {
+                node_id,
+                endpoint: expected_endpoint,
+            }],
+            DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
+            DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS,
+        ) {
+            tracing::warn!(
+                target: "pair",
+                event = "matter_repeat_pair_subscription_refresh_failed",
+                error = %format!("{error:#}"),
+                "Matter repeat-pair probe succeeded but observed-state subscription refresh will rely on the background retry"
+            );
+        }
+
+        Ok(device)
     }
 
     fn set_on_off(&self, node_id: u64, endpoint: u16, on: bool) -> Result<()> {
@@ -2948,6 +3000,109 @@ mod tests {
             commission_attempts.load(std::sync::atomic::Ordering::SeqCst),
             1,
             "commissioning should not be retried automatically after an operational discovery failure"
+        );
+
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn repeat_pair_connection_recovery_reinitializes_probes_and_refreshes_subscription() {
+        const ADDRESS_RESOLVE_TIMEOUT_ERROR: &str = concat!(
+            "probing Matter light: ",
+            "src/lib/address_resolve/AddressResolve_DefaultImpl.cpp:124: ",
+            "CHIP Error 0x00000032: Timeout"
+        );
+
+        let socket_path = temp_socket_path("repeat-pair-connection-recovery");
+        let probe_attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_probe_attempts = probe_attempts.clone();
+        let handler = move |request: &ChipRpcRequestEnvelope| -> ChipRpcResponseEnvelope {
+            match &request.request {
+                ChipRpcRequest::ProbeLight { node_id }
+                    if observed_probe_attempts.fetch_add(1, Ordering::SeqCst) == 0 =>
+                {
+                    assert_eq!(*node_id, 42);
+                    ChipRpcResponseEnvelope::error(request.id, ADDRESS_RESOLVE_TIMEOUT_ERROR)
+                }
+                ChipRpcRequest::InitController(_) => ChipRpcResponseEnvelope::ok(
+                    request.id,
+                    ChipInitControllerResponse {
+                        fabric_id: "test".to_string(),
+                        operational_fabric_id: 1,
+                        compressed_fabric_id: Some("F800F5FBD9C145CD".to_string()),
+                    },
+                ),
+                ChipRpcRequest::ScanOperationalNode {
+                    node_id,
+                    timeout_ms,
+                } => {
+                    assert_eq!(*node_id, 42);
+                    assert_eq!(
+                        *timeout_ms,
+                        OPERATIONAL_RECOVERY_MDNS_SCAN_TIMEOUT.as_millis() as u64
+                    );
+                    ChipRpcResponseEnvelope::ok(
+                        request.id,
+                        ChipRpcOperationalDiscoveryResponse {
+                            node_id: *node_id,
+                            fabrics: vec!["F800F5FBD9C145CD".to_string()],
+                        },
+                    )
+                }
+                ChipRpcRequest::ProbeLight { node_id } => ChipRpcResponseEnvelope::ok(
+                    request.id,
+                    ChipRpcProbeLightResponse {
+                        device: commissioned_test_device(*node_id),
+                    },
+                ),
+                ChipRpcRequest::SubscribeOnOff {
+                    targets,
+                    min_interval_secs,
+                    max_interval_secs,
+                } => {
+                    assert_eq!(
+                        targets,
+                        &[MatterSubscriptionTarget {
+                            node_id: 42,
+                            endpoint: 1,
+                        }]
+                    );
+                    assert_eq!(*min_interval_secs, DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS);
+                    assert_eq!(*max_interval_secs, DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS);
+                    ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new())
+                }
+                other => panic!("unexpected RPC during repeat-pair recovery: {other:?}"),
+            }
+        };
+        let server = spawn_fake_server_multi(socket_path.clone(), 5, handler);
+
+        let transport = ChipTransport::for_test(socket_path.clone());
+        let device = transport
+            .recover_light_connection(42, 1)
+            .expect("saved node should recover after controller reinitialization");
+        assert_eq!(device.node_id, 42);
+        assert_eq!(probe_attempts.load(Ordering::SeqCst), 2);
+
+        let requests = server.join().unwrap();
+        let kinds = requests
+            .iter()
+            .map(|envelope| match envelope.request {
+                ChipRpcRequest::ProbeLight { .. } => "probe_light",
+                ChipRpcRequest::InitController(_) => "init_controller",
+                ChipRpcRequest::ScanOperationalNode { .. } => "scan_operational_node",
+                ChipRpcRequest::SubscribeOnOff { .. } => "subscribe_on_off",
+                _ => "other",
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec![
+                "probe_light",
+                "init_controller",
+                "scan_operational_node",
+                "probe_light",
+                "subscribe_on_off",
+            ]
         );
 
         let _ = fs::remove_file(socket_path);

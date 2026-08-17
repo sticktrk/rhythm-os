@@ -611,6 +611,19 @@ pub async fn require_api_auth_middleware(
         return next.run(req).await;
     }
 
+    // Appliance LAN traffic is intentionally open for local-first control,
+    // but secret-bearing recovery endpoints require positive owner proof even
+    // on that trusted network. Do this before the general `requires_auth`
+    // bypass so an unauthenticated LAN caller cannot read retained secrets.
+    if owner_token_required(req.method(), req.uri())
+        && !matches!(
+            verified_bearer.as_ref().map(|token| token.role),
+            Some(ApiTokenRole::Owner)
+        )
+    {
+        return unauthorized("Owner bearer token required");
+    }
+
     if !auth_info.requires_auth {
         return next.run(req).await;
     }
@@ -762,6 +775,9 @@ fn forbidden(message: &str) -> Response {
 
 fn support_token_forbidden_reason(method: &Method, uri: &Uri) -> Option<&'static str> {
     let path = uri.path();
+    if *method == Method::GET && path.starts_with("/api/matter/setup-code/") {
+        return Some("Support token cannot read Matter setup codes");
+    }
     if *method == Method::GET
         && path == "/api/backup"
         && query_flag_truthy(uri.query(), "include_secrets")
@@ -791,6 +807,10 @@ fn support_token_forbidden_reason(method: &Method, uri: &Uri) -> Option<&'static
     } else {
         None
     }
+}
+
+fn owner_token_required(method: &Method, uri: &Uri) -> bool {
+    *method == Method::GET && uri.path().starts_with("/api/matter/setup-code/")
 }
 
 fn query_flag_truthy(query: Option<&str>, key: &str) -> bool {
@@ -1210,6 +1230,65 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn appliance_lan_setup_code_recovery_requires_explicit_owner_token() {
+        let state = test_state();
+        {
+            let mut state = state.lock().unwrap();
+            state.platform_type = "appliance";
+            state.platform_context = "rpiz";
+            state.load_pairing_recovery_fn = Some(Arc::new(|_, hub_type, native_device_id| {
+                assert_eq!(hub_type, "matter");
+                assert_eq!(native_device_id, "matter-42-2");
+                Ok(Some(crate::pairing::PairingRecoverySecret {
+                    payload_kind: "qr_code".to_string(),
+                    setup_payload: "MT:OWNER-ONLY-SECRET".to_string(),
+                    captured_at: "2026-08-12T00:00:00Z".to_string(),
+                }))
+            }));
+        }
+        let owner = issue_local_owner_token(&state, Some("BLE Wi-Fi".into())).unwrap();
+        let app = auth_test_router(state);
+
+        let unauthenticated = app
+            .clone()
+            .oneshot(request_with_peer(
+                Method::GET,
+                "/api/matter/setup-code/matter-42-2",
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 42)),
+                Body::empty(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(unauthenticated.status(), StatusCode::UNAUTHORIZED);
+        let unauthenticated_body = to_bytes(unauthenticated.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(!String::from_utf8_lossy(&unauthenticated_body).contains("MT:"));
+
+        let authenticated = app
+            .oneshot({
+                let mut request = request_with_peer(
+                    Method::GET,
+                    "/api/matter/setup-code/matter-42-2",
+                    IpAddr::V4(Ipv4Addr::new(192, 168, 1, 42)),
+                    Body::empty(),
+                );
+                request.headers_mut().insert(
+                    AUTHORIZATION,
+                    format!("Bearer {}", owner.token).parse().unwrap(),
+                );
+                request
+            })
+            .await
+            .unwrap();
+        assert_eq!(authenticated.status(), StatusCode::OK);
+        let authenticated_body = to_bytes(authenticated.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&authenticated_body).contains("MT:OWNER-ONLY-SECRET"));
+    }
+
+    #[tokio::test]
     async fn appliance_lan_auth_status_reports_whether_the_bearer_is_an_owner() {
         let state = test_state();
         {
@@ -1625,6 +1704,11 @@ mod tests {
                 Method::GET,
                 "/api/backup?include_secrets=true",
                 "secret backup export",
+            ),
+            (
+                Method::GET,
+                "/api/matter/setup-code/matter-42",
+                "Matter setup code recovery",
             ),
         ];
 

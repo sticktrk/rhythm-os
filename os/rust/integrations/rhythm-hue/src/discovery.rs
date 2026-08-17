@@ -11,6 +11,7 @@ use log::{debug, info, warn};
 
 use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_core::DeviceRegistry;
+use rhythm_os::api_types::{LightCapabilitiesDto, LightColorTemperatureCapabilitiesDto};
 use rhythm_os::canonical::identity::{DiscoveredIdentity, HardwareId};
 use rhythm_os::discovery::{
     DiscoveredDevice, DiscoveredMotionState, DiscoveredRoom, HubDiscovery, ManagedSceneProjection,
@@ -53,6 +54,9 @@ pub struct HueDiscovery<H: HueTransport> {
     device_to_room_cache: Mutex<Option<HashMap<String, String>>>,
     /// Cached room_id → room_name mapping, populated by `discover_rooms()`.
     room_name_cache: Mutex<Option<HashMap<String, String>>>,
+    /// Cached native device ID → normalized endpoint capability metadata,
+    /// refreshed with each complete identity snapshot.
+    endpoint_capabilities_cache: Mutex<HashMap<String, serde_json::Value>>,
     mode: Mutex<HueDiscoveryMode>,
     ownership_source: Option<HueDiscoveryOwnershipSource>,
 }
@@ -68,6 +72,7 @@ impl<H: HueTransport> HueDiscovery<H> {
             username,
             device_to_room_cache: Mutex::new(None),
             room_name_cache: Mutex::new(None),
+            endpoint_capabilities_cache: Mutex::new(HashMap::new()),
             mode: Mutex::new(mode),
             ownership_source: None,
         }
@@ -87,6 +92,7 @@ impl<H: HueTransport> HueDiscovery<H> {
             username,
             device_to_room_cache: Mutex::new(None),
             room_name_cache: Mutex::new(None),
+            endpoint_capabilities_cache: Mutex::new(HashMap::new()),
             mode: Mutex::new(HueDiscoveryMode::BridgeNative),
             ownership_source: Some(HueDiscoveryOwnershipSource { storage, bridge_id }),
         })
@@ -168,6 +174,10 @@ impl<H: HueTransport> HueDiscovery<H> {
             .room_name_cache
             .lock()
             .map_err(|_| anyhow::anyhow!("Failed to lock room_name cache"))? = None;
+        self.endpoint_capabilities_cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Failed to lock endpoint capability cache"))?
+            .clear();
         Ok(())
     }
 
@@ -414,6 +424,144 @@ impl<H: HueTransport> HueDiscovery<H> {
         } else {
             None
         }
+    }
+
+    fn kelvin_from_mirek(mirek: u64) -> Option<u16> {
+        if mirek == 0 {
+            return None;
+        }
+        let kelvin = (1_000_000.0_f64 / mirek as f64).round() as u64;
+        u16::try_from(kelvin)
+            .ok()
+            .filter(|kelvin| (500..=25_000).contains(kelvin))
+    }
+
+    /// Normalize Hue V2 light-resource capability metadata by owning device.
+    ///
+    /// A missing light resource or malformed mirek schema is "unknown" and is
+    /// deliberately omitted. A complete light resource without a
+    /// `color_temperature` member is an explicit brightness/color-only light
+    /// and publishes an empty normalized CCT capability. Multi-light devices
+    /// (for example Centris fixtures) expose the safe intersection across all
+    /// of their light services.
+    fn extract_endpoint_capabilities(
+        device_data: &[serde_json::Value],
+        light_data: &[serde_json::Value],
+    ) -> HashMap<String, serde_json::Value> {
+        let light_resources = light_data
+            .iter()
+            .filter_map(|light| {
+                light
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|id| (id, light))
+            })
+            .collect::<HashMap<_, _>>();
+        let mut normalized = HashMap::new();
+
+        for device in device_data {
+            let Some(device_id) = device.get("id").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let light_service_ids = device
+                .get("services")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|service| {
+                    service.get("rtype").and_then(serde_json::Value::as_str) == Some("light")
+                })
+                .filter_map(|service| service.get("rid").and_then(serde_json::Value::as_str))
+                .collect::<Vec<_>>();
+            if light_service_ids.is_empty() {
+                continue;
+            }
+
+            let mut complete = true;
+            let mut all_support_color_temperature = true;
+            let mut supports_xy_color = false;
+            let mut intersection: Option<LightColorTemperatureCapabilitiesDto> = None;
+            for service_id in light_service_ids {
+                let Some(light) = light_resources.get(service_id) else {
+                    complete = false;
+                    break;
+                };
+                supports_xy_color |= light.get("color").is_some();
+                let Some(color_temperature) = light.get("color_temperature") else {
+                    all_support_color_temperature = false;
+                    intersection = None;
+                    continue;
+                };
+                let Some(minimum_mirek) = color_temperature
+                    .pointer("/mirek_schema/mirek_minimum")
+                    .and_then(serde_json::Value::as_u64)
+                else {
+                    complete = false;
+                    break;
+                };
+                let Some(maximum_mirek) = color_temperature
+                    .pointer("/mirek_schema/mirek_maximum")
+                    .and_then(serde_json::Value::as_u64)
+                else {
+                    complete = false;
+                    break;
+                };
+                if minimum_mirek > maximum_mirek {
+                    complete = false;
+                    break;
+                }
+                let Some(min_kelvin) = Self::kelvin_from_mirek(maximum_mirek) else {
+                    complete = false;
+                    break;
+                };
+                let Some(max_kelvin) = Self::kelvin_from_mirek(minimum_mirek) else {
+                    complete = false;
+                    break;
+                };
+                if min_kelvin > max_kelvin {
+                    complete = false;
+                    break;
+                }
+                if all_support_color_temperature {
+                    intersection = Some(match intersection {
+                        Some(current) => LightColorTemperatureCapabilitiesDto {
+                            min_kelvin: current.min_kelvin.max(min_kelvin),
+                            max_kelvin: current.max_kelvin.min(max_kelvin),
+                        },
+                        None => LightColorTemperatureCapabilitiesDto {
+                            min_kelvin,
+                            max_kelvin,
+                        },
+                    });
+                }
+            }
+
+            if !complete {
+                continue;
+            }
+            let color_temperature = if all_support_color_temperature {
+                intersection.filter(|range| range.min_kelvin <= range.max_kelvin)
+            } else {
+                None
+            };
+            if all_support_color_temperature && color_temperature.is_none() {
+                continue;
+            }
+            normalized.insert(
+                device_id.to_string(),
+                serde_json::json!({
+                    "light_capabilities": LightCapabilitiesDto {
+                        color_temperature,
+                        individual_profile_overrides: None,
+                    },
+                    "automatic_naming": {
+                        "color_kind": if supports_xy_color { "color" } else { "white" }
+                    }
+                }),
+            );
+        }
+
+        normalized
     }
 
     /// Build device_id → mac_address mapping from zigbee_connectivity resources.
@@ -951,6 +1099,10 @@ impl<H: HueTransport + 'static> HubDiscovery for HueDiscovery<H> {
     /// names, manufacturer/model, and MAC addresses from zigbee_connectivity.
     /// Used by the canonical device registry for cross-hub deduplication.
     fn discover_identities(&self) -> Result<Vec<DiscoveredIdentity>> {
+        self.endpoint_capabilities_cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Failed to lock endpoint capability cache"))?
+            .clear();
         let device_to_room = self.cached_or_fetch_device_to_room()?;
 
         // Get room names cache
@@ -995,6 +1147,22 @@ impl<H: HueTransport + 'static> HubDiscovery for HueDiscovery<H> {
             .iter()
             .filter(|i| i.device_type == DeviceType::Light)
             .count();
+        if light_count > 0 {
+            match self.transport.get_resources(&self.username, "light") {
+                Ok(response) => match response.get("data").and_then(serde_json::Value::as_array) {
+                    Some(light_data) => {
+                        *self.endpoint_capabilities_cache.lock().map_err(|_| {
+                            anyhow::anyhow!("Failed to lock endpoint capability cache")
+                        })? = Self::extract_endpoint_capabilities(dev_data, light_data);
+                    }
+                    None => warn!(target: "hue_discovery",
+                        "Hue light capability response had no data array; retaining unknown capability state"),
+                },
+                Err(error) => warn!(target: "hue_discovery",
+                    "Hue light capability discovery failed; retaining unknown capability state: {}",
+                    error),
+            }
+        }
         let button_count = identities
             .iter()
             .filter(|i| i.device_type == DeviceType::Button)
@@ -1007,6 +1175,13 @@ impl<H: HueTransport + 'static> HubDiscovery for HueDiscovery<H> {
             "Discovered {} device identities ({} lights, {} buttons, {} motion) from Hue bridge",
             identities.len(), light_count, button_count, motion_count);
         Ok(identities)
+    }
+
+    fn endpoint_capabilities(&self, native_id: &str) -> Option<serde_json::Value> {
+        self.endpoint_capabilities_cache
+            .lock()
+            .ok()
+            .and_then(|capabilities| capabilities.get(native_id).cloned())
     }
 
     fn discover_motion_state(&self) -> Result<Vec<DiscoveredMotionState>> {
@@ -1378,6 +1553,23 @@ mod tests {
                 }),
             )
             .with_resource(
+                "light",
+                serde_json::json!({
+                    "data": [{
+                        "id": "light-1",
+                        "owner": { "rtype": "device", "rid": "dev-light" },
+                        "color_temperature": {
+                            "mirek": 250,
+                            "mirek_valid": true,
+                            "mirek_schema": {
+                                "mirek_minimum": 153,
+                                "mirek_maximum": 500
+                            }
+                        }
+                    }]
+                }),
+            )
+            .with_resource(
                 "behavior_instance",
                 serde_json::json!({
                     "data": [
@@ -1451,6 +1643,16 @@ mod tests {
                 && identity.native_id == "motion-1"
                 && identity.hardware_ids == vec![HardwareId::mac("00:17:88:01:00:00:03")]
         }));
+        let light_capabilities = discovery
+            .endpoint_capabilities("dev-light")
+            .expect("Hue V2 light schema should be normalized by device identity");
+        assert_eq!(
+            light_capabilities.pointer("/light_capabilities/color_temperature"),
+            Some(&serde_json::json!({
+                "min_kelvin": 2000,
+                "max_kelvin": 6536
+            }))
+        );
 
         let configured = discovery.discover_configured_devices().unwrap();
         assert_eq!(
@@ -1460,6 +1662,127 @@ mod tests {
                 ("behavior-dependee".to_string(), "dev-motion".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn hue_light_capabilities_intersect_multi_service_and_preserve_unknown() {
+        let devices = serde_json::json!([
+            {
+                "id": "multi-light-device",
+                "services": [
+                    {"rtype": "light", "rid": "light-wide"},
+                    {"rtype": "light", "rid": "light-narrow"}
+                ]
+            },
+            {
+                "id": "brightness-only-device",
+                "services": [{"rtype": "light", "rid": "light-white"}]
+            },
+            {
+                "id": "xy-only-device",
+                "services": [{"rtype": "light", "rid": "light-color"}]
+            },
+            {
+                "id": "missing-resource-device",
+                "services": [{"rtype": "light", "rid": "light-missing"}]
+            },
+            {
+                "id": "malformed-schema-device",
+                "services": [{"rtype": "light", "rid": "light-malformed"}]
+            }
+        ]);
+        let lights = serde_json::json!([
+            {
+                "id": "light-wide",
+                "color_temperature": {
+                    "mirek_schema": {"mirek_minimum": 153, "mirek_maximum": 500}
+                }
+            },
+            {
+                "id": "light-narrow",
+                "color_temperature": {
+                    "mirek_schema": {"mirek_minimum": 200, "mirek_maximum": 454}
+                }
+            },
+            {"id": "light-white", "dimming": {"brightness": 42.0}},
+            {
+                "id": "light-color",
+                "color": {
+                    "xy": {"x": 0.3, "y": 0.3},
+                    "gamut_type": "C"
+                }
+            },
+            {"id": "light-malformed", "color_temperature": {"mirek": 250}}
+        ]);
+
+        let capabilities = HueDiscovery::<StaticHueTransport>::extract_endpoint_capabilities(
+            devices.as_array().unwrap(),
+            lights.as_array().unwrap(),
+        );
+
+        assert_eq!(
+            capabilities["multi-light-device"].pointer("/light_capabilities/color_temperature"),
+            Some(&serde_json::json!({
+                "min_kelvin": 2203,
+                "max_kelvin": 5000
+            }))
+        );
+        assert_eq!(
+            capabilities["brightness-only-device"],
+            serde_json::json!({
+                "light_capabilities": {},
+                "automatic_naming": {"color_kind": "white"}
+            }),
+            "a complete Hue light resource without color_temperature is explicitly non-CT"
+        );
+        assert_eq!(
+            capabilities["xy-only-device"],
+            serde_json::json!({
+                "light_capabilities": {},
+                "automatic_naming": {"color_kind": "color"}
+            }),
+            "XY color is retained so the shared resolver can expose CCT-curve fallback"
+        );
+        assert!(
+            !capabilities.contains_key("missing-resource-device"),
+            "a partial light snapshot must remain unknown"
+        );
+        assert!(
+            !capabilities.contains_key("malformed-schema-device"),
+            "a malformed schema must remain unknown rather than becoming unsupported"
+        );
+    }
+
+    #[test]
+    fn identity_discovery_keeps_working_when_light_capability_fetch_fails() {
+        let transport = StaticHueTransport::default()
+            .with_resource(
+                "device",
+                serde_json::json!({"data": [{
+                    "id": "light-device",
+                    "metadata": {"name": "Future Hue"},
+                    "product_data": {
+                        "manufacturer_name": "Signify Netherlands B.V.",
+                        "model_id": "FUTURE-HUE"
+                    },
+                    "services": [{"rtype": "light", "rid": "light-service"}]
+                }]}),
+            )
+            .with_resource(
+                "zigbee_connectivity",
+                serde_json::json!({"data": [{
+                    "owner": {"rtype": "device", "rid": "light-device"},
+                    "mac_address": "00:17:88:01:00:00:09"
+                }]}),
+            )
+            .failing_resource("light");
+        let discovery = HueDiscovery::new(Arc::new(transport), "test-user".to_string());
+
+        let identities = discovery.discover_identities().unwrap();
+
+        assert_eq!(identities.len(), 1);
+        assert_eq!(identities[0].native_id, "light-device");
+        assert!(discovery.endpoint_capabilities("light-device").is_none());
     }
 
     #[test]

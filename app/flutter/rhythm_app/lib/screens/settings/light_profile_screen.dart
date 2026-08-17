@@ -15,8 +15,96 @@ import '../../providers/subscription_provider.dart';
 import '../../services/analytics_service.dart';
 import '../../utils/app_color_temperature.dart';
 import '../../widgets/auto_slider_setting_row.dart';
+import '../../widgets/color_wheel_picker.dart';
 import '../../widgets/info_tooltip.dart';
 import '../../widgets/pro_lock.dart';
+
+/// Presentation modes for one room's daytime color behavior.
+///
+/// The mode is derived from the existing profile contract rather than stored:
+/// equal CCT endpoints are a fixed white, while a curve direct color is a
+/// fixed color.
+enum RoomDayColorMode { natural, white, color }
+
+/// Presentation modes for one room's daytime brightness behavior.
+///
+/// Equal min/max brightness endpoints represent one fixed brightness, while
+/// distinct endpoints keep Rhythm's automatic daytime range.
+enum RoomDayBrightnessMode { automatic, fixed }
+
+extension on RoomDayColorMode {
+  String get analyticsValue => switch (this) {
+        RoomDayColorMode.natural => 'natural',
+        RoomDayColorMode.white => 'static_temperature',
+        RoomDayColorMode.color => 'static_color',
+      };
+}
+
+extension on RoomDayBrightnessMode {
+  String get analyticsValue => switch (this) {
+        RoomDayBrightnessMode.automatic => 'automatic',
+        RoomDayBrightnessMode.fixed => 'fixed',
+      };
+}
+
+@visibleForTesting
+RoomDayBrightnessMode roomDayBrightnessModeForConfig(
+  sdk.RhythmCurveConfig config,
+) =>
+    config.minBrightness == config.maxBrightness
+        ? RoomDayBrightnessMode.fixed
+        : RoomDayBrightnessMode.automatic;
+
+@visibleForTesting
+({int minBrightness, int maxBrightness}) roomDayBrightnessEndpointsForMode({
+  required RoomDayBrightnessMode mode,
+  required double automaticMinBrightness,
+  required double automaticMaxBrightness,
+  required double fixedBrightness,
+}) {
+  final fixed = fixedBrightness.round().clamp(1, 100);
+  if (mode == RoomDayBrightnessMode.fixed) {
+    return (minBrightness: fixed, maxBrightness: fixed);
+  }
+  return (
+    minBrightness: automaticMinBrightness.round().clamp(1, 100),
+    maxBrightness: automaticMaxBrightness.round().clamp(1, 100),
+  );
+}
+
+@visibleForTesting
+RoomDayColorMode roomDayColorModeForConfig(sdk.RhythmCurveConfig config) {
+  final directColor = switch (config.curve) {
+    sdk.RhythmSuperGaussianCurve(:final directColor) => directColor,
+    sdk.RhythmConstantCurve(:final directColor) => directColor,
+    _ => null,
+  };
+  if (directColor != null) return RoomDayColorMode.color;
+  if (config.minColorTemp == config.maxColorTemp) {
+    return RoomDayColorMode.white;
+  }
+  return RoomDayColorMode.natural;
+}
+
+@visibleForTesting
+sdk.RhythmSuperGaussianCurve roomDayCurveForMode({
+  required RoomDayColorMode mode,
+  required sdk.RhythmDirectColor selectedColor,
+  required double widthLeftBri,
+  required double widthRightBri,
+  required double widthLeftCct,
+  required double widthRightCct,
+  required double shapeP,
+}) {
+  return sdk.RhythmSuperGaussianCurve(
+    widthLeftBri: widthLeftBri,
+    widthRightBri: widthRightBri,
+    widthLeftCct: widthLeftCct,
+    widthRightCct: widthRightCct,
+    shapeP: shapeP,
+    directColor: mode == RoomDayColorMode.color ? selectedColor : null,
+  );
+}
 
 /// Full-screen modal for configuring the light profile.
 ///
@@ -92,6 +180,19 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
   double _maxDimSteps = 6;
   int _motionTimeoutSecs = 600;
   bool _motionTimeoutAuto = true;
+
+  // Room-scoped daytime color presentation. These values map onto the
+  // existing CCT endpoints and curve direct_color fields at save time.
+  RoomDayColorMode _roomDayColorMode = RoomDayColorMode.natural;
+  double _roomDayWhiteKelvin = 3500;
+  double _roomDayHue = 35;
+  double _roomDaySaturation = 0.85;
+
+  // Fixed brightness maps to equal min/max endpoints. Keep the automatic
+  // range separately so switching modes cannot retain a stale fixed endpoint.
+  RoomDayBrightnessMode _roomDayBrightnessMode =
+      RoomDayBrightnessMode.automatic;
+  double _roomDayFixedBrightness = 50;
 
   // Interval auto mode (null = server decides).
   bool _intervalAuto = false;
@@ -249,6 +350,9 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
   }
 
   bool get _isSleepProfile => _selectedProfileId == 'sleep';
+
+  bool get _usesRoomDayColorControl =>
+      widget.isRoomScoped && widget.overrideScope == 'room' && !_isSleepProfile;
 
   sdk.RhythmMode _modeForProfileId(String profileId) =>
       profileId == 'sleep' ? sdk.RhythmMode.sleep : sdk.RhythmMode.day;
@@ -498,10 +602,28 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
   }
 
   void _applyProfileConfig(sdk.RhythmCurveConfig config) {
-    _minColorTemp = config.minColorTemp.toDouble();
-    _maxColorTemp = config.maxColorTemp.toDouble();
-    _minBrightness = config.minBrightness.toDouble();
-    _maxBrightness = config.maxBrightness.toDouble();
+    final roomDayMode = _usesRoomDayColorControl
+        ? roomDayColorModeForConfig(config)
+        : RoomDayColorMode.natural;
+    final inheritedConfig = _globalProfileConfigs[config.id];
+    final adaptiveRange = roomDayMode == RoomDayColorMode.white &&
+            inheritedConfig != null &&
+            inheritedConfig.minColorTemp != inheritedConfig.maxColorTemp
+        ? inheritedConfig
+        : config;
+    _minColorTemp = adaptiveRange.minColorTemp.toDouble();
+    _maxColorTemp = adaptiveRange.maxColorTemp.toDouble();
+    final roomDayBrightnessMode = _usesRoomDayColorControl
+        ? roomDayBrightnessModeForConfig(config)
+        : RoomDayBrightnessMode.automatic;
+    final inheritedBrightnessConfig =
+        roomDayBrightnessMode == RoomDayBrightnessMode.fixed &&
+                inheritedConfig != null &&
+                inheritedConfig.minBrightness != inheritedConfig.maxBrightness
+            ? inheritedConfig
+            : config;
+    _minBrightness = inheritedBrightnessConfig.minBrightness.toDouble();
+    _maxBrightness = inheritedBrightnessConfig.maxBrightness.toDouble();
     _maxDimSteps = config.maxDimSteps.toDouble();
     _fadeAuto = config.fadeMs == null;
     _fadeMs = (config.fadeMs ?? _serverSync.effectiveFadeMs ?? 500).toDouble();
@@ -529,11 +651,39 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
       _ => null,
     };
 
-    if (directColor != null) {
+    if (config.id == 'sleep' && directColor != null) {
       final rgb = directColor.rgb;
       _sleepHue = HSVColor.fromColor(
         Color.fromARGB(255, rgb.r, rgb.g, rgb.b),
       ).hue;
+    }
+
+    if (_usesRoomDayColorControl) {
+      _roomDayBrightnessMode = roomDayBrightnessMode;
+      _roomDayFixedBrightness =
+          roomDayBrightnessMode == RoomDayBrightnessMode.fixed
+              ? config.minBrightness.toDouble().clamp(1, 100)
+              : ((config.minBrightness + config.maxBrightness) / 2)
+                  .clamp(1, 100);
+      _roomDayColorMode = roomDayMode;
+      final editorRange = _colorTemperatureEditorRange;
+      final fallbackWhite = 3500.0
+          .clamp(
+            editorRange?.minKelvin.toDouble() ?? 1500,
+            editorRange?.maxKelvin.toDouble() ?? 6500,
+          )
+          .toDouble();
+      _roomDayWhiteKelvin = roomDayMode == RoomDayColorMode.white
+          ? config.minColorTemp.toDouble()
+          : fallbackWhite;
+      if (directColor != null) {
+        final rgb = directColor.rgb;
+        final hsv = HSVColor.fromColor(
+          Color.fromARGB(255, rgb.r, rgb.g, rgb.b),
+        );
+        _roomDayHue = hsv.hue;
+        _roomDaySaturation = hsv.saturation;
+      }
     }
 
     if (config.id == 'sleep') {
@@ -651,13 +801,24 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
     final curve = base.curve;
     sdk.RhythmCurveShape nextCurve;
     if (curve is sdk.RhythmSuperGaussianCurve) {
-      nextCurve = curve.copyWith(
-        widthLeftBri: _widthLeftBri,
-        widthRightBri: _widthRightBri,
-        widthLeftCct: _widthLeftCct,
-        widthRightCct: _widthRightCct,
-        shapeP: _shapeP,
-      );
+      nextCurve = _usesRoomDayColorControl
+          ? roomDayCurveForMode(
+              mode: _roomDayColorMode,
+              selectedColor: _roomDayDirectColor,
+              widthLeftBri: _widthLeftBri,
+              widthRightBri: _widthRightBri,
+              widthLeftCct: _widthLeftCct,
+              widthRightCct: _widthRightCct,
+              shapeP: _shapeP,
+            )
+          : sdk.RhythmSuperGaussianCurve(
+              widthLeftBri: _widthLeftBri,
+              widthRightBri: _widthRightBri,
+              widthLeftCct: _widthLeftCct,
+              widthRightCct: _widthRightCct,
+              shapeP: _shapeP,
+              directColor: curve.directColor,
+            );
     } else {
       nextCurve = curve;
     }
@@ -665,13 +826,29 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
     final canUseAdvancedDay = context
         .read<SubscriptionProvider>()
         .has(Entitlement.advancedDayControls);
+    final roomDayBrightness = roomDayBrightnessEndpointsForMode(
+      mode: _roomDayBrightnessMode,
+      automaticMinBrightness: _minBrightness,
+      automaticMaxBrightness: _maxBrightness,
+      fixedBrightness: _roomDayFixedBrightness,
+    );
     return sdk.RhythmCurveConfig(
       id: base.id,
       name: base.name,
-      minColorTemp: _minColorTemp.round(),
-      maxColorTemp: _maxColorTemp.round(),
-      minBrightness: _minBrightness.round(),
-      maxBrightness: _maxBrightness.round(),
+      minColorTemp: _usesRoomDayColorControl &&
+              _roomDayColorMode == RoomDayColorMode.white
+          ? _roomDayWhiteKelvin.round()
+          : _minColorTemp.round(),
+      maxColorTemp: _usesRoomDayColorControl &&
+              _roomDayColorMode == RoomDayColorMode.white
+          ? _roomDayWhiteKelvin.round()
+          : _maxColorTemp.round(),
+      minBrightness: _usesRoomDayColorControl
+          ? roomDayBrightness.minBrightness
+          : _minBrightness.round(),
+      maxBrightness: _usesRoomDayColorControl
+          ? roomDayBrightness.maxBrightness
+          : _maxBrightness.round(),
       maxDimSteps: _maxDimSteps.round(),
       fadeSetting: canUseAdvancedDay
           ? _fadeAuto
@@ -1085,10 +1262,16 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
         ),
         const SizedBox(height: 24),
       ] else ...[
-        _buildBrightnessRangeCard(),
+        if (_usesRoomDayColorControl)
+          _buildRoomDayBrightnessCard()
+        else
+          _buildBrightnessRangeCard(),
         if (!_colorTemperatureExplicitlyUnsupported) ...[
           const SizedBox(height: 14),
-          _buildColorTempRangeCard(),
+          if (_usesRoomDayColorControl)
+            _buildRoomDayColorCard()
+          else
+            _buildColorTempRangeCard(),
         ],
         const SizedBox(height: 24),
       ],
@@ -1655,6 +1838,18 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
   Color get _sleepSelectedColor =>
       HSVColor.fromAHSV(1, _sleepHue, 0.85, 1).toColor();
 
+  sdk.RhythmDirectColor get _roomDayDirectColor {
+    final color = _roomDaySelectedColor;
+    return _rgbToDirectColor(
+      (color.r * 255).round(),
+      (color.g * 255).round(),
+      (color.b * 255).round(),
+    );
+  }
+
+  Color get _roomDaySelectedColor =>
+      HSVColor.fromAHSV(1, _roomDayHue, _roomDaySaturation, 1).toColor();
+
   bool _isSleepPresetSelected(Color presetColor) {
     final selected = _sleepSelectedColor;
     return (selected.r - presetColor.r).abs() < 0.04 &&
@@ -1996,9 +2191,356 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
     );
   }
 
+  void _selectRoomDayBrightnessMode(RoomDayBrightnessMode mode) {
+    if (mode == _roomDayBrightnessMode) return;
+    _onCurveChanged(() => _roomDayBrightnessMode = mode);
+  }
+
+  Widget _buildRoomDayBrightnessCard() {
+    const color = _Palette.amber;
+    final fixedValue = _roomDayFixedBrightness.clamp(1, 100).toDouble();
+    final minValue = _minBrightness.clamp(1, 100).toDouble();
+    final maxValue = _maxBrightness.clamp(1, 100).toDouble();
+    final isFixed = _roomDayBrightnessMode == RoomDayBrightnessMode.fixed;
+    final modeLabel = isFixed
+        ? '${fixedValue.round()} percent fixed'
+        : '${minValue.round()} to ${maxValue.round()} percent';
+    final detail = switch (_roomDayBrightnessMode) {
+      RoomDayBrightnessMode.automatic => Padding(
+          key: const ValueKey('room-day-brightness-automatic-detail'),
+          padding: const EdgeInsets.fromLTRB(2, 10, 2, 4),
+          child: LightProfileBrightnessRangeBar(
+            minValue: minValue,
+            maxValue: maxValue,
+            tint: color,
+            onMinChanged: (value) =>
+                _onCurveChanged(() => _minBrightness = value),
+            onMaxChanged: (value) =>
+                _onCurveChanged(() => _maxBrightness = value),
+          ),
+        ),
+      RoomDayBrightnessMode.fixed => Padding(
+          key: const ValueKey('room-day-brightness-fixed-detail'),
+          padding: const EdgeInsets.only(top: 12),
+          child: Semantics(
+            slider: true,
+            label: 'Fixed daytime brightness',
+            value: '${fixedValue.round()} percent',
+            child: KeyedSubtree(
+              key: const ValueKey('room-day-fixed-brightness-slider'),
+              child: _buildInlineSlider(
+                label: 'Brightness',
+                value: fixedValue,
+                min: 1,
+                max: 100,
+                divisions: 99,
+                format: (value) => '${value.round()}%',
+                color: color,
+                onChanged: (value) => _onCurveChanged(
+                  () => _roomDayFixedBrightness = value,
+                ),
+              ),
+            ),
+          ),
+        ),
+    };
+
+    return Semantics(
+      key: const ValueKey('room-day-brightness-control'),
+      container: true,
+      label: 'Day brightness',
+      value: modeLabel,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOutCubic,
+        padding: const EdgeInsets.fromLTRB(18, 18, 18, 10),
+        decoration: BoxDecoration(
+          color: _Palette.card,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: color.withValues(alpha: 0.25)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: color.withValues(alpha: 0.12),
+                  ),
+                  child: const Icon(
+                    Icons.wb_sunny_rounded,
+                    color: color,
+                    size: 18,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                const Expanded(
+                  child: Text(
+                    'Day brightness',
+                    style: TextStyle(
+                      color: _Palette.textPrimary,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: -0.1,
+                    ),
+                  ),
+                ),
+                Text(
+                  isFixed
+                      ? '${fixedValue.round()}%'
+                      : '${minValue.round()}–${maxValue.round()}%',
+                  style: const TextStyle(
+                    color: color,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    fontFeatures: [FontFeature.tabularFigures()],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              isFixed
+                  ? 'Hold one brightness throughout the day.'
+                  : 'Automatically rise and fall between a brightness range.',
+              style: const TextStyle(
+                color: _Palette.textSecondary,
+                fontSize: 12,
+              ),
+            ),
+            const SizedBox(height: 14),
+            RoomDayBrightnessModeSelector(
+              mode: _roomDayBrightnessMode,
+              onChanged: _selectRoomDayBrightnessMode,
+            ),
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 220),
+              switchInCurve: Curves.easeOutCubic,
+              switchOutCurve: Curves.easeInCubic,
+              child: detail,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   // ---------------------------------------------------------------------------
   // Color Temperature Card — kelvin range with gradient preview
   // ---------------------------------------------------------------------------
+
+  void _selectRoomDayColorMode(RoomDayColorMode mode) {
+    if (mode == _roomDayColorMode) return;
+    if (mode == RoomDayColorMode.color &&
+        _selectedProfileConfig?.curve is! sdk.RhythmSuperGaussianCurve) {
+      return;
+    }
+    _onCurveChanged(() => _roomDayColorMode = mode);
+  }
+
+  Widget _buildRoomDayColorCard() {
+    final editorRange = _colorTemperatureEditorRange!;
+    final hardMin = editorRange.minKelvin.toDouble();
+    final hardMax = editorRange.maxKelvin.toDouble();
+    final minValue = _minColorTemp.clamp(hardMin, hardMax).toDouble();
+    final maxValue = _maxColorTemp.clamp(hardMin, hardMax).toDouble();
+    final whiteValue = _roomDayWhiteKelvin.clamp(hardMin, hardMax).toDouble();
+    final span = hardMax - hardMin;
+    final divisions = (span / 100).round().clamp(1, 190);
+    final warmColor = AppColorTemperature.curveColor(minValue.round());
+    final coolColor = AppColorTemperature.curveColor(maxValue.round());
+    final whiteColor = AppColorTemperature.curveColor(whiteValue.round());
+    final selectedColor = switch (_roomDayColorMode) {
+      RoomDayColorMode.natural => warmColor,
+      RoomDayColorMode.white => whiteColor,
+      RoomDayColorMode.color => _roomDaySelectedColor,
+    };
+    final supportsDirectColor =
+        _selectedProfileConfig?.curve is sdk.RhythmSuperGaussianCurve;
+    final modeLabel = switch (_roomDayColorMode) {
+      RoomDayColorMode.natural =>
+        '${minValue.round()} to ${maxValue.round()} kelvin',
+      RoomDayColorMode.white => '${whiteValue.round()} kelvin',
+      RoomDayColorMode.color => 'fixed color',
+    };
+
+    final detail = switch (_roomDayColorMode) {
+      RoomDayColorMode.natural => Padding(
+          key: const ValueKey('room-day-color-natural-detail'),
+          padding: const EdgeInsets.only(top: 10),
+          child: LightProfileColorTemperatureRangeBar(
+            minValue: minValue,
+            maxValue: maxValue,
+            hardMin: hardMin,
+            hardMax: hardMax,
+            tint: warmColor,
+            minThumbColor: warmColor,
+            maxThumbColor: coolColor,
+            gradient: LinearGradient(
+              colors: List.generate(12, (i) {
+                final kelvin = hardMin + (i / 11) * span;
+                return AppColorTemperature.curveColor(kelvin.round());
+              }),
+            ),
+            divisions: divisions,
+            onMinChanged: (value) =>
+                _onCurveChanged(() => _minColorTemp = value),
+            onMaxChanged: (value) =>
+                _onCurveChanged(() => _maxColorTemp = value),
+          ),
+        ),
+      RoomDayColorMode.white => Padding(
+          key: const ValueKey('room-day-color-white-detail'),
+          padding: const EdgeInsets.only(top: 12),
+          child: Semantics(
+            slider: true,
+            label: 'Fixed daytime white temperature',
+            value: '${whiteValue.round()} kelvin',
+            child: KeyedSubtree(
+              key: const ValueKey('room-day-white-temperature-slider'),
+              child: _buildInlineSlider(
+                label: 'White',
+                value: whiteValue,
+                min: hardMin,
+                max: hardMax,
+                divisions: divisions,
+                format: (value) => '${value.round()}K',
+                color: whiteColor,
+                onChanged: (value) =>
+                    _onCurveChanged(() => _roomDayWhiteKelvin = value),
+              ),
+            ),
+          ),
+        ),
+      RoomDayColorMode.color => Padding(
+          key: const ValueKey('room-day-color-color-detail'),
+          padding: const EdgeInsets.only(top: 16),
+          child: ColorWheelPicker(
+            value: HSVColor.fromAHSV(
+              1,
+              _roomDayHue,
+              _roomDaySaturation,
+              1,
+            ),
+            maxSide: 252,
+            semanticsLabel: 'Fixed daytime color wheel',
+            interactionKey: const ValueKey('room-day-color-spectrum'),
+            wheelKey: const ValueKey('room-day-color-wheel'),
+            onChanged: (color, {required commit}) => _onCurveChanged(() {
+              _roomDayHue = color.hue;
+              _roomDaySaturation = color.saturation;
+            }),
+          ),
+        ),
+    };
+
+    return Semantics(
+      key: const ValueKey('room-day-color-control'),
+      container: true,
+      label: 'Day color',
+      value: modeLabel,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOutCubic,
+        padding: const EdgeInsets.fromLTRB(18, 18, 18, 10),
+        decoration: BoxDecoration(
+          color: _Palette.card,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: selectedColor.withValues(alpha: 0.28)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  width: 36,
+                  height: 36,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: selectedColor.withValues(alpha: 0.16),
+                  ),
+                  child: Icon(
+                    _roomDayColorMode == RoomDayColorMode.color
+                        ? Icons.palette_outlined
+                        : Icons.thermostat_rounded,
+                    color: selectedColor,
+                    size: 18,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Row(
+                    children: [
+                      const Flexible(
+                        child: Text(
+                          'Day color',
+                          style: TextStyle(
+                            color: _Palette.textPrimary,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            letterSpacing: -0.1,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      InfoTooltip(
+                        accentColor: selectedColor,
+                        message: 'Auto warms and cools through the day. White '
+                            'holds one color temperature. Color holds one '
+                            'selected color while brightness still follows the '
+                            'daytime curve.',
+                      ),
+                    ],
+                  ),
+                ),
+                if (_roomDayColorMode == RoomDayColorMode.color)
+                  Container(
+                    width: 24,
+                    height: 24,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: selectedColor,
+                      border: Border.all(
+                        color: Colors.white.withValues(alpha: 0.45),
+                      ),
+                    ),
+                  )
+                else
+                  Text(
+                    _roomDayColorMode == RoomDayColorMode.white
+                        ? '${whiteValue.round()}K'
+                        : '${minValue.round()}–${maxValue.round()}K',
+                    style: TextStyle(
+                      color: selectedColor,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            RoomDayColorModeSelector(
+              mode: _roomDayColorMode,
+              colorEnabled: supportsDirectColor,
+              onChanged: _selectRoomDayColorMode,
+            ),
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 220),
+              switchInCurve: Curves.easeOutCubic,
+              switchOutCurve: Curves.easeInCubic,
+              child: detail,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   Widget _buildColorTempRangeCard() {
     final editorRange = _colorTemperatureEditorRange!;
@@ -2010,14 +2552,6 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
     final coolColor = AppColorTemperature.curveColor(maxValue.round());
     final span = hardMax - hardMin;
     final divisions = (span / 100).round().clamp(1, 190);
-    final minThumbMax = math
-        .min(4000, hardMax - _DualRangeBar.minSeparation)
-        .clamp(hardMin, hardMax)
-        .toDouble();
-    final maxThumbMin = math
-        .max(2000, hardMin + _DualRangeBar.minSeparation)
-        .clamp(hardMin, hardMax)
-        .toDouble();
     final hardwareRange = _nodeLightCapabilities?.colorTemperature;
     final tooltipSuffix = hardwareRange == null
         ? ''
@@ -2136,13 +2670,11 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(2, 10, 2, 4),
-              child: _DualRangeBar(
+              child: LightProfileColorTemperatureRangeBar(
                 minValue: minValue,
                 maxValue: maxValue,
                 hardMin: hardMin,
                 hardMax: hardMax,
-                minThumbMax: minThumbMax,
-                maxThumbMin: maxThumbMin,
                 tint: warmColor,
                 minThumbColor: warmColor,
                 maxThumbColor: coolColor,
@@ -2762,6 +3294,11 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
         profile: _selectedProfileId,
         outcome: 'failed',
         changedFieldCount: profileOverride.changedFields.length,
+        dayColorMode:
+            _usesRoomDayColorControl ? _roomDayColorMode.analyticsValue : null,
+        dayBrightnessMode: _usesRoomDayColorControl
+            ? _roomDayBrightnessMode.analyticsValue
+            : null,
         failureStage: 'request',
         scope: widget.overrideScope,
       );
@@ -2782,6 +3319,11 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
       profile: _selectedProfileId,
       outcome: 'succeeded',
       changedFieldCount: profileOverride.changedFields.length,
+      dayColorMode:
+          _usesRoomDayColorControl ? _roomDayColorMode.analyticsValue : null,
+      dayBrightnessMode: _usesRoomDayColorControl
+          ? _roomDayBrightnessMode.analyticsValue
+          : null,
       scope: widget.overrideScope,
     );
     _showSaveFeedback(
@@ -2856,6 +3398,172 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
     );
     if (confirmed != true || !mounted) return;
     await _resetToDefaults();
+  }
+}
+
+/// Compact Auto/Fixed selector for one room's daytime brightness behavior.
+class RoomDayBrightnessModeSelector extends StatelessWidget {
+  const RoomDayBrightnessModeSelector({
+    super.key,
+    required this.mode,
+    required this.onChanged,
+  });
+
+  final RoomDayBrightnessMode mode;
+  final ValueChanged<RoomDayBrightnessMode> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      container: true,
+      label: 'Day brightness mode',
+      child: Container(
+        padding: const EdgeInsets.all(3),
+        decoration: BoxDecoration(
+          color: _Palette.bg.withValues(alpha: 0.65),
+          borderRadius: BorderRadius.circular(11),
+          border: Border.all(color: _Palette.border),
+        ),
+        child: Row(
+          children: RoomDayBrightnessMode.values.map((candidate) {
+            final selected = candidate == mode;
+            final label = switch (candidate) {
+              RoomDayBrightnessMode.automatic => 'Auto',
+              RoomDayBrightnessMode.fixed => 'Fixed',
+            };
+            return Expanded(
+              child: Semantics(
+                key: ValueKey('room-day-brightness-mode-${candidate.name}'),
+                button: true,
+                selected: selected,
+                label: label,
+                onTap: () => onChanged(candidate),
+                excludeSemantics: true,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => onChanged(candidate),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    curve: Curves.easeOutCubic,
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    decoration: BoxDecoration(
+                      color: selected
+                          ? _Palette.amber.withValues(alpha: 0.16)
+                          : Colors.transparent,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: selected
+                            ? _Palette.amber.withValues(alpha: 0.32)
+                            : Colors.transparent,
+                      ),
+                    ),
+                    alignment: Alignment.center,
+                    child: Text(
+                      label,
+                      style: TextStyle(
+                        color: selected
+                            ? _Palette.amber
+                            : _Palette.textSecondary.withValues(alpha: 0.65),
+                        fontSize: 12,
+                        fontWeight:
+                            selected ? FontWeight.w700 : FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          }).toList(growable: false),
+        ),
+      ),
+    );
+  }
+}
+
+/// Compact mode selector shared by the room-Day card and its widget tests.
+class RoomDayColorModeSelector extends StatelessWidget {
+  const RoomDayColorModeSelector({
+    super.key,
+    required this.mode,
+    required this.onChanged,
+    this.colorEnabled = true,
+  });
+
+  final RoomDayColorMode mode;
+  final ValueChanged<RoomDayColorMode> onChanged;
+  final bool colorEnabled;
+
+  @override
+  Widget build(BuildContext context) {
+    return Semantics(
+      container: true,
+      label: 'Day color mode',
+      child: Container(
+        padding: const EdgeInsets.all(3),
+        decoration: BoxDecoration(
+          color: _Palette.bg.withValues(alpha: 0.65),
+          borderRadius: BorderRadius.circular(11),
+          border: Border.all(color: _Palette.border),
+        ),
+        child: Row(
+          children: RoomDayColorMode.values.map((candidate) {
+            final selected = candidate == mode;
+            final enabled = candidate != RoomDayColorMode.color || colorEnabled;
+            final label = switch (candidate) {
+              RoomDayColorMode.natural => 'Auto',
+              RoomDayColorMode.white => 'White',
+              RoomDayColorMode.color => 'Color',
+            };
+            return Expanded(
+              child: Semantics(
+                key: ValueKey('room-day-color-mode-${candidate.name}'),
+                button: true,
+                selected: selected,
+                enabled: enabled,
+                label: label,
+                onTap: enabled ? () => onChanged(candidate) : null,
+                excludeSemantics: true,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: enabled ? () => onChanged(candidate) : null,
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    curve: Curves.easeOutCubic,
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    decoration: BoxDecoration(
+                      color: selected
+                          ? _Palette.amber.withValues(alpha: 0.16)
+                          : Colors.transparent,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: selected
+                            ? _Palette.amber.withValues(alpha: 0.32)
+                            : Colors.transparent,
+                      ),
+                    ),
+                    child: Text(
+                      label,
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: !enabled
+                            ? _Palette.textSecondary.withValues(alpha: 0.25)
+                            : selected
+                                ? _Palette.amber
+                                : _Palette.textSecondary
+                                    .withValues(alpha: 0.72),
+                        fontSize: 12,
+                        fontWeight:
+                            selected ? FontWeight.w700 : FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            );
+          }).toList(),
+        ),
+      ),
+    );
   }
 }
 
@@ -2965,6 +3673,60 @@ class LightProfileBrightnessRangeBar extends StatelessWidget {
   }
 }
 
+/// Color-temperature range editor used by room and bulb light settings.
+///
+/// Unlike brightness, a color-temperature range may intentionally collapse to
+/// one fixed value. Both thumbs can therefore traverse the full supported
+/// hardware range and meet at the same Kelvin value.
+class LightProfileColorTemperatureRangeBar extends StatelessWidget {
+  const LightProfileColorTemperatureRangeBar({
+    super.key,
+    required this.minValue,
+    required this.maxValue,
+    required this.hardMin,
+    required this.hardMax,
+    required this.tint,
+    required this.onMinChanged,
+    required this.onMaxChanged,
+    this.minThumbColor,
+    this.maxThumbColor,
+    this.gradient,
+    this.divisions,
+  });
+
+  final double minValue;
+  final double maxValue;
+  final double hardMin;
+  final double hardMax;
+  final Color tint;
+  final ValueChanged<double> onMinChanged;
+  final ValueChanged<double> onMaxChanged;
+  final Color? minThumbColor;
+  final Color? maxThumbColor;
+  final Gradient? gradient;
+  final int? divisions;
+
+  @override
+  Widget build(BuildContext context) {
+    return _DualRangeBar(
+      minValue: minValue,
+      maxValue: maxValue,
+      hardMin: hardMin,
+      hardMax: hardMax,
+      minThumbMax: hardMax,
+      maxThumbMin: hardMin,
+      minSeparation: 0,
+      tint: tint,
+      minThumbColor: minThumbColor,
+      maxThumbColor: maxThumbColor,
+      gradient: gradient,
+      divisions: divisions,
+      onMinChanged: onMinChanged,
+      onMaxChanged: onMaxChanged,
+    );
+  }
+}
+
 class _DualRangeBar extends StatefulWidget {
   const _DualRangeBar({
     required this.minValue,
@@ -2980,10 +3742,8 @@ class _DualRangeBar extends StatefulWidget {
     this.maxThumbColor,
     this.gradient,
     this.divisions,
+    this.minSeparation = 1.0,
   });
-
-  /// Smallest allowed gap (in value units) between the two thumbs.
-  static const double minSeparation = 1.0;
 
   final double minValue;
   final double maxValue;
@@ -3010,6 +3770,9 @@ class _DualRangeBar extends StatefulWidget {
 
   /// Snap to this many equally-spaced divisions across [hardMin, hardMax].
   final int? divisions;
+
+  /// Smallest allowed gap (in value units) between the two thumbs.
+  final double minSeparation;
 
   final ValueChanged<double> onMinChanged;
   final ValueChanged<double> onMaxChanged;
@@ -3053,15 +3816,15 @@ class _DualRangeBarState extends State<_DualRangeBar> {
     final snapped = _snap(_denormalize(frac));
 
     if (_active == _DualRangeThumb.min) {
-      final cap = math.min(
-          widget.minThumbMax, widget.maxValue - _DualRangeBar.minSeparation);
+      final cap =
+          math.min(widget.minThumbMax, widget.maxValue - widget.minSeparation);
       final clamped = snapped
           .clamp(widget.hardMin, math.max(widget.hardMin, cap))
           .toDouble();
       if (clamped != widget.minValue) widget.onMinChanged(clamped);
     } else if (_active == _DualRangeThumb.max) {
-      final floor = math.max(
-          widget.maxThumbMin, widget.minValue + _DualRangeBar.minSeparation);
+      final floor =
+          math.max(widget.maxThumbMin, widget.minValue + widget.minSeparation);
       final clamped = snapped
           .clamp(math.min(widget.hardMax, floor), widget.hardMax)
           .toDouble();

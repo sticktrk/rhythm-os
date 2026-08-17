@@ -9,7 +9,8 @@ use std::time::Duration;
 
 use crate::api_types::{HueV2GroupedLight, HueV2Light, HueV2Response};
 use crate::transport::{
-    HueBridgeSearchLight, HueCreatedResource, HueCreatedRoom, HueRoomDefinition, HueTransport,
+    HueBridgeDeviceClass, HueBridgeSearchLight, HueBridgeSearchSensor, HueCreatedResource,
+    HueCreatedRoom, HueRoomDefinition, HueTransport,
 };
 use anyhow::Result;
 
@@ -58,6 +59,10 @@ fn room_definition_body(definition: &HueRoomDefinition) -> serde_json::Value {
 }
 
 fn room_rename_body(name: &str) -> serde_json::Value {
+    serde_json::json!({"metadata": {"name": name}})
+}
+
+fn device_rename_body(name: &str) -> serde_json::Value {
     serde_json::json!({"metadata": {"name": name}})
 }
 
@@ -292,7 +297,7 @@ fn hue_v1_is_exact_missing_resource(value: &serde_json::Value, expected_address:
         })
 }
 
-fn can_tolerate_missing_v1_light(
+fn can_tolerate_missing_v1_resource(
     value: &serde_json::Value,
     expected_address: &str,
     had_successful_delete: bool,
@@ -312,6 +317,13 @@ struct NewLightsSnapshot {
     active: bool,
     generation: Option<String>,
     lights: Vec<HueBridgeSearchLight>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NewSensorsSnapshot {
+    active: bool,
+    generation: Option<String>,
+    sensors: Vec<HueBridgeSearchSensor>,
 }
 
 fn parse_new_lights(value: &serde_json::Value) -> Result<NewLightsSnapshot> {
@@ -356,6 +368,54 @@ fn completed_new_scan(
     !current.active && (saw_active || current.generation != before.generation)
 }
 
+fn parse_new_sensors(value: &serde_json::Value) -> Result<NewSensorsSnapshot> {
+    validate_hue_v1_response("GET sensors/new", value)?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("GET sensors/new returned an invalid response"))?;
+    let generation = object
+        .get("lastscan")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let active = generation
+        .as_deref()
+        .is_some_and(|lastscan| lastscan.eq_ignore_ascii_case("active"));
+    let mut sensors = object
+        .iter()
+        .filter(|(id, _)| id.as_str() != "lastscan")
+        .map(|(id, sensor)| HueBridgeSearchSensor {
+            legacy_id: id.clone(),
+            name: sensor
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("Hue accessory {id}")),
+        })
+        .collect::<Vec<_>>();
+    sensors.sort_by(|left, right| left.legacy_id.cmp(&right.legacy_id));
+    Ok(NewSensorsSnapshot {
+        active,
+        generation,
+        sensors,
+    })
+}
+
+fn completed_new_sensor_scan(
+    before: &NewSensorsSnapshot,
+    current: &NewSensorsSnapshot,
+    saw_active: bool,
+) -> bool {
+    !current.active && (saw_active || current.generation != before.generation)
+}
+
+fn legacy_collection_for_device_class(device_class: HueBridgeDeviceClass) -> &'static str {
+    match device_class {
+        HueBridgeDeviceClass::Light => "lights",
+        HueBridgeDeviceClass::Sensor => "sensors",
+    }
+}
+
 fn validate_hue_v2_envelope<'a>(
     operation: &str,
     value: &'a serde_json::Value,
@@ -387,13 +447,13 @@ fn normalized_zigbee_mac(value: &str) -> Option<String> {
 }
 
 fn hue_uniqueid_mac(value: &str) -> Option<String> {
-    if let Some((mac, endpoint)) = value.rsplit_once('-') {
-        if endpoint.len() == 2
-            && endpoint
-                .chars()
-                .all(|character| character.is_ascii_hexdigit())
-        {
-            if let Some(mac) = normalized_zigbee_mac(mac) {
+    // Light unique IDs normally append one endpoint (`-0b`); sensor IDs can
+    // append endpoint plus cluster (`-02-fc00`). Accept the first hyphen whose
+    // prefix is exactly one normalized 64-bit Zigbee MAC. This also tolerates
+    // bridges that format the MAC itself with hyphens.
+    for (index, character) in value.char_indices() {
+        if character == '-' {
+            if let Some(mac) = normalized_zigbee_mac(&value[..index]) {
                 return Some(mac);
             }
         }
@@ -435,27 +495,28 @@ fn zigbee_macs_for_device(
     Ok(macs)
 }
 
-fn legacy_light_ids_for_macs(
+fn legacy_resource_ids_for_macs(
     value: &serde_json::Value,
     macs: &BTreeSet<String>,
+    collection: &str,
 ) -> Result<Vec<String>> {
-    validate_hue_v1_response("GET lights", value)?;
-    let lights = value
+    let operation = format!("GET {collection}");
+    validate_hue_v1_response(&operation, value)?;
+    let resources = value
         .as_object()
-        .ok_or_else(|| anyhow::anyhow!("GET lights returned an invalid non-object response"))?;
-    let mut ids = lights
+        .ok_or_else(|| anyhow::anyhow!("{operation} returned an invalid non-object response"))?;
+    let mut ids = resources
         .iter()
-        .filter_map(|(id, light)| {
-            let uniqueid = light.get("uniqueid").and_then(serde_json::Value::as_str)?;
+        .filter_map(|(id, resource)| {
+            let uniqueid = resource
+                .get("uniqueid")
+                .and_then(serde_json::Value::as_str)?;
             let mac = hue_uniqueid_mac(uniqueid)?;
             macs.contains(&mac).then(|| id.clone())
         })
         .collect::<Vec<_>>();
     ids.sort();
     ids.dedup();
-    if ids.is_empty() {
-        anyhow::bail!("No Hue V1 lights exactly matched the V2 device Zigbee MAC");
-    }
     Ok(ids)
 }
 
@@ -994,6 +1055,76 @@ impl HueTransport for ReqwestHueTransport {
         }
     }
 
+    fn search_new_sensors(&self, username: &str) -> Result<Vec<HueBridgeSearchSensor>> {
+        let url = format!("{}/api/{}/sensors", self.base_url(), username);
+        let status_url = format!("{}/new", url);
+        let response = self
+            .client
+            .get(&status_url)
+            .send()
+            .map_err(|_| anyhow::anyhow!("Hue accessory-search status request failed"))?;
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("GET sensors/new before search failed with HTTP status {status}");
+        }
+        let before_value: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
+            anyhow::anyhow!("GET sensors/new before search returned invalid JSON: {error}")
+        })?;
+        let before = parse_new_sensors(&before_value)?;
+        if before.active {
+            anyhow::bail!(
+                "The Hue Bridge is already searching for accessories; wait for that search to finish"
+            );
+        }
+
+        let response = self
+            .client
+            .post(&url)
+            .json(&serde_json::json!({}))
+            .send()
+            .map_err(|_| anyhow::anyhow!("Hue accessory-search request failed"))?;
+        let status = response.status();
+        let body = response.text().unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("POST sensors search failed with HTTP status {status}");
+        }
+        let value: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
+            anyhow::anyhow!("POST sensors search returned invalid JSON: {error}")
+        })?;
+        validate_hue_v1_success("POST sensors search", &value, "/sensors")?;
+
+        let deadline = std::time::Instant::now() + HUE_BRIDGE_SEARCH_TIMEOUT;
+        let mut saw_active = false;
+        loop {
+            let response = self
+                .client
+                .get(&status_url)
+                .send()
+                .map_err(|_| anyhow::anyhow!("Hue accessory-search status request failed"))?;
+            let status = response.status();
+            let body = response.text().unwrap_or_default();
+            if !status.is_success() {
+                anyhow::bail!("GET sensors/new failed with HTTP status {status}");
+            }
+            let value: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
+                anyhow::anyhow!("GET sensors/new returned invalid JSON: {error}")
+            })?;
+            let current = parse_new_sensors(&value)?;
+            if current.active {
+                saw_active = true;
+            } else if completed_new_sensor_scan(&before, &current, saw_active) {
+                return Ok(current.sensors);
+            }
+            if std::time::Instant::now() >= deadline {
+                anyhow::bail!(
+                    "Hue Bridge accessory search timed out before a new scan generation completed"
+                );
+            }
+            std::thread::sleep(HUE_BRIDGE_SEARCH_POLL_INTERVAL);
+        }
+    }
+
     fn device_exists(&self, username: &str, v2_device_id: &str) -> Result<bool> {
         let value = self.get_resources(username, "device")?;
         let data = validate_hue_v2_envelope("GET device", &value)?;
@@ -1002,7 +1133,12 @@ impl HueTransport for ReqwestHueTransport {
         }))
     }
 
-    fn remove_light_device(&self, username: &str, v2_device_id: &str) -> Result<()> {
+    fn remove_device(
+        &self,
+        username: &str,
+        v2_device_id: &str,
+        device_class: HueBridgeDeviceClass,
+    ) -> Result<()> {
         if !self.device_exists(username, v2_device_id)? {
             return Ok(());
         }
@@ -1010,43 +1146,63 @@ impl HueTransport for ReqwestHueTransport {
         let zigbee = self.get_resources(username, "zigbee_connectivity")?;
         let macs = zigbee_macs_for_device(&zigbee, v2_device_id)?;
 
-        let lights_url = format!("{}/api/{}/lights", self.base_url(), username);
-        let response = self
-            .client
-            .get(&lights_url)
-            .send()
-            .map_err(|_| anyhow::anyhow!("Hue light inventory request failed"))?;
-        let status = response.status();
-        let body = response.text().unwrap_or_default();
-        if !status.is_success() {
-            anyhow::bail!("GET lights failed with HTTP status {status}");
+        let collection = legacy_collection_for_device_class(device_class);
+        let mut matches = Vec::new();
+        for collection in [collection] {
+            let collection_url = format!("{}/api/{}/{}", self.base_url(), username, collection);
+            let response = self
+                .client
+                .get(&collection_url)
+                .send()
+                .map_err(|_| anyhow::anyhow!("Hue {collection} inventory request failed"))?;
+            let status = response.status();
+            let body = response.text().unwrap_or_default();
+            if !status.is_success() {
+                anyhow::bail!("GET {collection} failed with HTTP status {status}");
+            }
+            let value: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
+                anyhow::anyhow!("GET {collection} returned invalid JSON: {error}")
+            })?;
+            matches.extend(
+                legacy_resource_ids_for_macs(&value, &macs, collection)?
+                    .into_iter()
+                    .map(|id| (collection.to_string(), id)),
+            );
         }
-        let value: serde_json::Value = serde_json::from_str(&body)
-            .map_err(|error| anyhow::anyhow!("GET lights returned invalid JSON: {error}"))?;
-        let legacy_ids = legacy_light_ids_for_macs(&value, &macs)?;
+        if matches.is_empty() {
+            anyhow::bail!("No Hue V1 {collection} exactly matched the V2 device Zigbee MAC");
+        }
 
-        for (index, legacy_id) in legacy_ids.iter().enumerate() {
-            let delete_url = format!("{lights_url}/{legacy_id}");
+        for (index, (collection, legacy_id)) in matches.iter().enumerate() {
+            let delete_url = format!(
+                "{}/api/{}/{}/{}",
+                self.base_url(),
+                username,
+                collection,
+                legacy_id
+            );
             let response = self
                 .client
                 .delete(&delete_url)
                 .send()
-                .map_err(|_| anyhow::anyhow!("Hue light deletion request failed"))?;
+                .map_err(|_| anyhow::anyhow!("Hue {collection} deletion request failed"))?;
             let status = response.status();
             let body = response.text().unwrap_or_default();
             if !status.is_success() {
-                anyhow::bail!("Hue light deletion failed with HTTP status {status}");
+                anyhow::bail!("Hue {collection} deletion failed with HTTP status {status}");
             }
             let value: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
-                anyhow::anyhow!("Hue light deletion returned invalid JSON: {error}")
+                anyhow::anyhow!("Hue {collection} deletion returned invalid JSON: {error}")
             })?;
-            let expected_address = format!("/lights/{legacy_id}");
-            if let Err(error) =
-                validate_hue_v1_delete_success("Hue light deletion", &value, &expected_address)
-            {
+            let expected_address = format!("/{collection}/{legacy_id}");
+            if let Err(error) = validate_hue_v1_delete_success(
+                "Hue device resource deletion",
+                &value,
+                &expected_address,
+            ) {
                 if index > 0 && hue_v1_is_exact_missing_resource(&value, &expected_address) {
                     let v2_device_exists = self.device_exists(username, v2_device_id)?;
-                    if can_tolerate_missing_v1_light(
+                    if can_tolerate_missing_v1_resource(
                         &value,
                         &expected_address,
                         true,
@@ -1055,7 +1211,7 @@ impl HueTransport for ReqwestHueTransport {
                         return Ok(());
                     }
                     anyhow::bail!(
-                        "A Hue V1 light disappeared during multi-light deletion while its V2 device remained present"
+                        "A Hue V1 resource disappeared during multi-resource deletion while its V2 device remained present"
                     );
                 }
                 return Err(error);
@@ -1069,7 +1225,7 @@ impl HueTransport for ReqwestHueTransport {
             }
             if std::time::Instant::now() >= deadline {
                 anyhow::bail!(
-                    "Hue Bridge still reports a V2 device after its V1 lights were deleted"
+                    "Hue Bridge still reports a V2 device after its V1 resources were deleted"
                 );
             }
             std::thread::sleep(HUE_BRIDGE_REMOVE_POLL_INTERVAL);
@@ -1165,6 +1321,10 @@ impl HueTransport for ReqwestHueTransport {
 
     fn rename_room(&self, username: &str, room_id: &str, name: &str) -> Result<()> {
         self.update_resource(username, "room", room_id, &room_rename_body(name))
+    }
+
+    fn rename_device(&self, username: &str, device_id: &str, name: &str) -> Result<()> {
+        self.update_resource(username, "device", device_id, &device_rename_body(name))
     }
 
     fn delete_room(&self, username: &str, room_id: &str) -> Result<()> {
@@ -1346,6 +1506,22 @@ mod tests {
                 name: "Desk lamp".to_string(),
             }]
         );
+
+        let active_sensors = parse_new_sensors(&serde_json::json!({"lastscan": "active"})).unwrap();
+        assert!(active_sensors.active);
+        assert!(active_sensors.sensors.is_empty());
+        let completed_sensors = parse_new_sensors(&serde_json::json!({
+            "21": {"name": "Kitchen dimmer"},
+            "lastscan": "2026-08-09T00:00:00"
+        }))
+        .unwrap();
+        assert_eq!(
+            completed_sensors.sensors,
+            vec![HueBridgeSearchSensor {
+                legacy_id: "21".to_string(),
+                name: "Kitchen dimmer".to_string(),
+            }]
+        );
     }
 
     #[test]
@@ -1454,6 +1630,12 @@ mod tests {
             })
         );
         assert_eq!(
+            device_rename_body("Hue Zig Color Lamp 2 GuestBath"),
+            serde_json::json!({
+                "metadata": {"name": "Hue Zig Color Lamp 2 GuestBath"}
+            })
+        );
+        assert_eq!(
             created_hue_v2_resource(
                 "POST room",
                 "room",
@@ -1476,7 +1658,15 @@ mod tests {
     }
 
     #[test]
-    fn bridge_removal_maps_v2_device_mac_to_all_exact_v1_light_ids() {
+    fn bridge_removal_maps_v2_device_mac_to_exact_v1_light_and_sensor_ids() {
+        assert_eq!(
+            legacy_collection_for_device_class(HueBridgeDeviceClass::Light),
+            "lights"
+        );
+        assert_eq!(
+            legacy_collection_for_device_class(HueBridgeDeviceClass::Sensor),
+            "sensors"
+        );
         let macs = zigbee_macs_for_device(
             &serde_json::json!({
                 "errors": [],
@@ -1500,7 +1690,7 @@ mod tests {
         .unwrap();
         assert_eq!(macs, BTreeSet::from(["00178801aabbccdd".to_string()]));
 
-        let ids = legacy_light_ids_for_macs(
+        let ids = legacy_resource_ids_for_macs(
             &serde_json::json!({
                 "7": {"uniqueid": "00:17:88:01:aa:bb:cc:dd-0b"},
                 "8": {"uniqueid": "00:17:88:01:AA:BB:CC:DD-02"},
@@ -1508,9 +1698,22 @@ mod tests {
                 "10": {"uniqueid": "00178801aabbccdd00"}
             }),
             &macs,
+            "lights",
         )
         .unwrap();
         assert_eq!(ids, vec!["7".to_string(), "8".to_string()]);
+
+        let sensor_ids = legacy_resource_ids_for_macs(
+            &serde_json::json!({
+                "21": {"uniqueid": "00:17:88:01:aa:bb:cc:dd-02-fc00"},
+                "22": {"uniqueid": "00:17:88:01:aa:bb:cc:dd-02"},
+                "23": {"uniqueid": "00:17:88:01:aa:bb:cc:de-02"}
+            }),
+            &macs,
+            "sensors",
+        )
+        .unwrap();
+        assert_eq!(sensor_ids, vec!["21".to_string(), "22".to_string()]);
 
         let ambiguous = zigbee_macs_for_device(
             &serde_json::json!({
@@ -1541,19 +1744,19 @@ mod tests {
             &exact_missing,
             "/lights/8"
         ));
-        assert!(can_tolerate_missing_v1_light(
+        assert!(can_tolerate_missing_v1_resource(
             &exact_missing,
             "/lights/8",
             true,
             false
         ));
-        assert!(!can_tolerate_missing_v1_light(
+        assert!(!can_tolerate_missing_v1_resource(
             &exact_missing,
             "/lights/8",
             false,
             false
         ));
-        assert!(!can_tolerate_missing_v1_light(
+        assert!(!can_tolerate_missing_v1_resource(
             &exact_missing,
             "/lights/8",
             true,

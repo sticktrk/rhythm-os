@@ -42,6 +42,20 @@ Scope timeouts, cooldowns, retry budgets, queues, and liveness to the smallest r
 
 After restart, reconcile persisted state with the external integration. When older persisted data can preserve a defect, add a startup repair or migration and test both old and repaired forms.
 
+## Hue room topology projection
+
+Hue automation suppression, room-membership projection, and grouped-light dispatch are separate authorities:
+
+- automation suppression requires its existing complete room review;
+- topology projection is an additional capability-gated opt-in and defaults off;
+- Rhythm's canonical room assignment commits even when Hue is unavailable;
+- the desired projection is durable canonical state, so restart or reconnect can retry it;
+- Rhythm may change only Hue light membership and rooms carrying an explicit stable-bridge ownership receipt;
+- user-created Hue rooms, zones, scenes, automations, and accessory membership are preserved;
+- ambiguous native recovery is an attention state, never a name-based ownership guess;
+- grouped dispatch stays fenced until exact Hue membership and grouped-light identity are read back;
+- an offline, partial, or conflicting projection continues through individual-light dispatch and must not fence unrelated integrations.
+
 ## App/appliance skew
 
 The app and appliance release independently. Contract-changing work should cover this matrix where relevant:

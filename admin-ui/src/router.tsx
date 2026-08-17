@@ -13,6 +13,7 @@ const ScenesPage = lazy(() => import('./pages/hub/ScenesPage'));
 const ModesPage = lazy(() => import('./pages/hub/ModesPage'));
 const InputsPage = lazy(() => import('./pages/hub/InputsPage'));
 const TopologyPage = lazy(() => import('./pages/hub/TopologyPage'));
+const HubManagementPage = lazy(() => import('./pages/hub/HubManagementPage'));
 const EnvironmentPage = lazy(() => import('./pages/hub/EnvironmentPage'));
 const HistoryPage = lazy(() => import('./pages/hub/HistoryPage'));
 const RemotePage = lazy(() => import('./pages/hub/RemotePage'));
@@ -88,6 +89,22 @@ export function AppRoutes() {
           element={
             <Suspense fallback={<PageFallback />}>
               <TopologyPage />
+            </Suspense>
+          }
+        />
+        <Route
+          path="integrations"
+          element={
+            <Suspense fallback={<PageFallback />}>
+              <HubManagementPage />
+            </Suspense>
+          }
+        />
+        <Route
+          path="integrations/:integrationType/:integrationAddress"
+          element={
+            <Suspense fallback={<PageFallback />}>
+              <HubManagementPage />
             </Suspense>
           }
         />

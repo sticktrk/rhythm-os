@@ -58,6 +58,17 @@ const DEFAULT_PENDING_RESULT_TTL_MS: u64 = 60 * 60 * 1_000;
 static PAIRING_DOCUMENT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static ACTIVE_PAIRING_RESULTS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 
+/// Owner-visible secret recovery material retained by a pairing integration.
+///
+/// The shared layer transports this value but must never persist it in pairing
+/// history, logs, analytics, or ordinary diagnostics.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairingRecoverySecret {
+    pub payload_kind: String,
+    pub setup_payload: String,
+    pub captured_at: String,
+}
+
 /// Validate a client-generated pairing correlation ID.
 pub fn validate_pairing_session_id(session_id: &str) -> Result<(), &'static str> {
     if session_id.is_empty() {
@@ -416,8 +427,9 @@ pub struct PairingResultStatus {
 }
 
 /// A bounded durable reconciliation record. It intentionally contains no
-/// request parameters or integration-specific `details`; setup payloads and
-/// hardware identities must never enter this document.
+/// request parameters or private integration details; setup payloads and
+/// hardware identities must never enter this document. The Matter pairing
+/// path may retain one explicitly allowlisted low-cardinality recovery action.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PairingResultRecord {
     pub session_id: String,
@@ -642,6 +654,14 @@ pub struct PairingHistoryEntry {
     /// "pair" or "unpair".
     pub kind: String,
     pub hub_type: String,
+    /// App-generated privacy-safe journey correlation. This deliberately does
+    /// not fall back to the transport session ID because retries have their
+    /// own session IDs while one user journey owns the lifecycle outcome.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correlation_id: Option<String>,
+    /// Canonical device class involved in the lifecycle attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_type: Option<String>,
     /// Bounded protocol profile identifier (for example
     /// `orein.oc02001.button.v1`). Raw setup or hardware identity values are
     /// never persisted in pairing history.
@@ -804,7 +824,7 @@ fn validate_pairing_document(document: &PairingHistory) -> anyhow::Result<()> {
 
 fn validate_terminal_session(session: &PairingSession, hub_type: &str) -> anyhow::Result<()> {
     validate_terminal_session_input(session, hub_type)?;
-    if session.details.is_some() {
+    if session.details != sanitized_terminal_details(session) {
         anyhow::bail!("durable pairing results cannot contain private details");
     }
     Ok(())
@@ -1066,14 +1086,35 @@ fn sanitized_terminal_session(session: &PairingSession) -> PairingSession {
             .map(|warning| bounded_pairing_text(warning, 512))
             .collect(),
         // Details may contain candidate addresses or protocol setup fields.
-        details: None,
+        // Preserve only the explicit Matter recovery enum used to explain a
+        // repeat-pair outcome to the initiating app.
+        details: sanitized_terminal_details(session),
     }
+}
+
+fn sanitized_terminal_details(session: &PairingSession) -> Option<serde_json::Value> {
+    if session.hub_type != "matter" {
+        return None;
+    }
+    let recovery_action = session.details.as_ref()?.get("recovery_action")?.as_str()?;
+    if !matches!(
+        recovery_action,
+        "existing_connection_recovered"
+            | "existing_node_recommissioned"
+            | "existing_node_recommission_failed"
+    ) {
+        return None;
+    }
+    Some(serde_json::json!({
+        "recovery_action": recovery_action,
+    }))
 }
 
 /// Validate an integration terminal before producing the bounded, privacy-safe
 /// representation suitable for durable storage, HTTP, SSE, and app recovery.
-/// Public device identity fields remain exact; private `details` are removed
-/// and human diagnostic text has recognizable setup/address tokens redacted.
+/// Public device identity fields remain exact; private `details` are removed,
+/// the bounded Matter recovery outcome is retained, and human diagnostic text
+/// has recognizable setup/address tokens redacted.
 pub fn sanitized_terminal_session_for_delivery(
     session: &PairingSession,
     hub_type: &str,
@@ -1453,6 +1494,29 @@ fn bounded_profile_id(params: &serde_json::Value) -> Option<String> {
     crate::hub::is_valid_device_profile_id(profile_id).then(|| profile_id.to_string())
 }
 
+fn bounded_correlation_id(params: &serde_json::Value) -> Option<String> {
+    let correlation_id = params.get("correlation_id")?.as_str()?.trim();
+    validate_pairing_session_id(correlation_id)
+        .is_ok()
+        .then(|| correlation_id.to_string())
+}
+
+fn device_type_label(device_type: &DeviceType) -> &'static str {
+    match device_type {
+        DeviceType::Light => "light",
+        DeviceType::Button => "button",
+        DeviceType::Motion => "motion",
+        DeviceType::Contact => "contact",
+    }
+}
+
+fn bounded_device_type(params: &serde_json::Value) -> Option<String> {
+    match params.get("device_type")?.as_str()?.trim() {
+        value @ ("light" | "button" | "motion" | "contact") => Some(value.to_string()),
+        _ => None,
+    }
+}
+
 fn canonical_advertised_profile_id(
     capabilities: &[crate::hub::HubIntegrationCapability],
     hub_type: &str,
@@ -1481,6 +1545,18 @@ pub fn pairing_history_entry_for_pair(
         epoch_ms: crate::state::current_epoch_ms(),
         kind: "pair".to_string(),
         hub_type: hub_type.to_string(),
+        correlation_id: bounded_correlation_id(params),
+        device_type: completed_devices
+            .first()
+            .map(|device| device_type_label(&device.device_type).to_string())
+            .or_else(|| bounded_device_type(params))
+            .or_else(|| {
+                (params
+                    .get("device_kind")
+                    .and_then(serde_json::Value::as_str)
+                    == Some("button"))
+                .then(|| "button".to_string())
+            }),
         profile_id: bounded_profile_id(params),
         device_id: session
             .device
@@ -1517,6 +1593,8 @@ pub fn pairing_history_entry_for_unpair(
         epoch_ms: crate::state::current_epoch_ms(),
         kind: "unpair".to_string(),
         hub_type: hub_type.to_string(),
+        correlation_id: bounded_correlation_id(params),
+        device_type: bounded_device_type(params),
         profile_id: bounded_profile_id(params),
         device_id: device_id
             .map(str::to_string)
@@ -1572,7 +1650,10 @@ pub fn record_pairing_history(state: &crate::state::SharedState, mut entry: Pair
     let history = history.normalized();
     if let Err(e) = storage.save_pairing_history(&history) {
         log::warn!(target: "pair", "Failed to save pairing history: {e}");
+        return;
     }
+    drop(_guard);
+    crate::activity_cloud::enqueue_recent_activity_upload(state);
 }
 
 #[cfg(test)]
@@ -1716,6 +1797,29 @@ mod tests {
             &session,
         );
         assert_eq!(lowercased_identity.profile_id, None);
+
+        let hue_button = pairing_history_entry_for_pair(
+            "hue",
+            &serde_json::json!({
+                "device_kind": "button",
+                "correlation_id": "hue-button-journey"
+            }),
+            &session,
+        );
+        assert_eq!(hue_button.device_type.as_deref(), Some("button"));
+        assert_eq!(
+            hue_button.correlation_id.as_deref(),
+            Some("hue-button-journey")
+        );
+        let unsafe_correlation = pairing_history_entry_for_pair(
+            "hue",
+            &serde_json::json!({
+                "device_kind": "button",
+                "correlation_id": "contains/unsafe/path"
+            }),
+            &session,
+        );
+        assert_eq!(unsafe_correlation.correlation_id, None);
     }
 
     #[test]
@@ -1733,6 +1837,7 @@ mod tests {
                 onboarding_methods: vec!["local_ble_qr".to_string()],
             }],
             supports_unpairing: true,
+            unpairable_device_types: vec!["button".to_string()],
             supports_roomless_devices: true,
             blocks_room_readiness: false,
         }];
@@ -1831,7 +1936,12 @@ mod tests {
 
     #[test]
     fn unpair_entry_captures_force_flag_and_device_id() {
-        let params = serde_json::json!({ "device_id": "matter-102", "force": true });
+        let params = serde_json::json!({
+            "device_id": "matter-102",
+            "device_type": "button",
+            "correlation_id": "hue-remove-journey",
+            "force": true
+        });
         let entry = pairing_history_entry_for_unpair(
             "matter",
             &params,
@@ -1843,6 +1953,8 @@ mod tests {
         assert_eq!(entry.device_id.as_deref(), Some("matter-102"));
         assert_eq!(entry.force, Some(true));
         assert_eq!(entry.status, "complete");
+        assert_eq!(entry.device_type.as_deref(), Some("button"));
+        assert_eq!(entry.correlation_id.as_deref(), Some("hue-remove-journey"));
     }
 
     #[test]
@@ -1890,6 +2002,8 @@ mod tests {
             epoch_ms,
             kind: "pair".to_string(),
             hub_type: "matter".to_string(),
+            correlation_id: None,
+            device_type: None,
             profile_id: None,
             device_id: None,
             force: None,
@@ -1937,6 +2051,8 @@ mod tests {
         let history = history.normalized();
         assert_eq!(history.schema_version, 1);
         assert_eq!(history.entries[0].profile_id, None);
+        assert_eq!(history.entries[0].correlation_id, None);
+        assert_eq!(history.entries[0].device_type, None);
         assert!(history.pairing_results.is_empty());
     }
 
@@ -2333,6 +2449,52 @@ mod tests {
         assert!(!persisted.contains("0A0B0C0D0E0F"));
         assert!(!persisted.contains("EA:84:C2:50:A8:65"));
         std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn matter_terminal_result_keeps_only_allowlisted_recovery_action() {
+        let session = PairingSession {
+            hub_type: "matter".to_string(),
+            status: PairingStatus::Complete,
+            device: Some(PairedDeviceInfo {
+                device_id: "matter-42".to_string(),
+                name: "Light".to_string(),
+                device_type: DeviceType::Light,
+                manufacturer: None,
+                model: None,
+            }),
+            devices: Vec::new(),
+            error: None,
+            failure_stage: None,
+            warnings: Vec::new(),
+            details: Some(serde_json::json!({
+                "recovery_action": "existing_connection_recovered",
+                "setup_payload": "MT:PAIRING-SECRET",
+                "node_id": 42,
+            })),
+        };
+
+        let result = sanitized_terminal_session_for_delivery(&session, "matter").unwrap();
+        assert_eq!(
+            result.details,
+            Some(serde_json::json!({
+                "recovery_action": "existing_connection_recovered",
+            }))
+        );
+        let serialized = serde_json::to_string(&result).unwrap();
+        assert!(!serialized.contains("PAIRING-SECRET"));
+        assert!(!serialized.contains("node_id"));
+
+        let mut unknown = session;
+        unknown.details = Some(serde_json::json!({
+            "recovery_action": "future_recovery_action",
+        }));
+        assert_eq!(
+            sanitized_terminal_session_for_delivery(&unknown, "matter")
+                .unwrap()
+                .details,
+            None
+        );
     }
 
     #[test]

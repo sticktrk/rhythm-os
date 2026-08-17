@@ -39,6 +39,8 @@ class RhythmMatterPairingResponse {
     this.status,
     this.device,
     this.error,
+    this.recoveryAction,
+    this.warnings = const <String>[],
   });
 
   factory RhythmMatterPairingResponse.fromHttp({
@@ -54,6 +56,8 @@ class RhythmMatterPairingResponse {
             ? Map<String, dynamic>.from(json['device'] as Map)
             : null,
         error: (json['error'] ?? json['message']) as String?,
+        recoveryAction: _readRecoveryAction(json['details']),
+        warnings: _readWarnings(json['warnings']),
       );
     }
 
@@ -72,6 +76,34 @@ class RhythmMatterPairingResponse {
   final String? status;
   final Map<String, dynamic>? device;
   final String? error;
+  final String? recoveryAction;
+  final List<String> warnings;
+
+  static String? _readRecoveryAction(Object? details) {
+    if (details is! Map) return null;
+    final action = details['recovery_action'];
+    if (action == 'existing_connection_recovered' ||
+        action == 'existing_node_recommissioned' ||
+        action == 'existing_node_recommission_failed') {
+      return action as String;
+    }
+    return null;
+  }
+
+  static List<String> _readWarnings(Object? value) {
+    if (value is! List) return const <String>[];
+    return value
+        .whereType<String>()
+        .map((warning) => warning.trim())
+        .where((warning) => warning.isNotEmpty)
+        .take(32)
+        .map(
+          (warning) => warning.runes.length <= 512
+              ? warning
+              : String.fromCharCodes(warning.runes.take(512)),
+        )
+        .toList(growable: false);
+  }
 }
 
 class RhythmMatterCapturesResponse {

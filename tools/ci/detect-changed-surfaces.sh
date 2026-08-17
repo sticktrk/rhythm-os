@@ -72,6 +72,7 @@ fi
 
 rust=false
 flutter=false
+flutter_ui=false
 sdk=false
 admin_api=false
 admin_ui=false
@@ -80,6 +81,7 @@ supabase=false
 mark_all() {
     rust=true
     flutter=true
+    flutter_ui=true
     sdk=true
     admin_api=true
     admin_ui=true
@@ -101,6 +103,19 @@ else
         case "$path" in
             app/flutter/rhythm_app/*|app/flutter/rhythm_core/*|tools/app/scripts/*|sdk/*)
                 flutter=true
+                ;;
+        esac
+        case "$path" in
+            app/flutter/rhythm_app/lib/main.dart|\
+            app/flutter/rhythm_app/lib/app_shell.dart|\
+            app/flutter/rhythm_app/lib/screens/*|\
+            app/flutter/rhythm_app/lib/widgets/*|\
+            app/flutter/rhythm_app/lib/onboarding/*|\
+            app/flutter/rhythm_app/lib/theme/*|\
+            app/flutter/rhythm_app/assets/*|\
+            app/flutter/rhythm_app/fonts/*|\
+            app/flutter/rhythm_app/pubspec.yaml)
+                flutter_ui=true
                 ;;
         esac
         case "$path" in
@@ -147,6 +162,7 @@ emit() {
 emit base "$BASE"
 emit rust "$rust"
 emit flutter "$flutter"
+emit flutter_ui "$flutter_ui"
 emit sdk "$sdk"
 emit admin_api "$admin_api"
 emit admin_ui "$admin_ui"

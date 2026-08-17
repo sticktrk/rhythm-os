@@ -93,7 +93,8 @@ pub fn adapt_command(
         };
     }
 
-    let brightness = Some(clamp_brightness(brightness, caps.min_brightness));
+    let corrected_brightness = caps.control_corrections.map_brightness(brightness);
+    let brightness = Some(clamp_brightness(corrected_brightness, caps.min_brightness));
     let (kelvin, xy, hue_saturation) = select_color(caps, color, preference);
 
     AdaptedCommand {
@@ -142,15 +143,18 @@ fn select_color(
             hue_saturation,
         } => {
             let clamped_kelvin = clamp_kelvin(kelvin, caps.min_kelvin, caps.max_kelvin);
+            let corrected_kelvin = caps
+                .control_corrections
+                .map_color_temperature(clamped_kelvin);
             let clamped_xy = clamp_xy(caps, xy);
 
             match preference {
                 ColorPreference::PreferColorTemperature if supports_ct => {
-                    (Some(clamped_kelvin), None, None)
+                    (Some(corrected_kelvin), None, None)
                 }
                 ColorPreference::PreferXy if supports_xy => (None, Some(clamped_xy), None),
                 ColorPreference::PreferHueSaturation if supports_hs => (None, None, hue_saturation),
-                _ if supports_ct => (Some(clamped_kelvin), None, None),
+                _ if supports_ct => (Some(corrected_kelvin), None, None),
                 _ if supports_xy => (None, Some(clamped_xy), None),
                 _ if supports_hs => (None, None, hue_saturation),
                 _ => (None, None, None),
@@ -351,6 +355,61 @@ mod tests {
     }
 
     #[test]
+    fn applies_hue_relative_brightness_and_ct_corrections() {
+        let caps = LightCapabilities {
+            min_kelvin: Some(2700),
+            max_kelvin: Some(6500),
+            min_brightness: Some(7),
+            control_corrections: crate::ControlCorrections {
+                brightness: vec![
+                    crate::BrightnessCorrectionPoint {
+                        logical_percent: 1,
+                        command_percent: 7,
+                    },
+                    crate::BrightnessCorrectionPoint {
+                        logical_percent: 10,
+                        command_percent: 20,
+                    },
+                    crate::BrightnessCorrectionPoint {
+                        logical_percent: 100,
+                        command_percent: 100,
+                    },
+                ],
+                color_temperature: vec![
+                    crate::ColorTemperatureCorrectionPoint {
+                        logical_kelvin: 2700,
+                        command_kelvin: 2400,
+                    },
+                    crate::ColorTemperatureCorrectionPoint {
+                        logical_kelvin: 4000,
+                        command_kelvin: 3650,
+                    },
+                    crate::ColorTemperatureCorrectionPoint {
+                        logical_kelvin: 6500,
+                        command_kelvin: 6200,
+                    },
+                ],
+            },
+            ..LightCapabilities::defaults_for(LightType::ColorTemperature)
+        };
+
+        let adapted = adapt_command(
+            &caps,
+            10,
+            ColorRequest::ColorTemperature {
+                kelvin: 4000,
+                xy: (0.3, 0.3),
+                hue_saturation: None,
+            },
+            None,
+            ColorPreference::PreferColorTemperature,
+        );
+
+        assert_eq!(adapted.brightness, Some(20));
+        assert_eq!(adapted.kelvin, Some(3650));
+    }
+
+    #[test]
     fn extended_color_prefers_kelvin_for_group_protocols() {
         let caps = LightCapabilities::defaults_for(LightType::ExtendedColor);
         let adapted = adapt_command(
@@ -523,6 +582,7 @@ mod tests {
             gamut: None,
             min_brightness: None,
             supports_transition: true,
+            control_corrections: crate::ControlCorrections::default(),
         };
         let adapted = adapt_command(
             &caps,

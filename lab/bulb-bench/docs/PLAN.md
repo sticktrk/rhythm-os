@@ -2,9 +2,12 @@
 
 ## Outcome
 
-BulbBench will become a one-button, evidence-first smart-bulb laboratory. It
-will combine physical optical measurements with protocol commands, electrical
-measurements, environmental state, power cycling, and repeatability evidence.
+BulbBench will become a one-button, evidence-first smart-bulb laboratory. The
+first value milestone is deliberately narrower: profile inexpensive Matter
+bulbs against a measured Hue reference and quickly produce the brightness/CT
+adjustments, residual flaws, and deployment boundaries Rhythm needs. The
+long-term system will add complete physical, protocol, electrical, BLE,
+reliability, and grading evidence.
 
 The authoritative result is the physical observation. A successful Matter or
 BLE command acknowledgement is useful protocol evidence, but does not prove
@@ -97,17 +100,22 @@ schemas.
 
 ### Phase 1 — safe quick suite
 
-- Implement the interlocked mains and environment drivers.
-- Implement one nanoLambda driver.
-- Implement a read-only rpiz discovery adapter and bounded Matter command
-  adapter through existing HTTP APIs.
-- Add an evidence directory with an immutable manifest and JSON Lines event
-  log.
-- Run dark, stabilization, three brightness points, representative CCT points,
-  a simple Matter behavior smoke test, reference recheck, and safe shutdown.
-- Render a local HTML/JSON report.
+- Treat Hue as a measured operational reference, with a versioned baseline for
+  the exact bench geometry and calibration period.
+- Measure the candidate's stable brightness floor and curve, representative CT
+  curve, Duv difference, and only the Matter behaviors needed for correct
+  control.
+- Produce suitable/avoid deployment guidance and a reviewed `rhythm-devices`
+  entry containing directly usable Matter hints and brightness/CT correction
+  lookup tables.
+- Implement one nanoLambda driver, reuse the existing rpiz Matter tester, and
+  add immutable measurement evidence.
+- Add the interlocked mains/environment drivers and guarded one-button runner
+  after manual/imported measurement collection proves the analysis loop.
 
-Exit: one real bulb completes a guarded quick run without manual test timing.
+Exit: one real candidate completes a repeatable Hue-relative profile in a
+target of under 20 minutes and the report identifies both usable roles and hard
+limits. See [Matter bulb profile MVP](MATTER_PROFILE_MVP.md).
 
 ### Phase 2 — optical and electrical characterization
 

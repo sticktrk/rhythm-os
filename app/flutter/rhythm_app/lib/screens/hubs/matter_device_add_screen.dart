@@ -24,6 +24,7 @@ class MatterDevicePairingResult {
     required this.deviceType,
     this.manufacturer,
     this.model,
+    this.warnings = const <String>[],
   });
 
   final String nativeDeviceId;
@@ -31,6 +32,7 @@ class MatterDevicePairingResult {
   final String deviceType;
   final String? manufacturer;
   final String? model;
+  final List<String> warnings;
 }
 
 enum _PairingPhase { input, pairing, failed }
@@ -334,6 +336,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
           'Pairing failed.',
           detail: result.error,
           failureStage: 'commissioning',
+          recoveryAction: result.recoveryAction,
         );
         return;
       }
@@ -349,7 +352,10 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
           return;
         }
 
-        _logPairingCompleted(outcome: 'succeeded');
+        _logPairingCompleted(
+          outcome: 'succeeded',
+          recoveryAction: result.recoveryAction,
+        );
         HapticFeedback.heavyImpact();
         Navigator.of(context).pop(
           MatterDevicePairingResult(
@@ -358,6 +364,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
             deviceType: device['device_type'] as String? ?? 'light',
             manufacturer: device['manufacturer'] as String?,
             model: device['model'] as String?,
+            warnings: result.warnings,
           ),
         );
         return;
@@ -413,6 +420,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
   void _logPairingCompleted({
     required String outcome,
     String? failureStage,
+    String? recoveryAction,
   }) {
     AnalyticsService().logMatterPairingCompleted(
       journeyId: _sessionId,
@@ -422,6 +430,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       attemptNumber: _attemptNumber,
       outcome: outcome,
       failureStage: failureStage,
+      recoveryAction: recoveryAction,
     );
   }
 
@@ -429,12 +438,14 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     String message, {
     String? detail,
     required String failureStage,
+    String? recoveryAction,
   }) {
     _progressSub?.cancel();
     _progressSub = null;
     _logPairingCompleted(
       outcome: 'failed',
       failureStage: failureStage,
+      recoveryAction: recoveryAction,
     );
     setState(() {
       _phase = _PairingPhase.failed;

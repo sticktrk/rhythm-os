@@ -6,7 +6,9 @@ import '../models/rhythm_assistant.dart';
 import '../models/rhythm_curve_config.dart';
 import '../models/rhythm_curve_data.dart';
 import '../models/rhythm_input_binding.dart';
+import '../models/rhythm_hue_authority.dart';
 import '../models/rhythm_pairing.dart';
+import '../models/rhythm_pairing_recovery.dart';
 import '../models/rhythm_room.dart';
 import '../models/rhythm_scene.dart';
 import '../models/rhythm_settings.dart';
@@ -1183,6 +1185,51 @@ class RhythmServerApi {
     return false;
   }
 
+  /// Fetch the explicit per-room Hue automation ownership review.
+  Future<RhythmHueAuthority?> getHueAuthority() async {
+    try {
+      final response = await _dio.get('api/hue/authority');
+      final data = jsonMap(response.data);
+      return data == null ? null : RhythmHueAuthority.fromJson(data);
+    } catch (e) {
+      _log.warning('getHueAuthority failed', e);
+    }
+    return null;
+  }
+
+  /// Replace the complete reviewed room set for one Hue bridge.
+  Future<RhythmHueAuthority?> updateHueAuthority({
+    required RhythmHueBridgeAuthority bridge,
+    required Map<String, RhythmHueRoomAuthorityOwner> owners,
+    required String correlationId,
+    bool? topologySyncEnabled,
+  }) async {
+    try {
+      final response = await _dio.put('api/hue/authority', data: {
+        'address': bridge.address,
+        'revision': bridge.revision,
+        'correlation_id': correlationId,
+        if (topologySyncEnabled != null)
+          'topology_sync_enabled': topologySyncEnabled,
+        'rooms': [
+          for (final room in bridge.rooms)
+            {
+              'room_id': room.roomId,
+              'owner': switch (owners[room.roomId] ?? room.owner) {
+                RhythmHueRoomAuthorityOwner.unreviewed => 'hue',
+                final owner => owner.wireValue,
+              },
+            },
+        ],
+      });
+      final data = jsonMap(response.data);
+      return data == null ? null : RhythmHueAuthority.fromJson(data);
+    } catch (e) {
+      _log.warning('updateHueAuthority failed', e);
+    }
+    return null;
+  }
+
   /// Disconnect ALL hubs on the server.
   Future<void> hubDisconnect() async {
     try {
@@ -1474,6 +1521,30 @@ class RhythmServerApi {
       _log.warning('getCanonicalDevice failed', e);
     }
     return null;
+  }
+
+  /// Fetch the setup payload retained for one currently registered Matter endpoint.
+  ///
+  /// Returns `null` when this endpoint has no saved recovery material. Other
+  /// response failures throw without logging the secret-bearing body.
+  Future<RhythmPairingRecoverySecret?> getMatterSetupCode(
+    String nativeDeviceId,
+  ) async {
+    final encodedId = Uri.encodeComponent(nativeDeviceId);
+    final response = await _dio.get(
+      'api/matter/setup-code/$encodedId',
+      options:
+          Options(validateStatus: (status) => status == 200 || status == 404),
+    );
+    if (response.statusCode == 404) return null;
+    if (response.statusCode != 200) {
+      throw StateError('Matter setup code recovery failed');
+    }
+    final data = response.data;
+    if (data is! Map<String, dynamic>) {
+      throw const FormatException('Invalid pairing recovery response');
+    }
+    return RhythmPairingRecoverySecret.fromJson(data);
   }
 
   /// Fetch all canonical devices.
@@ -2123,10 +2194,14 @@ class RhythmServerApi {
     required String hubType,
     required String deviceId,
     String? hubAddress,
+    String? deviceType,
+    String? correlationId,
     bool force = false,
     Duration receiveTimeout = const Duration(seconds: 90),
   }) async {
     final normalizedHubAddress = hubAddress?.trim();
+    final normalizedDeviceType = deviceType?.trim();
+    final normalizedCorrelationId = correlationId?.trim();
     try {
       final response = await _dio.post(
         'api/devices/unpair',
@@ -2136,6 +2211,11 @@ class RhythmServerApi {
             'device_id': deviceId,
             if (normalizedHubAddress != null && normalizedHubAddress.isNotEmpty)
               'hub_address': normalizedHubAddress,
+            if (normalizedDeviceType != null && normalizedDeviceType.isNotEmpty)
+              'device_type': normalizedDeviceType,
+            if (normalizedCorrelationId != null &&
+                normalizedCorrelationId.isNotEmpty)
+              'correlation_id': normalizedCorrelationId,
             'force': force,
           },
         },

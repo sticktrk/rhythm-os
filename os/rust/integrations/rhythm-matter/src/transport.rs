@@ -326,6 +326,26 @@ pub trait MatterTransport: Send + Sync {
     /// Probe a single node and return its typed light capabilities.
     fn probe_light(&self, node_id: u64) -> Result<CommissionedDevice>;
 
+    /// Re-establish an existing node's operational connection without changing
+    /// its fabric identity. Compatibility transports prove the node with a
+    /// fresh probe; native transports may additionally repair controller
+    /// discovery state and refresh attribute subscriptions.
+    fn recover_light_connection(
+        &self,
+        node_id: u64,
+        expected_endpoint: u16,
+    ) -> Result<CommissionedDevice> {
+        let device = self.probe_light(node_id)?;
+        if device.light_endpoint != expected_endpoint {
+            anyhow::bail!(
+                "Matter recovery probe returned endpoint {} instead of expected endpoint {}",
+                device.light_endpoint,
+                expected_endpoint
+            );
+        }
+        Ok(device)
+    }
+
     /// Set the On/Off state of a light endpoint.
     fn set_on_off(&self, node_id: u64, endpoint: u16, on: bool) -> Result<()>;
 

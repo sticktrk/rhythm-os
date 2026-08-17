@@ -24,6 +24,26 @@ void main() {
     expect(feature.copyWith(status: 'reported').reportKind,
         SupportReportKind.feature);
     expect(legacy.reportKind, SupportReportKind.bug);
+    expect(feature.bundleStatus, 'none');
+  });
+
+  test('submission rows expose asynchronous bundle state', () {
+    final collecting = DebugBundleSubmission.fromRow({
+      'id': 'submission-1',
+      'reference_code': 'RHY-1234',
+      'status': 'received',
+      'bundle_status': 'collecting',
+      'bundle_storage_path': 'private/expected.tar.gz',
+    });
+    final legacyUploaded = DebugBundleSubmission.fromRow({
+      'id': 'submission-2',
+      'reference_code': 'RHY-5678',
+      'status': 'received',
+      'bundle_storage_path': 'private/legacy.tar.gz',
+    });
+
+    expect(collecting.bundleStatus, 'collecting');
+    expect(legacyUploaded.bundleStatus, 'uploaded');
   });
 
   test('appends app log while preserving server tarball entries', () {

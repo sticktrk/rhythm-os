@@ -503,6 +503,11 @@ pub struct AppState {
     /// failed operation from restoring a snapshot over another successful
     /// room edit.
     pub external_topology_transaction_lock: Arc<Mutex<()>>,
+    /// Serializes user-facing external-controller policy transitions while
+    /// allowing the integration callback to acquire the topology transaction
+    /// lock around bridge I/O. Keeping these locks distinct avoids a
+    /// non-reentrant callback deadlock.
+    pub external_controller_policy_transaction_lock: Arc<Mutex<()>>,
 
     // ---- Room state (all keyed by topology room IDs) ----
     /// Typed observed-power cache for API, poll, and SSE projections.
@@ -748,6 +753,21 @@ pub struct AppState {
         >,
     >,
 
+    /// Rename an integration-native device to its canonical Rhythm name.
+    #[allow(clippy::type_complexity)]
+    pub rename_hub_device_fn: Option<
+        Arc<
+            dyn Fn(
+                    &SharedState,
+                    &crate::canonical::identity::HubKey,
+                    &str,
+                    &str,
+                ) -> anyhow::Result<()>
+                + Send
+                + Sync,
+        >,
+    >,
+
     /// Platform-specific hub provider lookup.
     /// Returns a hub provider for a given hub type.
     pub get_hub_provider_fn: Option<
@@ -786,6 +806,20 @@ pub struct AppState {
                     &str,
                     &serde_json::Value,
                 ) -> anyhow::Result<crate::pairing::UnpairingResult>
+                + Send
+                + Sync,
+        >,
+    >,
+
+    /// Load secret pairing recovery material for one integration-native device.
+    #[allow(clippy::type_complexity)]
+    pub load_pairing_recovery_fn: Option<
+        Arc<
+            dyn Fn(
+                    &SharedState,
+                    &str,
+                    &str,
+                ) -> anyhow::Result<Option<crate::pairing::PairingRecoverySecret>>
                 + Send
                 + Sync,
         >,
@@ -976,6 +1010,7 @@ impl Default for AppState {
             topology_group_sync_pending: false,
             authority_state_recovery_required: false,
             external_topology_transaction_lock: Arc::new(Mutex::new(())),
+            external_controller_policy_transaction_lock: Arc::new(Mutex::new(())),
             room_observed_power: HashMap::new(),
             motion_snapshots: HashMap::new(),
             motion_timer_restores: HashMap::new(),
@@ -1033,10 +1068,12 @@ impl Default for AppState {
             finalize_external_controller_release_fn: None,
             prepare_hub_device_room_assignment_fn: None,
             delete_source_room_fn: None,
+            rename_hub_device_fn: None,
             get_hub_provider_fn: None,
             start_pairing_fn: None,
             reconcile_pairing_results_fn: None,
             start_unpairing_fn: None,
+            load_pairing_recovery_fn: None,
             run_device_test_fn: None,
             save_device_test_report_fn: None,
             hub_credentials_interceptor: None,
@@ -1405,6 +1442,31 @@ impl AppState {
         !self.authority_state_recovery_required
             && !self.external_controller_initial_sync_pending.contains(key)
             && !self.external_controller_authority_pending.contains(key)
+    }
+
+    /// Effective unattended-output admission combines the durable room choice
+    /// with the live controller transition fence. Desired all-Rhythm consent
+    /// must not publish effective authority while capture, suppression, or
+    /// restoration is still pending.
+    pub fn rhythm_automation_allowed_for_node(&self, node_id: &str) -> bool {
+        if !self.topology.rhythm_automation_allowed_for_node(node_id) {
+            return false;
+        }
+        let room_id = if self.topology.get(node_id).is_some() {
+            Some(node_id)
+        } else {
+            self.topology.device_parent_room_id(node_id)
+        };
+        let Some(room_id) = room_id else {
+            return true;
+        };
+        let Some(room) = self.topology.get(room_id) else {
+            return true;
+        };
+        room.hub_room_bindings
+            .iter()
+            .filter(|binding| binding.hub_key.hub_type.as_str() == crate::hub::HubType::HUE)
+            .all(|binding| self.external_controller_authority_is_ready(&binding.hub_key))
     }
 
     /// Forget the live connection state for a hub.
@@ -2023,5 +2085,38 @@ mod tests {
                 }],
             }
         );
+    }
+
+    #[test]
+    fn hue_automation_consent_is_not_effective_while_controller_transition_is_pending() {
+        let mut state = AppState::default();
+        let key = HubKey::new(HubType::new(HubType::HUE), "bridge.local");
+        let room_id = state.topology.create_room("Office");
+        state
+            .topology
+            .get_mut(&room_id)
+            .unwrap()
+            .upsert_hub_room_binding(crate::topology::HubRoomBinding {
+                hub_key: key.clone(),
+                hub_room_id: "hue-office".to_string(),
+                control_id: "grouped-office".to_string(),
+                light_device_ids: Vec::new(),
+            });
+        state
+            .topology
+            .replace_external_room_automation_decisions(
+                &key,
+                &[(
+                    room_id.clone(),
+                    crate::topology::ExternalRoomAutomationOwner::Rhythm,
+                )],
+            )
+            .unwrap();
+
+        assert!(state.rhythm_automation_allowed_for_node(&room_id));
+        state.mark_external_controller_authority_pending(&key);
+        assert!(!state.rhythm_automation_allowed_for_node(&room_id));
+        state.mark_external_controller_authority_ready(&key);
+        assert!(state.rhythm_automation_allowed_for_node(&room_id));
     }
 }

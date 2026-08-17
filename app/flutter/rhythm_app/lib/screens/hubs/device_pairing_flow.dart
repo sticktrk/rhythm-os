@@ -86,16 +86,19 @@ List<HueBridgePairingTarget> connectedHueBridgePairingTargets({
   return targets;
 }
 
-/// Starts universal code intake, direct Hue BLE scan, or Hue Bridge search.
+/// Starts universal code intake, direct Hue BLE add, or Hue Bridge search.
 ///
-/// Hue Bluetooth bulbs retain their nearby-scan flow. Other local-BLE profiles
-/// may use universal QR/manual intake when explicitly advertised by the host.
+/// Add Device goes directly to camera/manual code intake. While camera intake
+/// is visible it can offer a separately observed nearby Hue Bluetooth bulb.
+/// Other local-BLE profiles use QR/manual intake when advertised by the host.
 Future<void> startDevicePairingFlow(
   BuildContext context, {
   DevicePairingTarget target = DevicePairingTarget.any,
   String analyticsSource = 'unknown',
   String? hubAddress,
   DevicePairingRoomAssignment? roomAssignment,
+  String hueBleInputMethod = 'nearby_scan',
+  String? hueBleJourneyId,
 }) async {
   final syncProvider = context.read<ServerSyncProvider>();
   final allowsLightPairing = roomAssignment == null ||
@@ -106,7 +109,7 @@ Future<void> startDevicePairingFlow(
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            'Update your Rhythm Box to scan for Hue Bluetooth bulbs.',
+            'Update your Rhythm Box to add Hue Bluetooth bulbs.',
           ),
         ),
       );
@@ -116,6 +119,8 @@ Future<void> startDevicePairingFlow(
       context,
       analyticsSource: analyticsSource,
       roomAssignment: roomAssignment,
+      inputMethod: hueBleInputMethod,
+      journeyId: hueBleJourneyId,
     );
     return;
   }
@@ -137,30 +142,6 @@ Future<void> startDevicePairingFlow(
   }
   final journeyId = 'device-pair-${const Uuid().v4()}';
 
-  if (!hueBridgeOnly && allowsLightPairing && syncProvider.canAddHueBleDevice) {
-    final canUseSetupCode = syncProvider.canAddMatterDevice ||
-        syncProvider.canAddHueBridgeDeviceBySerial ||
-        syncProvider.canAddLocalBleDevice;
-    if (!canUseSetupCode) {
-      await _startHueBlePairing(
-        context,
-        analyticsSource: analyticsSource,
-        roomAssignment: roomAssignment,
-      );
-      return;
-    }
-    final intake = await showUniversalDevicePairingIntakeChooser(context);
-    if (!context.mounted || intake == null) return;
-    if (intake == DevicePairingTarget.hueBle) {
-      await _startHueBlePairing(
-        context,
-        analyticsSource: analyticsSource,
-        roomAssignment: roomAssignment,
-      );
-      return;
-    }
-  }
-
   final hueBridgeSerialSearchAvailable =
       allowsLightPairing && syncProvider.canAddHueBridgeDeviceBySerial;
 
@@ -172,6 +153,10 @@ Future<void> startDevicePairingFlow(
       supportedLocalBleProfileIds: syncProvider.supportedLocalBleProfileIds,
       hueBridgeOnly: hueBridgeOnly,
       journeyId: journeyId,
+      autoDiscoverHueBle: !hueBridgeOnly &&
+          allowsLightPairing &&
+          syncProvider.canAddHueBleDevice,
+      analyticsSource: analyticsSource,
     );
     if (!context.mounted || intake == null) return;
 
@@ -243,6 +228,30 @@ Future<void> startDevicePairingFlow(
         );
         return;
 
+      case DevicePairingScannerAction.hueBle:
+        if (hueBridgeOnly || !allowsLightPairing) continue;
+        if (!syncProvider.canAddHueBleDevice) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                'Update your Rhythm Box before adding Hue Bluetooth bulbs.',
+              ),
+            ),
+          );
+          continue;
+        }
+        await _startHueBlePairing(
+          context,
+          analyticsSource: analyticsSource,
+          roomAssignment: roomAssignment,
+          inputMethod: intake.inputMethod,
+          journeyId: pairingJourneyIdForIntake(
+            intake,
+            fallbackPrefix: 'hue-ble-pair',
+          ),
+        );
+        return;
+
       case DevicePairingScannerAction.localBle:
         if (hueBridgeOnly) continue;
         final profileId = intake.localBleSetup?.profileId;
@@ -287,99 +296,14 @@ Future<void> startDevicePairingFlow(
   }
 }
 
-@visibleForTesting
-Future<DevicePairingTarget?> showUniversalDevicePairingIntakeChooser(
-  BuildContext context,
-) {
-  return showModalBottomSheet<DevicePairingTarget>(
-    context: context,
-    backgroundColor: const Color(0xFF151923),
-    showDragHandle: true,
-    builder: (sheetContext) => SafeArea(
-      child: Padding(
-        key: const ValueKey('device-pairing-method-chooser'),
-        padding: const EdgeInsets.fromLTRB(20, 4, 20, 20),
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const Text(
-                'How do you want to add it?',
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 21,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Text(
-                'Hue Bluetooth bulbs are found nearby without a setup code. '
-                'Other supported devices use their QR or printed code.',
-                style: TextStyle(
-                  color: Colors.white.withValues(alpha: 0.7),
-                  fontSize: 14,
-                  height: 1.4,
-                ),
-              ),
-              const SizedBox(height: 18),
-              ListTile(
-                key: const ValueKey('pairing-method-hue-ble'),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                tileColor: const Color(0xFFFFB900).withValues(alpha: 0.12),
-                leading: const Icon(
-                  Icons.bluetooth_searching_rounded,
-                  color: Color(0xFFFFB900),
-                ),
-                title: const Text(
-                  'Find nearby Hue Bluetooth bulbs',
-                  style: TextStyle(color: Colors.white),
-                ),
-                subtitle: Text(
-                  'No QR code or serial required',
-                  style: TextStyle(color: Colors.white.withValues(alpha: 0.62)),
-                ),
-                onTap: () =>
-                    Navigator.of(sheetContext).pop(DevicePairingTarget.hueBle),
-              ),
-              const SizedBox(height: 10),
-              ListTile(
-                key: const ValueKey('pairing-method-code'),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14),
-                ),
-                tileColor: Colors.white.withValues(alpha: 0.06),
-                leading: const Icon(
-                  Icons.qr_code_scanner_rounded,
-                  color: Color(0xFF4DD0C8),
-                ),
-                title: const Text(
-                  'Scan or enter a setup code',
-                  style: TextStyle(color: Colors.white),
-                ),
-                subtitle: Text(
-                  'Matter, Bluetooth devices, or a Hue Bridge bulb serial',
-                  style: TextStyle(color: Colors.white.withValues(alpha: 0.62)),
-                ),
-                onTap: () =>
-                    Navigator.of(sheetContext).pop(DevicePairingTarget.any),
-              ),
-            ],
-          ),
-        ),
-      ),
-    ),
-  );
-}
-
 Future<DevicePairingScannerResult?> _capturePairingCode(
   BuildContext context, {
   required bool hueBridgeSerialSearchAvailable,
   required Set<String> supportedLocalBleProfileIds,
   bool hueBridgeOnly = false,
   required String journeyId,
+  required bool autoDiscoverHueBle,
+  required String analyticsSource,
 }) async {
   if (supportsDevicePairingCamera) {
     final scanned = await DevicePairingScannerScreen.show(
@@ -388,6 +312,8 @@ Future<DevicePairingScannerResult?> _capturePairingCode(
       supportedLocalBleProfileIds: supportedLocalBleProfileIds,
       hueBridgeOnly: hueBridgeOnly,
       journeyId: journeyId,
+      autoDiscoverHueBle: autoDiscoverHueBle,
+      analyticsSource: analyticsSource,
     );
     if (!context.mounted || scanned == null) return null;
     if (scanned.action == DevicePairingScannerAction.enterCode) {
@@ -662,12 +588,15 @@ Future<void> _startHueBlePairing(
   BuildContext context, {
   required String analyticsSource,
   DevicePairingRoomAssignment? roomAssignment,
+  String inputMethod = 'nearby_scan',
+  String? journeyId,
 }) async {
   final syncProvider = context.read<ServerSyncProvider>();
   final result = await HueBleDeviceAddScreen.show(
     context,
     analyticsSource: analyticsSource,
-    journeyId: 'hue-ble-pair-${const Uuid().v4()}',
+    journeyId: journeyId ?? 'hue-ble-pair-${const Uuid().v4()}',
+    inputMethod: inputMethod,
   );
   if (!context.mounted || result == null) return;
 

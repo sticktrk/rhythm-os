@@ -461,12 +461,12 @@ class _RhythmTunerChartState extends State<RhythmTunerChart>
       case 'maxCCT':
         final v = (l.yToCCT(pos.dy) / 100).round() * 100;
         nc = c.copyWith(
-            maxColorTemp: v.clamp(c.minColorTemp + 200, 6500));
+            maxColorTemp: v.clamp(c.minColorTemp, 6500));
         break;
       case 'minCCT':
         final v = (l.yToCCT(pos.dy) / 100).round() * 100;
         nc = c.copyWith(
-            minColorTemp: v.clamp(500, c.maxColorTemp - 200));
+            minColorTemp: v.clamp(500, c.maxColorTemp));
         break;
       // Chart handles
       case 'widthLeftBri':

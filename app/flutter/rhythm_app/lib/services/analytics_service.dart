@@ -229,11 +229,90 @@ class AnalyticsService {
     await logEvent('hub_disconnected', {'hub_type': hubType});
   }
 
+  Future<void> logMatterSetupCodeRecoveryAttempted({
+    required String source,
+  }) async {
+    await logEvent('matter_setup_code_recovery_attempted', {
+      'source': source,
+    });
+  }
+
+  Future<void> logMatterSetupCodeRecoveryCompleted({
+    required String source,
+    required String outcome,
+    String? failureStage,
+  }) async {
+    await logEvent('matter_setup_code_recovery_completed', {
+      'source': source,
+      'outcome': outcome,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
   /// Track room sync from a hub.
   Future<void> logRoomSync(int roomCount, String hubType) async {
     await logEvent('room_sync', {
       'room_count': roomCount,
       'hub_type': hubType,
+    });
+  }
+
+  Future<void> logHueAuthorityReviewOpened({
+    required String journeyId,
+    required String source,
+    required String authorityScope,
+    required int roomCount,
+    required bool hadPriorReview,
+  }) async {
+    await logEvent('hue_authority_review_opened', {
+      'journey_id': journeyId,
+      'source': source,
+      'authority_scope': authorityScope,
+      'affected_room_count_bucket': _layoutCountBucket(roomCount),
+      'had_prior_review': hadPriorReview ? 1 : 0,
+    });
+  }
+
+  Future<void> logHueAuthorityReviewSubmitted({
+    required String journeyId,
+    required String source,
+    required int roomCount,
+    required int hueRoomCount,
+    required int rhythmRoomCount,
+    required bool bridgeTakeoverRequested,
+    required String authorityScope,
+  }) async {
+    final choice = hueRoomCount == roomCount
+        ? 'all_hue'
+        : rhythmRoomCount == roomCount
+            ? 'all_rhythm'
+            : 'mixed';
+    await logEvent('hue_room_control_choice_submitted', {
+      'journey_id': journeyId,
+      'source': source,
+      'authority_scope': authorityScope,
+      'choice': choice,
+      'affected_room_count_bucket': _layoutCountBucket(roomCount),
+      'conflict_count_bucket': 'unknown',
+      'bridge_takeover_requested': bridgeTakeoverRequested ? 1 : 0,
+    });
+  }
+
+  Future<void> logHueAuthorityReviewCompleted({
+    required String journeyId,
+    required String source,
+    required String outcome,
+    required bool bridgeTakeoverRequested,
+    required String authorityScope,
+    String? failureStage,
+  }) async {
+    await logEvent('hue_room_control_transition_completed', {
+      'journey_id': journeyId,
+      'source': source,
+      'authority_scope': authorityScope,
+      'outcome': outcome,
+      'bridge_takeover_requested': bridgeTakeoverRequested ? 1 : 0,
+      if (failureStage != null) 'failure_stage': failureStage,
     });
   }
 
@@ -678,10 +757,12 @@ class AnalyticsService {
   Future<void> logLightProfileRoomDefaultChanged({
     required String profile,
     required bool cleared,
+    String source = 'automations',
   }) async {
     await logEvent('light_profile_room_default_changed', {
       'profile': profile,
       'cleared': cleared ? 1 : 0,
+      'source': source,
     });
   }
 
@@ -703,6 +784,8 @@ class AnalyticsService {
     required String profile,
     required String outcome,
     required int changedFieldCount,
+    String? dayColorMode,
+    String? dayBrightnessMode,
     String? failureStage,
     String scope = 'room',
   }) async {
@@ -711,6 +794,9 @@ class AnalyticsService {
       'profile': profile,
       'outcome': outcome,
       'changed_field_count': changedFieldCount,
+      if (dayColorMode != null) 'day_color_mode': dayColorMode,
+      if (dayBrightnessMode != null)
+        'day_brightness_mode': dayBrightnessMode,
       if (failureStage != null) 'failure_stage': failureStage,
     });
   }
@@ -835,7 +921,15 @@ class AnalyticsService {
     required int attemptNumber,
     required String outcome,
     String? failureStage,
+    String? recoveryAction,
   }) async {
+    final boundedRecoveryAction = switch (recoveryAction) {
+      'existing_connection_recovered' => 'existing_connection_recovered',
+      'existing_node_recommissioned' => 'existing_node_recommissioned',
+      'existing_node_recommission_failed' =>
+        'existing_node_recommission_failed',
+      _ => null,
+    };
     await logEvent('matter_pairing_completed', {
       'journey_id': journeyId,
       'source': source,
@@ -844,6 +938,8 @@ class AnalyticsService {
       'attempt_number': attemptNumber,
       'outcome': outcome,
       if (failureStage != null) 'failure_stage': failureStage,
+      if (boundedRecoveryAction != null)
+        'recovery_action': boundedRecoveryAction,
     });
   }
 
@@ -878,6 +974,84 @@ class AnalyticsService {
       'attempt_number': attemptNumber,
       'outcome': outcome,
       if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
+  /// Track an explicit Hue Bridge button/switch search request.
+  Future<void> logHueBridgeButtonPairingAttempted({
+    required String journeyId,
+    required String source,
+    required int attemptNumber,
+  }) async {
+    await logEvent('hue_bridge_button_pairing_attempted', {
+      'journey_id': journeyId,
+      'source': source,
+      'input_method': 'bridge_search',
+      'attempt_number': attemptNumber,
+    });
+  }
+
+  /// Track the terminal app-observed result of one Bridge accessory search.
+  Future<void> logHueBridgeButtonPairingCompleted({
+    required String journeyId,
+    required String source,
+    required int attemptNumber,
+    required String outcome,
+    String? failureStage,
+  }) async {
+    await logEvent('hue_bridge_button_pairing_completed', {
+      'journey_id': journeyId,
+      'source': source,
+      'input_method': 'bridge_search',
+      'attempt_number': attemptNumber,
+      'outcome': outcome,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
+  /// Track a terminal Hue Bridge device removal without retaining identity.
+  Future<void> logHueBridgeDeviceRemovalCompleted({
+    required String journeyId,
+    required String deviceType,
+    required String outcome,
+    required bool force,
+    String? failureStage,
+  }) async {
+    await logEvent('hue_bridge_device_removal_completed', {
+      'journey_id': journeyId,
+      'device_type': deviceType,
+      'outcome': outcome,
+      'force': force ? 1 : 0,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
+  /// Track one bounded phone-side Hue BLE observation without advertisement
+  /// identity, signal strength, or raw plugin errors.
+  Future<void> logHueBleNearbyDiscoveryCompleted({
+    required String source,
+    required String outcome,
+    required int deviceCount,
+  }) async {
+    await logEvent('hue_ble_nearby_discovery_completed', {
+      'source': source,
+      'outcome': outcome,
+      'device_count': deviceCount < 0
+          ? 0
+          : deviceCount > 10
+              ? 10
+              : deviceCount,
+    });
+  }
+
+  /// Track the user's response to the privacy-safe nearby-bulb invitation.
+  Future<void> logHueBleNearbyPromptAnswered({
+    required String source,
+    required String outcome,
+  }) async {
+    await logEvent('hue_ble_nearby_prompt_answered', {
+      'source': source,
+      'outcome': outcome,
     });
   }
 

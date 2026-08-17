@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use log::warn;
@@ -19,21 +19,25 @@ use crate::reqwest_sse::start_reqwest_sse;
 use crate::reqwest_transport::ReqwestHueTransport;
 use crate::sse::HueSseConfig;
 use crate::sse_liveness::HueSseLiveness;
-use crate::transport::HueTransport;
+use crate::transport::{HueBridgeDeviceClass, HueTransport};
 
 use rhythm_os::canonical::identity::HubKey;
 use rhythm_os::hub::{
     ActiveHub, ExternalControllerReleaseReason, ExternalLightHubIntegration, HubCredentials,
     HubDeviceRoomAssignment, HubDeviceRoomAssignmentOutcome, HubEvent, HubIntegrationCapability,
-    HubProvider, HubType, DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_SERIAL_SEARCH,
+    HubProvider, HubType, DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_BUTTON_SEARCH,
+    DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_SERIAL_SEARCH,
 };
 use rhythm_os::pairing::{
     PairedDeviceInfo, PairingSession, PairingStage, PairingStatus, UnpairingResult,
 };
-use rhythm_os::state::SharedState;
+use rhythm_os::state::{AppState, SharedState};
 use rhythm_os::storage::Storage;
 
 const HUE_ADDRESS_MIGRATION_FROM_FIELD: &str = "address_migration_from";
+const HUE_BUTTON_PROJECTION_TIMEOUT: Duration = Duration::from_secs(45);
+const HUE_BUTTON_SYNC_SLOT_TIMEOUT: Duration = Duration::from_secs(5);
+const HUE_TAKEOVER_FAILED_ATTEMPTS_BEFORE_POLICY_ROLLBACK: u32 = 2;
 
 // ============================================================================
 // Boot-time connection
@@ -169,9 +173,10 @@ pub fn create_hue_controller(
 
 /// Refuse binary rollback while a bridge is still under Rhythm authority.
 ///
-/// Automatic Hue restoration is intentionally disabled. A snapshot retained
-/// after credential removal is archival and may survive rollback, but this
-/// function never writes captured state back to a bridge.
+/// This offline rollback hook never writes captured state back to a bridge.
+/// The room-authority release path must first perform verified restoration;
+/// any active or incomplete ownership epoch keeps rollback blocked. A legacy
+/// retained snapshot is archival only when its bridge credentials are absent.
 pub fn restore_authoritative_bridges_before_binary_rollback(
     data_dir: &std::path::Path,
 ) -> Result<()> {
@@ -638,8 +643,14 @@ fn complete_pending_hue_address_migration(
 
     let canonical_old = state.canonical_registry.references_hub_key(&old_key);
     let canonical_new = state.canonical_registry.references_hub_key(new_key);
-    let topology_old = state.topology.references_hub_key(&old_key);
-    let topology_new = state.topology.references_hub_key(new_key);
+    // Policy-only grandfather markers are address-scoped admission metadata,
+    // not competing controller graphs. During a crash-resumed address change
+    // the legacy-policy migration can legitimately retain a marker for both
+    // the staged new credential and the still-bound old topology. Only real
+    // graph references are identity conflicts here; remap_hub_key coalesces
+    // the markers after the proven bridge identity is committed.
+    let topology_old = state.topology.structurally_references_hub_key(&old_key);
+    let topology_new = state.topology.structurally_references_hub_key(new_key);
     if (canonical_old && canonical_new) || (topology_old && topology_new) {
         anyhow::bail!("Hue address migration found conflicting old and new controller references");
     }
@@ -818,6 +829,39 @@ fn hue_authority_context(state: &SharedState, key: &HubKey) -> Result<HueAuthori
     })
 }
 
+fn hue_automation_suppression_scope(
+    state: &SharedState,
+    key: &HubKey,
+) -> Result<crate::ownership::HueAutomationSuppressionScope> {
+    let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let mut scope = crate::ownership::HueAutomationSuppressionScope::default();
+    for (room_id, _, owner) in state.topology.external_automation_rooms_for_hub(key) {
+        let room = state.topology.get(&room_id).ok_or_else(|| {
+            anyhow::anyhow!("Hue authority room disappeared during reconciliation")
+        })?;
+        for binding in room
+            .hub_room_bindings
+            .iter()
+            .filter(|binding| binding.hub_key == *key)
+        {
+            if owner == Some(rhythm_os::topology::ExternalRoomAutomationOwner::Rhythm) {
+                scope.include_rhythm_room(
+                    &binding.hub_room_id,
+                    &binding.control_id,
+                    &binding.light_device_ids,
+                );
+            } else {
+                scope.include_external_room(
+                    &binding.hub_room_id,
+                    &binding.control_id,
+                    &binding.light_device_ids,
+                );
+            }
+        }
+    }
+    Ok(scope)
+}
+
 fn hue_release_context(state: &SharedState, key: &HubKey) -> Result<Option<HueAuthorityContext>> {
     let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let Some(storage) = state.storage.clone() else {
@@ -920,7 +964,21 @@ fn verify_and_persist_connected_bridge_identity(
 
 fn ensure_hue_start_phase_is_not_release_fenced(
     phase: Option<crate::ownership::HueOwnershipPhase>,
+    release_intent: Option<crate::ownership::HueOwnershipReleaseIntent>,
 ) -> Result<()> {
+    let resumable_room_policy_release = release_intent
+        == Some(crate::ownership::HueOwnershipReleaseIntent::RoomAuthorityChanged)
+        && matches!(
+            phase,
+            Some(
+                crate::ownership::HueOwnershipPhase::Restoring
+                    | crate::ownership::HueOwnershipPhase::RestoreIncomplete
+                    | crate::ownership::HueOwnershipPhase::Restored
+            )
+        );
+    if resumable_room_policy_release {
+        return Ok(());
+    }
     if matches!(
         phase,
         Some(
@@ -943,12 +1001,18 @@ fn ensure_hue_start_is_not_release_fenced(state: &SharedState, bridge_id: &str) 
         .map_err(|_| anyhow::anyhow!("lock"))?
         .storage
         .clone();
-    let phase = match storage {
-        Some(storage) => crate::ownership::load_controller_ownership(storage.as_ref(), bridge_id)?
-            .map(|ownership| ownership.phase),
-        None => None,
+    let (phase, release_intent) = match storage {
+        Some(storage) => {
+            let ownership =
+                crate::ownership::load_controller_ownership(storage.as_ref(), bridge_id)?;
+            (
+                ownership.as_ref().map(|ownership| ownership.phase),
+                ownership.and_then(|ownership| ownership.release_intent()),
+            )
+        }
+        None => (None, None),
     };
-    ensure_hue_start_phase_is_not_release_fenced(phase)
+    ensure_hue_start_phase_is_not_release_fenced(phase, release_intent)
 }
 
 fn hue_authority_should_fence_on_connect(
@@ -983,6 +1047,270 @@ fn start_hue_after_release_fence<T>(
 ) -> Result<T> {
     ensure_hue_start_is_not_release_fenced(state, bridge_id)?;
     start()
+}
+
+#[derive(Clone, Debug)]
+struct HueDesiredTopology {
+    rooms: Vec<crate::managed_rooms::DesiredHueRoom>,
+    controlled_device_ids: BTreeSet<String>,
+}
+
+/// Project only canonical Hue lights. Other Hue room children are deliberately
+/// outside this ownership boundary and the managed-room reconciler preserves
+/// them verbatim.
+fn desired_hue_topology_locked(state: &AppState, key: &HubKey) -> Result<HueDesiredTopology> {
+    let mut controlled_device_ids = BTreeSet::new();
+    let mut rooms = BTreeMap::<String, (String, Vec<String>)>::new();
+
+    for device in state.canonical_registry.devices() {
+        if device.device_type != rhythm_core::runtime::hub_registry::DeviceType::Light {
+            continue;
+        }
+        let Some(endpoint) = device
+            .active_endpoints()
+            .find(|endpoint| endpoint.hub_key == *key)
+        else {
+            continue;
+        };
+        controlled_device_ids.insert(endpoint.native_id.clone());
+        let Some(room_id) = state
+            .topology
+            .device_parent_room_id(&device.id)
+            .map(str::to_string)
+            .or_else(|| device.room_id.clone())
+        else {
+            continue;
+        };
+        let room = state
+            .topology
+            .get(&room_id)
+            .ok_or_else(|| anyhow::anyhow!("A Hue light references a missing Rhythm room"))?;
+        rooms
+            .entry(room_id)
+            .or_insert_with(|| {
+                (
+                    crate::managed_rooms::managed_room_projection_name(&room.name),
+                    Vec::new(),
+                )
+            })
+            .1
+            .push(endpoint.native_id.clone());
+    }
+
+    let rooms = rooms
+        .into_iter()
+        .map(|(rhythm_room_id, (name, mut device_ids))| {
+            device_ids.sort();
+            device_ids.dedup();
+            crate::managed_rooms::DesiredHueRoom::new(rhythm_room_id, name, device_ids)
+        })
+        .collect();
+    Ok(HueDesiredTopology {
+        rooms,
+        controlled_device_ids,
+    })
+}
+
+fn desired_hue_topology(state: &SharedState, key: &HubKey) -> Result<HueDesiredTopology> {
+    let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    desired_hue_topology_locked(&state, key)
+}
+
+fn exact_managed_room_bindings<H: HueTransport + ?Sized>(
+    key: &HubKey,
+    transport: &H,
+    username: &str,
+    ownership: &crate::ownership::HueControllerOwnership,
+    desired: &HueDesiredTopology,
+) -> Result<Vec<(String, String, rhythm_os::topology::HubRoomBinding)>> {
+    let observed = crate::managed_rooms::observe_hue_rooms(transport, username)?;
+    let observed_by_id = observed
+        .iter()
+        .map(|room| (room.hue_room_id.as_str(), room))
+        .collect::<BTreeMap<_, _>>();
+    let mut bindings = Vec::with_capacity(desired.rooms.len());
+
+    for desired_room in &desired.rooms {
+        let managed = ownership
+            .managed_rooms()
+            .get(&desired_room.rhythm_room_id)
+            .ok_or_else(|| anyhow::anyhow!("Hue managed-room reconciliation is incomplete"))?;
+        let observed = observed_by_id
+            .get(managed.hue_room_id.as_str())
+            .ok_or_else(|| anyhow::anyhow!("A managed Hue room is not observable"))?;
+        let mut expected_device_ids = desired_room.device_ids.clone();
+        expected_device_ids.sort();
+        expected_device_ids.dedup();
+        let observed_controlled_device_ids = observed
+            .device_ids
+            .iter()
+            .filter(|device_id| desired.controlled_device_ids.contains(*device_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        if observed_controlled_device_ids != expected_device_ids
+            || observed.grouped_light_id.as_deref() != Some(managed.grouped_light_id.as_str())
+        {
+            anyhow::bail!("A managed Hue room failed exact membership verification");
+        }
+        bindings.push((
+            desired_room.rhythm_room_id.clone(),
+            desired_room.name.clone(),
+            rhythm_os::topology::HubRoomBinding {
+                hub_key: key.clone(),
+                hub_room_id: managed.hue_room_id.clone(),
+                control_id: managed.grouped_light_id.clone(),
+                light_device_ids: expected_device_ids,
+            },
+        ));
+    }
+    if ownership.managed_rooms().len() != bindings.len() {
+        anyhow::bail!("Hue ownership contains stale managed-room mappings");
+    }
+    Ok(bindings)
+}
+
+fn set_hue_topology_sync_state(
+    state: &SharedState,
+    key: &HubKey,
+    suspended: bool,
+    attention: bool,
+) -> Result<()> {
+    let changed = {
+        let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let before = state.topology.clone();
+        let changed = state
+            .topology
+            .set_external_grouped_dispatch_suspended(key, suspended);
+        let changed = state
+            .topology
+            .set_external_room_topology_sync_attention(key, attention)
+            || changed;
+        if !changed {
+            return Ok(());
+        }
+        if let Err(error) = rhythm_os::commands::save_authority_state(&state) {
+            state.topology = before;
+            return Err(error.context("Failed to persist the Hue grouped-dispatch fence"));
+        }
+        true
+    };
+    if changed {
+        rhythm_os::commands::rebuild_composite_routing(state);
+    }
+    Ok(())
+}
+
+fn publish_managed_room_bindings(
+    state: &SharedState,
+    key: &HubKey,
+    bindings: &[(String, String, rhythm_os::topology::HubRoomBinding)],
+) -> Result<()> {
+    let mut state_guard = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let topology_before = state_guard.topology.clone();
+    let mut stale_room_ids = BTreeSet::new();
+    for (rhythm_room_id, _, _) in bindings {
+        if let Some(room) = state_guard.topology.get(rhythm_room_id) {
+            stale_room_ids.extend(
+                room.hub_room_bindings
+                    .iter()
+                    .filter(|binding| binding.hub_key == *key)
+                    .map(|binding| binding.hub_room_id.clone()),
+            );
+        }
+    }
+    for (rhythm_room_id, _, binding) in bindings {
+        if !state_guard
+            .topology
+            .upsert_managed_room_binding(rhythm_room_id, binding.clone())
+        {
+            state_guard.topology = topology_before;
+            anyhow::bail!("Failed to publish an exact managed Hue room binding");
+        }
+        stale_room_ids.remove(&binding.hub_room_id);
+    }
+    state_guard
+        .topology
+        .set_external_grouped_dispatch_suspended(key, false);
+    state_guard
+        .topology
+        .set_external_room_topology_sync_attention(key, false);
+
+    if let Err(error) = rhythm_os::commands::save_authority_state(&state_guard) {
+        state_guard.topology = topology_before;
+        return Err(error.context("Failed to durably publish managed Hue room bindings"));
+    }
+
+    if let Some(registry) = state_guard
+        .hubs
+        .get(key)
+        .and_then(|hub| hub.registry.as_ref())
+        .cloned()
+    {
+        let mut registry = registry
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Failed to lock Hue registry"))?;
+        for room_id in stale_room_ids {
+            registry.remove_room(&room_id);
+        }
+        for (_, name, binding) in bindings {
+            registry.upsert_room(
+                &binding.hub_room_id,
+                name,
+                &binding.control_id,
+                &binding.light_device_ids,
+            );
+        }
+    }
+    drop(state_guard);
+    rhythm_os::commands::persist_registry(state);
+    rhythm_os::commands::rebuild_composite_routing(state);
+    Ok(())
+}
+
+fn active_ownership_for_topology_sync(
+    storage: &dyn Storage,
+    bridge_id: &str,
+) -> Result<crate::ownership::HueControllerOwnership> {
+    let ownership = crate::ownership::load_controller_ownership(storage, bridge_id)?
+        .ok_or_else(|| anyhow::anyhow!("Hue automation handoff is required before room sync"))?;
+    if ownership.phase != crate::ownership::HueOwnershipPhase::Active {
+        anyhow::bail!("Hue automation handoff is required before room sync");
+    }
+    Ok(ownership)
+}
+
+/// Resolve a durably rejected takeover without weakening Hue suppression.
+///
+/// A repeatedly failed receipt in `clear_incomplete` means the same journaled
+/// suppression operation could not be applied or verified across retries.
+/// Retrying that same epoch across every restart leaves the controller fenced
+/// indefinitely. Persist the native Hue room policy first, then restore and
+/// finalize the partial epoch. If restoration fails, the native policy remains
+/// durable and the ordinary observe-only bootstrap path resumes restoration on
+/// its next retry. Inventory failures and first-attempt write failures remain
+/// retryable.
+fn recover_incomplete_hue_takeover_policy(
+    state: &SharedState,
+    key: &HubKey,
+    phase: Option<crate::ownership::HueOwnershipPhase>,
+    has_repeated_failed_receipt: bool,
+    release: impl FnOnce() -> Result<()>,
+) -> Result<bool> {
+    if phase != Some(crate::ownership::HueOwnershipPhase::ClearIncomplete)
+        || !has_repeated_failed_receipt
+    {
+        return Ok(false);
+    }
+
+    rhythm_os::commands::fail_closed_external_room_automation_policy(state, key)
+        .context("Failed to persist fail-closed Hue policy after rejected takeover")?;
+    release().context("Failed to restore Hue after rejected takeover")?;
+    warn!(
+        target: "hue_authority",
+        "Recovered rejected Hue takeover for {}; room automation returned to Hue",
+        key
+    );
+    Ok(true)
 }
 
 /// Static integration instance for platform crate registries.
@@ -1020,10 +1348,68 @@ impl ExternalLightHubIntegration for HueIntegration {
         true
     }
 
-    fn sync_topology_groups(&self, _state: &SharedState, _key: &HubKey) -> Result<()> {
-        // Hue discovery remains authoritative. Ordinary sync never infers
-        // native room identity from a local name; explicit user mutations use
-        // the dedicated source-room lifecycle hooks below.
+    fn sync_topology_groups(&self, state: &SharedState, key: &HubKey) -> Result<()> {
+        let enabled = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .topology
+            .external_room_topology_sync_is_enabled(key);
+        if !enabled {
+            return Ok(());
+        }
+
+        // Publish the individual-device fallback before the first bridge
+        // mutation. If Hue goes offline or readback is partial, this durable
+        // fence survives restart and prevents a stale grouped target.
+        set_hue_topology_sync_state(state, key, true, false)?;
+        let result = (|| {
+            let desired = desired_hue_topology(state, key)?;
+            let context = hue_authority_context(state, key)?;
+            let transport = ReqwestHueTransport::new(&context.bridge_ip)?;
+            let bridge_id =
+                crate::ownership::connected_hue_bridge_id(&transport, &context.username)?;
+            persist_connected_bridge_identity(state, key, &bridge_id)?;
+            let operation_lock = crate::ownership::controller_operation_lock(&bridge_id);
+            let _operation = operation_lock
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Failed to lock Hue controller operations"))?;
+            let mut ownership =
+                active_ownership_for_topology_sync(context.storage.as_ref(), &bridge_id)?;
+
+            crate::managed_rooms::reconcile_managed_rooms(
+                context.storage.as_ref(),
+                key,
+                &mut ownership,
+                &transport,
+                &context.username,
+                &desired.rooms,
+                &desired.controlled_device_ids,
+            )?;
+            let bindings = exact_managed_room_bindings(
+                key,
+                &transport,
+                &context.username,
+                &ownership,
+                &desired,
+            )?;
+            publish_managed_room_bindings(state, key, &bindings)
+        })();
+        if let Err(error) = result {
+            if let Err(status_error) = set_hue_topology_sync_state(state, key, true, true) {
+                warn!(
+                    "Failed to persist Hue topology attention status: {:#}",
+                    status_error
+                );
+            }
+            // Hue has an explicit per-device fallback, so an optional mirror
+            // failure must not trip the platform-wide required-group fence
+            // used by Matter-like integrations. The durable attention marker
+            // keeps this bridge individually routed until a later retry.
+            warn!(
+                "Hue room topology sync deferred; individual-light routing remains active: {:#}",
+                error
+            );
+        }
         Ok(())
     }
 
@@ -1046,38 +1432,101 @@ impl ExternalLightHubIntegration for HueIntegration {
         )
     }
 
+    fn rename_device(
+        &self,
+        state: &SharedState,
+        key: &HubKey,
+        native_device_id: &str,
+        name: &str,
+    ) -> Result<()> {
+        let context = hue_authority_context(state, key)?;
+        let transport = ReqwestHueTransport::new(&context.bridge_ip)?;
+        let bridge_id = crate::ownership::connected_hue_bridge_id(&transport, &context.username)?;
+        let operation_lock = crate::ownership::controller_operation_lock(&bridge_id);
+        let _operation = operation_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Failed to lock Hue controller operations"))?;
+        transport.rename_device(&context.username, native_device_id, name)
+    }
+
     fn reconcile_external_controller_authority(
         &self,
         state: &SharedState,
         key: &HubKey,
     ) -> Result<()> {
+        let has_rhythm_room_consent = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .topology
+            .external_hub_has_rhythm_consent(key);
+        if !has_rhythm_room_consent {
+            // Upgrades can arrive with an ownership manifest created by the
+            // old implicit-takeover behavior. Observe-only must undo that
+            // work before the generic callback publishes this controller as
+            // ready; otherwise Hue would remain silently suppressed even
+            // though every room now fails closed to Hue.
+            self.release_external_controller_authority(
+                state,
+                key,
+                ExternalControllerReleaseReason::RoomAuthorityChanged,
+            )?;
+            log::info!(
+                target: "hue_authority",
+                "Hue bridge {} remains observe-only until at least one bound room explicitly chooses Rhythm automation",
+                key
+            );
+            return Ok(());
+        }
+        let suppression_scope = hue_automation_suppression_scope(state, key)?;
         let context = hue_authority_context(state, key)?;
         let transport = ReqwestHueTransport::new(&context.bridge_ip)?;
         let bridge_id = crate::ownership::connected_hue_bridge_id(&transport, &context.username)?;
         persist_connected_bridge_identity(state, key, &bridge_id)?;
-        if crate::ownership::load_controller_ownership(context.storage.as_ref(), &bridge_id)?
-            .is_some_and(|ownership| {
-                matches!(
-                    ownership.phase,
-                    crate::ownership::HueOwnershipPhase::Restoring
-                        | crate::ownership::HueOwnershipPhase::RestoreIncomplete
-                        | crate::ownership::HueOwnershipPhase::Restored
-                        | crate::ownership::HueOwnershipPhase::ReleasePending
-                )
+        let ownership =
+            crate::ownership::load_controller_ownership(context.storage.as_ref(), &bridge_id)?;
+        let has_repeated_failed_receipt = ownership.as_ref().is_some_and(|ownership| {
+            ownership.receipts().any(|receipt| {
+                receipt.status == crate::ownership::HueOwnershipReceiptStatus::Failed
+                    && receipt.attempt >= HUE_TAKEOVER_FAILED_ATTEMPTS_BEFORE_POLICY_ROLLBACK
             })
-        {
+        });
+        if recover_incomplete_hue_takeover_policy(
+            state,
+            key,
+            ownership.as_ref().map(|ownership| ownership.phase),
+            has_repeated_failed_receipt,
+            || {
+                self.release_external_controller_authority(
+                    state,
+                    key,
+                    ExternalControllerReleaseReason::RoomAuthorityChanged,
+                )
+            },
+        )? {
+            return Ok(());
+        }
+        if ownership.is_some_and(|ownership| {
+            matches!(
+                ownership.phase,
+                crate::ownership::HueOwnershipPhase::Restoring
+                    | crate::ownership::HueOwnershipPhase::RestoreIncomplete
+                    | crate::ownership::HueOwnershipPhase::Restored
+                    | crate::ownership::HueOwnershipPhase::ReleasePending
+            )
+        }) {
             anyhow::bail!("Hue bridge release has started; takeover cannot be resumed");
         }
         let operation_lock = crate::ownership::controller_operation_lock(&bridge_id);
         let _operation = operation_lock
             .lock()
             .map_err(|_| anyhow::anyhow!("Failed to lock Hue controller operations"))?;
-        let _ = crate::ownership::acquire_authoritative_control_best_effort(
+        crate::ownership::acquire_authoritative_control_in_scope(
             context.storage.as_ref(),
             key,
             &transport,
             &context.username,
-        );
+            &suppression_scope,
+        )?;
         Ok(())
     }
 
@@ -1085,7 +1534,7 @@ impl ExternalLightHubIntegration for HueIntegration {
         &self,
         state: &SharedState,
         key: &HubKey,
-        _reason: ExternalControllerReleaseReason,
+        reason: ExternalControllerReleaseReason,
     ) -> Result<()> {
         let Some(context) = hue_release_context(state, key)? else {
             return Ok(());
@@ -1096,20 +1545,27 @@ impl ExternalLightHubIntegration for HueIntegration {
         let _operation = operation_lock
             .lock()
             .map_err(|_| anyhow::anyhow!("Failed to lock Hue controller operations"))?;
-        let Some(ownership) = crate::ownership::release_authoritative_control(
+        let release_intent = if reason == ExternalControllerReleaseReason::RoomAuthorityChanged {
+            crate::ownership::HueOwnershipReleaseIntent::RoomAuthorityChanged
+        } else {
+            crate::ownership::HueOwnershipReleaseIntent::LocalTeardown
+        };
+        let Some(ownership) = crate::ownership::release_authoritative_control_with_intent(
             context.storage.as_ref(),
             key,
             &transport,
             &context.username,
+            release_intent,
         )?
         else {
             return Ok(());
         };
-        if ownership.phase != crate::ownership::HueOwnershipPhase::ReleasePending {
-            anyhow::bail!("Hue controller release did not retain its captured snapshot");
+        if ownership.phase != crate::ownership::HueOwnershipPhase::Restored {
+            anyhow::bail!("Hue controller release did not verify restored automation state");
         }
-        // The retained snapshot is the release result. The command layer may
-        // now remove credentials without any restoration write to the bridge.
+        if reason == ExternalControllerReleaseReason::RoomAuthorityChanged {
+            crate::ownership::finalize_released_control(context.storage.as_ref(), &bridge_id)?;
+        }
         Ok(())
     }
 
@@ -1147,10 +1603,16 @@ impl ExternalLightHubIntegration for HueIntegration {
             hub_type: HubType::HUE.to_string(),
             configurable: true,
             device_onboarding_methods: vec![
-                DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_SERIAL_SEARCH.to_string()
+                DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_SERIAL_SEARCH.to_string(),
+                DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_BUTTON_SEARCH.to_string(),
             ],
             device_profiles: Vec::new(),
             supports_unpairing: true,
+            unpairable_device_types: vec![
+                "light".to_string(),
+                "button".to_string(),
+                "motion".to_string(),
+            ],
             supports_roomless_devices: true,
             blocks_room_readiness: true,
         }
@@ -1161,6 +1623,18 @@ impl ExternalLightHubIntegration for HueIntegration {
         state: &SharedState,
         params: &serde_json::Value,
     ) -> Result<PairingSession> {
+        let device_kind = params
+            .get("device_kind")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("light");
+        if device_kind == "button" {
+            return start_bridge_button_pairing(state, params);
+        }
+        if device_kind != "light" {
+            anyhow::bail!("Unsupported Hue Bridge pairing device kind");
+        }
         let raw_serial = params
             .get("serial")
             .and_then(serde_json::Value::as_str)
@@ -1238,8 +1712,12 @@ impl ExternalLightHubIntegration for HueIntegration {
                             true,
                             Duration::from_secs(30),
                         ) {
-                            Ok(_) => match exact_bridge_light_projection(
-                                bridge_light_devices(state, &key),
+                            Ok(_) => match exact_bridge_device_projection(
+                                bridge_devices(
+                                    state,
+                                    &key,
+                                    rhythm_core::runtime::hub_registry::DeviceType::Light,
+                                ),
                                 &expected_device_ids,
                             ) {
                                 Ok(devices) => {
@@ -1274,6 +1752,7 @@ impl ExternalLightHubIntegration for HueIntegration {
                 "Hue Bridge found the bulb, but Rhythm could not confirm its exact V2 device projection after refresh: {projection_error}"
             )
         })?;
+        reconcile_paired_light_names(state, &key, &mut devices)?;
         devices.sort_by(|left, right| left.device_id.cmp(&right.device_id));
         Ok(PairingSession {
             hub_type: HubType::HUE.to_string(),
@@ -1320,7 +1799,17 @@ impl ExternalLightHubIntegration for HueIntegration {
                         .storage
                         .clone();
                     ensure_physical_hue_unpair_allowed(storage.as_deref(), &bridge_id)?;
-                    transport.remove_light_device(&target.username, &target.native_id)?;
+                    let device_class = match target.device_type {
+                        rhythm_core::runtime::hub_registry::DeviceType::Light => {
+                            HueBridgeDeviceClass::Light
+                        }
+                        rhythm_core::runtime::hub_registry::DeviceType::Button
+                        | rhythm_core::runtime::hub_registry::DeviceType::Motion
+                        | rhythm_core::runtime::hub_registry::DeviceType::Contact => {
+                            HueBridgeDeviceClass::Sensor
+                        }
+                    };
+                    transport.remove_device(&target.username, &target.native_id, device_class)?;
                 }
                 if transport.device_exists(&target.username, &target.native_id)? {
                     anyhow::bail!(
@@ -1368,6 +1857,121 @@ fn target_hub_room_id_for_assignment(assignment: &HubDeviceRoomAssignment) -> Re
     })
 }
 
+fn start_bridge_button_pairing(
+    state: &SharedState,
+    params: &serde_json::Value,
+) -> Result<PairingSession> {
+    let session_id = params
+        .get("session_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|session_id| !session_id.is_empty());
+    let requested_address = params
+        .get("hub_address")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|address| !address.is_empty());
+    let (key, bridge_ip, username) = bridge_pairing_target(state, requested_address)?;
+    rhythm_os::pairing::emit_pairing_progress(
+        state,
+        HubType::HUE,
+        session_id,
+        PairingStatus::Searching,
+        PairingStage::Searching,
+        "Asking the Hue Bridge to search for a button or switch",
+        None,
+        None,
+    );
+    let transport = ReqwestHueTransport::new(&bridge_ip)?;
+    let found = transport.search_new_sensors(&username)?;
+    if found.is_empty() {
+        anyhow::bail!(
+            "The Hue Bridge did not find a new button or switch. Put the accessory in pairing mode and try again"
+        );
+    }
+
+    rhythm_os::pairing::emit_pairing_progress(
+        state,
+        HubType::HUE,
+        session_id,
+        PairingStatus::Commissioning,
+        PairingStage::Finalizing,
+        "Hue Bridge search finished; confirming the new button or switch",
+        None,
+        None,
+    );
+    let found_ids = found
+        .iter()
+        .map(|sensor| sensor.legacy_id.clone())
+        .collect::<BTreeSet<_>>();
+    let mut projected_devices = None;
+    let mut projection_error = "Hue V2 has not projected a button resource".to_string();
+    let projection_deadline = Instant::now() + HUE_BUTTON_PROJECTION_TIMEOUT;
+    const PROJECTION_ATTEMPTS: usize = 15;
+    for attempt in 0..PROJECTION_ATTEMPTS {
+        match transport
+            .get_resources(&username, "button")
+            .and_then(|resources| v2_device_ids_for_legacy_buttons(&resources, &found_ids))
+        {
+            Ok(mapped) if mapped.is_empty() => {
+                projection_error =
+                    "The Hue Bridge found sensors, but none exposed a button service".to_string();
+            }
+            Ok(mapped) => {
+                let expected_device_ids = mapped.into_values().collect::<BTreeSet<_>>();
+                match rhythm_os::room_sync::sync_from_hub_for_key_wait(
+                    state,
+                    &key,
+                    true,
+                    HUE_BUTTON_SYNC_SLOT_TIMEOUT,
+                ) {
+                    Ok(_) => match exact_bridge_device_projection(
+                        bridge_devices(
+                            state,
+                            &key,
+                            rhythm_core::runtime::hub_registry::DeviceType::Button,
+                        ),
+                        &expected_device_ids,
+                    ) {
+                        Ok(devices) => {
+                            projected_devices = Some(devices);
+                            break;
+                        }
+                        Err(error) => projection_error = error.to_string(),
+                    },
+                    Err(error) => {
+                        projection_error = format!("Hue Bridge refresh failed: {error:#}");
+                    }
+                }
+            }
+            Err(error) => {
+                projection_error = format!("Hue V2 button projection lookup failed: {error:#}");
+            }
+        }
+        if attempt + 1 < PROJECTION_ATTEMPTS && Instant::now() < projection_deadline {
+            std::thread::sleep(Duration::from_secs(1));
+        } else {
+            break;
+        }
+    }
+    let mut devices = projected_devices.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Hue Bridge search completed, but Rhythm could not confirm an exact button or switch after refresh: {projection_error}"
+        )
+    })?;
+    devices.sort_by(|left, right| left.device_id.cmp(&right.device_id));
+    Ok(PairingSession {
+        hub_type: HubType::HUE.to_string(),
+        status: PairingStatus::Complete,
+        device: devices.first().cloned(),
+        devices,
+        error: None,
+        failure_stage: None,
+        warnings: Vec::new(),
+        details: None,
+    })
+}
+
 fn bridge_pairing_target(
     state: &SharedState,
     requested_address: Option<&str>,
@@ -1390,16 +1994,21 @@ fn bridge_pairing_target(
             "The requested Hue Bridge is not connected: {}",
             requested_address.unwrap_or_default()
         ),
-        0 => anyhow::bail!("Connect a Hue Bridge before adding a bulb by serial"),
+        0 => anyhow::bail!("Connect a Hue Bridge before adding a device"),
         1 => Ok(candidates.pop().expect("one candidate")),
         _ => anyhow::bail!(
-            "Multiple Hue Bridges are connected; provide hub_address for the bridge that should add the bulb"
+            "Multiple Hue Bridges are connected; provide hub_address for the bridge that should add the device"
         ),
     }
 }
 
 fn legacy_id_from_v2_id_v1(id_v1: &str) -> Option<&str> {
     let id = id_v1.strip_prefix("/lights/")?;
+    (!id.is_empty() && !id.contains('/')).then_some(id)
+}
+
+fn legacy_sensor_id_from_v2_id_v1(id_v1: &str) -> Option<&str> {
+    let id = id_v1.strip_prefix("/sensors/")?;
     (!id.is_empty() && !id.contains('/')).then_some(id)
 }
 
@@ -1459,7 +2068,58 @@ fn v2_device_ids_for_legacy_lights(
     Ok(mapped)
 }
 
-fn exact_bridge_light_projection(
+fn v2_device_ids_for_legacy_buttons(
+    value: &serde_json::Value,
+    requested_legacy_ids: &BTreeSet<String>,
+) -> Result<BTreeMap<String, String>> {
+    let errors = value
+        .get("errors")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("GET button returned an invalid Hue V2 response"))?;
+    if !errors.is_empty() {
+        anyhow::bail!("GET button returned {} Hue error(s)", errors.len());
+    }
+    let data = value
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("GET button returned a Hue V2 response without data"))?;
+
+    let mut mapped = BTreeMap::new();
+    for button in data {
+        let Some(legacy_id) = button
+            .get("id_v1")
+            .and_then(serde_json::Value::as_str)
+            .and_then(legacy_sensor_id_from_v2_id_v1)
+        else {
+            continue;
+        };
+        if !requested_legacy_ids.contains(legacy_id) {
+            continue;
+        }
+        if button
+            .pointer("/owner/rtype")
+            .and_then(serde_json::Value::as_str)
+            != Some("device")
+        {
+            continue;
+        }
+        let Some(device_id) = button
+            .pointer("/owner/rid")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| !id.is_empty())
+        else {
+            continue;
+        };
+        if let Some(previous) = mapped.insert(legacy_id.to_string(), device_id.to_string()) {
+            if previous != device_id {
+                anyhow::bail!("Hue V1 sensor {legacy_id} maps to multiple Hue V2 button devices");
+            }
+        }
+    }
+    Ok(mapped)
+}
+
+fn exact_bridge_device_projection(
     devices: Vec<PairedDeviceInfo>,
     expected_device_ids: &BTreeSet<String>,
 ) -> Result<Vec<PairedDeviceInfo>> {
@@ -1495,7 +2155,7 @@ fn ensure_physical_hue_unpair_allowed(
         return Ok(());
     };
     if crate::ownership::load_controller_ownership(storage, bridge_id)?.is_some() {
-        anyhow::bail!("Release Rhythm control of this Hue Bridge before removing a Bridge bulb");
+        anyhow::bail!("Release Rhythm control of this Hue Bridge before removing a Bridge device");
     }
     Ok(())
 }
@@ -1506,12 +2166,14 @@ struct BridgeUnpairTarget {
     bridge_ip: String,
     username: String,
     native_id: String,
+    device_type: rhythm_core::runtime::hub_registry::DeviceType,
 }
 
 fn bridge_unpair_target(
     state: &SharedState,
     requested_id: &str,
     requested_address: Option<&str>,
+    requested_device_type: Option<&str>,
 ) -> Result<BridgeUnpairTarget> {
     let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let canonical = state
@@ -1527,20 +2189,37 @@ fn bridge_unpair_target(
                 requested_address
                     .is_none_or(|address| endpoint.hub_key.address.eq_ignore_ascii_case(address))
             })
-            .map(|endpoint| (endpoint.hub_key.clone(), endpoint.native_id.clone()))
+            .map(|endpoint| {
+                (
+                    endpoint.hub_key.clone(),
+                    endpoint.native_id.clone(),
+                    device.device_type.clone(),
+                )
+            })
             .collect::<Vec<_>>()
     } else {
         state
             .canonical_registry
             .devices()
-            .flat_map(|device| device.endpoints.iter())
-            .filter(|endpoint| endpoint.hub_key.hub_type.as_str() == HubType::HUE)
-            .filter(|endpoint| endpoint.native_id == requested_id)
-            .filter(|endpoint| {
+            .flat_map(|device| {
+                device
+                    .endpoints
+                    .iter()
+                    .map(move |endpoint| (device, endpoint))
+            })
+            .filter(|(_, endpoint)| endpoint.hub_key.hub_type.as_str() == HubType::HUE)
+            .filter(|(_, endpoint)| endpoint.native_id == requested_id)
+            .filter(|(_, endpoint)| {
                 requested_address
                     .is_none_or(|address| endpoint.hub_key.address.eq_ignore_ascii_case(address))
             })
-            .map(|endpoint| (endpoint.hub_key.clone(), endpoint.native_id.clone()))
+            .map(|(device, endpoint)| {
+                (
+                    endpoint.hub_key.clone(),
+                    endpoint.native_id.clone(),
+                    device.device_type.clone(),
+                )
+            })
             .collect::<Vec<_>>()
     };
     endpoints.sort_by(|left, right| {
@@ -1570,16 +2249,27 @@ fn bridge_unpair_target(
                     && requested_address
                         .is_none_or(|address| key.address.eq_ignore_ascii_case(address))
             })
-            .map(|(key, _)| (key.clone(), requested_id.to_string()))
+            .map(|(key, _)| {
+                (
+                    key.clone(),
+                    requested_id.to_string(),
+                    match requested_device_type {
+                        Some("button") => rhythm_core::runtime::hub_registry::DeviceType::Button,
+                        Some("motion") => rhythm_core::runtime::hub_registry::DeviceType::Motion,
+                        Some("contact") => rhythm_core::runtime::hub_registry::DeviceType::Contact,
+                        _ => rhythm_core::runtime::hub_registry::DeviceType::Light,
+                    },
+                )
+            })
             .collect();
     }
 
-    let (hub_key, native_id) = match endpoints.as_slice() {
+    let (hub_key, native_id, device_type) = match endpoints.as_slice() {
         [] if requested_address.is_some() => anyhow::bail!(
             "The requested Hue Bridge is not connected: {}",
             requested_address.unwrap_or_default()
         ),
-        [] => anyhow::bail!("Connect a Hue Bridge before removing a Bridge light"),
+        [] => anyhow::bail!("Connect a Hue Bridge before removing a Bridge device"),
         [only] => only.clone(),
         _ => anyhow::bail!(
             "The Hue device is reachable through multiple Bridges; provide hub_address for the exact endpoint"
@@ -1595,6 +2285,7 @@ fn bridge_unpair_target(
         bridge_ip: hue.bridge_ip.clone(),
         username: hue.username.clone(),
         native_id,
+        device_type,
     })
 }
 
@@ -1623,7 +2314,17 @@ where
         .get("force")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    let target = bridge_unpair_target(state, requested_id, requested_address)?;
+    let requested_device_type = params
+        .get("device_type")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let target = bridge_unpair_target(
+        state,
+        requested_id,
+        requested_address,
+        requested_device_type,
+    )?;
     let failed = |error: anyhow::Error| UnpairingResult {
         hub_type: HubType::HUE.to_string(),
         hub_address: Some(target.hub_key.address.clone()),
@@ -1654,17 +2355,18 @@ where
     })
 }
 
-fn bridge_light_devices(state: &SharedState, key: &HubKey) -> Vec<PairedDeviceInfo> {
+fn bridge_devices(
+    state: &SharedState,
+    key: &HubKey,
+    device_type: rhythm_core::runtime::hub_registry::DeviceType,
+) -> Vec<PairedDeviceInfo> {
     let Ok(state) = state.lock() else {
         return Vec::new();
     };
     state
         .canonical_registry
         .devices()
-        .filter(|device| {
-            !device.is_removed()
-                && device.device_type == rhythm_core::runtime::hub_registry::DeviceType::Light
-        })
+        .filter(|device| !device.is_removed() && device.device_type == device_type)
         .filter_map(|device| {
             let endpoint = device
                 .active_endpoints()
@@ -1672,12 +2374,51 @@ fn bridge_light_devices(state: &SharedState, key: &HubKey) -> Vec<PairedDeviceIn
             Some(PairedDeviceInfo {
                 device_id: endpoint.native_id.clone(),
                 name: device.name.clone(),
-                device_type: rhythm_core::runtime::hub_registry::DeviceType::Light,
+                device_type: device.device_type.clone(),
                 manufacturer: device.manufacturer.clone(),
                 model: device.model.clone(),
             })
         })
         .collect()
+}
+
+fn reconcile_paired_light_names(
+    state: &SharedState,
+    key: &HubKey,
+    devices: &mut [PairedDeviceInfo],
+) -> Result<()> {
+    let transaction_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .external_topology_transaction_lock
+        .clone();
+    let _transaction = transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
+    let mut scope = rhythm_os::device_naming::LightNameReconciliationScope::default();
+    {
+        let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        for device in devices.iter() {
+            if let Some(canonical) = state
+                .canonical_registry
+                .find_by_native_id(key, &device.device_id)
+            {
+                scope.include_device(canonical.id.clone());
+            }
+        }
+    }
+    rhythm_os::device_naming::reconcile_automatic_light_names(state, &scope)?;
+
+    let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    for device in devices {
+        if let Some(canonical) = state
+            .canonical_registry
+            .find_by_native_id(key, &device.device_id)
+        {
+            device.name = canonical.name.clone();
+        }
+    }
+    Ok(())
 }
 
 // ============================================================================
@@ -1965,19 +2706,23 @@ mod tests {
 
     #[test]
     fn hue_start_phase_fence_blocks_release_phases_only() {
-        use crate::ownership::HueOwnershipPhase;
+        use crate::ownership::{HueOwnershipPhase, HueOwnershipReleaseIntent};
 
-        for phase in [
-            HueOwnershipPhase::Restoring,
-            HueOwnershipPhase::RestoreIncomplete,
-            HueOwnershipPhase::Restored,
-            HueOwnershipPhase::ReleasePending,
-        ] {
-            let error = ensure_hue_start_phase_is_not_release_fenced(Some(phase)).unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                "Hue bridge release is incomplete; retry disconnecting Hue before reconnecting it"
-            );
+        for release_intent in [None, Some(HueOwnershipReleaseIntent::LocalTeardown)] {
+            for phase in [
+                HueOwnershipPhase::Restoring,
+                HueOwnershipPhase::RestoreIncomplete,
+                HueOwnershipPhase::Restored,
+                HueOwnershipPhase::ReleasePending,
+            ] {
+                let error =
+                    ensure_hue_start_phase_is_not_release_fenced(Some(phase), release_intent)
+                        .unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    "Hue bridge release is incomplete; retry disconnecting Hue before reconnecting it"
+                );
+            }
         }
 
         for phase in [
@@ -1987,9 +2732,26 @@ mod tests {
             HueOwnershipPhase::Active,
             HueOwnershipPhase::SnapshotRetained,
         ] {
-            ensure_hue_start_phase_is_not_release_fenced(Some(phase)).unwrap();
+            ensure_hue_start_phase_is_not_release_fenced(Some(phase), None).unwrap();
         }
-        ensure_hue_start_phase_is_not_release_fenced(None).unwrap();
+        ensure_hue_start_phase_is_not_release_fenced(None, None).unwrap();
+
+        for phase in [
+            HueOwnershipPhase::Restoring,
+            HueOwnershipPhase::RestoreIncomplete,
+            HueOwnershipPhase::Restored,
+        ] {
+            ensure_hue_start_phase_is_not_release_fenced(
+                Some(phase),
+                Some(HueOwnershipReleaseIntent::RoomAuthorityChanged),
+            )
+            .unwrap();
+        }
+        ensure_hue_start_phase_is_not_release_fenced(
+            Some(HueOwnershipPhase::ReleasePending),
+            Some(HueOwnershipReleaseIntent::RoomAuthorityChanged),
+        )
+        .expect_err("credential teardown must never resume as an ordinary bootstrap");
     }
 
     #[test]
@@ -2326,6 +3088,55 @@ mod tests {
     }
 
     #[test]
+    fn durable_room_policy_release_intent_allows_hue_restart() {
+        static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+
+        let path = std::env::temp_dir().join(format!(
+            "rhythm-hue-room-policy-release-restart-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let storage = Arc::new(FileStorage::new(path.to_str().unwrap()).unwrap());
+        let manifest = serde_json::json!({
+            "schema_version": crate::ownership::HUE_CONTROLLER_OWNERSHIP_SCHEMA_VERSION,
+            "phase": "restore_incomplete",
+            "baseline": {
+                "schema_version": crate::ownership::HUE_CONTROLLER_OWNERSHIP_SCHEMA_VERSION,
+                "capture_id": "capture-room-policy-release",
+                "bridge_id": "bridge-room-policy-release",
+                "v2_resources": {},
+                "v1_resources": {}
+            },
+            "managed_rooms": {},
+            "managed_scenes": {},
+            "receipts": {},
+            "release_intent": "room_authority_changed"
+        });
+        storage
+            .save_integration_state_file(
+                &crate::ownership::hue_controller_ownership_path("bridge-room-policy-release")
+                    .unwrap(),
+                &serde_json::to_string(&manifest).unwrap(),
+            )
+            .unwrap();
+
+        let state = shared_state();
+        state.lock().unwrap().storage = Some(storage.clone());
+        let started = AtomicBool::new(false);
+
+        start_hue_after_release_fence(&state, "bridge-room-policy-release", || {
+            started.store(true, Ordering::Relaxed);
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(started.load(Ordering::Relaxed));
+        drop(state);
+        drop(storage);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
     fn pending_same_key_controller_blocks_reconfiguration_without_a_manifest() {
         let state = shared_state();
         let key = hue_key("192.0.2.10");
@@ -2512,10 +3323,151 @@ mod tests {
         assert!(caps.configurable);
         assert_eq!(
             caps.device_onboarding_methods,
-            vec![DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_SERIAL_SEARCH]
+            vec![
+                DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_SERIAL_SEARCH,
+                DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_BUTTON_SEARCH,
+            ]
         );
         assert!(caps.supports_unpairing);
+        assert_eq!(
+            caps.unpairable_device_types,
+            vec!["light", "button", "motion"]
+        );
         assert!(caps.supports_roomless_devices);
+    }
+
+    fn rhythm_owned_hue_room_state() -> (SharedState, HubKey) {
+        let state = shared_state();
+        let key = hue_key("192.0.2.10");
+        {
+            let mut app = state.lock().unwrap();
+            let mut room = rhythm_os::topology::TopologyRoom::new("rhythm-office", "Office");
+            room.hub_room_bindings.push(HubRoomBinding {
+                hub_key: key.clone(),
+                hub_room_id: "hue-office".to_string(),
+                control_id: "hue-office-group".to_string(),
+                light_device_ids: vec!["hue-light-1".to_string()],
+            });
+            app.topology.insert_room(room);
+            app.topology
+                .replace_external_room_automation_decisions(
+                    &key,
+                    &[(
+                        "rhythm-office".to_string(),
+                        rhythm_os::topology::ExternalRoomAutomationOwner::Rhythm,
+                    )],
+                )
+                .unwrap();
+        }
+        (state, key)
+    }
+
+    #[test]
+    fn clear_incomplete_takeover_returns_room_policy_to_hue_before_release() {
+        let (state, key) = rhythm_owned_hue_room_state();
+        let release_calls = AtomicUsize::new(0);
+
+        assert!(recover_incomplete_hue_takeover_policy(
+            &state,
+            &key,
+            Some(crate::ownership::HueOwnershipPhase::ClearIncomplete),
+            true,
+            || {
+                let app = state.lock().unwrap();
+                assert_eq!(
+                    app.topology
+                        .external_room_automation_owner("rhythm-office", &key),
+                    Some(rhythm_os::topology::ExternalRoomAutomationOwner::External)
+                );
+                release_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .unwrap());
+        assert_eq!(release_calls.load(Ordering::SeqCst), 1);
+        let app = state.lock().unwrap();
+        assert_eq!(
+            app.topology
+                .external_room_automation_owner("rhythm-office", &key),
+            Some(rhythm_os::topology::ExternalRoomAutomationOwner::External)
+        );
+        assert!(!app.rhythm_automation_allowed_for_node("rhythm-office"));
+    }
+
+    #[test]
+    fn transient_takeover_phase_remains_retryable_without_policy_rollback() {
+        let (state, key) = rhythm_owned_hue_room_state();
+        let release_calls = AtomicUsize::new(0);
+
+        assert!(!recover_incomplete_hue_takeover_policy(
+            &state,
+            &key,
+            Some(crate::ownership::HueOwnershipPhase::Captured),
+            false,
+            || {
+                release_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .unwrap());
+        assert_eq!(release_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .topology
+                .external_room_automation_owner("rhythm-office", &key),
+            Some(rhythm_os::topology::ExternalRoomAutomationOwner::Rhythm)
+        );
+    }
+
+    #[test]
+    fn first_incomplete_takeover_failure_remains_retryable() {
+        let (state, key) = rhythm_owned_hue_room_state();
+        let release_calls = AtomicUsize::new(0);
+
+        assert!(!recover_incomplete_hue_takeover_policy(
+            &state,
+            &key,
+            Some(crate::ownership::HueOwnershipPhase::ClearIncomplete),
+            false,
+            || {
+                release_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .unwrap());
+        assert_eq!(release_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .topology
+                .external_room_automation_owner("rhythm-office", &key),
+            Some(rhythm_os::topology::ExternalRoomAutomationOwner::Rhythm)
+        );
+    }
+
+    #[test]
+    fn failed_incomplete_takeover_release_keeps_native_policy_for_retry() {
+        let (state, key) = rhythm_owned_hue_room_state();
+
+        recover_incomplete_hue_takeover_policy(
+            &state,
+            &key,
+            Some(crate::ownership::HueOwnershipPhase::ClearIncomplete),
+            true,
+            || anyhow::bail!("injected Hue restore failure"),
+        )
+        .expect_err("controller restoration should remain retryable");
+
+        let app = state.lock().unwrap();
+        assert_eq!(
+            app.topology
+                .external_room_automation_owner("rhythm-office", &key),
+            Some(rhythm_os::topology::ExternalRoomAutomationOwner::External)
+        );
+        assert!(!app.rhythm_automation_allowed_for_node("rhythm-office"));
     }
 
     #[test]
@@ -2564,6 +3516,177 @@ mod tests {
     }
 
     #[test]
+    fn desired_topology_uses_canonical_rhythm_room_membership() {
+        let state = shared_state();
+        let key = hue_key("192.0.2.10");
+        let light_id = add_hue_light_endpoint(&state, &key, "hue-light-1");
+        let room_id = {
+            let mut app = state.lock().unwrap();
+            let room_id = app.topology.create_room("Diane Sink");
+            assert!(app
+                .topology
+                .attach_device_user_override(&room_id, &light_id));
+            assert!(app
+                .canonical_registry
+                .assign_room(&light_id, Some(&room_id)));
+            room_id
+        };
+
+        let desired = {
+            let app = state.lock().unwrap();
+            desired_hue_topology_locked(&app, &key).unwrap()
+        };
+        assert_eq!(desired.rooms.len(), 1);
+        assert_eq!(desired.rooms[0].rhythm_room_id, room_id);
+        assert_eq!(desired.rooms[0].name, "Rhythm · Diane Sink");
+        assert_eq!(desired.rooms[0].device_ids, vec!["hue-light-1"]);
+    }
+
+    #[test]
+    fn exact_binding_publication_preserves_consent_and_releases_fallback_fence() {
+        static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "rhythm-hue-topology-publish-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let storage = Arc::new(FileStorage::new(path.to_str().unwrap()).unwrap());
+        let state = shared_state();
+        let key = hue_key("192.0.2.10");
+        {
+            let mut app = state.lock().unwrap();
+            app.storage = Some(storage.clone());
+            let mut room = rhythm_os::topology::TopologyRoom::new("rhythm-office", "Office");
+            room.upsert_hub_room_binding(HubRoomBinding {
+                hub_key: key.clone(),
+                hub_room_id: "source-office".to_string(),
+                control_id: "source-office-group".to_string(),
+                light_device_ids: vec!["hue-light-1".to_string()],
+            });
+            app.topology.insert_room(room);
+            app.topology
+                .replace_external_room_automation_decisions(
+                    &key,
+                    &[(
+                        "rhythm-office".to_string(),
+                        rhythm_os::topology::ExternalRoomAutomationOwner::Rhythm,
+                    )],
+                )
+                .unwrap();
+            app.topology
+                .set_external_room_topology_sync_enabled(&key, true);
+            rhythm_os::commands::save_authority_state(&app).unwrap();
+        }
+
+        publish_managed_room_bindings(
+            &state,
+            &key,
+            &[(
+                "rhythm-office".to_string(),
+                "Rhythm · Office".to_string(),
+                HubRoomBinding {
+                    hub_key: key.clone(),
+                    hub_room_id: "managed-office".to_string(),
+                    control_id: "managed-office-group".to_string(),
+                    light_device_ids: vec!["hue-light-1".to_string()],
+                },
+            )],
+        )
+        .unwrap();
+
+        let app = state.lock().unwrap();
+        assert!(app.topology.external_hub_has_full_rhythm_consent(&key));
+        assert!(app.topology.external_room_topology_sync_is_enabled(&key));
+        assert!(!app.topology.external_grouped_dispatch_is_suspended(&key));
+        assert!(app
+            .topology
+            .room_binding_is_managed("rhythm-office", &key, "managed-office"));
+        drop(app);
+        drop(state);
+        drop(storage);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn offline_topology_sync_keeps_individual_fallback_and_records_attention() {
+        static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "rhythm-hue-topology-offline-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let storage = Arc::new(FileStorage::new(path.to_str().unwrap()).unwrap());
+        let state = shared_state();
+        let key = hue_key("192.0.2.10");
+        {
+            let mut app = state.lock().unwrap();
+            app.storage = Some(storage.clone());
+            app.topology
+                .set_external_room_topology_sync_enabled(&key, true);
+            rhythm_os::commands::save_authority_state(&app).unwrap();
+        }
+
+        // No active Hue hub is installed. Optional topology sync absorbs the
+        // transport/context failure because the durable device fallback is
+        // already authoritative.
+        INTEGRATION.sync_topology_groups(&state, &key).unwrap();
+
+        let app = state.lock().unwrap();
+        assert!(app.topology.external_grouped_dispatch_is_suspended(&key));
+        assert!(app
+            .topology
+            .external_room_topology_sync_needs_attention(&key));
+        drop(app);
+        let durable = storage.load_authority_state().unwrap().unwrap();
+        let mut durable_topology: rhythm_os::topology::RoomTopologyStore =
+            serde_json::from_value(durable.topology).unwrap();
+        durable_topology.rebuild_indices();
+        assert!(durable_topology.external_room_topology_sync_needs_attention(&key));
+        drop(state);
+        drop(storage);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn unreviewed_hue_room_reconciliation_is_observe_only() {
+        let state = shared_state();
+        let key = hue_key("192.0.2.10");
+        {
+            let mut app = state.lock().unwrap();
+            let mut room = rhythm_os::topology::TopologyRoom::new("rhythm-office", "Office");
+            room.hub_room_bindings.push(HubRoomBinding {
+                hub_key: key.clone(),
+                hub_room_id: "hue-office".to_string(),
+                control_id: "hue-office-group".to_string(),
+                light_device_ids: vec!["hue-light-1".to_string()],
+            });
+            app.topology.insert_room(room);
+        }
+
+        // No credentials or transport are installed. Returning successfully
+        // proves the consent guard ran before any bridge authority I/O.
+        INTEGRATION
+            .reconcile_external_controller_authority(&state, &key)
+            .unwrap();
+
+        {
+            let mut app = state.lock().unwrap();
+            app.topology
+                .replace_external_room_automation_decisions(
+                    &key,
+                    &[(
+                        "rhythm-office".to_string(),
+                        rhythm_os::topology::ExternalRoomAutomationOwner::Rhythm,
+                    )],
+                )
+                .unwrap();
+        }
+        assert!(INTEGRATION
+            .reconcile_external_controller_authority(&state, &key)
+            .is_err());
+    }
+
+    #[test]
     fn bridge_pairing_maps_only_exact_v1_results_to_v2_owner_devices() {
         let requested = BTreeSet::from(["12".to_string(), "14".to_string(), "99".to_string()]);
         let mapped = v2_device_ids_for_legacy_lights(
@@ -2602,6 +3725,41 @@ mod tests {
     }
 
     #[test]
+    fn bridge_button_pairing_maps_only_exact_new_sensor_ids_to_button_owners() {
+        let requested = BTreeSet::from(["21".to_string(), "22".to_string()]);
+        let mapped = v2_device_ids_for_legacy_buttons(
+            &serde_json::json!({
+                "errors": [],
+                "data": [
+                    {
+                        "id": "button-a",
+                        "id_v1": "/sensors/21",
+                        "owner": {"rtype": "device", "rid": "device-a"}
+                    },
+                    {
+                        "id": "button-unrelated",
+                        "id_v1": "/sensors/23",
+                        "owner": {"rtype": "device", "rid": "device-unrelated"}
+                    },
+                    {
+                        "id": "malformed-owner",
+                        "id_v1": "/sensors/22",
+                        "owner": {"rtype": "room", "rid": "room-a"}
+                    }
+                ]
+            }),
+            &requested,
+        )
+        .unwrap();
+        assert_eq!(
+            mapped,
+            BTreeMap::from([("21".to_string(), "device-a".to_string())])
+        );
+        assert!(!mapped.contains_key("22"));
+        assert!(!mapped.contains_key("23"));
+    }
+
+    #[test]
     fn bridge_pairing_requires_nonempty_exact_canonical_projection() {
         let expected = BTreeSet::from(["device-a".to_string()]);
         let unrelated = PairedDeviceInfo {
@@ -2611,8 +3769,8 @@ mod tests {
             manufacturer: None,
             model: None,
         };
-        assert!(exact_bridge_light_projection(vec![unrelated], &expected).is_err());
-        assert!(exact_bridge_light_projection(Vec::new(), &BTreeSet::new()).is_err());
+        assert!(exact_bridge_device_projection(vec![unrelated], &expected).is_err());
+        assert!(exact_bridge_device_projection(Vec::new(), &BTreeSet::new()).is_err());
 
         let exact = PairedDeviceInfo {
             device_id: "device-a".to_string(),
@@ -2621,7 +3779,7 @@ mod tests {
             manufacturer: Some("Signify".to_string()),
             model: Some("LCA009".to_string()),
         };
-        let projected = exact_bridge_light_projection(vec![exact.clone()], &expected).unwrap();
+        let projected = exact_bridge_device_projection(vec![exact.clone()], &expected).unwrap();
         assert_eq!(projected, vec![exact]);
     }
 
@@ -2671,6 +3829,52 @@ mod tests {
             | ResolveResult::Created { canonical_id } => canonical_id,
             ResolveResult::Queued { .. } => panic!("unexpected triage"),
         }
+    }
+
+    #[test]
+    fn pairing_name_reconciliation_only_touches_projected_devices() {
+        let state = shared_state();
+        let key = hue_key("192.0.2.10");
+        let paired_id = add_hue_light_endpoint(&state, &key, "hue-paired");
+        let unrelated_id = add_hue_light_endpoint(&state, &key, "hue-unrelated");
+        let renamed_native_ids = Arc::new(Mutex::new(Vec::<String>::new()));
+        state.lock().unwrap().rename_hub_device_fn = Some(Arc::new({
+            let renamed_native_ids = renamed_native_ids.clone();
+            move |_, _, native_id, _| {
+                renamed_native_ids
+                    .lock()
+                    .unwrap()
+                    .push(native_id.to_string());
+                Ok(())
+            }
+        }));
+        let mut paired_devices = bridge_devices(
+            &state,
+            &key,
+            rhythm_core::runtime::hub_registry::DeviceType::Light,
+        )
+        .into_iter()
+        .filter(|device| device.device_id == "hue-paired")
+        .collect::<Vec<_>>();
+
+        reconcile_paired_light_names(&state, &key, &mut paired_devices).unwrap();
+
+        let state = state.lock().unwrap();
+        assert!(state
+            .canonical_registry
+            .get(&paired_id)
+            .unwrap()
+            .name
+            .starts_with("Hue Zig "));
+        assert_eq!(
+            state.canonical_registry.get(&unrelated_id).unwrap().name,
+            "Test Hue lamp"
+        );
+        assert!(paired_devices[0].name.starts_with("Hue Zig "));
+        assert_eq!(
+            renamed_native_ids.lock().unwrap().as_slice(),
+            ["hue-paired"]
+        );
     }
 
     fn install_address_migration_graph(state: &SharedState, old_key: &HubKey) -> (String, String) {
@@ -2924,7 +4128,36 @@ mod tests {
             Some(old_key.address.as_str())
         );
 
+        // Simulate the first candidate startup after the failed authority
+        // commit. Pre-policy topology still names the old address while the
+        // crash-resumable credential already names the new one. The legacy
+        // policy migration therefore retains admission markers for both
+        // aliases; those markers must not manufacture a graph conflict.
+        {
+            let mut state = state.lock().unwrap();
+            let mut legacy_topology = serde_json::to_value(&state.topology).unwrap();
+            legacy_topology
+                .as_object_mut()
+                .unwrap()
+                .remove("external_room_automation_policy_version");
+            let mut legacy_topology: rhythm_os::topology::RoomTopologyStore =
+                serde_json::from_value(legacy_topology).unwrap();
+            legacy_topology.rebuild_indices();
+            let migration = legacy_topology
+                .migrate_legacy_external_room_automation_policy(std::slice::from_ref(&new_key));
+            assert!(migration.changed());
+            assert!(legacy_topology.references_hub_key(&old_key));
+            assert!(legacy_topology.references_hub_key(&new_key));
+            assert!(legacy_topology.structurally_references_hub_key(&old_key));
+            assert!(!legacy_topology.structurally_references_hub_key(&new_key));
+            state.topology = legacy_topology;
+        }
+
         storage.set_fail_authority_save(false);
+        {
+            let state = state.lock().unwrap();
+            rhythm_os::commands::save_authority_state(&state).unwrap();
+        }
         configure_authenticated_hue_hub(
             &new_key.address,
             r#"{"username":"new-user"}"#,
@@ -3195,10 +4428,10 @@ mod tests {
             .unwrap()
             .upsert_endpoint(second.clone(), "device-a-via-second".to_string(), 2, None);
 
-        let ambiguous = bridge_unpair_target(&state, &canonical_id, None).unwrap_err();
+        let ambiguous = bridge_unpair_target(&state, &canonical_id, None, None).unwrap_err();
         assert!(ambiguous.to_string().contains("multiple Bridges"));
 
-        let target = bridge_unpair_target(&state, &canonical_id, Some("192.0.2.11")).unwrap();
+        let target = bridge_unpair_target(&state, &canonical_id, Some("192.0.2.11"), None).unwrap();
         assert_eq!(target.hub_key, second);
         assert_eq!(target.native_id, "device-a-via-second");
     }

@@ -29,6 +29,15 @@ fn scenario_sync_imports_roomless_commissioned_device() {
     assert_eq!(canonical.name, "Vendor Lamp");
     assert_eq!(canonical.manufacturer.as_deref(), Some("Vendor"));
     assert_eq!(canonical.model.as_deref(), Some("Lamp"));
+    assert_eq!(
+        canonical.endpoints[0]
+            .capabilities
+            .as_ref()
+            .and_then(|value| value.pointer("/automatic_naming/color_kind"))
+            .and_then(serde_json::Value::as_str),
+        Some("color"),
+        "discovery should attach naming evidence without renaming the existing inventory"
+    );
     assert!(canonical.room_id.is_none());
     let canonical_id = canonical.id.clone();
     let sleep_config = state

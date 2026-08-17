@@ -152,6 +152,9 @@ impl HueTransport for Arc<SpyHueTransport> {
     fn rename_room(&self, username: &str, room_id: &str, name: &str) -> anyhow::Result<()> {
         (**self).rename_room(username, room_id, name)
     }
+    fn rename_device(&self, username: &str, device_id: &str, name: &str) -> anyhow::Result<()> {
+        (**self).rename_device(username, device_id, name)
+    }
     fn delete_room(&self, username: &str, room_id: &str) -> anyhow::Result<()> {
         (**self).delete_room(username, room_id)
     }
@@ -234,6 +237,10 @@ pub enum HueTransportCall {
         room_id: String,
         name: String,
     },
+    RenameDevice {
+        device_id: String,
+        name: String,
+    },
     DeleteRoom {
         room_id: String,
     },
@@ -251,6 +258,8 @@ pub struct SpyHueTransport {
     resources: Arc<Mutex<HashMap<String, serde_json::Value>>>,
     should_fail: Arc<AtomicBool>,
     ignore_resource_mutations: Arc<AtomicBool>,
+    fail_next_resource_read_after_update: Arc<AtomicBool>,
+    resource_read_failure_armed: Arc<AtomicBool>,
     fail_resource_update: Arc<Mutex<Option<(String, String)>>>,
     fail_room_update: Arc<Mutex<Option<String>>>,
     v1_write_response_override: Arc<Mutex<Option<serde_json::Value>>>,
@@ -266,6 +275,8 @@ impl SpyHueTransport {
             resources: Arc::new(Mutex::new(HashMap::new())),
             should_fail: Arc::new(AtomicBool::new(false)),
             ignore_resource_mutations: Arc::new(AtomicBool::new(false)),
+            fail_next_resource_read_after_update: Arc::new(AtomicBool::new(false)),
+            resource_read_failure_armed: Arc::new(AtomicBool::new(false)),
             fail_resource_update: Arc::new(Mutex::new(None)),
             fail_room_update: Arc::new(Mutex::new(None)),
             v1_write_response_override: Arc::new(Mutex::new(None)),
@@ -288,6 +299,14 @@ impl SpyHueTransport {
     pub fn set_ignore_resource_mutations(&self, ignore: bool) {
         self.ignore_resource_mutations
             .store(ignore, Ordering::Relaxed);
+    }
+
+    /// Apply the next resource update, then fail its first typed read-back.
+    /// This models an acknowledged write followed by a transient observation
+    /// failure without making later recovery reads fail.
+    pub fn set_fail_next_resource_read_after_update(&self, fail: bool) {
+        self.fail_next_resource_read_after_update
+            .store(fail, Ordering::Relaxed);
     }
 
     /// Configure one generic V2 resource update that should fail.
@@ -531,6 +550,12 @@ impl HueTransport for SpyHueTransport {
         if self.should_fail.load(Ordering::Relaxed) {
             anyhow::bail!("spy: get_resources failed");
         }
+        if self
+            .resource_read_failure_armed
+            .swap(false, Ordering::Relaxed)
+        {
+            anyhow::bail!("spy: post-update get_resources failed");
+        }
         Ok(self
             .resources
             .lock()
@@ -658,6 +683,13 @@ impl HueTransport for SpyHueTransport {
             })
             .ok_or_else(|| anyhow::anyhow!("spy: resource not found"))?;
         merge_json(resource, body);
+        if self
+            .fail_next_resource_read_after_update
+            .swap(false, Ordering::Relaxed)
+        {
+            self.resource_read_failure_armed
+                .store(true, Ordering::Relaxed);
+        }
         Ok(())
     }
 
@@ -925,6 +957,29 @@ impl HueTransport for SpyHueTransport {
             .find(|room| room.get("id").and_then(serde_json::Value::as_str) == Some(room_id))
             .ok_or_else(|| anyhow::anyhow!("spy: room not found"))?;
         room["metadata"]["name"] = serde_json::Value::String(name.to_string());
+        Ok(())
+    }
+
+    fn rename_device(&self, _username: &str, device_id: &str, name: &str) -> anyhow::Result<()> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(HueTransportCall::RenameDevice {
+                device_id: device_id.to_string(),
+                name: name.to_string(),
+            });
+        if self.should_fail.load(Ordering::Relaxed) {
+            anyhow::bail!("spy: rename_device failed");
+        }
+        if self.ignore_resource_mutations.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let mut resources = self.resources.lock().unwrap();
+        let device = resource_data_mut(&mut resources, "device")?
+            .iter_mut()
+            .find(|device| device.get("id").and_then(serde_json::Value::as_str) == Some(device_id))
+            .ok_or_else(|| anyhow::anyhow!("spy: device not found"))?;
+        device["metadata"]["name"] = serde_json::Value::String(name.to_string());
         Ok(())
     }
 

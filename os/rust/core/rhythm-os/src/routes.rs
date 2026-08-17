@@ -239,6 +239,10 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["PUT", "DELETE"],
     },
     SharedRoute {
+        path: "/api/hue/authority",
+        methods: &["GET", "PUT"],
+    },
+    SharedRoute {
         path: "/api/sync",
         methods: &["POST"],
     },
@@ -261,6 +265,10 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
     },
     SharedRoute {
         path: "/api/matter/captures/:id",
+        methods: &["GET"],
+    },
+    SharedRoute {
+        path: "/api/matter/setup-code/:id",
         methods: &["GET"],
     },
     SharedRoute {

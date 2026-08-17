@@ -1,13 +1,18 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
 import '../services/analytics_service.dart';
+import '../services/hue_ble_auto_discovery_service.dart';
+import '../widgets/nearby_hue_ble_prompt.dart';
 import '../widgets/room_picker_sheet.dart';
 import '../widgets/settings_row.dart';
 import '../widgets/solar_orbit.dart'; // For CelestialColors
 import 'hubs/device_pairing_flow.dart';
+import 'hubs/hue_authority_screen.dart';
 import 'hubs/rhythmserver_settings_screen.dart';
 
 enum _TriageFilter { all, devices, rooms }
@@ -17,7 +22,12 @@ enum _TriageFilter { all, devices, rooms }
 /// Shows pending triage entries (device merges and room bindings) and allows
 /// the user to merge, keep separate, bind rooms, or dismiss.
 class TriageScreen extends StatefulWidget {
-  const TriageScreen({super.key});
+  const TriageScreen({
+    super.key,
+    @visibleForTesting this.hueBleDiscoveryRequest,
+  });
+
+  final HueBleDiscoveryRequest? hueBleDiscoveryRequest;
 
   /// Combined "Add & Review" screen — pair new devices/rooms and resolve any
   /// pending device-review items in one place.
@@ -40,6 +50,8 @@ class _TriageScreenState extends State<TriageScreen> {
   bool _loading = true;
   bool _busy = false;
   bool _connectionError = false;
+  RhythmHueAuthority? _hueAuthority;
+  String? _reviewingHueBridgeAddress;
   _TriageFilter _filter = _TriageFilter.all;
 
   @override
@@ -47,6 +59,38 @@ class _TriageScreenState extends State<TriageScreen> {
     super.initState();
     AnalyticsService().logScreenView('device_review');
     _loadEntries();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_discoverNearbyHueBle());
+    });
+  }
+
+  Future<void> _discoverNearbyHueBle() async {
+    final syncProvider = context.read<ServerSyncProvider>();
+    if (!syncProvider.canAddHueBleDevice) return;
+
+    final discover = widget.hueBleDiscoveryRequest ??
+        HueBleAutoDiscoveryService.instance.discover;
+    final discovery = await discover(source: 'add_review');
+    if (!mounted ||
+        !discovery.found ||
+        ModalRoute.of(context)?.isCurrent != true) {
+      return;
+    }
+
+    final accepted = await showNearbyHueBlePrompt(
+      context,
+      source: 'add_review',
+      discovery: discovery,
+    );
+    if (!accepted || !mounted) return;
+
+    await startDevicePairingFlow(
+      context,
+      target: DevicePairingTarget.hueBle,
+      analyticsSource: 'add_review',
+      hueBleInputMethod: 'auto_discovery',
+    );
+    if (mounted) await _loadEntries();
   }
 
   String _kindForEntry(Map<String, dynamic> entry) =>
@@ -61,6 +105,16 @@ class _TriageScreenState extends State<TriageScreen> {
   int get _deviceCount => _entries.where(_isDeviceEntry).length;
 
   int get _roomCount => _entries.where(_isRoomEntry).length;
+
+  List<RhythmHueBridgeAuthority> get _hueBridgesNeedingReview =>
+      _hueAuthority?.bridges
+          .where(
+            (bridge) => bridge.rooms.any(
+              (room) => room.owner == RhythmHueRoomAuthorityOwner.unreviewed,
+            ),
+          )
+          .toList(growable: false) ??
+      const <RhythmHueBridgeAuthority>[];
 
   List<Map<String, dynamic>> get _filteredEntries {
     if (_filter == _TriageFilter.all) return _entries;
@@ -83,6 +137,16 @@ class _TriageScreenState extends State<TriageScreen> {
         debugPrint('TriageScreen: sync complete');
       }
       final entries = await http.getTriageEntries();
+      RhythmHueAuthority? hueAuthority;
+      if (syncProvider.hueRoomAuthorityConsentSupported) {
+        try {
+          hueAuthority = await syncProvider.fetchHueAuthority();
+        } catch (error, stackTrace) {
+          debugPrint(
+            'TriageScreen: Hue authority load failed: $error\n$stackTrace',
+          );
+        }
+      }
       debugPrint('TriageScreen: got ${entries?.length ?? 'null'} entries');
       if (entries != null && entries.isNotEmpty) {
         debugPrint(
@@ -92,6 +156,7 @@ class _TriageScreenState extends State<TriageScreen> {
         setState(() {
           _connectionError = entries == null;
           _entries = entries ?? [];
+          _hueAuthority = hueAuthority;
           _loading = false;
         });
       }
@@ -253,6 +318,7 @@ class _TriageScreenState extends State<TriageScreen> {
   Widget _buildEntryList(ServerSyncProvider serverSync) {
     final filtered = _filteredEntries;
     final hasBothKinds = _deviceCount > 0 && _roomCount > 0;
+    final hueBridgesNeedingReview = _hueBridgesNeedingReview;
 
     return ListView(
       padding: const EdgeInsets.all(20),
@@ -264,16 +330,15 @@ class _TriageScreenState extends State<TriageScreen> {
         ],
         // Third-party hubs bring in devices that are already paired elsewhere.
         RhythmServerHubManagementSection(
-          showConfigured: false,
-          showMatterAddOption: false,
-          showHueBleAddOption: true,
-          addOptionsTitle: 'SYNC FROM A HUB',
+          showConfigured: true,
+          showMatterAddOption: true,
+          showHueBleAddOption: false,
+          addOptionsTitle: 'DEVICE ACTIONS',
           addOptionsSubtitle:
-              'Bring in devices already paired with Home Assistant or '
-              'Philips Hue.',
-          resyncLabel: 'Sync Devices',
+              'Add Matter hardware or refresh devices from every connected hub.',
+          resyncLabel: 'Sync All Hubs',
           resyncBusyLabel: 'Syncing…',
-          resyncTrailingLabel: 'Pull in paired hardware',
+          resyncTrailingLabel: 'Refresh paired hardware',
           onResynced: () => _loadEntries(),
         ),
         const SizedBox(height: 30),
@@ -294,6 +359,31 @@ class _TriageScreenState extends State<TriageScreen> {
         ),
         const SizedBox(height: 30),
         // ── Review ──────────────────────────────────────────────────────
+        if (hueBridgesNeedingReview.isNotEmpty) ...[
+          _sectionHeading(
+            'Automation Review',
+            subtitle:
+                'Choose who controls rooms on newly connected Hue bridges.',
+          ),
+          const SizedBox(height: 10),
+          SettingsGroup(
+            children: [
+              for (final bridge in hueBridgesNeedingReview)
+                SettingsRow(
+                  icon: Icons.admin_panel_settings_outlined,
+                  iconColor: const Color(0xFFFFB900),
+                  label: _reviewingHueBridgeAddress == bridge.address
+                      ? 'Loading Hue room automation…'
+                      : 'Review Hue room automation',
+                  value: _hueReviewSummary(bridge),
+                  onTap: _reviewingHueBridgeAddress == null
+                      ? () => _reviewHueAutomation(bridge)
+                      : null,
+                ),
+            ],
+          ),
+          const SizedBox(height: 30),
+        ],
         _sectionLabel('Device Review'),
         const SizedBox(height: 12),
         if (hasBothKinds) ...[
@@ -313,6 +403,30 @@ class _TriageScreenState extends State<TriageScreen> {
         for (final entry in filtered) _entryCard(entry, serverSync),
       ],
     );
+  }
+
+  String _hueReviewSummary(RhythmHueBridgeAuthority bridge) {
+    final roomCount = bridge.rooms
+        .where(
+          (room) => room.owner == RhythmHueRoomAuthorityOwner.unreviewed,
+        )
+        .length;
+    return '$roomCount ${roomCount == 1 ? 'room needs' : 'rooms need'} review';
+  }
+
+  Future<void> _reviewHueAutomation(RhythmHueBridgeAuthority bridge) async {
+    if (_reviewingHueBridgeAddress != null) return;
+    setState(() => _reviewingHueBridgeAddress = bridge.address);
+    final reviewed = await HueAuthorityScreen.show(
+      context,
+      bridge,
+      source: 'add_review',
+    );
+    if (!mounted) return;
+    setState(() => _reviewingHueBridgeAddress = null);
+    if (reviewed == true) {
+      await _loadEntries();
+    }
   }
 
   Widget _sectionLabel(String text) => Padding(

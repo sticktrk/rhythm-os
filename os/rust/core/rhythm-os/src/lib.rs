@@ -16,6 +16,7 @@ pub mod button_resolve;
 pub mod canonical;
 pub mod commands;
 pub mod controller_helpers;
+pub mod device_naming;
 pub mod discovery;
 pub mod event_loop;
 pub mod factory_default_config;

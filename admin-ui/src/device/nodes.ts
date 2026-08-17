@@ -2,10 +2,23 @@ import type { DeviceClient } from './client';
 
 export type RgbColor = { r: number; g: number; b: number };
 
+export const NODE_ACTIONS = [
+  { id: 'on', label: 'On' },
+  { id: 'off', label: 'Off' },
+  { id: 'toggle', label: 'Toggle' },
+  { id: 'reset', label: 'Reset' },
+  { id: 'step_up', label: 'Step up' },
+  { id: 'step_down', label: 'Step down' },
+  { id: 'rhythm_on', label: 'Rhythm on' },
+  { id: 'rhythm_off', label: 'Rhythm off' }
+] as const;
+
+export type NodeAction = (typeof NODE_ACTIONS)[number]['id'];
+
 export function sendNodeAction(
   client: DeviceClient,
   nodeId: string,
-  action: string
+  action: NodeAction
 ) {
   return client.put('api/nodes/action', {
     body: { node_id: nodeId, action }
@@ -116,6 +129,7 @@ export function setNodeProfileOverrides(
     replace?: boolean;
     correlationId?: string;
     expectedProfileOverrides?: Record<string, unknown>;
+    expectedServerInstanceId?: string;
     resourcePrecondition?: {
       path: string;
       query?: Record<string, string>;
@@ -136,6 +150,9 @@ export function setNodeProfileOverrides(
         : {})
     },
     ...(options.correlationId ? { requestId: options.correlationId } : {}),
+    ...(options.expectedServerInstanceId
+      ? { expectedServerInstanceId: options.expectedServerInstanceId }
+      : {}),
     ...(options.resourcePrecondition
       ? { resourcePrecondition: options.resourcePrecondition }
       : {})

@@ -13,10 +13,33 @@ use rhythm_os::state::SharedState;
 use serde_json::Value;
 
 use crate::hub_state::MatterHubData;
+use crate::setup_recovery::SetupPayloadTarget;
 use crate::transport::{
     CommissionedDevice, MatterCommissionRequest, MatterCommissioningNetwork,
     MatterCommissioningRendezvous, MatterCommissioningWifiCredentials, MatterTransport,
 };
+
+const RECOVERY_ACTION_CONNECTION_RECOVERED: &str = "existing_connection_recovered";
+const RECOVERY_ACTION_NODE_RECOMMISSIONED: &str = "existing_node_recommissioned";
+const RECOVERY_ACTION_NODE_RECOMMISSION_FAILED: &str = "existing_node_recommission_failed";
+const SETUP_PAYLOAD_PERSISTENCE_WARNING: &str = "The light was paired, but Rhythm could not save its Matter setup code for recovery. Keep using the light normally. Do not reset or pair it again; contact Rhythm Support if its connection needs recovery.";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PairingCompletion {
+    New,
+    ExistingConnectionRecovered,
+    ExistingNodeRecommissioned,
+}
+
+impl PairingCompletion {
+    fn recovery_action(self) -> Option<&'static str> {
+        match self {
+            Self::New => None,
+            Self::ExistingConnectionRecovered => Some(RECOVERY_ACTION_CONNECTION_RECOVERED),
+            Self::ExistingNodeRecommissioned => Some(RECOVERY_ACTION_NODE_RECOMMISSIONED),
+        }
+    }
+}
 
 /// Parsed Matter pairing request owned by `rhythm-matter`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +156,139 @@ pub fn pair_device(
     hub_data: Arc<MatterHubData>,
     request: &MatterPairingParams,
 ) -> Result<PairingSession> {
+    let recovery_targets = match registered_recovery_targets(
+        state,
+        &hub_data,
+        &request.setup_payload,
+    ) {
+        Ok(targets) => targets,
+        Err(error) => {
+            tracing::error!(
+                target: "pair",
+                event = "matter_repeat_pair_lookup_unavailable",
+                error = %format!("{error:#}"),
+                "Matter recovery metadata could not be checked; refusing to risk a duplicate pairing"
+            );
+            return Ok(PairingSession {
+                hub_type: "matter".to_string(),
+                status: PairingStatus::Failed,
+                device: None,
+                devices: Vec::new(),
+                error: Some(
+                    "Rhythm could not safely check whether this Matter setup code is already registered, so pairing was not started. Restart the server and try again."
+                        .to_string(),
+                ),
+                failure_stage: None,
+                warnings: Vec::new(),
+                details: None,
+            });
+        }
+    };
+    if recovery_targets.len() > 1 {
+        tracing::warn!(
+            target: "pair",
+            event = "matter_repeat_pair_ambiguous",
+            match_count = recovery_targets.len(),
+            "Matter repeat-pair payload matched multiple registered endpoints; refusing to guess"
+        );
+        return Ok(PairingSession {
+            hub_type: "matter".to_string(),
+            status: PairingStatus::Failed,
+            device: None,
+            devices: Vec::new(),
+            error: Some(
+                "This setup code matches more than one saved Matter device, so Rhythm did not change either one. Remove the stale duplicate before trying again."
+                    .to_string(),
+            ),
+            failure_stage: None,
+            warnings: Vec::new(),
+            details: None,
+        });
+    }
+
+    if let Some(target) = recovery_targets.first().copied() {
+        rhythm_os::pairing::emit_pairing_progress(
+            state,
+            "matter",
+            request.session_id.as_deref(),
+            PairingStatus::Searching,
+            PairingStage::Searching,
+            "Checking saved Matter device connection",
+            None,
+            None,
+        );
+        match transport.recover_light_connection(target.node_id, target.endpoint) {
+            Ok(device) => {
+                tracing::info!(
+                    target: "pair",
+                    event = "matter_repeat_pair_connection_recovered",
+                    "Matter repeat-pair recovered the existing operational connection"
+                );
+                hub_data.record_node_proof_of_life(target.node_id);
+                return build_success_session(
+                    state,
+                    &hub_data,
+                    device,
+                    &request.setup_payload,
+                    request.session_id.as_deref(),
+                    PairingCompletion::ExistingConnectionRecovered,
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "pair",
+                    event = "matter_repeat_pair_probe_failed",
+                    error = %format!("{error:#}"),
+                    "Saved Matter device was unreachable; trying same-node recommissioning"
+                );
+            }
+        }
+
+        let wifi_credentials = match load_commissioning_wifi_credentials(state) {
+            Ok(credentials) => credentials,
+            Err(error) => {
+                return Ok(failed_recovery_session(
+                    &error,
+                    "Rhythm found this saved Matter device, but cannot recommission it until the appliance Wi-Fi credentials are available.",
+                ));
+            }
+        };
+        let commission_request = request.to_commission_request(target.node_id, wifi_credentials);
+        rhythm_os::pairing::emit_pairing_progress(
+            state,
+            "matter",
+            request.session_id.as_deref(),
+            PairingStatus::Commissioning,
+            PairingStage::Commissioning,
+            "Recommissioning saved Matter device",
+            None,
+            None,
+        );
+
+        return match transport.commission_light(&commission_request) {
+            Ok(device) => build_success_session(
+                state,
+                &hub_data,
+                device,
+                &request.setup_payload,
+                request.session_id.as_deref(),
+                PairingCompletion::ExistingNodeRecommissioned,
+            ),
+            Err(error) => {
+                tracing::error!(
+                    target: "pair",
+                    event = "matter_repeat_pair_recommission_failed",
+                    error = %format!("{error:#}"),
+                    "Matter same-node recommissioning failed"
+                );
+                Ok(failed_recovery_session(
+                    &error,
+                    "Rhythm found this saved Matter device, but could not restore its connection or recommission it. Put the light in Matter pairing mode, keep it powered, and try again.",
+                ))
+            }
+        };
+    }
+
     let wifi_credentials = load_commissioning_wifi_credentials(state)?;
     let node_id = hub_data.reserve_node_id();
     let commission_request = request.to_commission_request(node_id, wifi_credentials);
@@ -148,9 +304,14 @@ pub fn pair_device(
     );
 
     match transport.commission_light(&commission_request) {
-        Ok(device) => {
-            build_success_session(state, &hub_data, device, request.session_id.as_deref())
-        }
+        Ok(device) => build_success_session(
+            state,
+            &hub_data,
+            device,
+            &request.setup_payload,
+            request.session_id.as_deref(),
+            PairingCompletion::New,
+        ),
         Err(error) => {
             error!(target: "pair", "Matter commissioning error: {:#}", error);
             Ok(PairingSession {
@@ -164,6 +325,55 @@ pub fn pair_device(
                 details: None,
             })
         }
+    }
+}
+
+fn registered_recovery_targets(
+    state: &SharedState,
+    hub_data: &MatterHubData,
+    setup_payload: &str,
+) -> Result<Vec<SetupPayloadTarget>> {
+    let targets = crate::setup_recovery::find_setup_payload_targets(
+        state,
+        &hub_data.fabric_id,
+        setup_payload,
+    )?;
+    if targets.is_empty() {
+        return Ok(targets);
+    }
+
+    let matter_hub_key = HubKey::new(HubType::new("matter"), "local");
+    let state = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Matter canonical registry lock poisoned"))?;
+    Ok(targets
+        .into_iter()
+        .filter(|target| {
+            let native_id = crate::lifecycle::format_device_id(target.node_id, target.endpoint);
+            state
+                .canonical_registry
+                .find_by_native_id(&matter_hub_key, &native_id)
+                .is_some_and(|device| !device.is_removed())
+        })
+        .collect())
+}
+
+fn failed_recovery_session(error: &anyhow::Error, message: &str) -> PairingSession {
+    PairingSession {
+        hub_type: "matter".to_string(),
+        status: PairingStatus::Failed,
+        device: None,
+        devices: Vec::new(),
+        error: Some(format!(
+            "{} {}",
+            message,
+            summarize_commissioning_error(error)
+        )),
+        failure_stage: None,
+        warnings: Vec::new(),
+        details: Some(serde_json::json!({
+            "recovery_action": RECOVERY_ACTION_NODE_RECOMMISSION_FAILED,
+        })),
     }
 }
 
@@ -306,7 +516,9 @@ fn build_success_session(
     state: &SharedState,
     hub_data: &Arc<MatterHubData>,
     device: CommissionedDevice,
+    setup_payload: &str,
     session_id: Option<&str>,
+    completion: PairingCompletion,
 ) -> Result<PairingSession> {
     rhythm_os::pairing::emit_pairing_progress(
         state,
@@ -323,13 +535,22 @@ fn build_success_session(
     let device_name = format!("{} {}", device.vendor_name, device.product_name);
     let hub_key = HubKey::new(HubType::new("matter"), "local");
 
-    info!(
-        target: "sys",
-        "Matter: paired {} (node {}, id={})",
-        device_name,
-        device.node_id,
-        device_id
-    );
+    if let Some(recovery_action) = completion.recovery_action() {
+        tracing::info!(
+            target: "pair",
+            event = "matter_repeat_pair_completed",
+            recovery_action,
+            "Matter repeat-pair completed against the existing identity"
+        );
+    } else {
+        info!(
+            target: "sys",
+            "Matter: paired {} (node {}, id={})",
+            device_name,
+            device.node_id,
+            device_id
+        );
+    }
 
     hub_data.record_commissioned_device(&device);
     store_device_metadata(hub_data, &device, &device_id);
@@ -343,6 +564,24 @@ fn build_success_session(
     }
     register_canonical_identity(state, &hub_key, &device, &device_id, &device_name)?;
     materialize_unassigned_canonical_device(state, &hub_key, &device_id)?;
+
+    let mut warnings = Vec::new();
+    if let Err(error) = crate::setup_recovery::save_setup_payload(
+        state,
+        &hub_data.fabric_id,
+        device.node_id,
+        device.light_endpoint,
+        setup_payload,
+    ) {
+        warn!(
+            target: "pair",
+            "Matter setup recovery material was not persisted: {}",
+            error
+        );
+        warnings.push(SETUP_PAYLOAD_PERSISTENCE_WARNING.to_string());
+    } else {
+        info!(target: "pair", "Matter setup recovery material persisted");
+    }
 
     let _ = hub_data.event_tx.send(
         crate::events::device_paired_event(
@@ -366,8 +605,10 @@ fn build_success_session(
         devices: Vec::new(),
         error: None,
         failure_stage: None,
-        warnings: Vec::new(),
-        details: None,
+        warnings,
+        details: completion
+            .recovery_action()
+            .map(|recovery_action| serde_json::json!({ "recovery_action": recovery_action })),
     })
 }
 
@@ -536,6 +777,8 @@ mod tests {
     struct FakeMatterTransport {
         commission_requests: Mutex<Vec<MatterCommissionRequest>>,
         commission_error: Mutex<Option<String>>,
+        recovery_requests: Mutex<Vec<(u64, u16)>>,
+        recovery_error: Mutex<Option<String>>,
         subscribe_calls: AtomicUsize,
     }
 
@@ -543,6 +786,24 @@ mod tests {
         fn with_commission_error(error: impl Into<String>) -> Self {
             Self {
                 commission_error: Mutex::new(Some(error.into())),
+                ..Self::default()
+            }
+        }
+
+        fn with_recovery_error(error: impl Into<String>) -> Self {
+            Self {
+                recovery_error: Mutex::new(Some(error.into())),
+                ..Self::default()
+            }
+        }
+
+        fn with_recovery_and_commission_error(
+            recovery_error: impl Into<String>,
+            commission_error: impl Into<String>,
+        ) -> Self {
+            Self {
+                recovery_error: Mutex::new(Some(recovery_error.into())),
+                commission_error: Mutex::new(Some(commission_error.into())),
                 ..Self::default()
             }
         }
@@ -572,6 +833,21 @@ mod tests {
         }
 
         fn probe_light(&self, node_id: u64) -> Result<CommissionedDevice> {
+            Ok(commissioned_device(node_id))
+        }
+
+        fn recover_light_connection(
+            &self,
+            node_id: u64,
+            expected_endpoint: u16,
+        ) -> Result<CommissionedDevice> {
+            self.recovery_requests
+                .lock()
+                .unwrap()
+                .push((node_id, expected_endpoint));
+            if let Some(error) = self.recovery_error.lock().unwrap().clone() {
+                anyhow::bail!(error);
+            }
             Ok(commissioned_device(node_id))
         }
 
@@ -750,6 +1026,38 @@ mod tests {
             "rendezvous": "ble"
         }))
         .unwrap()
+    }
+
+    fn seed_saved_device(
+        state: &SharedState,
+        hub_data: &Arc<MatterHubData>,
+        node_id: u64,
+        setup_payload: &str,
+    ) -> String {
+        let device = commissioned_device(node_id);
+        let device_id = crate::lifecycle::format_device_id(node_id, device.light_endpoint);
+        let device_name = format!("{} {}", device.vendor_name, device.product_name);
+        let hub_key = HubKey::new(HubType::new("matter"), "local");
+        hub_data.record_commissioned_device(&device);
+        store_device_metadata(hub_data, &device, &device_id);
+        register_canonical_identity(state, &hub_key, &device, &device_id, &device_name).unwrap();
+        materialize_unassigned_canonical_device(state, &hub_key, &device_id).unwrap();
+        crate::setup_recovery::save_setup_payload(
+            state,
+            &hub_data.fabric_id,
+            node_id,
+            device.light_endpoint,
+            setup_payload,
+        )
+        .unwrap();
+        state
+            .lock()
+            .unwrap()
+            .canonical_registry
+            .find_by_native_id(&hub_key, &device_id)
+            .unwrap()
+            .id
+            .clone()
     }
 
     fn string_error<T>(result: Result<T>) -> String {
@@ -1037,6 +1345,12 @@ mod tests {
             .get_device_node(&canonical.id)
             .is_some());
         drop(state_guard);
+        let recovery =
+            crate::setup_recovery::load_setup_payload(&state, &hub_data.fabric_id, "matter-10-2")
+                .unwrap()
+                .expect("successful commission should retain setup recovery");
+        assert_eq!(recovery.payload_kind, "qr_code");
+        assert_eq!(recovery.setup_payload, pairing_request().setup_payload);
 
         match event_rx.try_recv().unwrap() {
             HubEvent::DevicePaired {
@@ -1052,6 +1366,273 @@ mod tests {
             }
             other => panic!("expected device paired event, got {other:?}"),
         }
+
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn setup_payload_persistence_failure_does_not_recommend_or_reserve_a_new_pairing() {
+        let state = state();
+        let (hub_data, _event_rx) = hub_data();
+        hub_data.next_node_id.store(43, Ordering::SeqCst);
+        let next_node_id = hub_data.next_node_id.load(Ordering::SeqCst);
+
+        let session = build_success_session(
+            &state,
+            &hub_data,
+            commissioned_device(42),
+            &pairing_request().setup_payload,
+            Some("pair-persistence-failure"),
+            PairingCompletion::New,
+        )
+        .unwrap();
+
+        assert_eq!(session.status, PairingStatus::Complete);
+        assert_eq!(
+            session.warnings,
+            vec![SETUP_PAYLOAD_PERSISTENCE_WARNING.to_string()]
+        );
+        assert!(!session.warnings[0].contains("Pair it again"));
+        assert!(session.warnings[0].contains("Do not reset or pair it again"));
+        assert_eq!(
+            hub_data.next_node_id.load(Ordering::SeqCst),
+            next_node_id,
+            "non-mutating recovery guidance must not reserve a replacement node"
+        );
+        assert_eq!(
+            state.lock().unwrap().canonical_registry.devices().count(),
+            1
+        );
+    }
+
+    #[test]
+    fn repeat_pair_recovers_registered_connection_without_reserving_or_commissioning() {
+        let (state, path) = state_with_storage("repeat-connection");
+        let (hub_data, _event_rx) = hub_data();
+        let original_canonical_id =
+            seed_saved_device(&state, &hub_data, 42, &pairing_request().setup_payload);
+        let room = rhythm_os::commands::do_topology_create_room(&state, "Bedroom").unwrap();
+        let room_id = serde_json::from_str::<serde_json::Value>(&room).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        rhythm_os::commands::do_canonical_assign_room(
+            &state,
+            &original_canonical_id,
+            Some(&room_id),
+        )
+        .unwrap();
+        let next_node_id = hub_data.next_node_id.load(Ordering::SeqCst);
+        let transport = Arc::new(FakeMatterTransport::default());
+
+        let session = pair_device(
+            &state,
+            transport.clone() as Arc<dyn MatterTransport>,
+            hub_data.clone(),
+            &pairing_request(),
+        )
+        .unwrap();
+
+        assert_eq!(session.status, PairingStatus::Complete);
+        assert_eq!(session.device.unwrap().device_id, "matter-42-2");
+        assert_eq!(
+            session.details,
+            Some(serde_json::json!({
+                "recovery_action": RECOVERY_ACTION_CONNECTION_RECOVERED,
+            }))
+        );
+        assert_eq!(
+            transport.recovery_requests.lock().unwrap().as_slice(),
+            &[(42, 2)]
+        );
+        assert!(transport.commission_requests.lock().unwrap().is_empty());
+        assert_eq!(hub_data.next_node_id.load(Ordering::SeqCst), next_node_id);
+        let matter_key = HubKey::new(HubType::new("matter"), "local");
+        let state_guard = state.lock().unwrap();
+        assert_eq!(state_guard.canonical_registry.devices().count(), 1);
+        let recovered = state_guard
+            .canonical_registry
+            .find_by_native_id(&matter_key, "matter-42-2")
+            .unwrap();
+        assert_eq!(recovered.id, original_canonical_id);
+        assert_eq!(recovered.room_id.as_deref(), Some(room_id.as_str()));
+        drop(state_guard);
+
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn repeat_pair_recommissions_the_same_node_and_preserves_canonical_identity() {
+        let (state, path) = state_with_storage("repeat-recommission");
+        save_wifi(&path, &wifi("PairNet", "pair-secret"));
+        let (hub_data, _event_rx) = hub_data();
+        let original_canonical_id =
+            seed_saved_device(&state, &hub_data, 42, &pairing_request().setup_payload);
+        let room = rhythm_os::commands::do_topology_create_room(&state, "Bedroom").unwrap();
+        let room_id = serde_json::from_str::<serde_json::Value>(&room).unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        rhythm_os::commands::do_canonical_assign_room(
+            &state,
+            &original_canonical_id,
+            Some(&room_id),
+        )
+        .unwrap();
+        let next_node_id = hub_data.next_node_id.load(Ordering::SeqCst);
+        let transport = Arc::new(FakeMatterTransport::with_recovery_error(
+            "operational node unreachable",
+        ));
+
+        let session = pair_device(
+            &state,
+            transport.clone() as Arc<dyn MatterTransport>,
+            hub_data.clone(),
+            &pairing_request(),
+        )
+        .unwrap();
+
+        assert_eq!(session.status, PairingStatus::Complete);
+        assert_eq!(
+            session.details,
+            Some(serde_json::json!({
+                "recovery_action": RECOVERY_ACTION_NODE_RECOMMISSIONED,
+            }))
+        );
+        let requests = transport.commission_requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].node_id, 42);
+        drop(requests);
+        assert_eq!(
+            hub_data.next_node_id.load(Ordering::SeqCst),
+            next_node_id,
+            "same-node recovery must not reserve a replacement identity"
+        );
+        let matter_key = HubKey::new(HubType::new("matter"), "local");
+        let state_guard = state.lock().unwrap();
+        assert_eq!(state_guard.canonical_registry.devices().count(), 1);
+        let recovered = state_guard
+            .canonical_registry
+            .find_by_native_id(&matter_key, "matter-42-2")
+            .unwrap();
+        assert_eq!(recovered.id, original_canonical_id);
+        assert_eq!(recovered.room_id.as_deref(), Some(room_id.as_str()));
+        drop(state_guard);
+
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn failed_repeat_pair_keeps_existing_identity_and_recovery_material() {
+        let (state, path) = state_with_storage("repeat-failed");
+        save_wifi(&path, &wifi("PairNet", "pair-secret"));
+        let (hub_data, _event_rx) = hub_data();
+        let original_canonical_id =
+            seed_saved_device(&state, &hub_data, 42, &pairing_request().setup_payload);
+        let next_node_id = hub_data.next_node_id.load(Ordering::SeqCst);
+        let transport = Arc::new(FakeMatterTransport::with_recovery_and_commission_error(
+            "operational node unreachable",
+            "ConnectionDelegate timeout",
+        ));
+
+        let session = pair_device(
+            &state,
+            transport.clone() as Arc<dyn MatterTransport>,
+            hub_data.clone(),
+            &pairing_request(),
+        )
+        .unwrap();
+
+        assert_eq!(session.status, PairingStatus::Failed);
+        assert_eq!(
+            session.details,
+            Some(serde_json::json!({
+                "recovery_action": RECOVERY_ACTION_NODE_RECOMMISSION_FAILED,
+            }))
+        );
+        assert_eq!(transport.commission_requests.lock().unwrap()[0].node_id, 42);
+        assert_eq!(hub_data.next_node_id.load(Ordering::SeqCst), next_node_id);
+        assert_eq!(hub_data.commissioned.lock().unwrap()[0].node_id, 42);
+        let recovery =
+            crate::setup_recovery::load_setup_payload(&state, &hub_data.fabric_id, "matter-42-2")
+                .unwrap()
+                .expect("failed recovery must retain saved setup material");
+        assert_eq!(recovery.setup_payload, pairing_request().setup_payload);
+        let matter_key = HubKey::new(HubType::new("matter"), "local");
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .canonical_registry
+                .find_by_native_id(&matter_key, "matter-42-2")
+                .unwrap()
+                .id,
+            original_canonical_id
+        );
+
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn ambiguous_repeat_pair_does_not_probe_reserve_or_commission() {
+        let (state, path) = state_with_storage("repeat-ambiguous");
+        let (hub_data, _event_rx) = hub_data();
+        seed_saved_device(&state, &hub_data, 42, "12345678901");
+        seed_saved_device(&state, &hub_data, 43, "123-456-78901");
+        let next_node_id = hub_data.next_node_id.load(Ordering::SeqCst);
+        let transport = Arc::new(FakeMatterTransport::default());
+        let request = MatterPairingParams::from_value(&serde_json::json!({
+            "setup_payload": "123 456 78901",
+            "session_id": "pair-ambiguous",
+        }))
+        .unwrap();
+
+        let session = pair_device(
+            &state,
+            transport.clone() as Arc<dyn MatterTransport>,
+            hub_data.clone(),
+            &request,
+        )
+        .unwrap();
+
+        assert_eq!(session.status, PairingStatus::Failed);
+        assert!(session.error.unwrap().contains("more than one saved"));
+        assert!(transport.recovery_requests.lock().unwrap().is_empty());
+        assert!(transport.commission_requests.lock().unwrap().is_empty());
+        assert_eq!(hub_data.next_node_id.load(Ordering::SeqCst), next_node_id);
+        assert_eq!(
+            state.lock().unwrap().canonical_registry.devices().count(),
+            2
+        );
+
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn unreadable_recovery_metadata_fails_before_reserving_or_commissioning() {
+        let (state, path) = state_with_storage("repeat-unreadable");
+        save_wifi(&path, &wifi("PairNet", "pair-secret"));
+        let storage = state.lock().unwrap().storage.clone().unwrap();
+        storage
+            .save_integration_state_file("matter/setup-payloads.json", "{")
+            .unwrap();
+        let (hub_data, _event_rx) = hub_data();
+        let next_node_id = hub_data.next_node_id.load(Ordering::SeqCst);
+        let transport = Arc::new(FakeMatterTransport::default());
+
+        let session = pair_device(
+            &state,
+            transport.clone() as Arc<dyn MatterTransport>,
+            hub_data.clone(),
+            &pairing_request(),
+        )
+        .unwrap();
+
+        assert_eq!(session.status, PairingStatus::Failed);
+        assert!(session.error.unwrap().contains("could not safely check"));
+        assert!(transport.recovery_requests.lock().unwrap().is_empty());
+        assert!(transport.commission_requests.lock().unwrap().is_empty());
+        assert_eq!(hub_data.next_node_id.load(Ordering::SeqCst), next_node_id);
 
         std::fs::remove_dir_all(path).ok();
     }

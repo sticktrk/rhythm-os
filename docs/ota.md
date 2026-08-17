@@ -43,6 +43,12 @@ that the public `rpiz/manifest.json` exposes that exact beta package before it
 creates a stable tag. This prevents promoting a tag while its beta publish is
 still missing or stale.
 
+The stable publish job also generates the GitHub Release body from the exact
+range between the new stable tag and its nearest ancestor `vX.Y.Z-stable` tag.
+Beta tags are deliberately excluded as comparison boundaries, so the notes
+summarize the complete fleet-visible change since the last stable promotion,
+with linked pull requests and a full comparison link.
+
 Add `--device http://HOST:54448 --token-file FILE --scenario smoke|state|onboarding|ota`
 to verify the exact package on a bench device and write a local receipt under
 `.release-evidence/`. Device evidence is optional so routine iteration remains

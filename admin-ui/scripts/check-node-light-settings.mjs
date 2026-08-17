@@ -35,6 +35,7 @@ const {
   profileOverrideMapsEqual,
   profileOverridesForNode,
   profileOverridesFromNode,
+  serverInstanceIdFromState,
   withDirectColor,
   withSelectedProfileOverride,
 } = lightSettings;
@@ -46,6 +47,7 @@ const state = {
       'motion_activation_toggle',
       'room_light_profile_overrides',
       'guarded_room_light_profile_overrides',
+      'target_guarded_room_light_profile_overrides',
     ],
   },
   profiles: [
@@ -82,8 +84,21 @@ const state = {
 
 assert.equal(
   lightProfileOverrideSupport(state),
+  'target_guarded',
+  'prefers the target-specific compare-and-set capability',
+);
+assert.equal(
+  lightProfileOverrideSupport({
+    ...state,
+    capabilities: {
+      ...state.capabilities,
+      features: state.capabilities.features.filter(
+        (feature) => feature !== 'target_guarded_room_light_profile_overrides',
+      ),
+    },
+  }),
   'guarded',
-  'recognizes the complete guarded-write capability contract',
+  'keeps the legacy whole-resource guard for previous appliances',
 );
 assert.equal(
   lightProfileOverrideSupport({
@@ -118,6 +133,14 @@ assert.deepEqual(
 assert.equal(isLightAddressableKind('room'), true);
 assert.equal(isLightAddressableKind('light_device'), true);
 assert.equal(isLightAddressableKind('motion_sensor'), false);
+assert.equal(
+  serverInstanceIdFromState({ server_instance_id: 'server-1' }),
+  'server-1',
+);
+assert.equal(
+  serverInstanceIdFromState({ serverInstanceId: 'server-2' }),
+  'server-2',
+);
 
 const day = state.profiles[2];
 const existingOverride = {
@@ -294,6 +317,16 @@ assert.match(
   pageSource,
   /expectedProfileOverrides: baselineOverrides/,
   'sends the reviewed effective override map for appliance-side queued compare-and-set',
+);
+assert.match(
+  pageSource,
+  /latestSupport === 'guarded'[\s\S]*resourcePrecondition/,
+  'uses the volatile whole-resource hash only for legacy guarded appliances',
+);
+assert.match(
+  pageSource,
+  /expectedServerInstanceId/,
+  'pins the reviewed server identity without another client-side state fetch',
 );
 assert.match(
   pageSource,

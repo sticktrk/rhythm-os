@@ -59,6 +59,7 @@ class RoomPageProvider extends ChangeNotifier {
   bool _editMode = false;
   bool _initialized = false;
   String? _scopeKey;
+  List<String> _scopeKeyAliases = const [];
   bool _claimedLegacyLayout = false;
   bool _pausePersistenceUntilRoomSetChanges = false;
   String? _roomSignatureAtScopeChange;
@@ -83,10 +84,17 @@ class RoomPageProvider extends ChangeNotifier {
   }
 
   /// Load saved page layout from persistent storage.
-  void initialize({String? scopeKey}) {
+  void initialize({
+    String? scopeKey,
+    Iterable<String> scopeKeyAliases = const <String>[],
+  }) {
     if (_initialized) return;
     _initialized = true;
-    setLayoutScope(scopeKey, notify: false);
+    setLayoutScope(
+      scopeKey,
+      scopeKeyAliases: scopeKeyAliases,
+      notify: false,
+    );
   }
 
   /// Build a room-layout scope key from the currently active home and hubs.
@@ -103,7 +111,7 @@ class RoomPageProvider extends ChangeNotifier {
     final serverHub =
         enabledHubs.where((hub) => hub.type == HubType.server).firstOrNull;
     if (serverHub != null) {
-      return 'server:${_hubFingerprint(serverHub)}';
+      return 'server:${hubLayoutKey(serverHub)}';
     }
 
     if (enabledHubs.isNotEmpty) {
@@ -112,6 +120,27 @@ class RoomPageProvider extends ChangeNotifier {
     }
 
     return home == null ? null : 'home:${home.id}:default';
+  }
+
+  /// Previous local keys that may contain the layout for the active scope.
+  ///
+  /// Layouts used to be keyed by the server's mutable network endpoint. Keep
+  /// that key as a read-through alias while durable server identities take
+  /// over as the canonical local scope.
+  static List<String> layoutScopeAliasesFor({
+    required Home? home,
+    required List<Hub> hubs,
+  }) {
+    final serverHub = hubs
+        .where((hub) => hub.enabled && hub.type == HubType.server)
+        .firstOrNull;
+    if (serverHub == null) return const <String>[];
+
+    final canonical = 'server:${hubLayoutKey(serverHub)}';
+    final endpointScope = 'server:${_hubFingerprint(serverHub)}';
+    return canonical == endpointScope
+        ? const <String>[]
+        : <String>[endpointScope];
   }
 
   /// Stable key used by cloud layout sync to match an All Rooms layout to the
@@ -133,17 +162,46 @@ class RoomPageProvider extends ChangeNotifier {
   }
 
   /// Reload the persisted layout for a new room source scope.
-  void setLayoutScope(String? scopeKey, {bool notify = true}) {
+  void setLayoutScope(
+    String? scopeKey, {
+    Iterable<String> scopeKeyAliases = const <String>[],
+    bool notify = true,
+  }) {
     final normalizedScopeKey =
         scopeKey != null && scopeKey.isEmpty ? null : scopeKey;
+    final normalizedAliases = scopeKeyAliases
+        .where((alias) => alias.isNotEmpty && alias != normalizedScopeKey)
+        .toSet()
+        .toList(growable: false);
 
+    if (_initialized &&
+        normalizedScopeKey == _scopeKey &&
+        listEquals(normalizedAliases, _scopeKeyAliases)) {
+      return;
+    }
+
+    // A mutable endpoint alias can change while the durable scope remains the
+    // same. Keep the already-loaded canonical layout in memory instead of
+    // briefly replacing it with an empty lookup while an alias copy is still
+    // being persisted.
     if (_initialized && normalizedScopeKey == _scopeKey) {
+      _scopeKeyAliases = normalizedAliases;
+      if (_pages.isNotEmpty) return;
+
+      _pages = _loadPagesForScope(normalizedScopeKey, normalizedAliases);
+      if (!_editMode) {
+        _compactPages();
+      }
+      if (notify) {
+        notifyListeners();
+      }
       return;
     }
 
     _initialized = true;
     _scopeKey = normalizedScopeKey;
-    _pages = _loadPagesForScope(normalizedScopeKey);
+    _scopeKeyAliases = normalizedAliases;
+    _pages = _loadPagesForScope(normalizedScopeKey, normalizedAliases);
     if (!_editMode) {
       _compactPages();
     }
@@ -159,7 +217,7 @@ class RoomPageProvider extends ChangeNotifier {
   ///
   /// Used after cloud settings restore writes the layout outside this provider.
   void reloadLayout({bool notify = true}) {
-    _pages = _loadPagesForScope(_scopeKey);
+    _pages = _loadPagesForScope(_scopeKey, _scopeKeyAliases);
     if (!_editMode) {
       _compactPages();
     }
@@ -345,10 +403,22 @@ class RoomPageProvider extends ChangeNotifier {
     }
   }
 
-  List<List<String>> _loadPagesForScope(String? scopeKey) {
+  List<List<String>> _loadPagesForScope(
+    String? scopeKey,
+    Iterable<String> scopeKeyAliases,
+  ) {
     final scoped = _layoutStore.loadLayout(scopeKey: scopeKey);
     if (scoped != null) {
       return scoped;
+    }
+
+    if (scopeKey != null) {
+      for (final alias in scopeKeyAliases) {
+        final aliased = _layoutStore.loadLayout(scopeKey: alias);
+        if (aliased == null) continue;
+        unawaited(_copyAliasedLayoutToScope(aliased, scopeKey));
+        return aliased;
+      }
     }
 
     if (scopeKey == null || _claimedLegacyLayout) {
@@ -363,6 +433,19 @@ class RoomPageProvider extends ChangeNotifier {
     _claimedLegacyLayout = true;
     unawaited(_layoutStore.migrateLegacyLayoutToScope(scopeKey));
     return legacy;
+  }
+
+  Future<void> _copyAliasedLayoutToScope(
+    List<List<String>> pages,
+    String scopeKey,
+  ) async {
+    try {
+      await _layoutStore.saveLayout(pages, scopeKey: scopeKey);
+    } catch (e) {
+      debugPrint(
+        'RoomPageProvider: Failed to migrate endpoint-keyed layout: $e',
+      );
+    }
   }
 
   bool _allowPersistenceForRooms(List<RoomDto> rooms) {

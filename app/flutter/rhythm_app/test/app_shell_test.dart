@@ -760,6 +760,13 @@ void main() {
     await _selectNavigationFanItem(tester, 'Settings');
     expect(find.text('Settings'), findsWidgets);
     expect(find.byType(SettingsScreen), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byType(SettingsScreen),
+        matching: find.text('Devices'),
+      ),
+      findsNothing,
+    );
 
     serverSync.beginHomeEntryRefresh(homeName: home.name);
     await tester.pump(const Duration(milliseconds: 10));

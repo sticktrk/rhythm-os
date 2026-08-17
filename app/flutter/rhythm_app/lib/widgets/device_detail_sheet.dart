@@ -3,7 +3,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDevice, RhythmDeviceType;
+import 'package:rhythm_sdk/rhythm_sdk.dart'
+    show RhythmDevice, RhythmDeviceType, RhythmPairingRecoverySecret;
 import 'package:uuid/uuid.dart';
 import '../providers/server_sync_provider.dart';
 import '../screens/hubs/matter_bulb_tester_screen.dart';
@@ -11,6 +12,7 @@ import '../screens/settings/light_screen.dart';
 import '../services/analytics_service.dart';
 import '../services/matter_removal_flow.dart';
 import 'low_glow_switch.dart';
+import 'matter_setup_code_dialog.dart';
 import 'room_picker_sheet.dart';
 import 'segmented_tab_bar.dart';
 import 'solar_orbit.dart'; // For CelestialColors
@@ -486,6 +488,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   Map<String, dynamic>? _canonicalData;
   bool _loading = true;
   bool _moving = false;
+  bool _loadingMatterSetupCode = false;
   _DeviceEndpoint? _removingEndpoint;
   _DeviceTab _selectedTab = _DeviceTab.settings;
 
@@ -523,6 +526,9 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     final canUnpairMatter = context.select<ServerSyncProvider, bool>(
       (sync) => sync.canUnpairMatterDevices,
     );
+    final canRecoverMatterSetupCode = context.select<ServerSyncProvider, bool>(
+      (sync) => sync.canRecoverMatterSetupCode,
+    );
     final canUnpairHueBle = context.select<ServerSyncProvider, bool>(
       (sync) => sync.canUnpairHueBleDevices,
     );
@@ -530,7 +536,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       (sync) => sync.canUnpairLocalBleDevices,
     );
     final canUnpairHueBridge = context.select<ServerSyncProvider, bool>(
-      (sync) => sync.canUnpairHueBridgeDevices,
+      (sync) => sync.canUnpairHueBridgeDeviceType(device.type),
     );
     // Low glow and profile overrides are node-level settings. Only expose
     // them for bulbs that the server reports as independently addressable
@@ -660,6 +666,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                         context,
                         device,
                         canUnpairMatter,
+                        canRecoverMatterSetupCode,
                         canUnpairHueBle,
                         canUnpairLocalBle,
                         canUnpairHueBridge,
@@ -796,8 +803,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
               unsupportedStatus: groupedLightSettings ? 'Room only' : null,
               unsupportedSemanticsValue:
                   groupedLightSettings ? 'Controlled by room' : null,
-              unsupportedIcon:
-                  groupedLightSettings ? Icons.home_rounded : null,
+              unsupportedIcon: groupedLightSettings ? Icons.home_rounded : null,
               onPressed: lightSettingsSupported
                   ? () => _openBulbLightSettings(device)
                   : groupedLightSettings
@@ -829,6 +835,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     BuildContext context,
     RhythmDevice device,
     bool canUnpairMatter,
+    bool canRecoverMatterSetupCode,
     bool canUnpairHueBle,
     bool canUnpairLocalBle,
     bool canUnpairHueBridge,
@@ -854,6 +861,10 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
           _buildConnectionsSection(),
           if (isLight && _matterNativeId != null) ...[
             const SizedBox(height: 12),
+            if (canRecoverMatterSetupCode) ...[
+              _buildMatterSetupCodeButton(context, _matterNativeId!),
+              const SizedBox(height: 12),
+            ],
             _buildMatterTesterButton(context, _matterNativeId!),
           ],
           if (isLight) ...[
@@ -1238,6 +1249,123 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     );
   }
 
+  Widget _buildMatterSetupCodeButton(BuildContext context, String nativeId) {
+    return GestureDetector(
+      key: const ValueKey('matter-setup-code-recovery'),
+      onTap: _loadingMatterSetupCode
+          ? null
+          : () => _showMatterSetupCode(context, nativeId),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(
+          color: CelestialColors.backgroundDark.withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: CelestialColors.orbitRing.withValues(alpha: 0.3),
+          ),
+        ),
+        child: Row(
+          children: [
+            if (_loadingMatterSetupCode)
+              const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            else
+              Icon(
+                Icons.key_outlined,
+                color: CelestialColors.sunWarm.withValues(alpha: 0.9),
+                size: 20,
+              ),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Text(
+                'Matter setup code',
+                style: TextStyle(
+                  color: CelestialColors.textPrimary,
+                  fontSize: 15,
+                ),
+              ),
+            ),
+            const Icon(
+              Icons.chevron_right,
+              color: CelestialColors.textSecondary,
+              size: 20,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showMatterSetupCode(
+    BuildContext context,
+    String nativeId,
+  ) async {
+    const source = 'device_network';
+    setState(() => _loadingMatterSetupCode = true);
+    unawaited(
+      AnalyticsService().logMatterSetupCodeRecoveryAttempted(source: source),
+    );
+
+    RhythmPairingRecoverySecret? secret;
+    String? failureStage;
+    try {
+      secret = await context
+          .read<ServerSyncProvider>()
+          .api
+          .getMatterSetupCode(nativeId);
+      if (secret == null) failureStage = 'not_available';
+    } catch (_) {
+      failureStage = 'request';
+    } finally {
+      if (mounted) setState(() => _loadingMatterSetupCode = false);
+    }
+    if (!context.mounted) return;
+
+    if (secret == null) {
+      unawaited(
+        AnalyticsService().logMatterSetupCodeRecoveryCompleted(
+          source: source,
+          outcome: 'failed',
+          failureStage: failureStage,
+        ),
+      );
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content:
+              Text('No saved Matter setup code is available for this device.'),
+        ),
+      );
+      return;
+    }
+
+    unawaited(
+      AnalyticsService().logMatterSetupCodeRecoveryCompleted(
+        source: source,
+        outcome: 'succeeded',
+      ),
+    );
+    await _showMatterSetupCodeDialog(context, secret);
+  }
+
+  Future<void> _showMatterSetupCodeDialog(
+    BuildContext context,
+    RhythmPairingRecoverySecret secret,
+  ) async {
+    final messenger = ScaffoldMessenger.of(context);
+    await showDialog<void>(
+      context: context,
+      builder: (_) => MatterSetupCodeDialog(
+        secret: secret,
+        onCopied: () => messenger.showSnackBar(
+          const SnackBar(content: Text('Matter setup code copied')),
+        ),
+      ),
+    );
+  }
+
   List<Map<String, dynamic>> get _allEndpoints {
     final endpoints = _canonicalData?['endpoints'] as List<dynamic>? ?? [];
     return [
@@ -1299,6 +1427,20 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
         _ => 'Matter',
       };
 
+  String get _deviceTypeAnalyticsLabel => switch (widget.device.type) {
+        RhythmDeviceType.light => 'light',
+        RhythmDeviceType.button => 'button',
+        RhythmDeviceType.motion => 'motion',
+        RhythmDeviceType.contact => 'contact',
+      };
+
+  String get _hueRemovalNoun => switch (widget.device.type) {
+        RhythmDeviceType.light => 'bulb',
+        RhythmDeviceType.button => 'switch',
+        RhythmDeviceType.motion => 'motion sensor',
+        RhythmDeviceType.contact => 'contact sensor',
+      };
+
   String _removeConfirmation(
     _DeviceEndpoint endpoint, {
     required bool removesConnectionOnly,
@@ -1312,7 +1454,8 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       return 'This will ask your Hue Bridge to remove "$name", then remove '
           'the $connectionLabel connection from Rhythm.$otherConnectionNote'
           '\n\nIf bridge removal does not return cleanly, Rhythm can check '
-          'whether the bulb is already absent before finishing cleanup.';
+          'whether the $_hueRemovalNoun is already absent before finishing '
+          'cleanup.';
     }
     if (removesConnectionOnly) {
       final handoffNote = endpoint.hubType == 'hue_ble'
@@ -1453,14 +1596,19 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   }) async {
     final syncProvider = context.read<ServerSyncProvider>();
     final api = syncProvider.api;
+    final hueJourneyId = endpoint.hubType == 'hue'
+        ? 'hue-bridge-remove-${const Uuid().v4()}'
+        : null;
 
     var retryHueBleRelease = false;
+    var forceAttempted = false;
     Map<String, dynamic>? completionResult;
     late MatterRemovalOutcome outcome;
     do {
       retryHueBleRelease = false;
       outcome = await runMatterRemovalFlow(
         unpair: ({required bool force}) {
+          forceAttempted = forceAttempted || force;
           if (mounted) setState(() => _removingEndpoint = endpoint);
           return api.unpairDevice(
             hubType: endpoint.hubType,
@@ -1469,6 +1617,8 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                 endpoint.hubType == 'hue' && endpoint.hubAddress.isNotEmpty
                     ? endpoint.hubAddress
                     : null,
+            deviceType: _deviceTypeAnalyticsLabel,
+            correlationId: hueJourneyId,
             force: force,
           );
         },
@@ -1533,8 +1683,9 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
           final isHueBridge = endpoint.hubType == 'hue';
           final forceRemovalExplanation = isHueBridge
               ? 'Check the Hue Bridge and finish removal? Rhythm will clean '
-                  'up its connection only after the bridge confirms the bulb '
-                  'is absent. If the bridge still owns it, this fails safely.'
+                  'up its connection only after the bridge confirms the '
+                  '$_hueRemovalNoun is absent. If the bridge still owns it, '
+                  'this fails safely.'
               : 'Force remove? This cleans up local state without contacting '
                   'the device.';
           final forceRemove = await showDialog<bool>(
@@ -1568,6 +1719,19 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
         onComplete: (result) => completionResult = result,
       );
     } while (retryHueBleRelease && context.mounted);
+
+    if (hueJourneyId != null) {
+      unawaited(
+        AnalyticsService().logHueBridgeDeviceRemovalCompleted(
+          journeyId: hueJourneyId,
+          deviceType: _deviceTypeAnalyticsLabel,
+          outcome: outcome == MatterRemovalOutcome.removed
+              ? 'succeeded'
+              : 'cancelled',
+          force: forceAttempted,
+        ),
+      );
+    }
 
     if (!context.mounted) return;
 

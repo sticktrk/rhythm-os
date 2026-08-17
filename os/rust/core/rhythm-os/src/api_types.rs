@@ -270,10 +270,16 @@ pub struct HubStartupRetryDto {
 
 /// API capability metadata in state snapshot.
 pub const API_SCHEMA_VERSION: u32 = 2;
+pub const FEATURE_ASYNC_DEBUG_BUNDLE_UPLOAD: &str = "async_debug_bundle_upload";
 pub const FEATURE_MOTION_ACTIVATION_TOGGLE: &str = "motion_activation_toggle";
 pub const FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES: &str = "room_light_profile_overrides";
 pub const FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES: &str =
     "guarded_room_light_profile_overrides";
+pub const FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES: &str =
+    "target_guarded_room_light_profile_overrides";
+pub const FEATURE_HUE_ROOM_AUTHORITY_CONSENT: &str = "hue_room_authority_consent_v1";
+pub const FEATURE_MATTER_SETUP_CODE_RECOVERY: &str = "matter_setup_code_recovery_v1";
+pub const FEATURE_HUE_ROOM_TOPOLOGY_SYNC: &str = "hue_room_topology_sync_v1";
 
 #[derive(Clone, Debug)]
 pub struct ApiCapabilitiesDto {
@@ -290,9 +296,14 @@ impl Serialize for ApiCapabilitiesDto {
         state.serialize_field(
             "features",
             &[
+                FEATURE_ASYNC_DEBUG_BUNDLE_UPLOAD,
                 FEATURE_MOTION_ACTIVATION_TOGGLE,
                 FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES,
                 FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
+                FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
+                FEATURE_HUE_ROOM_AUTHORITY_CONSENT,
+                FEATURE_MATTER_SETUP_CODE_RECOVERY,
+                FEATURE_HUE_ROOM_TOPOLOGY_SYNC,
             ],
         )?;
         state.serialize_field("hubs", &self.hubs)?;
@@ -311,6 +322,8 @@ pub struct HubCapabilityDto {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub device_profiles: Vec<crate::hub::HubDeviceProfileCapability>,
     pub supports_unpairing: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unpairable_device_types: Vec<String>,
     pub supports_roomless_devices: bool,
     pub blocks_room_readiness: bool,
 }
@@ -486,11 +499,12 @@ pub struct LightColorTemperatureCapabilitiesDto {
     pub max_kelvin: u16,
 }
 
-/// Extensible, normalized light-control capabilities for a node.
+/// Extensible, normalized light-control capabilities for a device node.
 ///
-/// Room color capabilities describe the intersection supported by every
-/// member light, not the union. The object can still contain route-level
-/// capabilities when the hardware color envelope is unknown.
+/// Room curve controls are transport-agnostic and do not use this device
+/// capability object. Each endpoint adapter decides whether the rendered room
+/// command becomes native color temperature, XY, hue/saturation, or brightness
+/// only.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LightCapabilitiesDto {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -637,6 +651,69 @@ pub struct SyncResponse {
 #[derive(Debug, Serialize)]
 pub struct HubCredentialsResponse {
     pub hub_connected: bool,
+}
+
+/// Explicit room choice accepted by `PUT /api/hue/authority`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HueRoomAuthorityOwnerDto {
+    Hue,
+    Rhythm,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct HueRoomAuthorityDecisionRequest {
+    pub room_id: String,
+    pub owner: HueRoomAuthorityOwnerDto,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct HueAuthorityUpdateRequest {
+    pub address: String,
+    pub revision: String,
+    pub correlation_id: String,
+    /// Additive opt-in. Older clients omit it and preserve the current value.
+    #[serde(default)]
+    pub topology_sync_enabled: Option<bool>,
+    pub rooms: Vec<HueRoomAuthorityDecisionRequest>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct HueRoomAuthorityDto {
+    pub room_id: String,
+    pub name: String,
+    /// `unreviewed`, `hue`, or `rhythm`.
+    pub owner: String,
+    pub rhythm_automation_enabled: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct HueBridgeAuthorityDto {
+    pub address: String,
+    pub revision: String,
+    /// `room` when Hue suppression and Rhythm admission honor each room's
+    /// explicit owner independently; older appliances report `bridge`.
+    pub takeover_scope: &'static str,
+    /// Whether the reported scope contains at least one explicit Rhythm
+    /// choice. Under legacy `bridge` scope this becomes true only for the
+    /// all-Rhythm choice.
+    pub bridge_takeover_requested: bool,
+    /// Whether Rhythm should mirror canonical light membership into explicit,
+    /// Rhythm-owned Hue rooms.
+    pub topology_sync_enabled: bool,
+    /// `disabled`, `blocked`, `pending`, `attention`, or `synced`.
+    pub topology_sync_status: String,
+    /// Privacy-bounded local preview of the desired projection. No bridge
+    /// identifiers are exposed and no Hue mutation is needed to compute it.
+    pub topology_sync_room_count: usize,
+    pub topology_sync_light_count: usize,
+    pub rooms: Vec<HueRoomAuthorityDto>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct HueAuthorityResponse {
+    pub schema_version: u32,
+    pub bridges: Vec<HueBridgeAuthorityDto>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1156,6 +1233,7 @@ mod tests {
                 onboarding_methods: vec!["local_ble_qr".into()],
             }],
             supports_unpairing: true,
+            unpairable_device_types: vec!["button".into()],
             supports_roomless_devices: true,
             blocks_room_readiness: false,
         };
@@ -1164,6 +1242,7 @@ mod tests {
         assert!(json.get("hub_type").is_none());
         assert_eq!(json["device_onboarding_methods"][0], "local_ble_qr");
         assert_eq!(json["supports_roomless_devices"], true);
+        assert_eq!(json["unpairable_device_types"][0], "button");
         assert_eq!(json["device_profiles"][0]["id"], "orein.oc02001.button.v2");
         assert_eq!(
             json["device_profiles"][0]["compatible_profile_ids"][0],
@@ -1405,6 +1484,7 @@ mod tests {
                     device_onboarding_methods: vec!["matter_on_network_setup_code".into()],
                     device_profiles: Vec::new(),
                     supports_unpairing: true,
+                    unpairable_device_types: vec!["light".into()],
                     supports_roomless_devices: true,
                     blocks_room_readiness: true,
                 }],
@@ -1486,15 +1566,35 @@ mod tests {
         );
         assert_eq!(
             json["capabilities"]["features"][0],
-            FEATURE_MOTION_ACTIVATION_TOGGLE
+            FEATURE_ASYNC_DEBUG_BUNDLE_UPLOAD
         );
         assert_eq!(
             json["capabilities"]["features"][1],
-            FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES
+            FEATURE_MOTION_ACTIVATION_TOGGLE
         );
         assert_eq!(
             json["capabilities"]["features"][2],
+            FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES
+        );
+        assert_eq!(
+            json["capabilities"]["features"][3],
             FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES
+        );
+        assert_eq!(
+            json["capabilities"]["features"][4],
+            FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES
+        );
+        assert_eq!(
+            json["capabilities"]["features"][5],
+            FEATURE_HUE_ROOM_AUTHORITY_CONSENT
+        );
+        assert_eq!(
+            json["capabilities"]["features"][6],
+            FEATURE_MATTER_SETUP_CODE_RECOVERY
+        );
+        assert_eq!(
+            json["capabilities"]["features"][7],
+            FEATURE_HUE_ROOM_TOPOLOGY_SYNC
         );
         assert_eq!(
             json["capabilities"]["hubs"][0]["device_onboarding_methods"][0],

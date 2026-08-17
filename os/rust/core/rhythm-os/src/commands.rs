@@ -43,6 +43,7 @@ use crate::bundle::{
     PROFILE_BUNDLE_SCHEMA_VERSION,
 };
 use crate::canonical::identity::HubKey;
+use crate::device_naming::LightNameReconciliationScope;
 use crate::discovery::{HubDiscovery, ManagedSceneProjection, ManagedSceneProjectionTarget};
 use crate::factory_default_config::{
     factory_default_active_mode, factory_default_active_profile_config_for_mode,
@@ -1440,6 +1441,37 @@ pub(crate) fn update_lights_on_cache_for_runtime_node(
     );
 }
 
+/// Record an accepted asynchronous command for one runtime node without
+/// synchronously querying its parent. Mixed-route fan-out has already queued
+/// every sibling and records the public parent separately; a Matter read here
+/// would only delay the app response and cannot prove physical completion.
+pub(crate) fn update_lights_on_cache_for_runtime_node_without_parent_refresh(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    node_id: &str,
+    lights_on: bool,
+) {
+    if let Some(snap) = runtime.engine_effective_node_snapshot(node_id) {
+        update_lights_on_cache_for_node_with_source(
+            state,
+            &snap.id,
+            snap.kind,
+            snap.parent_id.as_deref(),
+            lights_on,
+            ObservedPowerSource::Command,
+        );
+    } else {
+        update_lights_on_cache_for_node_with_source(
+            state,
+            node_id,
+            LightNodeKind::Room,
+            None,
+            lights_on,
+            ObservedPowerSource::Command,
+        );
+    }
+}
+
 pub(crate) fn update_lights_on_cache_for_runtime_node_with_source(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
@@ -1758,20 +1790,35 @@ fn known_light_capabilities_for_device(
     let entry = rhythm_devices::builtin_db()
         .lookup(device.manufacturer.as_deref()?, device.model.as_deref()?)?;
     let capabilities = entry.capabilities();
-    if !capabilities.supports_color_temp() {
-        return Some(LightCapabilitiesDto {
-            color_temperature: None,
-            individual_profile_overrides: None,
-        });
+    let color_temperature = if capabilities.supports_color_temp() {
+        let min_kelvin = capabilities.min_kelvin?;
+        let max_kelvin = capabilities.max_kelvin?;
+        (min_kelvin > 0 && min_kelvin <= max_kelvin).then_some(
+            LightColorTemperatureCapabilitiesDto {
+                min_kelvin,
+                max_kelvin,
+            },
+        )
+    } else if capabilities.supports_xy_color() || capabilities.supports_hue_saturation() {
+        // The room curve is a white-point request, not a requirement to use a
+        // native CT cluster. Color-capable lights can render the same target
+        // through the command adapter's XY / hue-saturation fallback.
+        Some(LightColorTemperatureCapabilitiesDto {
+            min_kelvin: 2_000,
+            max_kelvin: 6_500,
+        })
+    } else {
+        None
+    };
+    if color_temperature.is_none()
+        && (capabilities.supports_color_temp()
+            || capabilities.supports_xy_color()
+            || capabilities.supports_hue_saturation())
+    {
+        return None;
     }
-
-    let min_kelvin = capabilities.min_kelvin?;
-    let max_kelvin = capabilities.max_kelvin?;
-    (min_kelvin > 0 && min_kelvin <= max_kelvin).then_some(LightCapabilitiesDto {
-        color_temperature: Some(LightColorTemperatureCapabilitiesDto {
-            min_kelvin,
-            max_kelvin,
-        }),
+    Some(LightCapabilitiesDto {
+        color_temperature,
         individual_profile_overrides: None,
     })
 }
@@ -1801,7 +1848,19 @@ fn live_endpoint_light_capabilities(
         };
         let valid_range = capabilities
             .color_temperature
-            .filter(|range| range.min_kelvin > 0 && range.min_kelvin <= range.max_kelvin);
+            .filter(|range| range.min_kelvin > 0 && range.min_kelvin <= range.max_kelvin)
+            .or_else(|| {
+                (endpoint
+                    .capabilities
+                    .as_ref()
+                    .and_then(|value| value.pointer("/automatic_naming/color_kind"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("color"))
+                .then_some(LightColorTemperatureCapabilitiesDto {
+                    min_kelvin: 2_000,
+                    max_kelvin: 6_500,
+                })
+            });
         saw_normalized = true;
         match valid_range {
             Some(range) if all_support_color_temperature => {
@@ -1851,41 +1910,11 @@ fn light_capabilities_for_node(
             )
         }
         LightNodeKind::Room => {
-            let room = s.topology.get(node_id)?;
-            let mut intersection: Option<LightColorTemperatureCapabilitiesDto> = None;
-            let mut saw_light = false;
-            let mut all_support_color_temperature = true;
-
-            for member in &room.devices {
-                let device = s.canonical_registry.get(&member.device_id)?;
-                if device.is_removed() || device.device_type != DeviceType::Light {
-                    continue;
-                }
-                saw_light = true;
-                if let Some(member_range) = known_light_capabilities_for_device(device)
-                    .and_then(|capabilities| capabilities.color_temperature)
-                {
-                    if all_support_color_temperature {
-                        intersection = Some(match intersection {
-                            Some(current) => LightColorTemperatureCapabilitiesDto {
-                                min_kelvin: current.min_kelvin.max(member_range.min_kelvin),
-                                max_kelvin: current.max_kelvin.min(member_range.max_kelvin),
-                            },
-                            None => member_range,
-                        });
-                    }
-                } else {
-                    all_support_color_temperature = false;
-                    intersection = None;
-                }
-            }
-
-            let color_temperature = if saw_light && all_support_color_temperature {
-                intersection.filter(|range| range.min_kelvin <= range.max_kelvin)
-            } else {
-                None
-            };
-            (color_temperature, true)
+            // A room slider changes the room's curve position. It is not a
+            // request for a particular wire-level color command, so member
+            // transport capabilities must not gate the control. The rendered
+            // LightingCommand is adapted independently for every endpoint.
+            return None;
         }
         _ => return None,
     };
@@ -2685,6 +2714,15 @@ pub(crate) fn matching_button_input_binding_action(
         .map(|binding| binding.action.clone())
 }
 
+/// Fail-closed gate for unattended behavior in externally automated rooms.
+/// Manual API commands intentionally do not consult this helper.
+pub(crate) fn rhythm_automation_allowed_for_node(state: &SharedState, node_id: &str) -> bool {
+    state
+        .lock()
+        .ok()
+        .is_some_and(|s| s.rhythm_automation_allowed_for_node(node_id))
+}
+
 fn validate_input_binding_source(s: &AppState, source_node_id: &str) -> Result<()> {
     if !s.topology.has_public_node(source_node_id) {
         return Err(anyhow::anyhow!(
@@ -2882,6 +2920,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
                     device_onboarding_methods: capability.device_onboarding_methods.clone(),
                     device_profiles: capability.device_profiles.clone(),
                     supports_unpairing: capability.supports_unpairing,
+                    unpairable_device_types: capability.unpairable_device_types.clone(),
                     supports_roomless_devices: capability.supports_roomless_devices,
                     blocks_room_readiness: capability.blocks_room_readiness,
                 })
@@ -3410,6 +3449,25 @@ pub fn nodes_state_resource_sha256(state: &SharedState) -> Result<String> {
     let resource: Value = serde_json::from_str(&serialized)
         .map_err(|e| anyhow::anyhow!("parse serialized nodes-state resource: {}", e))?;
     Ok(canonical_json_sha256(&resource))
+}
+
+/// Return only the effective profile overrides used by the guarded node write.
+///
+/// Unlike `/api/nodes/state`, this value excludes motion, observed-power, and
+/// transition fields that can change while an admin proposal is being sent.
+pub fn effective_node_profile_overrides(
+    state: &SharedState,
+    node_id: &str,
+) -> Result<BTreeMap<String, LightProfileNodeOverride>> {
+    let runtime = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .hub_runtime()
+        .ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+    let current = runtime
+        .engine_effective_node_snapshot(node_id)
+        .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
+    Ok(current.profile_settings.profile_overrides)
 }
 
 /// Build a lightweight rooms-state snapshot for polling.
@@ -5687,6 +5745,29 @@ fn sanitize_nonportable_backup_installation(installation: &mut BackupInstallatio
         .retain(|file| !file.path.starts_with("hue_ble/") && !file.path.starts_with("local_ble/"));
 }
 
+fn migrate_legacy_backup_external_room_automation_policy(installation: &mut BackupInstallation) {
+    let configured_hub_keys = installation
+        .hub_credentials
+        .iter()
+        .filter_map(|credential| {
+            credential
+                .hub_type
+                .as_ref()
+                .map(|hub_type| HubKey::new(hub_type.clone(), credential.address.clone()))
+        })
+        .collect::<Vec<_>>();
+    let migration = installation
+        .topology
+        .migrate_legacy_external_room_automation_policy(&configured_hub_keys);
+    if migration.changed() {
+        info!(
+            target: "cmd",
+            "Migrated legacy backup Hue room automation policy: grandfathered_hue_rooms={}",
+            migration.grandfathered_hue_rooms
+        );
+    }
+}
+
 pub fn build_profile_bundle_dto(state: &SharedState) -> Result<ProfileBundle> {
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
@@ -5799,8 +5880,9 @@ pub fn do_factory_reset(state: &SharedState) -> Result<String> {
         .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
     // Releasing an authoritative external controller is itself a safety
     // prerequisite for reset. The platform barrier may scrub peripheral
-    // trust or stage other irreversible local work, so a Hue snapshot-retention
-    // failure must abort while credentials and local state are still intact.
+    // trust or stage other irreversible local work, so Hue recovery preflight,
+    // controller release, and the fail-closed policy tombstone must all
+    // complete while credentials and controller recovery material are intact.
     preflight_current_hue_recovery_state(state, HueRecoveryPreflightMode::ControllerRelease)
         .context("factory reset Hue recovery preflight failed")?;
     let release_keys = configured_or_active_hub_keys(state)?;
@@ -5810,6 +5892,12 @@ pub fn do_factory_reset(state: &SharedState) -> Result<String> {
         crate::hub::ExternalControllerReleaseReason::FactoryReset,
     )
     .context("releasing external controller authority before factory reset")?;
+    let policy_keys = external_room_automation_policy_keys_for_disconnect(state, &release_keys)?;
+    durably_forget_external_room_automation_policy(
+        state,
+        &policy_keys,
+        crate::hub::ExternalControllerReleaseReason::FactoryReset,
+    )?;
 
     if let Some(callback) = state
         .lock()
@@ -5819,10 +5907,11 @@ pub fn do_factory_reset(state: &SharedState) -> Result<String> {
     {
         callback(state).context("preparing platform for factory reset")?;
     }
-    // The platform safety barrier runs before any shared state is destroyed.
-    // In particular, an appliance may need live hub metadata and credentials
-    // to release peripheral-held Bluetooth trust. A failed barrier therefore
-    // leaves the current local installation intact and retryable.
+    // The platform safety barrier runs before credentials or hub state are
+    // destroyed. In particular, an appliance may need live hub metadata and
+    // credentials to release peripheral-held Bluetooth trust. A failed barrier
+    // therefore remains retryable, with room automation intentionally kept
+    // fail-closed after the external controller was restored.
     (|| {
         disconnect_hubs_after_external_controller_release(state)?;
         clear_factory_reset_storage(state)?;
@@ -6362,18 +6451,21 @@ enum HueRecoveryPreflightMode {
 
 /// Refuse to cross a destructive local-state boundary if persisted Hue
 /// recovery material has become orphaned from the one credential that can
-/// restore its physical bridge. This check intentionally runs before the
+/// restore its physical bridge, or when the runtime cannot execute the full
+/// release/finalization lifecycle. This check intentionally runs before the
 /// integration release callback, platform reset barrier, or backup
 /// replacement writes anything.
 fn preflight_current_hue_recovery_state(
     state: &SharedState,
     mode: HueRecoveryPreflightMode,
 ) -> Result<Vec<BackupIntegrationFile>> {
-    let (storage, credentials) = {
+    let (storage, credentials, release_callback_available, finalize_callback_available) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         (
             s.storage.clone(),
             s.hub_credentials.values().cloned().collect::<Vec<_>>(),
+            s.release_external_controller_authority_fn.is_some(),
+            s.finalize_external_controller_release_fn.is_some(),
         )
     };
     let Some(storage) = storage else {
@@ -6430,13 +6522,17 @@ fn preflight_current_hue_recovery_state(
                 "Persisted state contains Hue controller recovery state that cannot be transferred during controller release"
             );
         }
-        if hue_ownership_phase_is_archival(&phase)
-            && (matching_credentials.is_empty()
-                || (matching_credentials.len() == 1 && matching_usable_credentials == 1))
-        {
+        if hue_ownership_phase_is_archival(&phase) && matching_credentials.is_empty() {
             continue;
         }
         if matching_credentials.len() == 1 && matching_usable_credentials == 1 {
+            if mode == HueRecoveryPreflightMode::ControllerRelease
+                && (!release_callback_available || !finalize_callback_available)
+            {
+                anyhow::bail!(
+                    "Persisted Hue controller recovery cannot be released because its lifecycle callbacks are unavailable"
+                );
+            }
             continue;
         }
         anyhow::bail!(
@@ -7170,13 +7266,13 @@ fn send_work_item_with_pending(
     }
 }
 
-/// Persisted user-managed rooms that definitively have no physical target.
+/// Persisted topology rooms that definitively have no physical target.
 ///
 /// Missing routes alone are not enough to skip work: an integration/controller
-/// failure must remain visible, and empty bootstrap rooms may still be backed by
-/// a legacy runtime route. A user-customized room with neither device membership
-/// nor a source-room binding is a semantic settings container with nothing to
-/// dispatch.
+/// failure must remain visible. Topology membership is the source of truth for
+/// composite routing, so any room with neither device membership nor a
+/// source-room binding is a semantic settings container with nothing to
+/// dispatch, regardless of whether the user has customized it.
 #[derive(Default)]
 struct EmptyTopologyRooms {
     room_ids: HashSet<String>,
@@ -7190,7 +7286,7 @@ impl EmptyTopologyRooms {
         let room_ids = s
             .topology
             .rooms()
-            .filter(|room| room.user_customized && !room.has_devices() && !room.has_bindings())
+            .filter(|room| !room.has_devices() && !room.has_bindings())
             .map(|room| room.id.clone())
             .collect();
         Self { room_ids }
@@ -7229,6 +7325,7 @@ fn apply_room_mode_defaults(
     let mut changed_room_ids = Vec::new();
     let mut non_hard_off_changed_room_ids = Vec::new();
     let mut hard_off_rooms = Vec::new();
+    let mut attached_hard_off_node_ids = Vec::new();
     let mut empty_hard_off_room_ids = Vec::new();
     let mut lights_on_updates = Vec::new();
     let mut missing_rooms = 0usize;
@@ -7243,16 +7340,29 @@ fn apply_room_mode_defaults(
             let target_state = defaults_by_room
                 .get(snap.id.as_str())
                 .copied()
+                .or_else(|| {
+                    snap.parent_id
+                        .as_deref()
+                        .and_then(|parent_id| defaults_by_room.get(parent_id).copied())
+                })
                 .unwrap_or(RoomModeState::Active);
             target_rooms.push((snap, target_state));
         }
     } else {
         for room_default in &mode_config.room_defaults {
-            let Some(snap) = snapshots_by_id.get(room_default.room_id.as_str()).copied() else {
+            if !snapshots_by_id.contains_key(room_default.room_id.as_str()) {
                 missing_rooms += 1;
-                continue;
-            };
-            target_rooms.push((snap, room_default.state));
+            }
+        }
+        for snap in snapshots {
+            let target_state = defaults_by_room.get(snap.id.as_str()).copied().or_else(|| {
+                snap.parent_id
+                    .as_deref()
+                    .and_then(|parent_id| defaults_by_room.get(parent_id).copied())
+            });
+            if let Some(target_state) = target_state {
+                target_rooms.push((snap, target_state));
+            }
         }
     }
 
@@ -7323,6 +7433,11 @@ fn apply_room_mode_defaults(
             }
             RoomModeState::HardOff => {
                 lights_on_updates.push((snap.id.clone(), false));
+                if snap.parent_id.is_some() {
+                    attached_hard_off_node_ids.push(snap.id.clone());
+                    changed_room_ids.push(snap.id.clone());
+                    continue;
+                }
                 let transition_ms = ctx
                     .transition
                     .and_then(|config| {
@@ -7366,6 +7481,11 @@ fn apply_room_mode_defaults(
     // until that worker finally fires.
     for room_id in &non_hard_off_changed_room_ids {
         emit_node_state_event_after_apply(state, runtime, room_id);
+    }
+
+    for node_id in &attached_hard_off_node_ids {
+        queue_motion_timer_clear(state, node_id);
+        emit_node_state_event_after_apply(state, runtime, node_id);
     }
 
     for room_id in &empty_hard_off_room_ids {
@@ -8456,6 +8576,29 @@ fn addressable_root_snapshots(runtime: &Arc<dyn RuntimeHandle>) -> Vec<rhythm_co
         .collect()
 }
 
+fn addressable_node_snapshots(runtime: &Arc<dyn RuntimeHandle>) -> Vec<rhythm_core::RoomSnapshot> {
+    runtime
+        .engine_all_node_snapshots()
+        .into_iter()
+        .filter(|node| node.kind.is_light_addressable())
+        .map(|node| rhythm_core::RoomSnapshot {
+            id: node.id,
+            name: node.name,
+            kind: node.kind,
+            parent_id: node.parent_id,
+            rhythm_enabled: node.rhythm_enabled,
+            disabled: node.disabled,
+            time_offset_minutes: node.time_offset_minutes,
+            brightness_offset: node.brightness_offset,
+            soft_off: node.soft_off,
+            mood_active: node.mood_active,
+            standby_enabled: node.standby_enabled,
+            hard_off: node.hard_off,
+            profile_settings: node.profile_settings,
+        })
+        .collect()
+}
+
 struct ActiveModeOutputApply {
     previous_mode: RhythmMode,
     target_mode: RhythmMode,
@@ -8544,7 +8687,10 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
         timezone_name: timezone_name.as_deref(),
         utc_offset,
     };
-    let snapshots = addressable_root_snapshots(&runtime);
+    // Keep internal mode/default state current for every addressable settings
+    // node so a later reviewed handoff starts from the active mode. Only the
+    // physical-output pass below is authority-gated.
+    let default_snapshots = addressable_node_snapshots(&runtime);
     let room_defaults_changed = apply_room_mode_defaults(
         state,
         &runtime,
@@ -8558,23 +8704,23 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
             reset_all_room_defaults,
             reassert_hard_off_defaults,
         },
-        &snapshots,
+        &default_snapshots,
     );
     if room_defaults_changed {
         if let Ok(s) = state.lock() {
             room_observed_power = s.room_observed_power.clone();
         }
     }
-    let snapshots = if room_defaults_changed {
-        addressable_root_snapshots(&runtime)
-    } else {
-        snapshots
-    };
+    let snapshots = addressable_root_snapshots(&runtime)
+        .into_iter()
+        .filter(|snapshot| rhythm_automation_allowed_for_node(state, &snapshot.id))
+        .collect::<Vec<_>>();
     let mut room_commands = Vec::new();
     let mut dispatch_snapshots = Vec::new();
     let mut transitioned_rooms = Vec::new();
     let mut changed_room_ids = Vec::new();
     let mut preserved_hard_off = 0usize;
+    let mut empty_rooms_skipped = 0usize;
     let mut hidden_rooms = 0usize;
     let mut unresolved_rooms = 0usize;
 
@@ -8591,6 +8737,15 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
         );
 
         if !apply_scope.includes(room_state) {
+            continue;
+        }
+
+        // Empty topology rooms retain their semantic mode/default state,
+        // but have no physical route. The defaults pass above already applies
+        // and persists that state; do not enqueue the subsequent lighting
+        // command for a controller that cannot exist.
+        if empty_topology_rooms.contains(&snap.id) {
+            empty_rooms_skipped += 1;
             continue;
         }
 
@@ -8742,10 +8897,11 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
 
     debug!(
         target: "cmd",
-        "active_mode_apply: {} rooms scanned, {} changed, {} transitioning, {} hidden, {} preserved hard-off, {} unresolved",
+        "active_mode_apply: {} rooms scanned, {} changed, {} transitioning, {} empty, {} hidden, {} preserved hard-off, {} unresolved",
         snapshots.len(),
         changed_room_ids.len(),
         transitioned_rooms.len(),
+        empty_rooms_skipped,
         hidden_rooms,
         preserved_hard_off,
         unresolved_rooms
@@ -9839,6 +9995,11 @@ pub fn do_backup_restore(state: &SharedState, bundle: BackupBundle) -> Result<St
     validate_imported_backup_configuration(&bundle.configuration)?;
     let mut installation = bundle.installation.clone();
     sanitize_nonportable_backup_installation(&mut installation);
+    // Backup restore bypasses startup's persisted-state migration and commits
+    // the imported topology directly. Migrate the imported graph while its
+    // original configured-hub set is still available, before either the
+    // authority-state commit or stored-hub bootstrap can observe it.
+    migrate_legacy_backup_external_room_automation_policy(&mut installation);
     let valid_profile_ids = valid_import_profile_ids(&bundle.configuration.profiles);
     let scene_ids =
         valid_scene_ids_from_map(&normalized_scene_map(bundle.configuration.scenes.clone())?);
@@ -10063,7 +10224,18 @@ pub fn do_room_set(
             (room_unchanged, room_has_new_light_device_ids)
         })
         .unwrap_or((false, false));
-    if room_unchanged {
+    // A restored per-hub registry can already contain this native room while
+    // the canonical topology is absent (for example, a credentials/registry-
+    // only legacy backup). Treat it as unchanged only after the topology
+    // binding also exists; otherwise this sync is the one chance to recreate
+    // the room and make its migrated automation policy effective.
+    let topology_binding_exists = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .topology
+        .find_by_hub_room(hub_key, &params.id)
+        .is_some();
+    if room_unchanged && topology_binding_exists {
         if apply_runtime {
             if let Ok(room_state) = build_room_rhythm_state(state, &params.id) {
                 info!(target: "cmd", "room_set: {} unchanged, skipping persist", params.id);
@@ -10272,6 +10444,9 @@ pub fn do_node_action(
         .lock()
         .map_err(|_| anyhow::anyhow!("node action lock"))?;
 
+    let activate_direct_children =
+        crate::light_runtime::button_action_activates_direct_children(action);
+
     info!(target: "cmd", "node_action: {} -> {:?}", node_id, action);
 
     let runtime = {
@@ -10313,11 +10488,12 @@ pub fn do_node_action(
             "node action still required a light-state check after retry"
         ));
     };
-    crate::light_runtime::apply_runtime_plan_to_handle(
+    crate::light_runtime::apply_runtime_plan_to_handle_with_child_activation(
         state,
         crate::light_runtime::RHYTHM_ADAPTIVE_RUNTIME_ID,
         runtime.as_ref(),
         &plan,
+        activate_direct_children,
     )?;
     runtime.record_rhythm_dispatches(&dispatch_records)?;
     sync_active_mode_from_runtime(state, &runtime);
@@ -10618,6 +10794,54 @@ pub fn do_set_node_curve_modifier(
     build_node_state(state, node_id).and_then(|node_state| {
         serde_json::to_string(&node_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
     })
+}
+
+/// Clear a node's local curve position and brightness modifiers without
+/// dispatching a new lighting command.
+///
+/// Motion-owned timeout uses this after it has successfully restored the
+/// room's configured off state. Keeping this separate from `Reset` avoids a
+/// visible turn-on flash while ensuring the next activation starts from the
+/// current adaptive curve rather than a stale manual adjustment.
+pub fn do_reset_node_curve_modifiers(
+    state: &SharedState,
+    node_id: &str,
+    persist: bool,
+) -> Result<bool> {
+    let runtime = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.hub_runtime()
+    };
+    let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+    let snapshot = runtime
+        .engine_node_snapshot(node_id)
+        .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
+    if !snapshot.kind.is_light_addressable() {
+        return Err(anyhow::anyhow!(
+            "Curve modifiers can only be reset on light-addressable nodes"
+        ));
+    }
+    if snapshot.time_offset_minutes.abs() <= f32::EPSILON
+        && snapshot.brightness_offset.abs() <= f32::EPSILON
+    {
+        return Ok(false);
+    }
+
+    let mut restored = RestoredNodeState::from(&snapshot);
+    restored.time_offset_minutes = 0.0;
+    restored.brightness_offset = 0.0;
+    runtime.restore_node_state(node_id, restored);
+    clear_room_mode_transition(state, node_id);
+    emit_node_state_event_after_apply(state, &runtime, node_id);
+    if persist {
+        persist_rooms(state);
+    }
+    info!(
+        target: "cmd",
+        "reset_node_curve_modifiers: {} cleared time and brightness offsets",
+        node_id
+    );
+    Ok(true)
 }
 
 pub fn queue_set_node_curve_modifier(
@@ -11105,7 +11329,7 @@ pub fn do_device_hard_remove(
         .lock()
         .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
 
-    let (canonical_id, canonical_device, assignments, prepare_assignment) = {
+    let (canonical_id, canonical_device, assignments, prepare_assignment, automatic_name_scope) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let canonical_id = if s.canonical_registry.get(device_id).is_some() {
             Some(device_id.to_string())
@@ -11127,11 +11351,23 @@ pub fn do_device_hard_remove(
             .as_ref()
             .map(|device| build_hub_device_room_assignments(&s, device, None))
             .unwrap_or_default();
+        let automatic_name_scope = canonical_device
+            .as_ref()
+            .filter(|device| device.device_type == DeviceType::Light)
+            .map(|device| {
+                let room_id = s
+                    .topology
+                    .device_parent_room_id(&device.id)
+                    .map(str::to_string)
+                    .or_else(|| device.room_id.clone());
+                LightNameReconciliationScope::for_room(room_id)
+            });
         (
             canonical_id,
             canonical_device,
             assignments,
             s.prepare_hub_device_room_assignment_fn.clone(),
+            automatic_name_scope,
         )
     };
     let prepared_assignments =
@@ -11280,6 +11516,9 @@ pub fn do_device_hard_remove(
     }
 
     persist_registry(state);
+    if let Some(name_scope) = automatic_name_scope.as_ref() {
+        reconcile_automatic_light_names_best_effort(state, name_scope);
+    }
     reconcile_runtime_from_state(state)?;
 
     {
@@ -12146,6 +12385,327 @@ pub fn do_hub_credentials(
     Ok(())
 }
 
+/// Build the privacy-bounded, per-room Hue automation ownership review.
+pub fn build_hue_authority(state: &SharedState) -> Result<crate::api_types::HueAuthorityResponse> {
+    use crate::api_types::{HueAuthorityResponse, HueBridgeAuthorityDto, HueRoomAuthorityDto};
+    use crate::topology::ExternalRoomAutomationOwner;
+
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let mut keys = s
+        .hub_credentials
+        .keys()
+        .chain(s.hubs.keys())
+        .chain(s.topology.referenced_hub_keys().iter())
+        .filter(|key| key.hub_type.as_str() == crate::hub::HubType::HUE)
+        .cloned()
+        .collect::<Vec<_>>();
+    keys.sort_by(|left, right| left.address.cmp(&right.address));
+    keys.dedup();
+
+    let bridges = keys
+        .into_iter()
+        .filter_map(|key| {
+            let rooms = s.topology.external_automation_rooms_for_hub(&key);
+            if rooms.is_empty() {
+                return None;
+            }
+            let mut topology_sync_room_ids = HashSet::new();
+            let topology_sync_light_count = s
+                .canonical_registry
+                .devices()
+                .filter(|device| {
+                    if !matches!(device.device_type, DeviceType::Light)
+                        || !device
+                            .active_endpoints()
+                            .any(|endpoint| endpoint.hub_key == key)
+                    {
+                        return false;
+                    }
+                    let room_id = s
+                        .topology
+                        .device_parent_room_id(&device.id)
+                        .map(str::to_string)
+                        .or_else(|| device.room_id.clone());
+                    if let Some(room_id) = room_id {
+                        topology_sync_room_ids.insert(room_id);
+                        true
+                    } else {
+                        false
+                    }
+                })
+                .count();
+            Some(HueBridgeAuthorityDto {
+                address: key.address.clone(),
+                revision: s.topology.external_automation_revision(&key),
+                takeover_scope: "room",
+                bridge_takeover_requested: s.topology.external_hub_has_rhythm_consent(&key),
+                topology_sync_enabled: s.topology.external_room_topology_sync_is_enabled(&key),
+                topology_sync_status: if !s.topology.external_room_topology_sync_is_enabled(&key) {
+                    "disabled"
+                } else if !s.topology.external_hub_has_full_rhythm_consent(&key) {
+                    "blocked"
+                } else if s.topology.external_room_topology_sync_needs_attention(&key) {
+                    "attention"
+                } else if s.topology.external_grouped_dispatch_is_suspended(&key) {
+                    "pending"
+                } else {
+                    "synced"
+                }
+                .to_string(),
+                topology_sync_room_count: topology_sync_room_ids.len(),
+                topology_sync_light_count,
+                rooms: rooms
+                    .into_iter()
+                    .map(|(room_id, name, owner)| HueRoomAuthorityDto {
+                        rhythm_automation_enabled: s.rhythm_automation_allowed_for_node(&room_id),
+                        room_id,
+                        name,
+                        owner: match owner {
+                            None => "unreviewed",
+                            Some(ExternalRoomAutomationOwner::External) => "hue",
+                            Some(ExternalRoomAutomationOwner::Rhythm) => "rhythm",
+                        }
+                        .to_string(),
+                    })
+                    .collect(),
+            })
+        })
+        .collect();
+
+    Ok(HueAuthorityResponse {
+        schema_version: 1,
+        bridges,
+    })
+}
+
+/// Durably return every currently bound room on one external controller to
+/// its native automation owner.
+///
+/// Callers hold the external-topology transaction while an authority handoff
+/// is fenced. Persisting this fail-closed policy before restoring a partial
+/// controller epoch makes recovery restart-safe: a later bootstrap resumes
+/// release instead of attempting the rejected takeover again.
+pub fn fail_closed_external_room_automation_policy(
+    state: &SharedState,
+    key: &HubKey,
+) -> Result<bool> {
+    let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let fail_closed_decisions = state
+        .topology
+        .external_automation_rooms_for_hub(key)
+        .into_iter()
+        .map(|(room_id, _, _)| {
+            (
+                room_id,
+                crate::topology::ExternalRoomAutomationOwner::External,
+            )
+        })
+        .collect::<Vec<_>>();
+    if fail_closed_decisions.is_empty() {
+        return Ok(false);
+    }
+
+    let topology_before = state.topology.clone();
+    let changed = state
+        .topology
+        .replace_external_room_automation_decisions(key, &fail_closed_decisions)
+        .map_err(anyhow::Error::msg)?;
+    if !changed {
+        return Ok(false);
+    }
+    if let Err(error) = save_authority_state(&state) {
+        state.topology = topology_before;
+        return Err(error);
+    }
+    state.invalidate_queued_light_dispatches();
+    Ok(true)
+}
+
+/// Atomically persist one complete Hue room review. Any Rhythm-owned room
+/// acquires a selective suppression scope; Hue-owned rooms remain untouched.
+pub fn do_hue_authority_update(
+    state: &SharedState,
+    request: crate::api_types::HueAuthorityUpdateRequest,
+) -> Result<crate::api_types::HueAuthorityResponse> {
+    use crate::api_types::HueRoomAuthorityOwnerDto;
+    use crate::topology::ExternalRoomAutomationOwner;
+
+    if request.address.trim().is_empty() || request.address.len() > 255 {
+        anyhow::bail!("A valid Hue bridge address is required");
+    }
+    if request.revision.len() != 16
+        || !request
+            .revision
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        anyhow::bail!("A valid Hue authority revision is required");
+    }
+    if request.correlation_id.trim().is_empty()
+        || request.correlation_id.len() > 96
+        || !request
+            .correlation_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        anyhow::bail!("A valid Hue authority correlation ID is required");
+    }
+    let correlation_id = request.correlation_id.clone();
+    let key = HubKey::new(
+        crate::hub::HubType::new(crate::hub::HubType::HUE),
+        request.address,
+    );
+    let (policy_transaction_lock, topology_transaction_lock) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        (
+            s.external_controller_policy_transaction_lock.clone(),
+            s.external_topology_transaction_lock.clone(),
+        )
+    };
+    let _policy_transaction = policy_transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("External controller policy lock poisoned"))?;
+    let (rhythm_consent, full_rhythm_consent, authority_changed) = {
+        let _topology_transaction = topology_transaction_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let known = s.hub_credentials.contains_key(&key)
+            || s.hubs.contains_key(&key)
+            || s.topology.references_hub_key(&key);
+        if !known {
+            anyhow::bail!("The selected Hue bridge is not configured");
+        }
+        let current_revision = s.topology.external_automation_revision(&key);
+        if current_revision != request.revision {
+            anyhow::bail!(
+                "Hue rooms changed while they were being reviewed; refresh and try again"
+            );
+        }
+
+        let decisions = request
+            .rooms
+            .into_iter()
+            .map(|room| {
+                (
+                    room.room_id,
+                    match room.owner {
+                        HueRoomAuthorityOwnerDto::Hue => ExternalRoomAutomationOwner::External,
+                        HueRoomAuthorityOwnerDto::Rhythm => ExternalRoomAutomationOwner::Rhythm,
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let topology_before = s.topology.clone();
+        let authority_changed = s
+            .topology
+            .replace_external_room_automation_decisions(&key, &decisions)
+            .map_err(anyhow::Error::msg)?;
+        let mut changed = authority_changed;
+        if let Some(enabled) = request.topology_sync_enabled {
+            changed |= s
+                .topology
+                .set_external_room_topology_sync_enabled(&key, enabled);
+        }
+        if changed {
+            if let Err(error) = save_authority_state(&s) {
+                s.topology = topology_before;
+                return Err(error).context("Failed to persist Hue room authority choices");
+            }
+            // Any command queued under the previous admission policy must
+            // fail its final generation check before it can reach a light.
+            s.invalidate_queued_light_dispatches();
+        }
+        let rhythm_consent = s.topology.external_hub_has_rhythm_consent(&key);
+        let full_rhythm_consent = s.topology.external_hub_has_full_rhythm_consent(&key);
+        if rhythm_consent {
+            // Publish the transition fence in the same state-lock epoch as
+            // the desired policy, leaving no window where periodic work can
+            // observe consent before controller suppression begins.
+            s.mark_external_controller_authority_pending(&key);
+        }
+        (rhythm_consent, full_rhythm_consent, authority_changed)
+    };
+
+    if rhythm_consent {
+        if authority_changed {
+            // Restore the previous selective epoch before deriving a new one.
+            // This prevents a room returned to Hue from inheriting a behavior
+            // that Rhythm disabled under the prior policy.
+            let _topology_transaction = topology_transaction_lock
+                .lock()
+                .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
+            prepare_external_controller_release(
+                state,
+                std::slice::from_ref(&key),
+                crate::hub::ExternalControllerReleaseReason::RoomAuthorityChanged,
+            )
+            .context("Failed to restore the prior Hue room authority scope")?;
+            state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("lock"))?
+                .mark_external_controller_authority_pending(&key);
+        }
+        if let Err(acquire_error) = reconcile_external_controller_authority(state, &key) {
+            // Never publish a Rhythm-owned policy after an incomplete bridge
+            // handoff. Restore the previous fail-closed policy, then ask Hue
+            // to undo any successfully journaled partial mutations.
+            let _topology_transaction = topology_transaction_lock
+                .lock()
+                .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
+            fail_closed_external_room_automation_policy(state, &key)
+                .context("Failed to roll back Hue room choices after takeover failure")?;
+            prepare_external_controller_release(
+                state,
+                std::slice::from_ref(&key),
+                crate::hub::ExternalControllerReleaseReason::RoomAuthorityChanged,
+            )
+            .context("Failed to restore Hue after an incomplete room handoff")?;
+            state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("lock"))?
+                .mark_external_controller_authority_ready(&key);
+            return Err(acquire_error)
+                .context("Hue room choices were not applied because bridge authority failed");
+        }
+        state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .mark_external_controller_authority_ready(&key);
+    } else {
+        let _topology_transaction = topology_transaction_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
+        prepare_external_controller_release(
+            state,
+            std::slice::from_ref(&key),
+            crate::hub::ExternalControllerReleaseReason::RoomAuthorityChanged,
+        )
+        .context("Hue room choices were saved, but prior bridge changes could not be restored")?;
+        state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .mark_external_controller_authority_ready(&key);
+    }
+    info!(
+        target: "hue_authority",
+        "event=hue_room_authority_transition_completed correlation_id={} outcome=succeeded room_takeover={} full_rhythm={}",
+        correlation_id,
+        rhythm_consent,
+        full_rhythm_consent
+    );
+    let topology_sync_requested = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .topology
+        .external_room_topology_sync_is_enabled(&key);
+    if full_rhythm_consent && topology_sync_requested {
+        schedule_topology_group_sync_for_integrations(state);
+    }
+    crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
+    build_hue_authority(state)
+}
+
 /// Reset startup retry state for one configured hub and request an immediate
 /// stored-credentials bootstrap attempt.
 pub fn do_retry_hub_connect(state: &SharedState, hub_type_str: &str, address: &str) -> Result<()> {
@@ -12293,7 +12853,29 @@ fn configured_or_active_hub_keys(state: &SharedState) -> Result<Vec<HubKey>> {
         .chain(state.hubs.keys())
         .cloned()
         .collect::<Vec<_>>();
-    keys.sort_by(|left, right| left.to_string().cmp(&right.to_string()));
+    keys.sort_by_key(|key| key.to_string());
+    keys.dedup();
+    Ok(keys)
+}
+
+/// Include Hue keys retained only by topology policy in the durable tombstone
+/// set. They are intentionally not returned from `configured_or_active_hub_keys`:
+/// a marker-only key has no live controller to release or finalize.
+fn external_room_automation_policy_keys_for_disconnect(
+    state: &SharedState,
+    release_keys: &[HubKey],
+) -> Result<Vec<HubKey>> {
+    let mut keys = release_keys.to_vec();
+    keys.extend(
+        state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .topology
+            .referenced_hub_keys()
+            .into_iter()
+            .filter(|key| key.hub_type.as_str() == crate::hub::HubType::HUE),
+    );
+    keys.sort_by_key(|key| key.to_string());
     keys.dedup();
     Ok(keys)
 }
@@ -12325,6 +12907,50 @@ fn stage_hub_credential_deletion(
     storage
         .save_all_hub_credentials(&remaining)
         .context("Failed to durably delete hub credentials")?;
+    Ok(())
+}
+
+/// Durably clear retained room-automation authority after successful controller
+/// release and before credential removal or finalization becomes irreversible.
+///
+/// A failed coupled authority-state commit restores the exact in-memory
+/// topology and leaves credentials untouched so the disconnect can be retried.
+/// The integration's already-durable released phase continues to fence a new
+/// takeover until that retry completes.
+fn durably_forget_external_room_automation_policy(
+    state: &SharedState,
+    hub_keys: &[HubKey],
+    reason: crate::hub::ExternalControllerReleaseReason,
+) -> Result<()> {
+    let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let topology_before = s.topology.clone();
+    let mut changed = false;
+    for key in hub_keys {
+        changed |= s
+            .topology
+            .forget_external_room_automation_policy_for_hub(key);
+    }
+    if !changed {
+        return Ok(());
+    }
+    // Backup restore and factory reset are the two explicit replacement
+    // operations allowed to recover a corrupt combined authority snapshot.
+    // Their intermediate tombstone must cross the same durability boundary,
+    // but it deliberately leaves the recovery fence raised until the complete
+    // replacement installation is committed below. Ordinary disconnects must
+    // preserve corrupt evidence and therefore use the checked save path.
+    let save_result = match reason {
+        crate::hub::ExternalControllerReleaseReason::BackupRestore
+        | crate::hub::ExternalControllerReleaseReason::FactoryReset => {
+            save_authority_state_unchecked(&s)
+        }
+        _ => save_authority_state(&s),
+    };
+    if let Err(error) = save_result {
+        s.topology = topology_before;
+        return Err(error.context("Failed to durably forget external room automation policy"));
+    }
+    s.invalidate_queued_light_dispatches();
     Ok(())
 }
 
@@ -12365,6 +12991,8 @@ fn disconnect_hubs_with_reason_under_transaction(
         .context("hub disconnect Hue recovery preflight failed")?;
     let release_keys = configured_or_active_hub_keys(state)?;
     prepare_external_controller_release(state, &release_keys, reason)?;
+    let policy_keys = external_room_automation_policy_keys_for_disconnect(state, &release_keys)?;
+    durably_forget_external_room_automation_policy(state, &policy_keys, reason)?;
 
     disconnect_hubs_after_external_controller_release(state)
 }
@@ -12378,22 +13006,22 @@ fn disconnect_hubs_with_reason_under_transaction(
 /// before entering this local teardown.
 fn disconnect_hubs_after_external_controller_release(state: &SharedState) -> Result<()> {
     let release_keys = configured_or_active_hub_keys(state)?;
-    let hub_keys: Vec<HubKey> = state
+    let hub_keys = state
         .lock()
         .map_err(|_| anyhow::anyhow!("lock"))?
         .hubs
         .keys()
         .cloned()
-        .collect();
+        .collect::<Vec<_>>();
     let discovered_native_ids = HashSet::new();
     for hub_key in &hub_keys {
         let _ = reconcile_hub_endpoint_visibility(state, hub_key, &discovered_native_ids)?;
     }
 
     // Finish every fallible local visibility update before crossing the
-    // credential/finalization boundary. Once release becomes archival, no
-    // ordinary error may leave a live pending hub able to begin a new
-    // acquisition epoch.
+    // credential/finalization boundary. The authority-policy tombstone became
+    // durable after controller release, so any failure here remains fail-closed
+    // while credentials stay retryable.
     stage_hub_credential_deletion(state, None)?;
     finalize_external_controller_release(state, &release_keys)?;
 
@@ -12515,6 +13143,11 @@ pub fn do_hub_disconnect_one(state: &SharedState, hub_type_str: &str, address: &
     preflight_current_hue_recovery_state(state, HueRecoveryPreflightMode::ControllerRelease)
         .context("hub disconnect Hue recovery preflight failed")?;
     prepare_external_controller_release(
+        state,
+        std::slice::from_ref(&key),
+        crate::hub::ExternalControllerReleaseReason::UserDisconnect,
+    )?;
+    durably_forget_external_room_automation_policy(
         state,
         std::slice::from_ref(&key),
         crate::hub::ExternalControllerReleaseReason::UserDisconnect,
@@ -13801,6 +14434,19 @@ pub fn persist_rooms(state: &SharedState) {
 // Canonical device commands
 // ============================================================================
 
+fn reconcile_automatic_light_names_best_effort(
+    state: &SharedState,
+    scope: &LightNameReconciliationScope,
+) {
+    if let Err(error) = crate::device_naming::reconcile_automatic_light_names(state, scope) {
+        warn!(
+            target: "device_naming",
+            "automatic_light_name_reconciliation_failed stage=planning error={}",
+            error
+        );
+    }
+}
+
 /// Build JSON for all canonical devices.
 pub fn build_canonical_devices(state: &SharedState) -> Result<String> {
     // Snapshot while holding the shared-state lock, then serialize outside it.
@@ -13843,12 +14489,12 @@ pub fn do_canonical_rename_device(state: &SharedState, device_id: &str, name: &s
 
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        let device = s
+        if !s
             .canonical_registry
-            .get_mut(device_id)
-            .filter(|device| !device.is_removed())
-            .ok_or_else(|| anyhow::anyhow!("Device not found: {}", device_id))?;
-        device.name = trimmed.to_string();
+            .rename_device_by_user(device_id, trimmed)
+        {
+            return Err(anyhow::anyhow!("Device not found: {}", device_id));
+        }
         persist_canonical(&s);
     }
 
@@ -14450,14 +15096,8 @@ pub fn do_canonical_assign_room_with_precondition(
     let was_topology_standalone = s.topology.device_parent_room_id(device_id).is_none();
     let assigning_standalone_light_child =
         room_id.is_some() && was_topology_standalone && matches!(&device_type, DeviceType::Light);
-    let sleep_default_node_to_seed = if matches!(&device_type, DeviceType::Light) {
-        room_id
-            .filter(|_| assigning_standalone_light_child)
-            .or_else(|| room_id.is_none().then_some(device_id))
-            .map(str::to_string)
-    } else {
-        None
-    };
+    let sleep_default_node_to_seed =
+        matches!(&device_type, DeviceType::Light).then(|| room_id.unwrap_or(device_id).to_string());
     let old_room_id = s
         .topology
         .device_parent_room_id(device_id)
@@ -14622,6 +15262,14 @@ pub fn do_canonical_assign_room_with_precondition(
     persist_registry(state);
     if let Some(node_id) = sleep_default_node_to_seed.as_deref() {
         ensure_sleep_mode_hard_off_default(state, node_id);
+    }
+    if matches!(device_type, DeviceType::Light) {
+        let mut name_scope = LightNameReconciliationScope::for_device(device_id.to_string());
+        if source_room_id.as_deref() != room_id {
+            name_scope.include_room(source_room_id.clone());
+            name_scope.include_room(room_id.map(str::to_string));
+        }
+        reconcile_automatic_light_names_best_effort(state, &name_scope);
     }
     reconcile_runtime_from_state(state)?;
     if assigning_standalone_light_child {
@@ -14811,6 +15459,8 @@ pub fn do_triage_merge(state: &SharedState, entry_id: &str, canonical_id: &str) 
         }
         drop(s);
         commit_triage_authority_mutation(state, topology_before, canonical_before, "device merge")?;
+        let name_scope = LightNameReconciliationScope::for_device(canonical_id.to_string());
+        reconcile_automatic_light_names_best_effort(state, &name_scope);
         reconcile_runtime_from_state(state)?;
         {
             emit_triage_changed(state);
@@ -14882,6 +15532,8 @@ pub fn do_triage_new_device(state: &SharedState, entry_id: &str) -> Result<Strin
                         canonical_before,
                         "new device",
                     )?;
+                    let name_scope = LightNameReconciliationScope::for_device(canonical_id.clone());
+                    reconcile_automatic_light_names_best_effort(state, &name_scope);
                     reconcile_runtime_from_state(state)?;
                     {
                         emit_triage_changed(state);
@@ -14920,6 +15572,8 @@ pub fn do_triage_new_device(state: &SharedState, entry_id: &str) -> Result<Strin
             ) {
                 persist_canonical(&s);
                 drop(s);
+                let name_scope = LightNameReconciliationScope::for_device(canonical_id.clone());
+                reconcile_automatic_light_names_best_effort(state, &name_scope);
                 reconcile_runtime_from_state(state)?;
                 emit_triage_changed(state);
                 crate::state::emit_server_event(
@@ -15105,6 +15759,8 @@ pub fn do_triage_bind_room_to(
 
     drop(s);
     commit_triage_authority_mutation(state, topology_before, canonical_before, "room binding")?;
+    let name_scope = LightNameReconciliationScope::for_room(Some(target_id));
+    reconcile_automatic_light_names_best_effort(state, &name_scope);
     reconcile_runtime_from_state(state)?;
 
     // Emit SSE events
@@ -15387,6 +16043,7 @@ pub fn do_topology_create_room(state: &SharedState, name: &str) -> Result<String
     let id = s.topology.create_room(name);
     persist_topology(&s);
     drop(s);
+    ensure_sleep_mode_hard_off_default(state, &id);
     reconcile_runtime_from_state(state)?;
     Ok(format!(r#"{{"id":"{}","name":"{}"}}"#, id, name))
 }
@@ -15441,6 +16098,8 @@ pub fn do_topology_rename_room(state: &SharedState, room_id: &str, name: &str) -
             error,
         ));
     }
+    let name_scope = LightNameReconciliationScope::for_room(Some(room_id.to_string()));
+    reconcile_automatic_light_names_best_effort(state, &name_scope);
     reconcile_runtime_from_state(state)?;
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
     Ok(())
@@ -15587,6 +16246,8 @@ pub fn do_topology_delete_room(state: &SharedState, room_id: &str) -> Result<()>
     }
 
     queue_motion_timer_clear(state, room_id);
+    let name_scope = LightNameReconciliationScope::for_room(None);
+    reconcile_automatic_light_names_best_effort(state, &name_scope);
     reconcile_runtime_from_state(state)?;
 
     {
@@ -15666,6 +16327,8 @@ pub fn do_topology_merge_rooms(
                 error,
             ));
         }
+        let name_scope = LightNameReconciliationScope::for_room(Some(target_id.to_string()));
+        reconcile_automatic_light_names_best_effort(state, &name_scope);
         reconcile_runtime_from_state(state)?;
 
         {
@@ -18571,7 +19234,7 @@ mod tests {
     }
 
     #[test]
-    fn room_set_unchanged_skips_registry_write_when_syncing_without_runtime_apply() {
+    fn room_set_registry_match_without_topology_recreates_binding_during_sync() {
         let (state, runtime) = setup_state_with_registry(vec![make_snapshot("r1", false, false)]);
         let hub_key = state.lock().unwrap().hubs.keys().next().cloned().unwrap();
         let params = RoomParams {
@@ -18589,6 +19252,12 @@ mod tests {
         assert_eq!(result, "");
         assert!(runtime.restore_calls().is_empty());
         assert_eq!(runtime.engine_all_room_snapshots().len(), 1);
+        assert!(state
+            .lock()
+            .unwrap()
+            .topology
+            .find_by_hub_room(&hub_key, "r1")
+            .is_some());
     }
 
     #[test]
@@ -19839,7 +20508,16 @@ mod tests {
         assert!(!device.mood_active);
         assert_eq!(device.profile_settings.mood_scene_id, None);
 
-        let s = state.lock().unwrap();
+        let mut s = state.lock().unwrap();
+        s.topology
+            .replace_external_room_automation_decisions(
+                &HubKey::new(HubType::new(HubType::HUE), "bridge"),
+                &[(
+                    "room1".to_string(),
+                    crate::topology::ExternalRoomAutomationOwner::Rhythm,
+                )],
+            )
+            .unwrap();
         let snapshots = runtime.engine_all_node_snapshots();
         let dispatch_nodes = crate::periodic::periodic_dispatch_nodes_from_state(&s, &snapshots);
         assert!(
@@ -21735,6 +22413,148 @@ mod tests {
         key
     }
 
+    fn legacy_hue_topology(
+        key: &HubKey,
+        include_room: bool,
+    ) -> (crate::topology::RoomTopologyStore, Option<String>) {
+        let mut topology = crate::topology::RoomTopologyStore::new();
+        let room_id = include_room.then(|| {
+            let room_id = topology.create_room("Office");
+            assert!(topology.upsert_room_binding(
+                &room_id,
+                crate::topology::HubRoomBinding {
+                    hub_key: key.clone(),
+                    hub_room_id: "hue-office".to_string(),
+                    control_id: "grouped-office".to_string(),
+                    light_device_ids: Vec::new(),
+                },
+            ));
+            room_id
+        });
+        let mut value = serde_json::to_value(topology).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("external_room_automation_policy_version");
+        let mut topology: crate::topology::RoomTopologyStore =
+            serde_json::from_value(value).unwrap();
+        topology.rebuild_indices();
+        (topology, room_id)
+    }
+
+    fn hue_disconnect_policy_fixture() -> (SharedState, TestStorage, HubKey, String) {
+        let storage = TestStorage::default();
+        let key = HubKey::new(HubType::new(HubType::HUE), "bridge.local");
+        let credential = HubCredentials::new(
+            HubType::HUE,
+            &key.address,
+            serde_json::json!({"username": "persisted-secret"}),
+        );
+        let (mut topology, room_id) = legacy_hue_topology(&key, true);
+        assert!(topology
+            .migrate_legacy_external_room_automation_policy(std::slice::from_ref(&key))
+            .changed());
+        let room_id = room_id.unwrap();
+        let state = Arc::new(Mutex::new(AppState {
+            storage: Some(Arc::new(storage.clone())),
+            topology,
+            ..Default::default()
+        }));
+        {
+            let mut s = state.lock().unwrap();
+            s.hub_credentials.insert(key.clone(), credential.clone());
+            save_authority_state(&s).unwrap();
+        }
+        storage.inner.lock().unwrap().hub_credentials = vec![credential];
+        (state, storage, key, room_id)
+    }
+
+    #[test]
+    fn fail_closed_external_policy_retires_grandfathered_rhythm_authority_durably() {
+        let (state, storage, key, room_id) = hue_disconnect_policy_fixture();
+        let transaction_lock = state
+            .lock()
+            .unwrap()
+            .external_topology_transaction_lock
+            .clone();
+        let _transaction = transaction_lock.lock().unwrap();
+
+        assert!(fail_closed_external_room_automation_policy(&state, &key).unwrap());
+
+        let app = state.lock().unwrap();
+        assert_eq!(app.light_dispatch_generation, 1);
+        assert_eq!(
+            app.topology.external_room_automation_owner(&room_id, &key),
+            Some(crate::topology::ExternalRoomAutomationOwner::External)
+        );
+        assert!(!app.rhythm_automation_allowed_for_node(&room_id));
+        drop(app);
+
+        let saved = storage.inner.lock().unwrap();
+        let mut topology: crate::topology::RoomTopologyStore =
+            serde_json::from_value(saved.topology.clone().unwrap()).unwrap();
+        topology.rebuild_indices();
+        assert_eq!(
+            topology.external_room_automation_owner(&room_id, &key),
+            Some(crate::topology::ExternalRoomAutomationOwner::External)
+        );
+        assert!(!topology.rhythm_automation_allowed_for_node(&room_id));
+    }
+
+    #[test]
+    fn fail_closed_external_policy_restores_memory_when_persistence_fails() {
+        let (state, storage, key, room_id) = hue_disconnect_policy_fixture();
+        storage.inner.lock().unwrap().fail_save_authority_state = true;
+        let transaction_lock = state
+            .lock()
+            .unwrap()
+            .external_topology_transaction_lock
+            .clone();
+        let _transaction = transaction_lock.lock().unwrap();
+
+        fail_closed_external_room_automation_policy(&state, &key)
+            .expect_err("a non-durable fail-closed policy must not publish in memory");
+
+        let app = state.lock().unwrap();
+        assert_eq!(app.light_dispatch_generation, 0);
+        assert_eq!(
+            app.topology.external_room_automation_owner(&room_id, &key),
+            Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+        );
+    }
+
+    fn legacy_hue_backup(
+        topology: crate::topology::RoomTopologyStore,
+        key: &HubKey,
+    ) -> BackupBundle {
+        BackupBundle {
+            schema_version: crate::bundle::LEGACY_BACKUP_SCHEMA_VERSION,
+            kind: BundleKind::BackupBundle,
+            created_at: "2026-08-11T00:00:00Z".into(),
+            secrets_included: true,
+            configuration: BackupConfiguration::default(),
+            installation: BackupInstallation {
+                location: None,
+                rooms: rhythm_core::RoomManager::new(),
+                topology,
+                canonical_registry: crate::canonical::registry::CanonicalRegistry::new(),
+                hub_credentials: vec![BackupHubCredentials {
+                    hub_type: Some(key.hub_type.clone()),
+                    address: key.address.clone(),
+                    data: Some(serde_json::json!({"username": "restored-secret"})),
+                }],
+                hub_registries: Vec::new(),
+                integration_files: Vec::new(),
+            },
+            runtime_state: BackupRuntimeState {
+                active_mode: RhythmMode::Day,
+                last_change_cause: ModeChangeCause::Manual,
+                last_change_transition_id: None,
+                last_change_epoch_ms: None,
+            },
+        }
+    }
+
     fn install_mock_hub_provider(state: &SharedState) {
         let mut app = state.lock().unwrap();
         app.get_hub_provider_fn = Some(Arc::new(|_| &MOCK_BACKUP_HUB_PROVIDER));
@@ -23464,6 +24284,8 @@ mod tests {
             app.hub_capabilities
                 .push(crate::hub::HubIntegrationCapability::new(HubType::HUE));
             app.get_hub_provider_fn = Some(Arc::new(|_| &ACCEPTING_HUE_BACKUP_HUB_PROVIDER));
+            app.release_external_controller_authority_fn = Some(Arc::new(|_, _, _| Ok(())));
+            app.finalize_external_controller_release_fn = Some(Arc::new(|_, _| Ok(())));
         }
         let bundle = hue_authority_backup_bundle(&state, "bridge-1");
         let bootstrap_calls = Arc::new(AtomicUsize::new(0));
@@ -23738,6 +24560,145 @@ mod tests {
             bundle.installation.rooms.get("stale-node").is_none(),
             "stale runtime node should not leak into backup export"
         );
+    }
+
+    #[test]
+    fn legacy_hue_backup_restore_grandfathers_bound_rooms_before_bootstrap_and_restart() {
+        let storage = TestStorage::default();
+        let key = HubKey::new(HubType::new(HubType::HUE), "bridge.local");
+        let (topology, room_id) = legacy_hue_topology(&key, true);
+        let room_id = room_id.unwrap();
+        let bootstrap_observed_admission = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(Mutex::new(AppState {
+            storage: Some(Arc::new(storage.clone())),
+            hub_capabilities: vec![HubIntegrationCapability::new(HubType::HUE)],
+            get_hub_provider_fn: Some(Arc::new(|_| &ACCEPTING_HUE_BACKUP_HUB_PROVIDER)),
+            ..Default::default()
+        }));
+        {
+            let room_id = room_id.clone();
+            let key = key.clone();
+            let observed = bootstrap_observed_admission.clone();
+            state.lock().unwrap().request_hub_bootstrap_fn = Some(Arc::new(move |state| {
+                let s = state.lock().unwrap();
+                assert_eq!(
+                    s.topology.external_room_automation_owner(&room_id, &key),
+                    Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+                );
+                assert!(s.rhythm_automation_allowed_for_node(&room_id));
+                observed.store(true, Ordering::SeqCst);
+            }));
+        }
+
+        do_backup_restore(&state, legacy_hue_backup(topology, &key)).unwrap();
+
+        assert!(bootstrap_observed_admission.load(Ordering::SeqCst));
+        {
+            let s = state.lock().unwrap();
+            assert_eq!(
+                s.topology.external_room_automation_owner(&room_id, &key),
+                Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+            );
+            assert!(s.rhythm_automation_allowed_for_node(&room_id));
+        }
+
+        let mut restarted = AppState {
+            storage: Some(Arc::new(storage)),
+            ..Default::default()
+        };
+        crate::storage::load_persisted_state(&mut restarted);
+        assert_eq!(
+            restarted
+                .topology
+                .external_room_automation_owner(&room_id, &key),
+            Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+        );
+        assert!(restarted.rhythm_automation_allowed_for_node(&room_id));
+    }
+
+    #[test]
+    fn legacy_hue_backup_restore_grandfathers_rooms_discovered_by_immediate_bootstrap() {
+        let storage = TestStorage::default();
+        let key = HubKey::new(HubType::new(HubType::HUE), "bridge.local");
+        let (topology, _) = legacy_hue_topology(&key, false);
+        let discovered_room_id = Arc::new(Mutex::new(None::<String>));
+        let state = Arc::new(Mutex::new(AppState {
+            storage: Some(Arc::new(storage.clone())),
+            hub_capabilities: vec![HubIntegrationCapability::new(HubType::HUE)],
+            get_hub_provider_fn: Some(Arc::new(|_| &ACCEPTING_HUE_BACKUP_HUB_PROVIDER)),
+            ..Default::default()
+        }));
+        {
+            let key = key.clone();
+            let discovered_room_id = discovered_room_id.clone();
+            state.lock().unwrap().request_hub_bootstrap_fn = Some(Arc::new(move |state| {
+                let mut s = state.lock().unwrap();
+                let action = s.topology.sync_hub_room(
+                    &key,
+                    &crate::topology::DiscoveredTopologyRoom {
+                        hub_room_id: "hue-office".to_string(),
+                        name: "Office".to_string(),
+                        control_id: "grouped-office".to_string(),
+                        light_device_ids: Vec::new(),
+                        canonical_device_ids: Vec::new(),
+                        source_name_authoritative: true,
+                    },
+                );
+                let room_id = action.rhythm_room_id().to_string();
+                assert_eq!(
+                    s.topology.external_room_automation_owner(&room_id, &key),
+                    Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+                );
+                assert!(s.rhythm_automation_allowed_for_node(&room_id));
+                save_authority_state(&s).unwrap();
+                *discovered_room_id.lock().unwrap() = Some(room_id);
+            }));
+        }
+
+        do_backup_restore(&state, legacy_hue_backup(topology, &key)).unwrap();
+
+        let room_id = discovered_room_id
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("bootstrap should discover the Hue room");
+        let mut restarted = AppState {
+            storage: Some(Arc::new(storage)),
+            ..Default::default()
+        };
+        crate::storage::load_persisted_state(&mut restarted);
+        assert_eq!(
+            restarted
+                .topology
+                .external_room_automation_owner(&room_id, &key),
+            Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+        );
+        assert!(restarted.rhythm_automation_allowed_for_node(&room_id));
+    }
+
+    #[test]
+    fn backup_restore_recovery_path_can_replace_fenced_grandfathered_policy() {
+        let (state, storage, key, room_id) = hue_disconnect_policy_fixture();
+        state.lock().unwrap().authority_state_recovery_required = true;
+        let mut bundle = legacy_hue_backup(crate::topology::RoomTopologyStore::new(), &key);
+        bundle.installation.hub_credentials.clear();
+
+        do_backup_restore(&state, bundle).unwrap();
+
+        let s = state.lock().unwrap();
+        assert!(!s.authority_state_recovery_required);
+        assert!(s.hub_credentials.is_empty());
+        assert_eq!(
+            s.topology.external_room_automation_owner(&room_id, &key),
+            None
+        );
+        drop(s);
+        let saved = storage.inner.lock().unwrap();
+        assert!(saved.hub_credentials.is_empty());
+        let mut topology: crate::topology::RoomTopologyStore =
+            serde_json::from_value(saved.topology.clone().unwrap()).unwrap();
+        topology.rebuild_indices();
+        assert!(!topology.references_hub_key(&key));
     }
 
     #[test]
@@ -24832,6 +25793,208 @@ mod tests {
     }
 
     #[test]
+    fn disconnect_all_authority_commit_failure_after_release_keeps_credentials() {
+        let (state, storage, key, room_id) = hue_disconnect_policy_fixture();
+        let released = Arc::new(AtomicBool::new(false));
+        let finalized = Arc::new(AtomicBool::new(false));
+        {
+            let mut s = state.lock().unwrap();
+            let released = released.clone();
+            s.release_external_controller_authority_fn = Some(Arc::new(move |_, _, _| {
+                released.store(true, Ordering::SeqCst);
+                Ok(())
+            }));
+            let finalized = finalized.clone();
+            s.finalize_external_controller_release_fn = Some(Arc::new(move |_, _| {
+                finalized.store(true, Ordering::SeqCst);
+                Ok(())
+            }));
+        }
+        storage.inner.lock().unwrap().fail_save_authority_state = true;
+
+        let error = do_hub_disconnect(&state).unwrap_err();
+
+        assert!(format!("{error:#}")
+            .contains("Failed to durably forget external room automation policy"));
+        assert!(released.load(Ordering::SeqCst));
+        assert!(!finalized.load(Ordering::SeqCst));
+        {
+            let s = state.lock().unwrap();
+            assert!(s.hub_credentials.contains_key(&key));
+            assert_eq!(
+                s.topology.external_room_automation_owner(&room_id, &key),
+                Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+            );
+        }
+        let saved = storage.inner.lock().unwrap();
+        assert_eq!(saved.hub_credentials.len(), 1);
+        let mut topology: crate::topology::RoomTopologyStore =
+            serde_json::from_value(saved.topology.clone().unwrap()).unwrap();
+        topology.rebuild_indices();
+        assert_eq!(
+            topology.external_room_automation_owner(&room_id, &key),
+            Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+        );
+    }
+
+    #[test]
+    fn disconnect_one_authority_commit_failure_after_release_keeps_credentials() {
+        let (state, storage, key, room_id) = hue_disconnect_policy_fixture();
+        let released = Arc::new(AtomicBool::new(false));
+        let finalized = Arc::new(AtomicBool::new(false));
+        {
+            let mut s = state.lock().unwrap();
+            let released = released.clone();
+            s.release_external_controller_authority_fn = Some(Arc::new(move |_, _, _| {
+                released.store(true, Ordering::SeqCst);
+                Ok(())
+            }));
+            let finalized = finalized.clone();
+            s.finalize_external_controller_release_fn = Some(Arc::new(move |_, _| {
+                finalized.store(true, Ordering::SeqCst);
+                Ok(())
+            }));
+        }
+        storage.inner.lock().unwrap().fail_save_authority_state = true;
+
+        let error = do_hub_disconnect_one(&state, key.hub_type.as_str(), &key.address).unwrap_err();
+
+        assert!(format!("{error:#}")
+            .contains("Failed to durably forget external room automation policy"));
+        assert!(released.load(Ordering::SeqCst));
+        assert!(!finalized.load(Ordering::SeqCst));
+        {
+            let s = state.lock().unwrap();
+            assert!(s.hub_credentials.contains_key(&key));
+            assert_eq!(
+                s.topology.external_room_automation_owner(&room_id, &key),
+                Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+            );
+        }
+        assert_eq!(storage.inner.lock().unwrap().hub_credentials.len(), 1);
+    }
+
+    #[test]
+    fn successful_disconnects_durably_clear_grandfathering_before_same_address_repair() {
+        for disconnect_one in [false, true] {
+            let (state, storage, key, room_id) = hue_disconnect_policy_fixture();
+
+            if disconnect_one {
+                do_hub_disconnect_one(&state, key.hub_type.as_str(), &key.address).unwrap();
+            } else {
+                do_hub_disconnect(&state).unwrap();
+            }
+
+            assert!(!state.lock().unwrap().hub_credentials.contains_key(&key));
+            let saved = storage.inner.lock().unwrap();
+            assert!(saved.hub_credentials.is_empty());
+            let mut topology: crate::topology::RoomTopologyStore =
+                serde_json::from_value(saved.topology.clone().unwrap()).unwrap();
+            drop(saved);
+            topology.rebuild_indices();
+            assert!(topology.upsert_room_binding(
+                &room_id,
+                crate::topology::HubRoomBinding {
+                    hub_key: key.clone(),
+                    hub_room_id: "hue-office-repaired".to_string(),
+                    control_id: "grouped-office-repaired".to_string(),
+                    light_device_ids: Vec::new(),
+                },
+            ));
+            assert_eq!(
+                topology.external_room_automation_owner(&room_id, &key),
+                None
+            );
+            assert!(!topology.rhythm_automation_allowed_for_node(&room_id));
+        }
+    }
+
+    #[test]
+    fn disconnect_all_clears_marker_only_hue_policy_before_same_address_repair() {
+        let storage = TestStorage::default();
+        let key = HubKey::new(HubType::new(HubType::HUE), "forgotten-bridge.local");
+        let (mut topology, room_id) = legacy_hue_topology(&key, true);
+        assert!(topology
+            .migrate_legacy_external_room_automation_policy(std::slice::from_ref(&key))
+            .changed());
+        let room_id = room_id.unwrap();
+        assert_eq!(
+            topology.remove_stale_bindings(&key, &[]),
+            vec![room_id.clone()]
+        );
+        assert!(topology.references_hub_key(&key));
+        let state = Arc::new(Mutex::new(AppState {
+            storage: Some(Arc::new(storage.clone())),
+            topology,
+            ..Default::default()
+        }));
+        save_authority_state(&state.lock().unwrap()).unwrap();
+
+        do_hub_disconnect(&state).unwrap();
+
+        let saved = storage.inner.lock().unwrap();
+        let mut topology: crate::topology::RoomTopologyStore =
+            serde_json::from_value(saved.topology.clone().unwrap()).unwrap();
+        drop(saved);
+        topology.rebuild_indices();
+        assert!(!topology.references_hub_key(&key));
+        assert!(topology.upsert_room_binding(
+            &room_id,
+            crate::topology::HubRoomBinding {
+                hub_key: key.clone(),
+                hub_room_id: "hue-office-repaired".to_string(),
+                control_id: "grouped-office-repaired".to_string(),
+                light_device_ids: Vec::new(),
+            },
+        ));
+        assert_eq!(
+            topology.external_room_automation_owner(&room_id, &key),
+            None
+        );
+        assert!(!topology.rhythm_automation_allowed_for_node(&room_id));
+    }
+
+    #[test]
+    fn disconnect_and_factory_release_failures_keep_credentials_and_existing_policy() {
+        for factory_reset in [false, true] {
+            let (state, storage, key, room_id) = hue_disconnect_policy_fixture();
+            state
+                .lock()
+                .unwrap()
+                .release_external_controller_authority_fn = Some(Arc::new(|_, _, _| {
+                anyhow::bail!("injected controller release failure")
+            }));
+
+            let error = if factory_reset {
+                do_factory_reset(&state).unwrap_err()
+            } else {
+                do_hub_disconnect(&state).unwrap_err()
+            };
+
+            assert!(format!("{error:#}").contains("injected controller release failure"));
+            assert!(!factory_reset_error_is_post_barrier(&error));
+            {
+                let s = state.lock().unwrap();
+                assert!(s.hub_credentials.contains_key(&key));
+                assert_eq!(
+                    s.topology.external_room_automation_owner(&room_id, &key),
+                    Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+                );
+                assert!(s.rhythm_automation_allowed_for_node(&room_id));
+            }
+            let saved = storage.inner.lock().unwrap();
+            assert_eq!(saved.hub_credentials.len(), 1);
+            let mut topology: crate::topology::RoomTopologyStore =
+                serde_json::from_value(saved.topology.clone().unwrap()).unwrap();
+            topology.rebuild_indices();
+            assert_eq!(
+                topology.external_room_automation_owner(&room_id, &key),
+                Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+            );
+        }
+    }
+
+    #[test]
     fn release_preparation_does_not_fence_non_authoritative_hubs() {
         let (state, _runtime) = setup_state(Vec::new());
         let key = state.lock().unwrap().hubs.keys().next().unwrap().clone();
@@ -25143,18 +26306,131 @@ mod tests {
     }
 
     #[test]
+    fn active_hue_recovery_without_lifecycle_callbacks_blocks_destructive_release() {
+        for (release_callback_available, finalize_callback_available) in
+            [(false, false), (false, true), (true, false)]
+        {
+            for factory_reset in [false, true] {
+                let (state, storage, key, room_id) = hue_disconnect_policy_fixture();
+                let bridge_id = "physical-bridge-id";
+                let credential = HubCredentials::new(
+                    HubType::HUE,
+                    &key.address,
+                    serde_json::json!({
+                        "username": "persisted-secret",
+                        "bridge_id": bridge_id,
+                    }),
+                );
+                let manifest = hue_ownership_manifest_file(bridge_id);
+                {
+                    let mut inner = storage.inner.lock().unwrap();
+                    inner.hub_credentials = vec![credential.clone()];
+                    inner.integration_files = vec![manifest.clone()];
+                }
+                let barrier_called = Arc::new(AtomicBool::new(false));
+                let release_called = Arc::new(AtomicBool::new(false));
+                let finalize_called = Arc::new(AtomicBool::new(false));
+                {
+                    let mut app = state.lock().unwrap();
+                    app.hub_credentials.insert(key.clone(), credential);
+                    if release_callback_available {
+                        let release_called = release_called.clone();
+                        app.release_external_controller_authority_fn =
+                            Some(Arc::new(move |_, _, _| {
+                                release_called.store(true, Ordering::SeqCst);
+                                Ok(())
+                            }));
+                    }
+                    if finalize_callback_available {
+                        let finalize_called = finalize_called.clone();
+                        app.finalize_external_controller_release_fn =
+                            Some(Arc::new(move |_, _| {
+                                finalize_called.store(true, Ordering::SeqCst);
+                                Ok(())
+                            }));
+                    }
+                    let barrier_called = barrier_called.clone();
+                    app.before_factory_reset_fn = Some(Arc::new(move |_| {
+                        barrier_called.store(true, Ordering::SeqCst);
+                        Ok(())
+                    }));
+                }
+
+                let error = if factory_reset {
+                    do_factory_reset(&state).unwrap_err()
+                } else {
+                    do_hub_disconnect(&state).unwrap_err()
+                };
+
+                assert!(format!("{error:#}").contains("lifecycle callbacks are unavailable"));
+                assert!(!factory_reset_error_is_post_barrier(&error));
+                assert!(!barrier_called.load(Ordering::SeqCst));
+                assert!(!release_called.load(Ordering::SeqCst));
+                assert!(!finalize_called.load(Ordering::SeqCst));
+                {
+                    let app = state.lock().unwrap();
+                    assert_eq!(
+                        app.hub_credentials
+                            .get(&key)
+                            .and_then(|credential| credential.get_str("bridge_id")),
+                        Some(bridge_id)
+                    );
+                    assert_eq!(
+                        app.topology.external_room_automation_owner(&room_id, &key),
+                        Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+                    );
+                }
+                let inner = storage.inner.lock().unwrap();
+                assert_eq!(inner.hub_credential_save_calls, 0);
+                assert_eq!(inner.hub_credentials.len(), 1);
+                assert_eq!(
+                    inner.hub_credentials[0].get_str("bridge_id"),
+                    Some(bridge_id)
+                );
+                assert_eq!(inner.integration_files, vec![manifest]);
+                let mut persisted_topology: crate::topology::RoomTopologyStore =
+                    serde_json::from_value(inner.topology.clone().unwrap()).unwrap();
+                persisted_topology.rebuild_indices();
+                assert_eq!(
+                    persisted_topology.external_room_automation_owner(&room_id, &key),
+                    Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn corrupt_authority_state_blocks_ordinary_save_but_factory_reset_recovers_it() {
         let (state, _runtime) = setup_state(Vec::new());
         let storage = TestStorage::default();
+        let hue_key = HubKey::new(HubType::new(HubType::HUE), "bridge.local");
+        let hue_credential = HubCredentials::new(
+            HubType::HUE,
+            &hue_key.address,
+            serde_json::json!({"username": "persisted-secret"}),
+        );
+        let (mut topology, room_id) = legacy_hue_topology(&hue_key, true);
+        assert!(topology
+            .migrate_legacy_external_room_automation_policy(std::slice::from_ref(&hue_key))
+            .changed());
+        let room_id = room_id.unwrap();
         {
             let mut inner = storage.inner.lock().unwrap();
             inner.canonical_registry = Some(serde_json::json!({"sentinel": "canonical"}));
             inner.topology = Some(serde_json::json!({"sentinel": "topology"}));
+            inner.hub_credentials = vec![hue_credential.clone()];
         }
         {
             let mut s = state.lock().unwrap();
             s.storage = Some(Arc::new(storage.clone()));
+            s.topology = topology;
+            s.hub_credentials.insert(hue_key.clone(), hue_credential);
             s.authority_state_recovery_required = true;
+            assert_eq!(
+                s.topology
+                    .external_room_automation_owner(&room_id, &hue_key),
+                Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+            );
         }
 
         let error = {
@@ -25551,7 +26827,7 @@ mod tests {
     }
 
     #[test]
-    fn node_light_capabilities_use_model_range_and_room_intersection() {
+    fn device_capabilities_use_model_range_while_room_curve_stays_transport_agnostic() {
         let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
         let hub_key = HubKey::new(HubType::new("mock"), "mock");
         let wide_id = insert_known_canonical_light(
@@ -25601,12 +26877,13 @@ mod tests {
         assert_eq!(event_range.min_kelvin, 1_000);
         assert_eq!(event_range.max_kelvin, 20_000);
 
-        let room = build_node_state(&state, "room1").unwrap();
-        let room_capabilities = room.light_capabilities.unwrap();
-        assert_eq!(room_capabilities.individual_profile_overrides, Some(true));
-        let room_range = room_capabilities.color_temperature.unwrap();
-        assert_eq!(room_range.min_kelvin, 2_000);
-        assert_eq!(room_range.max_kelvin, 6_500);
+        assert!(
+            build_node_state(&state, "room1")
+                .unwrap()
+                .light_capabilities
+                .is_none(),
+            "room curve intent must not be gated by member transport ranges"
+        );
     }
 
     #[test]
@@ -25684,7 +26961,7 @@ mod tests {
     }
 
     #[test]
-    fn room_light_capabilities_distinguish_non_ct_from_unknown_members() {
+    fn room_curve_control_ignores_non_ct_and_unknown_companion_capabilities() {
         let (state, runtime) = setup_state(vec![
             make_snapshot("non-ct-room", false, false),
             make_snapshot("unknown-room", false, false),
@@ -25751,18 +27028,11 @@ mod tests {
         assert!(build_node_state(&state, "non-ct-room")
             .unwrap()
             .light_capabilities
-            .expect("all members are known")
-            .color_temperature
             .is_none());
-        let unknown_room_capabilities = build_node_state(&state, "unknown-room")
+        assert!(build_node_state(&state, "unknown-room")
             .unwrap()
             .light_capabilities
-            .expect("room route capability is known");
-        assert!(unknown_room_capabilities.color_temperature.is_none());
-        assert_eq!(
-            unknown_room_capabilities.individual_profile_overrides,
-            Some(true)
-        );
+            .is_none());
         assert!(build_node_state(&state, &dimmable_id)
             .unwrap()
             .light_capabilities
@@ -25772,12 +27042,117 @@ mod tests {
         let unknown_light_capabilities = build_node_state(&state, &unknown_id)
             .unwrap()
             .light_capabilities
-            .expect("device route capability is known");
+            .expect("device routing capability remains available for unknown models");
         assert!(unknown_light_capabilities.color_temperature.is_none());
         assert_eq!(
             unknown_light_capabilities.individual_profile_overrides,
             Some(true)
         );
+    }
+
+    #[test]
+    fn room_curve_control_does_not_depend_on_member_capability_proof() {
+        let (state, runtime) = setup_state(vec![
+            make_snapshot("white-room", false, false),
+            make_snapshot("unknown-room", false, false),
+        ]);
+        let hub_key = HubKey::new(HubType::new("mock"), "mock");
+        let white_id = insert_known_canonical_light(
+            &state,
+            hub_key.clone(),
+            "white-only",
+            "Signify Netherlands B.V.",
+            "LWA003",
+        );
+        let unknown_id = insert_known_canonical_light(
+            &state,
+            hub_key,
+            "future-light",
+            "Example Manufacturer",
+            "FUTURE-1",
+        );
+        {
+            let mut state = state.lock().unwrap();
+            state
+                .topology
+                .insert_room(crate::topology::TopologyRoom::new(
+                    "white-room",
+                    "White Room",
+                ));
+            state
+                .topology
+                .insert_room(crate::topology::TopologyRoom::new(
+                    "unknown-room",
+                    "Unknown Room",
+                ));
+            assert!(state
+                .topology
+                .attach_device_user_override("white-room", &white_id));
+            assert!(state
+                .topology
+                .attach_device_user_override("unknown-room", &unknown_id));
+        }
+        runtime.snapshots.lock().unwrap().extend([
+            make_light_child_snapshot(&white_id, "white-room"),
+            make_light_child_snapshot(&unknown_id, "unknown-room"),
+        ]);
+
+        assert!(build_node_state(&state, "white-room")
+            .unwrap()
+            .light_capabilities
+            .is_none());
+        assert!(build_node_state(&state, "unknown-room")
+            .unwrap()
+            .light_capabilities
+            .is_none());
+    }
+
+    #[test]
+    fn live_color_endpoint_can_render_the_cct_curve_without_native_ct() {
+        let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        let hub_key = HubKey::new(HubType::new("matter"), "local");
+        let device_id = insert_known_canonical_light(
+            &state,
+            hub_key.clone(),
+            "future-rgb",
+            "Example Manufacturer",
+            "FUTURE-RGB",
+        );
+        {
+            let mut state = state.lock().unwrap();
+            state
+                .canonical_registry
+                .get_mut(&device_id)
+                .unwrap()
+                .endpoints
+                .iter_mut()
+                .find(|endpoint| endpoint.hub_key == hub_key)
+                .unwrap()
+                .capabilities = Some(serde_json::json!({
+                "light_capabilities": {},
+                "automatic_naming": {"color_kind": "color"}
+            }));
+            state
+                .topology
+                .insert_room(crate::topology::TopologyRoom::new("room1", "Room 1"));
+            assert!(state
+                .topology
+                .attach_device_user_override("room1", &device_id));
+        }
+        runtime
+            .snapshots
+            .lock()
+            .unwrap()
+            .push(make_light_child_snapshot(&device_id, "room1"));
+
+        let range = build_node_state(&state, &device_id)
+            .unwrap()
+            .light_capabilities
+            .expect("normalized color metadata should be understood")
+            .color_temperature
+            .expect("XY/HS fallback can render the curve's white point");
+        assert_eq!(range.min_kelvin, 2_000);
+        assert_eq!(range.max_kelvin, 6_500);
     }
 
     #[test]
@@ -28565,6 +29940,50 @@ mod tests {
     }
 
     #[test]
+    fn mode_change_parent_default_clears_attached_light_stale_hard_off() {
+        let parent = make_snapshot("hallway", false, false);
+        let mut child = make_light_child_snapshot("matter-light", "hallway");
+        child.hard_off = true;
+        child.profile_settings.profile_overrides.insert(
+            rhythm_core::RHYTHM_PROFILE_ID.into(),
+            LightProfileNodeOverride {
+                max_brightness: Some(20),
+                ..Default::default()
+            },
+        );
+        let (state, runtime) = setup_state(vec![parent, child]);
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = RhythmMode::Sleep;
+            s.set_mode_configs(vec![ModeConfig {
+                mode: RhythmMode::Day,
+                active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+                idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![rhythm_core::RoomModeDefault {
+                    room_id: "hallway".into(),
+                    state: RoomModeState::Active,
+                }],
+            }]);
+        }
+
+        do_set_active_mode(&state, RhythmMode::Day).unwrap();
+
+        let child = runtime.engine_node_snapshot("matter-light").unwrap();
+        assert!(!child.hard_off);
+        assert!(!child.soft_off);
+        assert_eq!(
+            child.profile_settings.profile_overrides[rhythm_core::RHYTHM_PROFILE_ID].max_brightness,
+            Some(20)
+        );
+        assert_eq!(
+            runtime.restore_calls(),
+            vec![("matter-light".into(), false, false)]
+        );
+    }
+
+    #[test]
     fn room_default_overrides_preserve_hard_off_for_explicit_room() {
         let mut snapshot = make_snapshot("r1", false, false);
         snapshot.hard_off = true;
@@ -28688,7 +30107,104 @@ mod tests {
     }
 
     #[test]
-    fn empty_topology_rooms_exclude_bootstrap_and_routable_rooms() {
+    fn mode_change_skips_physical_hard_off_for_empty_bootstrap_room() {
+        let (state, runtime) =
+            setup_state(vec![make_snapshot("empty-bootstrap-room", false, false)]);
+        add_topology_room(&state, "empty-bootstrap-room", &[]);
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = RhythmMode::Day;
+            set_observed_lights_on_in_app(&mut s, "empty-bootstrap-room", true);
+            s.set_mode_configs(vec![ModeConfig {
+                mode: RhythmMode::Sleep,
+                active_profile_id: Some(rhythm_core::SLEEP_PROFILE_ID.into()),
+                idle_profile_id: Some(rhythm_core::SLEEP_IDLE_PROFILE_ID.into()),
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![rhythm_core::RoomModeDefault {
+                    room_id: "empty-bootstrap-room".into(),
+                    state: RoomModeState::HardOff,
+                }],
+            }]);
+        }
+
+        do_set_active_mode(&state, RhythmMode::Sleep).unwrap();
+
+        assert!(runtime.lights_off_calls().is_empty());
+        assert!(
+            runtime
+                .engine_room_snapshot("empty-bootstrap-room")
+                .unwrap()
+                .hard_off
+        );
+    }
+
+    #[test]
+    fn mode_change_skips_active_dispatch_for_empty_topology_room() {
+        let mut room = make_snapshot("empty-room", false, false);
+        room.hard_off = true;
+        let (state, runtime) = setup_state(vec![room]);
+        add_topology_room(&state, "empty-room", &[]);
+        {
+            let mut s = state.lock().unwrap();
+            s.topology.get_mut("empty-room").unwrap().user_customized = true;
+            s.active_mode = RhythmMode::Sleep;
+            set_observed_lights_on_in_app(&mut s, "empty-room", false);
+            s.set_mode_configs(vec![ModeConfig {
+                mode: RhythmMode::Day,
+                active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+                idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![rhythm_core::RoomModeDefault {
+                    room_id: "empty-room".into(),
+                    state: RoomModeState::Active,
+                }],
+            }]);
+        }
+
+        do_set_active_mode(&state, RhythmMode::Day).unwrap();
+
+        assert!(runtime.applied_commands().is_empty());
+        assert!(!runtime.engine_room_snapshot("empty-room").unwrap().hard_off);
+    }
+
+    #[test]
+    fn mode_change_skips_active_dispatch_for_empty_bootstrap_room() {
+        let mut room = make_snapshot("empty-bootstrap-room", false, false);
+        room.hard_off = true;
+        let (state, runtime) = setup_state(vec![room]);
+        add_topology_room(&state, "empty-bootstrap-room", &[]);
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = RhythmMode::Sleep;
+            set_observed_lights_on_in_app(&mut s, "empty-bootstrap-room", false);
+            s.set_mode_configs(vec![ModeConfig {
+                mode: RhythmMode::Day,
+                active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+                idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![rhythm_core::RoomModeDefault {
+                    room_id: "empty-bootstrap-room".into(),
+                    state: RoomModeState::Active,
+                }],
+            }]);
+        }
+
+        do_set_active_mode(&state, RhythmMode::Day).unwrap();
+
+        assert!(runtime.applied_commands().is_empty());
+        assert!(
+            !runtime
+                .engine_room_snapshot("empty-bootstrap-room")
+                .unwrap()
+                .hard_off
+        );
+    }
+
+    #[test]
+    fn empty_topology_rooms_include_bootstrap_but_exclude_routable_rooms() {
         let (state, _) = setup_state(Vec::new());
         add_topology_room(&state, "empty-custom-room", &[]);
         add_topology_room(&state, "empty-bootstrap-room", &[]);
@@ -28715,7 +30231,7 @@ mod tests {
         let empty_rooms = EmptyTopologyRooms::from_state(&state);
 
         assert!(empty_rooms.contains("empty-custom-room"));
-        assert!(!empty_rooms.contains("empty-bootstrap-room"));
+        assert!(empty_rooms.contains("empty-bootstrap-room"));
         assert!(!empty_rooms.contains("bound-custom-room"));
         assert!(!empty_rooms.contains("device-custom-room"));
     }
@@ -28931,8 +30447,8 @@ mod tests {
             rhythm_core::ModeTransitionConfig::new(RhythmMode::Sleep, RhythmMode::Day, 4_321)
                 .with_trigger(ModeTransitionTrigger::Sunrise);
 
-        add_topology_room(&state, "active-room", &[]);
-        add_topology_room(&state, "hard-off-room", &[]);
+        add_topology_room(&state, "active-room", &["matter"]);
+        add_topology_room(&state, "hard-off-room", &["matter"]);
 
         {
             let mut s = state.lock().unwrap();
@@ -32065,6 +33581,50 @@ mod tests {
             runtime.engine_node_snapshot(&device_id).is_none(),
             "hard-removed device should be removed from runtime"
         );
+    }
+
+    #[test]
+    fn device_hard_remove_renumbers_remaining_automatic_light_names() {
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+        let room: serde_json::Value =
+            serde_json::from_str(&do_topology_create_room(&state, "Office").unwrap()).unwrap();
+        let room_id = room["id"].as_str().unwrap().to_string();
+        let device_one =
+            insert_canonical_device(&state, hub_key.clone(), "matter-100", "Lamp A", "", "");
+        let device_two = insert_canonical_device(&state, hub_key, "matter-101", "Lamp B", "", "");
+
+        do_canonical_assign_room(&state, &device_one, Some(&room_id)).unwrap();
+        do_canonical_assign_room(&state, &device_two, Some(&room_id)).unwrap();
+
+        let (first_id, second_id) = {
+            let state = state.lock().unwrap();
+            let one = state.canonical_registry.get(&device_one).unwrap();
+            let two = state.canonical_registry.get(&device_two).unwrap();
+            if one.name.contains(" 1 ") {
+                (one.id.clone(), two.id.clone())
+            } else {
+                (two.id.clone(), one.id.clone())
+            }
+        };
+        assert!(state
+            .lock()
+            .unwrap()
+            .canonical_registry
+            .get(&second_id)
+            .unwrap()
+            .name
+            .contains(" 2 "));
+
+        do_device_hard_remove(&state, &first_id, None).unwrap();
+
+        let state = state.lock().unwrap();
+        assert!(state.canonical_registry.get(&first_id).is_none());
+        assert!(state
+            .canonical_registry
+            .get(&second_id)
+            .unwrap()
+            .name
+            .contains(" 1 "));
     }
 
     #[test]

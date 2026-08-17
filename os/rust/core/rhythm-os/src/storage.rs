@@ -2053,6 +2053,7 @@ impl Storage for FileStorage {
             "topology.json",
             "commissioning_wifi.json",
             "auth.json",
+            "support_bundle_jobs.json",
         ] {
             self.remove_if_exists(name)?;
         }
@@ -2379,9 +2380,11 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
         }
     }
 
+    let mut hub_credentials_loaded = false;
     if let Some(storage) = s.storage.as_ref() {
         match storage.load_all_hub_credentials() {
             Ok(all_creds) => {
+                hub_credentials_loaded = true;
                 for creds in all_creds {
                     info!(target: "sys", "Loaded hub credentials: type={:?}, addr={}", creds.hub_type, creds.address);
                     if let Some(key) = creds.hub_key() {
@@ -2398,6 +2401,7 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
     let authority_storage = s.storage.as_ref().cloned();
     let mut loaded_authority_snapshot = false;
     let mut loaded_legacy_authority = false;
+    let mut authority_sources_absent = false;
     s.authority_state_recovery_required = false;
     if let Some(storage) = authority_storage.as_ref() {
         let mut authority_snapshot_absent = false;
@@ -2448,9 +2452,35 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
                 Ok((Some(canonical_registry), Some(topology))) => {
                     Some((canonical_registry, topology))
                 }
-                Ok((None, None)) => None,
+                Ok((None, None)) => {
+                    authority_sources_absent = true;
+                    if s.hub_credentials.is_empty() {
+                        None
+                    } else {
+                        match (
+                            serde_json::to_value(
+                                crate::canonical::registry::CanonicalRegistry::new(),
+                            ),
+                            serde_json::to_value(crate::topology::RoomTopologyStore::legacy_empty()),
+                        ) {
+                            (Ok(canonical_registry), Ok(topology)) => {
+                                Some((canonical_registry, topology))
+                            }
+                            (canonical_registry, topology) => {
+                                s.authority_state_recovery_required = true;
+                                warn!(
+                                    target: "sys",
+                                    "Failed to construct credentials-only legacy authority state: canonical_registry={:?}, topology={:?}",
+                                    canonical_registry.err(),
+                                    topology.err()
+                                );
+                                None
+                            }
+                        }
+                    }
+                }
                 Ok((Some(canonical_registry), None)) => {
-                    match serde_json::to_value(crate::topology::RoomTopologyStore::new()) {
+                    match serde_json::to_value(crate::topology::RoomTopologyStore::legacy_empty()) {
                         Ok(topology) => Some((canonical_registry, topology)),
                         Err(error) => {
                             s.authority_state_recovery_required = true;
@@ -2520,6 +2550,18 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
         }
     }
 
+    let configured_hub_keys = s.hub_credentials.keys().cloned().collect::<Vec<_>>();
+    let external_automation_migration = s
+        .topology
+        .migrate_legacy_external_room_automation_policy(&configured_hub_keys);
+    if external_automation_migration.changed() {
+        info!(
+            target: "sys",
+            "Migrated legacy Hue room automation policy: grandfathered_hue_rooms={}",
+            external_automation_migration.grandfathered_hue_rooms
+        );
+    }
+
     let topology_migration = s
         .topology
         .migrate_legacy_light_room_bindings(&mut s.canonical_registry);
@@ -2535,10 +2577,25 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
     // A successful legacy load is migrated only after both files have been
     // considered and any legacy light-room bindings have moved. Likewise, a
     // migration of a valid combined snapshot is committed as one new record.
-    // If every source was absent/invalid, leave the evidence untouched rather
-    // than replacing it with defaults.
-    let should_persist_authority_migration =
-        loaded_legacy_authority || (loaded_authority_snapshot && topology_migration.changed());
+    // Invalid sources remain untouched rather than being replaced by defaults.
+    // Persist an explicit version-1 empty authority snapshot for a genuinely
+    // fresh installation. That commit must predate pairing credentials: if a
+    // later pairing is interrupted after its credential write, the next boot
+    // can distinguish the new unreviewed bridge from credentials left by a
+    // pre-policy installation. Failed credential or authority reads are not
+    // absence evidence and must never initialize over the files involved.
+    let should_initialize_fresh_authority = authority_sources_absent
+        && hub_credentials_loaded
+        && s.hub_credentials.is_empty()
+        && !s.authority_state_recovery_required;
+    if should_initialize_fresh_authority {
+        info!(target: "sys", "Initializing fresh versioned authority state");
+    }
+
+    let should_persist_authority_migration = loaded_legacy_authority
+        || should_initialize_fresh_authority
+        || (loaded_authority_snapshot
+            && (topology_migration.changed() || external_automation_migration.changed()));
     if should_persist_authority_migration {
         if let Some(storage) = authority_storage.as_ref() {
             let migration_commit = (|| -> Result<()> {
@@ -2752,6 +2809,7 @@ mod tests {
         saved_canonical_registry: Arc<Mutex<Vec<Value>>>,
         topology: Option<Value>,
         saved_topology: Arc<Mutex<Vec<Value>>>,
+        hub_credentials: Vec<HubCredentials>,
         authority_state_absent: bool,
         fail_save_authority_state: bool,
     }
@@ -2797,7 +2855,7 @@ mod tests {
         }
 
         fn load_all_hub_credentials(&self) -> Result<Vec<HubCredentials>> {
-            Ok(Vec::new())
+            Ok(self.hub_credentials.clone())
         }
 
         fn save_all_hub_credentials(&self, _creds: &[HubCredentials]) -> Result<()> {
@@ -3412,6 +3470,61 @@ mod tests {
     }
 
     #[test]
+    fn load_persisted_state_grandfathers_hue_bridge_configured_before_consent() {
+        use crate::topology::{DiscoveredTopologyRoom, ExternalRoomAutomationOwner, SyncAction};
+
+        let address = "192.168.1.10";
+        let hub_key = HubKey::new(crate::hub::HubType::new(crate::hub::HubType::HUE), address);
+        let credentials = HubCredentials::new(
+            crate::hub::HubType::HUE,
+            address,
+            serde_json::json!({"username": "existing-user"}),
+        );
+        let mut legacy_topology =
+            serde_json::to_value(crate::topology::RoomTopologyStore::new()).unwrap();
+        legacy_topology
+            .as_object_mut()
+            .unwrap()
+            .remove("external_room_automation_policy_version");
+        let storage = TestStorage {
+            canonical_registry: Some(
+                serde_json::to_value(crate::canonical::registry::CanonicalRegistry::new()).unwrap(),
+            ),
+            topology: Some(legacy_topology),
+            hub_credentials: vec![credentials],
+            ..Default::default()
+        };
+        let mut app = crate::state::AppState {
+            storage: Some(Arc::new(storage)),
+            ..Default::default()
+        };
+
+        load_persisted_state(&mut app);
+
+        let action = app.topology.sync_hub_room(
+            &hub_key,
+            &DiscoveredTopologyRoom {
+                hub_room_id: "hue-office".to_string(),
+                name: "Office".to_string(),
+                control_id: "grouped-office".to_string(),
+                light_device_ids: Vec::new(),
+                canonical_device_ids: Vec::new(),
+                source_name_authoritative: true,
+            },
+        );
+        let room_id = match action {
+            SyncAction::Created { rhythm_room_id } => rhythm_room_id,
+            other => panic!("unexpected sync action: {other:?}"),
+        };
+        assert_eq!(
+            app.topology
+                .external_room_automation_owner(&room_id, &hub_key),
+            Some(ExternalRoomAutomationOwner::Rhythm)
+        );
+        assert!(app.topology.rhythm_automation_allowed_for_node(&room_id));
+    }
+
+    #[test]
     fn failed_legacy_authority_migration_commit_keeps_controller_writes_fenced() {
         let hub_key = HubKey::new(crate::hub::HubType::new("hue"), "bridge");
         let mut topology = crate::topology::RoomTopologyStore::new();
@@ -3437,7 +3550,25 @@ mod tests {
     }
 
     #[test]
-    fn load_persisted_state_migrates_legacy_hue_room_light_bindings() {
+    fn failed_fresh_authority_initialization_keeps_controller_writes_fenced() {
+        let hub_key = HubKey::new(crate::hub::HubType::new("hue"), "new-bridge");
+        let storage = TestStorage {
+            fail_save_authority_state: true,
+            ..Default::default()
+        };
+        let mut app = crate::state::AppState {
+            storage: Some(Arc::new(storage)),
+            ..Default::default()
+        };
+
+        load_persisted_state(&mut app);
+
+        assert!(app.authority_state_recovery_required);
+        assert!(!app.external_controller_authority_is_ready(&hub_key));
+    }
+
+    #[test]
+    fn load_persisted_state_preserves_user_light_move_while_filtering_legacy_bindings() {
         use crate::canonical::identity::{DiscoveredIdentity, HardwareId};
         use crate::canonical::registry::{CanonicalRegistry, ResolveResult};
         use crate::hub::HubType;
@@ -3537,14 +3668,15 @@ mod tests {
 
         assert_eq!(
             app.topology.device_parent_room_id(&drop_zone_light_id),
-            Some(drop_zone_room_id.as_str())
+            Some(stairwell_room_id.as_str()),
+            "startup migration must not replace an explicit user room move with the Hue default"
         );
         assert_eq!(
             app.topology
                 .get_device_node(&drop_zone_light_id)
                 .unwrap()
                 .placement,
-            DevicePlacement::HubDefault
+            DevicePlacement::UserOverride
         );
         assert_eq!(
             app.canonical_registry
@@ -3552,7 +3684,8 @@ mod tests {
                 .unwrap()
                 .room_id
                 .as_deref(),
-            Some(drop_zone_room_id.as_str())
+            Some(stairwell_room_id.as_str()),
+            "canonical room authority must survive the same restart boundary as topology"
         );
 
         let stairwell_room = app
@@ -4321,6 +4454,181 @@ mod tests {
             assert!(loaded.can_restore_external_controller());
             assert!(!loaded.can_connect());
             assert!(app.authority_state_recovery_required);
+            cleanup(&path);
+        }
+
+        fn load_file_backed_app(storage: Arc<FileStorage>) -> crate::state::AppState {
+            let mut app = crate::state::AppState {
+                storage: Some(storage),
+                ..Default::default()
+            };
+            load_persisted_state(&mut app);
+            app
+        }
+
+        fn discover_hue_room(
+            app: &mut crate::state::AppState,
+            hub_key: &HubKey,
+            native_room_id: &str,
+        ) -> String {
+            use crate::topology::{DiscoveredTopologyRoom, SyncAction};
+
+            match app.topology.sync_hub_room(
+                hub_key,
+                &DiscoveredTopologyRoom {
+                    hub_room_id: native_room_id.to_string(),
+                    name: format!("Room {native_room_id}"),
+                    control_id: format!("grouped-{native_room_id}"),
+                    light_device_ids: Vec::new(),
+                    canonical_device_ids: Vec::new(),
+                    source_name_authoritative: true,
+                },
+            ) {
+                SyncAction::Created { rhythm_room_id } => rhythm_room_id,
+                other => panic!("unexpected sync action: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn credentials_only_legacy_hue_state_is_grandfathered_across_two_restarts() {
+            use crate::topology::ExternalRoomAutomationOwner;
+
+            let (storage, path) = temp_storage();
+            let address = "192.0.2.20";
+            let hub_key = HubKey::new(crate::hub::HubType::new(crate::hub::HubType::HUE), address);
+            storage
+                .save_all_hub_credentials(&[HubCredentials::new(
+                    crate::hub::HubType::HUE,
+                    address,
+                    serde_json::json!({"username": "existing-user"}),
+                )])
+                .unwrap();
+            let storage = Arc::new(storage);
+
+            let first_restart = load_file_backed_app(storage.clone());
+            assert!(!first_restart.authority_state_recovery_required);
+            assert_eq!(
+                first_restart
+                    .topology
+                    .external_room_automation_owner("future-room", &hub_key),
+                Some(ExternalRoomAutomationOwner::Rhythm)
+            );
+            assert!(path.join("authority_state.json").exists());
+            drop(first_restart);
+
+            let mut second_restart = load_file_backed_app(storage.clone());
+            assert!(!second_restart.authority_state_recovery_required);
+            let room_id = discover_hue_room(&mut second_restart, &hub_key, "legacy-office");
+            assert_eq!(
+                second_restart
+                    .topology
+                    .external_room_automation_owner(&room_id, &hub_key),
+                Some(ExternalRoomAutomationOwner::Rhythm)
+            );
+            assert!(second_restart
+                .topology
+                .rhythm_automation_allowed_for_node(&room_id));
+            cleanup(&path);
+        }
+
+        #[test]
+        fn canonical_only_legacy_hue_state_is_grandfathered_across_two_restarts() {
+            use crate::topology::ExternalRoomAutomationOwner;
+
+            let (storage, path) = temp_storage();
+            let address = "192.0.2.21";
+            let hub_key = HubKey::new(crate::hub::HubType::new(crate::hub::HubType::HUE), address);
+            storage
+                .save_all_hub_credentials(&[HubCredentials::new(
+                    crate::hub::HubType::HUE,
+                    address,
+                    serde_json::json!({"username": "existing-user"}),
+                )])
+                .unwrap();
+            storage
+                .save_canonical_registry(
+                    &serde_json::to_value(crate::canonical::registry::CanonicalRegistry::new())
+                        .unwrap(),
+                )
+                .unwrap();
+            let storage = Arc::new(storage);
+
+            let first_restart = load_file_backed_app(storage.clone());
+            assert!(!first_restart.authority_state_recovery_required);
+            assert_eq!(
+                first_restart
+                    .topology
+                    .external_room_automation_owner("future-room", &hub_key),
+                Some(ExternalRoomAutomationOwner::Rhythm)
+            );
+            assert!(path.join("authority_state.json").exists());
+            drop(first_restart);
+
+            let mut second_restart = load_file_backed_app(storage.clone());
+            assert!(!second_restart.authority_state_recovery_required);
+            let room_id = discover_hue_room(&mut second_restart, &hub_key, "legacy-bedroom");
+            assert_eq!(
+                second_restart
+                    .topology
+                    .external_room_automation_owner(&room_id, &hub_key),
+                Some(ExternalRoomAutomationOwner::Rhythm)
+            );
+            assert!(second_restart
+                .topology
+                .rhythm_automation_allowed_for_node(&room_id));
+            cleanup(&path);
+        }
+
+        #[test]
+        fn fresh_authority_snapshot_prevents_interrupted_new_pairing_from_being_grandfathered() {
+            let (storage, path) = temp_storage();
+            let storage = Arc::new(storage);
+            let address = "192.0.2.22";
+            let hub_key = HubKey::new(crate::hub::HubType::new(crate::hub::HubType::HUE), address);
+
+            let fresh_start = load_file_backed_app(storage.clone());
+            assert!(!fresh_start.authority_state_recovery_required);
+            assert!(path.join("authority_state.json").exists());
+            assert_eq!(
+                fresh_start
+                    .topology
+                    .external_room_automation_owner("future-room", &hub_key),
+                None
+            );
+            drop(fresh_start);
+
+            // Model the durability window where a newly paired bridge's
+            // credentials commit but discovery/topology never does.
+            storage
+                .save_all_hub_credentials(&[HubCredentials::new(
+                    crate::hub::HubType::HUE,
+                    address,
+                    serde_json::json!({"username": "new-user"}),
+                )])
+                .unwrap();
+
+            let first_restart = load_file_backed_app(storage.clone());
+            assert!(!first_restart.authority_state_recovery_required);
+            assert_eq!(
+                first_restart
+                    .topology
+                    .external_room_automation_owner("future-room", &hub_key),
+                None
+            );
+            drop(first_restart);
+
+            let mut second_restart = load_file_backed_app(storage.clone());
+            assert!(!second_restart.authority_state_recovery_required);
+            let room_id = discover_hue_room(&mut second_restart, &hub_key, "new-office");
+            assert_eq!(
+                second_restart
+                    .topology
+                    .external_room_automation_owner(&room_id, &hub_key),
+                None
+            );
+            assert!(!second_restart
+                .topology
+                .rhythm_automation_allowed_for_node(&room_id));
             cleanup(&path);
         }
 
@@ -5229,6 +5537,7 @@ mod tests {
             std::fs::create_dir_all(path.join("cloudflared")).unwrap();
             std::fs::write(path.join("cloudflared").join("connector_token"), "secret").unwrap();
             std::fs::write(path.join("cloudflared").join("hostname"), "host").unwrap();
+            std::fs::write(path.join("support_bundle_jobs.json"), "secret job").unwrap();
 
             storage.clear_remote_access_config().unwrap();
             assert!(storage.load_remote_access_config().unwrap().is_none());
@@ -5457,6 +5766,7 @@ mod tests {
                 "auth.json",
                 "activity_cloud.json",
                 "remote_access.json",
+                "support_bundle_jobs.json",
                 "cloudflared/connector_token",
                 "cloudflared/hostname",
                 "hub_registry_hue_192_168_1_2.json",

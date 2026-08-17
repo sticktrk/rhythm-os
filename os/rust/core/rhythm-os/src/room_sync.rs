@@ -185,19 +185,23 @@ pub fn sync_from_hub_for_key(
         .map_err(|_| anyhow::anyhow!("lock"))?
         .external_topology_transaction_lock
         .clone();
-    let _transaction = transaction_lock
-        .lock()
-        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
-    let Some(_guard) = try_acquire_hub_sync_guard(state, hub_key)? else {
-        debug!(target: "room_sync", "Skipping sync for {}: already in progress", hub_key);
-        return Ok(SyncReport::default());
+    let report = {
+        let _transaction = transaction_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
+        let Some(_guard) = try_acquire_hub_sync_guard(state, hub_key)? else {
+            debug!(target: "room_sync", "Skipping sync for {}: already in progress", hub_key);
+            return Ok(SyncReport::default());
+        };
+        sync_from_hub_for_key_acquired(
+            state,
+            hub_key,
+            discover_devices,
+            SyncFailurePolicy::BestEffort,
+        )?
     };
-    sync_from_hub_for_key_acquired(
-        state,
-        hub_key,
-        discover_devices,
-        SyncFailurePolicy::BestEffort,
-    )
+    reconcile_external_controller_authority_after_sync(state, hub_key)?;
+    Ok(report)
 }
 
 /// Build the complete desired graph required before taking authority over an
@@ -247,16 +251,40 @@ pub fn sync_from_hub_for_key_wait(
         .map_err(|_| anyhow::anyhow!("lock"))?
         .external_topology_transaction_lock
         .clone();
-    let _transaction = transaction_lock
-        .lock()
-        .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
-    let _guard = acquire_hub_sync_guard_with_timeout(state, hub_key, timeout)?;
-    sync_from_hub_for_key_acquired(
-        state,
-        hub_key,
-        discover_devices,
-        SyncFailurePolicy::BestEffort,
-    )
+    let report = {
+        let _transaction = transaction_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
+        let _guard = acquire_hub_sync_guard_with_timeout(state, hub_key, timeout)?;
+        sync_from_hub_for_key_acquired(
+            state,
+            hub_key,
+            discover_devices,
+            SyncFailurePolicy::BestEffort,
+        )?
+    };
+    reconcile_external_controller_authority_after_sync(state, hub_key)?;
+    Ok(report)
+}
+
+/// A room discovered after prior all-Rhythm consent invalidates that complete
+/// consent set. Reconcile only after dropping the topology transaction guard:
+/// the integration callback acquires that same guard around capture/release.
+fn reconcile_external_controller_authority_after_sync(
+    state: &SharedState,
+    hub_key: &HubKey,
+) -> Result<()> {
+    let callback = {
+        let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        if state.external_controller_initial_sync_is_pending(hub_key) {
+            return Ok(());
+        }
+        state.reconcile_external_controller_authority_fn.clone()
+    };
+    if let Some(callback) = callback {
+        callback(state, hub_key)?;
+    }
+    Ok(())
 }
 
 fn sync_from_hub_for_key_acquired(
@@ -318,16 +346,19 @@ fn sync_with_discovery(
     // Phase 2: Diff and apply source rooms into registry + topology only.
     // Runtime materialization is an explicit final sync phase.
     // ========================================================================
-    let current_room_ids = {
-        let registry = extract_registry_for(state, hub_key);
-        let room_ids: HashSet<String> = registry
-            .and_then(|r| {
-                r.lock()
-                    .ok()
-                    .map(|reg| reg.rooms().into_iter().map(|r| r.id).collect())
-            })
-            .unwrap_or_default();
-        room_ids
+    let mut complete_room_graph_applied = true;
+    let current_room_ids = match extract_registry_for(state, hub_key) {
+        Some(registry) => match registry.lock() {
+            Ok(registry) => registry.rooms().into_iter().map(|room| room.id).collect(),
+            Err(_) => {
+                complete_room_graph_applied = false;
+                HashSet::new()
+            }
+        },
+        None => {
+            complete_room_graph_applied = false;
+            HashSet::new()
+        }
     };
 
     let discovered_ids: HashSet<String> = discovered_rooms.iter().map(|r| r.id.clone()).collect();
@@ -367,6 +398,7 @@ fn sync_with_discovery(
                         format!("Failed to apply discovered room on {}", hub_key)
                     });
                 }
+                complete_room_graph_applied = false;
                 warn!(target: "room_sync", "Failed to set room '{}': {}", room.name, e);
             }
         }
@@ -398,6 +430,7 @@ fn sync_with_discovery(
                         hub_key
                     );
                 }
+                complete_room_graph_applied = false;
                 warn!(target: "room_sync", "No hub registry available for stale room '{}'", room_id);
                 continue;
             };
@@ -410,6 +443,7 @@ fn sync_with_discovery(
                     if failure_policy.fail_closed() {
                         anyhow::bail!("Failed to apply stale-room removal on {}", hub_key);
                     }
+                    complete_room_graph_applied = false;
                     warn!(target: "room_sync", "Failed to lock hub registry for stale room '{}'", room_id);
                 }
             }
@@ -437,6 +471,44 @@ fn sync_with_discovery(
                 target: "room_sync",
                 "Removed stale source bindings for {} topology rooms on {}",
                 removed_bindings.len(),
+                hub_key
+            );
+        }
+    }
+
+    if complete_room_graph_applied && !discovered_rooms.is_empty() {
+        let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        complete_room_graph_applied = discovered_rooms
+            .iter()
+            .all(|room| state.topology.find_by_hub_room(hub_key, &room.id).is_some());
+    }
+
+    // A legacy bridge marker exists only to carry pre-policy approval through
+    // its first complete room discovery. Convert that temporary approval into
+    // explicit per-room decisions before controller reconciliation, then
+    // commit the marker retirement with the ordinary authority-state writer.
+    // Any best-effort room apply failure retains the marker for a later retry.
+    if complete_room_graph_applied {
+        let materialized = {
+            let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            let topology_before = s.topology.clone();
+            if !s
+                .topology
+                .materialize_grandfathered_external_room_automation_decisions(hub_key)
+            {
+                false
+            } else if let Err(error) = commands::save_topology(&s) {
+                s.topology = topology_before;
+                return Err(error)
+                    .context("Failed to durably materialize legacy Hue room automation authority");
+            } else {
+                true
+            }
+        };
+        if materialized {
+            info!(
+                target: "room_sync",
+                "Materialized legacy Hue room automation authority for {}",
                 hub_key
             );
         }
@@ -518,6 +590,14 @@ fn sync_with_discovery(
             .iter()
             .map(|identity| identity.native_id.clone())
             .collect();
+        let discovered_endpoint_capabilities: HashMap<String, serde_json::Value> = identities
+            .iter()
+            .filter_map(|identity| {
+                discovery
+                    .endpoint_capabilities(&identity.native_id)
+                    .map(|capabilities| (identity.native_id.clone(), capabilities))
+            })
+            .collect();
         let has_typed_light_identities = identities
             .iter()
             .any(|identity| identity.device_type == DeviceType::Light);
@@ -596,6 +676,22 @@ fn sync_with_discovery(
                         ResolveResult::Queued { .. } => continue,
                         ResolveResult::Created { canonical_id } => (canonical_id, true),
                     };
+                    if let Some(capabilities) =
+                        discovered_endpoint_capabilities.get(&identity.native_id)
+                    {
+                        if let Some(endpoint) = s
+                            .canonical_registry
+                            .get_mut(&canonical_id)
+                            .and_then(|device| {
+                                device.endpoints.iter_mut().find(|endpoint| {
+                                    endpoint.hub_key == canonical_hub_key
+                                        && endpoint.native_id == identity.native_id
+                                })
+                            })
+                        {
+                            endpoint.capabilities = Some(capabilities.clone());
+                        }
+                    }
                     if created_canonical_device && identity.device_type == DeviceType::Light {
                         new_light_canonical_ids.insert(canonical_id.clone());
                     }
@@ -1363,6 +1459,41 @@ mod tests {
     }
 
     #[test]
+    fn completed_refresh_reconciles_authority_after_the_topology_guard_is_released() {
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        let hub_key = HubKey::new(HubType::new(HubType::HUE), "bridge-refresh");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        {
+            let calls = calls.clone();
+            state
+                .lock()
+                .unwrap()
+                .reconcile_external_controller_authority_fn = Some(Arc::new(move |state, _| {
+                let transaction = state
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("lock"))?
+                    .external_topology_transaction_lock
+                    .clone();
+                let _guard = transaction
+                    .try_lock()
+                    .map_err(|_| anyhow::anyhow!("topology guard was still held after refresh"))?;
+                calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }));
+        }
+
+        reconcile_external_controller_authority_after_sync(&state, &hub_key).unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        state
+            .lock()
+            .unwrap()
+            .mark_external_controller_initial_sync_pending(&hub_key);
+        reconcile_external_controller_authority_after_sync(&state, &hub_key).unwrap();
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn required_sync_times_out_instead_of_reporting_busy_noop_as_success() {
         let state: SharedState = Arc::new(Mutex::new(AppState::default()));
         let hub_key = HubKey::new(HubType::new(HubType::HUE), "bridge-busy");
@@ -1575,6 +1706,41 @@ mod tests {
         }
     }
 
+    struct CapabilityIdentityDiscovery {
+        rooms: Vec<DiscoveredRoom>,
+        identities: Vec<crate::canonical::identity::DiscoveredIdentity>,
+        endpoint_capabilities: HashMap<String, serde_json::Value>,
+    }
+
+    impl HubDiscovery for CapabilityIdentityDiscovery {
+        fn discover_rooms(&self) -> Result<Vec<DiscoveredRoom>> {
+            Ok(self
+                .rooms
+                .iter()
+                .map(|room| DiscoveredRoom {
+                    id: room.id.clone(),
+                    name: room.name.clone(),
+                    grouped_light_id: room.grouped_light_id.clone(),
+                    device_ids: room.device_ids.clone(),
+                })
+                .collect())
+        }
+
+        fn discover_devices(&self) -> Result<Vec<DiscoveredDevice>> {
+            Ok(Vec::new())
+        }
+
+        fn discover_identities(
+            &self,
+        ) -> Result<Vec<crate::canonical::identity::DiscoveredIdentity>> {
+            Ok(self.identities.clone())
+        }
+
+        fn endpoint_capabilities(&self, native_id: &str) -> Option<serde_json::Value> {
+            self.endpoint_capabilities.get(native_id).cloned()
+        }
+    }
+
     fn make_identity(
         native_id: &str,
         hub_room_id: &str,
@@ -1616,6 +1782,199 @@ mod tests {
         );
         let state: SharedState = Arc::new(Mutex::new(app));
         (hub_key, state)
+    }
+
+    #[test]
+    fn sync_persists_normalized_endpoint_capabilities_with_canonical_identity() {
+        let (hub_key, state) = install_test_hub();
+        let discovery = CapabilityIdentityDiscovery {
+            rooms: vec![DiscoveredRoom {
+                id: "future-room".to_string(),
+                name: "Future Room".to_string(),
+                grouped_light_id: "future-group".to_string(),
+                device_ids: vec!["future-light".to_string()],
+            }],
+            identities: vec![make_identity(
+                "future-light",
+                "future-room",
+                "Future Room",
+                "Future Hue light",
+                DeviceType::Light,
+            )],
+            endpoint_capabilities: HashMap::from([(
+                "future-light".to_string(),
+                serde_json::json!({
+                    "light_capabilities": {
+                        "color_temperature": {
+                            "min_kelvin": 2000,
+                            "max_kelvin": 6536
+                        }
+                    }
+                }),
+            )]),
+        };
+
+        sync_with_discovery(
+            &state,
+            &hub_key,
+            &discovery,
+            true,
+            SyncFailurePolicy::BestEffort,
+        )
+        .unwrap();
+
+        let state = state.lock().unwrap();
+        let device = state
+            .canonical_registry
+            .find_by_native_id(&hub_key, "future-light")
+            .expect("identity should resolve");
+        let endpoint = device
+            .endpoints
+            .iter()
+            .find(|endpoint| endpoint.hub_key == hub_key)
+            .expect("Hue endpoint should be retained");
+        assert_eq!(
+            endpoint
+                .capabilities
+                .as_ref()
+                .and_then(|value| value.pointer("/light_capabilities/color_temperature")),
+            Some(&serde_json::json!({
+                "min_kelvin": 2000,
+                "max_kelvin": 6536
+            }))
+        );
+        let serialized = serde_json::to_string(&state.canonical_registry).unwrap();
+        drop(state);
+
+        let mut restored: crate::canonical::registry::CanonicalRegistry =
+            serde_json::from_str(&serialized).unwrap();
+        restored.rebuild_indices();
+        assert_eq!(
+            restored
+                .find_by_native_id(&hub_key, "future-light")
+                .and_then(|device| {
+                    device
+                        .endpoints
+                        .iter()
+                        .find(|endpoint| endpoint.hub_key == hub_key)
+                })
+                .and_then(|endpoint| endpoint.capabilities.as_ref())
+                .and_then(|value| value.pointer("/light_capabilities/color_temperature")),
+            Some(&serde_json::json!({
+                "min_kelvin": 2000,
+                "max_kelvin": 6536
+            })),
+            "normalized Hue capabilities must survive authority-state restart"
+        );
+    }
+
+    #[test]
+    fn complete_room_discovery_materializes_legacy_hue_authority_without_device_discovery() {
+        let (hub_key, state) = install_test_hub();
+        {
+            let mut state = state.lock().unwrap();
+            state.topology = crate::topology::RoomTopologyStore::legacy_empty();
+            state
+                .topology
+                .migrate_legacy_external_room_automation_policy(std::slice::from_ref(&hub_key));
+        }
+        let discovery = MockDiscovery {
+            rooms: vec![DiscoveredRoom {
+                id: "hue-office".to_string(),
+                name: "Office".to_string(),
+                grouped_light_id: "grouped-office".to_string(),
+                device_ids: Vec::new(),
+            }],
+            devices: Vec::new(),
+        };
+
+        sync_with_discovery(
+            &state,
+            &hub_key,
+            &discovery,
+            false,
+            SyncFailurePolicy::BestEffort,
+        )
+        .unwrap();
+
+        let mut state = state.lock().unwrap();
+        let room_id = state
+            .topology
+            .find_by_hub_room(&hub_key, "hue-office")
+            .expect("discovered Hue room should be bound")
+            .id
+            .clone();
+        assert_eq!(
+            state
+                .topology
+                .external_room_automation_owner(&room_id, &hub_key),
+            Some(crate::topology::ExternalRoomAutomationOwner::Rhythm)
+        );
+        assert!(state
+            .topology
+            .external_hub_has_full_rhythm_consent(&hub_key));
+        assert!(
+            !state
+                .topology
+                .materialize_grandfathered_external_room_automation_decisions(&hub_key),
+            "the sync should already have retired the bootstrap marker"
+        );
+
+        let later = state.topology.sync_hub_room(
+            &hub_key,
+            &DiscoveredTopologyRoom {
+                hub_room_id: "hue-later".to_string(),
+                name: "Later".to_string(),
+                control_id: "grouped-later".to_string(),
+                light_device_ids: Vec::new(),
+                canonical_device_ids: Vec::new(),
+                source_name_authoritative: true,
+            },
+        );
+        assert_eq!(
+            state
+                .topology
+                .external_room_automation_owner(later.rhythm_room_id(), &hub_key),
+            None
+        );
+    }
+
+    #[test]
+    fn failed_best_effort_room_apply_retains_legacy_hue_marker() {
+        let hub_key = HubKey::new(HubType::new(HubType::HUE), "missing-hub");
+        let mut app = AppState {
+            topology: crate::topology::RoomTopologyStore::legacy_empty(),
+            ..Default::default()
+        };
+        app.topology
+            .migrate_legacy_external_room_automation_policy(std::slice::from_ref(&hub_key));
+        let state: SharedState = Arc::new(Mutex::new(app));
+        let discovery = MockDiscovery {
+            rooms: vec![DiscoveredRoom {
+                id: "hue-office".to_string(),
+                name: "Office".to_string(),
+                grouped_light_id: "grouped-office".to_string(),
+                device_ids: Vec::new(),
+            }],
+            devices: Vec::new(),
+        };
+
+        sync_with_discovery(
+            &state,
+            &hub_key,
+            &discovery,
+            false,
+            SyncFailurePolicy::BestEffort,
+        )
+        .unwrap();
+
+        let state = state.lock().unwrap();
+        assert!(state.topology.references_hub_key(&hub_key));
+        assert!(!state.topology.structurally_references_hub_key(&hub_key));
+        assert!(state
+            .topology
+            .find_by_hub_room(&hub_key, "hue-office")
+            .is_none());
     }
 
     /// Issue #302 field reproducer: legacy Hue authority takeover can leave

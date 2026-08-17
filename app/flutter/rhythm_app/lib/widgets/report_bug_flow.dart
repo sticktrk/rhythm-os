@@ -4,7 +4,11 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show RhythmApiException, RhythmDebugBundle;
+    show
+        RhythmApiException,
+        RhythmCapabilities,
+        RhythmDebugBundle,
+        RhythmFeature;
 import 'package:uuid/uuid.dart';
 
 import '../providers/server_sync_provider.dart';
@@ -179,6 +183,7 @@ Future<void> showSupportReportFlow(
   final submissionId = _supportReportUuid.v4();
   final journeyId = 'support-report-$submissionId';
   var bundleScope = serverHub == null ? 'app_only' : 'server_and_app';
+  var collectingInBackground = false;
   unawaited(
     AnalyticsService().logSupportReportAttempted(
       journeyId: journeyId,
@@ -209,14 +214,11 @@ Future<void> showSupportReportFlow(
         debugBundleReceiveTimeout: _serverDebugBundleReceiveTimeout,
       );
 
-      // Preferred: the device uploads the bundle straight to storage, so a
-      // large bundle never has to fit through the app's download window.
-      DebugBundleSubmission? directSubmission;
-      RhythmDebugBundle? bundle;
-      String? bundleFailure;
-      try {
-        final direct =
-            await DebugBundleSubmissionService.instance.submitViaDeviceUpload(
+      final supportsServerQueue =
+          supportsServerManagedSupportReport(syncProvider.serverCapabilities);
+      if (supportsServerQueue) {
+        submission =
+            await DebugBundleSubmissionService.instance.submitViaServerQueue(
           submissionId: submissionId,
           reportKind: request.kind,
           serverHub: serverHub,
@@ -225,56 +227,76 @@ Future<void> showSupportReportFlow(
           serverPlatformContext: serverPlatformContext,
           summary: request.summary,
         );
-        directSubmission = direct.submission;
-        // Older firmware ignores the upload request and returns the bundle
-        // bytes — reuse them below instead of downloading twice.
-        bundle = direct.legacyBundle;
-      } catch (error) {
-        debugPrint(
-          'SupportReportFlow: device-direct upload unavailable from '
-          '${resolved.baseUrl}, falling back to download: $error',
-        );
-      }
-
-      if (directSubmission == null && bundle == null) {
+        bundleScope = 'server_async';
+        collectingInBackground = true;
+      } else {
+        // Previous-floor servers keep the synchronous direct upload/download
+        // contract. Only an explicitly advertised capability enters the path
+        // that tells the user it is safe to close the app.
+        DebugBundleSubmission? directSubmission;
+        RhythmDebugBundle? bundle;
+        String? bundleFailure;
         try {
-          bundle = await client.downloadDebugBundle();
-          bundleFailure = null;
+          final direct =
+              await DebugBundleSubmissionService.instance.submitViaDeviceUpload(
+            submissionId: submissionId,
+            reportKind: request.kind,
+            serverHub: serverHub,
+            deviceClient: client,
+            serverVersion: serverVersion,
+            serverPlatformContext: serverPlatformContext,
+            summary: request.summary,
+          );
+          directSubmission = direct.submission;
+          bundle = direct.legacyBundle;
         } catch (error) {
-          bundleFailure = _formatDebugBundleFailure(error);
           debugPrint(
-            'SupportReportFlow: server debug bundle download failed from '
-            '${resolved.baseUrl}: $bundleFailure',
+            'SupportReportFlow: device-direct upload unavailable from '
+            '${resolved.baseUrl}, falling back to download: $error',
           );
         }
-      }
 
-      if (directSubmission != null) {
-        submission = directSubmission;
-      } else if (bundle != null) {
-        submission = await DebugBundleSubmissionService.instance.submit(
-          submissionId: submissionId,
-          reportKind: request.kind,
-          serverHub: serverHub,
-          bundle: bundle,
-          serverVersion: serverVersion,
-          serverPlatformContext: serverPlatformContext,
-          summary: request.summary,
-        );
-      } else {
-        bundleScope = 'app_only_after_server_failure';
-        submission = await DebugBundleSubmissionService.instance.submitTextOnly(
-          submissionId: submissionId,
-          reportKind: request.kind,
-          summary: _summaryWithDebugBundleFailure(
+        if (directSubmission == null && bundle == null) {
+          try {
+            bundle = await client.downloadDebugBundle();
+            bundleFailure = null;
+          } catch (error) {
+            bundleFailure = _formatDebugBundleFailure(error);
+            debugPrint(
+              'SupportReportFlow: server debug bundle download failed from '
+              '${resolved.baseUrl}: $bundleFailure',
+            );
+          }
+        }
+
+        if (directSubmission != null) {
+          submission = directSubmission;
+        } else if (bundle != null) {
+          submission = await DebugBundleSubmissionService.instance.submit(
+            submissionId: submissionId,
+            reportKind: request.kind,
+            serverHub: serverHub,
+            bundle: bundle,
+            serverVersion: serverVersion,
+            serverPlatformContext: serverPlatformContext,
             summary: request.summary,
-            endpoint: resolved.baseUrl,
-            detail: bundleFailure,
-          ),
-          serverHub: serverHub,
-          serverVersion: serverVersion,
-          serverPlatformContext: serverPlatformContext,
-        );
+          );
+        } else {
+          bundleScope = 'app_only_after_server_failure';
+          submission =
+              await DebugBundleSubmissionService.instance.submitTextOnly(
+            submissionId: submissionId,
+            reportKind: request.kind,
+            summary: _summaryWithDebugBundleFailure(
+              summary: request.summary,
+              endpoint: resolved.baseUrl,
+              detail: bundleFailure,
+            ),
+            serverHub: serverHub,
+            serverVersion: serverVersion,
+            serverPlatformContext: serverPlatformContext,
+          );
+        }
       }
     } else {
       submission = await DebugBundleSubmissionService.instance.submitTextOnly(
@@ -289,7 +311,7 @@ Future<void> showSupportReportFlow(
         journeyId: journeyId,
         reportKind: request.kind.name,
         bundleScope: bundleScope,
-        outcome: 'succeeded',
+        outcome: collectingInBackground ? 'accepted' : 'succeeded',
       ),
     );
     if (!context.mounted) return;
@@ -298,6 +320,7 @@ Future<void> showSupportReportFlow(
       context,
       submission.referenceCode,
       request.kind,
+      collectingInBackground: collectingInBackground,
     );
   } catch (error) {
     unawaited(
@@ -364,8 +387,9 @@ void _showSupportReportProgress(
 Future<void> _showSupportReportSubmitted(
   BuildContext context,
   String referenceCode,
-  SupportReportKind kind,
-) {
+  SupportReportKind kind, {
+  required bool collectingInBackground,
+}) {
   return showDialog<void>(
     context: context,
     builder: (ctx) => AlertDialog(
@@ -388,9 +412,7 @@ Future<void> _showSupportReportSubmitted(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            kind == SupportReportKind.bug
-                ? 'Support can now review this report.'
-                : 'The product team can now review this request.',
+            _submittedMessage(kind, collectingInBackground),
             style: const TextStyle(
               color: CelestialColors.textSecondary,
               fontSize: 14,
@@ -419,6 +441,33 @@ Future<void> _showSupportReportSubmitted(
       ],
     ),
   );
+}
+
+@visibleForTesting
+String supportReportSubmittedMessageForTesting({
+  required SupportReportKind kind,
+  required bool collectingInBackground,
+}) {
+  return _submittedMessage(kind, collectingInBackground);
+}
+
+String _submittedMessage(
+  SupportReportKind kind,
+  bool collectingInBackground,
+) {
+  if (collectingInBackground) {
+    return 'RhythmServer is collecting the private debug bundle in the '
+        'background. You can close the app.';
+  }
+  return kind == SupportReportKind.bug
+      ? 'Support can now review this report.'
+      : 'The product team can now review this request.';
+}
+
+@visibleForTesting
+bool supportsServerManagedSupportReport(RhythmCapabilities? capabilities) {
+  return capabilities?.supportsFeature(RhythmFeature.asyncDebugBundleUpload) ??
+      false;
 }
 
 String _formatVersion(String version) {

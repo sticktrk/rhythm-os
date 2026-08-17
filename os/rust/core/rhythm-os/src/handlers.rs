@@ -543,6 +543,24 @@ pub fn handle_matter_bulb_test_report(state: &SharedState, body: &Value) -> ApiR
     }
 }
 
+pub fn handle_get_matter_setup_code(state: &SharedState, device_id: &str) -> ApiResponse {
+    let loader = match state.lock() {
+        Ok(state) => state.load_pairing_recovery_fn.clone(),
+        Err(_) => return ApiResponse::server_error("lock"),
+    };
+    let Some(loader) = loader else {
+        return ApiResponse::server_error("Matter setup code recovery is unavailable");
+    };
+    match loader(state, "matter", device_id) {
+        Ok(Some(secret)) => match serde_json::to_string(&secret) {
+            Ok(json) => ApiResponse::json_ok(json),
+            Err(error) => ApiResponse::server_error(error),
+        },
+        Ok(None) => ApiResponse::not_found("No saved Matter setup code is available"),
+        Err(error) => ApiResponse::server_error(error),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
@@ -2029,6 +2047,42 @@ pub fn handle_put_hub_credentials(state: &SharedState, body: &Value) -> ApiRespo
     }
 }
 
+pub fn handle_get_hue_authority(state: &SharedState) -> ApiResponse {
+    match commands::build_hue_authority(state)
+        .and_then(|response| serde_json::to_string(&response).map_err(anyhow::Error::from))
+    {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(error) => ApiResponse::server_error(error),
+    }
+}
+
+pub fn handle_put_hue_authority(state: &SharedState, body: &Value) -> ApiResponse {
+    let request =
+        match serde_json::from_value::<crate::api_types::HueAuthorityUpdateRequest>(body.clone()) {
+            Ok(request) => request,
+            Err(error) => {
+                return ApiResponse::bad_request(&format!("Invalid Hue authority request: {error}"))
+            }
+        };
+    match commands::do_hue_authority_update(state, request)
+        .and_then(|response| serde_json::to_string(&response).map_err(anyhow::Error::from))
+    {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(error) if error.to_string().contains("changed while") => {
+            ApiResponse::conflict(&error.to_string())
+        }
+        Err(error)
+            if error.to_string().contains("required")
+                || error.to_string().contains("not configured")
+                || error.to_string().contains("stale or incomplete")
+                || error.to_string().contains("No rooms") =>
+        {
+            ApiResponse::bad_request(&error.to_string())
+        }
+        Err(error) => ApiResponse::server_error(error),
+    }
+}
+
 /// Disconnect hub(s). If `hub_type` and `address` are provided, disconnects
 /// only that hub. Otherwise disconnects all hubs.
 pub fn handle_delete_hub(
@@ -2925,10 +2979,22 @@ pub fn handle_put_node_profile_overrides_with_precondition(
             }
             true
         }
+        (Some(server_instance_id), None) => {
+            let live_server_instance_id = match state.lock() {
+                Ok(locked) => locked.server_instance_id.clone(),
+                Err(_) => return ApiResponse::server_error("lock"),
+            };
+            if live_server_instance_id != server_instance_id {
+                return ApiResponse::conflict(
+                    "node profile override precondition failed: live server identity changed",
+                );
+            }
+            true
+        }
         (None, None) => false,
-        _ => {
+        (None, Some(_)) => {
             return ApiResponse::bad_request(
-                "Guarded node profile override writes require both expected server identity and resource hash",
+                "Guarded node profile override writes require expected server identity",
             )
         }
     };
@@ -2986,6 +3052,29 @@ pub fn handle_put_node_profile_overrides_with_precondition(
                 ..Default::default()
             }),
         });
+    }
+
+    if guarded {
+        for update in &updates {
+            let Some(expected) = update
+                .room_profile
+                .as_ref()
+                .and_then(|profile| profile.expected_effective_profile_overrides.as_ref())
+            else {
+                return ApiResponse::bad_request(
+                    "Guarded node profile override writes require expected_profile_overrides",
+                );
+            };
+            let current = match commands::effective_node_profile_overrides(state, &update.node_id) {
+                Ok(current) => current,
+                Err(error) => return ApiResponse::server_error(error),
+            };
+            if current != *expected {
+                return ApiResponse::conflict(
+                    "node profile override precondition failed: live effective overrides changed",
+                );
+            }
+        }
     }
 
     let node_ids: Vec<String> = updates
@@ -4035,8 +4124,8 @@ mod tests {
     };
     use crate::hub::{ActiveHub, HubType};
     use crate::pairing::{
-        PairedDeviceInfo, PairingRequest, PairingSession, PairingStage, PairingStatus,
-        UnpairingRequest, UnpairingResult,
+        PairedDeviceInfo, PairingRecoverySecret, PairingRequest, PairingSession, PairingStage,
+        PairingStatus, UnpairingRequest, UnpairingResult,
     };
     use crate::registry::HubDeviceRegistry;
     use crate::state::{AppState, ObservedPowerSource, ObservedPowerState, WorkItem};
@@ -4077,6 +4166,36 @@ mod tests {
         let r = ApiResponse::json_ok("{}".to_string());
         assert_eq!(r.status, 200);
         assert_eq!(r.content_type, "application/json");
+    }
+
+    #[test]
+    fn matter_setup_code_handler_returns_only_integration_owned_secret() {
+        let state = test_state();
+        state.lock().unwrap().load_pairing_recovery_fn =
+            Some(Arc::new(|_, hub_type, native_device_id| {
+                assert_eq!(hub_type, "matter");
+                assert_eq!(native_device_id, "matter-42-2");
+                Ok(Some(PairingRecoverySecret {
+                    payload_kind: "qr_code".to_string(),
+                    setup_payload: "MT:HANDLER-SECRET".to_string(),
+                    captured_at: "2026-08-11T12:00:00Z".to_string(),
+                }))
+            }));
+
+        let response = handle_get_matter_setup_code(&state, "matter-42-2");
+
+        assert_eq!(response.status, 200);
+        let json: Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(json["payload_kind"], "qr_code");
+        assert_eq!(json["setup_payload"], "MT:HANDLER-SECRET");
+        assert_eq!(json["captured_at"], "2026-08-11T12:00:00Z");
+    }
+
+    #[test]
+    fn matter_setup_code_handler_fails_closed_without_integration_callback() {
+        let response = handle_get_matter_setup_code(&test_state(), "matter-42");
+        assert_eq!(response.status, 500);
+        assert!(!response.body.contains("MT:"));
     }
 
     #[test]
@@ -6211,6 +6330,247 @@ mod tests {
     // ---- Hub credentials validation ----
 
     #[test]
+    fn hue_authority_requires_fresh_complete_room_consent_before_reconcile() {
+        let state = test_state();
+        let key = HubKey::new(HubType::new(HubType::HUE), "bridge.local");
+        let reconcile_calls = Arc::new(AtomicUsize::new(0));
+        {
+            let mut s = state.lock().unwrap();
+            let mut room = crate::topology::TopologyRoom::new("room-office", "Office");
+            room.upsert_hub_room_binding(HubRoomBinding {
+                hub_key: key.clone(),
+                hub_room_id: "hue-office".to_string(),
+                control_id: "hue-office-group".to_string(),
+                light_device_ids: Vec::new(),
+            });
+            s.topology.insert_room(room);
+            let calls = reconcile_calls.clone();
+            s.reconcile_external_controller_authority_fn = Some(Arc::new(move |state, _| {
+                // Production integration callbacks own this transaction lock.
+                // The API policy lock must be distinct or this try_lock would
+                // expose a non-reentrant deadlock.
+                let topology_transaction = state
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("lock"))?
+                    .external_topology_transaction_lock
+                    .clone();
+                let _topology_transaction = topology_transaction
+                    .try_lock()
+                    .map_err(|_| anyhow::anyhow!("topology transaction remained locked"))?;
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }));
+        }
+
+        let initial = handle_get_hue_authority(&state);
+        assert_eq!(initial.status, 200);
+        let initial: Value = serde_json::from_str(&initial.body).unwrap();
+        assert_eq!(initial["bridges"][0]["topology_sync_enabled"], false);
+        assert_eq!(initial["bridges"][0]["topology_sync_status"], "disabled");
+        assert_eq!(initial["bridges"][0]["rooms"][0]["owner"], "unreviewed");
+        let revision = initial["bridges"][0]["revision"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let hue_owned = handle_put_hue_authority(
+            &state,
+            &json!({
+                "address": "bridge.local",
+                "revision": revision,
+                "correlation_id": "hue-authority-test-1",
+                "topology_sync_enabled": true,
+                "rooms": [{"room_id": "room-office", "owner": "hue"}]
+            }),
+        );
+        assert_eq!(hue_owned.status, 200);
+        let hue_owned: Value = serde_json::from_str(&hue_owned.body).unwrap();
+        assert_eq!(hue_owned["bridges"][0]["topology_sync_enabled"], true);
+        assert_eq!(hue_owned["bridges"][0]["topology_sync_status"], "blocked");
+        assert_eq!(reconcile_calls.load(Ordering::SeqCst), 0);
+
+        let stale = handle_put_hue_authority(
+            &state,
+            &json!({
+                "address": "bridge.local",
+                "revision": revision,
+                "correlation_id": "hue-authority-test-2",
+                "rooms": [{"room_id": "room-office", "owner": "rhythm"}]
+            }),
+        );
+        assert_eq!(stale.status, 409);
+
+        let current = handle_get_hue_authority(&state);
+        let current: Value = serde_json::from_str(&current.body).unwrap();
+        let current_revision = current["bridges"][0]["revision"].as_str().unwrap();
+        let rhythm_owned = handle_put_hue_authority(
+            &state,
+            &json!({
+                "address": "bridge.local",
+                "revision": current_revision,
+                "correlation_id": "hue-authority-test-3",
+                "rooms": [{"room_id": "room-office", "owner": "rhythm"}]
+            }),
+        );
+        assert_eq!(rhythm_owned.status, 200);
+        let rhythm_owned: Value = serde_json::from_str(&rhythm_owned.body).unwrap();
+        assert_eq!(rhythm_owned["bridges"][0]["topology_sync_enabled"], true);
+        assert_eq!(
+            rhythm_owned["bridges"][0]["topology_sync_status"],
+            "pending"
+        );
+        assert_eq!(reconcile_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn mixed_hue_authority_reconciles_and_applies_effective_owner_per_room() {
+        let state = test_state();
+        let key = HubKey::new(HubType::new(HubType::HUE), "bridge.local");
+        let reconcile_calls = Arc::new(AtomicUsize::new(0));
+        let release_calls = Arc::new(AtomicUsize::new(0));
+        {
+            let mut s = state.lock().unwrap();
+            for (room_id, name) in [("room-office", "Office"), ("room-hall", "Hall")] {
+                let mut room = crate::topology::TopologyRoom::new(room_id, name);
+                room.upsert_hub_room_binding(HubRoomBinding {
+                    hub_key: key.clone(),
+                    hub_room_id: format!("hue-{room_id}"),
+                    control_id: format!("group-{room_id}"),
+                    light_device_ids: Vec::new(),
+                });
+                s.topology.insert_room(room);
+            }
+            let calls = reconcile_calls.clone();
+            s.reconcile_external_controller_authority_fn = Some(Arc::new(move |_, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }));
+            let calls = release_calls.clone();
+            s.release_external_controller_authority_fn = Some(Arc::new(move |_, _, reason| {
+                assert_eq!(
+                    reason,
+                    crate::hub::ExternalControllerReleaseReason::RoomAuthorityChanged
+                );
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }));
+        }
+
+        let initial: Value = serde_json::from_str(&handle_get_hue_authority(&state).body).unwrap();
+        let mixed = handle_put_hue_authority(
+            &state,
+            &json!({
+                "address": "bridge.local",
+                "revision": initial["bridges"][0]["revision"],
+                "correlation_id": "hue-authority-mixed",
+                "rooms": [
+                    {"room_id": "room-office", "owner": "rhythm"},
+                    {"room_id": "room-hall", "owner": "hue"}
+                ]
+            }),
+        );
+        assert_eq!(mixed.status, 200);
+        let mixed: Value = serde_json::from_str(&mixed.body).unwrap();
+        assert_eq!(reconcile_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(release_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(mixed["bridges"][0]["takeover_scope"], "room");
+        let mixed_rooms = mixed["bridges"][0]["rooms"].as_array().unwrap();
+        assert!(mixed_rooms
+            .iter()
+            .find(|room| room["room_id"] == "room-office")
+            .is_some_and(|room| room["rhythm_automation_enabled"] == true));
+        assert!(mixed_rooms
+            .iter()
+            .find(|room| room["room_id"] == "room-hall")
+            .is_some_and(|room| room["rhythm_automation_enabled"] == false));
+
+        let all_rhythm = handle_put_hue_authority(
+            &state,
+            &json!({
+                "address": "bridge.local",
+                "revision": mixed["bridges"][0]["revision"],
+                "correlation_id": "hue-authority-all-rhythm",
+                "rooms": [
+                    {"room_id": "room-office", "owner": "rhythm"},
+                    {"room_id": "room-hall", "owner": "rhythm"}
+                ]
+            }),
+        );
+        assert_eq!(all_rhythm.status, 200);
+        assert_eq!(reconcile_calls.load(Ordering::SeqCst), 2);
+
+        let all_rhythm: Value = serde_json::from_str(&all_rhythm.body).unwrap();
+        let back_to_hue = handle_put_hue_authority(
+            &state,
+            &json!({
+                "address": "bridge.local",
+                "revision": all_rhythm["bridges"][0]["revision"],
+                "correlation_id": "hue-authority-back-to-hue",
+                "rooms": [
+                    {"room_id": "room-office", "owner": "hue"},
+                    {"room_id": "room-hall", "owner": "hue"}
+                ]
+            }),
+        );
+        assert_eq!(back_to_hue.status, 200);
+        assert_eq!(release_calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn failed_reacquisition_never_reopens_an_existing_rhythm_policy() {
+        let state = test_state();
+        let key = HubKey::new(HubType::new(HubType::HUE), "bridge.local");
+        let release_calls = Arc::new(AtomicUsize::new(0));
+        let room_id = "room-office".to_string();
+        {
+            let mut s = state.lock().unwrap();
+            let mut room = crate::topology::TopologyRoom::new(room_id.clone(), "Office");
+            room.upsert_hub_room_binding(HubRoomBinding {
+                hub_key: key.clone(),
+                hub_room_id: "hue-office".to_string(),
+                control_id: "hue-office-group".to_string(),
+                light_device_ids: Vec::new(),
+            });
+            s.topology.insert_room(room);
+            s.topology
+                .replace_external_room_automation_decisions(
+                    &key,
+                    &[(
+                        room_id.clone(),
+                        crate::topology::ExternalRoomAutomationOwner::Rhythm,
+                    )],
+                )
+                .unwrap();
+            s.reconcile_external_controller_authority_fn = Some(Arc::new(|_, _| {
+                Err(anyhow::anyhow!("simulated Hue takeover failure"))
+            }));
+            let calls = release_calls.clone();
+            s.release_external_controller_authority_fn = Some(Arc::new(move |_, _, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }));
+        }
+
+        let initial: Value = serde_json::from_str(&handle_get_hue_authority(&state).body).unwrap();
+        let response = handle_put_hue_authority(
+            &state,
+            &json!({
+                "address": "bridge.local",
+                "revision": initial["bridges"][0]["revision"],
+                "correlation_id": "hue-authority-reacquire-failure",
+                "rooms": [{"room_id": room_id, "owner": "rhythm"}]
+            }),
+        );
+
+        assert_eq!(response.status, 500);
+        assert_eq!(release_calls.load(Ordering::SeqCst), 1);
+        let s = state.lock().unwrap();
+        assert!(!s.topology.external_hub_has_full_rhythm_consent(&key));
+        assert!(!s.rhythm_automation_allowed_for_node("room-office"));
+        assert!(s.external_controller_authority_is_ready(&key));
+    }
+
+    #[test]
     fn hub_credentials_missing_hub_type() {
         let state = test_state();
         let r = handle_put_hub_credentials(&state, &json!({"address": "x", "credentials": {}}));
@@ -7239,6 +7599,69 @@ mod tests {
     }
 
     #[test]
+    fn target_guarded_node_profile_override_ignores_unrelated_nodes_state_changes() {
+        let state = handler_state_with_runtime();
+        let rx = attach_work_queue(&state);
+        let server_instance_id = state.lock().unwrap().server_instance_id.clone();
+        let stale_resource_sha256 = commands::nodes_state_resource_sha256(&state).unwrap();
+        state.lock().unwrap().room_observed_power.insert(
+            "standalone-light".to_string(),
+            ObservedPowerState::new(true, ObservedPowerSource::Command),
+        );
+        assert_ne!(
+            commands::nodes_state_resource_sha256(&state).unwrap(),
+            stale_resource_sha256,
+        );
+
+        let response = handle_put_node_profile_overrides_with_precondition(
+            &state,
+            &json!({
+                "node_id": "standalone-light",
+                "replace": true,
+                "expected_profile_overrides": {},
+                "profile_overrides": {
+                    "rhythm": {"min_brightness": 8}
+                }
+            }),
+            false,
+            Some(&server_instance_id),
+            None,
+        );
+
+        assert_eq!(response.status, 200);
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            WorkItem::SetNodePreferences { .. }
+        ));
+    }
+
+    #[test]
+    fn target_guarded_node_profile_override_rejects_stale_target_state() {
+        let state = handler_state_with_runtime();
+        let server_instance_id = state.lock().unwrap().server_instance_id.clone();
+
+        let response = handle_put_node_profile_overrides_with_precondition(
+            &state,
+            &json!({
+                "node_id": "standalone-light",
+                "replace": true,
+                "expected_profile_overrides": {
+                    "rhythm": {"min_brightness": 22}
+                },
+                "profile_overrides": {
+                    "rhythm": {"min_brightness": 8}
+                }
+            }),
+            false,
+            Some(&server_instance_id),
+            None,
+        );
+
+        assert_eq!(response.status, 409);
+        assert!(response.body.contains("live effective overrides changed"));
+    }
+
+    #[test]
     fn queued_node_profile_override_rejects_changed_effective_overrides_at_worker_admission() {
         let state = handler_state_with_runtime();
         let rx = attach_work_queue(&state);
@@ -7641,6 +8064,7 @@ mod tests {
                     device_onboarding_methods: Vec::new(),
                     device_profiles: Vec::new(),
                     supports_unpairing: true,
+                    unpairable_device_types: vec!["light".to_string()],
                     supports_roomless_devices: true,
                     blocks_room_readiness: true,
                 });
@@ -7693,6 +8117,7 @@ mod tests {
                     device_onboarding_methods: Vec::new(),
                     device_profiles: Vec::new(),
                     supports_unpairing: true,
+                    unpairable_device_types: vec!["light".to_string()],
                     supports_roomless_devices: true,
                     blocks_room_readiness: true,
                 });
@@ -7731,6 +8156,7 @@ mod tests {
                     device_onboarding_methods: Vec::new(),
                     device_profiles: Vec::new(),
                     supports_unpairing: true,
+                    unpairable_device_types: vec!["light".to_string()],
                     supports_roomless_devices: true,
                     blocks_room_readiness: true,
                 });

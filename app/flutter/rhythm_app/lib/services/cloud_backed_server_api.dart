@@ -412,6 +412,24 @@ class CloudBackedServerApi {
     );
   }
 
+  Future<RhythmHueAuthority?> getHueAuthority() {
+    return _delegate.getHueAuthority();
+  }
+
+  Future<RhythmHueAuthority?> updateHueAuthority({
+    required RhythmHueBridgeAuthority bridge,
+    required Map<String, RhythmHueRoomAuthorityOwner> owners,
+    required String correlationId,
+    bool? topologySyncEnabled,
+  }) {
+    return _delegate.updateHueAuthority(
+      bridge: bridge,
+      owners: owners,
+      correlationId: correlationId,
+      topologySyncEnabled: topologySyncEnabled,
+    );
+  }
+
   Future<void> hubDisconnect() {
     return _delegate.hubDisconnect();
   }
@@ -500,6 +518,12 @@ class CloudBackedServerApi {
 
   Future<Map<String, dynamic>?> getCanonicalDevice(String id) {
     return _delegate.getCanonicalDevice(id);
+  }
+
+  Future<RhythmPairingRecoverySecret?> getMatterSetupCode(
+    String nativeDeviceId,
+  ) {
+    return _delegate.getMatterSetupCode(nativeDeviceId);
   }
 
   Future<List<Map<String, dynamic>>?> getCanonicalDevices() {
@@ -739,6 +763,8 @@ class CloudBackedServerApi {
     required String hubType,
     required String deviceId,
     String? hubAddress,
+    String? deviceType,
+    String? correlationId,
     bool force = false,
     Duration receiveTimeout = const Duration(seconds: 90),
   }) {
@@ -746,6 +772,8 @@ class CloudBackedServerApi {
       hubType: hubType,
       deviceId: deviceId,
       hubAddress: hubAddress,
+      deviceType: deviceType,
+      correlationId: correlationId,
       force: force,
       receiveTimeout: receiveTimeout,
     );

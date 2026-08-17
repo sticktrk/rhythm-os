@@ -39,6 +39,12 @@ class AccountHomeServerHubs {
   }
 }
 
+enum AccountHomeRemovalOutcome {
+  alreadyAbsent,
+  deleted,
+  left,
+}
+
 /// Keeps the signed-in account's minimal cloud home/server-hub records current.
 ///
 /// Local-only and anonymous users are valid app users, but they are not cloud
@@ -261,24 +267,100 @@ class AccountCloudSyncService {
     }
   }
 
-  Future<void> deleteHome({
+  Future<bool> deleteHome({
     required String homeId,
     required String reason,
   }) async {
     final client = _client;
-    if (!canUseSignedInCloudFeatures || client == null) return;
+    final userId = AuthService().currentUserId;
+    if (!canUseSignedInCloudFeatures || client == null || userId == null) {
+      return true;
+    }
 
     try {
-      await client.from('homes').delete().eq('id', homeId);
-      debugPrint(
-        'AccountCloudSyncService: deleted home=$homeId reason=$reason',
+      final outcome = await removeHomeFromAccount(
+        client: client,
+        homeId: homeId,
+        userId: userId,
       );
-    } catch (error) {
       debugPrint(
-        'AccountCloudSyncService: home delete skipped for home=$homeId '
+        'AccountCloudSyncService: removed home=$homeId '
+        'outcome=${outcome.name} reason=$reason',
+      );
+      return true;
+    } catch (error, stackTrace) {
+      debugPrint(
+        'AccountCloudSyncService: home removal failed for home=$homeId '
         'reason=$reason error=$error',
       );
+      debugPrint('$stackTrace');
+      return false;
     }
+  }
+
+  /// Remove a Home from this account without letting an RLS-filtered no-op
+  /// masquerade as success.
+  ///
+  /// Owners delete the canonical Home. Non-owner members leave it by removing
+  /// only their own membership, preserving the Home for its owner and other
+  /// members. Both paths verify that the Home no longer belongs to the account.
+  @visibleForTesting
+  static Future<AccountHomeRemovalOutcome> removeHomeFromAccount({
+    required SupabaseClient client,
+    required String homeId,
+    required String userId,
+  }) async {
+    final rows = await client
+        .from('homes')
+        .select('id,owner_id,member_ids')
+        .eq('id', homeId)
+        .limit(1);
+    final homeRows = rows.whereType<Map>().toList(growable: false);
+    if (homeRows.isEmpty) return AccountHomeRemovalOutcome.alreadyAbsent;
+
+    final row = Map<String, dynamic>.from(homeRows.single);
+    final ownerId = row['owner_id']?.toString();
+    final memberIds = (row['member_ids'] as List? ?? const [])
+        .map((memberId) => memberId.toString())
+        .toSet();
+
+    late final AccountHomeRemovalOutcome outcome;
+    if (ownerId == userId) {
+      await client.from('homes').delete().eq('id', homeId);
+      outcome = AccountHomeRemovalOutcome.deleted;
+    } else if (memberIds.contains(userId)) {
+      await client.rpc(
+        'remove_home_member',
+        params: {
+          'home_uuid': homeId,
+          'user_uuid': userId,
+        },
+      );
+      outcome = AccountHomeRemovalOutcome.left;
+    } else {
+      throw StateError('The signed-in account cannot remove this Home.');
+    }
+
+    final remainingRows = await client
+        .from('homes')
+        .select('id,member_ids')
+        .eq('id', homeId)
+        .limit(1);
+    final remainingHomeRows =
+        remainingRows.whereType<Map>().toList(growable: false);
+    final removalDidNotTakeEffect = switch (outcome) {
+      AccountHomeRemovalOutcome.deleted => remainingHomeRows.isNotEmpty,
+      AccountHomeRemovalOutcome.left => remainingHomeRows.any(
+          (row) => (row['member_ids'] as List? ?? const [])
+              .map((memberId) => memberId.toString())
+              .contains(userId),
+        ),
+      AccountHomeRemovalOutcome.alreadyAbsent => false,
+    };
+    if (removalDidNotTakeEffect) {
+      throw StateError('The Home remained available after account removal.');
+    }
+    return outcome;
   }
 
   static Map<String, dynamic> homeSnapshotPayload(

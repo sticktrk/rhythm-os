@@ -40,6 +40,9 @@ verify_jwt = false
 [functions.report-bug]
 verify_jwt = false
 
+[functions.report-bug-bundle-complete]
+verify_jwt = false
+
 [functions.matter-device-profiles]
 verify_jwt = false
 
@@ -55,3 +58,4 @@ verify_jwt = false
 # Devices authenticate with a hashed upload token, not a Supabase JWT.
 [functions.server-activity-ingest]
 verify_jwt = false
+

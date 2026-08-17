@@ -199,6 +199,77 @@ fn motion_clear_enters_warning_then_owned_timeout_turns_room_off() {
 }
 
 #[test]
+fn motion_timeout_respects_disabled_low_glow_over_a_standby_mode_default() {
+    let (harness, spy) = TestHarness::with_spy_controller();
+    let harness = harness.with_discovery(
+        vec![room("hall", "Hall")],
+        vec![
+            light("light-hall", "hall"),
+            motion_sensor("motion-hall", "hall"),
+        ],
+    );
+    harness.sync();
+    let hall_id = harness.resolve("hall");
+
+    harness.action("hall", "on").unwrap();
+    harness.set_lights_on("hall", true);
+    commands::do_node_preferences_set(
+        &harness.state,
+        &hall_id,
+        None,
+        None,
+        Some(true),
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+    commands::do_node_preferences_set(
+        &harness.state,
+        &hall_id,
+        None,
+        None,
+        Some(false),
+        None,
+        None,
+        false,
+    )
+    .unwrap();
+
+    let mut day = rhythm_core::ModeConfig::default_for_mode(RhythmMode::Day);
+    day.room_defaults = vec![rhythm_core::RoomModeDefault {
+        room_id: hall_id.clone(),
+        state: RoomModeState::Standby,
+    }];
+    harness.set_mode_configs(vec![day]);
+    harness.state.lock().unwrap().default_motion_timeout_secs = 120;
+
+    let mut motion = MotionTimerState::new();
+    motion.sensors.insert(
+        "motion-hall".into(),
+        MotionSourceState {
+            source_node_id: "motion-hall".into(),
+            target_node_id: hall_id.clone(),
+            stopped_at: Some(Instant::now() - Duration::from_secs(2_000)),
+            stopped_at_epoch_ms: None,
+        },
+    );
+    motion.motion_owned.insert(hall_id);
+    spy.reset();
+
+    event_loop::check_motion_timers(&harness.state, &mut motion);
+    wait_for(
+        || spy.turn_off_count() >= 1,
+        "disabled Low Glow must hard-off after motion even when the mode default is Standby",
+    );
+
+    let snapshot = harness.snapshot("hall").unwrap();
+    assert!(snapshot.hard_off);
+    assert!(!snapshot.soft_off);
+    assert!(!snapshot.standby_enabled);
+}
+
+#[test]
 fn external_physical_light_reports_update_observed_state_without_dispatch() {
     let (harness, spy) = TestHarness::with_spy_controller();
     let (rooms, devices) = rooms_with_lights(&[("kitchen", "Kitchen")]);

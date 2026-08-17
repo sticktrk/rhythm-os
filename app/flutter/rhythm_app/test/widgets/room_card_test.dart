@@ -507,6 +507,10 @@ void main() {
       'Custom light profile: brightness range and color temperature range',
     );
     expect(find.text('Light settings'), findsNothing);
+    expect(
+      find.byKey(const ValueKey('room-card-schedule-room-1')),
+      findsNothing,
+    );
     expect(serverSync.hasNodeLightProfileOverrides('room-1'), isTrue);
 
     await tester.pumpWidget(
@@ -534,6 +538,18 @@ void main() {
       const ValueKey('room-settings-light-settings-room-1'),
     );
     expect(button, findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('room-settings-schedule-room-1')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('room-settings-schedule-day-room-1')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('room-settings-schedule-night-room-1')),
+      findsOneWidget,
+    );
     expect(find.text('Lighting'), findsOneWidget);
     expect(
       tester
@@ -2021,6 +2037,11 @@ void main() {
     expect(_roomSegment('Color'), findsOneWidget);
     expect(find.byType(Slider), findsNothing);
 
+    expect(
+      find.byKey(const ValueKey('room-card-schedule-room-1')),
+      findsNothing,
+    );
+
     final powerRect = tester.getRect(_powerToggle());
     final scenesRect = tester.getRect(_scenesControl());
     final brightnessRect = tester.getRect(_brightnessControl());
@@ -2643,6 +2664,106 @@ void main() {
       isFalse,
     );
     expect(semantics.hint, 'This light supports brightness only');
+  });
+
+  testWidgets(
+      'room curve color remains available despite member transport capabilities',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await roomProvider.addRoom(
+      const RoomDto(
+        id: 'room-1',
+        name: 'Hallway',
+        source: RoomSourceDto.hue,
+        kind: RoomNodeKind.room,
+        deviceIds: ['white-bulb'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    await roomProvider.applyServerNodeState(
+      'room-1',
+      rhythmEnabled: true,
+      timeOffset: 0,
+      brightnessOffset: 0,
+      state: RoomModeState.active,
+      lightsOn: true,
+      brightness: 50,
+      kelvin: 4000,
+    );
+
+    final connection = _TestRhythmConnection();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _FakeHomeProvider(),
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    // v0.6.580 briefly serialized member-derived hardware capabilities for
+    // rooms. Room curve intent must ignore both their availability decision
+    // and their range; endpoint adapters own the final representation.
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Hallway',
+            'kind': 'room',
+            'hub_types': ['hue'],
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'lights_on': true,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'brightness': 50,
+            'kelvin': 4000,
+            'light_capabilities': {
+              'color_temperature': {
+                'min_kelvin': 3000,
+                'max_kelvin': 3500,
+              },
+            },
+          },
+        ],
+      }),
+    );
+    await tester.pump();
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'room-1',
+              globalConfig: defaultCurveConfig,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    await _tapRoomSegment(tester, 'Color', roomId: 'room-1');
+    final slider = tester.widget<Slider>(_cctSlider(roomId: 'room-1'));
+    expect(slider.min, 2000);
+    expect(slider.max, 6500);
+    slider.onChanged!(4500);
+    await tester.pump();
+    tester.widget<Slider>(_cctSlider(roomId: 'room-1')).onChangeEnd!(4500);
+    await tester.pump();
+
+    expect(connection.api.nodeCurveColorTemperatureCalls, hasLength(1));
+    expect(connection.api.nodeCurveColorTemperatureCalls.single.kelvin, 4500);
   });
 
   testWidgets('active CCT slider uses current curve side without wrapping',

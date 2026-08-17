@@ -47,12 +47,33 @@ class _MutableHubProvider extends ServerSyncProvider {
   }) : _hubs = hubs;
 
   List<Map<String, dynamic>> _hubs;
+  RhythmHubCapabilities? hueCapabilitiesForTest;
+  bool hueAuthoritySupportedForTest = false;
+  RhythmHueAuthority? hueAuthorityForTest;
 
   @override
   List<Map<String, dynamic>> get serverHubInfos => _hubs;
 
   @override
   RhythmConnectionState get connectionState => RhythmConnectionState.connected;
+
+  @override
+  Set<String> get connectedHubTypes => _hubs
+      .where((hub) => hub['connected'] == true && hub['type'] != 'none')
+      .map((hub) => hub['type'] as String)
+      .toSet();
+
+  @override
+  RhythmHubCapabilities? hubCapabilities(String hubType) {
+    if (hubType == 'hue') return hueCapabilitiesForTest;
+    return super.hubCapabilities(hubType);
+  }
+
+  @override
+  bool get hueRoomAuthorityConsentSupported => hueAuthoritySupportedForTest;
+
+  @override
+  Future<RhythmHueAuthority?> fetchHueAuthority() async => hueAuthorityForTest;
 
   void replaceHubs(List<Map<String, dynamic>> hubs) {
     _hubs = hubs;
@@ -71,6 +92,18 @@ const _localBleHub = <String, dynamic>{
 const _matterHub = <String, dynamic>{
   'type': 'matter',
   'address': 'local',
+  'connected': true,
+};
+
+const _hueHub = <String, dynamic>{
+  'type': 'hue',
+  'address': '192.0.2.25',
+  'connected': true,
+};
+
+const _secondHueHub = <String, dynamic>{
+  'type': 'hue',
+  'address': '192.0.2.26',
   'connected': true,
 };
 
@@ -184,5 +217,125 @@ void main() {
       await tester.pump(const Duration(milliseconds: 16));
     }
     expect(api.canonicalDeviceCalls, 1);
+  });
+
+  testWidgets('Hue detail offers Bridge button search only when advertised', (
+    tester,
+  ) async {
+    syncProvider.replaceHubs(const [_hueHub]);
+    syncProvider.hueCapabilitiesForTest = const RhythmHubCapabilities(
+      type: 'hue',
+      configurable: true,
+      deviceOnboardingMethods: [
+        RhythmDeviceOnboardingMethod.hueBridgeButtonSearch,
+      ],
+      supportsUnpairing: true,
+      unpairableDeviceTypes: ['light', 'button'],
+      supportsRoomlessDevices: true,
+    );
+
+    await tester.pumpWidget(buildSection(showConfigured: true));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Philips Hue'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Pair button or switch'), findsOneWidget);
+  });
+
+  testWidgets('legacy Hue detail hides Bridge button search', (tester) async {
+    syncProvider.replaceHubs(const [_hueHub]);
+
+    await tester.pumpWidget(buildSection(showConfigured: true));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Philips Hue'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Pair button or switch'), findsNothing);
+  });
+
+  testWidgets('each configured hub opens a dedicated address-scoped page', (
+    tester,
+  ) async {
+    syncProvider.replaceHubs(const [_hueHub, _secondHueHub]);
+    api.canonicalDevices = const [
+      {
+        'id': 'hue-light-one',
+        'name': 'Bridge One Bulb',
+        'device_type': 'light',
+        'endpoints': [
+          {
+            'hub_key': {
+              'hub_type': 'hue',
+              'address': '192.0.2.25',
+            },
+          },
+        ],
+      },
+      {
+        'id': 'hue-light-two',
+        'name': 'Bridge Two Bulb',
+        'device_type': 'light',
+        'endpoints': [
+          {
+            'hub_key': {
+              'hub_type': 'hue',
+              'address': '192.0.2.26',
+            },
+          },
+        ],
+      },
+    ];
+
+    await tester.pumpWidget(buildSection(showConfigured: true));
+    await tester.pumpAndSettle();
+
+    expect(find.text('HUBS'), findsOneWidget);
+    expect(find.text('Bridge One Bulb'), findsNothing);
+    expect(find.text('Bridge Two Bulb'), findsNothing);
+
+    await tester.tap(find.text('Philips Hue').first);
+    await tester.pumpAndSettle();
+
+    expect(find.text('DEVICES'), findsOneWidget);
+    expect(find.text('Bridge One Bulb'), findsOneWidget);
+    expect(find.text('Bridge Two Bulb'), findsNothing);
+  });
+
+  testWidgets('Hue hub page permanently exposes room automation review', (
+    tester,
+  ) async {
+    syncProvider.replaceHubs(const [_hueHub]);
+    syncProvider.hueAuthoritySupportedForTest = true;
+    syncProvider.hueAuthorityForTest = const RhythmHueAuthority(
+      schemaVersion: 1,
+      bridges: [
+        RhythmHueBridgeAuthority(
+          address: '192.0.2.25:443',
+          revision: '0123456789abcdef',
+          takeoverScope: 'bridge',
+          bridgeTakeoverRequested: true,
+          rooms: [
+            RhythmHueRoomAuthority(
+              roomId: 'office',
+              name: 'Office',
+              owner: RhythmHueRoomAuthorityOwner.rhythm,
+              rhythmAutomationEnabled: true,
+            ),
+          ],
+        ),
+      ],
+    );
+
+    await tester.pumpWidget(buildSection(showConfigured: true));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Philips Hue'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Hue room automation'), findsOneWidget);
+    await tester.tap(find.text('Hue room automation'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Who should automate each room?'), findsOneWidget);
+    expect(find.text('Office'), findsOneWidget);
   });
 }

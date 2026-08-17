@@ -4,6 +4,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::gamut::GamutTriangle;
+use crate::ControlCorrections;
 
 /// High-level classification of a light device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -69,6 +70,10 @@ pub struct LightCapabilities {
     /// Whether this light supports transitions/dynamics.
     #[cfg_attr(feature = "serde", serde(default = "default_true"))]
     pub supports_transition: bool,
+
+    /// Optional Hue-relative command corrections for this exact device model.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub control_corrections: ControlCorrections,
 }
 
 fn default_true() -> bool {
@@ -87,6 +92,7 @@ impl LightCapabilities {
                 gamut: None,
                 min_brightness: None,
                 supports_transition: true,
+                control_corrections: ControlCorrections::default(),
             },
             LightType::ColorTemperature => Self {
                 light_type,
@@ -96,6 +102,7 @@ impl LightCapabilities {
                 gamut: None,
                 min_brightness: None,
                 supports_transition: true,
+                control_corrections: ControlCorrections::default(),
             },
             LightType::Dimmable => Self {
                 light_type,
@@ -105,6 +112,7 @@ impl LightCapabilities {
                 gamut: None,
                 min_brightness: None,
                 supports_transition: true,
+                control_corrections: ControlCorrections::default(),
             },
             LightType::OnOff => Self {
                 light_type,
@@ -114,6 +122,7 @@ impl LightCapabilities {
                 gamut: None,
                 min_brightness: None,
                 supports_transition: false,
+                control_corrections: ControlCorrections::default(),
             },
         }
     }
@@ -214,6 +223,10 @@ impl LightCapabilities {
             gamut,
             min_brightness,
             supports_transition,
+            // Room-level commands can span unlike devices. Per-device
+            // corrections must be applied only after the command is fanned
+            // out to an exact model.
+            control_corrections: ControlCorrections::default(),
         })
     }
 

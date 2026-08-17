@@ -770,6 +770,7 @@ class _RoomCardState extends State<RoomCard> {
         final hardwareCctRange = context
             .select<ServerSyncProvider, ({int minKelvin, int maxKelvin})?>(
                 (provider) {
+          if (room.kind.isRoom) return null;
           final range =
               provider.colorTemperatureCapabilitiesForNode(widget.roomId);
           return range == null
@@ -779,8 +780,9 @@ class _RoomCardState extends State<RoomCard> {
                   maxKelvin: range.maxKelvin,
                 );
         });
-        final colorTemperatureSupported =
+        final deviceColorTemperatureSupported =
             context.select<ServerSyncProvider, bool?>((provider) {
+          if (room.kind.isRoom) return true;
           final capabilities =
               provider.nodeById(widget.roomId)?.lightCapabilities;
           if (capabilities == null) return null;
@@ -945,8 +947,8 @@ class _RoomCardState extends State<RoomCard> {
             mode == RoomMode.on || mode == RoomMode.standby;
         final controlInteractionEnabled = hubConnected && !isTransitioning;
         final brightnessControlAvailable = mode != RoomMode.off;
-        final colorControlAvailable =
-            adaptiveControlsAvailable && colorTemperatureSupported != false;
+        final colorControlAvailable = adaptiveControlsAvailable &&
+            deviceColorTemperatureSupported != false;
         if ((_expandedControl == _RoomDetailControl.brightness &&
                 !brightnessControlAvailable) ||
             (_expandedControl == _RoomDetailControl.color &&
@@ -1360,11 +1362,8 @@ class _RoomCardState extends State<RoomCard> {
                                       '${cctRange.clampKelvin(_sliderKelvin ?? kelvin)} kelvin',
                                   semanticsHint: mode == RoomMode.mood
                                       ? 'Color temperature is unavailable while Scenes is active'
-                                      : colorTemperatureSupported == false
-                                          ? room.kind ==
-                                                  RoomNodeKind.lightDevice
-                                              ? 'This light supports brightness only'
-                                              : 'Color temperature is unavailable because not every light supports it'
+                                      : deviceColorTemperatureSupported == false
+                                          ? 'This light supports brightness only'
                                           : !colorControlAvailable
                                               ? 'Turn the room on to adjust color temperature'
                                               : _expandedControl ==

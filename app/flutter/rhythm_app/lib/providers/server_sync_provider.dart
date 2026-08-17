@@ -306,6 +306,10 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Mode configs from the server (profile routing per mode).
   List<RhythmModeConfig> _modeConfigs = const [];
+  Timer? _roomModeDefaultsSaveDebounce;
+  List<RhythmModeConfig>? _roomModeDefaultsRollback;
+  int _roomModeDefaultsEditGeneration = 0;
+  bool _roomModeDefaultsSaveInFlight = false;
 
   /// Profile configs from the server hello.
   List<RhythmCurveConfig> _profiles = const [];
@@ -670,6 +674,113 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Mode configs (profile routing per mode).
   List<RhythmModeConfig> get modeConfigs => _modeConfigs;
 
+  /// The configured state for [roomId] when [mode] engages.
+  ///
+  /// A null state means the room follows the automatic lighting behavior.
+  String? roomDefaultStateForMode(String roomId, RhythmMode mode) {
+    for (final config in _modeConfigs) {
+      if (config.mode != mode) continue;
+      for (final roomDefault in config.roomDefaults) {
+        if (roomDefault.roomId == roomId) return roomDefault.state;
+      }
+    }
+    return null;
+  }
+
+  /// Optimistically update one room's Day/Night behavior and coalesce rapid
+  /// edits into the existing mode-config write.
+  ///
+  /// Both the room card and Automations editor call this method so neither UI
+  /// owns a private copy that can drift from the other.
+  void updateRoomDefaultForMode({
+    required String roomId,
+    required RhythmMode mode,
+    required String? state,
+  }) {
+    if (roomDefaultStateForMode(roomId, mode) == state) return;
+
+    _roomModeDefaultsRollback ??= _modeConfigs;
+    final defaults = <String, String>{};
+    RhythmModeConfig? existing;
+    for (final config in _modeConfigs) {
+      if (config.mode != mode) continue;
+      existing = config;
+      for (final roomDefault in config.roomDefaults) {
+        defaults[roomDefault.roomId] = roomDefault.state;
+      }
+      break;
+    }
+    if (state == null) {
+      defaults.remove(roomId);
+    } else {
+      defaults[roomId] = state;
+    }
+    final updatedDefaults = [
+      for (final entry in defaults.entries)
+        RoomDefault(roomId: entry.key, state: entry.value),
+    ];
+    final updatedConfig = existing?.copyWith(roomDefaults: updatedDefaults) ??
+        RhythmModeConfig(
+          mode: mode,
+          activeProfileId: '',
+          roomDefaults: updatedDefaults,
+        );
+    _modeConfigs = List<RhythmModeConfig>.unmodifiable([
+      for (final config in _modeConfigs)
+        if (config.mode == mode) updatedConfig else config,
+      if (existing == null) updatedConfig,
+    ]);
+    _roomModeDefaultsEditGeneration++;
+    notifyListeners();
+    _scheduleRoomModeDefaultsSave();
+  }
+
+  void _scheduleRoomModeDefaultsSave() {
+    _roomModeDefaultsSaveDebounce?.cancel();
+    _roomModeDefaultsSaveDebounce = Timer(
+      const Duration(milliseconds: 800),
+      () => unawaited(_persistRoomModeDefaults()),
+    );
+  }
+
+  Future<void> _persistRoomModeDefaults() async {
+    if (_roomModeDefaultsSaveInFlight) {
+      _scheduleRoomModeDefaultsSave();
+      return;
+    }
+    final generation = _roomModeDefaultsEditGeneration;
+    final configs = _modeConfigs;
+    final rollback = _roomModeDefaultsRollback;
+    _roomModeDefaultsSaveInFlight = true;
+    var success = false;
+    try {
+      success = await api.modeSet(configs: configs);
+    } catch (error) {
+      debugPrint('ServerSync: room mode defaults save failed: $error');
+    } finally {
+      _roomModeDefaultsSaveInFlight = false;
+    }
+
+    if (success) {
+      if (generation == _roomModeDefaultsEditGeneration) {
+        _roomModeDefaultsRollback = null;
+      } else {
+        // This snapshot is now the authoritative fallback for a newer edit.
+        _roomModeDefaultsRollback = configs;
+        _scheduleRoomModeDefaultsSave();
+      }
+      return;
+    }
+
+    if (generation == _roomModeDefaultsEditGeneration && rollback != null) {
+      _modeConfigs = rollback;
+      _roomModeDefaultsRollback = null;
+      notifyListeners();
+    } else if (generation != _roomModeDefaultsEditGeneration) {
+      _scheduleRoomModeDefaultsSave();
+    }
+  }
+
   /// Profile configs from the server.
   List<RhythmCurveConfig> get profiles => _profiles;
 
@@ -770,6 +881,20 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Host capabilities from the last server hello, if the server advertises them.
   RhythmCapabilities? get serverCapabilities => _capabilities;
 
+  /// Hue configuration is destructive on legacy servers because they can
+  /// seize bridge automation authority without a room review. New app builds
+  /// therefore fail closed unless the server advertises the consent contract.
+  bool get hueRoomAuthorityConsentSupported =>
+      HueServiceLocator.isDemoMode ||
+      _capabilities?.supportsFeature(
+            RhythmFeature.hueRoomAuthorityConsent,
+          ) ==
+          true;
+
+  bool get hueRoomTopologySyncSupported =>
+      HueServiceLocator.isDemoMode ||
+      _capabilities?.supportsFeature(RhythmFeature.hueRoomTopologySync) == true;
+
   /// Whether the host explicitly advertised supported hub types.
   bool get hasExplicitHubCapabilities => _capabilities != null;
 
@@ -822,6 +947,13 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Whether the UI should allow Matter decommissioning.
   bool get canUnpairMatterDevices =>
       matterCapabilities?.supportsUnpairing ?? !hasExplicitHubCapabilities;
+
+  /// Whether the appliance can return an owner-saved Matter setup payload.
+  bool get canRecoverMatterSetupCode =>
+      _capabilities?.supportsFeature(
+        RhythmFeature.matterSetupCodeRecovery,
+      ) ??
+      false;
 
   /// Whether a Matter device may exist before room assignment.
   bool get supportsMatterRoomlessDevices =>
@@ -912,6 +1044,15 @@ class ServerSyncProvider extends ChangeNotifier {
           ) ??
           false);
 
+  /// Whether a connected Hue Bridge can run its native accessory search for
+  /// a physical button, remote, or wall switch.
+  bool get canAddHueBridgeButton =>
+      connectedHubTypes.contains('hue') &&
+      (hueBridgeCapabilities?.supportsDeviceOnboardingMethod(
+            RhythmDeviceOnboardingMethod.hueBridgeButtonSearch,
+          ) ??
+          false);
+
   bool get canUnpairHueBleDevices =>
       hueBleCapabilities?.supportsUnpairing ?? false;
 
@@ -920,6 +1061,16 @@ class ServerSyncProvider extends ChangeNotifier {
 
   bool get canUnpairHueBridgeDevices =>
       hueBridgeCapabilities?.supportsUnpairing ?? false;
+
+  bool canUnpairHueBridgeDeviceType(RhythmDeviceType deviceType) {
+    final type = switch (deviceType) {
+      RhythmDeviceType.light => 'light',
+      RhythmDeviceType.button => 'button',
+      RhythmDeviceType.motion => 'motion',
+      RhythmDeviceType.contact => 'contact',
+    };
+    return hueBridgeCapabilities?.supportsUnpairingDeviceType(type) ?? false;
+  }
 
   bool get supportsHueBleRoomlessDevices =>
       hueBleCapabilities?.supportsRoomlessDevices ?? false;
@@ -1001,11 +1152,10 @@ class ServerSyncProvider extends ChangeNotifier {
   RhythmRoom? nodeById(String nodeId) =>
       _helloNodes.where((node) => node.id == nodeId).firstOrNull;
 
-  /// Hardware-safe color-temperature envelope advertised for this node.
+  /// Hardware-safe color-temperature envelope advertised for a device node.
   ///
-  /// Room nodes carry the server-computed intersection across their member
-  /// lights. A null result means the server did not prove a compatible range,
-  /// so callers must retain their legacy conservative bounds.
+  /// Room curve controls are transport-agnostic; their endpoint adapters own
+  /// any native color-range clamping or representation fallback.
   RhythmColorTemperatureCapabilities? colorTemperatureCapabilitiesForNode(
     String nodeId,
   ) =>
@@ -2613,7 +2763,12 @@ class ServerSyncProvider extends ChangeNotifier {
     }
     _optimisticMoodSceneIds.clear();
     _moodSceneApplyGenerations.clear();
-    _modeConfigs = [...?hello.mode?.configs];
+    // Do not let a reconnect snapshot erase a local Day/Night behavior edit
+    // while its coalesced write is still pending. The write result either
+    // adopts that optimistic cache or rolls it back explicitly.
+    if (_roomModeDefaultsRollback == null) {
+      _modeConfigs = [...?hello.mode?.configs];
+    }
     _profiles = [...hello.profiles];
     _activeProfileId = hello.activeProfile['id'] as String? ??
         hello.mode?.activeConfig?.activeProfileId;
@@ -2987,14 +3142,18 @@ class ServerSyncProvider extends ChangeNotifier {
     final previousLightRuntime = _lightRuntime;
     _activeMode = mode.active;
     _lightRuntime = _authoritativeLightRuntimeFromMode(mode) ?? _lightRuntime;
-    if (mode.configs.isNotEmpty) {
+    final acceptedConfigs =
+        mode.configs.isNotEmpty && _roomModeDefaultsRollback == null;
+    if (acceptedConfigs) {
       _modeConfigs = [...mode.configs];
       _activeProfileId = mode.activeConfig?.activeProfileId;
     }
     _modeChangeGeneration++;
     debugPrint(
         'ServerSync: mode_changed active=${mode.active.wireValue} cause=${mode.lastChange?.cause ?? ''} transition=${mode.lastChange?.transitionId ?? ''}');
-    if (previous != _activeMode || previousLightRuntime != _lightRuntime) {
+    if (previous != _activeMode ||
+        previousLightRuntime != _lightRuntime ||
+        acceptedConfigs) {
       notifyListeners();
     }
   }
@@ -4287,8 +4446,44 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Called after Hue pairing or other hub configuration changes so the
   /// server gets the credentials it needs to connect to the hub.
   Future<bool> pushHubCredentials(RoomSourceDto source) async {
-    if (!_connection.connected) return false;
+    if (!HueServiceLocator.isDemoMode && !_connection.connected) return false;
+    if (source == RoomSourceDto.hue && !hueRoomAuthorityConsentSupported) {
+      debugPrint(
+        'ServerSync: refusing Hue credential push; server lacks room authority consent',
+      );
+      return false;
+    }
     return _pushHubCredentialsForSource(source);
+  }
+
+  Future<RhythmHueAuthority?> fetchHueAuthority() async {
+    if ((!HueServiceLocator.isDemoMode && !_connection.connected) ||
+        !hueRoomAuthorityConsentSupported) {
+      return null;
+    }
+    return api.getHueAuthority();
+  }
+
+  Future<RhythmHueAuthority?> updateHueAuthority({
+    required RhythmHueBridgeAuthority bridge,
+    required Map<String, RhythmHueRoomAuthorityOwner> owners,
+    required String correlationId,
+    bool? topologySyncEnabled,
+  }) async {
+    if ((!HueServiceLocator.isDemoMode && !_connection.connected) ||
+        !hueRoomAuthorityConsentSupported) {
+      return null;
+    }
+    final updated = await api.updateHueAuthority(
+      bridge: bridge,
+      owners: owners,
+      correlationId: correlationId,
+      topologySyncEnabled: topologySyncEnabled,
+    );
+    if (updated != null && !HueServiceLocator.isDemoMode) {
+      await _connection.reconnect();
+    }
+    return updated;
   }
 
   /// Tell the addon to auto-configure HA using its SUPERVISOR_TOKEN.
@@ -4648,7 +4843,9 @@ class ServerSyncProvider extends ChangeNotifier {
     _activeProfileId = mode?.activeConfig?.activeProfileId;
     _modeTransitions = await DemoServerApi.instance.getTransitions();
     _inputBindings = await DemoServerApi.instance.getInputBindings();
-    _modeConfigs = [...?mode?.configs];
+    if (_roomModeDefaultsRollback == null) {
+      _modeConfigs = [...?mode?.configs];
+    }
     _profiles = const [];
     _rhythmIntervalSecs = 60;
     _effectiveFadeMs = 1800;
@@ -5059,6 +5256,7 @@ class ServerSyncProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+    _roomModeDefaultsSaveDebounce?.cancel();
     _roomReadinessGraceTimer?.cancel();
     _helloSub?.cancel();
     _rhythmStateSub?.cancel();

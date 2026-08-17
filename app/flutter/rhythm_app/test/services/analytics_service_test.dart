@@ -72,6 +72,8 @@ void main() {
       profile: 'rhythm',
       outcome: 'succeeded',
       changedFieldCount: 2,
+      dayColorMode: 'static_temperature',
+      dayBrightnessMode: 'fixed',
     );
     await analytics.logRoomLightSettingsResetCompleted(
       journeyId: 'room-light-settings-456',
@@ -90,6 +92,14 @@ void main() {
       outcome: 'partial',
       failureStage: 'authoritative_refresh',
     );
+    await analytics.logMatterSetupCodeRecoveryAttempted(
+      source: 'device_network',
+    );
+    await analytics.logMatterSetupCodeRecoveryCompleted(
+      source: 'device_network',
+      outcome: 'failed',
+      failureStage: 'not_available',
+    );
 
     expect(
       backend.events.map((event) => event.name),
@@ -106,6 +116,8 @@ void main() {
         'room_light_settings_reset_completed',
         'bulb_identify_completed',
         'device_room_move_completed',
+        'matter_setup_code_recovery_attempted',
+        'matter_setup_code_recovery_completed',
       ],
     );
     expect(backend.events.first.properties, {
@@ -142,6 +154,14 @@ void main() {
       containsPair('changed_field_count', 2),
     );
     expect(
+      backend.events[8].properties,
+      containsPair('day_color_mode', 'static_temperature'),
+    );
+    expect(
+      backend.events[8].properties,
+      containsPair('day_brightness_mode', 'fixed'),
+    );
+    expect(
       backend.events[9].properties,
       containsPair('failure_stage', 'request'),
     );
@@ -156,6 +176,12 @@ void main() {
       backend.events[11].properties,
       containsPair('failure_stage', 'authoritative_refresh'),
     );
+    expect(backend.events[12].properties, {'source': 'device_network'});
+    expect(backend.events[13].properties, {
+      'source': 'device_network',
+      'outcome': 'failed',
+      'failure_stage': 'not_available',
+    });
 
     final serialized = backend.events
         .map((event) => '${event.name}:${event.properties}')
@@ -166,10 +192,52 @@ void main() {
       'scene_id',
       'room_id',
       'device_id',
+      'kelvin',
+      'rgb',
+      'xy',
+      '3500',
       'error',
+      'MT:RECOVERY-SECRET',
     ]) {
       expect(serialized, isNot(contains(forbidden)));
     }
+  });
+
+  test('Matter pairing analytics allowlist repeat-pair recovery actions',
+      () async {
+    await analytics.logMatterPairingCompleted(
+      journeyId: 'matter-recovery-1',
+      source: 'scanner',
+      inputMethod: 'camera',
+      addMethod: 'automatic',
+      attemptNumber: 1,
+      outcome: 'succeeded',
+      recoveryAction: 'existing_connection_recovered',
+    );
+    await analytics.logMatterPairingCompleted(
+      journeyId: 'matter-recovery-2',
+      source: 'scanner',
+      inputMethod: 'camera',
+      addMethod: 'automatic',
+      attemptNumber: 1,
+      outcome: 'succeeded',
+      recoveryAction: 'MT:RECOVERY-SECRET',
+    );
+
+    expect(
+      backend.events.first.properties['recovery_action'],
+      'existing_connection_recovered',
+    );
+    expect(
+      backend.events.last.properties.containsKey('recovery_action'),
+      isFalse,
+    );
+    expect(
+      backend.events
+          .map((event) => event.properties.values.join(':'))
+          .join('\n'),
+      isNot(contains('MT:RECOVERY-SECRET')),
+    );
   });
 
   test('support report analytics correlate privacy-safe outcomes', () async {
@@ -211,6 +279,100 @@ void main() {
       'endpoint',
       'bundle_path',
       'reference_code',
+      'error',
+    ]) {
+      expect(serialized, isNot(contains(forbidden)));
+    }
+  });
+
+  test('Hue Bridge lifecycle analytics omit device and Bridge identity',
+      () async {
+    await analytics.logHueBridgeButtonPairingAttempted(
+      journeyId: 'hue-button-journey',
+      source: 'hue_bridge_hub_detail',
+      attemptNumber: 1,
+    );
+    await analytics.logHueBridgeButtonPairingCompleted(
+      journeyId: 'hue-button-journey',
+      source: 'hue_bridge_hub_detail',
+      attemptNumber: 1,
+      outcome: 'failed',
+      failureStage: 'bridge_search',
+    );
+    await analytics.logHueBridgeDeviceRemovalCompleted(
+      journeyId: 'hue-remove-journey',
+      deviceType: 'button',
+      outcome: 'succeeded',
+      force: false,
+    );
+
+    expect(backend.events.map((event) => event.name), [
+      'hue_bridge_button_pairing_attempted',
+      'hue_bridge_button_pairing_completed',
+      'hue_bridge_device_removal_completed',
+    ]);
+    expect(backend.events.last.properties, {
+      'journey_id': 'hue-remove-journey',
+      'device_type': 'button',
+      'outcome': 'succeeded',
+      'force': 0,
+    });
+    final serialized = backend.events
+        .map((event) => '${event.name}:${event.properties}')
+        .join('\n');
+    for (final forbidden in [
+      'device_id',
+      'device_name',
+      'hub_address',
+      'serial',
+      'error',
+    ]) {
+      expect(serialized, isNot(contains(forbidden)));
+    }
+  });
+
+  test('Hue room authority analytics record room scope without identities',
+      () async {
+    await analytics.logHueAuthorityReviewOpened(
+      journeyId: 'hue-authority-journey',
+      source: 'settings',
+      authorityScope: 'room',
+      roomCount: 2,
+      hadPriorReview: true,
+    );
+    await analytics.logHueAuthorityReviewSubmitted(
+      journeyId: 'hue-authority-journey',
+      source: 'settings',
+      authorityScope: 'room',
+      roomCount: 2,
+      hueRoomCount: 1,
+      rhythmRoomCount: 1,
+      bridgeTakeoverRequested: true,
+    );
+    await analytics.logHueAuthorityReviewCompleted(
+      journeyId: 'hue-authority-journey',
+      source: 'settings',
+      authorityScope: 'room',
+      outcome: 'succeeded',
+      bridgeTakeoverRequested: true,
+    );
+
+    expect(
+      backend.events.map((event) => event.properties['authority_scope']),
+      everyElement('room'),
+    );
+    expect(
+      backend.events[1].properties,
+      containsPair('bridge_takeover_requested', 1),
+    );
+    final serialized = backend.events
+        .map((event) => '${event.name}:${event.properties}')
+        .join('\n');
+    for (final forbidden in [
+      'room_id',
+      'room_name',
+      'hub_address',
+      'resource_id',
       'error',
     ]) {
       expect(serialized, isNot(contains(forbidden)));

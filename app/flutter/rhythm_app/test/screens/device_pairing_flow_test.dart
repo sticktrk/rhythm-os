@@ -2,39 +2,59 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/screens/hubs/device_pairing_flow.dart';
 import 'package:rhythm_app/screens/hubs/device_pairing_scanner_screen.dart';
+import 'package:rhythm_app/screens/hubs/matter_device_add_screen.dart';
+import 'package:rhythm_app/screens/hubs/matter_pairing_flow.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 void main() {
-  testWidgets('universal intake exposes nearby Hue separately from codes', (
-    tester,
-  ) async {
-    DevicePairingTarget? result;
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Builder(
-          builder: (context) => TextButton(
-            onPressed: () async {
-              result = await showUniversalDevicePairingIntakeChooser(context);
-            },
-            child: const Text('Add device'),
-          ),
+  test('auto-discovered Hue intake preserves the camera journey', () {
+    const intake = DevicePairingScannerResult.hueBle(
+      journeyId: 'device-pair-camera',
+    );
+
+    expect(intake.action, DevicePairingScannerAction.hueBle);
+    expect(intake.inputMethod, 'auto_discovery');
+    expect(
+      pairingJourneyIdForIntake(
+        intake,
+        fallbackPrefix: 'hue-ble-pair',
+      ),
+      'device-pair-camera',
+    );
+  });
+
+  test('Matter persistence warnings preserve success without retrying pairing',
+      () {
+    const result = MatterDevicePairingResult(
+      nativeDeviceId: 'matter-42',
+      name: 'Desk bulb',
+      deviceType: 'light',
+      warnings: [
+        'The setup code could not be saved. Keep using the light normally. '
+            'Do not reset or pair it again; contact Rhythm Support if its '
+            'connection needs recovery.',
+      ],
+    );
+
+    final warning = matterPairingWarningMessage(result);
+    expect(
+      warning,
+      'Desk bulb was added, but recovery needs attention. '
+      'The setup code could not be saved. Keep using the light normally. '
+      'Do not reset or pair it again; contact Rhythm Support if its '
+      'connection needs recovery.',
+    );
+    expect(warning, isNot(contains('Pair it again')));
+    expect(
+      matterPairingWarningMessage(
+        const MatterDevicePairingResult(
+          nativeDeviceId: 'matter-43',
+          name: 'Floor lamp',
+          deviceType: 'light',
         ),
       ),
+      isNull,
     );
-
-    await tester.tap(find.text('Add device'));
-    await tester.pumpAndSettle();
-
-    expect(
-      find.byKey(const ValueKey('pairing-method-hue-ble')),
-      findsOneWidget,
-    );
-    expect(find.byKey(const ValueKey('pairing-method-code')), findsOneWidget);
-    expect(find.text('No QR code or serial required'), findsOneWidget);
-
-    await tester.tap(find.byKey(const ValueKey('pairing-method-hue-ble')));
-    await tester.pumpAndSettle();
-    expect(result, DevicePairingTarget.hueBle);
   });
 
   testWidgets('Bridge chooser returns the exact selected address', (

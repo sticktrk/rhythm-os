@@ -66,6 +66,7 @@ export type DeviceRequestOptions = {
   body?: unknown;
   timeoutSeconds?: number;
   requestId?: string;
+  expectedServerInstanceId?: string;
   resourcePrecondition?: {
     path: string;
     query?: Record<string, string>;
@@ -102,6 +103,9 @@ export class DeviceClient {
       ...(options.body === undefined ? {} : { body: options.body }),
       timeoutSeconds: options.timeoutSeconds ?? 15,
       ...(options.requestId ? { requestId: options.requestId } : {}),
+      ...(options.expectedServerInstanceId
+        ? { expectedServerInstanceId: options.expectedServerInstanceId }
+        : {}),
       ...(options.resourcePrecondition
         ? { resourcePrecondition: options.resourcePrecondition }
         : {})

@@ -360,10 +360,13 @@ class RhythmApp extends StatelessWidget {
                 roomLayoutScopeKey: scopeKey,
               );
             });
+            final home = homeProvider.currentHome;
+            final hubs = homeProvider.currentHomeHubs;
             roomPageProvider.setLayoutScope(
-              RoomPageProvider.layoutScopeFor(
-                home: homeProvider.currentHome,
-                hubs: homeProvider.currentHomeHubs,
+              RoomPageProvider.layoutScopeFor(home: home, hubs: hubs),
+              scopeKeyAliases: RoomPageProvider.layoutScopeAliasesFor(
+                home: home,
+                hubs: hubs,
               ),
             );
             return roomPageProvider;

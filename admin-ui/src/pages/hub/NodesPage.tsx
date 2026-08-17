@@ -3,6 +3,7 @@ import {
   CheckCircle2,
   Clock3,
   Lightbulb,
+  Pencil,
   RefreshCw,
   RotateCcw,
   Save,
@@ -18,6 +19,7 @@ import {
 } from '../../components/controls/Slider';
 import { kelvinToRgb } from '../../components/controls/colorMath';
 import { ToggleSwitch } from '../../components/controls/ToggleSwitch';
+import { TextField } from '../../components/controls/fields';
 import { EmptyState, ErrorNotice } from '../../components/ui/bits';
 import { useConfirm } from '../../components/ui/ConfirmDialog';
 import {
@@ -25,6 +27,7 @@ import {
   SectionCard
 } from '../../components/ui/SectionCard';
 import {
+  NODE_ACTIONS,
   sendNodeAction,
   setNodeBrightness,
   setNodeColor,
@@ -34,6 +37,7 @@ import {
   setNodesOffset,
   type RgbColor
 } from '../../device/nodes';
+import { renameRoomGuarded } from '../../device/topology';
 import { getNodesState, getState } from '../../device/state';
 import {
   asBoolean,
@@ -63,20 +67,27 @@ import {
   profileOverridesForNode,
   profileOverridesFromNode,
   recordOf,
+  serverInstanceIdFromState,
   withDirectColor,
   withSelectedProfileOverride,
   type JsonRecord,
   type LightProfileOverrideSupport,
   type LightSettingsProfile
 } from './nodeLightSettings';
+import {
+  buildRoomRenameProposal,
+  createRoomRenameRequestId,
+  roomNameFromTopology,
+  roomRenameConfirmationStatus
+} from './roomRename';
+import { groupTopologyItems, isRoomKind } from './topologyMembership';
 import '../../styles/pages-phase4.css';
 
-type NodeSummary = {
+export type NodeSummary = {
   id: string;
   name: string;
   kind?: string;
   parentId?: string;
-  room?: string;
   powerOn?: boolean;
   rhythmEnabled?: boolean;
   disabled?: boolean;
@@ -86,18 +97,7 @@ type NodeSummary = {
   raw: Record<string, unknown>;
 };
 
-const NODE_ACTIONS: Array<{ id: string; label: string }> = [
-  { id: 'on_press', label: 'On' },
-  { id: 'off_press', label: 'Off' },
-  { id: 'toggle', label: 'Toggle' },
-  { id: 'reset', label: 'Reset' },
-  { id: 'step_up', label: 'Step up' },
-  { id: 'step_down', label: 'Step down' },
-  { id: 'rhythm_on', label: 'Rhythm on' },
-  { id: 'rhythm_off', label: 'Rhythm off' }
-];
-
-function parseNodes(payload: unknown): NodeSummary[] {
+export function parseNodes(payload: unknown): NodeSummary[] {
   const record = asRecord(payload);
   const rawNodes = Array.isArray(payload)
     ? asRecordArray(payload)
@@ -112,11 +112,6 @@ function parseNodes(payload: unknown): NodeSummary[] {
         name: asString(raw.name) ?? asString(raw.label) ?? id,
         kind: asString(raw.kind) ?? asString(raw.node_kind),
         parentId: asString(raw.parent_id),
-        room:
-          asString(raw.room_name) ??
-          asString(raw.room) ??
-          asString(raw.room_id) ??
-          asString(raw.parent_name),
         powerOn:
           asBoolean(raw.power_on) ??
           asBoolean(state.power_on) ??
@@ -160,16 +155,7 @@ export default function NodesPage() {
   const selected =
     nodes.find((node) => node.id === selectedId) ?? nodes[0] ?? null;
 
-  const grouped = useMemo(() => {
-    const groups = new Map<string, NodeSummary[]>();
-    for (const node of nodes) {
-      const key = node.room ?? node.kind ?? 'Ungrouped';
-      const list = groups.get(key) ?? [];
-      list.push(node);
-      groups.set(key, list);
-    }
-    return [...groups.entries()].sort(([a], [b]) => a.localeCompare(b));
-  }, [nodes]);
+  const grouped = useMemo(() => groupTopologyItems(nodes), [nodes]);
 
   return (
     <div className="consolePage wide">
@@ -208,10 +194,10 @@ export default function NodesPage() {
               icon={<Lightbulb size={20} />}
             />
           ) : (
-            grouped.map(([group, members]) => (
-              <div className="nodeGroup" key={group}>
-                <div className="nodeGroupTitle">{group}</div>
-                {members.map((node) => (
+            grouped.map((group) => (
+              <div className="nodeGroup" key={group.id}>
+                <div className="nodeGroupTitle">{group.label}</div>
+                {group.items.map((node) => (
                   <button
                     key={node.id}
                     type="button"
@@ -257,7 +243,7 @@ export default function NodesPage() {
   );
 }
 
-function NodeDetail({
+export function NodeDetail({
   node,
   parentProfileOverrides,
   onWrite,
@@ -275,6 +261,7 @@ function NodeDetail({
   lightSettingsError: string | null;
 }) {
   const client = useDeviceClient();
+  const lightAddressable = isLightAddressableKind(node.kind);
 
   const [colorScope, setColorScope] = useState<'preview' | 'mood' | 'auto'>('auto');
   const [wheelRgb, setWheelRgb] = useState<RgbColor>({ r: 255, g: 180, b: 120 });
@@ -304,48 +291,61 @@ function NodeDetail({
           </span>
         }
       >
-        <div className="actionRow">
-          {NODE_ACTIONS.map((action) => (
-            <button
-              key={action.id}
-              className="consoleButton small"
-              type="button"
-              disabled={write.busy}
-              onClick={() =>
-                void write.run(() => sendNodeAction(client, node.id, action.id))
-              }
-            >
-              {action.label}
-            </button>
-          ))}
-        </div>
+        {lightAddressable ? (
+          <>
+            <div className="actionRow">
+              {NODE_ACTIONS.map((action) => (
+                <button
+                  key={action.id}
+                  className="consoleButton small"
+                  type="button"
+                  disabled={write.busy}
+                  onClick={() =>
+                    void write.run(() => sendNodeAction(client, node.id, action.id))
+                  }
+                >
+                  {action.label}
+                </button>
+              ))}
+            </div>
 
-        <Slider
-          label="Brightness"
-          value={node.brightness ?? 50}
-          min={1}
-          max={100}
-          format={(value) => `${Math.round(value)}%`}
-          disabled={write.busy}
-          onCommit={(value) =>
-            void write.run(() => setNodeBrightness(client, node.id, value))
-          }
-        />
-        <KelvinSlider
-          label="Color temp"
-          value={node.kelvin ?? 3000}
-          min={500}
-          max={6500}
-          disabled={write.busy}
-          onCommit={(value) =>
-            void write.run(() =>
-              setNodeCurveColorTemperature(client, node.id, value, true)
-            )
-          }
-        />
+            <Slider
+              label="Brightness"
+              value={node.brightness ?? 50}
+              min={1}
+              max={100}
+              format={(value) => `${Math.round(value)}%`}
+              disabled={write.busy}
+              onCommit={(value) =>
+                void write.run(() => setNodeBrightness(client, node.id, value))
+              }
+            />
+            <KelvinSlider
+              label="Color temp"
+              value={node.kelvin ?? 3000}
+              min={500}
+              max={6500}
+              disabled={write.busy}
+              onCommit={(value) =>
+                void write.run(() =>
+                  setNodeCurveColorTemperature(client, node.id, value, true)
+                )
+              }
+            />
+          </>
+        ) : (
+          <p className="cardNote">
+            This device does not advertise light controls. Runtime preferences
+            and raw device state remain available below.
+          </p>
+        )}
       </SectionCard>
 
-      {isLightAddressableKind(node.kind) ? (
+      {isRoomKind(node.kind) ? (
+        <RoomRenameCard node={node} onWrite={onWrite} />
+      ) : null}
+
+      {lightAddressable ? (
         <NodeLightSettingsCard
           node={node}
           parentProfileOverrides={parentProfileOverrides}
@@ -357,39 +357,41 @@ function NodeDetail({
         />
       ) : null}
 
-      <div className="cardGrid two">
-        <SectionCard title="Color" subtitle="Direct RGB with scope">
-          <div className="colorRow">
-            <ColorWheel
-              rgb={wheelRgb}
-              size={180}
-              onChange={setWheelRgb}
-              onCommit={(rgb) => {
-                setWheelRgb(rgb);
-                void write.run(() =>
-                  setNodeColor(client, node.id, { rgb, scope: colorScope })
-                );
-              }}
-            />
-            <div className="colorControls">
-              <SegmentedControl
-                value={colorScope}
-                onChange={(value) =>
-                  setColorScope(value as 'preview' | 'mood' | 'auto')
-                }
-                options={[
-                  { value: 'auto', label: 'Auto' },
-                  { value: 'mood', label: 'Mood' },
-                  { value: 'preview', label: 'Preview' }
-                ]}
+      <div className={`cardGrid${lightAddressable ? ' two' : ''}`}>
+        {lightAddressable ? (
+          <SectionCard title="Color" subtitle="Direct RGB with scope">
+            <div className="colorRow">
+              <ColorWheel
+                rgb={wheelRgb}
+                size={180}
+                onChange={setWheelRgb}
+                onCommit={(rgb) => {
+                  setWheelRgb(rgb);
+                  void write.run(() =>
+                    setNodeColor(client, node.id, { rgb, scope: colorScope })
+                  );
+                }}
               />
-              <p className="cardNote">
-                Preview is temporary, mood persists as an override, auto lets
-                the device decide.
-              </p>
+              <div className="colorControls">
+                <SegmentedControl
+                  value={colorScope}
+                  onChange={(value) =>
+                    setColorScope(value as 'preview' | 'mood' | 'auto')
+                  }
+                  options={[
+                    { value: 'auto', label: 'Auto' },
+                    { value: 'mood', label: 'Mood' },
+                    { value: 'preview', label: 'Preview' }
+                  ]}
+                />
+                <p className="cardNote">
+                  Preview is temporary, mood persists as an override, auto lets
+                  the device decide.
+                </p>
+              </div>
             </div>
-          </div>
-        </SectionCard>
+          </SectionCard>
+        ) : null}
 
         <SectionCard title="Preferences" subtitle="Per-node runtime flags">
           <ToggleSwitch
@@ -450,6 +452,185 @@ function NodeDetail({
   );
 }
 
+type ProxyReceiptSummary = {
+  route?: 'remote' | 'local';
+  completedAt: string;
+  statusCode: number;
+  verifiedServerInstanceId?: string;
+  preconditionBodySha256?: string;
+  responseBodySha256?: string;
+};
+
+type RoomRenameReceipt = {
+  status: 'pending' | 'confirmed' | 'conflict';
+  requestId: string;
+  roomId: string;
+  before: string;
+  candidate: string;
+  after?: string | null;
+  topologyBodySha256: string;
+  proxy: ProxyReceiptSummary;
+};
+
+function RoomRenameCard({
+  node,
+  onWrite
+}: {
+  node: NodeSummary;
+  onWrite: () => Promise<void>;
+}) {
+  const client = useDeviceClient();
+  const confirm = useConfirm();
+  const [baselineName, setBaselineName] = useState(node.name);
+  const [draftName, setDraftName] = useState(node.name);
+  const [busy, setBusy] = useState(false);
+  const [stale, setStale] = useState(false);
+  const [writeError, setWriteError] = useState<string | null>(null);
+  const [receipt, setReceipt] = useState<RoomRenameReceipt | null>(null);
+  const proposal = buildRoomRenameProposal(node.id, baselineName, draftName);
+  const pending = receipt?.status === 'pending';
+
+  function patchDraft(value: string) {
+    setDraftName(value);
+    setStale(false);
+    setWriteError(null);
+    setReceipt(null);
+  }
+
+  async function reviewRename() {
+    if (!proposal || busy || pending) return;
+    const ok = await confirm({
+      title: 'Rename room',
+      message: `Rename room "${proposal.before}" to "${proposal.candidate}"? Room id: ${proposal.roomId}. The request will remain pending until fresh appliance topology confirms the new name.`,
+      confirmLabel: 'Rename room'
+    });
+    if (!ok) return;
+
+    const requestId = createRoomRenameRequestId();
+    setBusy(true);
+    setWriteError(null);
+    try {
+      const snapshot = await client.getReceipt('api/topology/nodes', {
+        requestId
+      });
+      if (!snapshot.bodySha256) {
+        throw new Error(
+          'The admin API did not provide a topology freshness hash; no rename was sent.'
+        );
+      }
+      const liveBefore = roomNameFromTopology(snapshot.body, proposal.roomId);
+      if (liveBefore === null) {
+        setStale(true);
+        throw new Error(
+          'The room is no longer present in appliance topology; no rename was sent.'
+        );
+      }
+      if (liveBefore !== proposal.before) {
+        setStale(true);
+        throw new Error(
+          `The room name changed from "${proposal.before}" to "${liveBefore}" while this proposal was open. Refresh and review before applying.`
+        );
+      }
+
+      const proxy = await renameRoomGuarded(
+        client,
+        proposal.roomId,
+        proposal.candidate,
+        {
+          requestId,
+          resourcePrecondition: {
+            path: 'api/topology/nodes',
+            bodySha256: snapshot.bodySha256
+          }
+        }
+      );
+      const pendingReceipt: RoomRenameReceipt = {
+        status: 'pending',
+        requestId,
+        roomId: proposal.roomId,
+        before: proposal.before,
+        candidate: proposal.candidate,
+        topologyBodySha256: snapshot.bodySha256,
+        proxy: proxyReceiptSummary(proxy)
+      };
+      setReceipt(pendingReceipt);
+
+      const confirmation = await client.getReceipt('api/topology/nodes', {
+        requestId
+      });
+      const after = roomNameFromTopology(confirmation.body, proposal.roomId);
+      const status = roomRenameConfirmationStatus(after, proposal.candidate);
+      setReceipt({ ...pendingReceipt, status, after });
+      if (status === 'confirmed') {
+        setBaselineName(proposal.candidate);
+        setDraftName(proposal.candidate);
+        setStale(false);
+      } else {
+        setStale(true);
+      }
+      await onWrite();
+    } catch (error) {
+      setWriteError(`${errorMessage(error)} Request ${requestId}.`);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <SectionCard
+      title="Room name"
+      subtitle={`Rename the canonical room while preserving room id ${node.id}`}
+      busy={busy}
+    >
+      <div className="roomRenameEditor">
+        <div className="buttonRow">
+          <TextField
+            value={draftName}
+            onChange={patchDraft}
+            placeholder="Room name"
+            disabled={busy || pending}
+          />
+          <button
+            className="consoleButton small primary"
+            type="button"
+            disabled={!proposal || busy || stale || pending}
+            onClick={() => void reviewRename()}
+          >
+            <Pencil size={13} />
+            <span>{busy ? 'Renaming…' : 'Review rename'}</span>
+          </button>
+        </div>
+
+        {stale ? (
+          <ErrorNotice message="The authoritative room name changed or could not be confirmed. Refresh before applying another rename." />
+        ) : null}
+        {writeError ? <ErrorNotice message={writeError} /> : null}
+
+        {receipt ? (
+          <div className={`nodeLightReceipt ${receipt.status}`}>
+            <div>
+              {receipt.status === 'confirmed' ? (
+                <CheckCircle2 size={16} />
+              ) : (
+                <Clock3 size={16} />
+              )}
+              <span>
+                {receipt.status === 'pending'
+                  ? 'Accepted; waiting for appliance topology confirmation.'
+                  : receipt.status === 'confirmed'
+                    ? 'Confirmed in canonical appliance topology.'
+                    : 'Canonical topology diverged; refresh and review before retrying.'}
+              </span>
+            </div>
+            <code>{receipt.requestId}</code>
+            <RawPayloadToggle payload={receipt} />
+          </div>
+        ) : null}
+      </div>
+    </SectionCard>
+  );
+}
+
 type SettingsWriteReceipt = {
   status: 'pending' | 'confirmed' | 'conflict';
   operation: 'save_profile' | 'reset_profile' | 'reset_all';
@@ -460,14 +641,7 @@ type SettingsWriteReceipt = {
   before: JsonRecord;
   candidate: JsonRecord;
   after?: JsonRecord;
-  proxy: {
-    route?: 'remote' | 'local';
-    completedAt: string;
-    statusCode: number;
-    verifiedServerInstanceId?: string;
-    preconditionBodySha256?: string;
-    responseBodySha256?: string;
-  };
+  proxy: ProxyReceiptSummary;
 };
 
 function NodeLightSettingsCard({
@@ -795,12 +969,21 @@ function ProfileLightSettingsEditor({
         requestId
       });
       const latestSupport = lightProfileOverrideSupport(latestState);
-      if (latestSupport !== 'guarded') {
+      if (
+        latestSupport !== 'guarded' &&
+        latestSupport !== 'target_guarded'
+      ) {
         setStale(true);
         throw new Error(
           latestSupport === 'unguarded'
             ? 'The appliance no longer advertises guarded light-setting writes; no write was sent.'
             : 'The appliance no longer supports per-room light settings; no write was sent.'
+        );
+      }
+      const expectedServerInstanceId = serverInstanceIdFromState(latestState);
+      if (!expectedServerInstanceId) {
+        throw new Error(
+          'The appliance did not report a durable server identity; no write was sent.'
         );
       }
       const latestProfile = lightSettingsProfilesFromState(latestState).find(
@@ -844,10 +1027,15 @@ function ProfileLightSettingsEditor({
         replace: true,
         correlationId: requestId,
         expectedProfileOverrides: baselineOverrides,
-        resourcePrecondition: {
-          path: 'api/nodes/state',
-          bodySha256: snapshot.bodySha256
-        }
+        expectedServerInstanceId,
+        ...(latestSupport === 'guarded'
+          ? {
+              resourcePrecondition: {
+                path: 'api/nodes/state',
+                bodySha256: snapshot.bodySha256
+              }
+            }
+          : {})
       });
       setReceipt({
         status: 'pending',
@@ -1164,7 +1352,7 @@ function ProfileLightSettingsEditor({
 
 function proxyReceiptSummary(
   proxy: DeviceAdminProxyResponse
-): SettingsWriteReceipt['proxy'] {
+): ProxyReceiptSummary {
   return {
     route: proxy.route,
     completedAt: proxy.completedAt,

@@ -17,6 +17,8 @@ const explicitExemptions = new Set([
   'GET api/discover',
   // Legacy ESP32-only endpoint; rhythm-server 404s it.
   'GET api/ota/version',
+  // Owner-only Matter setup secrets must never become staff/admin operations.
+  'GET api/matter/setup-code/{}',
 ]);
 
 const catalog = readFileSync(catalogPath, 'utf8');
