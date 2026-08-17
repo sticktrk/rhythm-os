@@ -507,6 +507,10 @@ void main() {
       'Custom light profile: brightness range and color temperature range',
     );
     expect(find.text('Light settings'), findsNothing);
+    expect(
+      find.byKey(const ValueKey('room-card-schedule-room-1')),
+      findsNothing,
+    );
     expect(serverSync.hasNodeLightProfileOverrides('room-1'), isTrue);
 
     await tester.pumpWidget(
@@ -534,6 +538,18 @@ void main() {
       const ValueKey('room-settings-light-settings-room-1'),
     );
     expect(button, findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('room-settings-schedule-room-1')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('room-settings-schedule-day-room-1')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('room-settings-schedule-night-room-1')),
+      findsOneWidget,
+    );
     expect(find.text('Lighting'), findsOneWidget);
     expect(
       tester
@@ -2020,6 +2036,11 @@ void main() {
     expect(_roomSegment('Brightness'), findsOneWidget);
     expect(_roomSegment('Color'), findsOneWidget);
     expect(find.byType(Slider), findsNothing);
+
+    expect(
+      find.byKey(const ValueKey('room-card-schedule-room-1')),
+      findsNothing,
+    );
 
     final powerRect = tester.getRect(_powerToggle());
     final scenesRect = tester.getRect(_scenesControl());

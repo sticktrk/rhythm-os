@@ -1,0 +1,288 @@
+import 'dart:async';
+
+import 'package:dio/dio.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:provider/provider.dart';
+import 'package:rhythm_app/backend/backend.dart';
+import 'package:rhythm_app/providers/home_provider.dart';
+import 'package:rhythm_app/providers/room_provider.dart';
+import 'package:rhythm_app/providers/server_sync_provider.dart';
+import 'package:rhythm_app/services/analytics_service.dart';
+import 'package:rhythm_app/widgets/room_schedule_behavior_control.dart';
+import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart';
+
+import '../helpers/capturing_analytics_backend.dart';
+
+class _FakeHomeProvider extends HomeProvider {
+  @override
+  List<Hub> get currentHomeHubs => const [];
+
+  @override
+  Hub? getFirstHubOfType(HubType type) => null;
+
+  @override
+  Future<void> onUserSignIn() async {}
+}
+
+class _FakeRhythmServerApi extends RhythmServerApi {
+  _FakeRhythmServerApi() : super(Dio());
+
+  bool modeSetSucceeds = true;
+  final List<List<RhythmModeConfig>> modeConfigCalls = [];
+
+  @override
+  Future<bool> modeSet({
+    RhythmMode? active,
+    List<RhythmModeConfig>? configs,
+  }) async {
+    modeConfigCalls.add(List<RhythmModeConfig>.of(configs ?? const []));
+    return modeSetSucceeds;
+  }
+}
+
+class _TestRhythmConnection extends RhythmConnection {
+  _TestRhythmConnection() : api = _FakeRhythmServerApi();
+
+  @override
+  final _FakeRhythmServerApi api;
+
+  final _helloController = StreamController<RhythmHello>.broadcast();
+
+  @override
+  Stream<RhythmHello> get helloEvents => _helloController.stream;
+
+  @override
+  bool get connected => true;
+
+  @override
+  RhythmConnectionState get connectionState => RhythmConnectionState.connected;
+
+  void emitHello(RhythmHello hello) => _helloController.add(hello);
+
+  @override
+  Future<void> pingOrReconnect() async {}
+
+  @override
+  Future<void> reconnect({bool authoritative = false}) async {}
+
+  @override
+  void disconnect() {}
+
+  @override
+  void dispose() {
+    _helloController.close();
+    super.dispose();
+  }
+}
+
+RhythmHello _helloWithRoomDefaults() => RhythmHello.fromJson({
+      'nodes': const <Map<String, dynamic>>[],
+      'mode': {
+        'active': 'day',
+        'configs': [
+          {
+            'mode': 'day',
+            'active_profile_id': 'rhythm',
+            'room_defaults': const <Map<String, dynamic>>[],
+          },
+          {
+            'mode': 'sleep',
+            'active_profile_id': 'sleep',
+            'room_defaults': [
+              {'room_id': 'room-1', 'state': 'standby'},
+            ],
+          },
+        ],
+      },
+      'location': const <String, dynamic>{},
+    });
+
+RhythmModeConfig _configFor(
+  List<RhythmModeConfig> configs,
+  RhythmMode mode,
+) =>
+    configs.singleWhere((config) => config.mode == mode);
+
+void main() {
+  testWidgets(
+    'room schedule control exposes Day and Night choices and coalesces writes',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(320, 700));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final analyticsBackend = CapturingAnalyticsBackend();
+      await analyticsBackend.initialize();
+      BackendProvider.setInstanceForTesting(
+        auth: OfflineAuthBackend(),
+        analytics: analyticsBackend,
+      );
+      final analytics = AnalyticsService();
+      analytics.resetForTesting();
+      await analytics.initialize();
+
+      final roomProvider = RoomProvider();
+      final connection = _TestRhythmConnection();
+      final sync = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _FakeHomeProvider(),
+      );
+      addTearDown(() {
+        sync.dispose();
+        roomProvider.dispose();
+        connection.dispose();
+        analytics.resetForTesting();
+        BackendProvider.resetForTesting();
+      });
+
+      connection.emitHello(_helloWithRoomDefaults());
+      await tester.pump(const Duration(milliseconds: 10));
+      await tester.pumpWidget(
+        ChangeNotifierProvider<ServerSyncProvider>.value(
+          value: sync,
+          child: const MaterialApp(
+            home: Scaffold(
+              body: Padding(
+                padding: EdgeInsets.all(12),
+                child: RoomScheduleBehaviorControl(
+                  roomId: 'room-1',
+                  foregroundColor: Colors.white,
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      final day = find.byKey(
+        const ValueKey('room-card-schedule-day-room-1'),
+      );
+      final night = find.byKey(
+        const ValueKey('room-card-schedule-night-room-1'),
+      );
+      expect(day, findsOneWidget);
+      expect(night, findsOneWidget);
+      expect(find.text('Day'), findsOneWidget);
+      expect(find.text('Night'), findsOneWidget);
+      expect(find.text('Auto'), findsOneWidget);
+      expect(find.text('Standby'), findsOneWidget);
+      expect(tester.getSize(day).height, greaterThanOrEqualTo(44));
+      expect(tester.getSize(night).height, greaterThanOrEqualTo(44));
+      expect(tester.getSemantics(day).label, 'Day schedule behavior');
+      expect(tester.getSemantics(day).value, 'Auto');
+      expect(tester.getSemantics(night).value, 'Standby');
+
+      await tester.tap(day);
+      await tester.pumpAndSettle();
+      expect(find.text('Auto'), findsNWidgets(2));
+      expect(find.text('Standby'), findsNWidgets(2));
+      expect(find.text('Off'), findsOneWidget);
+      expect(find.text('On'), findsOneWidget);
+      await tester.tap(find.text('On'));
+      await tester.pump(const Duration(milliseconds: 220));
+      expect(sync.roomDefaultStateForMode('room-1', RhythmMode.day), 'active');
+
+      tester
+          .widget<PopupMenuButton<RoomScheduleBehavior>>(night)
+          .onSelected!(RoomScheduleBehavior.off);
+      await tester.pump();
+      expect(
+        sync.roomDefaultStateForMode('room-1', RhythmMode.sleep),
+        'hard_off',
+      );
+
+      // A reconnect snapshot can race the debounce; it must not erase either
+      // optimistic choice before the write resolves.
+      connection.emitHello(_helloWithRoomDefaults());
+      await tester.pump(const Duration(milliseconds: 10));
+      expect(sync.roomDefaultStateForMode('room-1', RhythmMode.day), 'active');
+      expect(
+        sync.roomDefaultStateForMode('room-1', RhythmMode.sleep),
+        'hard_off',
+      );
+
+      expect(connection.api.modeConfigCalls, isEmpty);
+      await tester.pump(const Duration(milliseconds: 801));
+      await tester.pump();
+      expect(connection.api.modeConfigCalls, hasLength(1));
+      final saved = connection.api.modeConfigCalls.single;
+      expect(
+        _configFor(saved, RhythmMode.day).roomDefaults.single.state,
+        'active',
+      );
+      expect(
+        _configFor(saved, RhythmMode.sleep).roomDefaults.single.state,
+        'hard_off',
+      );
+
+      final events = analyticsBackend.events
+          .where(
+            (event) => event.name == 'light_profile_room_default_changed',
+          )
+          .toList();
+      expect(events, hasLength(2));
+      expect(events.first.properties, {
+        'profile': 'rhythm',
+        'cleared': 0,
+        'source': 'room_card',
+      });
+      expect(events.last.properties, {
+        'profile': 'sleep',
+        'cleared': 0,
+        'source': 'room_card',
+      });
+      expect(
+        events.expand((event) => event.properties.keys),
+        isNot(contains(anyOf('room_id', 'node_id', 'home_id', 'room_name'))),
+      );
+    },
+  );
+
+  testWidgets('rejected schedule behavior write restores the saved state',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    final connection = _TestRhythmConnection();
+    connection.api.modeSetSucceeds = false;
+    final sync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _FakeHomeProvider(),
+    );
+    addTearDown(() {
+      sync.dispose();
+      roomProvider.dispose();
+      connection.dispose();
+    });
+    connection.emitHello(_helloWithRoomDefaults());
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pumpWidget(
+      ChangeNotifierProvider<ServerSyncProvider>.value(
+        value: sync,
+        child: const MaterialApp(
+          home: Scaffold(
+            body: RoomScheduleBehaviorControl(
+              roomId: 'room-1',
+              foregroundColor: Colors.white,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final day = find.byKey(
+      const ValueKey('room-card-schedule-day-room-1'),
+    );
+    await tester.tap(day);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('On'));
+    await tester.pump(const Duration(milliseconds: 220));
+    expect(sync.roomDefaultStateForMode('room-1', RhythmMode.day), 'active');
+
+    await tester.pump(const Duration(milliseconds: 801));
+    await tester.pump();
+    expect(sync.roomDefaultStateForMode('room-1', RhythmMode.day), isNull);
+    expect(tester.getSemantics(day).value, 'Auto');
+  });
+}
