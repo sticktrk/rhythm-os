@@ -14082,11 +14082,39 @@ fn rollback_prepared_hub_device_room_assignments(
     if rollback_failure_count == 0 {
         primary_error
     } else {
-        anyhow::anyhow!(
-            "{primary_error:#}; {} native rollback operation(s) also failed",
-            rollback_failure_count
+        anyhow::Error::new(NativeRoomAssignmentRollbackError {
+            primary_error,
+            rollback_failure_count,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct NativeRoomAssignmentRollbackError {
+    primary_error: anyhow::Error,
+    rollback_failure_count: usize,
+}
+
+impl fmt::Display for NativeRoomAssignmentRollbackError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{:#}; {} native rollback operation(s) also failed",
+            self.primary_error, self.rollback_failure_count
         )
     }
+}
+
+impl std::error::Error for NativeRoomAssignmentRollbackError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.primary_error.as_ref())
+    }
+}
+
+pub(crate) fn native_room_assignment_rollback_failed(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<NativeRoomAssignmentRollbackError>()
+        .is_some()
 }
 
 fn prepare_hub_device_room_assignments<F>(

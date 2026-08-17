@@ -630,6 +630,15 @@ pub fn plan_light_assistant_device_room_move(
 }
 
 fn map_guarded_move_error(error: anyhow::Error) -> LightAssistantError {
+    if commands::native_room_assignment_rollback_failed(&error) {
+        return LightAssistantError {
+            status: 500,
+            code: "apply_failed",
+            message: "Rhythm could not confirm the reviewed move outcome; refresh topology before taking another action".to_string(),
+            retryable: false,
+            mutation_may_have_applied: true,
+        };
+    }
     let message = error.to_string();
     if message.starts_with("assistant topology precondition failed: ") {
         return if message.contains("server_instance_changed") {
@@ -786,6 +795,7 @@ mod tests {
     use crate::state::AppState;
     use crate::topology::{NodeControlKind, TopologyRoom};
     use rhythm_core::runtime::hub_registry::DeviceType;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     fn assistant_test_state() -> (SharedState, String) {
@@ -919,6 +929,85 @@ mod tests {
         assert_eq!(error.code, "apply_failed");
         assert!(!error.retryable);
         assert!(error.mutation_may_have_applied);
+    }
+
+    #[test]
+    fn failed_native_rollback_is_uncertain_and_retains_recovery_fence() {
+        let (state, device_id) = assistant_test_state();
+        let plan = plan_light_assistant_device_room_move(
+            &state,
+            LightAssistantMovePlanRequest {
+                device_id: device_id.clone(),
+                to_room_id: "foyer".to_string(),
+                correlation_id: "setup-rollback-failure".to_string(),
+            },
+        )
+        .unwrap();
+        let hub_key = HubKey::new(HubType::new(HubType::MATTER), "fabric-1");
+        let recovery_requests = Arc::new(AtomicUsize::new(0));
+        {
+            let recovery_requests = recovery_requests.clone();
+            let mut app = state.lock().unwrap();
+            app.topology
+                .set_grouped_room_control_required(&hub_key, true);
+            app.request_hub_bootstrap_fn = Some(Arc::new(move |state| {
+                assert!(state.try_lock().is_ok());
+                recovery_requests.fetch_add(1, Ordering::SeqCst);
+            }));
+        }
+        state.lock().unwrap().prepare_hub_device_room_assignment_fn =
+            Some(Arc::new(move |state, assignment| {
+                state
+                    .lock()
+                    .unwrap()
+                    .topology
+                    .get_mut("foyer")
+                    .unwrap()
+                    .name = "Foyer changed concurrently".to_string();
+                Ok(
+                    crate::hub::HubDeviceRoomAssignmentOutcome::ReassignedWithBinding {
+                        target_binding: Some(crate::topology::HubRoomBinding {
+                            hub_key: assignment.hub_key.clone(),
+                            hub_room_id: "managed-foyer".to_string(),
+                            control_id: "grouped-managed-foyer".to_string(),
+                            light_device_ids: vec![assignment.native_device_id.clone()],
+                        }),
+                        managed_by_rhythm: true,
+                        rollback: Box::new(|| {
+                            anyhow::bail!("simulated native compensation failure")
+                        }),
+                    },
+                )
+            }));
+
+        let error = apply_light_assistant_device_room_move(
+            &state,
+            LightAssistantMoveApplyRequest {
+                plan_id: plan.plan_id,
+                correlation_id: plan.correlation_id,
+                operation: plan.operation,
+                contract_sha256: plan.contract_sha256,
+                server_instance_id: plan.server_instance_id,
+                topology_resource_sha256: plan.topology_resource_sha256,
+                device_id: plan.device.id,
+                from_room_id: plan.from_room.map(|room| room.id),
+                to_room_id: plan.to_room.id,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(error.status, 500);
+        assert_eq!(error.code, "apply_failed");
+        assert!(!error.retryable);
+        assert!(error.mutation_may_have_applied);
+        assert_eq!(recovery_requests.load(Ordering::SeqCst), 1);
+        let app = state.lock().unwrap();
+        assert_eq!(
+            app.topology.device_parent_room_id(&device_id),
+            Some("bathroom")
+        );
+        assert!(app.external_controller_authority_pending.contains(&hub_key));
+        assert!(!app.external_controller_authority_is_ready(&hub_key));
     }
 
     #[test]
