@@ -1207,6 +1207,24 @@ fn publish_managed_room_bindings(
 ) -> Result<()> {
     let mut state_guard = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let topology_before = state_guard.topology.clone();
+    let typed_device_room_assignments = state_guard
+        .canonical_registry
+        .devices()
+        .filter(|device| {
+            device.device_type != rhythm_core::runtime::hub_registry::DeviceType::Light
+        })
+        .flat_map(|device| {
+            let room_id = state_guard
+                .topology
+                .device_parent_room_id(&device.id)
+                .map(str::to_string)
+                .or_else(|| device.room_id.clone());
+            device
+                .active_endpoints()
+                .filter(|endpoint| endpoint.hub_key == *key)
+                .map(move |endpoint| (endpoint.native_id.clone(), room_id.clone()))
+        })
+        .collect::<Vec<_>>();
     let mut stale_room_ids = BTreeSet::new();
     for (rhythm_room_id, _, _) in bindings {
         if let Some(room) = state_guard.topology.get(rhythm_room_id) {
@@ -1243,14 +1261,14 @@ fn publish_managed_room_bindings(
     if let Some(registry) = state_guard
         .hubs
         .get(key)
-        .and_then(|hub| hub.registry.as_ref())
-        .cloned()
+        .and_then(|hub| hub.data::<HueHubData>())
+        .map(|hue| hue.registry.clone())
     {
         let mut registry = registry
             .lock()
             .map_err(|_| anyhow::anyhow!("Failed to lock Hue registry"))?;
         for room_id in stale_room_ids {
-            registry.remove_room(&room_id);
+            registry.remove_room_preserving_typed_devices(&room_id);
         }
         for (_, name, binding) in bindings {
             registry.upsert_room(
@@ -1259,6 +1277,15 @@ fn publish_managed_room_bindings(
                 &binding.control_id,
                 &binding.light_device_ids,
             );
+        }
+        for (native_device_id, room_id) in typed_device_room_assignments {
+            if !registry.has_device(&native_device_id) {
+                continue;
+            }
+            match room_id {
+                Some(room_id) => registry.set_device_room(&native_device_id, &room_id),
+                None => registry.clear_device_room(&native_device_id),
+            }
         }
     }
     drop(state_guard);
@@ -3543,7 +3570,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_binding_publication_preserves_consent_and_releases_fallback_fence() {
+    fn exact_binding_publication_preserves_consent_fence_and_accessory_routes() {
         static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
         let path = std::env::temp_dir().join(format!(
             "rhythm-hue-topology-publish-{}-{}",
@@ -3553,6 +3580,40 @@ mod tests {
         let storage = Arc::new(FileStorage::new(path.to_str().unwrap()).unwrap());
         let state = shared_state();
         let key = hue_key("192.0.2.10");
+        let motion_id = add_hue_endpoint(
+            &state,
+            &key,
+            "hue-motion-1",
+            rhythm_core::runtime::hub_registry::DeviceType::Motion,
+        );
+        let switch_id = add_hue_endpoint(
+            &state,
+            &key,
+            "hue-switch-1",
+            rhythm_core::runtime::hub_registry::DeviceType::Button,
+        );
+        let registry = Arc::new(Mutex::new(HueDeviceRegistry::with_options(false)));
+        {
+            let mut registry = registry.lock().unwrap();
+            registry.upsert_room(
+                "source-office",
+                "Office",
+                "source-office-group",
+                &["hue-light-1".to_string()],
+            );
+            registry.upsert_device(
+                "hue-motion-1",
+                Some("source-office"),
+                &[],
+                rhythm_core::runtime::hub_registry::DeviceType::Motion,
+            );
+            registry.upsert_device(
+                "hue-switch-1",
+                Some("source-office"),
+                &[("hue-button-1".to_string(), 1)],
+                rhythm_core::runtime::hub_registry::DeviceType::Button,
+            );
+        }
         {
             let mut app = state.lock().unwrap();
             app.storage = Some(storage.clone());
@@ -3564,6 +3625,18 @@ mod tests {
                 light_device_ids: vec!["hue-light-1".to_string()],
             });
             app.topology.insert_room(room);
+            assert!(app
+                .topology
+                .attach_device_user_override("rhythm-office", &motion_id));
+            assert!(app
+                .topology
+                .attach_device_user_override("rhythm-office", &switch_id));
+            assert!(app
+                .canonical_registry
+                .assign_room(&motion_id, Some("rhythm-office")));
+            assert!(app
+                .canonical_registry
+                .assign_room(&switch_id, Some("rhythm-office")));
             app.topology
                 .replace_external_room_automation_decisions(
                     &key,
@@ -3575,6 +3648,23 @@ mod tests {
                 .unwrap();
             app.topology
                 .set_external_room_topology_sync_enabled(&key, true);
+            app.hubs.insert(
+                key.clone(),
+                ActiveHub {
+                    hub_type: HubType::new(HubType::HUE),
+                    hub_key: key.clone(),
+                    runtime: None,
+                    hub_data: Box::new(HueHubData {
+                        bridge_ip: key.address.clone(),
+                        username: "user-123".to_string(),
+                        registry: registry.clone(),
+                        sse_liveness: Arc::new(HueSseLiveness::default()),
+                    }),
+                    registry: Some(registry.clone()),
+                    discovery: None,
+                    shutdown: Arc::new(AtomicBool::new(false)),
+                },
+            );
             rhythm_os::commands::save_authority_state(&app).unwrap();
         }
 
@@ -3601,6 +3691,26 @@ mod tests {
         assert!(app
             .topology
             .room_binding_is_managed("rhythm-office", &key, "managed-office"));
+        let registry = app
+            .hubs
+            .get(&key)
+            .unwrap()
+            .data::<HueHubData>()
+            .unwrap()
+            .registry
+            .lock()
+            .unwrap();
+        assert_eq!(
+            registry
+                .get_room_for_motion_sensor("hue-motion-1")
+                .as_deref(),
+            Some("rhythm-office")
+        );
+        assert_eq!(
+            registry.get_room_for_button("hue-button-1").as_deref(),
+            Some("rhythm-office")
+        );
+        drop(registry);
         drop(app);
         drop(state);
         drop(storage);
@@ -3808,20 +3918,30 @@ mod tests {
         assert_eq!(username, "user-123");
     }
 
-    fn add_hue_light_endpoint(state: &SharedState, key: &HubKey, native_id: &str) -> String {
+    fn add_hue_endpoint(
+        state: &SharedState,
+        key: &HubKey,
+        native_id: &str,
+        device_type: rhythm_core::runtime::hub_registry::DeviceType,
+    ) -> String {
         use rhythm_os::canonical::identity::{DiscoveredIdentity, HardwareId};
         use rhythm_os::canonical::registry::ResolveResult;
 
         let mut state = state.lock().unwrap();
+        let is_light = device_type == rhythm_core::runtime::hub_registry::DeviceType::Light;
         let identity = DiscoveredIdentity {
             native_id: native_id.to_string(),
             room_id: None,
             room_name: None,
-            name: "Test Hue lamp".to_string(),
-            device_type: rhythm_core::runtime::hub_registry::DeviceType::Light,
+            name: if is_light {
+                "Test Hue lamp".to_string()
+            } else {
+                format!("Test Hue {device_type:?}")
+            },
+            device_type,
             hardware_ids: vec![HardwareId::serial(&format!("serial-{native_id}"))],
             manufacturer: Some("Signify".to_string()),
-            model: Some("LCA009".to_string()),
+            model: Some(if is_light { "LCA009" } else { "test-model" }.to_string()),
         };
         match state.canonical_registry.resolve(&identity, key, 1) {
             ResolveResult::AlreadyKnown { canonical_id }
@@ -3829,6 +3949,15 @@ mod tests {
             | ResolveResult::Created { canonical_id } => canonical_id,
             ResolveResult::Queued { .. } => panic!("unexpected triage"),
         }
+    }
+
+    fn add_hue_light_endpoint(state: &SharedState, key: &HubKey, native_id: &str) -> String {
+        add_hue_endpoint(
+            state,
+            key,
+            native_id,
+            rhythm_core::runtime::hub_registry::DeviceType::Light,
+        )
     }
 
     #[test]

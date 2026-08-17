@@ -326,6 +326,24 @@ impl HubDeviceRegistry {
         info!("Registry: removed room {}", room_id);
     }
 
+    /// Remove a room projection while retaining known button/motion devices.
+    ///
+    /// External topology reconciliation replaces hub-native rooms with new
+    /// managed rooms. Typed devices are routed from canonical Rhythm
+    /// assignments after that replacement, so deleting their type and button
+    /// metadata here would make otherwise valid SSE events unknown.
+    pub fn remove_room_preserving_typed_devices(&mut self, room_id: &str) {
+        self.room_names.remove(room_id);
+        self.room_to_grouped_light.remove(room_id);
+        self.device_rooms.retain(|_, room| room != room_id);
+        self.area_lights.remove(room_id);
+        self.dirty = true;
+        info!(
+            "Registry: removed room {} while preserving typed devices",
+            room_id
+        );
+    }
+
     /// Upsert a device with its button mappings and type.
     ///
     /// `room_id == None` registers the device as roomless: button/type mappings
@@ -947,6 +965,38 @@ mod tests {
         assert!(!reg.device_rooms.contains_key("ms1"));
         assert!(!reg.device_types.contains_key("ms1"));
         assert!(reg.get_light_entities("r1").is_empty());
+    }
+
+    #[test]
+    fn remove_room_projection_preserves_typed_devices_for_reassignment() {
+        let mut reg = HubDeviceRegistry::new();
+        reg.upsert_room("source-room", "Room", "gl1", &["light1".to_string()]);
+        reg.upsert_device("motion1", Some("source-room"), &[], DeviceType::Motion);
+        reg.upsert_device(
+            "switch1",
+            Some("source-room"),
+            &[("button1".to_string(), 1)],
+            DeviceType::Button,
+        );
+
+        reg.remove_room_preserving_typed_devices("source-room");
+
+        assert!(!reg.has_rooms());
+        assert!(reg.has_device("motion1"));
+        assert!(reg.has_device("switch1"));
+        assert_eq!(reg.get_room_for_motion_sensor("motion1"), None);
+        assert_eq!(reg.get_room_for_button("button1"), None);
+
+        reg.set_device_room("motion1", "rhythm-room");
+        reg.set_device_room("switch1", "rhythm-room");
+        assert_eq!(
+            reg.get_room_for_motion_sensor("motion1").as_deref(),
+            Some("rhythm-room")
+        );
+        assert_eq!(
+            reg.get_room_for_button("button1").as_deref(),
+            Some("rhythm-room")
+        );
     }
 
     // =========================================================================
