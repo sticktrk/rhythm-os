@@ -236,11 +236,11 @@ fn node_ref_schema() -> Value {
 
 fn topology_control_schema() -> Value {
     object_schema(
-        &["kind", "target_id", "inherited"],
+        &["kind", "target_id"],
         json!({
             "kind": {"enum": ["motion", "button", "switch"]},
             "target_id": {"type": "string"},
-            "inherited": {"type": "boolean"},
+            "inherited": {"type": "boolean", "default": false},
         }),
     )
 }
@@ -779,11 +779,12 @@ pub fn apply_light_assistant_device_room_move(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api_types::TopologyNodeControlDto;
     use crate::canonical::identity::{DiscoveredIdentity, HardwareId, HubKey};
     use crate::canonical::registry::ResolveResult;
     use crate::hub::HubType;
     use crate::state::AppState;
-    use crate::topology::TopologyRoom;
+    use crate::topology::{NodeControlKind, TopologyRoom};
     use rhythm_core::runtime::hub_registry::DeviceType;
     use std::sync::{Arc, Mutex};
 
@@ -847,6 +848,55 @@ mod tests {
             snapshot.result_schema["properties"]["nodes"]["items"]["additionalProperties"],
             false
         );
+    }
+
+    #[test]
+    fn topology_control_schema_matches_omitted_false_wire_default() {
+        let schema = topology_control_schema();
+        assert_eq!(schema["required"], json!(["kind", "target_id"]));
+        assert_eq!(schema["properties"]["inherited"]["type"], "boolean");
+        assert_eq!(schema["properties"]["inherited"]["default"], false);
+
+        let explicit = serde_json::to_value(TopologyNodeControlDto {
+            kind: NodeControlKind::Motion,
+            target_id: "room-explicit".to_string(),
+            inherited: false,
+        })
+        .unwrap();
+        assert_eq!(
+            explicit,
+            json!({"kind": "motion", "target_id": "room-explicit"})
+        );
+
+        let inherited = serde_json::to_value(TopologyNodeControlDto {
+            kind: NodeControlKind::Button,
+            target_id: "room-inherited".to_string(),
+            inherited: true,
+        })
+        .unwrap();
+        assert_eq!(
+            inherited,
+            json!({
+                "kind": "button",
+                "target_id": "room-inherited",
+                "inherited": true,
+            })
+        );
+
+        for control in [explicit, inherited] {
+            let object = control.as_object().unwrap();
+            for required in schema["required"].as_array().unwrap() {
+                assert!(object.contains_key(required.as_str().unwrap()));
+            }
+            assert!(object
+                .keys()
+                .all(|key| schema["properties"].get(key).is_some()));
+            if let Some(inherited) = object.get("inherited") {
+                assert!(inherited.is_boolean());
+            } else {
+                assert_eq!(schema["properties"]["inherited"]["default"], false);
+            }
+        }
     }
 
     #[test]
