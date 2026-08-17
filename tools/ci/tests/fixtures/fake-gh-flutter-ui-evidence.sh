@@ -71,11 +71,18 @@ case "$METHOD $ENDPOINT" in
     "GET repos/test/repo/git/ref/heads/master")
         emit_json "$(jq -n --arg sha "$FAKE_BASE_SHA" '{object: {sha: $sha}}')"
         ;;
-    "GET repos/test/repo/git/ref/heads/codex-ui-evidence-pr-7")
-        exit 1
+    "GET repos/test/repo/git/ref/heads/codex-ui-evidence")
+        if [ "${FAKE_EVIDENCE_BRANCH_EXISTS:-false}" = true ]; then
+            emit_json '{"object":{"sha":"1111111111111111111111111111111111111111"}}'
+        else
+            exit 1
+        fi
         ;;
     "GET repos/test/repo/git/commits/$FAKE_BASE_SHA")
         emit_json '{"tree":{"sha":"dddddddddddddddddddddddddddddddddddddddd"}}'
+        ;;
+    "GET repos/test/repo/git/commits/1111111111111111111111111111111111111111")
+        emit_json '{"tree":{"sha":"2222222222222222222222222222222222222222"}}'
         ;;
     "POST repos/test/repo/git/refs")
         emit_json "$(jq -n --arg sha "$FAKE_BASE_SHA" '{object: {sha: $sha}}')"
@@ -90,7 +97,7 @@ case "$METHOD $ENDPOINT" in
     "POST repos/test/repo/git/commits")
         emit_json '{"sha":"ffffffffffffffffffffffffffffffffffffffff"}'
         ;;
-    "PATCH repos/test/repo/git/refs/heads/codex-ui-evidence-pr-7")
+    "PATCH repos/test/repo/git/refs/heads/codex-ui-evidence")
         emit_json '{}'
         ;;
     "POST repos/test/repo/issues/7/comments")
