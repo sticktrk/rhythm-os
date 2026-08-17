@@ -8,6 +8,11 @@
 //! - Axum router test to verify all routes are registered
 //! - Platform HTTP servers to generate CORS OPTIONS handlers
 
+use crate::assistant::{
+    LIGHT_ASSISTANT_CONTRACT_PATH, LIGHT_ASSISTANT_MOVE_APPLY_PATH, LIGHT_ASSISTANT_MOVE_PLAN_PATH,
+    LIGHT_ASSISTANT_TOPOLOGY_PATH,
+};
+
 /// A shared API route with its path and accepted HTTP methods.
 pub struct SharedRoute {
     pub path: &'static str,
@@ -56,6 +61,22 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
     SharedRoute {
         path: "/api/state",
         methods: &["GET"],
+    },
+    SharedRoute {
+        path: LIGHT_ASSISTANT_CONTRACT_PATH,
+        methods: &["GET"],
+    },
+    SharedRoute {
+        path: LIGHT_ASSISTANT_TOPOLOGY_PATH,
+        methods: &["GET"],
+    },
+    SharedRoute {
+        path: LIGHT_ASSISTANT_MOVE_PLAN_PATH,
+        methods: &["POST"],
+    },
+    SharedRoute {
+        path: LIGHT_ASSISTANT_MOVE_APPLY_PATH,
+        methods: &["POST"],
     },
     SharedRoute {
         path: "/api/profile-bundle",

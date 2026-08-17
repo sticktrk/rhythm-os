@@ -16,6 +16,10 @@ use axum::{Json, Router};
 use futures::stream::Stream;
 use serde_json::Value;
 
+use crate::assistant::{
+    LIGHT_ASSISTANT_CONTRACT_PATH, LIGHT_ASSISTANT_MOVE_APPLY_PATH, LIGHT_ASSISTANT_MOVE_PLAN_PATH,
+    LIGHT_ASSISTANT_TOPOLOGY_PATH,
+};
 use crate::handlers::{self, ApiResponse};
 use crate::server_event::ServerEvent;
 use crate::state::SharedState;
@@ -73,6 +77,16 @@ fn shared_routes() -> Router<SharedState> {
             post(post_auth_support_session_token_revoke),
         )
         .route("/api/auth/settings", put(put_auth_settings))
+        .route(LIGHT_ASSISTANT_CONTRACT_PATH, get(get_assistant_contract))
+        .route(LIGHT_ASSISTANT_TOPOLOGY_PATH, get(get_assistant_topology))
+        .route(
+            LIGHT_ASSISTANT_MOVE_PLAN_PATH,
+            post(post_assistant_move_plan),
+        )
+        .route(
+            LIGHT_ASSISTANT_MOVE_APPLY_PATH,
+            post(post_assistant_move_apply),
+        )
         .route(
             "/api/remote-access/status",
             get(crate::remote_access::get_status),
@@ -848,6 +862,32 @@ async fn post_device_flash(
     Path(id): Path<String>,
 ) -> ApiResponse {
     run_blocking(move || handlers::handle_post_device_flash(&state, &id)).await
+}
+
+// ---------------------------------------------------------------------------
+// Assistant contract handlers
+// ---------------------------------------------------------------------------
+
+async fn get_assistant_contract(State(state): State<SharedState>) -> ApiResponse {
+    run_canonical_read(move || handlers::handle_get_assistant_contract(&state)).await
+}
+
+async fn get_assistant_topology(State(state): State<SharedState>) -> ApiResponse {
+    run_canonical_read(move || handlers::handle_get_assistant_topology(&state)).await
+}
+
+async fn post_assistant_move_plan(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_post_assistant_move_plan(&state, &body)).await
+}
+
+async fn post_assistant_move_apply(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_post_assistant_move_apply(&state, &body)).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1670,6 +1710,81 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn assistant_routes_expose_contract_snapshot_and_structured_errors() {
+        let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
+        let app = api_routes().with_state(state);
+
+        let contract_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(LIGHT_ASSISTANT_CONTRACT_PATH)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(contract_response.status(), StatusCode::OK);
+        let contract: Value = serde_json::from_slice(
+            &to_bytes(contract_response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(contract["schema_version"], 1);
+        assert_eq!(contract["contract_sha256"].as_str().unwrap().len(), 64);
+        assert!(contract["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|operation| operation["id"] == crate::assistant::OP_IDENTIFY_DEVICE));
+
+        let snapshot_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(LIGHT_ASSISTANT_TOPOLOGY_PATH)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(snapshot_response.status(), StatusCode::OK);
+        let snapshot: Value = serde_json::from_slice(
+            &to_bytes(snapshot_response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(snapshot["nodes"], json!([]));
+        assert_eq!(
+            snapshot["topology_resource_sha256"].as_str().unwrap().len(),
+            64
+        );
+
+        let invalid_plan_response = app
+            .oneshot(
+                Request::builder()
+                    .method(HttpMethod::POST)
+                    .uri(LIGHT_ASSISTANT_MOVE_PLAN_PATH)
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid_plan_response.status(), StatusCode::BAD_REQUEST);
+        let invalid_plan: Value = serde_json::from_slice(
+            &to_bytes(invalid_plan_response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(invalid_plan["error"]["code"], "invalid_request");
+        assert_eq!(invalid_plan["error"]["mutation_may_have_applied"], false);
     }
 
     #[tokio::test]
