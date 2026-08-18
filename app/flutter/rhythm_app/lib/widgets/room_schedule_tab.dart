@@ -83,6 +83,38 @@ class _RoomScheduleTabState extends State<RoomScheduleTab> {
   @override
   Widget build(BuildContext context) {
     final sync = context.watch<ServerSyncProvider>();
+    if (!sync.roomScheduleSupportedForNode(widget.roomId)) {
+      return ListView(
+        key: const ValueKey('schedule'),
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        children: const [
+          _Section(
+            title: 'Schedule',
+            child: Column(
+              children: [
+                Icon(Icons.system_update_alt,
+                    color: CelestialColors.sunWarm, size: 32),
+                SizedBox(height: 10),
+                Text(
+                  'Update required',
+                  key: ValueKey('room-schedule-update-required'),
+                  style: TextStyle(
+                    color: CelestialColors.textPrimary,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                SizedBox(height: 6),
+                Text(
+                  'Update this Rhythm appliance to set a schedule for this room.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: CelestialColors.textSecondary),
+                ),
+              ],
+            ),
+          ),
+        ],
+      );
+    }
     final schedule = sync.scheduleForRoom(widget.roomId);
     final followTime = schedule.source == RhythmRoomScheduleSource.followTime;
     final saving = sync.roomSchedulePendingForRoom(widget.roomId);
@@ -301,6 +333,17 @@ class _RoomTimeDialState extends State<_RoomTimeDial> {
   late int sleep = _parse(widget.sleepTime);
   bool draggingWake = true;
 
+  @override
+  void didUpdateWidget(covariant _RoomTimeDial oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.wakeTime != widget.wakeTime) {
+      wake = _parse(widget.wakeTime);
+    }
+    if (oldWidget.sleepTime != widget.sleepTime) {
+      sleep = _parse(widget.sleepTime);
+    }
+  }
+
   static int _parse(String value) {
     final parts = value.split(':');
     return int.parse(parts[0]) * 60 + int.parse(parts[1]);
@@ -332,6 +375,17 @@ class _RoomTimeDialState extends State<_RoomTimeDial> {
     setState(() => draggingWake ? wake = minute : sleep = minute);
   }
 
+  void _adjust({required bool wakeTime, required int delta}) {
+    setState(() {
+      if (wakeTime) {
+        wake = (wake + delta) % 1440;
+      } else {
+        sleep = (sleep + delta) % 1440;
+      }
+    });
+    widget.onChanged(_display(wake), _display(sleep));
+  }
+
   @override
   Widget build(BuildContext context) {
     const size = Size.square(184);
@@ -340,23 +394,28 @@ class _RoomTimeDialState extends State<_RoomTimeDial> {
       child: Column(
         children: [
           Center(
-            child: GestureDetector(
-              key: const ValueKey('room-schedule-time-dial'),
-              onPanStart: widget.enabled ? (d) => _start(d, size) : null,
-              onPanUpdate: widget.enabled ? (d) => _update(d, size) : null,
-              onPanEnd: widget.enabled
-                  ? (_) => widget.onChanged(_display(wake), _display(sleep))
-                  : null,
-              child: CustomPaint(
-                size: size,
-                painter: _DialPainter(wake: wake, sleep: sleep),
-                child: SizedBox.fromSize(
+            child: Semantics(
+              label: 'Room schedule time dial',
+              value: 'Wake ${_display(wake)}, Sleep ${_display(sleep)}',
+              hint: 'Drag a marker or use the 15 minute adjustment buttons',
+              child: GestureDetector(
+                key: const ValueKey('room-schedule-time-dial'),
+                onPanStart: widget.enabled ? (d) => _start(d, size) : null,
+                onPanUpdate: widget.enabled ? (d) => _update(d, size) : null,
+                onPanEnd: widget.enabled
+                    ? (_) => widget.onChanged(_display(wake), _display(sleep))
+                    : null,
+                child: CustomPaint(
                   size: size,
-                  child: const Center(
-                    child: Text('24 HOUR',
-                        style: TextStyle(
-                            color: CelestialColors.textSecondary,
-                            fontSize: 11)),
+                  painter: _DialPainter(wake: wake, sleep: sleep),
+                  child: SizedBox.fromSize(
+                    size: size,
+                    child: const Center(
+                      child: Text('24 HOUR',
+                          style: TextStyle(
+                              color: CelestialColors.textSecondary,
+                              fontSize: 11)),
+                    ),
                   ),
                 ),
               ),
@@ -368,15 +427,57 @@ class _RoomTimeDialState extends State<_RoomTimeDial> {
             spacing: 8,
             runSpacing: 4,
             children: [
+              IconButton(
+                key: const ValueKey('room-schedule-wake-earlier'),
+                tooltip: 'Wake 15 minutes earlier',
+                onPressed: widget.enabled
+                    ? () => _adjust(wakeTime: true, delta: -15)
+                    : null,
+                icon: const Icon(Icons.remove_circle_outline,
+                    color: CelestialColors.textSecondary, size: 18),
+              ),
               const Icon(Icons.wb_sunny_rounded,
                   color: Color(0xFFF9A825), size: 16),
               const SizedBox(width: 5),
-              Text('Wake ${_display(wake)}'),
+              Text(
+                'Wake ${_display(wake)}',
+                style: const TextStyle(color: CelestialColors.textPrimary),
+              ),
+              IconButton(
+                key: const ValueKey('room-schedule-wake-later'),
+                tooltip: 'Wake 15 minutes later',
+                onPressed: widget.enabled
+                    ? () => _adjust(wakeTime: true, delta: 15)
+                    : null,
+                icon: const Icon(Icons.add_circle_outline,
+                    color: CelestialColors.textSecondary, size: 18),
+              ),
               const SizedBox(width: 6),
+              IconButton(
+                key: const ValueKey('room-schedule-sleep-earlier'),
+                tooltip: 'Sleep 15 minutes earlier',
+                onPressed: widget.enabled
+                    ? () => _adjust(wakeTime: false, delta: -15)
+                    : null,
+                icon: const Icon(Icons.remove_circle_outline,
+                    color: CelestialColors.textSecondary, size: 18),
+              ),
               const Icon(Icons.bedtime_rounded,
                   color: Color(0xFF7C83FF), size: 16),
               const SizedBox(width: 5),
-              Text('Sleep ${_display(sleep)}'),
+              Text(
+                'Sleep ${_display(sleep)}',
+                style: const TextStyle(color: CelestialColors.textPrimary),
+              ),
+              IconButton(
+                key: const ValueKey('room-schedule-sleep-later'),
+                tooltip: 'Sleep 15 minutes later',
+                onPressed: widget.enabled
+                    ? () => _adjust(wakeTime: false, delta: 15)
+                    : null,
+                icon: const Icon(Icons.add_circle_outline,
+                    color: CelestialColors.textSecondary, size: 18),
+              ),
             ],
           ),
         ],

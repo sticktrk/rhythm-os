@@ -1579,26 +1579,30 @@ mod tests {
         );
         assert_eq!(
             json["capabilities"]["features"][2],
-            FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES
+            FEATURE_ROOM_SCHEDULE_V1
         );
         assert_eq!(
             json["capabilities"]["features"][3],
-            FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES
+            FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES
         );
         assert_eq!(
             json["capabilities"]["features"][4],
-            FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES
+            FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES
         );
         assert_eq!(
             json["capabilities"]["features"][5],
-            FEATURE_HUE_ROOM_AUTHORITY_CONSENT
+            FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES
         );
         assert_eq!(
             json["capabilities"]["features"][6],
-            FEATURE_MATTER_SETUP_CODE_RECOVERY
+            FEATURE_HUE_ROOM_AUTHORITY_CONSENT
         );
         assert_eq!(
             json["capabilities"]["features"][7],
+            FEATURE_MATTER_SETUP_CODE_RECOVERY
+        );
+        assert_eq!(
+            json["capabilities"]["features"][8],
             FEATURE_HUE_ROOM_TOPOLOGY_SYNC
         );
         assert_eq!(

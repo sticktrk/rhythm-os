@@ -214,6 +214,7 @@ class ServerSyncProvider extends ChangeNotifier {
   /// persisted value.
   final Set<String> _motionActivationPending = {};
   final Set<String> _roomSchedulePending = {};
+  final Map<String, int> _roomScheduleWriteGenerations = {};
   final Set<String> _roomScheduleTestPending = {};
   final Set<String> _lightProfileOverridePending = {};
   static const Uuid _uuid = Uuid();
@@ -287,6 +288,11 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Bumps whenever the server confirms a global mode event.
   int _modeChangeGeneration = 0;
+
+  /// Bumps whenever a full server hello replaces the node snapshot.
+  /// Optimistic room-schedule failures may only roll back when this value is
+  /// unchanged, so a reconnect can never be overwritten by an older request.
+  int _authoritativeNodeSnapshotGeneration = 0;
 
   /// Saved mode transitions from the server.
   List<RhythmModeTransitionConfig> _modeTransitions = const [];
@@ -1202,10 +1208,12 @@ class ServerSyncProvider extends ChangeNotifier {
     final index = _helloNodes.indexWhere((node) => node.id == roomId);
     if (index == -1 ||
         !roomScheduleSupportedForNode(roomId) ||
-        _roomSchedulePending.contains(roomId) ||
         (!HueServiceLocator.isDemoMode && !_connection.connected)) {
       return false;
     }
+    final writeGeneration = (_roomScheduleWriteGenerations[roomId] ?? 0) + 1;
+    _roomScheduleWriteGenerations[roomId] = writeGeneration;
+    final snapshotGeneration = _authoritativeNodeSnapshotGeneration;
     final previous = _helloNodes[index];
     final previousSettings =
         previous.profileSettings ?? const RhythmNodeProfileSettings();
@@ -1216,21 +1224,41 @@ class ServerSyncProvider extends ChangeNotifier {
     notifyListeners();
 
     var accepted = HueServiceLocator.isDemoMode;
-    if (!accepted) {
-      final authoritative = await api.roomScheduleSet(
-        roomId: roomId,
-        schedule: schedule,
-        requestId: _uuid.v4(),
-      );
-      final applied = authoritative?.profileSettings?.roomSchedule;
-      accepted = applied?.source == schedule.source &&
-          applied?.wakeTime == schedule.wakeTime &&
-          applied?.sleepTime == schedule.sleepTime;
+    RhythmRoomState? authoritative;
+    try {
+      if (!accepted) {
+        authoritative = await api.roomScheduleSet(
+          roomId: roomId,
+          schedule: schedule,
+          requestId: _uuid.v4(),
+        );
+        final applied = authoritative?.profileSettings?.roomSchedule;
+        accepted = applied?.source == schedule.source &&
+            applied?.wakeTime == schedule.wakeTime &&
+            applied?.sleepTime == schedule.sleepTime;
+      }
+    } catch (error) {
+      debugPrint('ServerSync: room schedule save failed: $error');
+      accepted = false;
+    } finally {
+      if (_roomScheduleWriteGenerations[roomId] == writeGeneration) {
+        _roomSchedulePending.remove(roomId);
+      }
     }
-    _roomSchedulePending.remove(roomId);
-    if (!accepted) {
+
+    final currentWrite =
+        _roomScheduleWriteGenerations[roomId] == writeGeneration;
+    if (!currentWrite) {
+      return true;
+    }
+    final snapshotUnchanged =
+        _authoritativeNodeSnapshotGeneration == snapshotGeneration;
+    if (accepted && authoritative != null && snapshotUnchanged) {
+      _updateHelloNodeFromRhythmState(authoritative);
+    } else if (!accepted && snapshotUnchanged) {
       final current = _helloNodes.indexWhere((node) => node.id == roomId);
-      if (current != -1) {
+      if (current != -1 &&
+          identical(_helloNodes[current].profileSettings, nextSettings)) {
         _helloNodes[current] = _copyNodeWithProfileSettings(
           _helloNodes[current],
           previousSettings,
@@ -1250,15 +1278,20 @@ class ServerSyncProvider extends ChangeNotifier {
     }
     _roomScheduleTestPending.add(roomId);
     notifyListeners();
-    final accepted = HueServiceLocator.isDemoMode ||
-        await api.roomScheduleTest(
-          roomId: roomId,
-          mode: mode,
-          requestId: _uuid.v4(),
-        );
-    _roomScheduleTestPending.remove(roomId);
-    notifyListeners();
-    return accepted;
+    try {
+      return HueServiceLocator.isDemoMode ||
+          await api.roomScheduleTest(
+            roomId: roomId,
+            mode: mode,
+            requestId: _uuid.v4(),
+          );
+    } catch (error) {
+      debugPrint('ServerSync: room schedule test failed: $error');
+      return false;
+    } finally {
+      _roomScheduleTestPending.remove(roomId);
+      notifyListeners();
+    }
   }
 
   RhythmNodeProfileSettings _settingsWithSchedule(
@@ -2827,6 +2860,7 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Handle hello from server — accept rooms and reconcile config.
   void _onHello(RhythmHello hello) {
+    _authoritativeNodeSnapshotGeneration++;
     final helloNodes = _mergeOptimisticStandbyEnabled(hello.nodes);
     debugPrint(
         'ServerSync: Hello received with ${helloNodes.length} nodes, version=${hello.version}');

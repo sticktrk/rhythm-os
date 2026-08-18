@@ -118,10 +118,6 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final scheduleSupported = room.kind.isRoom &&
-        context
-            .watch<ServerSyncProvider>()
-            .roomScheduleSupportedForNode(room.id);
     final topPad = MediaQuery.of(context).padding.top;
 
     return Padding(
@@ -192,15 +188,11 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
                     selected: _selectedTab,
                     onChanged: (tab) => setState(() => _selectedTab = tab),
                     tabs: const [
-                          SegmentedTab('Light', _SheetTab.light),
-                          SegmentedTab('Motion', _SheetTab.motion),
-                          SegmentedTab('Buttons', _SheetTab.buttons),
-                        ] +
-                        (scheduleSupported
-                            ? const [
-                                SegmentedTab('Schedule', _SheetTab.schedule),
-                              ]
-                            : const []),
+                      SegmentedTab('Light', _SheetTab.light),
+                      SegmentedTab('Motion', _SheetTab.motion),
+                      SegmentedTab('Buttons', _SheetTab.buttons),
+                      SegmentedTab('Schedule', _SheetTab.schedule),
+                    ],
                   ),
                 ),
                 const SizedBox(height: 16),

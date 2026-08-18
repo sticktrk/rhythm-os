@@ -8,6 +8,7 @@ import 'package:dio/dio.dart';
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_app/providers/home_provider.dart';
@@ -241,6 +242,10 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   Completer<bool>? roomScheduleTestCompleter;
   bool roomScheduleTestSucceeds = true;
   bool roomScheduleSetSucceeds = true;
+  bool roomScheduleSetThrows = false;
+  RhythmRoomState? roomScheduleSetResponse;
+  final List<Completer<RhythmRoomState?>> roomScheduleSetCompleters = [];
+  final List<RhythmRoomSchedule> roomScheduleSetCalls = [];
   final List<
       ({
         String nodeId,
@@ -335,14 +340,21 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     required String roomId,
     required RhythmRoomSchedule schedule,
     required String requestId,
-  }) async =>
-      roomScheduleSetSucceeds
-          ? RhythmRoomState.fromJson({
-              'node_id': roomId,
-              'state': 'active',
-              'profile_settings': {'room_schedule': schedule.toJson()},
-            })
-          : null;
+  }) async {
+    final callIndex = roomScheduleSetCalls.length;
+    roomScheduleSetCalls.add(schedule);
+    if (roomScheduleSetThrows) throw StateError('schedule write failed');
+    if (callIndex < roomScheduleSetCompleters.length) {
+      return roomScheduleSetCompleters[callIndex].future;
+    }
+    if (!roomScheduleSetSucceeds) return null;
+    return roomScheduleSetResponse ??
+        RhythmRoomState.fromJson({
+          'node_id': roomId,
+          'state': 'active',
+          'profile_settings': {'room_schedule': schedule.toJson()},
+        });
+  }
 
   @override
   Future<bool> roomScheduleTest({
@@ -953,6 +965,7 @@ Widget _buildTestApp({
   required RoomProvider roomProvider,
   required ServerSyncProvider provider,
   required Widget child,
+  String? fontFamily,
 }) {
   return MultiProvider(
     providers: [
@@ -963,6 +976,7 @@ Widget _buildTestApp({
       ),
     ],
     child: MaterialApp(
+      theme: ThemeData(fontFamily: fontFamily),
       home: Scaffold(body: child),
     ),
   );
@@ -1034,6 +1048,26 @@ Future<void> _captureRoomScheduleEvidence(
       flush: true,
     );
   });
+}
+
+Future<void> _loadRoomScheduleEvidenceFont() async {
+  final executable = File(Platform.resolvedExecutable);
+  final font = File(
+    '${executable.parent.parent.parent.path}/material_fonts/Roboto-Regular.ttf',
+  );
+  final loader = FontLoader('CodexReadableRoboto')
+    ..addFont(
+      font.readAsBytes().then((bytes) => bytes.buffer.asByteData()),
+    );
+  await loader.load();
+  final icons = File(
+    '${executable.parent.parent.parent.path}/material_fonts/MaterialIcons-Regular.otf',
+  );
+  final iconLoader = FontLoader('MaterialIcons')
+    ..addFont(
+      icons.readAsBytes().then((bytes) => bytes.buffer.asByteData()),
+    );
+  await iconLoader.load();
 }
 
 RhythmSceneDefinition _testScene(String id) => RhythmSceneDefinition(
@@ -1539,6 +1573,186 @@ void main() {
       );
       expect(provider.motionActivationEnabledForNode('room-1'), isTrue);
       expect(api.motionActivationCalls, isEmpty);
+    });
+  });
+
+  group('ServerSyncProvider room schedule authority', () {
+    RhythmHello scheduleHello({
+      String wakeTime = '06:30',
+      String name = 'Kitchen',
+    }) {
+      return RhythmHello.fromJson({
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': [RhythmFeature.roomScheduleV1],
+          'hubs': const <dynamic>[],
+        },
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': name,
+            'kind': 'room',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'profile_settings': {
+              'room_schedule': {
+                'source': 'follow_time',
+                'wake_time': wakeTime,
+                'sleep_time': '22:30',
+              },
+            },
+          },
+        ],
+      });
+    }
+
+    RhythmRoomSchedule schedule(String wakeTime) => RhythmRoomSchedule(
+          source: RhythmRoomScheduleSource.followTime,
+          wakeTime: wakeTime,
+          sleepTime: '22:30',
+        );
+
+    testWidgets('installs the full authoritative write response',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()
+        ..roomScheduleSetResponse = RhythmRoomState.fromJson({
+          'node_id': 'room-1',
+          'name': 'Authoritative Kitchen',
+          'state': 'active',
+          'rhythm_enabled': true,
+          'time_offset': 0.0,
+          'brightness_offset': 4.0,
+          'profile_settings': {
+            'room_schedule': schedule('07:15').toJson(),
+          },
+        });
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(scheduleHello());
+      await tester.pump();
+
+      expect(await provider.setRoomSchedule('room-1', schedule('07:15')),
+          isTrue);
+      expect(provider.nodeById('room-1')?.name, 'Authoritative Kitchen');
+      expect(provider.nodeById('room-1')?.brightnessOffset, 4.0);
+      expect(provider.scheduleForRoom('room-1').wakeTime, '07:15');
+      expect(provider.roomSchedulePendingForRoom('room-1'), isFalse);
+    });
+
+    testWidgets('a reconnect snapshot wins over an older rejection',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final pending = Completer<RhythmRoomState?>();
+      final api = _FakeRhythmServerApi()
+        ..roomScheduleSetCompleters.add(pending);
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(scheduleHello());
+      await tester.pump();
+      final write = provider.setRoomSchedule('room-1', schedule('07:15'));
+      await tester.pump();
+      connection.emitHello(
+        scheduleHello(wakeTime: '09:00', name: 'Reconnected Kitchen'),
+      );
+      await tester.pump();
+      pending.complete(null);
+
+      expect(await write, isFalse);
+      expect(provider.nodeById('room-1')?.name, 'Reconnected Kitchen');
+      expect(provider.scheduleForRoom('room-1').wakeTime, '09:00');
+      expect(provider.roomSchedulePendingForRoom('room-1'), isFalse);
+    });
+
+    testWidgets('rapid edits ignore the stale first completion',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final first = Completer<RhythmRoomState?>();
+      final second = Completer<RhythmRoomState?>();
+      final api = _FakeRhythmServerApi()
+        ..roomScheduleSetCompleters.addAll([first, second]);
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(scheduleHello());
+      await tester.pump();
+      final firstWrite =
+          provider.setRoomSchedule('room-1', schedule('07:15'));
+      await tester.pump();
+      final secondWrite =
+          provider.setRoomSchedule('room-1', schedule('08:00'));
+      await tester.pump();
+
+      first.complete(RhythmRoomState.fromJson({
+        'node_id': 'room-1',
+        'state': 'active',
+        'profile_settings': {
+          'room_schedule': schedule('07:15').toJson(),
+        },
+      }));
+      expect(await firstWrite, isTrue);
+      expect(provider.scheduleForRoom('room-1').wakeTime, '08:00');
+      expect(provider.roomSchedulePendingForRoom('room-1'), isTrue);
+
+      second.complete(RhythmRoomState.fromJson({
+        'node_id': 'room-1',
+        'state': 'active',
+        'profile_settings': {
+          'room_schedule': schedule('08:00').toJson(),
+        },
+      }));
+      expect(await secondWrite, isTrue);
+      expect(provider.scheduleForRoom('room-1').wakeTime, '08:00');
+      expect(provider.roomSchedulePendingForRoom('room-1'), isFalse);
+    });
+
+    testWidgets('a thrown write rolls back and always clears pending',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()..roomScheduleSetThrows = true;
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(scheduleHello());
+      await tester.pump();
+
+      expect(await provider.setRoomSchedule('room-1', schedule('07:15')),
+          isFalse);
+      expect(provider.scheduleForRoom('room-1').wakeTime, '06:30');
+      expect(provider.roomSchedulePendingForRoom('room-1'), isFalse);
     });
   });
 
@@ -5541,13 +5755,27 @@ void main() {
     expect(find.byKey(const ValueKey('schedule')), findsOneWidget);
     expect(find.text('ALARM / SCHEDULE SOURCE'), findsOneWidget);
     expect(find.text('WAKE / SLEEP PRESETS'), findsOneWidget);
-    expect(find.text('TEST'), findsOneWidget);
+    expect(find.text('TEST YOUR PRESETS'), findsOneWidget);
+    expect(
+      tester
+          .getSemantics(
+            find.byKey(const ValueKey('segmented-tab-schedule')),
+          )
+          .getSemanticsData()
+          .flagsCollection
+          .isSelected,
+      Tristate.isTrue,
+    );
     expect(
       find.byKey(const ValueKey('room-schedule-source-presets')),
       findsOneWidget,
     );
     expect(
       find.byKey(const ValueKey('room-schedule-time-dial')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('room-schedule-wake-later')),
       findsOneWidget,
     );
     expect(
@@ -5619,7 +5847,7 @@ void main() {
     semantics.dispose();
   });
 
-  testWidgets('room schedule renders deterministic visual evidence states',
+  testWidgets('unsupported room schedule stays visible as an update state',
       (tester) async {
     _registerWidgetCleanup(tester);
     final roomProvider = RoomProvider();
@@ -5636,7 +5864,72 @@ void main() {
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.binding.setSurfaceSize(const Size(390, 1200));
 
-    Map<String, dynamic> hello({bool followTime = false}) => {
+    connection.emitHello(RhythmHello.fromJson({
+      'nodes': [
+        {
+          'id': 'room-1',
+          'name': 'Kitchen',
+          'kind': 'room',
+          'state': 'active',
+          'rhythm_enabled': true,
+          'disabled': false,
+          'time_offset': 0.0,
+          'brightness_offset': 0.0,
+        },
+      ],
+    }));
+    await tester.pump();
+    await _pumpRoomSettingsSheet(
+      tester,
+      roomProvider: roomProvider,
+      provider: provider,
+      room: const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.matter,
+        deviceIds: [],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: false,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+
+    await _selectRoomSettingsTab(tester, 'Schedule');
+    expect(
+      find.byKey(const ValueKey('room-schedule-update-required')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('room-schedule-source-follow-time')),
+      findsNothing,
+    );
+    expect(api.roomScheduleSetCalls, isEmpty);
+  });
+
+  testWidgets('room schedule renders deterministic visual evidence states',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 1200));
+    await tester.runAsync(_loadRoomScheduleEvidenceFont);
+
+    Map<String, dynamic> hello({
+      bool followTime = false,
+      String wakeTime = '06:30',
+    }) => {
           'capabilities': {
             'api_schema_version': 2,
             'features': [RhythmFeature.roomScheduleV1],
@@ -5657,7 +5950,7 @@ void main() {
               'profile_settings': {
                 'room_schedule': {
                   'source': followTime ? 'follow_time' : 'wake_sleep_presets',
-                  'wake_time': '06:30',
+                  'wake_time': wakeTime,
                   'sleep_time': '22:30',
                 },
               },
@@ -5685,6 +5978,7 @@ void main() {
       _buildTestApp(
         roomProvider: roomProvider,
         provider: provider,
+        fontFamily: 'CodexReadableRoboto',
         child: RepaintBoundary(
           key: boundaryKey,
           child: const RoomSettingsSheet(
@@ -5696,14 +5990,24 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 10));
     await _selectRoomSettingsTab(tester, 'Schedule');
+    await tester.pump(const Duration(milliseconds: 250));
     await _captureRoomScheduleEvidence(
       tester,
       boundaryKey,
       '01-wake-sleep-presets.png',
     );
 
-    connection.emitHello(RhythmHello.fromJson(hello(followTime: true)));
+    connection.emitHello(
+      RhythmHello.fromJson(hello(followTime: true, wakeTime: '07:45')),
+    );
     await tester.pump(const Duration(milliseconds: 20));
+    expect(find.text('Wake 07:45'), findsOneWidget);
+    await tester.tap(
+      find.byKey(const ValueKey('room-schedule-wake-later')),
+    );
+    await tester.pumpAndSettle();
+    expect(api.roomScheduleSetCalls.last.wakeTime, '08:00');
+    expect(find.text('Wake 08:00'), findsOneWidget);
     expect(
       find.byKey(const ValueKey('room-schedule-presets-disabled')),
       findsOneWidget,

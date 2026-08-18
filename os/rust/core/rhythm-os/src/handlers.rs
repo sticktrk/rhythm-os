@@ -2915,6 +2915,16 @@ pub fn handle_put_node_preferences(
             return ApiResponse::bad_request("Missing node_id");
         };
         let node_id = commands::resolve_node_id(state, raw_node_id);
+        let previous_schedule = match state
+            .lock()
+            .ok()
+            .and_then(|locked| locked.hub_runtime())
+            .and_then(|runtime| runtime.engine_node_snapshot(&node_id))
+        {
+            Some(snapshot) if snapshot.kind.is_room() => snapshot.profile_settings.room_schedule,
+            Some(_) => return ApiResponse::bad_request("Room schedules require a room node"),
+            None => return ApiResponse::bad_request("Room schedule target was not found"),
+        };
         let patch = match parse_profile_settings_patch(
             items[0].get("profile_settings"),
             "profile_settings",
@@ -2923,18 +2933,24 @@ pub fn handle_put_node_preferences(
             Ok(None) => return ApiResponse::bad_request("Missing room schedule"),
             Err(error) => return ApiResponse::bad_request(&error),
         };
-        let source = patch
+        let Some(schedule) = patch
             .room_schedule
             .as_ref()
             .and_then(Option::as_ref)
-            .map(|schedule| {
-                if schedule.follows_time() {
-                    "follow_time"
-                } else {
-                    "wake_sleep_presets"
-                }
-            });
-        let result = commands::do_node_preferences_set(
+            .copied()
+        else {
+            return ApiResponse::bad_request("Room schedule cannot be cleared");
+        };
+        let source = if schedule.follows_time() {
+            "follow_time"
+        } else {
+            "wake_sleep_presets"
+        };
+        let request_id = items[0]
+            .get("request_id")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if let Err(error) = commands::do_node_preferences_set(
             state,
             &node_id,
             None,
@@ -2943,31 +2959,52 @@ pub fn handle_put_node_preferences(
             None,
             Some(&patch),
             persist,
-        );
-        let output_applied = result.is_ok()
-            && state
-                .lock()
-                .ok()
-                .and_then(|locked| locked.hub_runtime())
-                .is_some_and(|runtime| {
-                    runtime
-                        .periodic_tick_room(&node_id, runtime.current_hour())
-                        .is_ok()
-                });
+        ) {
+            let mut record =
+                crate::activity::LightActivityRecord::app(&node_id, "room_schedule_config_updated");
+            record.correlation_id = request_id;
+            record.payload = Some(json!({
+                "source": source,
+                "status": "failed",
+                "failure_stage": "persistence",
+            }));
+            crate::activity::record_light_activity(state, record);
+            return ApiResponse::server_error(error);
+        }
+        let output_applied = match commands::apply_room_schedule_configuration(
+            state,
+            &node_id,
+            previous_schedule,
+            schedule,
+        ) {
+            Ok(applied) => applied,
+            Err(error) => {
+                let mut record = crate::activity::LightActivityRecord::app(
+                    &node_id,
+                    "room_schedule_config_updated",
+                );
+                record.correlation_id = request_id;
+                record.payload = Some(json!({
+                    "source": source,
+                    "status": "failed",
+                    "failure_stage": "output_apply",
+                }));
+                crate::activity::record_light_activity(state, record);
+                return ApiResponse::server_error(error);
+            }
+        };
         let mut record =
             crate::activity::LightActivityRecord::app(&node_id, "room_schedule_config_updated");
-        record.correlation_id = items[0]
-            .get("request_id")
-            .and_then(Value::as_str)
-            .map(str::to_string);
+        record.correlation_id = request_id;
         record.payload = Some(json!({
             "source": source,
-            "status": if result.is_err() { "failed" } else if output_applied { "applied" } else { "accepted" },
-            "failure_stage": result.as_ref().err().map(|_| "persistence")
-                .or_else(|| (!output_applied).then_some("output_apply")),
+            "status": if output_applied { "applied" } else { "accepted" },
+            "failure_stage": Value::Null,
         }));
         crate::activity::record_light_activity(state, record);
-        return match result {
+        return match commands::build_node_state(state, &node_id)
+            .and_then(|node| serde_json::to_string(&node).map_err(Into::into))
+        {
             Ok(node) => ApiResponse::json_ok(format!(r#"{{"nodes":[{}]}}"#, node)),
             Err(error) => ApiResponse::server_error(error),
         };

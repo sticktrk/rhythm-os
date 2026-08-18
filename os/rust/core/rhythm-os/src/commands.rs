@@ -208,6 +208,17 @@ struct RoomLightingContext<'a> {
     utc_offset: f32,
 }
 
+fn effective_room_lighting_context<'a>(
+    lighting: RoomLightingContext<'a>,
+    settings: &RoomProfileSettings,
+    local_hour: f32,
+) -> RoomLightingContext<'a> {
+    RoomLightingContext {
+        mode: settings.schedule_mode(lighting.mode, local_hour),
+        ..lighting
+    }
+}
+
 #[derive(Clone, Copy)]
 struct RoomLightingInput<'a> {
     settings: &'a RoomProfileSettings,
@@ -566,6 +577,9 @@ fn compute_room_display_values_for_settings_from_parts(
     }
 
     let local = current_local_datetime(lighting.utc_offset);
+    let local_hour =
+        local.hour() as f32 + local.minute() as f32 / 60.0 + local.second() as f32 / 3600.0;
+    let lighting = effective_room_lighting_context(lighting, room.settings, local_hour);
     let ctx = rhythm_core::curve_context_for_local_datetime(
         lighting.solar_noon,
         lighting.latitude,
@@ -893,6 +907,7 @@ fn clear_removed_node_ephemeral_state(s: &mut AppState, node_id: &str) {
     s.light_usage.close_subject(node_id);
     s.motion_snapshots.remove(node_id);
     s.room_mode_transitions.remove(node_id);
+    s.room_schedule_evaluations.remove(node_id);
     s.pending_periodic_ticks.remove(node_id);
     s.node_preference_write_locks.remove(node_id);
     s.pending_motion_clear.retain(|pending| pending != node_id);
@@ -997,6 +1012,7 @@ fn resolved_room_motion_timeout_secs_from_parts(
     settings: &RoomProfileSettings,
     current_hour: f32,
 ) -> u64 {
+    let lighting = effective_room_lighting_context(lighting, settings, current_hour);
     let local = current_local_datetime(lighting.utc_offset);
     let registry = light_profile_registry_from_parts(
         lighting.light_profile_configs,
@@ -7854,7 +7870,10 @@ fn base_mood_profile_config_locked(
     }
 
     let mode_configs = s.mode_configs();
-    resolved_profile_config_for_room_state_from_parts(
+    let local = current_local_datetime(s.utc_offset_hours);
+    let local_hour =
+        local.hour() as f32 + local.minute() as f32 / 60.0 + local.second() as f32 / 3600.0;
+    let lighting = effective_room_lighting_context(
         RoomLightingContext {
             light_profile_configs: &s.light_profile_configs,
             mode_configs: &mode_configs,
@@ -7865,6 +7884,11 @@ fn base_mood_profile_config_locked(
             timezone_name: s.timezone_name.as_deref(),
             utc_offset: s.utc_offset_hours,
         },
+        &snapshot.profile_settings,
+        local_hour,
+    );
+    resolved_profile_config_for_room_state_from_parts(
+        lighting,
         &snapshot.profile_settings,
         RoomModeState::Mood,
     )
@@ -8497,6 +8521,10 @@ fn resolve_room_output_for_state_at_from_parts(
         return None;
     }
 
+    let local_hour = sample_at.hour() as f32
+        + sample_at.minute() as f32 / 60.0
+        + sample_at.second() as f32 / 3600.0;
+    let lighting = effective_room_lighting_context(lighting, room.settings, local_hour);
     let ctx = rhythm_core::curve_context_for_local_datetime(
         lighting.solar_noon,
         lighting.latitude,
@@ -8609,6 +8637,7 @@ fn resolve_mode_transition_duration_ms_for_room_from_parts(
         return Some(duration_ms);
     }
 
+    let lighting = effective_room_lighting_context(lighting, room.settings, started_at_hour);
     resolved_profile_config_for_room_state_from_parts(lighting, room.settings, room.room_state)
         .fade_ms
         .resolve(started_at_hour)
@@ -8631,12 +8660,68 @@ fn resolve_room_command_for_state_at_from_parts(
     ))
 }
 
-/// Preview one room's configured behavior for [mode] without changing global mode.
-pub fn do_room_schedule_test(
+fn room_schedule_local_datetime(utc_offset: f32, current_hour: f32) -> chrono::NaiveDateTime {
+    let date = current_local_datetime(utc_offset).date();
+    let total_seconds = ((current_hour.rem_euclid(24.0)) * 3600.0).round() as u32 % 86_400;
+    date.and_hms_opt(
+        total_seconds / 3600,
+        (total_seconds % 3600) / 60,
+        total_seconds % 60,
+    )
+    .expect("normalized room schedule time is valid")
+}
+
+fn room_schedule_interval_id(
+    room_id: &str,
+    schedule: rhythm_core::RoomScheduleConfig,
+    local: chrono::NaiveDateTime,
+) -> (RhythmMode, String) {
+    let minute = (local.hour() as u16) * 60 + local.minute() as u16;
+    let wake = schedule.wake_time.minutes_since_midnight();
+    let sleep = schedule.sleep_time.minutes_since_midnight();
+    let mode = schedule.effective_mode(minute as f32 / 60.0);
+    let started_today = match mode {
+        RhythmMode::Day if wake < sleep => true,
+        RhythmMode::Day => minute >= wake,
+        RhythmMode::Sleep if wake < sleep => minute >= sleep,
+        RhythmMode::Sleep => true,
+    };
+    let start_date = if started_today {
+        local.date()
+    } else {
+        local.date().pred_opt().unwrap_or_else(|| local.date())
+    };
+    let boundary = if mode == RhythmMode::Day { wake } else { sleep };
+    let mut hasher = Sha256::new();
+    hasher.update(b"room-schedule-evaluation-v1\0");
+    hasher.update(room_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(start_date.to_string().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(boundary.to_be_bytes());
+    hasher.update(wake.to_be_bytes());
+    hasher.update(sleep.to_be_bytes());
+    hasher.update([match mode {
+        RhythmMode::Day => 0,
+        RhythmMode::Sleep => 1,
+    }]);
+    (mode, format!("{:x}", hasher.finalize()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RoomScheduleReconcile {
+    pub evaluation_id: String,
+    pub mode: RhythmMode,
+}
+
+fn apply_room_schedule_target(
     state: &SharedState,
     room_id: &str,
     mode: RhythmMode,
-) -> Result<String> {
+    target_state: RoomModeState,
+    respect_room_schedule: bool,
+    persist: bool,
+) -> Result<()> {
     let (
         runtime,
         light_profile_configs,
@@ -8662,16 +8747,10 @@ pub fn do_room_schedule_test(
     let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
     let snapshot = runtime
         .engine_room_snapshot(room_id)
-        .ok_or_else(|| anyhow::anyhow!("Room '{}' not found in engine", room_id))?;
-    let target_state = mode_config_for_mode(&mode_configs, mode)
-        .and_then(|config| {
-            config
-                .room_defaults
-                .iter()
-                .find(|default| default.room_id == room_id)
-                .map(|default| default.state)
-        })
-        .unwrap_or(RoomModeState::Active);
+        .ok_or_else(|| anyhow::anyhow!("Room not found in engine"))?;
+    if !snapshot.kind.is_room() {
+        return Err(anyhow::anyhow!("Room schedule target must be a room node"));
+    }
     let (soft_off, mood_active, hard_off) = room_flags_for_target_state(target_state)?;
 
     runtime.restore_node_state(
@@ -8695,6 +8774,10 @@ pub fn do_room_schedule_test(
         runtime.lights_off_room(room_id, None)?;
         update_lights_on_cache_for_runtime_node(state, &runtime, room_id, false);
     } else {
+        let mut render_settings = snapshot.profile_settings.clone();
+        if !respect_room_schedule {
+            render_settings.room_schedule = None;
+        }
         let lighting = RoomLightingContext {
             light_profile_configs: &light_profile_configs,
             mode_configs: &mode_configs,
@@ -8707,15 +8790,162 @@ pub fn do_room_schedule_test(
         };
         let command = resolve_room_command_for_state_at_from_parts(
             lighting,
-            RoomLightingInput::from_snapshot(&snapshot, target_state),
+            RoomLightingInput {
+                settings: &render_settings,
+                room_state: target_state,
+                time_offset_minutes: snapshot.time_offset_minutes,
+                brightness_offset: snapshot.brightness_offset,
+            },
             current_local_datetime(utc_offset),
             Some(0),
         )
-        .ok_or_else(|| anyhow::anyhow!("Room schedule test output unavailable"))?;
+        .ok_or_else(|| anyhow::anyhow!("Room schedule output unavailable"))?;
         runtime.apply_room_command(room_id, command)?;
         update_lights_on_cache_for_runtime_node(state, &runtime, room_id, true);
     }
+    if persist {
+        persist_rooms(state);
+    }
     emit_node_state_event_after_apply(state, &runtime, room_id);
+    Ok(())
+}
+
+pub(crate) fn reconcile_room_schedule_before_tick(
+    state: &SharedState,
+    room_id: &str,
+    current_hour: f32,
+) -> Result<Option<RoomScheduleReconcile>> {
+    let (schedule, utc_offset) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let runtime = s
+            .hub_runtime()
+            .ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+        let Some(snapshot) = runtime.engine_room_snapshot(room_id) else {
+            return Ok(None);
+        };
+        if !snapshot.kind.is_room() {
+            return Ok(None);
+        }
+        (snapshot.profile_settings.room_schedule, s.utc_offset_hours)
+    };
+    let Some(schedule) = schedule.filter(|schedule| schedule.follows_time()) else {
+        if let Ok(mut s) = state.lock() {
+            s.room_schedule_evaluations.remove(room_id);
+        }
+        return Ok(None);
+    };
+    let local = room_schedule_local_datetime(utc_offset, current_hour);
+    let (mode, evaluation_id) = room_schedule_interval_id(room_id, schedule, local);
+    let previous = state
+        .lock()
+        .ok()
+        .and_then(|s| s.room_schedule_evaluations.get(room_id).cloned());
+    if previous.as_deref() == Some(evaluation_id.as_str()) {
+        return Ok(None);
+    }
+
+    let reason = if previous.is_some() {
+        "boundary_or_config"
+    } else {
+        "restart_reconcile"
+    };
+    let apply_result =
+        apply_room_schedule_target(state, room_id, mode, RoomModeState::Active, true, true);
+    let mut activity = crate::activity::LightActivityRecord::app(room_id, "room_schedule_boundary");
+    activity.correlation_id = Some(evaluation_id.clone());
+    activity.payload = Some(serde_json::json!({
+        "source": "follow_time",
+        "target_mode": if mode == RhythmMode::Day { "day" } else { "sleep" },
+        "status": if apply_result.is_ok() { "applied" } else { "failed" },
+        "failure_stage": apply_result.as_ref().err().map(|_| "output_apply"),
+        "reconciliation": reason,
+    }));
+    crate::activity::record_light_activity(state, activity);
+    apply_result?;
+    if let Ok(mut s) = state.lock() {
+        s.room_schedule_evaluations
+            .insert(room_id.to_string(), evaluation_id.clone());
+    }
+    Ok(Some(RoomScheduleReconcile {
+        evaluation_id,
+        mode,
+    }))
+}
+
+pub(crate) fn apply_room_schedule_configuration(
+    state: &SharedState,
+    room_id: &str,
+    previous: Option<rhythm_core::RoomScheduleConfig>,
+    schedule: rhythm_core::RoomScheduleConfig,
+) -> Result<bool> {
+    if schedule.follows_time() {
+        if let Ok(mut s) = state.lock() {
+            s.room_schedule_evaluations.remove(room_id);
+        }
+        let current_hour = state
+            .lock()
+            .ok()
+            .and_then(|s| s.hub_runtime())
+            .map(|runtime| runtime.current_hour())
+            .unwrap_or(12.0);
+        return reconcile_room_schedule_before_tick(state, room_id, current_hour)
+            .map(|result| result.is_some());
+    }
+
+    if let Ok(mut s) = state.lock() {
+        s.room_schedule_evaluations.remove(room_id);
+    }
+    if previous.map(|old| old.source) == Some(schedule.source) {
+        return Ok(false);
+    }
+    let (mode, target_state) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let mode = s.active_mode;
+        let target_state = s
+            .mode_configs()
+            .iter()
+            .find(|config| config.mode == mode)
+            .and_then(|config| {
+                config
+                    .room_defaults
+                    .iter()
+                    .find(|default| default.room_id == room_id)
+            })
+            .map(|default| default.state)
+            .unwrap_or(RoomModeState::Active);
+        (mode, target_state)
+    };
+    apply_room_schedule_target(state, room_id, mode, target_state, false, true)?;
+    Ok(true)
+}
+
+/// Preview one room's configured behavior for [mode] without changing global mode.
+pub fn do_room_schedule_test(
+    state: &SharedState,
+    room_id: &str,
+    mode: RhythmMode,
+) -> Result<String> {
+    let (runtime, mode_configs) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        (s.hub_runtime(), s.mode_configs())
+    };
+    let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+    let snapshot = runtime
+        .engine_room_snapshot(room_id)
+        .ok_or_else(|| anyhow::anyhow!("Room not found in engine"))?;
+    if !snapshot.kind.is_room() {
+        return Err(anyhow::anyhow!("Room schedule target must be a room node"));
+    }
+    let target_state = mode_config_for_mode(&mode_configs, mode)
+        .and_then(|config| {
+            config
+                .room_defaults
+                .iter()
+                .find(|default| default.room_id == room_id)
+                .map(|default| default.state)
+        })
+        .unwrap_or(RoomModeState::Active);
+    apply_room_schedule_target(state, room_id, mode, target_state, false, false)?;
     build_node_state(state, room_id).and_then(|node_state| {
         serde_json::to_string(&node_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
     })
@@ -29442,6 +29672,117 @@ mod tests {
         assert_eq!(applied.len(), 1);
         assert_eq!(applied[0].0, "r1");
         assert!(runtime.engine_room_snapshot("r2").is_some());
+    }
+
+    #[test]
+    fn room_schedule_interval_identity_is_boundary_stable_across_midnight_and_dst() {
+        let schedule = rhythm_core::RoomScheduleConfig {
+            source: rhythm_core::RoomScheduleSource::FollowTime,
+            wake_time: rhythm_core::ModeTransitionTime::parse("06:30").unwrap(),
+            sleep_time: rhythm_core::ModeTransitionTime::parse("22:30").unwrap(),
+        };
+        let before_midnight = chrono::NaiveDate::from_ymd_opt(2026, 11, 1)
+            .unwrap()
+            .and_hms_opt(23, 59, 0)
+            .unwrap();
+        let after_midnight = chrono::NaiveDate::from_ymd_opt(2026, 11, 2)
+            .unwrap()
+            .and_hms_opt(0, 1, 0)
+            .unwrap();
+        let repeated_fall_back_hour = chrono::NaiveDate::from_ymd_opt(2026, 11, 1)
+            .unwrap()
+            .and_hms_opt(1, 30, 0)
+            .unwrap();
+
+        let (_, before_id) = room_schedule_interval_id("stable-room", schedule, before_midnight);
+        let (_, after_id) = room_schedule_interval_id("stable-room", schedule, after_midnight);
+        let (_, first_fall_back_id) =
+            room_schedule_interval_id("stable-room", schedule, repeated_fall_back_hour);
+        let (_, second_fall_back_id) =
+            room_schedule_interval_id("stable-room", schedule, repeated_fall_back_hour);
+
+        assert_eq!(before_id, after_id, "midnight remains one Sleep interval");
+        assert_eq!(first_fall_back_id, second_fall_back_id);
+        assert_ne!(before_id, first_fall_back_id);
+    }
+
+    #[test]
+    fn room_schedule_authority_resets_only_target_and_reconciles_once() {
+        let schedule = rhythm_core::RoomScheduleConfig {
+            source: rhythm_core::RoomScheduleSource::FollowTime,
+            wake_time: rhythm_core::ModeTransitionTime::parse("06:30").unwrap(),
+            sleep_time: rhythm_core::ModeTransitionTime::parse("22:30").unwrap(),
+        };
+        let mut target = make_snapshot("r1", false, false);
+        target.hard_off = true;
+        target.profile_settings.room_schedule = Some(schedule);
+        let mut other = make_snapshot("r2", false, false);
+        other.hard_off = true;
+        let (state, runtime) = setup_state(vec![target, other]);
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = RhythmMode::Day;
+            s.set_mode_configs(vec![ModeConfig {
+                mode: RhythmMode::Day,
+                active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+                idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![rhythm_core::RoomModeDefault {
+                    room_id: "r1".into(),
+                    state: RoomModeState::HardOff,
+                }],
+            }]);
+        }
+
+        assert!(apply_room_schedule_configuration(
+            &state,
+            "r1",
+            Some(rhythm_core::RoomScheduleConfig::default()),
+            schedule,
+        )
+        .unwrap());
+        assert!(!runtime.engine_room_snapshot("r1").unwrap().hard_off);
+        assert!(runtime.engine_room_snapshot("r2").unwrap().hard_off);
+        assert_eq!(state.lock().unwrap().active_mode, RhythmMode::Day);
+        assert_eq!(runtime.applied_commands().len(), 1);
+        assert!(reconcile_room_schedule_before_tick(&state, "r1", 12.0)
+            .unwrap()
+            .is_none());
+
+        let presets = rhythm_core::RoomScheduleConfig::default();
+        let mut snapshot = runtime.engine_room_snapshot("r1").unwrap();
+        snapshot.profile_settings.room_schedule = Some(presets);
+        runtime.restore_node_state(
+            "r1",
+            RestoredNodeState {
+                rhythm_enabled: snapshot.rhythm_enabled,
+                disabled: snapshot.disabled,
+                time_offset_minutes: snapshot.time_offset_minutes,
+                brightness_offset: snapshot.brightness_offset,
+                soft_off: snapshot.soft_off,
+                mood_active: snapshot.mood_active,
+                standby_enabled: snapshot.standby_enabled,
+                hard_off: snapshot.hard_off,
+                profile_settings: snapshot.profile_settings,
+            },
+        );
+        assert!(apply_room_schedule_configuration(&state, "r1", Some(schedule), presets,).unwrap());
+        assert!(runtime.engine_room_snapshot("r1").unwrap().hard_off);
+        assert!(runtime.engine_room_snapshot("r2").unwrap().hard_off);
+    }
+
+    #[test]
+    fn room_schedule_rejects_device_targets_and_forgets_deleted_rooms() {
+        let (state, _runtime) = setup_state(vec![make_light_child_snapshot("light-1", "r1")]);
+        assert!(do_room_schedule_test(&state, "light-1", RhythmMode::Day).is_err());
+        {
+            let mut s = state.lock().unwrap();
+            s.room_schedule_evaluations
+                .insert("deleted-room".into(), "evaluation".into());
+            clear_removed_node_ephemeral_state(&mut s, "deleted-room");
+            assert!(!s.room_schedule_evaluations.contains_key("deleted-room"));
+        }
     }
 
     #[test]

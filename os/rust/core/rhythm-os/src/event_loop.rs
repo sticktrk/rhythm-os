@@ -3723,6 +3723,26 @@ fn process_work_item_inner(state: &SharedState, item: WorkItem) {
                 );
                 return;
             }
+            if crate::commands::reconcile_room_schedule_before_tick(
+                state,
+                &settings_node_id,
+                current_hour,
+            )
+            .is_err()
+            {
+                tracing::warn!(
+                    target: "sys",
+                    event = "room_schedule_reconcile_failed",
+                    failure_stage = "output_apply",
+                    "Room schedule reconciliation failed before periodic tick"
+                );
+                crate::periodic::clear_pending_periodic_tick_generation(
+                    state,
+                    &node_id,
+                    dispatch_generation,
+                );
+                return;
+            }
             let tick_started = Instant::now();
             let tick_result = crate::light_runtime::run_selected_light_runtime_event(
                 state,

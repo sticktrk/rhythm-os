@@ -1045,6 +1045,21 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
             for (idx, node) in periodic_nodes.iter().enumerate() {
                 let room_hour = SystemTimeProvider::new(utc_offset).current_hour();
                 let started = Instant::now();
+                if crate::commands::reconcile_room_schedule_before_tick(
+                    &state,
+                    &node.settings_node_id,
+                    room_hour,
+                )
+                .is_err()
+                {
+                    tracing::warn!(
+                        target: "periodic",
+                        event = "room_schedule_reconcile_failed",
+                        failure_stage = "output_apply",
+                        "Room schedule reconciliation failed before inline periodic tick"
+                    );
+                    continue;
+                }
                 if let Err(e) =
                     runtime.periodic_tick_node(&node.node_id, &node.settings_node_id, room_hour)
                 {
