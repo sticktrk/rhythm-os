@@ -9,6 +9,7 @@
 #   --release          Build in release mode
 #   --ipa              Build IPA for TestFlight (implies --release --no-run)
 #   --testflight       Build IPA and upload to TestFlight (implies --clean --release --no-run)
+#   --testflight-notes-file FILE  Required "What to Test" notes for a TestFlight upload
 #   --aab              Build AAB for Google Play (implies --android --release --no-run)
 #   --googleplay       Build AAB and upload to Google Play (implies --clean --release --no-run)
 #   --release-all      Run --testflight then --googleplay (ship to both stores)
@@ -381,6 +382,8 @@ BUILD_NUMBER_OVERRIDE=""
 BUILD_NUMBER_SOURCE=""
 RESOLVED_BUILD_NUMBER=""
 BUILD_METADATA_ARGS=""
+TESTFLIGHT_NOTES_FILE="${RHYTHM_TESTFLIGHT_NOTES_FILE:-}"
+TESTFLIGHT_CHANGELOG=""
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -416,6 +419,14 @@ while [[ $# -gt 0 ]]; do
             PLATFORM="ios"
             CLEAN=true
             shift
+            ;;
+        --testflight-notes-file)
+            if [ -z "${2:-}" ] || [[ "${2:-}" == --* ]]; then
+                echo "Error: --testflight-notes-file requires a path."
+                exit 1
+            fi
+            TESTFLIGHT_NOTES_FILE="$2"
+            shift 2
             ;;
         --setup-testflight)
             SETUP_TESTFLIGHT=true
@@ -508,21 +519,53 @@ if [ "$RELEASE_ALL" = true ]; then
     echo "Release all: TestFlight + Google Play"
     echo ""
 
-    EXTRA_ARGS=""
+    EXTRA_ARGS=()
     if [ -n "$BUILD_NUMBER_OVERRIDE" ]; then
-        EXTRA_ARGS="--build-number $BUILD_NUMBER_OVERRIDE"
+        EXTRA_ARGS+=(--build-number "$BUILD_NUMBER_OVERRIDE")
+    fi
+    if [ -n "$TESTFLIGHT_NOTES_FILE" ]; then
+        EXTRA_ARGS+=(--testflight-notes-file "$TESTFLIGHT_NOTES_FILE")
     fi
 
     echo "==> 1/2  TestFlight"
-    "$0" $EXTRA_ARGS --testflight
+    "$0" "${EXTRA_ARGS[@]}" --testflight
 
     echo ""
     echo "==> 2/2  Google Play"
-    "$0" $EXTRA_ARGS --googleplay
+    "$0" "${EXTRA_ARGS[@]}" --googleplay
 
     echo ""
     echo "Release all complete: shipped to TestFlight + Google Play."
     exit 0
+fi
+
+if [ "$UPLOAD_TESTFLIGHT" = true ]; then
+    if [ -z "$TESTFLIGHT_NOTES_FILE" ]; then
+        echo "Error: TestFlight uploads require build-specific 'What to Test' notes."
+        echo "Pass --testflight-notes-file FILE or set RHYTHM_TESTFLIGHT_NOTES_FILE."
+        exit 1
+    fi
+    if [ ! -f "$TESTFLIGHT_NOTES_FILE" ]; then
+        echo "Error: TestFlight notes file not found: $TESTFLIGHT_NOTES_FILE"
+        exit 1
+    fi
+
+    TESTFLIGHT_CHANGELOG="$(< "$TESTFLIGHT_NOTES_FILE")"
+    if ! grep -q '[^[:space:]]' <<<"$TESTFLIGHT_CHANGELOG"; then
+        echo "Error: TestFlight notes file is empty: $TESTFLIGHT_NOTES_FILE"
+        exit 1
+    fi
+
+    TESTFLIGHT_NOTES_LENGTH="$(
+        awk '{ total += length($0) + (NR > 1 ? 1 : 0) } END { print total + 0 }' \
+            "$TESTFLIGHT_NOTES_FILE"
+    )"
+    if [ "$TESTFLIGHT_NOTES_LENGTH" -gt 4000 ]; then
+        echo "Error: TestFlight notes exceed Apple's 4000-character limit ($TESTFLIGHT_NOTES_LENGTH)."
+        exit 1
+    fi
+    echo "Using TestFlight 'What to Test' notes: $TESTFLIGHT_NOTES_FILE ($TESTFLIGHT_NOTES_LENGTH characters)"
+    echo ""
 fi
 
 # Auto-detect platform
@@ -918,6 +961,7 @@ else
             fastlane pilot upload \
                 --api_key_path "$ASC_API_KEY_PATH" \
                 --ipa "$IPA_FILE" \
+                --changelog "$TESTFLIGHT_CHANGELOG" \
                 --skip_waiting_for_build_processing
             write_store_build_receipt \
                 app-store-connect testflight "$IPA_FILE" "$RESOLVED_BUILD_NUMBER"
