@@ -9463,4 +9463,131 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Low Glow'), findsNothing);
   });
+
+  testWidgets('returning Low Glow to Auto only clears the Day idle mapping',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    const initialProfiles = [
+      RhythmCurveConfig(id: 'rhythm', name: 'Day Profile'),
+      RhythmCurveConfig(id: 'sleep', name: 'Sleep Profile'),
+      RhythmCurveConfig(
+        id: 'day_idle',
+        name: 'Day Mood',
+        minColorTemp: 0,
+        maxColorTemp: 0,
+        minBrightness: 20,
+        maxBrightness: 20,
+        curve: RhythmConstantCurve(
+          brightness: 1,
+          colorTemp: 0,
+          directColor: RhythmDirectColor(
+            rgb: RhythmRgbColor(r: 255, g: 149, b: 41),
+            xy: RhythmXyColor(x: 0.61, y: 0.37),
+          ),
+        ),
+      ),
+      RhythmCurveConfig(
+        id: 'sleep_idle',
+        name: 'Sleep Mood',
+        minColorTemp: 0,
+        maxColorTemp: 0,
+        minBrightness: 1,
+        maxBrightness: 1,
+        curve: RhythmInheritActiveCurve(),
+      ),
+    ];
+    final api = _FakeRhythmServerApi()
+      ..profileConfigs = initialProfiles
+      ..profileMode = RhythmModeResource.fromJson({
+        'active': 'sleep',
+        'configs': [
+          {
+            'mode': 'day',
+            'active_profile_id': 'rhythm',
+            'idle_profile_id': 'day_idle',
+          },
+          {
+            'mode': 'sleep',
+            'active_profile_id': 'sleep',
+            'idle_profile_id': 'sleep_idle',
+          },
+        ],
+      });
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 1100));
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': const <Map<String, dynamic>>[],
+        'location': const <String, dynamic>{},
+        'profiles': [for (final profile in initialProfiles) profile.toJson()],
+        'mode': {
+          'active': 'sleep',
+          'configs': [
+            {
+              'mode': 'day',
+              'active_profile_id': 'rhythm',
+              'idle_profile_id': 'day_idle',
+            },
+            {
+              'mode': 'sleep',
+              'active_profile_id': 'sleep',
+              'idle_profile_id': 'sleep_idle',
+            },
+          ],
+        },
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const LightScreen(showBackButton: true),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Low Glow'));
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey('day-low-glow-custom-brightness')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey('day-low-glow-custom-color')),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+
+    expect(
+      api.profileConfigSetCalls,
+      isEmpty,
+      reason: 'returning to Auto must not rewrite or remove stored profiles',
+    );
+    expect(api.profileModeSetCalls, hasLength(1));
+    final savedConfigs = api.profileModeSetCalls.single.configs!;
+    final savedDay = savedConfigs.singleWhere(
+      (config) => config.mode == RhythmMode.day,
+    );
+    final savedSleep = savedConfigs.singleWhere(
+      (config) => config.mode == RhythmMode.sleep,
+    );
+    expect(savedDay.activeProfileId, 'rhythm');
+    expect(savedDay.idleProfileId, isNull);
+    expect(savedSleep.activeProfileId, 'sleep');
+    expect(savedSleep.idleProfileId, 'sleep_idle');
+    expect(api.profileConfigs, initialProfiles);
+  });
 }
