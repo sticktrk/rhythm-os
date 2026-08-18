@@ -175,6 +175,52 @@ def write_google_play_metadata(plan, version_code, root)
   end
 end
 
+def apple_release_status(plan)
+  app = connect_to_app_store
+  version = plan.fetch("version")
+  build_number = plan.dig("apple", "build_number").to_s
+  candidates = [
+    app.get_live_app_store_version(platform: "IOS"),
+    app.get_in_review_app_store_version(platform: "IOS"),
+    app.get_edit_app_store_version(platform: "IOS")
+  ].compact
+  app_version = candidates.find { |candidate| candidate.version_string == version }
+
+  {
+    version: version,
+    build_number: build_number,
+    raw_state: app_version ? app_version.app_version_state.to_s : "MISSING"
+  }
+end
+
+def google_play_release_status(plan)
+  require "supply"
+  require "supply/options"
+  require "supply/reader"
+
+  version = plan.fetch("version")
+  version_code = plan.dig("google_play", "version_code").to_s
+  Supply.config = FastlaneCore::Configuration.create(
+    Supply::Options.available_options,
+    {
+      package_name: APP_IDENTIFIER,
+      track: "production",
+      json_key: google_play_key_path
+    }
+  )
+  track = Supply::Reader.new.track_meta
+  release = track&.releases&.find do |candidate|
+    Array(candidate.version_codes).map(&:to_s).include?(version_code)
+  end
+
+  {
+    version: version,
+    version_code: version_code,
+    raw_state: release ? release.status.to_s : "MISSING",
+    rollout: release&.user_fraction
+  }
+end
+
 desc "Read-only validation of an exact Apple and/or Google Play production candidate"
 lane :app_release_preflight do |options|
   plan = release_plan(options)
@@ -189,6 +235,24 @@ lane :app_release_preflight do |options|
   end
   validate_android_candidate(plan) if %w[android all].include?(requested_platform)
   UI.success("Production release preflight passed for #{requested_platform}")
+end
+
+desc "Read the raw Apple and/or Google production state for one exact release plan"
+lane :app_release_status do |options|
+  plan = release_plan(options)
+  requested_platform = options[:platform].to_s
+  requested_platform = "all" if requested_platform.empty?
+  UI.user_error!("platform must be ios, android, or all") unless %w[ios android all].include?(requested_platform)
+  output_path = File.expand_path(options[:output].to_s)
+  UI.user_error!("Pass output:/absolute/path/status.json") if options[:output].to_s.empty?
+
+  status = {}
+  status[:ios] = apple_release_status(plan) if %w[ios all].include?(requested_platform)
+  status[:android] = google_play_release_status(plan) if %w[android all].include?(requested_platform)
+  FileUtils.mkdir_p(File.dirname(output_path))
+  File.write(output_path, JSON.pretty_generate(status) + "\n")
+  File.chmod(0o600, output_path)
+  UI.success("Production release status written to #{output_path}")
 end
 
 desc "Export existing App Store review contact and demo fields to a mode-0600 local JSON file"
