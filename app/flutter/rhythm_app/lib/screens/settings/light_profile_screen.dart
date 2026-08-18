@@ -118,6 +118,7 @@ class LightProfileScreen extends StatefulWidget {
   /// inside a host like `LightScreen` that supplies its own chrome and a single
   /// shared scroll view.
   final bool embedded;
+  final bool dayLowGlowOnly;
   final String? roomId;
   final String? roomName;
   final String overrideScope;
@@ -126,6 +127,7 @@ class LightProfileScreen extends StatefulWidget {
     super.key,
     this.initialProfile,
     this.embedded = false,
+    this.dayLowGlowOnly = false,
     this.roomId,
     this.roomName,
     this.overrideScope = 'room',
@@ -413,6 +415,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
   }
 
   String get _profileTitle => switch (_selectedProfileId) {
+        _ when widget.dayLowGlowOnly => 'Low Glow',
         'sleep' => 'Sleep Profile',
         _ => 'Day Profile',
       };
@@ -1244,6 +1247,26 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
         subscription.has(Entitlement.sleepPrimarySettings);
     final canUseAdvancedDay = subscription.has(Entitlement.advancedDayControls);
 
+    if (widget.dayLowGlowOnly) {
+      final canUseLowGlow = subscription.has(Entitlement.standby);
+      final children = <Widget>[
+        ProLockWrap(
+          unlocked: canUseLowGlow,
+          entitlement: Entitlement.standby,
+          child: _buildIdleSection(),
+        ),
+        if (_curveConfigDirty || _isSaving) ...[
+          const SizedBox(height: 24),
+          _buildPendingChangesActions(),
+        ],
+        const SizedBox(height: 18),
+      ];
+      return Padding(
+        padding: const EdgeInsets.fromLTRB(16, 6, 16, 18),
+        child: Column(children: children),
+      );
+    }
+
     final children = <Widget>[
       if (_isSleepProfile) ...[
         // Sleep "look" — promoted out of Advanced so the Light tab shows the
@@ -1531,12 +1554,11 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
   // Idle Section — folded into day/sleep profiles
   // ---------------------------------------------------------------------------
 
-  // ignore: unused_element
   Widget _buildIdleSection() {
     final isDefault = !_idleCustomBri && !_idleCustomColor;
     final briColor = _idleCustomBri ? _Palette.amber : _Palette.idle;
     final colorColor = _idleCustomColor ? _idleSelectedColor : _Palette.idle;
-    final expanded = _idleExpanded;
+    final expanded = widget.dayLowGlowOnly || _idleExpanded;
 
     return AnimatedContainer(
       duration: const Duration(milliseconds: 300),
@@ -1557,7 +1579,9 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
           // Header — tappable to expand/collapse.
           GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTap: () => setState(() => _idleExpanded = !_idleExpanded),
+            onTap: widget.dayLowGlowOnly
+                ? null
+                : () => setState(() => _idleExpanded = !_idleExpanded),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -1577,10 +1601,12 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
                       ),
                     ),
                     const SizedBox(width: 12),
-                    const Expanded(
+                    Expanded(
                       child: Text(
-                        'Mood Settings',
-                        style: TextStyle(
+                        widget.dayLowGlowOnly
+                            ? 'Brightness & Color'
+                            : 'Low Glow',
+                        style: const TextStyle(
                           color: _Palette.textPrimary,
                           fontSize: 15,
                           fontWeight: FontWeight.w600,
@@ -1641,17 +1667,19 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
                         ),
                       ),
                     ],
-                    const SizedBox(width: 6),
-                    AnimatedRotation(
-                      turns: expanded ? 0.5 : 0,
-                      duration: const Duration(milliseconds: 250),
-                      curve: Curves.easeOutCubic,
-                      child: Icon(
-                        Icons.keyboard_arrow_down_rounded,
-                        color: _Palette.textSecondary.withValues(alpha: 0.3),
-                        size: 20,
+                    if (!widget.dayLowGlowOnly) ...[
+                      const SizedBox(width: 6),
+                      AnimatedRotation(
+                        turns: expanded ? 0.5 : 0,
+                        duration: const Duration(milliseconds: 250),
+                        curve: Curves.easeOutCubic,
+                        child: Icon(
+                          Icons.keyboard_arrow_down_rounded,
+                          color: _Palette.textSecondary.withValues(alpha: 0.3),
+                          size: 20,
+                        ),
                       ),
-                    ),
+                    ],
                   ],
                 ),
               ],
@@ -1706,6 +1734,9 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
                           SizedBox(
                             height: 28,
                             child: Switch.adaptive(
+                              key: const ValueKey(
+                                'day-low-glow-custom-brightness',
+                              ),
                               value: _idleCustomBri,
                               onChanged: (v) {
                                 setState(() {
@@ -1793,6 +1824,9 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
                           SizedBox(
                             height: 28,
                             child: Switch.adaptive(
+                              key: const ValueKey(
+                                'day-low-glow-custom-color',
+                              ),
                               value: _idleCustomColor,
                               onChanged: (v) {
                                 setState(() {
@@ -3174,6 +3208,10 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
 
   Future<void> _saveCurveConfig() async {
     if (_isSaving) return;
+    if (widget.dayLowGlowOnly) {
+      await _saveDayLowGlowConfig();
+      return;
+    }
     final config = _buildDraftConfig();
     if (widget.isRoomScoped) {
       await _saveRoomCurveConfig(config);
@@ -3242,6 +3280,96 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
       await _syncActiveConfigModel(config);
       if (!mounted) return;
       AnalyticsService().logLightProfileSaved(_selectedProfileId);
+    } finally {
+      if (mounted) {
+        setState(() => _isSaving = false);
+      } else {
+        _isSaving = false;
+      }
+    }
+  }
+
+  Future<void> _saveDayLowGlowConfig() async {
+    if (!context.read<SubscriptionProvider>().has(Entitlement.standby)) {
+      return;
+    }
+
+    const profileId = 'day_idle';
+    final idleConfig = _buildIdleDraftConfig();
+    final serverSync = context.read<ServerSyncProvider>();
+    final api = serverSync.api;
+    setState(() {
+      _curveConfigDirty = false;
+      _isSaving = true;
+    });
+
+    try {
+      if (idleConfig != null) {
+        final profileSaved = await api.configSet(
+          idleConfig,
+          id: profileId,
+          apply: serverSync.activeProfileId == profileId,
+        );
+        if (!mounted) return;
+        if (!profileSaved) {
+          setState(() => _curveConfigDirty = true);
+          AnalyticsService().logLightProfileSaveFailed(
+            profileId,
+            stage: 'profile',
+          );
+          _showSaveFeedback(
+            'Low Glow settings could not be saved.',
+            error: true,
+          );
+          return;
+        }
+      }
+
+      final targetIdleProfileId = idleConfig?.id;
+      final currentIdleProfileId = _selectedCustomIdleProfileId;
+      List<sdk.RhythmModeConfig>? updatedModeConfigs;
+      if (currentIdleProfileId != targetIdleProfileId) {
+        updatedModeConfigs = _updatedModeConfigsForIdle(targetIdleProfileId);
+        final modeSaved = await api.modeSet(
+          active: _serverActiveMode,
+          configs: updatedModeConfigs,
+        );
+        if (!mounted) return;
+        if (!modeSaved) {
+          setState(() => _curveConfigDirty = true);
+          AnalyticsService().logLightProfileSaveFailed(
+            profileId,
+            stage: 'mode',
+          );
+          _showSaveFeedback(
+            targetIdleProfileId == null
+                ? 'Low Glow returned to Auto, but the Day profile could not be updated.'
+                : 'Low Glow was saved, but the Day profile could not use it.',
+            error: true,
+          );
+          return;
+        }
+      }
+
+      if (idleConfig != null) {
+        _profileConfigs[idleConfig.id] = idleConfig;
+        _applyIdleConfig(idleConfig);
+      } else {
+        _applyIdleFallback();
+      }
+      if (updatedModeConfigs != null) {
+        _modeConfigs = updatedModeConfigs;
+      }
+      await serverSync.fullRefresh();
+      _serverConfigSignature = _currentServerConfigSignature();
+      if (!mounted) return;
+      AnalyticsService().logLightProfileSaved(profileId);
+      _showSaveFeedback(
+        idleConfig == null
+            ? 'Low Glow now follows the automatic Day look.'
+            : 'Low Glow settings updated.',
+        error: false,
+      );
     } finally {
       if (mounted) {
         setState(() => _isSaving = false);

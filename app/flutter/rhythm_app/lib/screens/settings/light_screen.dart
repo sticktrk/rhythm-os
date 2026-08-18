@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -123,12 +125,14 @@ class _ProfileLayer {
   final String name;
   final IconData icon;
   final Color accent;
+  final bool globalOnly;
 
   const _ProfileLayer({
     required this.id,
     required this.name,
     required this.icon,
     required this.accent,
+    this.globalOnly = false,
   });
 }
 
@@ -144,6 +148,13 @@ const List<_ProfileLayer> _kProfileLayers = [
     name: 'Sleep',
     icon: Icons.bedtime_rounded,
     accent: Color(0xFF7C83FF),
+  ),
+  _ProfileLayer(
+    id: 'day_idle',
+    name: 'Low Glow',
+    icon: Icons.brightness_low_rounded,
+    accent: Color(0xFF9FA8DA),
+    globalOnly: true,
   ),
 ];
 
@@ -162,7 +173,11 @@ class _LightScreenState extends State<LightScreen> {
 
   void _toggle(String id) {
     HapticFeedback.selectionClick();
-    setState(() => _expandedId = _expandedId == id ? null : id);
+    final opening = _expandedId != id;
+    setState(() => _expandedId = opening ? id : null);
+    if (opening) {
+      unawaited(AnalyticsService().logLightProfileOpened(id));
+    }
   }
 
   @override
@@ -198,27 +213,33 @@ class _LightScreenState extends State<LightScreen> {
                           const SizedBox(height: 12),
                         ],
                         for (final layer in _kProfileLayers)
-                          _ProfileLayerCard(
-                            layer: layer,
-                            preview: _previewFor(
-                              _effectiveConfigFor(
-                                sync,
-                                layer.id,
-                                roomOverrides,
+                          if (!layer.globalOnly || !widget.isRoomScoped)
+                            _ProfileLayerCard(
+                              layer: layer,
+                              preview: layer.id == 'day_idle'
+                                  ? _dayLowGlowPreview(sync)
+                                  : _previewFor(
+                                      _effectiveConfigFor(
+                                        sync,
+                                        layer.id,
+                                        roomOverrides,
+                                      ),
+                                    ),
+                              customized:
+                                  !(roomOverrides[layer.id]?.isEmpty ?? true),
+                              expanded: _expandedId == layer.id,
+                              onToggle: () => _toggle(layer.id),
+                              child: LightProfileScreen(
+                                initialProfile: layer.id == 'day_idle'
+                                    ? 'rhythm'
+                                    : layer.id,
+                                embedded: true,
+                                dayLowGlowOnly: layer.id == 'day_idle',
+                                roomId: widget.roomId,
+                                roomName: widget.roomName,
+                                overrideScope: _analyticsScope,
                               ),
                             ),
-                            customized:
-                                !(roomOverrides[layer.id]?.isEmpty ?? true),
-                            expanded: _expandedId == layer.id,
-                            onToggle: () => _toggle(layer.id),
-                            child: LightProfileScreen(
-                              initialProfile: layer.id,
-                              embedded: true,
-                              roomId: widget.roomId,
-                              roomName: widget.roomName,
-                              overrideScope: _analyticsScope,
-                            ),
-                          ),
                         // The Time Simulator scrubs the Day curve, so it only
                         // belongs here when Day is the active mode.
                         if (!widget.isRoomScoped &&
@@ -342,6 +363,25 @@ class _LightScreenState extends State<LightScreen> {
     final global = _configFor(sync, id);
     if (global == null) return null;
     return overrides[id]?.applyTo(global) ?? global;
+  }
+
+  _LayerPreview _dayLowGlowPreview(ServerSyncProvider sync) {
+    RhythmModeConfig? dayMode;
+    for (final config in sync.modeConfigs) {
+      if (config.mode == RhythmMode.day) {
+        dayMode = config;
+        break;
+      }
+    }
+    final customId = dayMode?.idleProfileId;
+    if (customId != null && customId.isNotEmpty) {
+      return _previewFor(_configFor(sync, customId));
+    }
+
+    final day = _configFor(sync, dayMode?.activeProfileId ?? 'rhythm');
+    if (day == null) return _previewFor(null);
+    final inherited = _previewFor(day);
+    return _LayerPreview(inherited.gradient, 'Auto · 1%');
   }
 
   Widget _buildRoomScopeBanner(
