@@ -461,6 +461,50 @@ void main() {
       ]);
     });
 
+    test('explicit enable can defer public route verification', () async {
+      final stateLoads = <String>[];
+      final supabase = _FakeSupabaseClient(
+        responseData: {
+          'remote_endpoint': {
+            'host': 'hub.devices.rhythm.lighting',
+            'port': 443,
+            'useSsl': true,
+          },
+          'hostname': 'hub.devices.rhythm.lighting',
+          'connector_token': 'connector-token',
+          'tunnel_id': 'tunnel-id',
+          'tunnel_name': 'tunnel-name',
+        },
+      );
+      final service = RemoteAccessService.testing(
+        apiFactory: ({required String baseUrl, String? authToken}) =>
+            _FakeRemoteAccessApi(baseUrl: baseUrl),
+        supabaseClientFactory: () => supabase,
+        stateLoader: ({required endpoint, String? authToken}) async {
+          stateLoads.add(endpoint.baseUrl);
+          if (endpoint.useSsl) {
+            throw const RhythmApiException('remote hostname not ready');
+          }
+          return RhythmHello.fromJson({
+            'server_instance_id': 'srv-test-instance',
+          });
+        },
+        remoteRoutePollAttempts: 36,
+        supportGrant: (_) async {},
+        canUseRemoteAccessOverride: true,
+      );
+
+      final result = await service.enableForHub(
+        _serverHub(),
+        explicitUserEnable: true,
+      );
+
+      expect(result.routeVerified, isFalse);
+      expect(result.updatedHub.remoteEndpoint?.host,
+          'hub.devices.rhythm.lighting');
+      expect(stateLoads, ['http://192.168.5.123:54448']);
+    });
+
     test('enable retains a healthy tunnel while its public route is pending',
         () async {
       late _FakeRemoteAccessApi remoteApi;
@@ -899,6 +943,50 @@ void main() {
       expect(remoteApi.putConfigCalls, 1);
       expect(saved, hasLength(1));
       expect(saved.single.remoteEndpoint?.host, 'hub.devices.rhythm.lighting');
+    });
+
+    test('auto-enable does not re-bootstrap an active pending route', () async {
+      final home = Home.create(
+        id: 'home-1',
+        name: 'Kitchen',
+        ownerId: 'anonymous-user',
+      );
+      final supabase = _FakeSupabaseClient(responseData: const {});
+      final remoteApi = _FakeRemoteAccessApi(
+        baseUrl: 'http://192.168.5.123:54448',
+        statuses: [_remoteStatus(registeredConnections: 1)],
+      );
+      final saved = <Hub>[];
+      final service = RemoteAccessService.testing(
+        apiFactory: ({required String baseUrl, String? authToken}) => remoteApi,
+        supabaseClientFactory: () => supabase,
+        stateLoader: ({required endpoint, String? authToken}) async {
+          throw const RhythmApiException('route is still propagating');
+        },
+        supportGrant: (_) async {},
+        canUseRemoteAccessOverride: true,
+      );
+
+      await service.autoEnableForHubForTesting(
+        home: home,
+        serverHub: _serverHub(
+          serverInstanceId: 'srv-test-instance',
+          remoteEndpoint: const HubEndpoint(
+            host: 'hub.devices.rhythm.lighting',
+            port: 443,
+            useSsl: true,
+          ),
+        ),
+        saveHub: (hub) async {
+          saved.add(hub);
+          return true;
+        },
+      );
+
+      expect(remoteApi.statusCalls, 1);
+      expect(remoteApi.putConfigCalls, 0);
+      expect(supabase.functions.invocations, isEmpty);
+      expect(saved, isEmpty);
     });
 
     test('scheduled auto-enable retries a pending public route', () async {
