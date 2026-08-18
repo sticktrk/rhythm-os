@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
+import 'color_wheel_picker.dart';
+
 /// Which kind of mood the sheet is editing.
 enum MoodTab { color, scenes, hue }
 
@@ -196,27 +198,6 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
       _selectedSceneId = null;
     });
     if (commit) widget.onColorChanged(_selectedColor, _brightness);
-  }
-
-  void _commitColor() {
-    setState(() => _selectedSceneId = null);
-    widget.onColorChanged(_selectedColor, _brightness);
-  }
-
-  void _onColorWheel(Offset localPosition, Size size,
-      {bool haptic = false, bool commit = true}) {
-    final shortestSide = math.min(size.width, size.height);
-    if (shortestSide <= 0) return;
-    final center = Offset(size.width / 2, size.height / 2);
-    final radius = shortestSide / 2;
-    final vector = localPosition - center;
-    final distance = vector.distance;
-    final saturation = (distance / radius).clamp(0.0, 1.0);
-    final hue = distance <= 0.5
-        ? _hue
-        : ((math.atan2(vector.dy, vector.dx) * 180 / math.pi) + 360) % 360;
-    if (haptic) HapticFeedback.selectionClick();
-    _setColor(hue, saturation, commit: commit);
   }
 
   Future<void> _onSceneTap(RhythmSceneDefinition scene) async {
@@ -441,62 +422,17 @@ class _MoodSheetState extends State<MoodSheet> with TickerProviderStateMixin {
   }
 
   Widget _colorWheel(double maxSide) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final side = math.min(constraints.maxWidth, maxSide);
-        final radius = side / 2;
-        final markerAngle = _hue * math.pi / 180;
-        final markerOffset = Offset(
-          radius + math.cos(markerAngle) * radius * _saturation,
-          radius + math.sin(markerAngle) * radius * _saturation,
-        );
-
-        return Center(
-          child: Semantics(
-            label: 'Mood color wheel',
-            value: 'Selected color',
-            child: GestureDetector(
-              key: const Key('mood_color_spectrum'),
-              onTapDown: (d) => _onColorWheel(
-                d.localPosition,
-                Size.square(side),
-                haptic: true,
-              ),
-              onPanStart: (d) => _onColorWheel(
-                d.localPosition,
-                Size.square(side),
-                haptic: true,
-                commit: false,
-              ),
-              onPanUpdate: (d) => _onColorWheel(
-                d.localPosition,
-                Size.square(side),
-                commit: false,
-              ),
-              onPanEnd: (_) => _commitColor(),
-              child: SizedBox.square(
-                key: const Key('mood_color_wheel'),
-                dimension: side,
-                child: Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    Positioned.fill(
-                      child: CustomPaint(
-                        painter: const _RgbColorWheelPainter(),
-                      ),
-                    ),
-                    Positioned(
-                      left: markerOffset.dx - 14,
-                      top: markerOffset.dy - 14,
-                      child: _ColorWheelThumb(color: _selectedColor),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        );
-      },
+    return ColorWheelPicker(
+      value: HSVColor.fromAHSV(1, _hue, _saturation, 1),
+      maxSide: maxSide,
+      semanticsLabel: 'Mood color wheel',
+      interactionKey: const Key('mood_color_spectrum'),
+      wheelKey: const Key('mood_color_wheel'),
+      onChanged: (color, {required commit}) => _setColor(
+        color.hue,
+        color.saturation,
+        commit: commit,
+      ),
     );
   }
 
@@ -830,103 +766,6 @@ class _MoodTabToggle extends StatelessWidget {
                 letterSpacing: -0.2,
               ),
               child: Text(label),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _RgbColorWheelPainter extends CustomPainter {
-  const _RgbColorWheelPainter();
-
-  static const _colors = [
-    Color(0xFFFF0000),
-    Color(0xFFFFFF00),
-    Color(0xFF00FF00),
-    Color(0xFF00FFFF),
-    Color(0xFF0000FF),
-    Color(0xFFFF00FF),
-    Color(0xFFFF0000),
-  ];
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final side = math.min(size.width, size.height);
-    if (side <= 0) return;
-    final center = Offset(size.width / 2, size.height / 2);
-    final radius = side / 2;
-    final rect = Rect.fromCircle(center: center, radius: radius);
-
-    canvas.save();
-    canvas.clipPath(Path()..addOval(rect));
-    canvas.drawCircle(
-      center,
-      radius,
-      Paint()..shader = const SweepGradient(colors: _colors).createShader(rect),
-    );
-    canvas.drawCircle(
-      center,
-      radius,
-      Paint()
-        ..shader = const RadialGradient(
-          colors: [Colors.white, Color(0x00FFFFFF)],
-          stops: [0.0, 1.0],
-        ).createShader(rect),
-    );
-    canvas.restore();
-
-    canvas.drawCircle(
-      center,
-      radius - 0.5,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1
-        ..color = Colors.white.withValues(alpha: 0.16),
-    );
-    canvas.drawCircle(
-      center,
-      radius - 1.5,
-      Paint()
-        ..style = PaintingStyle.stroke
-        ..strokeWidth = 1
-        ..color = Colors.black.withValues(alpha: 0.28),
-    );
-  }
-
-  @override
-  bool shouldRepaint(_RgbColorWheelPainter oldDelegate) => false;
-}
-
-class _ColorWheelThumb extends StatelessWidget {
-  final Color color;
-
-  const _ColorWheelThumb({required this.color});
-
-  @override
-  Widget build(BuildContext context) {
-    return IgnorePointer(
-      child: Container(
-        width: 28,
-        height: 28,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: color,
-          border: Border.all(
-            color: Colors.white.withValues(alpha: 0.95),
-            width: 3,
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: color.withValues(alpha: 0.55),
-              blurRadius: 16,
-              spreadRadius: 1,
-            ),
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.55),
-              blurRadius: 7,
-              offset: const Offset(0, 2),
             ),
           ],
         ),

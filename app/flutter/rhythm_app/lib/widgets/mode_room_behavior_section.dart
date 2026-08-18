@@ -11,6 +11,7 @@ import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
 import '../services/analytics_service.dart';
 import '../utils/room_visibility.dart';
+import 'room_schedule_behavior_control.dart';
 
 /// Per-room On / Low glow / Off controls for a single [RhythmMode].
 ///
@@ -18,8 +19,8 @@ import '../utils/room_visibility.dart';
 /// out of the light-profile screen so the Automations tab can present it as its
 /// own automation (the light *look* lives on the Light tab; turning lights
 /// on/off/low-glow behavior is an automation). Reads the room defaults from
-/// [ServerSyncProvider.modeConfigs] and debounces writes back through
-/// `api.modeSet`, exactly as the profile screen used to.
+/// [ServerSyncProvider.modeConfigs] and sends edits through the provider's
+/// shared optimistic, debounced `modeSet` owner.
 class ModeRoomBehaviorSection extends StatefulWidget {
   /// Which mode's room behavior to edit — Day or Sleep.
   final RhythmMode mode;
@@ -32,25 +33,8 @@ class ModeRoomBehaviorSection extends StatefulWidget {
 }
 
 class _ModeRoomBehaviorSectionState extends State<ModeRoomBehaviorSection> {
-  Timer? _roomDefaultsDebounce;
-
-  // Optimistic local copy, held only once the user has made an edit, so rapid
-  // toggles feel instant despite the 800ms write debounce. Null until the first
-  // edit — until then we reflect the live provider state directly (which also
-  // lets us pick up mode configs that arrive after the first frame).
-  List<RhythmModeConfig>? _localConfigs;
-
-  @override
-  void dispose() {
-    _roomDefaultsDebounce?.cancel();
-    super.dispose();
-  }
-
-  List<RhythmModeConfig> _effectiveConfigs(ServerSyncProvider sync) =>
-      _localConfigs ?? sync.modeConfigs;
-
   Map<String, String> _roomDefaults(ServerSyncProvider sync) {
-    for (final config in _effectiveConfigs(sync)) {
+    for (final config in sync.modeConfigs) {
       if (config.mode == widget.mode) {
         return {for (final rd in config.roomDefaults) rd.roomId: rd.state};
       }
@@ -60,49 +44,15 @@ class _ModeRoomBehaviorSectionState extends State<ModeRoomBehaviorSection> {
 
   void _onRoomDefaultChanged(String roomId, String? newState) {
     final sync = context.read<ServerSyncProvider>();
-    final defaults = Map<String, String>.from(_roomDefaults(sync));
-    if (newState == null) {
-      defaults.remove(roomId);
-    } else {
-      defaults[roomId] = newState;
-    }
-
-    final updatedRoomDefaults = defaults.entries
-        .map((e) => RoomDefault(roomId: e.key, state: e.value))
-        .toList();
-
-    final base = _effectiveConfigs(sync);
-    final hasConfig = base.any((c) => c.mode == widget.mode);
-    final List<RhythmModeConfig> updatedConfigs;
-    if (hasConfig) {
-      updatedConfigs = base.map((config) {
-        if (config.mode == widget.mode) {
-          return config.copyWith(roomDefaults: updatedRoomDefaults);
-        }
-        return config;
-      }).toList();
-    } else {
-      updatedConfigs = [
-        ...base,
-        RhythmModeConfig(
-          mode: widget.mode,
-          activeProfileId: '',
-          roomDefaults: updatedRoomDefaults,
-        ),
-      ];
-    }
-
-    // Update UI immediately, debounce the server push.
-    setState(() => _localConfigs = updatedConfigs);
-
-    _roomDefaultsDebounce?.cancel();
-    _roomDefaultsDebounce = Timer(const Duration(milliseconds: 800), () {
-      if (!mounted) return;
-      context.read<ServerSyncProvider>().api.modeSet(configs: _localConfigs!);
-    });
+    sync.updateRoomDefaultForMode(
+      roomId: roomId,
+      mode: widget.mode,
+      state: newState,
+    );
     AnalyticsService().logLightProfileRoomDefaultChanged(
       profile: widget.mode == RhythmMode.sleep ? 'sleep' : 'rhythm',
       cleared: newState == null,
+      source: 'automations',
     );
   }
 
@@ -154,34 +104,22 @@ class _ModeRoomBehaviorSectionState extends State<ModeRoomBehaviorSection> {
 // Room default state model + helpers
 // ---------------------------------------------------------------------------
 
-enum _RoomDefaultMode { none, off, standby, active }
+typedef _RoomDefaultMode = RoomScheduleBehavior;
 
-_RoomDefaultMode _roomDefaultModeForState(String? state) => switch (state) {
-      'active' => _RoomDefaultMode.active,
-      'idle' || 'soft_off' || 'standby' => _RoomDefaultMode.standby,
-      'mood' || 'hard_off' => _RoomDefaultMode.off,
-      _ => _RoomDefaultMode.none,
-    };
+_RoomDefaultMode _roomDefaultModeForState(String? state) =>
+    roomScheduleBehaviorForState(state);
 
-String? _stateFromRoomDefaultMode(_RoomDefaultMode mode) => switch (mode) {
-      _RoomDefaultMode.active => 'active',
-      _RoomDefaultMode.standby => 'standby',
-      _RoomDefaultMode.off => 'hard_off',
-      _RoomDefaultMode.none => null,
-    };
+String? _stateFromRoomDefaultMode(_RoomDefaultMode mode) =>
+    stateForRoomScheduleBehavior(mode);
 
-_RoomDefaultMode _nextRoomDefaultMode(_RoomDefaultMode mode) => switch (mode) {
-      _RoomDefaultMode.active => _RoomDefaultMode.standby,
-      _RoomDefaultMode.standby => _RoomDefaultMode.off,
-      _RoomDefaultMode.off => _RoomDefaultMode.none,
-      _RoomDefaultMode.none => _RoomDefaultMode.active,
-    };
+_RoomDefaultMode _nextRoomDefaultMode(_RoomDefaultMode mode) =>
+    nextRoomScheduleBehavior(mode);
 
 String _roomDefaultLabel(_RoomDefaultMode mode) => switch (mode) {
-      _RoomDefaultMode.active => 'On',
+      _RoomDefaultMode.on => 'On',
       _RoomDefaultMode.standby => 'Low glow',
       _RoomDefaultMode.off => 'Off',
-      _RoomDefaultMode.none => 'No override',
+      _RoomDefaultMode.automatic => 'No override',
     };
 
 @visibleForTesting
@@ -213,28 +151,30 @@ class _RoomDefaultCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final mode = _mode;
-    final hasOverride = mode != _RoomDefaultMode.none;
+    final hasOverride = mode != _RoomDefaultMode.automatic;
 
     final bgColor = switch (mode) {
-      _RoomDefaultMode.active => const Color(0xFF1E1A12),
+      _RoomDefaultMode.on => const Color(0xFF1E1A12),
       _RoomDefaultMode.standby => const Color(0xFF1D1A13),
-      _RoomDefaultMode.off || _RoomDefaultMode.none => _Palette.card,
+      _RoomDefaultMode.off || _RoomDefaultMode.automatic => _Palette.card,
     };
 
     final stateLabel = _roomDefaultLabel(mode);
 
     final stateLabelColor = switch (mode) {
-      _RoomDefaultMode.active => const Color(0xFFD4A020),
+      _RoomDefaultMode.on => const Color(0xFFD4A020),
       _RoomDefaultMode.standby => _Palette.idle,
       _RoomDefaultMode.off => _Palette.textSecondary,
-      _RoomDefaultMode.none => _Palette.textSecondary.withValues(alpha: 0.4),
+      _RoomDefaultMode.automatic =>
+        _Palette.textSecondary.withValues(alpha: 0.4),
     };
 
     final indicatorColor = switch (mode) {
-      _RoomDefaultMode.active => const Color(0xFFD4A020),
+      _RoomDefaultMode.on => const Color(0xFFD4A020),
       _RoomDefaultMode.standby => _Palette.idle.withValues(alpha: 0.9),
       _RoomDefaultMode.off => _Palette.textSecondary.withValues(alpha: 0.8),
-      _RoomDefaultMode.none => _Palette.textSecondary.withValues(alpha: 0.75),
+      _RoomDefaultMode.automatic =>
+        _Palette.textSecondary.withValues(alpha: 0.75),
     };
 
     return Selector<RoomProvider,
@@ -557,7 +497,7 @@ class _DefaultStateToggle extends StatelessWidget {
               child: child,
             ),
           ),
-          child: mode == _RoomDefaultMode.none
+          child: mode == _RoomDefaultMode.automatic
               ? _buildNoOverrideChip()
               : _buildToggle(),
         ),
@@ -592,30 +532,34 @@ class _DefaultStateToggle extends StatelessWidget {
     final alignment = switch (mode) {
       _RoomDefaultMode.off => Alignment.centerLeft,
       _RoomDefaultMode.standby => Alignment.center,
-      _RoomDefaultMode.active => Alignment.centerRight,
-      _RoomDefaultMode.none => Alignment.centerRight, // unreachable
+      _RoomDefaultMode.on => Alignment.centerRight,
+      _RoomDefaultMode.automatic => Alignment.centerRight, // unreachable
     };
 
     final trackGradient = switch (mode) {
-      _RoomDefaultMode.off || _RoomDefaultMode.none => const LinearGradient(
+      _RoomDefaultMode.off ||
+      _RoomDefaultMode.automatic =>
+        const LinearGradient(
           colors: [Color(0xFF2A2F38), Color(0xFF30363D)],
         ),
       _RoomDefaultMode.standby => const LinearGradient(
           colors: [Color(0xFF2D2A20), Color(0xFF50472D)],
         ),
-      _RoomDefaultMode.active => const LinearGradient(
+      _RoomDefaultMode.on => const LinearGradient(
           colors: [Color(0xFF8B6B20), Color(0xFFD4A020)],
         ),
     };
 
     final thumbColor = switch (mode) {
-      _RoomDefaultMode.off || _RoomDefaultMode.none => _Palette.textSecondary,
+      _RoomDefaultMode.off ||
+      _RoomDefaultMode.automatic =>
+        _Palette.textSecondary,
       _RoomDefaultMode.standby => _Palette.idle,
-      _RoomDefaultMode.active => Colors.white,
+      _RoomDefaultMode.on => Colors.white,
     };
 
     final thumbShadow = switch (mode) {
-      _RoomDefaultMode.active => [
+      _RoomDefaultMode.on => [
           BoxShadow(
             color: _Palette.amber.withValues(alpha: 0.4),
             blurRadius: 8,
@@ -629,7 +573,7 @@ class _DefaultStateToggle extends StatelessWidget {
             spreadRadius: 1,
           ),
         ],
-      _RoomDefaultMode.off || _RoomDefaultMode.none => <BoxShadow>[],
+      _RoomDefaultMode.off || _RoomDefaultMode.automatic => <BoxShadow>[],
     };
 
     return AnimatedContainer(
