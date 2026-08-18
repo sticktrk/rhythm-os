@@ -15,6 +15,7 @@ use crate::backend::ChipControllerBackend;
 
 const EVENT_CAPACITY: usize = 2_048;
 const MAX_EVENT_WAIT: Duration = Duration::from_secs(30);
+const MAX_CONCURRENT_ENDPOINT_WORK: usize = 4;
 static NEXT_STREAM_NONCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Default)]
@@ -112,7 +113,7 @@ impl ControllerEventBroker {
 
 #[derive(Default)]
 struct EndpointSlot {
-    in_flight: bool,
+    running: bool,
     pending: Option<MatterEndpointCommandPlan>,
 }
 
@@ -120,11 +121,18 @@ struct EndpointSlot {
 struct DispatchState {
     slots: HashMap<(u64, u16), EndpointSlot>,
     active_ids: HashSet<u64>,
+    ready: VecDeque<(u64, u16)>,
+    active_lanes: usize,
 }
 
-/// Per-endpoint command executor. Exactly one plan can be in flight for an
-/// endpoint; one newer desired state is retained and any older queued state is
-/// terminally superseded. A slow endpoint never owns another endpoint's lane.
+/// Fair, bounded per-endpoint command executor.
+///
+/// Exactly one plan can run for an endpoint; one newer desired state is
+/// retained and any older queued state is terminally superseded. Controller
+/// work is capped globally so a large room fan-out cannot synchronize dozens
+/// of operational-discovery or CASE attempts. Ready endpoints are admitted in
+/// FIFO order, so an unavailable endpoint cannot repeatedly jump ahead of a
+/// healthy peer.
 pub struct CommandDispatcher {
     backend: Arc<RwLock<Box<dyn ChipControllerBackend>>>,
     broker: Arc<ControllerEventBroker>,
@@ -151,7 +159,6 @@ impl CommandDispatcher {
 
         let mut submissions = Vec::with_capacity(plans.len());
         let mut superseded = Vec::new();
-        let mut starters = Vec::new();
         {
             let mut state = self.state.lock().expect("chipd dispatch lock poisoned");
             if let Some(command_id) = plans
@@ -166,14 +173,13 @@ impl CommandDispatcher {
 
                 let key = (plan.node_id, plan.endpoint);
                 let slot = state.slots.entry(key).or_default();
-                if slot.in_flight {
-                    if let Some(previous) = slot.pending.replace(plan.clone()) {
-                        state.active_ids.remove(&previous.command_id);
-                        superseded.push(previous);
-                    }
-                } else {
-                    slot.in_flight = true;
-                    starters.push(plan.clone());
+                let was_idle = !slot.running && slot.pending.is_none();
+                if let Some(previous) = slot.pending.replace(plan.clone()) {
+                    state.active_ids.remove(&previous.command_id);
+                    superseded.push(previous);
+                }
+                if was_idle {
+                    state.ready.push_back(key);
                 }
                 submissions.push(MatterCommandSubmission {
                     command_id: plan.command_id,
@@ -186,11 +192,7 @@ impl CommandDispatcher {
         for plan in superseded {
             self.publish_outcome(&plan, MatterCommandOutcomeStatus::Superseded, None);
         }
-        for plan in starters {
-            if let Err(error) = self.spawn_lane(plan.clone()) {
-                self.fail_lane_to_spawn(plan, format!("starting endpoint worker: {error:#}"));
-            }
-        }
+        self.start_ready_lanes();
         Ok(submissions)
     }
 
@@ -202,78 +204,79 @@ impl CommandDispatcher {
         Ok(())
     }
 
-    fn fail_lane_to_spawn(
-        self: &Arc<Self>,
-        mut plan: MatterEndpointCommandPlan,
-        mut detail: String,
-    ) {
+    fn start_ready_lanes(self: &Arc<Self>) {
         loop {
-            self.publish_outcome(
-                &plan,
-                MatterCommandOutcomeStatus::Failed,
-                Some(detail.clone()),
-            );
-            let next = {
+            let Some(plan) = ({
                 let mut state = self.state.lock().expect("chipd dispatch lock poisoned");
-                state.active_ids.remove(&plan.command_id);
-                let key = (plan.node_id, plan.endpoint);
-                let Some(slot) = state.slots.get_mut(&key) else {
-                    return;
-                };
-                match slot.pending.take() {
-                    Some(next) => Some(next),
-                    None => {
-                        state.slots.remove(&key);
-                        None
+                if state.active_lanes >= MAX_CONCURRENT_ENDPOINT_WORK {
+                    None
+                } else {
+                    let mut next = None;
+                    while let Some(key) = state.ready.pop_front() {
+                        let Some(slot) = state.slots.get_mut(&key) else {
+                            continue;
+                        };
+                        if slot.running {
+                            continue;
+                        }
+                        let Some(plan) = slot.pending.take() else {
+                            continue;
+                        };
+                        slot.running = true;
+                        state.active_lanes += 1;
+                        next = Some(plan);
+                        break;
                     }
+                    next
                 }
-            };
-            let Some(next) = next else {
+            }) else {
                 return;
             };
-            match self.spawn_lane(next.clone()) {
-                Ok(()) => return,
-                Err(error) => {
-                    plan = next;
-                    detail = format!("starting endpoint worker: {error:#}");
-                }
+
+            if let Err(error) = self.spawn_lane(plan.clone()) {
+                self.fail_lane_to_spawn(plan, format!("starting endpoint worker: {error:#}"));
             }
         }
     }
 
-    fn run_lane(self: Arc<Self>, mut plan: MatterEndpointCommandPlan) {
-        loop {
-            let result = self.execute(&plan);
-            match result {
-                Ok(()) => self.publish_outcome(&plan, MatterCommandOutcomeStatus::Succeeded, None),
-                Err(error) => self.publish_outcome(
-                    &plan,
-                    MatterCommandOutcomeStatus::Failed,
-                    Some(format!("{error:#}")),
-                ),
-            }
+    fn fail_lane_to_spawn(self: &Arc<Self>, plan: MatterEndpointCommandPlan, detail: String) {
+        self.publish_outcome(&plan, MatterCommandOutcomeStatus::Failed, Some(detail));
+        self.finish_lane(&plan);
+    }
 
-            let next = {
-                let mut state = self.state.lock().expect("chipd dispatch lock poisoned");
-                state.active_ids.remove(&plan.command_id);
-                let key = (plan.node_id, plan.endpoint);
-                let Some(slot) = state.slots.get_mut(&key) else {
-                    return;
-                };
-                match slot.pending.take() {
-                    Some(next) => Some(next),
-                    None => {
-                        slot.in_flight = false;
-                        state.slots.remove(&key);
-                        None
-                    }
-                }
-            };
-            let Some(next) = next else {
+    fn run_lane(self: Arc<Self>, plan: MatterEndpointCommandPlan) {
+        let result = self.execute(&plan);
+        match result {
+            Ok(()) => self.publish_outcome(&plan, MatterCommandOutcomeStatus::Succeeded, None),
+            Err(error) => self.publish_outcome(
+                &plan,
+                MatterCommandOutcomeStatus::Failed,
+                Some(format!("{error:#}")),
+            ),
+        }
+        self.finish_lane(&plan);
+    }
+
+    /// Release one running plan and put any newer state for the same endpoint
+    /// at the back of the FIFO before admitting more work.
+    fn finish_lane(self: &Arc<Self>, plan: &MatterEndpointCommandPlan) {
+        let key = (plan.node_id, plan.endpoint);
+        {
+            let mut state = self.state.lock().expect("chipd dispatch lock poisoned");
+            state.active_ids.remove(&plan.command_id);
+            let Some(slot) = state.slots.get_mut(&key) else {
+                state.active_lanes = state.active_lanes.saturating_sub(1);
                 return;
             };
-            plan = next;
+            slot.running = false;
+            if slot.pending.is_some() {
+                state.ready.push_back(key);
+            } else {
+                state.slots.remove(&key);
+            }
+            state.active_lanes = state.active_lanes.saturating_sub(1);
         }
+        self.start_ready_lanes();
     }
 
     fn execute(&self, plan: &MatterEndpointCommandPlan) -> Result<()> {
@@ -395,7 +398,12 @@ mod tests {
         release_first: AtomicBool,
         fail_next: AtomicBool,
         calls: AtomicUsize,
+        active_calls: AtomicUsize,
+        max_active_calls: AtomicUsize,
+        blocked_endpoints: AtomicUsize,
+        healthy_calls: AtomicUsize,
         second_endpoint_ran: AtomicBool,
+        failed_nodes: Mutex<HashSet<u64>>,
     }
 
     struct BlockingBackend {
@@ -426,18 +434,35 @@ mod tests {
         fn decommission_device(&self, _: u64, _: bool) -> Result<()> {
             Ok(())
         }
-        fn set_on_off(&self, _: u64, endpoint: u16, _: bool) -> Result<()> {
+        fn set_on_off(&self, node_id: u64, endpoint: u16, _: bool) -> Result<()> {
             self.state.calls.fetch_add(1, Ordering::SeqCst);
+            let active = self.state.active_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            self.state
+                .max_active_calls
+                .fetch_max(active, Ordering::SeqCst);
             if self.state.fail_next.swap(false, Ordering::SeqCst) {
+                self.state.active_calls.fetch_sub(1, Ordering::SeqCst);
                 anyhow::bail!("synthetic endpoint failure");
             }
-            if endpoint == 1 && !self.state.release_first.load(Ordering::SeqCst) {
+            let blocked_through = self.state.blocked_endpoints.load(Ordering::SeqCst);
+            let should_block = if blocked_through == 0 {
+                endpoint == 1
+            } else {
+                usize::from(endpoint) <= blocked_through
+            };
+            if should_block && !self.state.release_first.load(Ordering::SeqCst) {
                 while !self.state.release_first.load(Ordering::SeqCst) {
                     std::thread::yield_now();
                 }
+            } else if blocked_through > 0 {
+                self.state.healthy_calls.fetch_add(1, Ordering::SeqCst);
             }
             if endpoint == 2 {
                 self.state.second_endpoint_ran.store(true, Ordering::SeqCst);
+            }
+            self.state.active_calls.fetch_sub(1, Ordering::SeqCst);
+            if self.state.failed_nodes.lock().unwrap().contains(&node_id) {
+                anyhow::bail!("synthetic offline endpoint {node_id}");
             }
             Ok(())
         }
@@ -509,9 +534,18 @@ mod tests {
     }
 
     fn plan(command_id: u64, endpoint: u16, on: bool) -> MatterEndpointCommandPlan {
+        plan_for(command_id, 9, endpoint, on)
+    }
+
+    fn plan_for(
+        command_id: u64,
+        node_id: u64,
+        endpoint: u16,
+        on: bool,
+    ) -> MatterEndpointCommandPlan {
         MatterEndpointCommandPlan {
             command_id,
-            node_id: 9,
+            node_id,
             endpoint,
             steps: vec![MatterCommandStep::SetOnOff { on }],
             inter_step_delay_ms: None,
@@ -614,6 +648,78 @@ mod tests {
         assert_eq!(blocking.calls.load(Ordering::SeqCst), 2);
         assert!(outcomes.contains(&(10, MatterCommandOutcomeStatus::Failed)));
         assert!(outcomes.contains(&(11, MatterCommandOutcomeStatus::Succeeded)));
+    }
+
+    #[test]
+    fn twenty_two_endpoint_fanout_is_bounded_and_healthy_peers_make_progress() {
+        let blocking = Arc::new(BlockingState::default());
+        blocking.blocked_endpoints.store(2, Ordering::SeqCst);
+        let backend = Arc::new(RwLock::new(
+            Box::new(BlockingBackend::new(blocking.clone())) as Box<dyn ChipControllerBackend>,
+        ));
+        let broker = Arc::new(ControllerEventBroker::new());
+        let dispatcher = CommandDispatcher::new(backend, broker.clone());
+        let plans: Vec<_> = (1_u16..=22)
+            .map(|endpoint| plan_for(u64::from(endpoint), u64::from(endpoint), endpoint, false))
+            .collect();
+
+        dispatcher.submit(plans).unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while blocking.healthy_calls.load(Ordering::SeqCst) < 20
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            blocking.healthy_calls.load(Ordering::SeqCst),
+            20,
+            "healthy endpoints must drain while two unavailable peers retain their lanes"
+        );
+        assert!(
+            blocking.max_active_calls.load(Ordering::SeqCst) <= MAX_CONCURRENT_ENDPOINT_WORK,
+            "controller work exceeded the global endpoint budget"
+        );
+        assert_eq!(blocking.active_calls.load(Ordering::SeqCst), 2);
+
+        blocking.release_first.store(true, Ordering::SeqCst);
+        let command_ids: Vec<_> = (1_u64..=22).collect();
+        let outcomes = wait_for_outcomes(&broker, &command_ids);
+        assert_eq!(outcomes.len(), 22);
+        assert!(outcomes
+            .iter()
+            .all(|(_, status)| *status == MatterCommandOutcomeStatus::Succeeded));
+    }
+
+    #[test]
+    fn twenty_two_endpoint_fanout_survives_six_unavailable_peers() {
+        let blocking = Arc::new(BlockingState::default());
+        blocking.release_first.store(true, Ordering::SeqCst);
+        blocking.failed_nodes.lock().unwrap().extend(1_u64..=6_u64);
+        let backend = Arc::new(RwLock::new(
+            Box::new(BlockingBackend::new(blocking.clone())) as Box<dyn ChipControllerBackend>,
+        ));
+        let broker = Arc::new(ControllerEventBroker::new());
+        let dispatcher = CommandDispatcher::new(backend, broker.clone());
+        let plans: Vec<_> = (1_u16..=22)
+            .map(|endpoint| plan_for(u64::from(endpoint), u64::from(endpoint), endpoint, false))
+            .collect();
+
+        dispatcher.submit(plans).unwrap();
+        let command_ids: Vec<_> = (1_u64..=22).collect();
+        let outcomes = wait_for_outcomes(&broker, &command_ids);
+
+        assert_eq!(outcomes.len(), 22);
+        for failed in 1_u64..=6_u64 {
+            assert!(outcomes.contains(&(failed, MatterCommandOutcomeStatus::Failed)));
+        }
+        for healthy in 7_u64..=22_u64 {
+            assert!(outcomes.contains(&(healthy, MatterCommandOutcomeStatus::Succeeded)));
+        }
+        assert!(
+            blocking.max_active_calls.load(Ordering::SeqCst) <= MAX_CONCURRENT_ENDPOINT_WORK,
+            "six unavailable peers must not exceed the controller budget or starve healthy work"
+        );
     }
 
     #[test]
