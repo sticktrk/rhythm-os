@@ -937,6 +937,10 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
         cb();
     }
 
+    // Reuse the existing appliance-wide scheduler for coalesced usage
+    // checkpoint/cloud work; this deliberately does not create another poller.
+    crate::light_usage::enqueue_due_maintenance(&state);
+
     let cycle_started = Instant::now();
 
     // Dispatch per-node ticks with stable staggering across the cycle.

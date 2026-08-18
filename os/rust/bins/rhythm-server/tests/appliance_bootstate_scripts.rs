@@ -696,6 +696,8 @@ fn cloudflared_service_is_manual_and_resource_guarded() {
     assert!(body.contains("start_cloudflared_child"));
     assert!(body.contains("connector restart limit reached"));
     assert!(body.contains("RHYTHM_CLOUDFLARED_MAX_RESTARTS:-0"));
+    assert!(body.contains("RHYTHM_CLOUDFLARED_EDGE_IP_VERSION:-4"));
+    assert!(body.contains("--edge-ip-version \"$EDGE_IP_VERSION\""));
     assert!(body.contains("run --token-file \"$TOKEN_FILE\""));
     assert!(!body.contains("run --token \"$token\""));
     // Stale pidfiles must never leave an orphaned connector running: stop()

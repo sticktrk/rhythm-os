@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 use crate::activity::{LightActivityEvent, LIGHT_ACTIVITY_HISTORY_LIMIT};
 use crate::auth::{ApiAuthRequestInfo, ApiTokenRole};
 use crate::handlers::ApiResponse;
+use crate::light_usage::LightUsageCloudBatch;
 use crate::pairing::{PairingHistoryEntry, PAIRING_HISTORY_LIMIT};
 use crate::state::SharedState;
 
@@ -127,6 +128,7 @@ struct ActivityCloudStatusBody {
     last_upload_http_status: Option<u16>,
     last_upload_error: Option<String>,
     auth_failed_at_epoch_ms: Option<u64>,
+    light_usage: crate::light_usage::LightUsageDiagnostics,
 }
 
 #[derive(Debug, Serialize)]
@@ -146,7 +148,7 @@ pub struct CloudJoinProof {
 
 pub async fn get_config(State(state): State<SharedState>) -> ApiResponse {
     match load_config(&state) {
-        Ok(config) => json_ok(status_body(config.as_ref())),
+        Ok(config) => json_ok(status_body_for_state(&state, config.as_ref())),
         Err(e) => ApiResponse::server_error(e),
     }
 }
@@ -163,15 +165,26 @@ pub async fn put_config(
     if let Err(e) = save_config(&state, &config) {
         return ApiResponse::server_error(e);
     }
-    enqueue_recent_activity_upload(&state);
-    json_ok(status_body(Some(&config)))
+    if config.enabled {
+        crate::light_usage::request_cloud_upload(&state);
+    } else if let Ok(mut state) = state.lock() {
+        state
+            .light_usage
+            .mark_cloud_unavailable("disabled", std::time::Instant::now());
+    }
+    json_ok(status_body_for_state(&state, Some(&config)))
 }
 
 pub async fn delete_config(State(state): State<SharedState>) -> ApiResponse {
     if let Err(e) = clear_config(&state) {
         return ApiResponse::server_error(e);
     }
-    json_ok(status_body(None))
+    if let Ok(mut state) = state.lock() {
+        state
+            .light_usage
+            .mark_cloud_unavailable("not_configured", std::time::Instant::now());
+    }
+    json_ok(status_body_for_state(&state, None))
 }
 
 pub async fn post_join_proof(
@@ -330,7 +343,10 @@ pub fn enqueue_recent_activity_upload(state: &SharedState) {
     let Some(snapshot) = upload_snapshot(state) else {
         return;
     };
-    if snapshot.activities.is_empty() && snapshot.device_events.is_empty() {
+    if snapshot.activities.is_empty()
+        && snapshot.device_events.is_empty()
+        && snapshot.usage.is_none()
+    {
         return;
     }
 
@@ -339,6 +355,13 @@ pub fn enqueue_recent_activity_upload(state: &SharedState) {
             target: "cmd",
             "Skipping server activity cloud upload: no Tokio runtime handle available"
         );
+        if snapshot.usage.is_some() {
+            if let Ok(mut state) = state.lock() {
+                state
+                    .light_usage
+                    .fail_cloud_upload("failed", std::time::Instant::now());
+            }
+        }
         return;
     };
 
@@ -349,14 +372,25 @@ pub fn enqueue_recent_activity_upload(state: &SharedState) {
             &snapshot.config,
             &snapshot.activities,
             &snapshot.device_events,
+            snapshot.usage.as_ref(),
         )
         .await
         {
-            Ok(()) => {
+            Ok(result) => {
                 crate::activity::remove_uploaded_light_activity(
                     &state_for_result,
                     &snapshot.activities,
                 );
+                if let Some(usage) = snapshot.usage.as_ref() {
+                    if let Ok(mut state) = state_for_result.lock() {
+                        state.light_usage.complete_cloud_upload(
+                            usage,
+                            result.usage_acknowledged(usage),
+                            std::time::Instant::now(),
+                            current_epoch_ms(),
+                        );
+                    }
+                }
                 if let Err(error) =
                     record_upload_success(&state_for_result, &snapshot.config, attempt_epoch_ms)
                 {
@@ -373,6 +407,18 @@ pub fn enqueue_recent_activity_upload(state: &SharedState) {
                     "Failed to upload server light activity batch: {:#}",
                     error
                 );
+                if snapshot.usage.is_some() {
+                    if let Ok(mut state) = state_for_result.lock() {
+                        state.light_usage.fail_cloud_upload(
+                            if error.is_auth_failure() {
+                                UPLOAD_STATUS_AUTH_FAILED
+                            } else {
+                                UPLOAD_STATUS_FAILED
+                            },
+                            std::time::Instant::now(),
+                        );
+                    }
+                }
                 if let Err(record_error) = record_upload_failure(
                     &state_for_result,
                     &snapshot.config,
@@ -436,6 +482,7 @@ struct ActivityCloudUploadSnapshot {
     config: StoredActivityCloudConfig,
     activities: Vec<LightActivityEvent>,
     device_events: Vec<DeviceLifecycleCloudEvent>,
+    usage: Option<LightUsageCloudBatch>,
 }
 
 fn upload_snapshot(state: &SharedState) -> Option<ActivityCloudUploadSnapshot> {
@@ -444,17 +491,20 @@ fn upload_snapshot(state: &SharedState) -> Option<ActivityCloudUploadSnapshot> {
         return None;
     }
 
-    let (activities, storage) = state
+    let (activities, storage, usage) = state
         .lock()
         .ok()
-        .map(|state| {
+        .map(|mut state| {
             let activities = state
                 .light_activity
                 .iter()
                 .take(LIGHT_ACTIVITY_HISTORY_LIMIT)
                 .cloned()
                 .collect::<Vec<_>>();
-            (activities, state.storage.clone())
+            let usage = state
+                .light_usage
+                .begin_cloud_upload(std::time::Instant::now(), current_epoch_ms());
+            (activities, state.storage.clone(), usage)
         })
         .unwrap_or_default();
 
@@ -475,6 +525,7 @@ fn upload_snapshot(state: &SharedState) -> Option<ActivityCloudUploadSnapshot> {
         config,
         activities,
         device_events,
+        usage,
     })
 }
 
@@ -545,19 +596,47 @@ struct ActivityCloudUploadBody<'a> {
     server_instance_id: Option<&'a str>,
     events: &'a [LightActivityEvent],
     device_events: &'a [DeviceLifecycleCloudEvent],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage_schema_version: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage_batch_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage_segments: Option<&'a [crate::light_usage::LightUsageUploadSegment]>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ActivityCloudUploadResponse {
+    usage_schema_version: Option<u8>,
+    usage_batch_id: Option<String>,
+}
+
+#[derive(Debug)]
+struct ActivityCloudUploadResult {
+    response: ActivityCloudUploadResponse,
+}
+
+impl ActivityCloudUploadResult {
+    fn usage_acknowledged(&self, batch: &LightUsageCloudBatch) -> bool {
+        self.response.usage_schema_version == Some(batch.schema_version)
+            && self.response.usage_batch_id.as_deref() == Some(batch.batch_id.as_str())
+    }
 }
 
 async fn upload_activity_batch(
     config: &StoredActivityCloudConfig,
     activities: &[LightActivityEvent],
     device_events: &[DeviceLifecycleCloudEvent],
-) -> Result<(), UploadFailure> {
+    usage: Option<&LightUsageCloudBatch>,
+) -> Result<ActivityCloudUploadResult, UploadFailure> {
     let body = ActivityCloudUploadBody {
         home_id: &config.home_id,
         hub_id: &config.hub_id,
         server_instance_id: config.server_instance_id.as_deref(),
         events: activities,
         device_events,
+        usage_schema_version: usage.map(|usage| usage.schema_version),
+        usage_batch_id: usage.map(|usage| usage.batch_id.as_str()),
+        usage_segments: usage.map(|usage| usage.segments.as_slice()),
     };
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
@@ -578,7 +657,11 @@ async fn upload_activity_batch(
             message: format!("ingest returned HTTP {}: {}", status, body),
         });
     }
-    Ok(())
+    let response = response
+        .json::<ActivityCloudUploadResponse>()
+        .await
+        .unwrap_or_default();
+    Ok(ActivityCloudUploadResult { response })
 }
 
 #[derive(Debug)]
@@ -701,7 +784,37 @@ fn same_upload_config(left: &StoredActivityCloudConfig, right: &StoredActivityCl
         && left.server_instance_id == right.server_instance_id
 }
 
+#[cfg(test)]
 fn status_body(config: Option<&StoredActivityCloudConfig>) -> ActivityCloudStatusBody {
+    status_body_with_usage(
+        config,
+        crate::light_usage::LightUsageLedger::default().diagnostics(current_epoch_ms()),
+    )
+}
+
+fn status_body_for_state(
+    state: &SharedState,
+    config: Option<&StoredActivityCloudConfig>,
+) -> ActivityCloudStatusBody {
+    let mut light_usage = state
+        .lock()
+        .ok()
+        .map(|state| state.light_usage.diagnostics(current_epoch_ms()))
+        .unwrap_or_else(|| {
+            crate::light_usage::LightUsageLedger::default().diagnostics(current_epoch_ms())
+        });
+    light_usage.cloud_status = match config {
+        None => "not_configured".to_string(),
+        Some(config) if !config.enabled => "disabled".to_string(),
+        _ => light_usage.cloud_status,
+    };
+    status_body_with_usage(config, light_usage)
+}
+
+fn status_body_with_usage(
+    config: Option<&StoredActivityCloudConfig>,
+    light_usage: crate::light_usage::LightUsageDiagnostics,
+) -> ActivityCloudStatusBody {
     let Some(config) = config else {
         return ActivityCloudStatusBody {
             status: "ok",
@@ -720,6 +833,7 @@ fn status_body(config: Option<&StoredActivityCloudConfig>) -> ActivityCloudStatu
             last_upload_http_status: None,
             last_upload_error: None,
             auth_failed_at_epoch_ms: None,
+            light_usage,
         };
     };
 
@@ -740,6 +854,7 @@ fn status_body(config: Option<&StoredActivityCloudConfig>) -> ActivityCloudStatu
         last_upload_http_status: config.last_upload_http_status,
         last_upload_error: config.last_upload_error.clone(),
         auth_failed_at_epoch_ms: config.auth_failed_at_epoch_ms,
+        light_usage,
     }
 }
 
@@ -946,6 +1061,23 @@ mod tests {
         }
     }
 
+    #[test]
+    fn light_usage_status_distinguishes_disabled_and_unconfigured_cloud() {
+        let state = test_state();
+        let unconfigured = serde_json::to_value(status_body_for_state(&state, None)).unwrap();
+        assert_eq!(
+            unconfigured["light_usage"]["cloud_status"],
+            "not_configured"
+        );
+
+        let mut disabled =
+            usable_config("https://example.test/functions/v1/server-activity-ingest");
+        disabled.enabled = false;
+        let disabled =
+            serde_json::to_value(status_body_for_state(&state, Some(&disabled))).unwrap();
+        assert_eq!(disabled["light_usage"]["cloud_status"], "disabled");
+    }
+
     fn test_activity() -> LightActivityEvent {
         LightActivityEvent {
             id: "activity-1-1783281103022".to_string(),
@@ -1015,6 +1147,35 @@ mod tests {
         ] {
             assert!(!serialized.contains(private_value));
         }
+    }
+
+    #[test]
+    fn usage_acknowledgement_requires_exact_schema_and_batch() {
+        let batch = LightUsageCloudBatch {
+            schema_version: crate::light_usage::LIGHT_USAGE_SCHEMA_VERSION,
+            batch_id: "00112233445566778899aabbccddeeff".into(),
+            backlog_capped: false,
+            segments: Vec::new(),
+        };
+        let exact = ActivityCloudUploadResult {
+            response: ActivityCloudUploadResponse {
+                usage_schema_version: Some(crate::light_usage::LIGHT_USAGE_SCHEMA_VERSION),
+                usage_batch_id: Some(batch.batch_id.clone()),
+            },
+        };
+        assert!(exact.usage_acknowledged(&batch));
+
+        let old_edge_function = ActivityCloudUploadResult {
+            response: ActivityCloudUploadResponse::default(),
+        };
+        assert!(!old_edge_function.usage_acknowledged(&batch));
+        let wrong_batch = ActivityCloudUploadResult {
+            response: ActivityCloudUploadResponse {
+                usage_schema_version: Some(crate::light_usage::LIGHT_USAGE_SCHEMA_VERSION),
+                usage_batch_id: Some("ffeeddccbbaa99887766554433221100".into()),
+            },
+        };
+        assert!(!wrong_batch.usage_acknowledged(&batch));
     }
 
     #[test]
