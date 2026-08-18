@@ -1,5 +1,6 @@
 //! Desktop Matter transport backed by a local native CHIP controller daemon.
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::ErrorKind;
@@ -76,6 +77,7 @@ fn rpc_timeout_for_request(request: &ChipRpcRequest) -> Duration {
         | ChipRpcRequest::SetHueSaturation { .. }
         | ChipRpcRequest::ReadOnOff { .. }
         | ChipRpcRequest::ReadLightState { .. } => RPC_CONTROL_TIMEOUT,
+        ChipRpcRequest::SubscribeOnOff { .. } => RPC_CONTROL_TIMEOUT,
         ChipRpcRequest::CommissionLight(_) => RPC_COMMISSION_TIMEOUT,
         _ => RPC_TIMEOUT,
     }
@@ -868,6 +870,33 @@ fn open_sidecar_log_file(path: &Path) -> Result<std::fs::File> {
 struct SidecarLogSinks {
     main: Mutex<std::fs::File>,
     verbose: Mutex<std::fs::File>,
+    repeated_failures: Mutex<HashMap<SidecarFailureClass, SidecarFailureSummary>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum SidecarFailureClass {
+    OperationalDiscovery,
+    OnOffResubscription,
+    CaseResubscription,
+    ResourceBusy,
+    BrokenPipe,
+}
+
+impl SidecarFailureClass {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::OperationalDiscovery => "operational_discovery",
+            Self::OnOffResubscription => "on_off_resubscription",
+            Self::CaseResubscription => "case_resubscription",
+            Self::ResourceBusy => "resource_busy",
+            Self::BrokenPipe => "broken_pipe",
+        }
+    }
+}
+
+struct SidecarFailureSummary {
+    count: u64,
+    first_at: String,
 }
 
 impl SidecarLogSinks {
@@ -875,15 +904,39 @@ impl SidecarLogSinks {
         Ok(Self {
             main: Mutex::new(open_sidecar_log_file(log_path)?),
             verbose: Mutex::new(open_sidecar_log_file(&verbose_sidecar_log_path(log_path))?),
+            repeated_failures: Mutex::new(HashMap::new()),
         })
     }
 
     fn write_line(&self, line: &str) {
-        let stamped = format!(
-            "{} {}\n",
-            chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
+        let now = chrono::Utc::now();
+        let summarized;
+        let line = if let Some(class) = repeated_sidecar_failure_class(line) {
+            let Ok(mut failures) = self.repeated_failures.lock() else {
+                return;
+            };
+            let entry = failures
+                .entry(class)
+                .or_insert_with(|| SidecarFailureSummary {
+                    count: 0,
+                    first_at: now.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string(),
+                });
+            entry.count = entry.count.saturating_add(1);
+            if !entry.count.is_power_of_two() {
+                return;
+            }
+            summarized = format!(
+                "[RHYTHM] Matter controller retry summary class={} count={} first_at={} last_at={}",
+                class.as_str(),
+                entry.count,
+                entry.first_at,
+                now.format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            );
+            summarized.as_str()
+        } else {
             line
-        );
+        };
+        let stamped = format!("{} {}\n", now.format("%Y-%m-%dT%H:%M:%S%.3fZ"), line);
         let sink = if is_verbose_chip_line(line) {
             &self.verbose
         } else {
@@ -914,6 +967,29 @@ fn verbose_sidecar_log_path(log_path: &Path) -> PathBuf {
 /// chipd's output and drown the commissioning story in the rotation budget.
 fn is_verbose_chip_line(line: &str) -> bool {
     line.starts_with("[EM]") || line.starts_with("[DMG]")
+}
+
+/// Collapse repeated controller retry classes into privacy-bounded power-of-two
+/// summaries. The first failure is retained immediately, then 2/4/8/etc.
+/// updates preserve scale and first/last timing without letting one endpoint
+/// consume the retained log window or leaking fabric/node identifiers.
+fn repeated_sidecar_failure_class(line: &str) -> Option<SidecarFailureClass> {
+    let lower = line.to_ascii_lowercase();
+    if lower.contains("resource is busy") || lower.contains("resource busy") {
+        Some(SidecarFailureClass::ResourceBusy)
+    } else if lower.contains("broken pipe") {
+        Some(SidecarFailureClass::BrokenPipe)
+    } else if lower.contains("onoff resubscription") || lower.contains("on/off resubscription") {
+        Some(SidecarFailureClass::OnOffResubscription)
+    } else if lower.contains("case") && lower.contains("resubscription") {
+        Some(SidecarFailureClass::CaseResubscription)
+    } else if lower.contains("operational discovery failed")
+        || lower.contains("address resolution timeout")
+    {
+        Some(SidecarFailureClass::OperationalDiscovery)
+    } else {
+        None
+    }
 }
 
 /// Strip ANSI CSI escape sequences from a chipd output line.
@@ -1568,12 +1644,18 @@ mod tests {
         let log_path = dir.join("rhythm-matter.log");
         let sinks = SidecarLogSinks::open(&log_path).unwrap();
 
-        let input = concat!(
+        let mut input = concat!(
             "\x1b[0;32m[CTL] Commission called for node ID 0x69\x1b[0m\n",
             "\x1b[0;34m[EM] Rxd Ack; Removing MessageCounter:1 from Retrans Table\x1b[0m\n",
             "\x1b[0;34m[DMG] AttributeReportIBs =\x1b[0m\n",
             "\n",
-        );
+        )
+        .to_string();
+        for _ in 0..10 {
+            input.push_str(
+                "[CTL] Matter OnOff resubscription attempt after timeout for node 0x1234\n",
+            );
+        }
         pump_sidecar_log(std::io::Cursor::new(input.as_bytes()), &sinks);
         drop(sinks);
 
@@ -1582,6 +1664,20 @@ mod tests {
 
         assert!(main.contains("[CTL] Commission called"));
         assert!(!main.contains("[EM]"), "chatter must not hit the main log");
+        assert!(
+            main.contains("Matter controller retry summary class=on_off_resubscription count=8")
+        );
+        assert!(main.contains("first_at="));
+        assert!(main.contains("last_at="));
+        assert!(
+            !main.contains("node 0x1234"),
+            "summaries must not retain endpoint identifiers"
+        );
+        assert_eq!(
+            main.matches("class=on_off_resubscription").count(),
+            4,
+            "ten repeats should retain only counts 1, 2, 4, and 8"
+        );
         assert!(!main.contains('\u{1b}'), "ANSI must be stripped: {main:?}");
         assert!(
             main.starts_with("20"),
@@ -1646,6 +1742,17 @@ mod tests {
             rpc_timeout_for_request(&ChipRpcRequest::ReadOnOff {
                 node_id: 42,
                 endpoint: 1,
+            }),
+            RPC_CONTROL_TIMEOUT
+        );
+        assert_eq!(
+            rpc_timeout_for_request(&ChipRpcRequest::SubscribeOnOff {
+                targets: vec![MatterSubscriptionTarget {
+                    node_id: 42,
+                    endpoint: 1,
+                }],
+                min_interval_secs: 1,
+                max_interval_secs: 30,
             }),
             RPC_CONTROL_TIMEOUT
         );

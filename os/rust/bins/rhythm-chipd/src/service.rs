@@ -18,7 +18,9 @@ use rhythm_matter::transport::{CommissionedDevice, MatterControllerEvent};
 use rhythm_matter::transport::{MatterDeviceInfo, MatterSubscriptionTarget};
 
 use crate::backend::ChipControllerBackend;
-use crate::command_dispatch::{CommandDispatcher, ControllerEventBroker};
+use crate::command_dispatch::{CommandDispatcher, ControllerEventBroker, ControllerWorkBudget};
+
+const MAX_CONCURRENT_CONTROLLER_WORK: usize = 4;
 
 const DEVICE_STORE_SCHEMA_VERSION: u32 = 1;
 const MATTER_OPERATIONAL_SERVICE_TYPE: &str = "_matter._tcp.local.";
@@ -55,6 +57,7 @@ impl CommissioningState {
 pub struct ChipControllerService {
     backend: Arc<RwLock<Box<dyn ChipControllerBackend>>>,
     command_dispatcher: Arc<CommandDispatcher>,
+    controller_work_budget: Arc<ControllerWorkBudget>,
     event_broker: Arc<ControllerEventBroker>,
     device_store: Mutex<DeviceStore>,
     state: RwLock<Option<CommissioningState>>,
@@ -67,10 +70,17 @@ impl ChipControllerService {
     pub fn new(backend: Box<dyn ChipControllerBackend>) -> Self {
         let backend = Arc::new(RwLock::new(backend));
         let event_broker = Arc::new(ControllerEventBroker::new());
-        let command_dispatcher = CommandDispatcher::new(backend.clone(), event_broker.clone());
+        let controller_work_budget =
+            Arc::new(ControllerWorkBudget::new(MAX_CONCURRENT_CONTROLLER_WORK));
+        let command_dispatcher = CommandDispatcher::with_work_budget(
+            backend.clone(),
+            event_broker.clone(),
+            controller_work_budget.clone(),
+        );
         Self {
             backend,
             command_dispatcher,
+            controller_work_budget,
             event_broker,
             device_store: Mutex::new(DeviceStore::default()),
             state: RwLock::new(None),
@@ -101,6 +111,7 @@ impl ChipControllerService {
                 self.device_store().upsert(device.clone())?;
                 // Keep newly commissioned endpoints inside the same
                 // authoritative observed-state stream as restored devices.
+                let _permit = self.controller_work_budget.acquire();
                 if let Err(error) = self.backend().subscribe_on_off(
                     &[MatterSubscriptionTarget {
                         node_id: device.node_id,
@@ -341,6 +352,7 @@ impl ChipControllerService {
             } => {
                 self.require_initialized()?;
                 let _lifecycle = self.lifecycle_lock.lock();
+                let _permit = self.controller_work_budget.acquire();
                 self.backend()
                     .subscribe_on_off(&targets, min_interval_secs, max_interval_secs)?;
                 Ok(serde_json::to_value(ChipRpcEmpty::new())?)

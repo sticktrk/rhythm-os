@@ -16,7 +16,68 @@ use crate::backend::ChipControllerBackend;
 const EVENT_CAPACITY: usize = 2_048;
 const MAX_EVENT_WAIT: Duration = Duration::from_secs(30);
 const MAX_CONCURRENT_ENDPOINT_WORK: usize = 4;
+#[cfg(not(test))]
+const MAX_ENDPOINT_OPERATION_DURATION: Duration = Duration::from_secs(8);
 static NEXT_STREAM_NONCE: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Default)]
+struct WorkBudgetState {
+    next_ticket: u64,
+    serving_ticket: u64,
+    in_flight: usize,
+}
+
+/// Fair controller-wide budget around endpoint discovery, CASE setup, and
+/// interaction work. Endpoint lanes remain isolated, but unavailable peers
+/// cannot all enter the constrained CHIP controller at once.
+pub(crate) struct ControllerWorkBudget {
+    capacity: usize,
+    state: Mutex<WorkBudgetState>,
+    changed: Condvar,
+}
+
+impl ControllerWorkBudget {
+    pub(crate) fn new(capacity: usize) -> Self {
+        assert!(capacity > 0, "controller work capacity must be non-zero");
+        Self {
+            capacity,
+            state: Mutex::new(WorkBudgetState::default()),
+            changed: Condvar::new(),
+        }
+    }
+
+    pub(crate) fn acquire(&self) -> ControllerWorkPermit<'_> {
+        let mut state = self.state.lock().expect("chipd work budget lock poisoned");
+        let ticket = state.next_ticket;
+        state.next_ticket = state.next_ticket.saturating_add(1);
+        while ticket != state.serving_ticket || state.in_flight >= self.capacity {
+            state = self
+                .changed
+                .wait(state)
+                .expect("chipd work budget lock poisoned while waiting");
+        }
+        state.serving_ticket = state.serving_ticket.saturating_add(1);
+        state.in_flight += 1;
+        self.changed.notify_all();
+        ControllerWorkPermit { budget: self }
+    }
+}
+
+pub(crate) struct ControllerWorkPermit<'a> {
+    budget: &'a ControllerWorkBudget,
+}
+
+impl Drop for ControllerWorkPermit<'_> {
+    fn drop(&mut self) {
+        let mut state = self
+            .budget
+            .state
+            .lock()
+            .expect("chipd work budget lock poisoned while releasing");
+        state.in_flight = state.in_flight.saturating_sub(1);
+        self.budget.changed.notify_all();
+    }
+}
 
 #[derive(Default)]
 struct BrokerState {
@@ -136,17 +197,29 @@ struct DispatchState {
 pub struct CommandDispatcher {
     backend: Arc<RwLock<Box<dyn ChipControllerBackend>>>,
     broker: Arc<ControllerEventBroker>,
+    work_budget: Arc<ControllerWorkBudget>,
     state: Mutex<DispatchState>,
 }
 
 impl CommandDispatcher {
+    #[cfg(test)]
     pub fn new(
         backend: Arc<RwLock<Box<dyn ChipControllerBackend>>>,
         broker: Arc<ControllerEventBroker>,
     ) -> Arc<Self> {
+        let work_budget = Arc::new(ControllerWorkBudget::new(MAX_CONCURRENT_ENDPOINT_WORK));
+        Self::with_work_budget(backend, broker, work_budget)
+    }
+
+    pub(crate) fn with_work_budget(
+        backend: Arc<RwLock<Box<dyn ChipControllerBackend>>>,
+        broker: Arc<ControllerEventBroker>,
+        work_budget: Arc<ControllerWorkBudget>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             backend,
             broker,
+            work_budget,
             state: Mutex::new(DispatchState::default()),
         })
     }
@@ -245,7 +318,28 @@ impl CommandDispatcher {
     }
 
     fn run_lane(self: Arc<Self>, plan: MatterEndpointCommandPlan) {
+        #[cfg(not(test))]
+        let completed = {
+            let (completed_tx, completed_rx) = std::sync::mpsc::sync_channel(0);
+            let _ = std::thread::Builder::new()
+                .name("chipd-operation-watchdog".to_string())
+                .spawn(move || {
+                    if matches!(
+                        completed_rx.recv_timeout(MAX_ENDPOINT_OPERATION_DURATION),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                    ) {
+                        eprintln!(
+                            "Matter endpoint operation exceeded its bounded deadline; exiting chipd for supervisor cancellation"
+                        );
+                        std::process::exit(70);
+                    }
+                });
+            completed_tx
+        };
+
         let result = self.execute(&plan);
+        #[cfg(not(test))]
+        let _ = completed.send(());
         match result {
             Ok(()) => self.publish_outcome(&plan, MatterCommandOutcomeStatus::Succeeded, None),
             Err(error) => self.publish_outcome(
@@ -281,9 +375,11 @@ impl CommandDispatcher {
 
     fn execute(&self, plan: &MatterEndpointCommandPlan) -> Result<()> {
         for (index, step) in plan.steps.iter().enumerate() {
+            let _permit = self.work_budget.acquire();
             let backend = self.backend.read().expect("chipd backend lock poisoned");
             execute_step(backend.as_ref(), plan.node_id, plan.endpoint, step)?;
             drop(backend);
+            drop(_permit);
 
             if index + 1 < plan.steps.len() {
                 if let Some(delay_ms) = plan.inter_step_delay_ms.filter(|delay| *delay > 0) {

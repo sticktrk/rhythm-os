@@ -1,7 +1,11 @@
 #include "chip_bridge.h"
 
 #include <app-common/zap-generated/cluster-objects.h>
+#include <app/AttributePathParams.h>
 #include <app/InteractionModelEngine.h>
+#include <app/ReadClient.h>
+#include <app/ReadPrepareParams.h>
+#include <app/data-model/Decode.h>
 #include <controller/CHIPCluster.h>
 #include <controller/CHIPDeviceController.h>
 #include <controller/CHIPDeviceControllerFactory.h>
@@ -29,6 +33,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -758,7 +763,7 @@ private:
     CHIP_ERROR mWriteStatus = CHIP_NO_ERROR;
 };
 
-class OnOffSubscriptionOperation final : public DeviceConnectionOperation
+class OnOffSubscriptionOperation final : public DeviceConnectionOperation, public app::ReadClient::Callback
 {
 public:
     using ReportFn = std::function<void(NodeId, EndpointId, bool)>;
@@ -767,49 +772,95 @@ public:
                                ReportFn onReport) :
         DeviceConnectionOperation(nodeId),
         mNodeId(nodeId), mEndpoint(endpoint), mMinIntervalSecs(minIntervalSecs), mMaxIntervalSecs(maxIntervalSecs),
-        mOnReport(std::move(onReport))
+        mOnReport(std::move(onReport)),
+        mAttributePath(endpoint, OnOff::Id, OnOff::Attributes::OnOff::Id)
     {}
+
+    bool IsActive() const { return mActive.load(std::memory_order_acquire); }
 
 protected:
     CHIP_ERROR HandleConnected(Messaging::ExchangeManager & exchangeMgr, const SessionHandle & sessionHandle) override
     {
-        ClusterBase cluster(exchangeMgr, sessionHandle, mEndpoint);
-        return cluster.template SubscribeAttribute<OnOff::Attributes::OnOff::TypeInfo>(
-            this, OnReport, OnFailure, mMinIntervalSecs, mMaxIntervalSecs, OnSubscriptionEstablished,
-            OnResubscriptionAttempt, true, true);
+        app::ReadPrepareParams params(sessionHandle);
+        params.mpAttributePathParamsList    = &mAttributePath;
+        params.mAttributePathParamsListSize = 1;
+        params.mMinIntervalFloorSeconds     = mMinIntervalSecs;
+        params.mMaxIntervalCeilingSeconds   = mMaxIntervalSecs;
+        params.mKeepSubscriptions           = true;
+        params.mIsFabricFiltered            = true;
+
+        mReadClient = Platform::MakeUnique<app::ReadClient>(
+            app::InteractionModelEngine::GetInstance(), &exchangeMgr, *this,
+            app::ReadClient::InteractionType::Subscribe);
+        VerifyOrReturnError(mReadClient != nullptr, CHIP_ERROR_NO_MEMORY);
+
+        // SendRequest intentionally leaves automatic re-subscription disabled.
+        // Rust owns retry timing and re-enters through SubscribeOnOff after a
+        // terminal subscription failure.
+        CHIP_ERROR err = mReadClient->SendRequest(params);
+        if (err != CHIP_NO_ERROR)
+        {
+            mReadClient = nullptr;
+        }
+        return err;
     }
 
 private:
-    static void OnReport(void * context, bool value)
+    void NotifySubscriptionStillActive(const app::ReadClient & readClient) override
     {
-        auto * self = static_cast<OnOffSubscriptionOperation *>(context);
-        VerifyOrReturn(self != nullptr);
-        if (self->mOnReport)
+        (void) readClient;
+        mActive.store(true, std::memory_order_release);
+    }
+
+    void OnAttributeData(const app::ConcreteDataAttributePath & path, TLV::TLVReader * data,
+                         const app::StatusIB & status) override
+    {
+        if (!status.IsSuccess() || data == nullptr || path.mClusterId != OnOff::Id ||
+            path.mAttributeId != OnOff::Attributes::OnOff::Id)
         {
-            self->mOnReport(self->mNodeId, self->mEndpoint, value);
+            return;
+        }
+
+        OnOff::Attributes::OnOff::TypeInfo::DecodableType value;
+        if (app::DataModel::Decode(*data, value) != CHIP_NO_ERROR)
+        {
+            return;
+        }
+
+        mActive.store(true, std::memory_order_release);
+        if (mOnReport)
+        {
+            mOnReport(mNodeId, mEndpoint, value);
         }
     }
 
-    static void OnFailure(void * context, CHIP_ERROR error)
-    {
-        auto * self = static_cast<OnOffSubscriptionOperation *>(context);
-        VerifyOrReturn(self != nullptr);
-        self->Finish(error);
-    }
-
-    static void OnSubscriptionEstablished(void * context, SubscriptionId subscriptionId)
+    void OnSubscriptionEstablished(SubscriptionId subscriptionId) override
     {
         (void) subscriptionId;
-        auto * self = static_cast<OnOffSubscriptionOperation *>(context);
-        VerifyOrReturn(self != nullptr);
-        self->Finish(CHIP_NO_ERROR);
+        mEstablished = true;
+        mActive.store(true, std::memory_order_release);
+        Finish(CHIP_NO_ERROR);
     }
 
-    static void OnResubscriptionAttempt(void * context, CHIP_ERROR error, uint32_t nextResubscribeIntervalMsec)
+    void OnError(CHIP_ERROR error) override
     {
-        (void) context;
-        ChipLogError(Controller, "Matter OnOff resubscription attempt after %" CHIP_ERROR_FORMAT " in %u ms", error.Format(),
-                     nextResubscribeIntervalMsec);
+        mLastError = error;
+        mActive.store(false, std::memory_order_release);
+        if (!mEstablished)
+        {
+            Finish(error);
+        }
+        ChipLogError(Controller, "Matter OnOff subscription terminated: %" CHIP_ERROR_FORMAT, error.Format());
+    }
+
+    void OnDone(app::ReadClient * readClient) override
+    {
+        (void) readClient;
+        mActive.store(false, std::memory_order_release);
+        if (!mEstablished)
+        {
+            Finish(mLastError == CHIP_NO_ERROR ? CHIP_ERROR_CONNECTION_ABORTED : mLastError);
+        }
     }
 
     NodeId mNodeId;
@@ -817,6 +868,11 @@ private:
     uint16_t mMinIntervalSecs;
     uint16_t mMaxIntervalSecs;
     ReportFn mOnReport;
+    app::AttributePathParams mAttributePath;
+    Platform::UniquePtr<app::ReadClient> mReadClient;
+    std::atomic<bool> mActive{ false };
+    bool mEstablished      = false;
+    CHIP_ERROR mLastError = CHIP_NO_ERROR;
 };
 
 class BlockingPairingDelegate final : public DevicePairingDelegate
@@ -1179,7 +1235,13 @@ public:
         VerifyOrReturnError(mCommissioner != nullptr, CHIP_ERROR_INCORRECT_STATE);
 
         CHIP_ERROR err = CHIP_NO_ERROR;
-        ReturnErrorOnFailure(ExecuteOnMatterThread([this, &err, nodeId]() { err = mCommissioner->UnpairDevice(nodeId); }));
+        ReturnErrorOnFailure(ExecuteOnMatterThread([this, &err, nodeId]() {
+            err = mCommissioner->UnpairDevice(nodeId);
+            if (err == CHIP_NO_ERROR)
+            {
+                RemoveOnOffSubscriptionsForNode(nodeId);
+            }
+        }));
         return err;
     }
 
@@ -1689,6 +1751,11 @@ public:
         VerifyOrReturnError(mCommissioner != nullptr, CHIP_ERROR_INCORRECT_STATE);
         VerifyOrReturnError(targets != nullptr || targetCount == 0, CHIP_ERROR_INVALID_ARGUMENT);
         VerifyOrReturnError(maxIntervalSecs >= minIntervalSecs, CHIP_ERROR_INVALID_ARGUMENT);
+
+        // ReadClient destruction belongs on the Matter thread. Prune terminal
+        // non-resubscribing clients before deciding whether a target already
+        // has a live Rust-owned subscription.
+        ReturnErrorOnFailure(ExecuteOnMatterThread([this]() { PruneInactiveOnOffSubscriptions(); }));
 
         for (size_t i = 0; i < targetCount; ++i)
         {
@@ -2327,8 +2394,41 @@ private:
 
     bool HasOnOffSubscription(NodeId nodeId, EndpointId endpoint) const
     {
-        return std::any_of(mOnOffSubscriptionKeys.begin(), mOnOffSubscriptionKeys.end(),
-                           [nodeId, endpoint](const auto & key) { return key.first == nodeId && key.second == endpoint; });
+        for (size_t index = 0; index < mOnOffSubscriptionKeys.size(); ++index)
+        {
+            const auto & key = mOnOffSubscriptionKeys[index];
+            if (key.first == nodeId && key.second == endpoint && mOnOffSubscriptions[index]->IsActive())
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void PruneInactiveOnOffSubscriptions()
+    {
+        for (size_t index = mOnOffSubscriptions.size(); index > 0; --index)
+        {
+            const size_t candidate = index - 1;
+            if (!mOnOffSubscriptions[candidate]->IsActive())
+            {
+                mOnOffSubscriptions.erase(mOnOffSubscriptions.begin() + candidate);
+                mOnOffSubscriptionKeys.erase(mOnOffSubscriptionKeys.begin() + candidate);
+            }
+        }
+    }
+
+    void RemoveOnOffSubscriptionsForNode(NodeId nodeId)
+    {
+        for (size_t index = mOnOffSubscriptions.size(); index > 0; --index)
+        {
+            const size_t candidate = index - 1;
+            if (mOnOffSubscriptionKeys[candidate].first == nodeId)
+            {
+                mOnOffSubscriptions.erase(mOnOffSubscriptions.begin() + candidate);
+                mOnOffSubscriptionKeys.erase(mOnOffSubscriptionKeys.begin() + candidate);
+            }
+        }
     }
 
     void QueueOnOffReport(NodeId nodeId, EndpointId endpoint, bool on)

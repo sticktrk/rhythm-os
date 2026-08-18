@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -26,7 +26,9 @@ const MATTER_EVENT_LONG_POLL: Duration = Duration::from_secs(1);
 const MATTER_EVENT_RETRY_INITIAL: Duration = Duration::from_millis(250);
 const MATTER_EVENT_RETRY_MAX: Duration = Duration::from_secs(5);
 const MATTER_EVENT_SHUTDOWN_POLL: Duration = Duration::from_millis(50);
-const MATTER_SUBSCRIPTION_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+const MATTER_SUBSCRIPTION_RETRY_INITIAL: Duration = Duration::from_secs(30);
+const MATTER_SUBSCRIPTION_RETRY_MAX: Duration = Duration::from_secs(30 * 60);
+const MATTER_SUBSCRIPTION_HEALTHCHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 fn next_controller_event_retry_delay(current: Duration) -> Duration {
     current.saturating_mul(2).min(MATTER_EVENT_RETRY_MAX)
@@ -68,83 +70,211 @@ fn subscription_targets(transport: &dyn MatterTransport) -> Vec<MatterSubscripti
     }
 }
 
-struct MatterSubscriptionFailure {
-    target: MatterSubscriptionTarget,
-    error: String,
+#[derive(Clone, Copy)]
+struct MatterSubscriptionRetry {
+    failures: u32,
+    next_attempt: std::time::Instant,
 }
 
-fn attempt_observed_state_subscriptions(
-    transport: &dyn MatterTransport,
-    mut should_stop: impl FnMut() -> bool,
-) -> Vec<MatterSubscriptionFailure> {
-    let targets = subscription_targets(transport);
-    let mut failures = Vec::new();
-    for target in targets {
-        if should_stop() {
-            break;
-        }
-        if let Err(error) = transport.subscribe_on_off(
-            std::slice::from_ref(&target),
-            DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
-            DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS,
-        ) {
-            failures.push(MatterSubscriptionFailure {
-                target,
-                error: format!("{error:#}"),
-            });
-        }
+enum MatterSubscriptionRefresh {
+    ControllerReset,
+    EndpointProof {
+        target: MatterSubscriptionTarget,
+        subscription_active: bool,
+    },
+}
+
+fn subscription_retry_delay(
+    target: &MatterSubscriptionTarget,
+    failures: u32,
+    initial: Duration,
+    maximum: Duration,
+) -> Duration {
+    let exponent = failures.saturating_sub(1).min(16);
+    let base = initial.saturating_mul(1u32 << exponent).min(maximum);
+    let base_ms = base.as_millis().try_into().unwrap_or(u64::MAX);
+    let jitter_span_ms = base_ms / 4;
+    if jitter_span_ms == 0 {
+        return base;
     }
-    failures
+
+    // Stable endpoint-specific jitter prevents a fleet of unavailable nodes
+    // from synchronizing discovery/CASE work after startup. Include the
+    // failure generation so endpoints also move relative to one another on
+    // later attempts without requiring a process-global random generator.
+    let hash = target
+        .node_id
+        .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        .wrapping_add(u64::from(target.endpoint).wrapping_mul(0xbf58_476d_1ce4_e5b9))
+        .wrapping_add(u64::from(failures).wrapping_mul(0x94d0_49bb_1331_11eb));
+    Duration::from_millis(base_ms.saturating_sub(hash % (jitter_span_ms + 1)))
+}
+
+fn subscription_failure_class(error: &anyhow::Error) -> &'static str {
+    let detail = format!("{error:#}").to_ascii_lowercase();
+    if detail.contains("operational") && detail.contains("discover") {
+        "operational_discovery"
+    } else if detail.contains("case") {
+        "case_session"
+    } else if detail.contains("resource") && detail.contains("busy") {
+        "resource_busy"
+    } else if detail.contains("broken pipe") {
+        "broken_pipe"
+    } else if detail.contains("timeout") || detail.contains("timed out") {
+        "timeout"
+    } else {
+        "other"
+    }
 }
 
 fn start_observed_state_subscription_worker(
     transport: Arc<dyn MatterTransport>,
     shutdown: Arc<std::sync::atomic::AtomicBool>,
-) -> SyncSender<()> {
-    let (refresh_tx, refresh_rx) = sync_channel(1);
+) -> Sender<MatterSubscriptionRefresh> {
+    start_observed_state_subscription_worker_with_backoff(
+        transport,
+        shutdown,
+        MATTER_SUBSCRIPTION_RETRY_INITIAL,
+        MATTER_SUBSCRIPTION_RETRY_MAX,
+    )
+}
+
+fn start_observed_state_subscription_worker_with_backoff(
+    transport: Arc<dyn MatterTransport>,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
+    retry_initial: Duration,
+    retry_max: Duration,
+) -> Sender<MatterSubscriptionRefresh> {
+    // Proof and reset signals are correctness events, not advisory wakeups.
+    // An unbounded channel avoids silently dropping a controller generation
+    // change behind a burst of endpoint reports.
+    let (refresh_tx, refresh_rx) = channel();
     let spawn_result = std::thread::Builder::new()
         .name("matter-observed-subscriptions".to_string())
         .spawn(move || {
-            let mut previous_failures = HashSet::new();
+            let mut subscribed: HashMap<(u64, u16), std::time::Instant> = HashMap::new();
+            let mut retries: HashMap<(u64, u16), MatterSubscriptionRetry> = HashMap::new();
             loop {
                 if shutdown.load(Ordering::Relaxed) {
                     break;
                 }
-                let failures = attempt_observed_state_subscriptions(transport.as_ref(), || {
-                    shutdown.load(Ordering::Relaxed)
-                });
-                let current_failures: HashSet<(u64, u16)> = failures
-                    .iter()
-                    .map(|failure| (failure.target.node_id, failure.target.endpoint))
-                    .collect();
 
-                for failure in &failures {
-                    let key = (failure.target.node_id, failure.target.endpoint);
-                    if !previous_failures.contains(&key) {
-                        warn!(
-                            target: "evt",
-                            "Matter observed-state subscription unavailable for node {} endpoint {}: {}",
-                            failure.target.node_id,
-                            failure.target.endpoint,
-                            failure.error
-                        );
+                let targets = subscription_targets(transport.as_ref());
+                let current_targets: HashSet<(u64, u16)> = targets
+                    .iter()
+                    .map(|target| (target.node_id, target.endpoint))
+                    .collect();
+                subscribed.retain(|key, _| current_targets.contains(key));
+                retries.retain(|key, _| current_targets.contains(key));
+
+                for target in targets {
+                    if shutdown.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let key = (target.node_id, target.endpoint);
+                    if subscribed
+                        .get(&key)
+                        .is_some_and(|next_check| *next_check > std::time::Instant::now())
+                        || retries
+                            .get(&key)
+                            .is_some_and(|retry| retry.next_attempt > std::time::Instant::now())
+                    {
+                        continue;
+                    }
+
+                    match transport.subscribe_on_off(
+                        std::slice::from_ref(&target),
+                        DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
+                        DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS,
+                    ) {
+                        Ok(()) => {
+                            if let Some(retry) = retries.remove(&key) {
+                                info!(target: "evt", "Matter observed-state subscription recovered after {} attempts", retry.failures.saturating_add(1));
+                            }
+                            subscribed.insert(
+                                key,
+                                std::time::Instant::now()
+                                    + MATTER_SUBSCRIPTION_HEALTHCHECK_INTERVAL,
+                            );
+                        }
+                        Err(error) => {
+                            let failure_class = subscription_failure_class(&error);
+                            let failures = retries
+                                .get(&key)
+                                .map(|retry| retry.failures)
+                                .unwrap_or(0)
+                                .saturating_add(1);
+                            let delay = subscription_retry_delay(
+                                &target,
+                                failures,
+                                retry_initial,
+                                retry_max,
+                            );
+                            retries.insert(
+                                key,
+                                MatterSubscriptionRetry {
+                                    failures,
+                                    next_attempt: std::time::Instant::now() + delay,
+                                },
+                            );
+                            if failures == 1 || failures.is_power_of_two() {
+                                warn!(
+                                    target: "evt",
+                                    "Matter observed-state subscription unavailable (class={}, attempts={}, retry_in_ms={})",
+                                    failure_class,
+                                    failures,
+                                    delay.as_millis()
+                                );
+                            }
+                        }
                     }
                 }
-                for (node_id, endpoint) in previous_failures.difference(&current_failures) {
-                    info!(
-                        target: "evt",
-                        "Matter observed-state subscription recovered for node {} endpoint {}",
-                        node_id,
-                        endpoint
-                    );
-                }
-                previous_failures = current_failures;
 
                 if shutdown.load(Ordering::Relaxed) {
                     break;
                 }
-                match refresh_rx.recv_timeout(MATTER_SUBSCRIPTION_RETRY_INTERVAL) {
-                    Ok(()) | Err(RecvTimeoutError::Timeout) => {}
+                let wait = retries
+                    .values()
+                    .map(|retry| {
+                        retry
+                            .next_attempt
+                            .saturating_duration_since(std::time::Instant::now())
+                    })
+                    .chain(subscribed.values().map(|next_check| {
+                        next_check.saturating_duration_since(std::time::Instant::now())
+                    }))
+                    .min()
+                    .unwrap_or(Duration::from_secs(60 * 60));
+                match refresh_rx.recv_timeout(wait) {
+                    Ok(MatterSubscriptionRefresh::ControllerReset) => {
+                        // A changed controller stream means every successful
+                        // subscription belonged to the old sidecar. Forget
+                        // success and stale cooldown together so recovery is
+                        // immediate and rebuilt from authoritative reports.
+                        subscribed.clear();
+                        retries.clear();
+                    }
+                    Ok(MatterSubscriptionRefresh::EndpointProof {
+                        target,
+                        subscription_active,
+                    }) => {
+                        let key = (target.node_id, target.endpoint);
+                        if subscription_active {
+                            retries.remove(&key);
+                            subscribed.insert(
+                                key,
+                                std::time::Instant::now()
+                                    + MATTER_SUBSCRIPTION_HEALTHCHECK_INTERVAL,
+                            );
+                        } else {
+                            // A command acknowledgement proves the endpoint
+                            // is reachable again. Retry observation now rather
+                            // than retaining an obsolete cooldown.
+                            retries.remove(&key);
+                            subscribed.remove(&key);
+                        }
+                    }
+                    Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => break,
                 }
             }
@@ -251,7 +381,7 @@ fn start_controller_event_stream(
                     // controller event stream. Re-subscription produces a new
                     // initial attribute report for every reachable endpoint.
                     invalidate_on_off_observations(on_off_observations.as_ref());
-                    let _ = subscription_refresh.try_send(());
+                    let _ = subscription_refresh.send(MatterSubscriptionRefresh::ControllerReset);
                 }
                 let mut last_sequence = cursor
                     .as_ref()
@@ -270,6 +400,15 @@ fn start_controller_event_stream(
                                 if let Ok(mut proof) = node_proof_of_life.lock() {
                                     proof.insert(outcome.node_id, std::time::Instant::now());
                                 }
+                                let _ = subscription_refresh.send(
+                                    MatterSubscriptionRefresh::EndpointProof {
+                                        target: MatterSubscriptionTarget {
+                                            node_id: outcome.node_id,
+                                            endpoint: outcome.endpoint,
+                                        },
+                                        subscription_active: false,
+                                    },
+                                );
                             }
                             Some(crate::events::translate_command_outcome(
                                 event_stream_id.clone(),
@@ -281,6 +420,15 @@ fn start_controller_event_stream(
                             if let Ok(mut proof) = node_proof_of_life.lock() {
                                 proof.insert(report.node_id, std::time::Instant::now());
                             }
+                            let _ = subscription_refresh.send(
+                                MatterSubscriptionRefresh::EndpointProof {
+                                    target: MatterSubscriptionTarget {
+                                        node_id: report.node_id,
+                                        endpoint: report.endpoint,
+                                    },
+                                    subscription_active: true,
+                                },
+                            );
                             crate::events::translate_report(&report)
                         }
                     };
@@ -693,8 +841,8 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     struct FakeMatterTransport {
-        devices: Vec<MatterDeviceInfo>,
-        persisted_devices: Vec<CommissionedDevice>,
+        devices: Mutex<Vec<MatterDeviceInfo>>,
+        persisted_devices: Mutex<Vec<CommissionedDevice>>,
         probe_calls: AtomicUsize,
         subscribe_calls: AtomicUsize,
         subscription_attempts: Mutex<Vec<MatterSubscriptionTarget>>,
@@ -707,8 +855,8 @@ mod tests {
     impl FakeMatterTransport {
         fn new(devices: Vec<MatterDeviceInfo>, persisted_devices: Vec<CommissionedDevice>) -> Self {
             Self {
-                devices,
-                persisted_devices,
+                devices: Mutex::new(devices),
+                persisted_devices: Mutex::new(persisted_devices),
                 probe_calls: AtomicUsize::new(0),
                 subscribe_calls: AtomicUsize::new(0),
                 subscription_attempts: Mutex::new(Vec::new()),
@@ -725,6 +873,13 @@ mod tests {
                 .unwrap()
                 .insert((node_id, endpoint), attempt_count);
         }
+
+        fn remove_commissioned_device(&self, node_id: u64) {
+            self.persisted_devices
+                .lock()
+                .unwrap()
+                .retain(|device| device.node_id != node_id);
+        }
     }
 
     impl MatterTransport for FakeMatterTransport {
@@ -740,11 +895,11 @@ mod tests {
         }
 
         fn list_devices(&self) -> Result<Vec<MatterDeviceInfo>> {
-            Ok(self.devices.clone())
+            Ok(self.devices.lock().unwrap().clone())
         }
 
         fn list_commissioned_devices(&self) -> Result<Vec<CommissionedDevice>> {
-            Ok(self.persisted_devices.clone())
+            Ok(self.persisted_devices.lock().unwrap().clone())
         }
 
         fn probe_light(&self, _node_id: u64) -> Result<CommissionedDevice> {
@@ -1274,7 +1429,9 @@ mod tests {
             "the healthy endpoint must still be attempted after its peer fails"
         );
 
-        refresh.try_send(()).unwrap();
+        refresh
+            .send(MatterSubscriptionRefresh::ControllerReset)
+            .unwrap();
         wait_for_atomic_at_least(&transport.subscribe_calls, 4);
         assert_eq!(
             transport.subscription_attempts.lock().unwrap().as_slice(),
@@ -1300,7 +1457,227 @@ mod tests {
         );
 
         shutdown.store(true, Ordering::SeqCst);
-        let _ = refresh.try_send(());
+        let _ = refresh.send(MatterSubscriptionRefresh::ControllerReset);
+    }
+
+    #[test]
+    fn observed_state_subscription_backoff_is_per_endpoint_jittered_and_resets_on_recovery() {
+        let devices: Vec<_> = (1..=22)
+            .map(|node_id| commissioned_device(node_id, 1))
+            .collect();
+        let transport = Arc::new(FakeMatterTransport::new(Vec::new(), devices));
+        // Model one assigned endpoint that recovers on its third attempt and
+        // one roomless commissioned endpoint that remains unavailable.
+        transport.fail_subscription_attempts(7, 1, 2);
+        transport.fail_subscription_attempts(22, 1, 100);
+        let shutdown = Arc::new(AtomicBool::new(false));
+
+        let refresh = start_observed_state_subscription_worker_with_backoff(
+            transport.clone(),
+            shutdown.clone(),
+            Duration::from_millis(20),
+            Duration::from_millis(80),
+        );
+        wait_for_atomic_at_least(&transport.subscribe_calls, 22);
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            let attempts = transport.subscription_attempts.lock().unwrap();
+            let recovered_attempts = attempts.iter().filter(|target| target.node_id == 7).count();
+            if recovered_attempts >= 3 {
+                break;
+            }
+            drop(attempts);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for the assigned endpoint to recover"
+            );
+            std::thread::yield_now();
+        }
+
+        let attempts_after_recovery = transport.subscription_attempts.lock().unwrap().clone();
+        for healthy_node in (1..=21).filter(|node_id| *node_id != 7) {
+            assert_eq!(
+                attempts_after_recovery
+                    .iter()
+                    .filter(|target| target.node_id == healthy_node)
+                    .count(),
+                1,
+                "healthy endpoint {healthy_node} must not be re-subscribed on a peer's retry tick"
+            );
+        }
+        assert_eq!(
+            attempts_after_recovery
+                .iter()
+                .filter(|target| target.node_id == 7)
+                .count(),
+            3,
+            "successful proof of life must clear the endpoint retry schedule"
+        );
+        assert!(
+            attempts_after_recovery
+                .iter()
+                .filter(|target| target.node_id == 22)
+                .count()
+                <= 3,
+            "an unavailable roomless endpoint must remain bounded while another endpoint recovers"
+        );
+
+        shutdown.store(true, Ordering::SeqCst);
+        let _ = refresh.send(MatterSubscriptionRefresh::ControllerReset);
+    }
+
+    #[test]
+    fn endpoint_proof_of_life_clears_subscription_cooldown_immediately() {
+        let transport = Arc::new(FakeMatterTransport::new(
+            Vec::new(),
+            vec![commissioned_device(44, 1)],
+        ));
+        transport.fail_subscription_attempts(44, 1, 1);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let refresh = start_observed_state_subscription_worker_with_backoff(
+            transport.clone(),
+            shutdown.clone(),
+            Duration::from_secs(10),
+            Duration::from_secs(10),
+        );
+        wait_for_atomic_at_least(&transport.subscribe_calls, 1);
+
+        refresh
+            .send(MatterSubscriptionRefresh::EndpointProof {
+                target: MatterSubscriptionTarget {
+                    node_id: 44,
+                    endpoint: 1,
+                },
+                subscription_active: false,
+            })
+            .unwrap();
+        wait_for_atomic_at_least(&transport.subscribe_calls, 2);
+        assert_eq!(
+            transport.subscribe_calls.load(Ordering::SeqCst),
+            2,
+            "a command acknowledgement must bypass the stale ten-second subscription cooldown"
+        );
+
+        shutdown.store(true, Ordering::SeqCst);
+        let _ = refresh.send(MatterSubscriptionRefresh::ControllerReset);
+    }
+
+    #[test]
+    fn controller_reset_is_lossless_after_a_saturated_proof_burst() {
+        let transport = Arc::new(FakeMatterTransport::new(
+            Vec::new(),
+            vec![commissioned_device(51, 1)],
+        ));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let refresh = start_observed_state_subscription_worker_with_backoff(
+            transport.clone(),
+            shutdown.clone(),
+            Duration::from_secs(10),
+            Duration::from_secs(10),
+        );
+        wait_for_atomic_at_least(&transport.subscribe_calls, 1);
+
+        for _ in 0..256 {
+            refresh
+                .send(MatterSubscriptionRefresh::EndpointProof {
+                    target: MatterSubscriptionTarget {
+                        node_id: 51,
+                        endpoint: 1,
+                    },
+                    subscription_active: true,
+                })
+                .unwrap();
+        }
+        refresh
+            .send(MatterSubscriptionRefresh::ControllerReset)
+            .unwrap();
+
+        wait_for_atomic_at_least(&transport.subscribe_calls, 2);
+        assert_eq!(transport.subscribe_calls.load(Ordering::SeqCst), 2);
+
+        shutdown.store(true, Ordering::SeqCst);
+        let _ = refresh.send(MatterSubscriptionRefresh::ControllerReset);
+    }
+
+    #[test]
+    fn removed_endpoint_is_not_rebuilt_after_controller_reset() {
+        let transport = Arc::new(FakeMatterTransport::new(
+            Vec::new(),
+            vec![commissioned_device(61, 1), commissioned_device(62, 1)],
+        ));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let refresh = start_observed_state_subscription_worker_with_backoff(
+            transport.clone(),
+            shutdown.clone(),
+            Duration::from_secs(10),
+            Duration::from_secs(10),
+        );
+        wait_for_atomic_at_least(&transport.subscribe_calls, 2);
+
+        transport.remove_commissioned_device(62);
+        refresh
+            .send(MatterSubscriptionRefresh::ControllerReset)
+            .unwrap();
+        wait_for_atomic_at_least(&transport.subscribe_calls, 3);
+
+        let attempts = transport.subscription_attempts.lock().unwrap();
+        assert_eq!(attempts.len(), 3);
+        assert_eq!(attempts[2].node_id, 61);
+
+        shutdown.store(true, Ordering::SeqCst);
+        let _ = refresh.send(MatterSubscriptionRefresh::ControllerReset);
+    }
+
+    #[test]
+    fn subscription_retry_delay_uses_bounded_endpoint_jitter() {
+        let initial = Duration::from_secs(30);
+        let maximum = Duration::from_secs(30 * 60);
+        let first = subscription_retry_delay(
+            &MatterSubscriptionTarget {
+                node_id: 1,
+                endpoint: 1,
+            },
+            1,
+            initial,
+            maximum,
+        );
+        let peer = subscription_retry_delay(
+            &MatterSubscriptionTarget {
+                node_id: 2,
+                endpoint: 1,
+            },
+            1,
+            initial,
+            maximum,
+        );
+        let capped = subscription_retry_delay(
+            &MatterSubscriptionTarget {
+                node_id: 1,
+                endpoint: 1,
+            },
+            100,
+            initial,
+            maximum,
+        );
+
+        assert!((Duration::from_millis(22_500)..=initial).contains(&first));
+        assert_ne!(first, peer, "peers should not synchronize retry work");
+        assert!((Duration::from_secs(22 * 60 + 30)..=maximum).contains(&capped));
+    }
+
+    #[test]
+    fn subscription_failure_class_redacts_endpoint_detail() {
+        assert_eq!(
+            subscription_failure_class(&anyhow::anyhow!(
+                "operational discovery timed out for node 0x1234"
+            )),
+            "operational_discovery"
+        );
+        assert_eq!(
+            subscription_failure_class(&anyhow::anyhow!("resource is busy for fabric 7")),
+            "resource_busy"
+        );
     }
 
     #[test]
