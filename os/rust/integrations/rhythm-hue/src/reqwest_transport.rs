@@ -425,9 +425,10 @@ fn validate_hue_v2_envelope<'a>(
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| anyhow::anyhow!("{operation} returned an invalid V2 response"))?;
     if !errors.is_empty() {
+        let categories = hue_v2_error_categories_from_value(value);
         anyhow::bail!(
-            "{operation} returned {} Hue application error(s)",
-            errors.len()
+            "{operation} returned Hue application error category: {}",
+            categories.join(",")
         );
     }
     value
@@ -441,6 +442,10 @@ fn hue_v2_error_categories(body: &str) -> Vec<&'static str> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
         return vec!["invalid_response"];
     };
+    hue_v2_error_categories_from_value(&value)
+}
+
+fn hue_v2_error_categories_from_value(value: &serde_json::Value) -> Vec<&'static str> {
     let Some(errors) = value.get("errors").and_then(serde_json::Value::as_array) else {
         return vec!["invalid_response"];
     };
@@ -1426,13 +1431,14 @@ mod tests {
 
         let error = validate_hue_v2_resource_write_response(
             "PUT scene/native-1 recall",
-            r#"{"data":[],"errors":[{"description":"scene unavailable"}]}"#,
+            r#"{"data":[],"errors":[{"description":"invalid value for scene private-scene-id"}]}"#,
             "native-1",
             "scene",
         )
         .unwrap_err();
-        assert!(error.to_string().contains("1 Hue application error"));
-        assert!(!error.to_string().contains("scene unavailable"));
+        let message = error.to_string();
+        assert!(message.contains("Hue application error category: invalid_value"));
+        assert!(!message.contains("private-scene-id"));
     }
 
     #[test]
@@ -1471,6 +1477,34 @@ mod tests {
             ),
             ["opaque"]
         );
+    }
+
+    #[test]
+    fn hue_error_categories_cover_fixed_categories_and_deduplicate_mixed_errors() {
+        let body = r#"{
+            "data": [],
+            "errors": [
+                {"description":"resource is not modifiable: private-room-id"},
+                {"description":"invalid base value for private-light-id"},
+                {"description":"operation forbidden for private-app-key"},
+                {"description":"read-only resource private-room-id"},
+                {"description":"vendor-specific private detail"}
+            ]
+        }"#;
+
+        assert_eq!(
+            hue_v2_error_categories(body),
+            [
+                "invalid_value",
+                "opaque",
+                "permission_denied",
+                "resource_immutable"
+            ]
+        );
+        let categories = hue_v2_error_categories(body).join(",");
+        assert!(!categories.contains("private-room-id"));
+        assert!(!categories.contains("private-light-id"));
+        assert!(!categories.contains("private-app-key"));
     }
 
     #[test]
