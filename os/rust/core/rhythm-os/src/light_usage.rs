@@ -19,7 +19,7 @@ pub const LIGHT_USAGE_SCHEMA_VERSION: u8 = 1;
 pub const LIGHT_USAGE_LEDGER_BYTES_LIMIT: u64 = 2 * 1024 * 1024;
 pub const LIGHT_USAGE_CLOUD_BATCH_LIMIT: usize = 512;
 
-const LIGHT_USAGE_SEGMENT_LIMIT: usize = 4096;
+pub(crate) const LIGHT_USAGE_SEGMENT_LIMIT: usize = 1024;
 const LIGHT_USAGE_RETENTION_MS: u64 = 35 * 24 * 60 * 60 * 1000;
 const LIGHT_USAGE_CHECKPOINT_INTERVAL: Duration = Duration::from_secs(15 * 60);
 const LIGHT_USAGE_CLOUD_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
@@ -351,7 +351,14 @@ impl LightUsageLedger {
             (u64::from(previous.lights_on).saturating_mul(elapsed_ms), 0)
         } else {
             let midpoint = elapsed_ms / 2;
-            (midpoint, midpoint)
+            (
+                if previous.lights_on {
+                    midpoint
+                } else {
+                    elapsed_ms.saturating_sub(midpoint)
+                },
+                midpoint,
+            )
         };
 
         let previous_date = usage_date(previous.observed_at_epoch_ms);
@@ -393,15 +400,26 @@ impl LightUsageLedger {
                 .saturating_sub(previous.observed_at_epoch_ms)
                 .min(wall_total);
             let before_covered = proportional(elapsed_ms, before_wall, wall_total);
-            let before_on = proportional(on_ms, before_covered, elapsed_ms.max(1));
+            let midpoint_covered = elapsed_ms / 2;
+            let before_on = if changed && !source.is_live() {
+                if previous.lights_on {
+                    before_covered.min(midpoint_covered)
+                } else {
+                    before_covered.saturating_sub(midpoint_covered)
+                }
+            } else {
+                proportional(on_ms, before_covered, elapsed_ms.max(1))
+            };
             let before_uncertainty =
                 proportional(uncertainty_ms, before_covered, elapsed_ms.max(1));
+            let transition_before_boundary = changed
+                && proportional(wall_total, midpoint_covered, elapsed_ms.max(1)) < before_wall;
             self.accrue_segment(
                 &previous.segment_id,
                 before_covered,
                 before_on,
                 before_uncertainty,
-                false,
+                transition_before_boundary,
                 source,
                 boundary.saturating_sub(1),
                 false,
@@ -424,7 +442,7 @@ impl LightUsageLedger {
                 elapsed_ms.saturating_sub(before_covered),
                 on_ms.saturating_sub(before_on),
                 uncertainty_ms.saturating_sub(before_uncertainty),
-                changed,
+                changed && !transition_before_boundary,
                 source,
                 observed_at_epoch_ms,
                 true,
@@ -653,7 +671,10 @@ impl LightUsageLedger {
         }
     }
 
-    pub fn persisted_snapshot(&self, checkpoint_epoch_ms: u64) -> Self {
+    pub fn persisted_snapshot(&mut self, checkpoint_epoch_ms: u64) -> Self {
+        // Numeric counters can widen after admission, so re-check the byte
+        // contract before every snapshot as well as when adding a segment.
+        let _ = self.enforce_serialized_byte_limit(None);
         let mut snapshot = self.clone();
         snapshot.last_checkpoint_epoch_ms = Some(checkpoint_epoch_ms);
         snapshot.baselines.clear();
@@ -798,6 +819,13 @@ impl LightUsageLedger {
             },
         );
         self.segment_order.push_back(segment_id.clone());
+        if !self.enforce_serialized_byte_limit(Some(&segment_id)) {
+            self.segments.remove(&segment_id);
+            self.segment_order
+                .retain(|candidate| candidate != &segment_id);
+            self.dropped_segment_count = self.dropped_segment_count.saturating_add(1);
+            return None;
+        }
         Some(segment_id)
     }
 
@@ -865,6 +893,34 @@ impl LightUsageLedger {
                     .is_none_or(|segment| segment.last_observed_at_epoch_ms >= retention_floor)
             {
                 break;
+            }
+        }
+    }
+
+    fn enforce_serialized_byte_limit(&mut self, protected_segment_id: Option<&str>) -> bool {
+        loop {
+            let serialized_len = serde_json::to_vec_pretty(self)
+                .map(|bytes| bytes.len() as u64)
+                .unwrap_or(u64::MAX);
+            if serialized_len <= LIGHT_USAGE_LEDGER_BYTES_LIMIT {
+                return true;
+            }
+
+            let active_ids = self
+                .baselines
+                .values()
+                .map(|baseline| baseline.segment_id.as_str())
+                .collect::<HashSet<_>>();
+            let removable = self.segment_order.iter().position(|segment_id| {
+                !active_ids.contains(segment_id.as_str())
+                    && protected_segment_id != Some(segment_id.as_str())
+            });
+            let Some(index) = removable else {
+                return false;
+            };
+            if let Some(segment_id) = self.segment_order.remove(index) {
+                self.segments.remove(&segment_id);
+                self.dropped_segment_count = self.dropped_segment_count.saturating_add(1);
             }
         }
     }
@@ -976,7 +1032,7 @@ pub fn request_cloud_upload(state: &SharedState) {
 pub fn flush_now(state: &SharedState) -> Result<()> {
     let now_epoch_ms = crate::state::current_epoch_ms();
     let (storage, snapshot) = {
-        let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let storage = state
             .storage
             .clone()
@@ -1300,6 +1356,57 @@ mod tests {
         );
         assert!(ledger.force_checkpoint);
         assert!(ledger.force_cloud);
+    }
+
+    #[test]
+    fn cross_midnight_poll_transitions_keep_each_state_on_its_side_of_midpoint() {
+        let start = Instant::now();
+        let before_midnight = 1_704_067_190_000; // 2023-12-31T23:59:50Z
+
+        for (initial_on, expected_old_on, expected_new_on) in
+            [(false, 0, 10_000), (true, 10_000, 0)]
+        {
+            let mut ledger = LightUsageLedger::default();
+            record(
+                &mut ledger,
+                "bulb-midnight",
+                LightUsageSubjectKind::Bulb,
+                initial_on,
+                LightUsageObservationSource::SyncPoll,
+                start,
+                before_midnight,
+            );
+            record(
+                &mut ledger,
+                "bulb-midnight",
+                LightUsageSubjectKind::Bulb,
+                !initial_on,
+                LightUsageObservationSource::Periodic,
+                start + Duration::from_secs(20),
+                before_midnight + 20_000,
+            );
+
+            let old = ledger
+                .segments
+                .values()
+                .find(|segment| segment.usage_date == "2023-12-31")
+                .unwrap();
+            let new = ledger
+                .segments
+                .values()
+                .find(|segment| segment.usage_date == "2024-01-01")
+                .unwrap();
+            assert_eq!(old.covered_ms, 10_000);
+            assert_eq!(new.covered_ms, 10_000);
+            assert_eq!(old.on_ms, expected_old_on);
+            assert_eq!(new.on_ms, expected_new_on);
+            assert_eq!(old.transition_uncertainty_ms, 5_000);
+            assert_eq!(new.transition_uncertainty_ms, 5_000);
+            assert_eq!(old.observation_count, 1);
+            assert_eq!(new.observation_count, 1);
+            assert_eq!(old.transition_count, 0);
+            assert_eq!(new.transition_count, 1);
+        }
     }
 
     #[test]

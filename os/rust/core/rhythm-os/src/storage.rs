@@ -5671,6 +5671,61 @@ mod tests {
         }
 
         #[test]
+        fn maximum_light_usage_ledger_remains_persistable_across_checkpoints() {
+            use crate::light_usage::{
+                LightUsageLedger, LightUsageSegment, LightUsageSourceSummary,
+                LightUsageSubjectKind, LIGHT_USAGE_LEDGER_BYTES_LIMIT, LIGHT_USAGE_SEGMENT_LIMIT,
+            };
+
+            let (storage, path) = temp_storage();
+            let mut ledger = LightUsageLedger::default();
+            for index in 0..LIGHT_USAGE_SEGMENT_LIMIT {
+                let segment_id = format!("{index:032x}");
+                let subject_id = format!("{index:08x}{}", "x".repeat(152));
+                ledger.segment_order.push_back(segment_id.clone());
+                ledger.segments.insert(
+                    segment_id.clone(),
+                    LightUsageSegment {
+                        segment_id,
+                        subject_id,
+                        subject_kind: LightUsageSubjectKind::RoomAggregate,
+                        usage_date: "9999-12-31".into(),
+                        revision: u64::MAX,
+                        synced_revision: u64::MAX - 1,
+                        on_ms: u64::MAX,
+                        covered_ms: u64::MAX,
+                        transition_uncertainty_ms: u64::MAX,
+                        observation_count: u64::MAX,
+                        transition_count: u64::MAX,
+                        first_observed_at_epoch_ms: u64::MAX,
+                        last_observed_at_epoch_ms: u64::MAX,
+                        source_summary: LightUsageSourceSummary {
+                            periodic: u64::MAX,
+                            sync_poll: u64::MAX,
+                            live_subscription: u64::MAX,
+                            authoritative_refresh: u64::MAX,
+                        },
+                    },
+                );
+            }
+
+            storage.save_light_usage_ledger(&ledger).unwrap();
+            let ledger_path = path.join("light_usage_ledger.json");
+            assert!(
+                std::fs::metadata(&ledger_path).unwrap().len() <= LIGHT_USAGE_LEDGER_BYTES_LIMIT
+            );
+
+            let mut loaded = storage.load_light_usage_ledger().unwrap().unwrap();
+            loaded.last_checkpoint_epoch_ms = Some(u64::MAX);
+            loaded.segments.values_mut().next().unwrap().revision = u64::MAX;
+            storage.save_light_usage_ledger(&loaded).unwrap();
+            assert!(
+                std::fs::metadata(&ledger_path).unwrap().len() <= LIGHT_USAGE_LEDGER_BYTES_LIMIT
+            );
+            cleanup(&path);
+        }
+
+        #[test]
         fn clear_factory_reset_state_removes_persisted_files() {
             let (storage, path) = temp_storage();
             storage
