@@ -3,6 +3,7 @@ import {
   JsonObject,
   rowForDeviceLifecycle,
 } from './device_lifecycle_contract.ts'
+import { readLightUsageBatch } from './light_usage_contract.ts'
 
 type DeviceTokenRow = {
   id: string
@@ -65,7 +66,9 @@ Deno.serve(async (req) => {
     if (events instanceof Response) return events
     const deviceEvents = readDeviceEvents(body)
     if (deviceEvents instanceof Response) return deviceEvents
-    if (events.length === 0 && deviceEvents.length === 0) {
+    const usage = readLightUsageBatch(body)
+    if (usage && 'error' in usage) return jsonResponse({ error: usage.error }, 400)
+    if (events.length === 0 && deviceEvents.length === 0 && !usage) {
       return jsonResponse({ status: 'ok', inserted: 0 })
     }
 
@@ -95,7 +98,7 @@ Deno.serve(async (req) => {
       )
       .filter((row): row is Record<string, unknown> => row != null)
 
-    if (rows.length === 0 && deviceRows.length === 0) {
+    if (rows.length === 0 && deviceRows.length === 0 && !usage) {
       return jsonResponse({ status: 'ok', inserted: 0 })
     }
 
@@ -114,6 +117,25 @@ Deno.serve(async (req) => {
       if (error) throw new Error(error.message)
     }
 
+    let usageUpserted = 0
+    if (usage) {
+      const { data, error } = await adminClient.rpc(
+        'ingest_server_light_usage_batch',
+        {
+          p_user_id: tokenRow.user_id,
+          p_home_id: homeId,
+          p_hub_id: hubId,
+          p_server_instance_id: serverInstanceId ??
+            tokenRow.server_instance_id ?? null,
+          p_usage_schema: usage.schemaVersion,
+          p_batch_id: usage.batchId,
+          p_segments: usage.segments,
+        },
+      )
+      if (error) throw new Error(error.message)
+      usageUpserted = typeof data === 'number' ? data : 0
+    }
+
     await adminClient
       .from('server_light_activity_device_tokens')
       .update({ last_used_at: new Date().toISOString() })
@@ -124,6 +146,13 @@ Deno.serve(async (req) => {
       inserted: uniqueRows.length + uniqueDeviceRows.length,
       light_inserted: uniqueRows.length,
       device_lifecycle_inserted: uniqueDeviceRows.length,
+      usage_upserted: usageUpserted,
+      ...(usage
+        ? {
+          usage_schema_version: usage.schemaVersion,
+          usage_batch_id: usage.batchId,
+        }
+        : {}),
       deduplicated: rows.length - uniqueRows.length +
         deviceRows.length - uniqueDeviceRows.length,
     })
