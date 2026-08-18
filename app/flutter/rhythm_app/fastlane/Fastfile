@@ -1,6 +1,7 @@
 require "json"
 require "fileutils"
 require "tmpdir"
+require_relative "apple_release_status"
 
 min_fastlane_version("2.237.0")
 
@@ -179,18 +180,7 @@ def apple_release_status(plan)
   app = connect_to_app_store
   version = plan.fetch("version")
   build_number = plan.dig("apple", "build_number").to_s
-  candidates = [
-    app.get_live_app_store_version(platform: "IOS"),
-    app.get_in_review_app_store_version(platform: "IOS"),
-    app.get_edit_app_store_version(platform: "IOS")
-  ].compact
-  app_version = candidates.find { |candidate| candidate.version_string == version }
-
-  {
-    version: version,
-    build_number: build_number,
-    raw_state: app_version ? app_version.app_version_state.to_s : "MISSING"
-  }
+  RhythmAppleReleaseStatus.read(app: app, version: version, build_number: build_number)
 end
 
 def google_play_release_status(plan)
