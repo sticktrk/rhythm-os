@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::{Datelike, Timelike};
@@ -890,6 +890,7 @@ fn refresh_cached_motion_timeout_after_settings_change(
 
 fn clear_removed_node_ephemeral_state(s: &mut AppState, node_id: &str) {
     s.room_observed_power.remove(node_id);
+    s.light_usage.close_subject(node_id);
     s.motion_snapshots.remove(node_id);
     s.room_mode_transitions.remove(node_id);
     s.pending_periodic_ticks.remove(node_id);
@@ -1297,6 +1298,13 @@ pub(crate) fn effective_lights_on_cache_key<'a>(
 
 const OBSERVED_POWER_MIN_FRESHNESS_SECS: u64 = 15;
 
+fn observed_power_continuity_budget(s: &AppState) -> Duration {
+    Duration::from_secs(
+        OBSERVED_POWER_MIN_FRESHNESS_SECS
+            .max(s.runtime_config.update_interval_secs.saturating_mul(2)),
+    )
+}
+
 pub(crate) fn observed_power_is_fresh(s: &AppState, observed: &ObservedPowerState) -> bool {
     match observed.source {
         ObservedPowerSource::SemanticOverride => true,
@@ -1305,11 +1313,22 @@ pub(crate) fn observed_power_is_fresh(s: &AppState, observed: &ObservedPowerStat
         | ObservedPowerSource::SyncPoll
         | ObservedPowerSource::LiveSubscription
         | ObservedPowerSource::AuthoritativeRefresh => {
-            let freshness_window_secs = OBSERVED_POWER_MIN_FRESHNESS_SECS
-                .max(s.runtime_config.update_interval_secs.saturating_mul(2));
             let age_ms = current_epoch_ms().saturating_sub(observed.observed_at_epoch_ms);
-            age_ms <= freshness_window_secs.saturating_mul(1000)
+            age_ms <= observed_power_continuity_budget(s).as_millis() as u64
         }
+    }
+}
+
+fn light_usage_source(
+    source: ObservedPowerSource,
+) -> Option<crate::light_usage::LightUsageObservationSource> {
+    use crate::light_usage::LightUsageObservationSource as UsageSource;
+    match source {
+        ObservedPowerSource::Periodic => Some(UsageSource::Periodic),
+        ObservedPowerSource::SyncPoll => Some(UsageSource::SyncPoll),
+        ObservedPowerSource::LiveSubscription => Some(UsageSource::LiveSubscription),
+        ObservedPowerSource::AuthoritativeRefresh => Some(UsageSource::AuthoritativeRefresh),
+        ObservedPowerSource::Command | ObservedPowerSource::SemanticOverride => None,
     }
 }
 
@@ -1407,8 +1426,14 @@ fn update_lights_on_cache_for_node_with_source(
     lights_on: bool,
     source: ObservedPowerSource,
 ) {
+    let observed_at_instant = Instant::now();
+    let observed_at_epoch_ms = current_epoch_ms();
     if let Ok(mut s) = state.lock() {
         let cache_key = effective_lights_on_cache_key(&s, node_id, kind, parent_id).to_string();
+        let usage_source = light_usage_source(source);
+        if usage_source.is_none() {
+            s.light_usage.record_excluded_source(observed_at_instant);
+        }
         if source == ObservedPowerSource::Command {
             if let Some(existing) = s.room_observed_power.get(&cache_key) {
                 if existing.source == ObservedPowerSource::LiveSubscription
@@ -1419,8 +1444,32 @@ fn update_lights_on_cache_for_node_with_source(
                 }
             }
         }
-        s.room_observed_power
-            .insert(cache_key, ObservedPowerState::new(lights_on, source));
+        if let Some(usage_source) = usage_source {
+            let subject_kind = if matches!(kind, LightNodeKind::LightDevice) && cache_key == node_id
+            {
+                crate::light_usage::LightUsageSubjectKind::Bulb
+            } else {
+                crate::light_usage::LightUsageSubjectKind::RoomAggregate
+            };
+            let continuity_budget = observed_power_continuity_budget(&s);
+            s.light_usage.record_observation(
+                &cache_key,
+                subject_kind,
+                lights_on,
+                usage_source,
+                observed_at_instant,
+                observed_at_epoch_ms,
+                continuity_budget,
+            );
+        }
+        s.room_observed_power.insert(
+            cache_key,
+            ObservedPowerState {
+                lights_on,
+                observed_at_epoch_ms,
+                source,
+            },
+        );
     }
 }
 
@@ -5806,7 +5855,18 @@ pub fn build_factory_default_profile_bundle() -> Result<String> {
 }
 
 fn clear_factory_reset_storage(state: &SharedState) -> Result<()> {
-    crate::pairing::clear_persisted_state_for_factory_reset(state)
+    let storage = {
+        let mut state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        state.light_usage.disable_shutdown_flush();
+        state.storage.clone()
+    };
+    let result = crate::pairing::clear_persisted_state_for_factory_reset(state);
+    if result.is_err() {
+        if let (Some(storage), Ok(mut state)) = (storage, state.lock()) {
+            state.light_usage.configure_shutdown_flush(storage);
+        }
+    }
+    result
 }
 
 fn clear_factory_reset_ephemeral_state(state: &SharedState) -> Result<()> {
@@ -5817,6 +5877,8 @@ fn clear_factory_reset_ephemeral_state(state: &SharedState) -> Result<()> {
     s.hub_reconnect_sync_at.clear();
     s.hub_pending_disconnect_at.clear();
     s.room_observed_power.clear();
+    s.light_usage.disable_shutdown_flush();
+    s.light_usage = crate::light_usage::LightUsageLedger::default();
     s.motion_snapshots.clear();
     s.room_mode_transitions.clear();
     s.last_check_hour = None;
@@ -16352,6 +16414,7 @@ pub fn do_topology_delete_room(state: &SharedState, room_id: &str) -> Result<()>
             );
         }
         state.room_observed_power.remove(room_id);
+        state.light_usage.close_subject(room_id);
         state.motion_snapshots.remove(room_id);
         state.room_mode_transitions.remove(room_id);
         state
@@ -22892,6 +22955,46 @@ mod tests {
         let observed = app.room_observed_power.get("room1").unwrap();
         assert!(!observed.lights_on);
         assert_eq!(observed.source, ObservedPowerSource::Command);
+    }
+
+    #[test]
+    fn authoritative_cache_updates_keep_bulb_and_room_usage_scopes_distinct() {
+        let (state, _runtime) = setup_state(Vec::new());
+        update_lights_on_cache_for_node_with_source(
+            &state,
+            "canonical-bulb-1",
+            LightNodeKind::LightDevice,
+            None,
+            true,
+            ObservedPowerSource::LiveSubscription,
+        );
+        update_lights_on_cache_for_node_with_source(
+            &state,
+            "room-1",
+            LightNodeKind::Room,
+            None,
+            true,
+            ObservedPowerSource::Periodic,
+        );
+        update_lights_on_cache_for_node_with_source(
+            &state,
+            "room-1",
+            LightNodeKind::Room,
+            None,
+            false,
+            ObservedPowerSource::Command,
+        );
+
+        let app = state.lock().unwrap();
+        assert!(app.light_usage.segments.values().any(|segment| {
+            segment.subject_id == "canonical-bulb-1"
+                && segment.subject_kind == crate::light_usage::LightUsageSubjectKind::Bulb
+        }));
+        assert!(app.light_usage.segments.values().any(|segment| {
+            segment.subject_id == "room-1"
+                && segment.subject_kind == crate::light_usage::LightUsageSubjectKind::RoomAggregate
+        }));
+        assert_eq!(app.light_usage.excluded_source_count, 1);
     }
 
     #[test]

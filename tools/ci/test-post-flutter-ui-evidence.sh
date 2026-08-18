@@ -69,13 +69,25 @@ export PATH="$BIN_DIR:$PATH"
 
 grep -Fq 'POST repos/test/repo/git/blobs' "$FAKE_GH_LOG" || fail "screenshots were not uploaded as Git blobs"
 grep -Fq 'POST repos/test/repo/git/trees' "$FAKE_GH_LOG" || fail "evidence tree was not created"
+grep -Fq 'GET repos/test/repo/git/ref/heads/codex-ui-evidence' "$FAKE_GH_LOG" || fail "shared evidence branch was not resolved"
+grep -Fq 'PATCH repos/test/repo/git/refs/heads/codex-ui-evidence' "$FAKE_GH_LOG" || fail "shared evidence branch was not advanced"
 grep -Fq 'POST repos/test/repo/issues/7/comments' "$FAKE_GH_LOG" || fail "PR comment was not posted"
 [ "$(jq '.tree | length' "$FAKE_TREE_JSON")" -eq 2 ] || fail "tree should contain one screenshot and one manifest"
+[ "$(jq -r '.base_tree' "$FAKE_TREE_JSON")" = "dddddddddddddddddddddddddddddddddddddddd" ] || fail "new shared branch should extend its initial default-branch tree"
 COMMENT_BODY="$(jq -r '.body' "$FAKE_COMMENT_JSON")"
 printf '%s' "$COMMENT_BODY" | grep -Fq "<!-- codex-cross-flutter-ui pr=7 head=$FAKE_HEAD_SHA -->" || fail "comment is missing the exact-head marker"
 printf '%s' "$COMMENT_BODY" | grep -Fq 'deterministic mock/test data' || fail "comment is missing the privacy statement"
 printf '%s' "$COMMENT_BODY" | grep -Fq 'Room settings — Auto color' || fail "comment is missing the screenshot caption"
 printf '%s' "$COMMENT_BODY" | grep -Fq "../blob/ffffffffffffffffffffffffffffffffffffffff/.github/ui-evidence/pr-7/$FAKE_HEAD_SHA/room-settings.png?raw=true" || fail "comment is missing the immutable private-repository screenshot URL"
+
+export FAKE_EVIDENCE_BRANCH_EXISTS=true
+: > "$FAKE_GH_LOG"
+"$POSTER" --pr 7 --head "$FAKE_HEAD_SHA" --manifest "$MANIFEST"
+if grep -Fq 'POST repos/test/repo/git/refs' "$FAKE_GH_LOG"; then
+    fail "an existing shared evidence branch must not be recreated"
+fi
+[ "$(jq -r '.base_tree' "$FAKE_TREE_JSON")" = "2222222222222222222222222222222222222222" ] || fail "uploads must preserve the existing shared evidence tree"
+unset FAKE_EVIDENCE_BRANCH_EXISTS
 
 export FAKE_EXISTING_MARKER=true
 : > "$FAKE_GH_LOG"
