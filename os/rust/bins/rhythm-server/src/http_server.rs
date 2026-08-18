@@ -979,7 +979,8 @@ async fn do_update(
     let snapshot = ota_status.snapshot();
     if matches!(
         snapshot.state,
-        crate::self_update::OtaUpdateState::Updating
+        crate::self_update::OtaUpdateState::Checking
+            | crate::self_update::OtaUpdateState::Updating
             | crate::self_update::OtaUpdateState::Restarting
     ) {
         return err_409("Update already in progress");
@@ -1082,6 +1083,30 @@ async fn do_update(
 
     let latest = info.latest_version.clone();
     let previous = info.current_version.clone();
+    let worker_status = ota_status.clone();
+    let worker_state = state.clone();
+    tokio::spawn(async move {
+        apply_accepted_update(worker_state, worker_status, info).await;
+    });
+
+    json_ok(
+        serde_json::json!({
+            "status": "accepted",
+            "message": format!("Update to v{} accepted", latest),
+            "previous_version": previous,
+            "new_version": latest,
+        })
+        .to_string(),
+    )
+}
+
+async fn apply_accepted_update(
+    state: SharedState,
+    ota_status: crate::self_update::OtaStatusHandle,
+    info: crate::self_update::UpdateInfo,
+) {
+    let latest = info.latest_version.clone();
+    let previous = info.current_version.clone();
     let apply_state = state.clone();
     let apply_previous = previous.clone();
     let apply_latest = latest.clone();
@@ -1110,7 +1135,7 @@ async fn do_update(
                 Vec::new(),
                 Some(e.clone()),
             );
-            return err_500(e);
+            return;
         }
         Err(e) => {
             ota_status.mark_error(e.to_string());
@@ -1127,7 +1152,7 @@ async fn do_update(
                 Vec::new(),
                 Some(e.to_string()),
             );
-            return err_500(e);
+            return;
         }
     };
     ota_status.mark_restarting(&previous, &latest, apply_result.checksum_verified);
@@ -1164,18 +1189,6 @@ async fn do_update(
             error
         );
     }
-
-    json_ok(format!(
-        r#"{{"status":"ok","message":"Updated to v{}, restarting...","previous_version":"{}","new_version":"{}","checksum_verified":{},"installed_targets":{}}}"#,
-        latest,
-        previous,
-        latest,
-        apply_result
-            .checksum_verified
-            .map(serde_json::Value::Bool)
-            .unwrap_or(serde_json::Value::Null),
-        serde_json::to_string(&apply_result.installed_targets).unwrap_or_else(|_| "[]".to_string())
-    ))
 }
 
 #[cfg(test)]
@@ -1232,16 +1245,26 @@ mod tests {
     }
 
     fn spawn_http_sequence(responses: Vec<(u16, String)>) -> String {
+        spawn_http_sequence_with_delays(
+            responses
+                .into_iter()
+                .map(|(status, body)| (status, body, Duration::ZERO))
+                .collect(),
+        )
+    }
+
+    fn spawn_http_sequence_with_delays(responses: Vec<(u16, String, Duration)>) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture");
         let port = listener.local_addr().unwrap().port();
         thread::spawn(move || {
-            for (status, body) in responses {
+            for (status, body, delay) in responses {
                 let Ok((mut stream, _)) = listener.accept() else {
                     return;
                 };
                 let mut request = [0_u8; 1024];
                 let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
                 let _ = stream.read(&mut request);
+                thread::sleep(delay);
                 let reason = match status {
                     200 => "OK",
                     404 => "Not Found",
@@ -1560,7 +1583,7 @@ mod tests {
     }
 
     #[test]
-    fn do_update_handler_reports_up_to_date_and_download_failure() {
+    fn do_update_handler_reports_up_to_date_and_accepts_background_apply() {
         let _guard = crate::self_update::ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1606,12 +1629,13 @@ mod tests {
                 }
             ));
 
-            let manifest_url = spawn_http_sequence(vec![
+            let manifest_url = spawn_http_sequence_with_delays(vec![
                 (
                     200,
                     update_manifest("999.0.1", "release/missing-rhythm-server.tar.gz"),
+                    Duration::ZERO,
                 ),
-                (404, String::new()),
+                (404, String::new(), Duration::from_millis(200)),
             ]);
             set_update_manifest_env(&manifest_url);
             let (tx, mut rx) = tokio::sync::broadcast::channel(16);
@@ -1621,9 +1645,15 @@ mod tests {
 
             let response = do_update(state, ota_status.clone()).await;
 
-            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-            let text = response_text(response).await;
-            assert!(text.contains("404"), "unexpected update error: {text}");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            assert_eq!(body["status"], "accepted");
+            assert_eq!(body["new_version"], "999.0.1");
+            assert_eq!(
+                ota_status.snapshot().state,
+                crate::self_update::OtaUpdateState::Updating,
+                "the server must own the accepted update after the client response"
+            );
             assert!(matches!(
                 rx.recv().await.unwrap(),
                 rhythm_os::server_event::ServerEvent::OtaUpdateProgress {
@@ -1638,21 +1668,25 @@ mod tests {
                     ..
                 }
             ));
-            let mut saw_failed = false;
-            while let Ok(event) = rx.try_recv() {
-                if matches!(
-                    event,
-                    rhythm_os::server_event::ServerEvent::OtaUpdateProgress {
-                        stage: rhythm_os::server_event::OtaUpdateStage::Failed,
-                        ..
+
+            let failed = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let event = rx.recv().await.unwrap();
+                    if matches!(
+                        event,
+                        rhythm_os::server_event::ServerEvent::OtaUpdateProgress {
+                            stage: rhythm_os::server_event::OtaUpdateStage::Failed,
+                            ..
+                        }
+                    ) {
+                        break;
                     }
-                ) {
-                    saw_failed = true;
                 }
-            }
+            })
+            .await;
             assert!(
-                saw_failed,
-                "download failure should emit failed OTA progress"
+                failed.is_ok(),
+                "background failure should emit OTA SSE progress"
             );
             assert!(ota_status.snapshot().last_error.is_some());
         });
