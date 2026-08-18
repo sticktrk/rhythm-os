@@ -72,6 +72,8 @@ void main() {
       profile: 'rhythm',
       outcome: 'succeeded',
       changedFieldCount: 2,
+      dayColorMode: 'static_temperature',
+      dayBrightnessMode: 'fixed',
     );
     await analytics.logRoomLightSettingsResetCompleted(
       journeyId: 'room-light-settings-456',
@@ -152,6 +154,14 @@ void main() {
       containsPair('changed_field_count', 2),
     );
     expect(
+      backend.events[8].properties,
+      containsPair('day_color_mode', 'static_temperature'),
+    );
+    expect(
+      backend.events[8].properties,
+      containsPair('day_brightness_mode', 'fixed'),
+    );
+    expect(
       backend.events[9].properties,
       containsPair('failure_stage', 'request'),
     );
@@ -182,6 +192,10 @@ void main() {
       'scene_id',
       'room_id',
       'device_id',
+      'kelvin',
+      'rgb',
+      'xy',
+      '3500',
       'error',
       'MT:RECOVERY-SECRET',
     ]) {
@@ -311,6 +325,54 @@ void main() {
       'device_name',
       'hub_address',
       'serial',
+      'error',
+    ]) {
+      expect(serialized, isNot(contains(forbidden)));
+    }
+  });
+
+  test('Hue room authority analytics record room scope without identities',
+      () async {
+    await analytics.logHueAuthorityReviewOpened(
+      journeyId: 'hue-authority-journey',
+      source: 'settings',
+      authorityScope: 'room',
+      roomCount: 2,
+      hadPriorReview: true,
+    );
+    await analytics.logHueAuthorityReviewSubmitted(
+      journeyId: 'hue-authority-journey',
+      source: 'settings',
+      authorityScope: 'room',
+      roomCount: 2,
+      hueRoomCount: 1,
+      rhythmRoomCount: 1,
+      bridgeTakeoverRequested: true,
+    );
+    await analytics.logHueAuthorityReviewCompleted(
+      journeyId: 'hue-authority-journey',
+      source: 'settings',
+      authorityScope: 'room',
+      outcome: 'succeeded',
+      bridgeTakeoverRequested: true,
+    );
+
+    expect(
+      backend.events.map((event) => event.properties['authority_scope']),
+      everyElement('room'),
+    );
+    expect(
+      backend.events[1].properties,
+      containsPair('bridge_takeover_requested', 1),
+    );
+    final serialized = backend.events
+        .map((event) => '${event.name}:${event.properties}')
+        .join('\n');
+    for (final forbidden in [
+      'room_id',
+      'room_name',
+      'hub_address',
+      'resource_id',
       'error',
     ]) {
       expect(serialized, isNot(contains(forbidden)));

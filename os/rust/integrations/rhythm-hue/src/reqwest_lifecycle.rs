@@ -37,6 +37,7 @@ use rhythm_os::storage::Storage;
 const HUE_ADDRESS_MIGRATION_FROM_FIELD: &str = "address_migration_from";
 const HUE_BUTTON_PROJECTION_TIMEOUT: Duration = Duration::from_secs(45);
 const HUE_BUTTON_SYNC_SLOT_TIMEOUT: Duration = Duration::from_secs(5);
+const HUE_TAKEOVER_FAILED_ATTEMPTS_BEFORE_POLICY_ROLLBACK: u32 = 2;
 
 // ============================================================================
 // Boot-time connection
@@ -828,6 +829,39 @@ fn hue_authority_context(state: &SharedState, key: &HubKey) -> Result<HueAuthori
     })
 }
 
+fn hue_automation_suppression_scope(
+    state: &SharedState,
+    key: &HubKey,
+) -> Result<crate::ownership::HueAutomationSuppressionScope> {
+    let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let mut scope = crate::ownership::HueAutomationSuppressionScope::default();
+    for (room_id, _, owner) in state.topology.external_automation_rooms_for_hub(key) {
+        let room = state.topology.get(&room_id).ok_or_else(|| {
+            anyhow::anyhow!("Hue authority room disappeared during reconciliation")
+        })?;
+        for binding in room
+            .hub_room_bindings
+            .iter()
+            .filter(|binding| binding.hub_key == *key)
+        {
+            if owner == Some(rhythm_os::topology::ExternalRoomAutomationOwner::Rhythm) {
+                scope.include_rhythm_room(
+                    &binding.hub_room_id,
+                    &binding.control_id,
+                    &binding.light_device_ids,
+                );
+            } else {
+                scope.include_external_room(
+                    &binding.hub_room_id,
+                    &binding.control_id,
+                    &binding.light_device_ids,
+                );
+            }
+        }
+    }
+    Ok(scope)
+}
+
 fn hue_release_context(state: &SharedState, key: &HubKey) -> Result<Option<HueAuthorityContext>> {
     let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let Some(storage) = state.storage.clone() else {
@@ -930,7 +964,21 @@ fn verify_and_persist_connected_bridge_identity(
 
 fn ensure_hue_start_phase_is_not_release_fenced(
     phase: Option<crate::ownership::HueOwnershipPhase>,
+    release_intent: Option<crate::ownership::HueOwnershipReleaseIntent>,
 ) -> Result<()> {
+    let resumable_room_policy_release = release_intent
+        == Some(crate::ownership::HueOwnershipReleaseIntent::RoomAuthorityChanged)
+        && matches!(
+            phase,
+            Some(
+                crate::ownership::HueOwnershipPhase::Restoring
+                    | crate::ownership::HueOwnershipPhase::RestoreIncomplete
+                    | crate::ownership::HueOwnershipPhase::Restored
+            )
+        );
+    if resumable_room_policy_release {
+        return Ok(());
+    }
     if matches!(
         phase,
         Some(
@@ -953,12 +1001,18 @@ fn ensure_hue_start_is_not_release_fenced(state: &SharedState, bridge_id: &str) 
         .map_err(|_| anyhow::anyhow!("lock"))?
         .storage
         .clone();
-    let phase = match storage {
-        Some(storage) => crate::ownership::load_controller_ownership(storage.as_ref(), bridge_id)?
-            .map(|ownership| ownership.phase),
-        None => None,
+    let (phase, release_intent) = match storage {
+        Some(storage) => {
+            let ownership =
+                crate::ownership::load_controller_ownership(storage.as_ref(), bridge_id)?;
+            (
+                ownership.as_ref().map(|ownership| ownership.phase),
+                ownership.and_then(|ownership| ownership.release_intent()),
+            )
+        }
+        None => (None, None),
     };
-    ensure_hue_start_phase_is_not_release_fenced(phase)
+    ensure_hue_start_phase_is_not_release_fenced(phase, release_intent)
 }
 
 fn hue_authority_should_fence_on_connect(
@@ -1225,6 +1279,40 @@ fn active_ownership_for_topology_sync(
     Ok(ownership)
 }
 
+/// Resolve a durably rejected takeover without weakening Hue suppression.
+///
+/// A repeatedly failed receipt in `clear_incomplete` means the same journaled
+/// suppression operation could not be applied or verified across retries.
+/// Retrying that same epoch across every restart leaves the controller fenced
+/// indefinitely. Persist the native Hue room policy first, then restore and
+/// finalize the partial epoch. If restoration fails, the native policy remains
+/// durable and the ordinary observe-only bootstrap path resumes restoration on
+/// its next retry. Inventory failures and first-attempt write failures remain
+/// retryable.
+fn recover_incomplete_hue_takeover_policy(
+    state: &SharedState,
+    key: &HubKey,
+    phase: Option<crate::ownership::HueOwnershipPhase>,
+    has_repeated_failed_receipt: bool,
+    release: impl FnOnce() -> Result<()>,
+) -> Result<bool> {
+    if phase != Some(crate::ownership::HueOwnershipPhase::ClearIncomplete)
+        || !has_repeated_failed_receipt
+    {
+        return Ok(false);
+    }
+
+    rhythm_os::commands::fail_closed_external_room_automation_policy(state, key)
+        .context("Failed to persist fail-closed Hue policy after rejected takeover")?;
+    release().context("Failed to restore Hue after rejected takeover")?;
+    warn!(
+        target: "hue_authority",
+        "Recovered rejected Hue takeover for {}; room automation returned to Hue",
+        key
+    );
+    Ok(true)
+}
+
 /// Static integration instance for platform crate registries.
 pub static INTEGRATION: HueIntegration = HueIntegration;
 
@@ -1366,12 +1454,12 @@ impl ExternalLightHubIntegration for HueIntegration {
         state: &SharedState,
         key: &HubKey,
     ) -> Result<()> {
-        let has_full_room_consent = state
+        let has_rhythm_room_consent = state
             .lock()
             .map_err(|_| anyhow::anyhow!("lock"))?
             .topology
-            .external_hub_has_full_rhythm_consent(key);
-        if !has_full_room_consent {
+            .external_hub_has_rhythm_consent(key);
+        if !has_rhythm_room_consent {
             // Upgrades can arrive with an ownership manifest created by the
             // old implicit-takeover behavior. Observe-only must undo that
             // work before the generic callback publishes this controller as
@@ -1384,37 +1472,60 @@ impl ExternalLightHubIntegration for HueIntegration {
             )?;
             log::info!(
                 target: "hue_authority",
-                "Hue bridge {} remains observe-only until every bound room explicitly chooses Rhythm automation",
+                "Hue bridge {} remains observe-only until at least one bound room explicitly chooses Rhythm automation",
                 key
             );
             return Ok(());
         }
+        let suppression_scope = hue_automation_suppression_scope(state, key)?;
         let context = hue_authority_context(state, key)?;
         let transport = ReqwestHueTransport::new(&context.bridge_ip)?;
         let bridge_id = crate::ownership::connected_hue_bridge_id(&transport, &context.username)?;
         persist_connected_bridge_identity(state, key, &bridge_id)?;
-        if crate::ownership::load_controller_ownership(context.storage.as_ref(), &bridge_id)?
-            .is_some_and(|ownership| {
-                matches!(
-                    ownership.phase,
-                    crate::ownership::HueOwnershipPhase::Restoring
-                        | crate::ownership::HueOwnershipPhase::RestoreIncomplete
-                        | crate::ownership::HueOwnershipPhase::Restored
-                        | crate::ownership::HueOwnershipPhase::ReleasePending
-                )
+        let ownership =
+            crate::ownership::load_controller_ownership(context.storage.as_ref(), &bridge_id)?;
+        let has_repeated_failed_receipt = ownership.as_ref().is_some_and(|ownership| {
+            ownership.receipts().any(|receipt| {
+                receipt.status == crate::ownership::HueOwnershipReceiptStatus::Failed
+                    && receipt.attempt >= HUE_TAKEOVER_FAILED_ATTEMPTS_BEFORE_POLICY_ROLLBACK
             })
-        {
+        });
+        if recover_incomplete_hue_takeover_policy(
+            state,
+            key,
+            ownership.as_ref().map(|ownership| ownership.phase),
+            has_repeated_failed_receipt,
+            || {
+                self.release_external_controller_authority(
+                    state,
+                    key,
+                    ExternalControllerReleaseReason::RoomAuthorityChanged,
+                )
+            },
+        )? {
+            return Ok(());
+        }
+        if ownership.is_some_and(|ownership| {
+            matches!(
+                ownership.phase,
+                crate::ownership::HueOwnershipPhase::Restoring
+                    | crate::ownership::HueOwnershipPhase::RestoreIncomplete
+                    | crate::ownership::HueOwnershipPhase::Restored
+                    | crate::ownership::HueOwnershipPhase::ReleasePending
+            )
+        }) {
             anyhow::bail!("Hue bridge release has started; takeover cannot be resumed");
         }
         let operation_lock = crate::ownership::controller_operation_lock(&bridge_id);
         let _operation = operation_lock
             .lock()
             .map_err(|_| anyhow::anyhow!("Failed to lock Hue controller operations"))?;
-        crate::ownership::acquire_authoritative_control(
+        crate::ownership::acquire_authoritative_control_in_scope(
             context.storage.as_ref(),
             key,
             &transport,
             &context.username,
+            &suppression_scope,
         )?;
         Ok(())
     }
@@ -1434,11 +1545,17 @@ impl ExternalLightHubIntegration for HueIntegration {
         let _operation = operation_lock
             .lock()
             .map_err(|_| anyhow::anyhow!("Failed to lock Hue controller operations"))?;
-        let Some(ownership) = crate::ownership::release_authoritative_control(
+        let release_intent = if reason == ExternalControllerReleaseReason::RoomAuthorityChanged {
+            crate::ownership::HueOwnershipReleaseIntent::RoomAuthorityChanged
+        } else {
+            crate::ownership::HueOwnershipReleaseIntent::LocalTeardown
+        };
+        let Some(ownership) = crate::ownership::release_authoritative_control_with_intent(
             context.storage.as_ref(),
             key,
             &transport,
             &context.username,
+            release_intent,
         )?
         else {
             return Ok(());
@@ -2589,19 +2706,23 @@ mod tests {
 
     #[test]
     fn hue_start_phase_fence_blocks_release_phases_only() {
-        use crate::ownership::HueOwnershipPhase;
+        use crate::ownership::{HueOwnershipPhase, HueOwnershipReleaseIntent};
 
-        for phase in [
-            HueOwnershipPhase::Restoring,
-            HueOwnershipPhase::RestoreIncomplete,
-            HueOwnershipPhase::Restored,
-            HueOwnershipPhase::ReleasePending,
-        ] {
-            let error = ensure_hue_start_phase_is_not_release_fenced(Some(phase)).unwrap_err();
-            assert_eq!(
-                error.to_string(),
-                "Hue bridge release is incomplete; retry disconnecting Hue before reconnecting it"
-            );
+        for release_intent in [None, Some(HueOwnershipReleaseIntent::LocalTeardown)] {
+            for phase in [
+                HueOwnershipPhase::Restoring,
+                HueOwnershipPhase::RestoreIncomplete,
+                HueOwnershipPhase::Restored,
+                HueOwnershipPhase::ReleasePending,
+            ] {
+                let error =
+                    ensure_hue_start_phase_is_not_release_fenced(Some(phase), release_intent)
+                        .unwrap_err();
+                assert_eq!(
+                    error.to_string(),
+                    "Hue bridge release is incomplete; retry disconnecting Hue before reconnecting it"
+                );
+            }
         }
 
         for phase in [
@@ -2611,9 +2732,26 @@ mod tests {
             HueOwnershipPhase::Active,
             HueOwnershipPhase::SnapshotRetained,
         ] {
-            ensure_hue_start_phase_is_not_release_fenced(Some(phase)).unwrap();
+            ensure_hue_start_phase_is_not_release_fenced(Some(phase), None).unwrap();
         }
-        ensure_hue_start_phase_is_not_release_fenced(None).unwrap();
+        ensure_hue_start_phase_is_not_release_fenced(None, None).unwrap();
+
+        for phase in [
+            HueOwnershipPhase::Restoring,
+            HueOwnershipPhase::RestoreIncomplete,
+            HueOwnershipPhase::Restored,
+        ] {
+            ensure_hue_start_phase_is_not_release_fenced(
+                Some(phase),
+                Some(HueOwnershipReleaseIntent::RoomAuthorityChanged),
+            )
+            .unwrap();
+        }
+        ensure_hue_start_phase_is_not_release_fenced(
+            Some(HueOwnershipPhase::ReleasePending),
+            Some(HueOwnershipReleaseIntent::RoomAuthorityChanged),
+        )
+        .expect_err("credential teardown must never resume as an ordinary bootstrap");
     }
 
     #[test]
@@ -2950,6 +3088,55 @@ mod tests {
     }
 
     #[test]
+    fn durable_room_policy_release_intent_allows_hue_restart() {
+        static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+
+        let path = std::env::temp_dir().join(format!(
+            "rhythm-hue-room-policy-release-restart-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let storage = Arc::new(FileStorage::new(path.to_str().unwrap()).unwrap());
+        let manifest = serde_json::json!({
+            "schema_version": crate::ownership::HUE_CONTROLLER_OWNERSHIP_SCHEMA_VERSION,
+            "phase": "restore_incomplete",
+            "baseline": {
+                "schema_version": crate::ownership::HUE_CONTROLLER_OWNERSHIP_SCHEMA_VERSION,
+                "capture_id": "capture-room-policy-release",
+                "bridge_id": "bridge-room-policy-release",
+                "v2_resources": {},
+                "v1_resources": {}
+            },
+            "managed_rooms": {},
+            "managed_scenes": {},
+            "receipts": {},
+            "release_intent": "room_authority_changed"
+        });
+        storage
+            .save_integration_state_file(
+                &crate::ownership::hue_controller_ownership_path("bridge-room-policy-release")
+                    .unwrap(),
+                &serde_json::to_string(&manifest).unwrap(),
+            )
+            .unwrap();
+
+        let state = shared_state();
+        state.lock().unwrap().storage = Some(storage.clone());
+        let started = AtomicBool::new(false);
+
+        start_hue_after_release_fence(&state, "bridge-room-policy-release", || {
+            started.store(true, Ordering::Relaxed);
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(started.load(Ordering::Relaxed));
+        drop(state);
+        drop(storage);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
     fn pending_same_key_controller_blocks_reconfiguration_without_a_manifest() {
         let state = shared_state();
         let key = hue_key("192.0.2.10");
@@ -3147,6 +3334,140 @@ mod tests {
             vec!["light", "button", "motion"]
         );
         assert!(caps.supports_roomless_devices);
+    }
+
+    fn rhythm_owned_hue_room_state() -> (SharedState, HubKey) {
+        let state = shared_state();
+        let key = hue_key("192.0.2.10");
+        {
+            let mut app = state.lock().unwrap();
+            let mut room = rhythm_os::topology::TopologyRoom::new("rhythm-office", "Office");
+            room.hub_room_bindings.push(HubRoomBinding {
+                hub_key: key.clone(),
+                hub_room_id: "hue-office".to_string(),
+                control_id: "hue-office-group".to_string(),
+                light_device_ids: vec!["hue-light-1".to_string()],
+            });
+            app.topology.insert_room(room);
+            app.topology
+                .replace_external_room_automation_decisions(
+                    &key,
+                    &[(
+                        "rhythm-office".to_string(),
+                        rhythm_os::topology::ExternalRoomAutomationOwner::Rhythm,
+                    )],
+                )
+                .unwrap();
+        }
+        (state, key)
+    }
+
+    #[test]
+    fn clear_incomplete_takeover_returns_room_policy_to_hue_before_release() {
+        let (state, key) = rhythm_owned_hue_room_state();
+        let release_calls = AtomicUsize::new(0);
+
+        assert!(recover_incomplete_hue_takeover_policy(
+            &state,
+            &key,
+            Some(crate::ownership::HueOwnershipPhase::ClearIncomplete),
+            true,
+            || {
+                let app = state.lock().unwrap();
+                assert_eq!(
+                    app.topology
+                        .external_room_automation_owner("rhythm-office", &key),
+                    Some(rhythm_os::topology::ExternalRoomAutomationOwner::External)
+                );
+                release_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .unwrap());
+        assert_eq!(release_calls.load(Ordering::SeqCst), 1);
+        let app = state.lock().unwrap();
+        assert_eq!(
+            app.topology
+                .external_room_automation_owner("rhythm-office", &key),
+            Some(rhythm_os::topology::ExternalRoomAutomationOwner::External)
+        );
+        assert!(!app.rhythm_automation_allowed_for_node("rhythm-office"));
+    }
+
+    #[test]
+    fn transient_takeover_phase_remains_retryable_without_policy_rollback() {
+        let (state, key) = rhythm_owned_hue_room_state();
+        let release_calls = AtomicUsize::new(0);
+
+        assert!(!recover_incomplete_hue_takeover_policy(
+            &state,
+            &key,
+            Some(crate::ownership::HueOwnershipPhase::Captured),
+            false,
+            || {
+                release_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .unwrap());
+        assert_eq!(release_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .topology
+                .external_room_automation_owner("rhythm-office", &key),
+            Some(rhythm_os::topology::ExternalRoomAutomationOwner::Rhythm)
+        );
+    }
+
+    #[test]
+    fn first_incomplete_takeover_failure_remains_retryable() {
+        let (state, key) = rhythm_owned_hue_room_state();
+        let release_calls = AtomicUsize::new(0);
+
+        assert!(!recover_incomplete_hue_takeover_policy(
+            &state,
+            &key,
+            Some(crate::ownership::HueOwnershipPhase::ClearIncomplete),
+            false,
+            || {
+                release_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        )
+        .unwrap());
+        assert_eq!(release_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .topology
+                .external_room_automation_owner("rhythm-office", &key),
+            Some(rhythm_os::topology::ExternalRoomAutomationOwner::Rhythm)
+        );
+    }
+
+    #[test]
+    fn failed_incomplete_takeover_release_keeps_native_policy_for_retry() {
+        let (state, key) = rhythm_owned_hue_room_state();
+
+        recover_incomplete_hue_takeover_policy(
+            &state,
+            &key,
+            Some(crate::ownership::HueOwnershipPhase::ClearIncomplete),
+            true,
+            || anyhow::bail!("injected Hue restore failure"),
+        )
+        .expect_err("controller restoration should remain retryable");
+
+        let app = state.lock().unwrap();
+        assert_eq!(
+            app.topology
+                .external_room_automation_owner("rhythm-office", &key),
+            Some(rhythm_os::topology::ExternalRoomAutomationOwner::External)
+        );
+        assert!(!app.rhythm_automation_allowed_for_node("rhythm-office"));
     }
 
     #[test]

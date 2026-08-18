@@ -425,9 +425,10 @@ fn validate_hue_v2_envelope<'a>(
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| anyhow::anyhow!("{operation} returned an invalid V2 response"))?;
     if !errors.is_empty() {
+        let categories = hue_v2_error_categories_from_value(value);
         anyhow::bail!(
-            "{operation} returned {} Hue application error(s)",
-            errors.len()
+            "{operation} returned Hue application error category: {}",
+            categories.join(",")
         );
     }
     value
@@ -435,6 +436,64 @@ fn validate_hue_v2_envelope<'a>(
         .and_then(serde_json::Value::as_array)
         .map(Vec::as_slice)
         .ok_or_else(|| anyhow::anyhow!("{operation} returned a V2 response without data"))
+}
+
+fn hue_v2_error_categories(body: &str) -> Vec<&'static str> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return vec!["invalid_response"];
+    };
+    hue_v2_error_categories_from_value(&value)
+}
+
+fn hue_v2_error_categories_from_value(value: &serde_json::Value) -> Vec<&'static str> {
+    let Some(errors) = value.get("errors").and_then(serde_json::Value::as_array) else {
+        return vec!["invalid_response"];
+    };
+    let mut categories = BTreeSet::new();
+    for error in errors {
+        let description = error
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let category =
+            if description.contains("json-schema") || description.contains("schema validation") {
+                "schema_validation"
+            } else if (description.contains("resource") && description.contains("not available"))
+                || description.contains("not found")
+            {
+                "resource_missing"
+            } else if description.contains("not modifiable")
+                || description.contains("cannot modify")
+                || description.contains("read-only")
+            {
+                "resource_immutable"
+            } else if description.contains("invalid base value")
+                || description.contains("invalid value")
+            {
+                "invalid_value"
+            } else if description.contains("not allowed")
+                || description.contains("unauthorized")
+                || description.contains("forbidden")
+            {
+                "permission_denied"
+            } else {
+                "opaque"
+            };
+        categories.insert(category);
+    }
+    if categories.is_empty() {
+        categories.insert("empty_error_envelope");
+    }
+    categories.into_iter().collect()
+}
+
+fn hue_v2_http_error(operation: &str, status: reqwest::StatusCode, body: &str) -> anyhow::Error {
+    let categories = hue_v2_error_categories(body);
+    anyhow::anyhow!(
+        "{operation} failed with HTTP status {status}; Hue error category: {}",
+        categories.join(",")
+    )
 }
 
 fn normalized_zigbee_mac(value: &str) -> Option<String> {
@@ -869,7 +928,7 @@ impl HueTransport for ReqwestHueTransport {
         let response_body = response.text().unwrap_or_default();
         let operation = format!("PUT Hue V2 {resource_type}");
         if !status.is_success() {
-            anyhow::bail!("{operation} failed with HTTP status {status}");
+            return Err(hue_v2_http_error(&operation, status, &response_body));
         }
         validate_hue_v2_resource_write_response(
             &operation,
@@ -1372,13 +1431,80 @@ mod tests {
 
         let error = validate_hue_v2_resource_write_response(
             "PUT scene/native-1 recall",
-            r#"{"data":[],"errors":[{"description":"scene unavailable"}]}"#,
+            r#"{"data":[],"errors":[{"description":"invalid value for scene private-scene-id"}]}"#,
             "native-1",
             "scene",
         )
         .unwrap_err();
-        assert!(error.to_string().contains("1 Hue application error"));
-        assert!(!error.to_string().contains("scene unavailable"));
+        let message = error.to_string();
+        assert!(message.contains("Hue application error category: invalid_value"));
+        assert!(!message.contains("private-scene-id"));
+    }
+
+    #[test]
+    fn hue_http_error_reports_privacy_bounded_categories() {
+        let body = r#"{
+            "data": [],
+            "errors": [
+                {"description":"resource 8d3e0c54-18d5-45f9-a12e-e27d9f15b177 not available"},
+                {"description":"error: 'json-schema validation', private room name"}
+            ]
+        }"#;
+
+        let error = hue_v2_http_error(
+            "PUT Hue V2 behavior_instance",
+            reqwest::StatusCode::BAD_REQUEST,
+            body,
+        );
+        let message = error.to_string();
+
+        assert!(message.contains("HTTP status 400 Bad Request"));
+        assert!(message.contains("resource_missing,schema_validation"));
+        assert!(!message.contains("8d3e0c54"));
+        assert!(!message.contains("private room name"));
+    }
+
+    #[test]
+    fn hue_http_error_classifies_malformed_and_unknown_responses() {
+        assert_eq!(hue_v2_error_categories("not-json"), ["invalid_response"]);
+        assert_eq!(
+            hue_v2_error_categories(r#"{"data":[],"errors":[]}"#),
+            ["empty_error_envelope"]
+        );
+        assert_eq!(
+            hue_v2_error_categories(
+                r#"{"data":[],"errors":[{"description":"vendor-specific failure"}]}"#
+            ),
+            ["opaque"]
+        );
+    }
+
+    #[test]
+    fn hue_error_categories_cover_fixed_categories_and_deduplicate_mixed_errors() {
+        let body = r#"{
+            "data": [],
+            "errors": [
+                {"description":"resource is not modifiable: private-room-id"},
+                {"description":"invalid base value for private-light-id"},
+                {"description":"operation forbidden for private-app-key"},
+                {"description":"read-only resource private-room-id"},
+                {"description":"vendor-specific private detail"}
+            ]
+        }"#;
+
+        assert_eq!(
+            hue_v2_error_categories(body),
+            [
+                "invalid_value",
+                "opaque",
+                "permission_denied",
+                "resource_immutable"
+            ]
+        );
+        let categories = hue_v2_error_categories(body).join(",");
+        assert!(!categories.contains("private-room-id"));
+        assert!(!categories.contains("private-light-id"));
+        assert!(!categories.contains("private-app-key"));
     }
 
     #[test]

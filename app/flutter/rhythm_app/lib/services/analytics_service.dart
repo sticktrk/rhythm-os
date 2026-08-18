@@ -260,12 +260,14 @@ class AnalyticsService {
   Future<void> logHueAuthorityReviewOpened({
     required String journeyId,
     required String source,
+    required String authorityScope,
     required int roomCount,
     required bool hadPriorReview,
   }) async {
     await logEvent('hue_authority_review_opened', {
       'journey_id': journeyId,
       'source': source,
+      'authority_scope': authorityScope,
       'affected_room_count_bucket': _layoutCountBucket(roomCount),
       'had_prior_review': hadPriorReview ? 1 : 0,
     });
@@ -278,6 +280,7 @@ class AnalyticsService {
     required int hueRoomCount,
     required int rhythmRoomCount,
     required bool bridgeTakeoverRequested,
+    required String authorityScope,
   }) async {
     final choice = hueRoomCount == roomCount
         ? 'all_hue'
@@ -287,6 +290,7 @@ class AnalyticsService {
     await logEvent('hue_room_control_choice_submitted', {
       'journey_id': journeyId,
       'source': source,
+      'authority_scope': authorityScope,
       'choice': choice,
       'affected_room_count_bucket': _layoutCountBucket(roomCount),
       'conflict_count_bucket': 'unknown',
@@ -299,11 +303,13 @@ class AnalyticsService {
     required String source,
     required String outcome,
     required bool bridgeTakeoverRequested,
+    required String authorityScope,
     String? failureStage,
   }) async {
     await logEvent('hue_room_control_transition_completed', {
       'journey_id': journeyId,
       'source': source,
+      'authority_scope': authorityScope,
       'outcome': outcome,
       'bridge_takeover_requested': bridgeTakeoverRequested ? 1 : 0,
       if (failureStage != null) 'failure_stage': failureStage,
@@ -751,10 +757,12 @@ class AnalyticsService {
   Future<void> logLightProfileRoomDefaultChanged({
     required String profile,
     required bool cleared,
+    String source = 'automations',
   }) async {
     await logEvent('light_profile_room_default_changed', {
       'profile': profile,
       'cleared': cleared ? 1 : 0,
+      'source': source,
     });
   }
 
@@ -776,6 +784,8 @@ class AnalyticsService {
     required String profile,
     required String outcome,
     required int changedFieldCount,
+    String? dayColorMode,
+    String? dayBrightnessMode,
     String? failureStage,
     String scope = 'room',
   }) async {
@@ -784,6 +794,9 @@ class AnalyticsService {
       'profile': profile,
       'outcome': outcome,
       'changed_field_count': changedFieldCount,
+      if (dayColorMode != null) 'day_color_mode': dayColorMode,
+      if (dayBrightnessMode != null)
+        'day_brightness_mode': dayBrightnessMode,
       if (failureStage != null) 'failure_stage': failureStage,
     });
   }

@@ -1798,12 +1798,20 @@ void main() {
         await provider.setNodeLightProfileOverride(
           'room-1',
           profileId: 'rhythm',
-          profileOverride:
-              const RhythmLightProfileNodeOverride(minBrightness: 8),
+          profileOverride: const RhythmLightProfileNodeOverride(
+            minBrightness: 42,
+            maxBrightness: 42,
+          ),
           correlationId: 'room-light-settings-failed',
         ),
         isFalse,
       );
+      expect(api.nodeProfileOverrideCalls.single.profileOverrides, {
+        'rhythm': {
+          'min_brightness': 42,
+          'max_brightness': 42,
+        },
+      });
       expect(
         provider
             .nodeById('room-1')

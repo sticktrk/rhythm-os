@@ -258,6 +258,8 @@ pub struct SpyHueTransport {
     resources: Arc<Mutex<HashMap<String, serde_json::Value>>>,
     should_fail: Arc<AtomicBool>,
     ignore_resource_mutations: Arc<AtomicBool>,
+    fail_next_resource_read_after_update: Arc<AtomicBool>,
+    resource_read_failure_armed: Arc<AtomicBool>,
     fail_resource_update: Arc<Mutex<Option<(String, String)>>>,
     fail_room_update: Arc<Mutex<Option<String>>>,
     v1_write_response_override: Arc<Mutex<Option<serde_json::Value>>>,
@@ -273,6 +275,8 @@ impl SpyHueTransport {
             resources: Arc::new(Mutex::new(HashMap::new())),
             should_fail: Arc::new(AtomicBool::new(false)),
             ignore_resource_mutations: Arc::new(AtomicBool::new(false)),
+            fail_next_resource_read_after_update: Arc::new(AtomicBool::new(false)),
+            resource_read_failure_armed: Arc::new(AtomicBool::new(false)),
             fail_resource_update: Arc::new(Mutex::new(None)),
             fail_room_update: Arc::new(Mutex::new(None)),
             v1_write_response_override: Arc::new(Mutex::new(None)),
@@ -295,6 +299,14 @@ impl SpyHueTransport {
     pub fn set_ignore_resource_mutations(&self, ignore: bool) {
         self.ignore_resource_mutations
             .store(ignore, Ordering::Relaxed);
+    }
+
+    /// Apply the next resource update, then fail its first typed read-back.
+    /// This models an acknowledged write followed by a transient observation
+    /// failure without making later recovery reads fail.
+    pub fn set_fail_next_resource_read_after_update(&self, fail: bool) {
+        self.fail_next_resource_read_after_update
+            .store(fail, Ordering::Relaxed);
     }
 
     /// Configure one generic V2 resource update that should fail.
@@ -538,6 +550,12 @@ impl HueTransport for SpyHueTransport {
         if self.should_fail.load(Ordering::Relaxed) {
             anyhow::bail!("spy: get_resources failed");
         }
+        if self
+            .resource_read_failure_armed
+            .swap(false, Ordering::Relaxed)
+        {
+            anyhow::bail!("spy: post-update get_resources failed");
+        }
         Ok(self
             .resources
             .lock()
@@ -665,6 +683,13 @@ impl HueTransport for SpyHueTransport {
             })
             .ok_or_else(|| anyhow::anyhow!("spy: resource not found"))?;
         merge_json(resource, body);
+        if self
+            .fail_next_resource_read_after_update
+            .swap(false, Ordering::Relaxed)
+        {
+            self.resource_read_failure_armed
+                .store(true, Ordering::Relaxed);
+        }
         Ok(())
     }
 

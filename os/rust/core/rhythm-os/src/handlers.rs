@@ -3861,6 +3861,72 @@ pub fn handle_post_device_flash(state: &SharedState, device_id: &str) -> ApiResp
     }
 }
 
+fn assistant_json_response<T: serde::Serialize>(value: &T) -> ApiResponse {
+    match serde_json::to_string(value) {
+        Ok(body) => ApiResponse::json_ok(body),
+        Err(error) => ApiResponse::server_error(error),
+    }
+}
+
+fn assistant_error_response(error: crate::assistant::LightAssistantError) -> ApiResponse {
+    match serde_json::to_string(&error.envelope()) {
+        Ok(body) => ApiResponse::json_status(error.status, body),
+        Err(serialization_error) => ApiResponse::server_error(serialization_error),
+    }
+}
+
+pub fn handle_get_assistant_contract(state: &SharedState) -> ApiResponse {
+    match crate::assistant::build_light_assistant_contract(state) {
+        Ok(contract) => assistant_json_response(&contract),
+        Err(error) => assistant_error_response(error),
+    }
+}
+
+pub fn handle_get_assistant_topology(state: &SharedState) -> ApiResponse {
+    match crate::assistant::build_light_assistant_topology_snapshot(state) {
+        Ok(snapshot) => assistant_json_response(&snapshot),
+        Err(error) => assistant_error_response(error),
+    }
+}
+
+pub fn handle_post_assistant_move_plan(state: &SharedState, body: &Value) -> ApiResponse {
+    let request = match serde_json::from_value(body.clone()) {
+        Ok(request) => request,
+        Err(_) => {
+            return assistant_error_response(crate::assistant::LightAssistantError {
+                status: 400,
+                code: "invalid_request",
+                message: "The move plan request does not match the advertised contract".to_string(),
+                retryable: false,
+                mutation_may_have_applied: false,
+            })
+        }
+    };
+    match crate::assistant::plan_light_assistant_device_room_move(state, request) {
+        Ok(plan) => assistant_json_response(&plan),
+        Err(error) => assistant_error_response(error),
+    }
+}
+
+pub fn handle_post_assistant_move_apply(state: &SharedState, body: &Value) -> ApiResponse {
+    let request = match serde_json::from_value(body.clone()) {
+        Ok(request) => request,
+        Err(_) => {
+            return assistant_error_response(crate::assistant::LightAssistantError {
+                status: 400,
+                code: "invalid_request",
+                message: "The apply request does not match the advertised contract".to_string(),
+                retryable: false,
+                mutation_may_have_applied: false,
+            })
+        }
+    };
+    match crate::assistant::apply_light_assistant_device_room_move(state, request) {
+        Ok(receipt) => assistant_json_response(&receipt),
+        Err(error) => assistant_error_response(error),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Triage handlers
 // ---------------------------------------------------------------------------
@@ -6357,7 +6423,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_hue_authority_stays_effectively_hue_and_releases_prior_takeover() {
+    fn mixed_hue_authority_reconciles_and_applies_effective_owner_per_room() {
         let state = test_state();
         let key = HubKey::new(HubType::new(HubType::HUE), "bridge.local");
         let reconcile_calls = Arc::new(AtomicUsize::new(0));
@@ -6405,13 +6471,18 @@ mod tests {
         );
         assert_eq!(mixed.status, 200);
         let mixed: Value = serde_json::from_str(&mixed.body).unwrap();
-        assert_eq!(reconcile_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(reconcile_calls.load(Ordering::SeqCst), 1);
         assert_eq!(release_calls.load(Ordering::SeqCst), 1);
-        assert!(mixed["bridges"][0]["rooms"]
-            .as_array()
-            .unwrap()
+        assert_eq!(mixed["bridges"][0]["takeover_scope"], "room");
+        let mixed_rooms = mixed["bridges"][0]["rooms"].as_array().unwrap();
+        assert!(mixed_rooms
             .iter()
-            .all(|room| room["rhythm_automation_enabled"] == false));
+            .find(|room| room["room_id"] == "room-office")
+            .is_some_and(|room| room["rhythm_automation_enabled"] == true));
+        assert!(mixed_rooms
+            .iter()
+            .find(|room| room["room_id"] == "room-hall")
+            .is_some_and(|room| room["rhythm_automation_enabled"] == false));
 
         let all_rhythm = handle_put_hue_authority(
             &state,
@@ -6426,7 +6497,7 @@ mod tests {
             }),
         );
         assert_eq!(all_rhythm.status, 200);
-        assert_eq!(reconcile_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(reconcile_calls.load(Ordering::SeqCst), 2);
 
         let all_rhythm: Value = serde_json::from_str(&all_rhythm.body).unwrap();
         let back_to_hue = handle_put_hue_authority(
@@ -6442,7 +6513,7 @@ mod tests {
             }),
         );
         assert_eq!(back_to_hue.status, 200);
-        assert_eq!(release_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(release_calls.load(Ordering::SeqCst), 3);
     }
 
     #[test]

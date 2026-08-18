@@ -22,6 +22,7 @@ import 'low_glow_switch.dart';
 import 'segmented_tab_bar.dart';
 import 'light_output_display.dart';
 import 'auto_slider_setting_row.dart';
+import 'room_schedule_behavior_control.dart';
 import 'solar_orbit.dart'; // For CelestialColors
 
 /// Bottom sheet with per-room settings.
@@ -401,6 +402,19 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
               color: const Color(0xFFFFB74D),
               deviceType: RhythmDeviceType.light,
               analyticsSource: 'room_settings_light',
+            ),
+          ]),
+          const SizedBox(height: 16),
+          _buildSettingsGroup('Schedule behavior', [
+            Padding(
+              padding: const EdgeInsets.all(10),
+              child: RoomScheduleBehaviorControl(
+                roomId: room.id,
+                foregroundColor: CelestialColors.textPrimary,
+                showTopDivider: false,
+                keyPrefix: 'room-settings-schedule',
+                analyticsSource: 'room_settings',
+              ),
             ),
           ]),
           const SizedBox(height: 16),

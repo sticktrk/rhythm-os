@@ -110,6 +110,10 @@ class DemoServerApi extends RhythmServerApi {
           (room) =>
               _hueRoomOwners[room['id']] == RhythmHueRoomAuthorityOwner.rhythm,
         );
+    final anyRhythm = roomEntries.any(
+      (room) =>
+          _hueRoomOwners[room['id']] == RhythmHueRoomAuthorityOwner.rhythm,
+    );
     final rooms = roomEntries
         .map(
           (room) => RhythmHueRoomAuthority(
@@ -117,7 +121,8 @@ class DemoServerApi extends RhythmServerApi {
             name: room['name'] as String? ?? 'Hue room',
             owner: _hueRoomOwners[room['id']] ??
                 RhythmHueRoomAuthorityOwner.unreviewed,
-            rhythmAutomationEnabled: allRhythm,
+            rhythmAutomationEnabled: _hueRoomOwners[room['id']] ==
+                RhythmHueRoomAuthorityOwner.rhythm,
           ),
         )
         .toList(growable: false);
@@ -127,8 +132,8 @@ class DemoServerApi extends RhythmServerApi {
         RhythmHueBridgeAuthority(
           address: _demoHubAddress,
           revision: _hueAuthorityRevision.toRadixString(16).padLeft(16, '0'),
-          takeoverScope: 'bridge',
-          bridgeTakeoverRequested: allRhythm,
+          takeoverScope: 'room',
+          bridgeTakeoverRequested: anyRhythm,
           topologySyncEnabled: _hueTopologySyncEnabled,
           topologySyncStatus: !_hueTopologySyncEnabled
               ? 'disabled'

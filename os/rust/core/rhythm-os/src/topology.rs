@@ -2337,15 +2337,22 @@ impl RoomTopologyStore {
                 .all(|(_, _, owner)| *owner == Some(ExternalRoomAutomationOwner::Rhythm))
     }
 
+    /// Whether at least one room on an external controller explicitly chose
+    /// Rhythm automation. Unlike full consent, this is sufficient for a
+    /// controller that can reconcile a selective, room-bounded suppression
+    /// scope while preserving every externally owned room.
+    pub fn external_hub_has_rhythm_consent(&self, hub_key: &HubKey) -> bool {
+        self.external_automation_rooms_for_hub(hub_key)
+            .iter()
+            .any(|(_, _, owner)| *owner == Some(ExternalRoomAutomationOwner::Rhythm))
+    }
+
     /// Whether unattended Rhythm behavior may target this public topology
     /// node. Hue-backed rooms default to false until explicitly reviewed.
     ///
-    /// The current Hue takeover primitive is bridge-wide. A mixed room review
-    /// therefore remains fail-closed for the complete bridge: Hue rules can
-    /// target more than one room, and Rhythm must not race an unsuppressed
-    /// cross-room automation. This can become truly per-room only after the
-    /// Hue integration supplies a complete target graph and selective
-    /// suppression receipts.
+    /// Hue behavior suppression is reconciled independently from this policy.
+    /// Cross-room or unsupported Hue behavior may intentionally coexist with
+    /// Rhythm; the persisted room decision is the admission boundary.
     pub fn rhythm_automation_allowed_for_node(&self, node_id: &str) -> bool {
         let room_id = if self.rooms.contains_key(node_id) {
             Some(node_id)
@@ -2361,7 +2368,10 @@ impl RoomTopologyStore {
         room.hub_room_bindings
             .iter()
             .filter(|binding| binding.hub_key.hub_type.as_str() == crate::hub::HubType::HUE)
-            .all(|binding| self.external_hub_has_full_rhythm_consent(&binding.hub_key))
+            .all(|binding| {
+                self.external_room_automation_owner(room_id, &binding.hub_key)
+                    == Some(ExternalRoomAutomationOwner::Rhythm)
+            })
     }
 
     /// Get all persisted explicit control links.
@@ -4967,7 +4977,7 @@ mod tests {
     }
 
     #[test]
-    fn hue_rooms_fail_closed_until_each_room_has_an_explicit_decision() {
+    fn hue_rooms_apply_explicit_authority_per_room() {
         let mut store = RoomTopologyStore::new();
         let office_id = store.create_room("Office");
         let bedroom_id = store.create_room("Bedroom");
@@ -4986,6 +4996,7 @@ mod tests {
 
         assert!(!store.rhythm_automation_allowed_for_node(&office_id));
         assert!(!store.external_hub_has_full_rhythm_consent(&key));
+        assert!(!store.external_hub_has_rhythm_consent(&key));
         let before_revision = store.external_automation_revision(&key);
 
         assert!(store
@@ -4997,12 +5008,18 @@ mod tests {
                 ],
             )
             .unwrap());
-        // Hue automations can span rooms, so mixed decisions keep the entire
-        // bridge fail-closed until selective target planning is available.
-        assert!(!store.rhythm_automation_allowed_for_node(&office_id));
+        assert!(store.rhythm_automation_allowed_for_node(&office_id));
         assert!(!store.rhythm_automation_allowed_for_node(&bedroom_id));
+        assert!(store.external_hub_has_rhythm_consent(&key));
         assert!(!store.external_hub_has_full_rhythm_consent(&key));
         assert_ne!(store.external_automation_revision(&key), before_revision);
+
+        let restored: RoomTopologyStore =
+            serde_json::from_value(serde_json::to_value(&store).unwrap()).unwrap();
+        assert!(restored.rhythm_automation_allowed_for_node(&office_id));
+        assert!(!restored.rhythm_automation_allowed_for_node(&bedroom_id));
+        assert!(restored.external_hub_has_rhythm_consent(&key));
+        assert!(!restored.external_hub_has_full_rhythm_consent(&key));
 
         assert!(store
             .replace_external_room_automation_decisions(
