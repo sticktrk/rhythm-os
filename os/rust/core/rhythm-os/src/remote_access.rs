@@ -1996,12 +1996,15 @@ while [ ! -f "$dir/release" ]; do sleep 0.05; done
 
         controller.start(&root, &config).unwrap();
         let marker_deadline = Instant::now() + Duration::from_secs(5);
-        while !marker.exists() {
-            assert!(
-                Instant::now() < marker_deadline,
-                "first restart did not begin"
-            );
-            thread::sleep(Duration::from_millis(10));
+        loop {
+            match std::fs::read_to_string(&marker) {
+                Ok(contents) if contents.lines().count() == 1 => break,
+                Ok(_) | Err(_) if Instant::now() < marker_deadline => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Ok(contents) => panic!("unexpected first restart marker: {contents:?}"),
+                Err(error) => panic!("first restart did not begin: {error}"),
+            }
         }
         for _ in 0..64 {
             controller.start(&root, &config).unwrap();
