@@ -25,6 +25,7 @@ pub mod hub;
 pub mod hue_buttons;
 pub mod lifecycle;
 pub mod light_runtime;
+pub mod light_usage;
 pub mod logging;
 pub mod mdns;
 pub mod pairing;

@@ -127,6 +127,11 @@ void main() {
             'configured': true,
             'hub_id': 'hub-1',
             'home_id': 'home-1',
+            'light_usage': {
+              'schema_version': 1,
+              'cloud_status': 'ok',
+              'covered_ms': 60000,
+            },
           },
         ),
       );
@@ -159,6 +164,8 @@ void main() {
       final cleared = await api.clearActivityCloudConfig();
 
       expect(status?['hub_id'], 'hub-1');
+      expect(status?['light_usage']?['schema_version'], 1);
+      expect(status?['light_usage']?['cloud_status'], 'ok');
       expect(updated?['configured'], isTrue);
       expect(cleared?['configured'], isFalse);
       verify(() => dio.put(

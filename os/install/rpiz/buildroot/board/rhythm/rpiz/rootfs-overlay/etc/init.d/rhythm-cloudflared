@@ -19,6 +19,7 @@ DATA_DIR="${RHYTHM_DATA_DIR:-/data}"
 CLOUDFLARED_BIN="${RHYTHM_CLOUDFLARED_BIN:-/usr/bin/cloudflared}"
 TOKEN_FILE="${RHYTHM_CLOUDFLARED_TOKEN_FILE:-$DATA_DIR/cloudflared/connector_token}"
 PROTOCOL="${RHYTHM_CLOUDFLARED_PROTOCOL:-http2}"
+EDGE_IP_VERSION="${RHYTHM_CLOUDFLARED_EDGE_IP_VERSION:-4}"
 LOGLEVEL="${RHYTHM_CLOUDFLARED_LOGLEVEL:-warn}"
 HA_CONNECTIONS="${RHYTHM_CLOUDFLARED_HA_CONNECTIONS:-1}"
 # Zero means unlimited. The connector already uses capped exponential backoff;
@@ -53,6 +54,7 @@ resolve_log_dir() {
 LOGFILE="$(resolve_log_dir)/cloudflared.log"
 
 case "$HA_CONNECTIONS" in ''|*[!0-9]*) HA_CONNECTIONS=1 ;; esac
+case "$EDGE_IP_VERSION" in auto|4|6) ;; *) EDGE_IP_VERSION=4 ;; esac
 case "$MAX_RESTARTS" in ''|*[!0-9]*) MAX_RESTARTS=0 ;; esac
 case "$STOP_TIMEOUT_SECS" in ''|*[!0-9]*) STOP_TIMEOUT_SECS=5 ;; esac
 case "$VMEM_LIMIT_KB" in ''|*[!0-9]*) VMEM_LIMIT_KB=262144 ;; esac
@@ -157,6 +159,7 @@ write_status() {
         printf 'next_restart_epoch_secs=%s\n' "${next_restart_epoch_secs:-}"
         printf 'metrics_addr=%s\n' "$METRICS_ADDR"
         printf 'protocol=%s\n' "$PROTOCOL"
+        printf 'edge_ip_version=%s\n' "$EDGE_IP_VERSION"
         printf 'loglevel=%s\n' "$LOGLEVEL"
         printf 'ha_connections=%s\n' "$HA_CONNECTIONS"
         printf 'max_restarts=%s\n' "$MAX_RESTARTS"
@@ -182,14 +185,14 @@ start_cloudflared_child() {
 }
 
 launch_connector() {
-    set -- tunnel --no-autoupdate --protocol "$PROTOCOL" --loglevel "$LOGLEVEL" --metrics "$METRICS_ADDR"
+    set -- tunnel --no-autoupdate --protocol "$PROTOCOL" --edge-ip-version "$EDGE_IP_VERSION" --loglevel "$LOGLEVEL" --metrics "$METRICS_ADDR"
     if [ "$HA_CONNECTIONS" != "0" ]; then
         set -- "$@" --ha-connections "$HA_CONNECTIONS"
     fi
     # Keep the remotely-managed tunnel credential out of /proc/<pid>/cmdline.
     set -- "$@" run --token-file "$TOKEN_FILE"
 
-    log "starting connector: protocol=$PROTOCOL metrics=$METRICS_ADDR ha_connections=${HA_CONNECTIONS:-default} vmem_limit_kb=$VMEM_LIMIT_KB"
+    log "starting connector: protocol=$PROTOCOL edge_ip_version=$EDGE_IP_VERSION metrics=$METRICS_ADDR ha_connections=${HA_CONNECTIONS:-default} vmem_limit_kb=$VMEM_LIMIT_KB"
     start_cloudflared_child "$@"
 }
 

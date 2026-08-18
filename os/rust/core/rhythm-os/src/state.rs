@@ -515,6 +515,8 @@ pub struct AppState {
     /// Keyed by the effective light-state cache key (topology room IDs for
     /// normal room dispatch, parent room IDs for composite/group dispatch).
     pub room_observed_power: HashMap<String, ObservedPowerState>,
+    /// Low-write authoritative observed-power duration ledger.
+    pub light_usage: crate::light_usage::LightUsageLedger,
 
     /// Per-target motion timer snapshots, updated by the main loop.
     /// Keyed by **topology node IDs** (not hub-native IDs).
@@ -1012,6 +1014,7 @@ impl Default for AppState {
             external_topology_transaction_lock: Arc::new(Mutex::new(())),
             external_controller_policy_transaction_lock: Arc::new(Mutex::new(())),
             room_observed_power: HashMap::new(),
+            light_usage: crate::light_usage::LightUsageLedger::default(),
             motion_snapshots: HashMap::new(),
             motion_timer_restores: HashMap::new(),
             room_mode_transitions: HashMap::new(),

@@ -15,8 +15,9 @@ usage() {
     cat <<'EOF'
 Usage: post-flutter-ui-evidence.sh --pr NUMBER --head FULL_SHA --manifest PATH [--dry-run]
 
-Validate deterministic Flutter screenshots, store them on a non-merged GitHub
-evidence branch, and add an exact-head PR comment with inline images.
+Validate deterministic Flutter screenshots, store them on the shared,
+non-merged GitHub evidence branch, and add an exact-head PR comment with inline
+images.
 
 Manifest schema:
 {
@@ -191,7 +192,7 @@ fi
 
 DEFAULT_BRANCH="$(gh api "repos/$REPOSITORY" --jq '.default_branch')"
 [ -n "$DEFAULT_BRANCH" ] || fail "could not resolve the repository default branch"
-EVIDENCE_BRANCH="codex-ui-evidence-pr-$PR_NUMBER"
+EVIDENCE_BRANCH="codex-ui-evidence"
 DEFAULT_REF_JSON="$TMP_DIR/default-ref.json"
 gh api "repos/$REPOSITORY/git/ref/heads/$DEFAULT_BRANCH" > "$DEFAULT_REF_JSON"
 DEFAULT_COMMIT="$(jq -r '.object.sha // empty' "$DEFAULT_REF_JSON")"
@@ -208,10 +209,10 @@ else
 fi
 printf '%s' "$PARENT_COMMIT" | grep -Eq '^[0-9a-f]{40}$' || fail "evidence branch ref has no valid commit"
 
-DEFAULT_COMMIT_JSON="$TMP_DIR/default-commit.json"
-gh api "repos/$REPOSITORY/git/commits/$DEFAULT_COMMIT" > "$DEFAULT_COMMIT_JSON"
-DEFAULT_TREE="$(jq -r '.tree.sha // empty' "$DEFAULT_COMMIT_JSON")"
-printf '%s' "$DEFAULT_TREE" | grep -Eq '^[0-9a-f]{40}$' || fail "default branch commit has no valid tree"
+PARENT_COMMIT_JSON="$TMP_DIR/parent-commit.json"
+gh api "repos/$REPOSITORY/git/commits/$PARENT_COMMIT" > "$PARENT_COMMIT_JSON"
+PARENT_TREE="$(jq -r '.tree.sha // empty' "$PARENT_COMMIT_JSON")"
+printf '%s' "$PARENT_TREE" | grep -Eq '^[0-9a-f]{40}$' || fail "evidence branch parent has no valid tree"
 
 REMOTE_ROOT=".github/ui-evidence/pr-$PR_NUMBER/$HEAD_SHA"
 TREE_ENTRIES="$TMP_DIR/tree-entries.jsonl"
@@ -247,7 +248,7 @@ printf '%s' "$MANIFEST_BLOB" | grep -Eq '^[0-9a-f]{40}$' || fail "GitHub returne
 jq -n --arg path "$REMOTE_ROOT/manifest.json" --arg sha "$MANIFEST_BLOB" '{path: $path, mode: "100644", type: "blob", sha: $sha}' >> "$TREE_ENTRIES"
 
 TREE_PAYLOAD="$TMP_DIR/tree.json"
-jq -s --arg base_tree "$DEFAULT_TREE" '{base_tree: $base_tree, tree: .}' "$TREE_ENTRIES" > "$TREE_PAYLOAD"
+jq -s --arg base_tree "$PARENT_TREE" '{base_tree: $base_tree, tree: .}' "$TREE_ENTRIES" > "$TREE_PAYLOAD"
 TREE_SHA="$(gh api --method POST "repos/$REPOSITORY/git/trees" --input "$TREE_PAYLOAD" --jq '.sha')"
 printf '%s' "$TREE_SHA" | grep -Eq '^[0-9a-f]{40}$' || fail "GitHub returned an invalid tree SHA"
 
