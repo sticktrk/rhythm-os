@@ -285,6 +285,41 @@ void main() {
     }
   });
 
+  test('daytime Low Glow profile analytics stay bounded and privacy-safe',
+      () async {
+    await analytics.logLightProfileOpened('day_idle');
+    await analytics.logLightProfileSaved('day_idle');
+    await analytics.logLightProfileSaveFailed(
+      'day_idle',
+      stage: 'profile',
+    );
+
+    expect(backend.events.map((event) => event.name), [
+      'light_profile_opened',
+      'light_profile_saved',
+      'light_profile_save_failed',
+    ]);
+    expect(backend.events[0].properties, {'profile': 'day_idle'});
+    expect(backend.events[1].properties, {'profile': 'day_idle'});
+    expect(backend.events[2].properties, {
+      'profile': 'day_idle',
+      'stage': 'profile',
+    });
+    final serialized = backend.events
+        .map((event) => '${event.name}:${event.properties}')
+        .join('\n');
+    for (final forbidden in [
+      'brightness',
+      'color',
+      'home_id',
+      'room_id',
+      'device_id',
+      'error',
+    ]) {
+      expect(serialized, isNot(contains(forbidden)));
+    }
+  });
+
   test('Hue Bridge lifecycle analytics omit device and Bridge identity',
       () async {
     await analytics.logHueBridgeButtonPairingAttempted(
