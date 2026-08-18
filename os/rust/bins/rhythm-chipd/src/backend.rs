@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 
@@ -7,6 +7,7 @@ use rhythm_matter::chip_rpc::ChipInitControllerResponse;
 use rhythm_matter::transport::{
     CommissionedDevice, MatterAttributeReport, MatterCommissionRequest, MatterGroup,
     MatterGroupMember, MatterLevelCommandVariant, MatterLevelStepMode, MatterSubscriptionTarget,
+    MatterSubscriptionTermination,
 };
 
 use crate::service::CommissioningState;
@@ -111,6 +112,12 @@ pub trait ChipControllerBackend: Send + Sync {
         max_interval_secs: u16,
     ) -> Result<()>;
     fn drain_attribute_reports(&self) -> Result<Vec<MatterAttributeReport>>;
+    /// Drain terminal subscription failures reported by the controller.
+    ///
+    /// The native bridge never re-subscribes on its own; each established
+    /// subscription that dies is reported exactly once and rhythm-matter owns
+    /// the cooldown and the next attempt.
+    fn drain_subscription_terminations(&self) -> Result<Vec<MatterSubscriptionTermination>>;
 }
 
 pub fn build_backend_from_env() -> Box<dyn ChipControllerBackend> {
@@ -327,6 +334,10 @@ impl ChipControllerBackend for NativeChipBackend {
     fn drain_attribute_reports(&self) -> Result<Vec<MatterAttributeReport>> {
         self.controller_ref()?.drain_attribute_reports()
     }
+
+    fn drain_subscription_terminations(&self) -> Result<Vec<MatterSubscriptionTermination>> {
+        self.controller_ref()?.drain_subscription_terminations()
+    }
 }
 
 #[derive(Default)]
@@ -360,11 +371,19 @@ impl FakeChipState {
 #[derive(Default)]
 pub struct FakeChipBackend {
     inner: Mutex<FakeChipState>,
+    terminations: Arc<Mutex<Vec<MatterSubscriptionTermination>>>,
 }
 
 impl FakeChipBackend {
     fn lock(&self) -> std::sync::MutexGuard<'_, FakeChipState> {
         self.inner.lock().expect("fake CHIP state poisoned")
+    }
+
+    /// Test hook: the queue drained by `drain_subscription_terminations`, so a
+    /// test can stage a native subscription termination.
+    #[cfg(test)]
+    pub(crate) fn termination_queue(&self) -> Arc<Mutex<Vec<MatterSubscriptionTermination>>> {
+        Arc::clone(&self.terminations)
     }
 
     fn fake_name(setup_payload: &str, suffix: &str) -> String {
@@ -693,6 +712,14 @@ impl ChipControllerBackend for FakeChipBackend {
     fn drain_attribute_reports(&self) -> Result<Vec<MatterAttributeReport>> {
         Ok(Vec::new())
     }
+
+    fn drain_subscription_terminations(&self) -> Result<Vec<MatterSubscriptionTermination>> {
+        let mut queued = self
+            .terminations
+            .lock()
+            .expect("fake CHIP termination queue poisoned");
+        Ok(std::mem::take(&mut *queued))
+    }
 }
 
 #[cfg(test)]
@@ -866,6 +893,10 @@ mod tests {
             )
             .unwrap();
         assert!(backend.drain_attribute_reports().unwrap().is_empty());
+        assert!(backend
+            .drain_subscription_terminations()
+            .unwrap()
+            .is_empty());
 
         let snapshot = backend.read_light_capability_snapshot(42, 1).unwrap();
         assert_eq!(snapshot["node_id"], 42);
@@ -1004,6 +1035,7 @@ mod tests {
             string_error(backend.read_light_state(1, 1)),
             string_error(backend.subscribe_on_off(&targets, 1, 60)),
             string_error(backend.drain_attribute_reports()),
+            string_error(backend.drain_subscription_terminations()),
         ] {
             assert!(
                 error.contains("CHIP controller backend not initialized"),

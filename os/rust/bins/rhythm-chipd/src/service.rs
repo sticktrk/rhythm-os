@@ -18,9 +18,9 @@ use rhythm_matter::transport::{CommissionedDevice, MatterControllerEvent};
 use rhythm_matter::transport::{MatterDeviceInfo, MatterSubscriptionTarget};
 
 use crate::backend::ChipControllerBackend;
-use crate::command_dispatch::{CommandDispatcher, ControllerEventBroker, ControllerWorkBudget};
-
-const MAX_CONCURRENT_CONTROLLER_WORK: usize = 4;
+use crate::command_dispatch::{
+    CommandDispatcher, ControllerEventBroker, ControllerWorkBudget, MAX_CONCURRENT_CONTROLLER_WORK,
+};
 
 const DEVICE_STORE_SCHEMA_VERSION: u32 = 1;
 const MATTER_OPERATIONAL_SERVICE_TYPE: &str = "_matter._tcp.local.";
@@ -351,7 +351,12 @@ impl ChipControllerService {
                 max_interval_secs,
             } => {
                 self.require_initialized()?;
-                let _lifecycle = self.lifecycle_lock.lock();
+                // No lifecycle lock: subscribing is ordinary controller work,
+                // and the native subscription table is owned by the Matter
+                // thread, so it cannot race a concurrent decommission. Holding
+                // the lifecycle lock here made one slow subscribe stall every
+                // commission/decommission and turned into a false-failure
+                // cascade. The shared work budget is the only bound.
                 let _permit = self.controller_work_budget.acquire();
                 self.backend()
                     .subscribe_on_off(&targets, min_interval_secs, max_interval_secs)?;
@@ -382,6 +387,12 @@ impl ChipControllerService {
                     for report in self.backend().drain_attribute_reports()? {
                         self.event_broker
                             .publish(MatterControllerEvent::AttributeReport(report));
+                    }
+                    // Terminal subscription failures are reported once by the
+                    // native bridge; rhythm-matter owns the retry timing.
+                    for termination in self.backend().drain_subscription_terminations()? {
+                        self.event_broker
+                            .publish(MatterControllerEvent::SubscriptionTerminated(termination));
                     }
 
                     let remaining = deadline.saturating_duration_since(Instant::now());
@@ -690,15 +701,17 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use rhythm_matter::chip_rpc::{
-        ChipRpcAttributeReportsResponse, ChipRpcCommissionLightResponse, ChipRpcEmpty,
-        ChipRpcJsonValueResponse, ChipRpcListDevicesResponse, ChipRpcOperationalDiscoveryResponse,
-        ChipRpcProbeLightResponse, ChipRpcReadOnOffResponse,
+        ChipRpcAttributeReportsResponse, ChipRpcCommissionLightResponse,
+        ChipRpcControllerEventsResponse, ChipRpcEmpty, ChipRpcJsonValueResponse,
+        ChipRpcListDevicesResponse, ChipRpcOperationalDiscoveryResponse, ChipRpcProbeLightResponse,
+        ChipRpcReadOnOffResponse,
     };
     use rhythm_matter::transport::{
         MatterColorMode, MatterCommissionRequest, MatterCommissioningNetwork,
-        MatterCommissioningRendezvous, MatterCommissioningWifiCredentials, MatterGroup,
-        MatterGroupMember, MatterLevelCommandVariant, MatterLevelStepMode,
-        MatterSubscriptionTarget,
+        MatterCommissioningRendezvous, MatterCommissioningWifiCredentials,
+        MatterControllerEventCursor, MatterGroup, MatterGroupMember, MatterLevelCommandVariant,
+        MatterLevelStepMode, MatterSubscriptionFailureClass, MatterSubscriptionTarget,
+        MatterSubscriptionTermination,
     };
 
     use crate::backend::FakeChipBackend;
@@ -1127,6 +1140,84 @@ mod tests {
         let error = string_error(store.ensure_controller_fabric(Some("399026E03C18B2D2")));
         assert!(error.contains("device store belongs to compressed fabric D6B252ACB7133A7E"));
         assert!(error.contains("current controller initialized fabric 399026E03C18B2D2"));
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn wait_controller_events_publishes_native_subscription_terminations() {
+        let dir = unique_test_dir("service-subscription-termination");
+        let storage_path = dir.join("chip.json");
+
+        let backend = FakeChipBackend::default();
+        let terminations = backend.termination_queue();
+        let service = ChipControllerService::new(Box::new(backend));
+        let _: ChipInitControllerResponse = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::InitController(init_request(&storage_path)))
+                .unwrap(),
+        )
+        .unwrap();
+
+        terminations
+            .lock()
+            .unwrap()
+            .push(MatterSubscriptionTermination {
+                node_id: 42,
+                endpoint: 1,
+                failure_class: MatterSubscriptionFailureClass::PeerClosed,
+                chip_error: 0x0000_002e,
+                detail: None,
+            });
+
+        let events: ChipRpcControllerEventsResponse = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::WaitControllerEvents {
+                    cursor: None,
+                    max_wait_ms: 500,
+                })
+                .unwrap(),
+        )
+        .unwrap();
+
+        let last_sequence = events
+            .batch
+            .events
+            .iter()
+            .map(|envelope| envelope.sequence)
+            .max()
+            .unwrap_or(0);
+        let published: Vec<_> = events
+            .batch
+            .events
+            .into_iter()
+            .filter_map(|envelope| match envelope.event {
+                MatterControllerEvent::SubscriptionTerminated(termination) => Some(termination),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(published.len(), 1);
+        assert_eq!(published[0].node_id, 42);
+        assert_eq!(published[0].endpoint, 1);
+        assert_eq!(
+            published[0].failure_class,
+            MatterSubscriptionFailureClass::PeerClosed
+        );
+
+        // Drained exactly once: a second wait must not replay it.
+        let repeat: ChipRpcControllerEventsResponse = serde_json::from_value(
+            service
+                .handle(ChipRpcRequest::WaitControllerEvents {
+                    cursor: Some(MatterControllerEventCursor {
+                        stream_id: events.batch.stream_id.clone(),
+                        sequence: last_sequence,
+                    }),
+                    max_wait_ms: 0,
+                })
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(repeat.batch.events.is_empty());
 
         let _ = fs::remove_dir_all(dir);
     }

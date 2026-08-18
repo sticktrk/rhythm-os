@@ -102,6 +102,36 @@ struct rhythm_chip_bridge_attribute_report
     bool bool_value;
 };
 
+/// Terminal failure class for an established subscription. Values are stable
+/// wire constants mirrored by rhythm-chipd's Rust FFI shim; they carry no node,
+/// fabric, or address identity.
+///
+/// ADDRESS_RESOLUTION and CASE_SESSION are reserved, not emitted: both kinds of
+/// death reach the bridge as CHIP_ERROR_TIMEOUT through OperationalSessionSetup,
+/// so the native mapper cannot distinguish them from any other timeout. They
+/// stay in the wire contract because Rust does produce them (from the sidecar
+/// log classifier) and because a future SDK-code mapping can fill them in.
+enum rhythm_chip_bridge_subscription_failure_class
+{
+    RHYTHM_CHIP_BRIDGE_SUB_FAIL_OTHER = 0,
+    RHYTHM_CHIP_BRIDGE_SUB_FAIL_ADDRESS_RESOLUTION = 1,
+    RHYTHM_CHIP_BRIDGE_SUB_FAIL_CASE_SESSION = 2,
+    RHYTHM_CHIP_BRIDGE_SUB_FAIL_RESOURCE_BUSY = 3,
+    RHYTHM_CHIP_BRIDGE_SUB_FAIL_TIMEOUT = 4,
+    RHYTHM_CHIP_BRIDGE_SUB_FAIL_PEER_CLOSED = 5,
+};
+
+/// One established On/Off subscription that ended. The native bridge never
+/// re-subscribes on its own: it reports the termination once and Rust owns
+/// cooldown, backoff, and the next attempt.
+struct rhythm_chip_bridge_subscription_termination
+{
+    uint64_t node_id;
+    uint16_t endpoint;
+    uint32_t chip_error;
+    uint8_t failure_class;
+};
+
 const char * rhythm_chip_bridge_link_mode(void);
 bool rhythm_chip_bridge_init(const char * storage_path, const char * fabric_id, uint64_t operational_fabric_id,
                              const char * ipk_hex, bool has_ble_controller, uint16_t ble_controller,
@@ -157,6 +187,9 @@ bool rhythm_chip_bridge_subscribe_on_off(const struct rhythm_chip_bridge_subscri
                                          size_t error_message_size);
 bool rhythm_chip_bridge_drain_attribute_reports(struct rhythm_chip_bridge_attribute_report * reports, size_t reports_capacity,
                                                 size_t * out_report_count, char * error_message, size_t error_message_size);
+bool rhythm_chip_bridge_drain_subscription_terminations(struct rhythm_chip_bridge_subscription_termination * terminations,
+                                                        size_t terminations_capacity, size_t * out_termination_count,
+                                                        char * error_message, size_t error_message_size);
 void rhythm_chip_bridge_shutdown(void);
 
 #ifdef __cplusplus

@@ -15,9 +15,10 @@ use crate::backend::ChipControllerBackend;
 
 const EVENT_CAPACITY: usize = 2_048;
 const MAX_EVENT_WAIT: Duration = Duration::from_secs(30);
-const MAX_CONCURRENT_ENDPOINT_WORK: usize = 4;
-#[cfg(not(test))]
-const MAX_ENDPOINT_OPERATION_DURATION: Duration = Duration::from_secs(8);
+/// One shared controller work budget governs every entry into the CHIP
+/// controller: command steps *and* subscribe attempts. It is the only cap —
+/// lane admission derives from it, so there is no second constant to drift.
+pub(crate) const MAX_CONCURRENT_CONTROLLER_WORK: usize = 4;
 static NEXT_STREAM_NONCE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Default)]
@@ -60,6 +61,12 @@ impl ControllerWorkBudget {
         state.in_flight += 1;
         self.changed.notify_all();
         ControllerWorkPermit { budget: self }
+    }
+
+    /// Concurrent controller work this budget admits. Lane admission uses it so
+    /// the dispatcher can never run more lanes than the budget will serve.
+    pub(crate) fn capacity(&self) -> usize {
+        self.capacity
     }
 }
 
@@ -202,12 +209,16 @@ pub struct CommandDispatcher {
 }
 
 impl CommandDispatcher {
-    #[cfg(test)]
+    /// Standalone dispatcher with its own controller work budget.
+    ///
+    /// The daemon always shares one budget with the service
+    /// (`with_work_budget`); this plain constructor is for standalone use.
+    #[allow(dead_code)]
     pub fn new(
         backend: Arc<RwLock<Box<dyn ChipControllerBackend>>>,
         broker: Arc<ControllerEventBroker>,
     ) -> Arc<Self> {
-        let work_budget = Arc::new(ControllerWorkBudget::new(MAX_CONCURRENT_ENDPOINT_WORK));
+        let work_budget = Arc::new(ControllerWorkBudget::new(MAX_CONCURRENT_CONTROLLER_WORK));
         Self::with_work_budget(backend, broker, work_budget)
     }
 
@@ -277,11 +288,17 @@ impl CommandDispatcher {
         Ok(())
     }
 
+    /// Admit ready endpoints until the shared budget is full.
+    ///
+    /// Single loop, no recursion: a lane that fails to spawn publishes its
+    /// failure and releases its slot through `release_lane_state`, which never
+    /// admits work itself, so this loop stays the only admission path.
     fn start_ready_lanes(self: &Arc<Self>) {
+        let capacity = self.work_budget.capacity();
         loop {
             let Some(plan) = ({
                 let mut state = self.state.lock().expect("chipd dispatch lock poisoned");
-                if state.active_lanes >= MAX_CONCURRENT_ENDPOINT_WORK {
+                if state.active_lanes >= capacity {
                     None
                 } else {
                     let mut next = None;
@@ -307,39 +324,26 @@ impl CommandDispatcher {
             };
 
             if let Err(error) = self.spawn_lane(plan.clone()) {
-                self.fail_lane_to_spawn(plan, format!("starting endpoint worker: {error:#}"));
+                self.publish_outcome(
+                    &plan,
+                    MatterCommandOutcomeStatus::Failed,
+                    Some(format!("starting endpoint worker: {error:#}")),
+                );
+                self.release_lane_state(&plan);
+                continue;
             }
         }
     }
 
-    fn fail_lane_to_spawn(self: &Arc<Self>, plan: MatterEndpointCommandPlan, detail: String) {
-        self.publish_outcome(&plan, MatterCommandOutcomeStatus::Failed, Some(detail));
-        self.finish_lane(&plan);
-    }
-
+    /// Run one plan to completion.
+    ///
+    /// There is no host wall-clock deadline here: a single unavailable bulb can
+    /// legitimately hold its lane for the SDK's own operational-discovery and
+    /// CASE timeouts, and killing chipd for that would restart every healthy
+    /// endpoint too. The bounds that matter are the SDK's, the native bridge's
+    /// last-resort wedge guard, and the client RPC timeout.
     fn run_lane(self: Arc<Self>, plan: MatterEndpointCommandPlan) {
-        #[cfg(not(test))]
-        let completed = {
-            let (completed_tx, completed_rx) = std::sync::mpsc::sync_channel(0);
-            let _ = std::thread::Builder::new()
-                .name("chipd-operation-watchdog".to_string())
-                .spawn(move || {
-                    if matches!(
-                        completed_rx.recv_timeout(MAX_ENDPOINT_OPERATION_DURATION),
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
-                    ) {
-                        eprintln!(
-                            "Matter endpoint operation exceeded its bounded deadline; exiting chipd for supervisor cancellation"
-                        );
-                        std::process::exit(70);
-                    }
-                });
-            completed_tx
-        };
-
         let result = self.execute(&plan);
-        #[cfg(not(test))]
-        let _ = completed.send(());
         match result {
             Ok(()) => self.publish_outcome(&plan, MatterCommandOutcomeStatus::Succeeded, None),
             Err(error) => self.publish_outcome(
@@ -352,34 +356,43 @@ impl CommandDispatcher {
     }
 
     /// Release one running plan and put any newer state for the same endpoint
-    /// at the back of the FIFO before admitting more work.
-    fn finish_lane(self: &Arc<Self>, plan: &MatterEndpointCommandPlan) {
+    /// at the back of the FIFO.
+    ///
+    /// Deliberately does not admit work, so it is safe to call from inside
+    /// `start_ready_lanes` (the spawn-failure path) without recursing.
+    fn release_lane_state(&self, plan: &MatterEndpointCommandPlan) {
         let key = (plan.node_id, plan.endpoint);
-        {
-            let mut state = self.state.lock().expect("chipd dispatch lock poisoned");
-            state.active_ids.remove(&plan.command_id);
-            let Some(slot) = state.slots.get_mut(&key) else {
-                state.active_lanes = state.active_lanes.saturating_sub(1);
-                return;
-            };
-            slot.running = false;
-            if slot.pending.is_some() {
-                state.ready.push_back(key);
-            } else {
-                state.slots.remove(&key);
-            }
+        let mut state = self.state.lock().expect("chipd dispatch lock poisoned");
+        state.active_ids.remove(&plan.command_id);
+        let Some(slot) = state.slots.get_mut(&key) else {
             state.active_lanes = state.active_lanes.saturating_sub(1);
+            return;
+        };
+        slot.running = false;
+        if slot.pending.is_some() {
+            state.ready.push_back(key);
+        } else {
+            state.slots.remove(&key);
         }
+        state.active_lanes = state.active_lanes.saturating_sub(1);
+    }
+
+    /// Release a finished lane and admit whatever the freed slot allows.
+    fn finish_lane(self: &Arc<Self>, plan: &MatterEndpointCommandPlan) {
+        self.release_lane_state(plan);
         self.start_ready_lanes();
     }
 
     fn execute(&self, plan: &MatterEndpointCommandPlan) -> Result<()> {
         for (index, step) in plan.steps.iter().enumerate() {
-            let _permit = self.work_budget.acquire();
+            // The shared controller budget is held for exactly one step, so a
+            // slow endpoint cannot hold a permit across its inter-step delay.
+            let permit = self.work_budget.acquire();
             let backend = self.backend.read().expect("chipd backend lock poisoned");
-            execute_step(backend.as_ref(), plan.node_id, plan.endpoint, step)?;
+            let step_result = execute_step(backend.as_ref(), plan.node_id, plan.endpoint, step);
             drop(backend);
-            drop(_permit);
+            drop(permit);
+            step_result?;
 
             if index + 1 < plan.steps.len() {
                 if let Some(delay_ms) = plan.inter_step_delay_ms.filter(|delay| *delay > 0) {
@@ -484,7 +497,7 @@ mod tests {
     use rhythm_matter::transport::{
         CommissionedDevice, MatterAttributeReport, MatterCommissionRequest, MatterGroup,
         MatterGroupMember, MatterLevelCommandVariant, MatterLevelStepMode,
-        MatterSubscriptionTarget,
+        MatterSubscriptionTarget, MatterSubscriptionTermination,
     };
 
     use crate::service::CommissioningState;
@@ -625,6 +638,9 @@ mod tests {
             Ok(())
         }
         fn drain_attribute_reports(&self) -> Result<Vec<MatterAttributeReport>> {
+            Ok(Vec::new())
+        }
+        fn drain_subscription_terminations(&self) -> Result<Vec<MatterSubscriptionTermination>> {
             Ok(Vec::new())
         }
     }
@@ -773,7 +789,7 @@ mod tests {
             "healthy endpoints must drain while two unavailable peers retain their lanes"
         );
         assert!(
-            blocking.max_active_calls.load(Ordering::SeqCst) <= MAX_CONCURRENT_ENDPOINT_WORK,
+            blocking.max_active_calls.load(Ordering::SeqCst) <= MAX_CONCURRENT_CONTROLLER_WORK,
             "controller work exceeded the global endpoint budget"
         );
         assert_eq!(blocking.active_calls.load(Ordering::SeqCst), 2);
@@ -813,7 +829,7 @@ mod tests {
             assert!(outcomes.contains(&(healthy, MatterCommandOutcomeStatus::Succeeded)));
         }
         assert!(
-            blocking.max_active_calls.load(Ordering::SeqCst) <= MAX_CONCURRENT_ENDPOINT_WORK,
+            blocking.max_active_calls.load(Ordering::SeqCst) <= MAX_CONCURRENT_CONTROLLER_WORK,
             "six unavailable peers must not exceed the controller budget or starve healthy work"
         );
     }
@@ -841,5 +857,87 @@ mod tests {
             batch.stream_id,
             restarted.wait(None, Duration::ZERO).stream_id
         );
+    }
+
+    #[test]
+    fn lane_admission_derives_from_the_shared_work_budget() {
+        let blocking = Arc::new(BlockingState::default());
+        blocking.release_first.store(true, Ordering::SeqCst);
+        let backend = Arc::new(RwLock::new(
+            Box::new(BlockingBackend::new(blocking.clone())) as Box<dyn ChipControllerBackend>,
+        ));
+        let broker = Arc::new(ControllerEventBroker::new());
+        let work_budget = Arc::new(ControllerWorkBudget::new(2));
+        assert_eq!(work_budget.capacity(), 2);
+        let dispatcher =
+            CommandDispatcher::with_work_budget(backend, broker.clone(), work_budget.clone());
+
+        let plans: Vec<_> = (1_u16..=8)
+            .map(|endpoint| plan_for(u64::from(endpoint), u64::from(endpoint), endpoint, false))
+            .collect();
+        dispatcher.submit(plans).unwrap();
+
+        let command_ids: Vec<_> = (1_u64..=8).collect();
+        let outcomes = wait_for_outcomes(&broker, &command_ids);
+        assert_eq!(outcomes.len(), 8);
+        assert!(
+            blocking.max_active_calls.load(Ordering::SeqCst) <= work_budget.capacity(),
+            "lane admission must follow the shared budget capacity, not a separate constant"
+        );
+    }
+
+    #[test]
+    fn releasing_a_lane_requeues_pending_work_without_admitting_it() {
+        let blocking = Arc::new(BlockingState::default());
+        blocking.release_first.store(true, Ordering::SeqCst);
+        let backend = Arc::new(RwLock::new(
+            Box::new(BlockingBackend::new(blocking.clone())) as Box<dyn ChipControllerBackend>,
+        ));
+        let broker = Arc::new(ControllerEventBroker::new());
+        let dispatcher = CommandDispatcher::new(backend, broker.clone());
+
+        let running = plan(1, 3, true);
+        let queued = plan(2, 3, false);
+        let key = (running.node_id, running.endpoint);
+        {
+            let mut state = dispatcher
+                .state
+                .lock()
+                .expect("chipd dispatch lock poisoned");
+            state.active_ids.insert(running.command_id);
+            state.active_ids.insert(queued.command_id);
+            state.slots.insert(
+                key,
+                EndpointSlot {
+                    running: true,
+                    pending: Some(queued.clone()),
+                },
+            );
+            state.active_lanes = 1;
+        }
+
+        // The spawn-failure path: release the slot without re-entering
+        // admission. Nothing may run as a side effect of releasing.
+        dispatcher.release_lane_state(&running);
+
+        {
+            let state = dispatcher
+                .state
+                .lock()
+                .expect("chipd dispatch lock poisoned");
+            assert_eq!(state.active_lanes, 0);
+            assert_eq!(state.ready.iter().copied().collect::<Vec<_>>(), vec![key]);
+            assert!(!state.slots[&key].running);
+            assert!(!state.active_ids.contains(&running.command_id));
+        }
+        assert_eq!(
+            blocking.calls.load(Ordering::SeqCst),
+            0,
+            "releasing a lane must not admit work"
+        );
+
+        dispatcher.start_ready_lanes();
+        let outcomes = wait_for_outcomes(&broker, &[2]);
+        assert!(outcomes.contains(&(2, MatterCommandOutcomeStatus::Succeeded)));
     }
 }

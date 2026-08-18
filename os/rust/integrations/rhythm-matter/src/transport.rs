@@ -109,11 +109,68 @@ pub struct MatterCommandOutcome {
     pub detail: Option<String>,
 }
 
+/// Privacy-bounded class of a terminal subscription or connection failure.
+/// Carries no node, fabric, or address identity; the endpoint key travels
+/// separately in the owning event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatterSubscriptionFailureClass {
+    /// Operational discovery / mDNS address resolution did not complete.
+    AddressResolution,
+    /// CASE session establishment failed or the secure session was lost.
+    CaseSession,
+    /// The peer or controller reported it could not accept more work.
+    ResourceBusy,
+    /// Subscription liveness or interaction timed out.
+    Timeout,
+    /// The peer closed or aborted the exchange/session.
+    PeerClosed,
+    /// Any other terminal failure.
+    Other,
+}
+
+impl MatterSubscriptionFailureClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AddressResolution => "address_resolution",
+            Self::CaseSession => "case_session",
+            Self::ResourceBusy => "resource_busy",
+            Self::Timeout => "timeout",
+            Self::PeerClosed => "peer_closed",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// An established On/Off subscription terminated on the native controller.
+///
+/// Under the Rust-owned retry contract the native side never re-subscribes
+/// on its own; it reports the termination once and the rhythm-matter
+/// subscription worker owns cooldown, backoff, and the next attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatterSubscriptionTermination {
+    pub node_id: u64,
+    pub endpoint: u16,
+    pub failure_class: MatterSubscriptionFailureClass,
+    /// Raw CHIP error code (`CHIP_ERROR::AsInteger()`), for diagnostics.
+    pub chip_error: u32,
+    /// Human-readable CHIP error text without identifiers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum MatterControllerEvent {
     CommandOutcome(MatterCommandOutcome),
     AttributeReport(MatterAttributeReport),
+    /// An established subscription ended; Rust owns the retry from here.
+    SubscriptionTerminated(MatterSubscriptionTermination),
+    /// Forward-compatibility sink: an event kind this build does not know.
+    /// Never emitted by chipd; consumers must ignore it instead of failing
+    /// the whole event batch.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
