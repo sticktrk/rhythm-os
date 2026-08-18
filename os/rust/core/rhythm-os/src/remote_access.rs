@@ -9,10 +9,9 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -34,6 +33,7 @@ const DEFAULT_CLOUDFLARED_LOGLEVEL: &str = "warn";
 const DEFAULT_CLOUDFLARED_HA_CONNECTIONS: u16 = 1;
 const DEFAULT_CLOUDFLARED_BIN: &str = "cloudflared";
 const REMOTE_ACCESS_STARTUP_HEALTH_GRACE: Duration = Duration::from_secs(5 * 60);
+const INIT_SCRIPT_ACTION_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredRemoteAccessConfig {
@@ -812,18 +812,44 @@ pub struct InitScriptRemoteAccessController {
     child_pidfile: PathBuf,
     metrics_addr: String,
     stop_delay: Duration,
+    action_timeout: Duration,
     actions: Arc<InitScriptActions>,
 }
 
-/// Start/stop fire detached threads; without coordination a delayed stop can
-/// run after a newer restart and kill the fresh connector, and concurrent
-/// restarts interleave the init script's stop+start phases.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum InitScriptAction {
+    Restart,
+    Stop,
+}
+
+impl InitScriptAction {
+    fn argument(self) -> &'static str {
+        match self {
+            Self::Restart => "restart",
+            Self::Stop => "stop",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+struct PendingInitScriptAction {
+    generation: u64,
+    action: InitScriptAction,
+}
+
+#[derive(Debug, Default)]
+struct InitScriptActionState {
+    generation: u64,
+    pending: Option<PendingInitScriptAction>,
+    worker_running: bool,
+}
+
+/// A single action worker drains the latest requested init-script operation.
+/// This bounds both worker threads and queued work when the watchdog observes
+/// the same unhealthy connector while an earlier restart is still blocked.
 #[derive(Debug, Default)]
 struct InitScriptActions {
-    /// Serializes init-script invocations.
-    run_lock: Mutex<()>,
-    /// Monotonic action id; a pending action aborts if superseded.
-    generation: AtomicU64,
+    state: Mutex<InitScriptActionState>,
 }
 
 impl InitScriptRemoteAccessController {
@@ -840,16 +866,9 @@ impl InitScriptRemoteAccessController {
             child_pidfile: child_pidfile.into(),
             metrics_addr: DEFAULT_METRICS_ADDR.to_string(),
             stop_delay: Duration::from_millis(750),
+            action_timeout: INIT_SCRIPT_ACTION_TIMEOUT,
             actions: Arc::new(InitScriptActions::default()),
         }
-    }
-
-    fn next_generation(&self) -> u64 {
-        self.actions.generation.fetch_add(1, Ordering::SeqCst) + 1
-    }
-
-    fn is_current_generation(&self, generation: u64) -> bool {
-        self.actions.generation.load(Ordering::SeqCst) == generation
     }
 
     pub fn with_metrics_addr(mut self, metrics_addr: impl Into<String>) -> Self {
@@ -861,12 +880,111 @@ impl InitScriptRemoteAccessController {
         if !self.init_script.exists() {
             return Ok(());
         }
-        let output = Command::new(&self.init_script).arg(action).output()?;
-        if output.status.success() {
+        let child = Command::new(&self.init_script)
+            .arg(action)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let status = wait_for_init_script(child, self.action_timeout, action)?;
+        if status.success() {
             return Ok(());
         }
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("cloudflared service {} failed: {}", action, stderr.trim());
+        anyhow::bail!("cloudflared service {action} failed with {status}");
+    }
+
+    fn enqueue_action(&self, action: InitScriptAction) -> anyhow::Result<()> {
+        let should_spawn = {
+            let mut state = self
+                .actions
+                .state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("remote access action lock"))?;
+            state.generation = state.generation.saturating_add(1);
+            state.pending = Some(PendingInitScriptAction {
+                generation: state.generation,
+                action,
+            });
+            if state.worker_running {
+                false
+            } else {
+                state.worker_running = true;
+                true
+            }
+        };
+
+        if should_spawn {
+            let controller = self.clone();
+            if let Err(error) = thread::Builder::new()
+                .name("remote-access-action".to_string())
+                .spawn(move || controller.run_action_worker())
+            {
+                if let Ok(mut state) = self.actions.state.lock() {
+                    state.worker_running = false;
+                }
+                return Err(error.into());
+            }
+        }
+        Ok(())
+    }
+
+    fn run_action_worker(self) {
+        loop {
+            let pending = {
+                let mut state = self
+                    .actions
+                    .state
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                match state.pending.take() {
+                    Some(pending) => pending,
+                    None => {
+                        state.worker_running = false;
+                        return;
+                    }
+                }
+            };
+
+            if pending.action == InitScriptAction::Stop {
+                thread::sleep(self.stop_delay);
+            }
+            let is_current = self
+                .actions
+                .state
+                .lock()
+                .map(|state| state.generation == pending.generation)
+                .unwrap_or(false);
+            if !is_current {
+                continue;
+            }
+            if let Err(error) = self.run_init_script(pending.action.argument()) {
+                log::warn!(
+                    target: "sys",
+                    "cloudflared service {} failed: {:#}",
+                    pending.action.argument(),
+                    error
+                );
+            }
+        }
+    }
+}
+
+fn wait_for_init_script(
+    mut child: Child,
+    timeout: Duration,
+    action: &str,
+) -> anyhow::Result<std::process::ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait()? {
+            Some(status) => return Ok(status),
+            None if Instant::now() < deadline => thread::sleep(Duration::from_millis(100)),
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                anyhow::bail!("cloudflared service {action} timed out after {timeout:?}");
+            }
+        }
     }
 }
 
@@ -937,49 +1055,14 @@ impl RemoteAccessController for InitScriptRemoteAccessController {
         if !self.init_script.exists() {
             return Ok(());
         }
-        let generation = self.next_generation();
-        let controller = self.clone();
-        thread::spawn(move || {
-            let _guard = controller
-                .actions
-                .run_lock
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            // A newer start/stop request replaces this one.
-            if !controller.is_current_generation(generation) {
-                return;
-            }
-            if let Err(error) = controller.run_init_script("restart") {
-                log::warn!(
-                    target: "sys",
-                    "cloudflared service restart failed: {:#}",
-                    error
-                );
-            }
-        });
-        Ok(())
+        self.enqueue_action(InitScriptAction::Restart)
     }
 
     fn stop(&self, _runtime_dir: &Path) -> anyhow::Result<()> {
         if !self.init_script.exists() {
             return Ok(());
         }
-        let generation = self.next_generation();
-        let controller = self.clone();
-        thread::spawn(move || {
-            thread::sleep(controller.stop_delay);
-            let _guard = controller
-                .actions
-                .run_lock
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            // If a start arrived while we slept, do not tear it down.
-            if !controller.is_current_generation(generation) {
-                return;
-            }
-            let _ = controller.run_init_script("stop");
-        });
-        Ok(())
+        self.enqueue_action(InitScriptAction::Stop)
     }
 }
 
@@ -1892,6 +1975,123 @@ printf '%s\n' "$1" > "$dir/marker"
         };
         assert_eq!(marker_contents.trim(), "restart");
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repeated_init_script_repairs_keep_one_worker_and_one_pending_action() {
+        let root = temp_root("init-script-single-flight");
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("cloudflared-service");
+        let marker = root.join("marker");
+        let release = root.join("release");
+        write_executable(
+            &script,
+            r#"#!/bin/sh
+dir="$(dirname "$0")"
+printf '%s\n' "$1" >> "$dir/marker"
+while [ ! -f "$dir/release" ]; do sleep 0.05; done
+"#,
+        );
+
+        let mut controller = InitScriptRemoteAccessController::new(
+            "/bin/true",
+            &script,
+            root.join("missing-supervisor.pid"),
+            root.join("missing-child.pid"),
+        );
+        controller.action_timeout = Duration::from_secs(5);
+        let config = StoredRemoteAccessConfig {
+            schema_version: 1,
+            enabled: true,
+            hostname: "box.devices.rhythm.lighting".into(),
+            connector_token: "secret".into(),
+            tunnel_id: None,
+            tunnel_name: None,
+            updated_at_epoch_ms: 81,
+        };
+
+        controller.start(&root, &config).unwrap();
+        let marker_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match std::fs::read_to_string(&marker) {
+                Ok(contents) if contents.lines().count() == 1 => break,
+                Ok(_) | Err(_) if Instant::now() < marker_deadline => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Ok(contents) => panic!("unexpected first restart marker: {contents:?}"),
+                Err(error) => panic!("first restart did not begin: {error}"),
+            }
+        }
+        for _ in 0..64 {
+            controller.start(&root, &config).unwrap();
+        }
+
+        {
+            let state = controller.actions.state.lock().unwrap();
+            assert!(state.worker_running);
+            assert_eq!(
+                state.pending.map(|pending| pending.action),
+                Some(InitScriptAction::Restart)
+            );
+        }
+        assert_eq!(std::fs::read_to_string(&marker).unwrap().lines().count(), 1);
+
+        std::fs::write(&release, "go").unwrap();
+        let worker_deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if !controller.actions.state.lock().unwrap().worker_running {
+                break;
+            }
+            assert!(
+                Instant::now() < worker_deadline,
+                "single action worker did not drain"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(std::fs::read_to_string(&marker).unwrap().lines().count(), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_script_timeout_terminates_the_underlying_action() {
+        let root = temp_root("init-script-timeout");
+        std::fs::create_dir_all(&root).unwrap();
+        let script = root.join("cloudflared-service");
+        write_executable(&script, "#!/bin/sh\nexec sleep 5\n");
+        let mut controller = InitScriptRemoteAccessController::new(
+            "/bin/true",
+            &script,
+            root.join("missing-supervisor.pid"),
+            root.join("missing-child.pid"),
+        );
+        controller.action_timeout = Duration::from_millis(100);
+        let config = StoredRemoteAccessConfig {
+            schema_version: 1,
+            enabled: true,
+            hostname: "box.devices.rhythm.lighting".into(),
+            connector_token: "secret".into(),
+            tunnel_id: None,
+            tunnel_name: None,
+            updated_at_epoch_ms: 82,
+        };
+
+        let started = Instant::now();
+        controller.start(&root, &config).unwrap();
+        let worker_deadline = started + Duration::from_secs(2);
+        loop {
+            if !controller.actions.state.lock().unwrap().worker_running {
+                break;
+            }
+            assert!(
+                Instant::now() < worker_deadline,
+                "timed-out init script kept the worker blocked"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(started.elapsed() < Duration::from_secs(2));
         let _ = std::fs::remove_dir_all(root);
     }
 
