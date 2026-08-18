@@ -28,6 +28,7 @@ const HOSTNAME_FILE: &str = "hostname";
 const STATUS_FILE: &str = "status.env";
 const DEFAULT_METRICS_ADDR: &str = "127.0.0.1:54449";
 const DEFAULT_CLOUDFLARED_PROTOCOL: &str = "http2";
+const DEFAULT_CLOUDFLARED_EDGE_IP_VERSION: &str = "4";
 const DEFAULT_CLOUDFLARED_LOGLEVEL: &str = "warn";
 const DEFAULT_CLOUDFLARED_HA_CONNECTIONS: u16 = 1;
 const DEFAULT_CLOUDFLARED_BIN: &str = "cloudflared";
@@ -1073,6 +1074,7 @@ pub struct ChildProcessRemoteAccessController {
 struct ChildProcessInner {
     cloudflared_bin: PathBuf,
     protocol: String,
+    edge_ip_version: String,
     loglevel: String,
     ha_connections: u16,
     metrics_addr: String,
@@ -1129,6 +1131,7 @@ impl ChildProcessRemoteAccessController {
             inner: Arc::new(ChildProcessInner {
                 cloudflared_bin: cloudflared_bin.into(),
                 protocol: DEFAULT_CLOUDFLARED_PROTOCOL.to_string(),
+                edge_ip_version: DEFAULT_CLOUDFLARED_EDGE_IP_VERSION.to_string(),
                 loglevel: DEFAULT_CLOUDFLARED_LOGLEVEL.to_string(),
                 ha_connections: DEFAULT_CLOUDFLARED_HA_CONNECTIONS,
                 metrics_addr: DEFAULT_METRICS_ADDR.to_string(),
@@ -1152,6 +1155,13 @@ impl ChildProcessRemoteAccessController {
         Arc::get_mut(&mut self.inner)
             .expect("controller not shared yet")
             .protocol = protocol.into();
+        self
+    }
+
+    pub fn with_edge_ip_version(mut self, edge_ip_version: impl Into<String>) -> Self {
+        Arc::get_mut(&mut self.inner)
+            .expect("controller not shared yet")
+            .edge_ip_version = edge_ip_version.into();
         self
     }
 
@@ -1218,6 +1228,10 @@ pub fn child_process_controller_from_env() -> ChildProcessRemoteAccessController
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_CLOUDFLARED_PROTOCOL.to_string());
+    let edge_ip_version = std::env::var("RHYTHM_CLOUDFLARED_EDGE_IP_VERSION")
+        .ok()
+        .filter(|value| matches!(value.as_str(), "auto" | "4" | "6"))
+        .unwrap_or_else(|| DEFAULT_CLOUDFLARED_EDGE_IP_VERSION.to_string());
     let loglevel = std::env::var("RHYTHM_CLOUDFLARED_LOGLEVEL")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -1230,6 +1244,7 @@ pub fn child_process_controller_from_env() -> ChildProcessRemoteAccessController
     ChildProcessRemoteAccessController::new(bin)
         .with_metrics_addr(metrics)
         .with_protocol(protocol)
+        .with_edge_ip_version(edge_ip_version)
         .with_loglevel(loglevel)
         .with_ha_connections(ha_connections)
 }
@@ -1465,6 +1480,8 @@ fn spawn_cloudflared(inner: &ChildProcessInner, desired: &ChildDesired) -> anyho
         .arg("--no-autoupdate")
         .arg("--protocol")
         .arg(&inner.protocol)
+        .arg("--edge-ip-version")
+        .arg(&inner.edge_ip_version)
         .arg("--loglevel")
         .arg(&inner.loglevel)
         .arg("--metrics")
@@ -1584,6 +1601,7 @@ fn write_child_status_env(
         )?;
         writeln!(file, "metrics_addr={}", inner.metrics_addr)?;
         writeln!(file, "protocol={}", inner.protocol)?;
+        writeln!(file, "edge_ip_version={}", inner.edge_ip_version)?;
         writeln!(file, "loglevel={}", inner.loglevel)?;
         writeln!(file, "ha_connections={}", inner.ha_connections)?;
     }
@@ -2518,6 +2536,7 @@ cloudflared_tunnel_server_locations{edge_location=\"iad\"} 1\n";
         let controller = ChildProcessRemoteAccessController::new("/missing")
             .with_metrics_addr("127.0.0.1:60000")
             .with_protocol("quic")
+            .with_edge_ip_version("4")
             .with_loglevel("info")
             .with_ha_connections(2);
         let status = ChildSupervisorStatus {
@@ -2538,6 +2557,7 @@ cloudflared_tunnel_server_locations{edge_location=\"iad\"} 1\n";
         assert_eq!(values.get("child_pid").map(String::as_str), Some("12"));
         assert_eq!(values.get("restart_count").map(String::as_str), Some("4"));
         assert_eq!(values.get("protocol").map(String::as_str), Some("quic"));
+        assert_eq!(values.get("edge_ip_version").map(String::as_str), Some("4"));
         assert_eq!(values.get("loglevel").map(String::as_str), Some("info"));
         assert_eq!(values.get("ha_connections").map(String::as_str), Some("2"));
         let _ = std::fs::remove_dir_all(root);

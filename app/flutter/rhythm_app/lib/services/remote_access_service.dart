@@ -54,7 +54,12 @@ class RemoteAccessEnableResult {
 
 enum _AutoEnableOutcome { complete, retry }
 
-enum _ExistingRemoteAccessState { healthy, needsRepair, unreachable }
+enum _ExistingRemoteAccessState {
+  healthy,
+  routePending,
+  needsRepair,
+  unreachable,
+}
 
 class RemoteAccessActivationException implements Exception {
   const RemoteAccessActivationException(this.status);
@@ -205,8 +210,10 @@ class RemoteAccessService {
     Home? home,
     bool requireSupportGrant = false,
     bool explicitUserEnable = false,
+    bool? verifyRemoteRoute,
   }) async {
     _ensureCanUse(serverHub);
+    final shouldVerifyRemoteRoute = verifyRemoteRoute ?? !explicitUserEnable;
 
     if (explicitUserEnable) {
       // An explicit enable always wins over a previously recorded opt-out.
@@ -286,24 +293,31 @@ class RemoteAccessService {
     }
 
     var routeVerified = false;
-    try {
-      final remoteHello = await _waitForRemoteRoute(
-        endpoint: remoteEndpoint,
-        authToken: serverHub.token,
-        expectedServerInstanceId: stableServerInstanceId,
-      );
-      routeVerified = true;
-      stableServerInstanceId ??= remoteHello.serverInstanceId?.trim();
-      if (stableServerInstanceId?.isEmpty ?? false) {
-        stableServerInstanceId = null;
+    if (shouldVerifyRemoteRoute) {
+      try {
+        final remoteHello = await _waitForRemoteRoute(
+          endpoint: remoteEndpoint,
+          authToken: serverHub.token,
+          expectedServerInstanceId: stableServerInstanceId,
+        );
+        routeVerified = true;
+        stableServerInstanceId ??= remoteHello.serverInstanceId?.trim();
+        if (stableServerInstanceId?.isEmpty ?? false) {
+          stableServerInstanceId = null;
+        }
+      } on RemoteAccessRouteException catch (error) {
+        // The connector is already registered with Cloudflare. A phone-side
+        // DNS or network failure must not tear down a healthy device tunnel;
+        // retain the endpoint and let background reconciliation verify it.
+        debugPrint(
+          'RemoteAccessService: tunnel is active but the public route is still '
+          'pending for hub=${serverHub.id}: $error',
+        );
       }
-    } on RemoteAccessRouteException catch (error) {
-      // The connector is already registered with Cloudflare. A phone-side DNS
-      // or network failure must not tear down a healthy device tunnel; retain
-      // the endpoint and let background reconciliation verify it later.
+    } else {
       debugPrint(
-        'RemoteAccessService: tunnel is active but the public route is still '
-        'pending for hub=${serverHub.id}: $error',
+        'RemoteAccessService: public route verification deferred for '
+        'hub=${serverHub.id}',
       );
     }
 
@@ -520,7 +534,8 @@ class RemoteAccessService {
           onEnabled?.call(hub);
           return _AutoEnableOutcome.complete;
         }
-        if (existingState == _ExistingRemoteAccessState.unreachable) {
+        if (existingState == _ExistingRemoteAccessState.routePending ||
+            existingState == _ExistingRemoteAccessState.unreachable) {
           return _AutoEnableOutcome.retry;
         }
       }
@@ -672,12 +687,13 @@ class RemoteAccessService {
       );
     }
 
-    // If device status was readable, a stopped or missing connector can be
-    // repaired through that same endpoint. If neither LAN nor tunnel status
-    // was reachable, retain cloud state and retry when connectivity changes.
+    // A readable, activated connector needs only another route probe. Do not
+    // re-bootstrap or rewrite its config while Cloudflare propagation or edge
+    // connectivity is pending. If neither LAN nor tunnel status was reachable,
+    // retain cloud state and retry when connectivity changes.
     return status == null
         ? _ExistingRemoteAccessState.unreachable
-        : _ExistingRemoteAccessState.needsRepair;
+        : _ExistingRemoteAccessState.routePending;
   }
 
   Future<Hub> ensureOwnerTokenForHub(Hub serverHub) async {

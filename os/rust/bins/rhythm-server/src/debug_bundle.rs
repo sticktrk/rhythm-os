@@ -54,6 +54,7 @@ const OPTIONAL_PERSISTED_FILES: &[&str] = &[
     "pairing_history.json",
     "ota_history.json",
     "activity_history.json",
+    "light_usage_ledger.json",
 ];
 const REMOTE_ACCESS_DEBUG_FILES: &[&str] = &["cloudflared/hostname", "cloudflared/status.env"];
 const OTA_DEBUG_FILES: &[&str] = &[crate::auto_update::AUTO_UPDATE_STATE_RELATIVE_PATH];
@@ -4190,6 +4191,11 @@ mod tests {
         )
         .unwrap();
         fs::write(
+            data_dir.join("light_usage_ledger.json"),
+            br#"{"schema_version":1,"segments":{},"segment_order":[],"dropped_segment_count":0,"clock_discontinuity_count":0,"excluded_source_count":0}"#,
+        )
+        .unwrap();
+        fs::write(
             data_dir.join("canonical_registry.json"),
             br#"{"devices":{},"triage":{"entries":[]}}"#,
         )
@@ -4359,6 +4365,15 @@ mod tests {
         );
         assert_eq!(
             files
+                .get("persisted/light_usage_ledger.json")
+                .map(Vec::as_slice),
+            Some(
+                br#"{"schema_version":1,"segments":{},"segment_order":[],"dropped_segment_count":0,"clock_discontinuity_count":0,"excluded_source_count":0}"#
+                    .as_slice()
+            )
+        );
+        assert_eq!(
+            files
                 .get("persisted/hub_registry_mock_local.json")
                 .map(Vec::as_slice),
             Some(br#"{"rooms":[{"id":"office"}]}"#.as_slice())
@@ -4433,7 +4448,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            12
+            13
         );
         assert!(!manifest["missing_persisted_files"]
             .as_array()
