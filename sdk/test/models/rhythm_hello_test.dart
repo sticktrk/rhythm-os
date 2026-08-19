@@ -377,6 +377,7 @@ void main() {
             RhythmFeature.asyncDebugBundleUpload,
             RhythmFeature.guardedRoomLightProfileOverrides,
             RhythmFeature.targetGuardedRoomLightProfileOverrides,
+            RhythmFeature.sceneMotionSuppression,
           ],
           'hubs': [
             {
@@ -441,6 +442,11 @@ void main() {
         hello.capabilities!.supportsFeature(
           RhythmFeature.targetGuardedRoomLightProfileOverrides,
         ),
+        isTrue,
+      );
+      expect(
+        hello.capabilities!
+            .supportsFeature(RhythmFeature.sceneMotionSuppression),
         isTrue,
       );
       expect(hello.capabilities!.supportsFeature('missing'), isFalse);

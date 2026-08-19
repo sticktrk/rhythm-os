@@ -1173,6 +1173,12 @@ class ServerSyncProvider extends ChangeNotifier {
   /// never overwrite [motionActivationEnabledForNode], which remains the
   /// user's durable preference and becomes effective again after the Scene.
   bool motionSuppressedByActiveSceneForNode(String nodeId) {
+    final supported = HueServiceLocator.isDemoMode ||
+        _capabilities?.supportsFeature(
+              RhythmFeature.sceneMotionSuppression,
+            ) ==
+            true;
+    if (!supported) return false;
     if (moodSceneIdForRoom(nodeId) == null) return false;
     return _roomProvider.getDisplayRoomState(nodeId) == RoomModeState.mood ||
         nodeById(nodeId)?.moodActive == true;

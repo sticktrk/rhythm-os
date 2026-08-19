@@ -1064,6 +1064,37 @@ void main() {
     expect(serverSync.motionActivationEnabledForNode('room-1'), isTrue);
     expect(
       serverSync.motionSuppressedByActiveSceneForNode('room-1'),
+      isFalse,
+      reason: 'a previous-stable capability payload cannot prove suppression',
+    );
+    expect(find.byIcon(Icons.sensors_rounded), findsOneWidget);
+    expect(
+      tester.getSemantics(motion).label,
+      'Turn off motion activation for Kitchen',
+    );
+    expect(
+      tester
+          .getSemantics(motion)
+          .getSemanticsData()
+          .hasAction(SemanticsAction.tap),
+      isTrue,
+    );
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': [RhythmFeature.sceneMotionSuppression],
+          'hubs': <dynamic>[],
+        },
+        'nodes': [helloNode(sceneActive: true)],
+      }),
+    );
+    await tester.pump();
+
+    expect(serverSync.motionActivationEnabledForNode('room-1'), isTrue);
+    expect(
+      serverSync.motionSuppressedByActiveSceneForNode('room-1'),
       isTrue,
     );
     expect(find.byIcon(Icons.sensors_off_rounded), findsOneWidget);
@@ -1093,6 +1124,11 @@ void main() {
 
     connection.emitHello(
       RhythmHello.fromJson({
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': [RhythmFeature.sceneMotionSuppression],
+          'hubs': <dynamic>[],
+        },
         'nodes': [helloNode(sceneActive: false)],
       }),
     );
