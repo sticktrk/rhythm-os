@@ -20,9 +20,13 @@ use crate::wifi;
 const WIFI_CHANGE_APPLY_DELAY: Duration = Duration::from_secs(1);
 const WIFI_CHANGE_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub fn create_router(state: SharedState, provisioning: ProvisioningManager) -> Router {
+pub fn create_router(
+    state: SharedState,
+    provisioning: ProvisioningManager,
+    ota_status: rhythm_server::self_update::OtaStatusHandle,
+) -> Router {
     let router_state = state.clone();
-    rhythm_server::http_server::create_router(router_state)
+    rhythm_server::http_server::create_router(router_state, ota_status)
         .route(
             "/api/wifi",
             get({
@@ -176,7 +180,11 @@ mod tests {
     fn create_router_builds_standard_and_wifi_routes() {
         let state = Arc::new(Mutex::new(AppState::default()));
         let provisioning = ProvisioningManager::new("test-version", state.clone());
-        let _router = create_router(state, provisioning);
+        let _router = create_router(
+            state,
+            provisioning,
+            rhythm_server::self_update::OtaStatusHandle::new("test-version"),
+        );
     }
 
     #[tokio::test]
@@ -195,16 +203,20 @@ mod tests {
         }
         let provisioning = ProvisioningManager::new("test-version", state.clone());
 
-        let response = create_router(state, provisioning)
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/diag/debug-bundle")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
+        let response = create_router(
+            state,
+            provisioning,
+            rhythm_server::self_update::OtaStatusHandle::new("test-version"),
+        )
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/diag/debug-bundle")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
