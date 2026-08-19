@@ -3109,6 +3109,10 @@ fn motion_activation_enabled_for_target(state: &SharedState, target_node_id: &st
     motion_suppression_reason_for_target(state, target_node_id).is_none()
 }
 
+fn is_generated_mood_scene_id(scene_id: &str) -> bool {
+    scene_id.starts_with("node-mood-scene-") || scene_id.starts_with("node_mood_scene_")
+}
+
 fn motion_suppression_reason_for_target(
     state: &SharedState,
     target_node_id: &str,
@@ -3122,7 +3126,13 @@ fn motion_suppression_reason_for_target(
             if !snapshot.profile_settings.motion_activation_enabled() {
                 return Some("motion_activation_disabled");
             }
-            if snapshot.mood_active && snapshot.profile_settings.mood_scene_id.is_some() {
+            if snapshot.mood_active
+                && snapshot
+                    .profile_settings
+                    .mood_scene_id
+                    .as_deref()
+                    .is_some_and(|scene_id| !is_generated_mood_scene_id(scene_id))
+            {
                 return Some("active_scene");
             }
             None
@@ -7171,6 +7181,48 @@ mod tests {
         assert!(motion.sensors.is_empty());
         assert!(motion.motion_owned.is_empty());
         assert!(turn_on_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn generated_custom_mood_scene_motion_claims_and_turns_on_target() {
+        for scene_id in ["node-mood-scene-room_a", "node_mood_scene_room_a"] {
+            let mut snapshot = room_snapshot_with_flags("room_a", false, false);
+            snapshot.mood_active = true;
+            snapshot.profile_settings.mood_scene_id = Some(scene_id.into());
+            snapshot.profile_settings.motion_activation_enabled = Some(true);
+            let turn_on_calls = Arc::new(AtomicUsize::new(0));
+            let state = make_state_with_counted_turn_on(snapshot, turn_on_calls.clone());
+            let hub_key = only_hub_key(&state);
+            add_canonical_control_source(
+                &state,
+                &hub_key,
+                "sensor_a",
+                "room_a",
+                DeviceType::Motion,
+            );
+            let mut motion = MotionTimerState::new();
+
+            handle_hub_event(
+                &state,
+                crate::hub::HubEvent::Motion {
+                    hub_key: Some(hub_key),
+                    room_id: "room_a".into(),
+                    sensor_id: "sensor_a".into(),
+                    detected: true,
+                },
+                &mut motion,
+            );
+
+            wait_for_atomic_at_least(&turn_on_calls, 1);
+            assert_eq!(
+                motion_suppression_reason_for_target(&state, "room_a"),
+                None,
+                "generated custom Mood scene {scene_id} must not suppress motion"
+            );
+            assert_eq!(motion.sensors.len(), 1);
+            assert!(motion.motion_owned.contains("room_a"));
+            assert_eq!(turn_on_calls.load(Ordering::SeqCst), 1);
+        }
     }
 
     #[test]

@@ -1012,7 +1012,10 @@ void main() {
     addTearDown(serverSync.dispose);
     addTearDown(connection.dispose);
 
-    Map<String, dynamic> helloNode({required bool sceneActive}) => {
+    Map<String, dynamic> helloNode({
+      required bool sceneActive,
+      String sceneId = 'evening-glow',
+    }) => {
           'id': 'room-1',
           'name': 'Kitchen',
           'kind': 'room',
@@ -1030,7 +1033,7 @@ void main() {
           'mood_active': sceneActive,
           'profile_settings': {
             'motion_activation_enabled': true,
-            'mood_scene_id': 'evening-glow',
+            'mood_scene_id': sceneId,
           },
         };
 
@@ -1119,6 +1122,43 @@ void main() {
       await expectLater(
         find.byType(RoomCard),
         matchesGoldenFile('goldens/room-scene-motion-paused.png'),
+      );
+    }
+
+    for (final generatedSceneId in [
+      'node-mood-scene-room-1',
+      'node_mood_scene_room_1',
+    ]) {
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'capabilities': {
+            'api_schema_version': 2,
+            'features': [RhythmFeature.sceneMotionSuppression],
+            'hubs': <dynamic>[],
+          },
+          'nodes': [
+            helloNode(sceneActive: true, sceneId: generatedSceneId),
+          ],
+        }),
+      );
+      await tester.pump();
+
+      expect(
+        serverSync.motionSuppressedByActiveSceneForNode('room-1'),
+        isFalse,
+        reason: '$generatedSceneId is a custom Mood, not a saved Scene',
+      );
+      expect(find.byIcon(Icons.sensors_rounded), findsOneWidget);
+      expect(
+        tester.getSemantics(motion).label,
+        'Turn off motion activation for Kitchen',
+      );
+      expect(
+        tester
+            .getSemantics(motion)
+            .getSemanticsData()
+            .hasAction(SemanticsAction.tap),
+        isTrue,
       );
     }
 
