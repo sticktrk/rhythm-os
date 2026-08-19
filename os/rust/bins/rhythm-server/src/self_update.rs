@@ -431,6 +431,21 @@ impl OtaStatusHandle {
         })
     }
 
+    pub fn mark_skipped(
+        &self,
+        operation: &OtaOperationLease,
+        message: impl Into<String>,
+    ) -> Result<(), String> {
+        let message = message.into();
+        self.with_operation_status(operation, |status| {
+            status.state = OtaUpdateState::Idle;
+            status.update_available = Some(false);
+            status.target_version = None;
+            status.message = Some(message);
+            status.last_error = None;
+        })
+    }
+
     pub fn mark_restarting(
         &self,
         operation: &OtaOperationLease,

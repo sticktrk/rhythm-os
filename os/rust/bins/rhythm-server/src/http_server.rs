@@ -27,8 +27,10 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tower_http::cors::CorsLayer;
 
 /// Create the Axum router with all API routes.
-pub fn create_router(state: SharedState) -> Router {
-    let ota_status = crate::self_update::OtaStatusHandle::new(crate::BUILD_VERSION);
+pub fn create_router(
+    state: SharedState,
+    ota_status: crate::self_update::OtaStatusHandle,
+) -> Router {
     let auth_state = state.clone();
 
     logging::with_http_observability(
@@ -1734,6 +1736,72 @@ mod tests {
     }
 
     #[test]
+    fn appliance_auto_update_apply_blocks_http_operations_and_failure_releases_gate() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+            state.lock().unwrap().platform_type = "appliance";
+            let ota_status = crate::self_update::OtaStatusHandle::new(crate::BUILD_VERSION);
+            let apply_entered = Arc::new(Barrier::new(2));
+            let release_apply = Arc::new(Barrier::new(2));
+            let worker_status = ota_status.clone();
+            let worker_entered = apply_entered.clone();
+            let worker_release = release_apply.clone();
+            let auto_update = thread::spawn(move || {
+                crate::auto_update::hold_failed_apply_for_test(
+                    worker_status,
+                    worker_entered,
+                    worker_release,
+                );
+            });
+
+            apply_entered.wait();
+            assert_eq!(
+                ota_status.snapshot().state,
+                crate::self_update::OtaUpdateState::Updating
+            );
+
+            let restart_scheduled = Arc::new(AtomicBool::new(false));
+            let scheduled_flag = restart_scheduled.clone();
+            let restart =
+                restart_device_with_scheduler(state.clone(), ota_status.clone(), move |_| {
+                    scheduled_flag.store(true, Ordering::SeqCst);
+                    Ok(())
+                });
+            assert_eq!(restart.status(), StatusCode::CONFLICT);
+            assert!(!restart_scheduled.load(Ordering::SeqCst));
+
+            let check = check_update(state.clone(), ota_status.clone()).await;
+            assert_eq!(check.status(), StatusCode::CONFLICT);
+
+            let update = do_update(state, ota_status.clone()).await;
+            assert_eq!(update.status(), StatusCode::CONFLICT);
+            assert_eq!(
+                ota_status.snapshot().state,
+                crate::self_update::OtaUpdateState::Updating,
+                "rejected HTTP operations must not replace auto-update status"
+            );
+
+            release_apply.wait();
+            auto_update.join().unwrap();
+            assert_eq!(
+                ota_status.snapshot().state,
+                crate::self_update::OtaUpdateState::Error
+            );
+            let retry = ota_status
+                .begin_operation()
+                .expect("terminal auto-update failure must release the shared gate");
+            drop(retry);
+            assert!(!ota_status.operation_active());
+        });
+    }
+
+    #[test]
     fn check_update_handler_reports_available_and_failed_progress() {
         let _guard = crate::self_update::ENV_LOCK
             .lock()
@@ -2237,7 +2305,10 @@ mod tests {
         init_restart_dry_run();
 
         let state: SharedState = Arc::new(Mutex::new(AppState::default()));
-        let router = create_router(state);
+        let router = create_router(
+            state,
+            crate::self_update::OtaStatusHandle::new(crate::BUILD_VERSION),
+        );
 
         let request = Request::builder()
             .method("POST")
@@ -2285,7 +2356,10 @@ mod tests {
                 FileStorage::new(&state.data_dir).unwrap(),
             ));
         }
-        let router = create_router(state);
+        let router = create_router(
+            state,
+            crate::self_update::OtaStatusHandle::new(crate::BUILD_VERSION),
+        );
 
         let request = Request::builder()
             .method("POST")
