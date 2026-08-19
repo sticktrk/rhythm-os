@@ -9923,5 +9923,200 @@ void main() {
     expect(savedSleep.activeProfileId, 'sleep');
     expect(savedSleep.idleProfileId, 'sleep_idle');
     expect(api.profileConfigs, initialProfiles);
+
+    Map<String, dynamic> roomHello({required bool explicitDayIdle}) => {
+          'version': '0.6.590-beta',
+          'capabilities': {
+            'api_schema_version': 2,
+            'features': [
+              RhythmFeature.roomLightProfileOverrides,
+              RhythmFeature.roomDayIdleProfileOverrides,
+            ],
+            'hubs': const <dynamic>[],
+          },
+          'nodes': [
+            {
+              'id': 'inheriting-room',
+              'name': 'Kitchen',
+              'kind': 'room',
+              'state': 'standby',
+              'rhythm_enabled': true,
+              'disabled': false,
+              'time_offset': 0.0,
+              'brightness_offset': 0.0,
+            },
+            {
+              'id': 'custom-room',
+              'name': 'Nursery',
+              'kind': 'room',
+              'state': 'standby',
+              'rhythm_enabled': true,
+              'disabled': false,
+              'time_offset': 0.0,
+              'brightness_offset': 0.0,
+              'profile_settings': {
+                'profile_overrides': {
+                  'day_idle': {
+                    'min_brightness': 7,
+                    'max_brightness': 7,
+                  },
+                },
+              },
+            },
+          ],
+          'profiles': [for (final profile in initialProfiles) profile.toJson()],
+          'mode': {
+            'active': 'day',
+            'configs': [
+              {
+                'mode': 'day',
+                'active_profile_id': 'rhythm',
+                if (explicitDayIdle) 'idle_profile_id': 'day_idle',
+              },
+              {
+                'mode': 'sleep',
+                'active_profile_id': 'sleep',
+                'idle_profile_id': 'sleep_idle',
+              },
+            ],
+          },
+        };
+
+    connection.emitHello(
+      RhythmHello.fromJson(roomHello(explicitDayIdle: false)),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const LightScreen(
+          key: ValueKey('inheriting-auto-room'),
+          roomId: 'inheriting-room',
+          roomName: 'Kitchen',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Auto · 1%'), findsOneWidget);
+    expect(
+      tester
+          .getSemantics(
+            find.byKey(const ValueKey('light-layer-preview-day_idle')),
+          )
+          .label,
+      contains('Auto, 1 percent, Day color'),
+    );
+    await tester.tap(find.text('Low Glow'));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<Switch>(
+            find.byKey(
+              const ValueKey('day-low-glow-custom-brightness'),
+            ),
+          )
+          .value,
+      isFalse,
+      reason: 'the room editor must ignore the stale stored custom profile',
+    );
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const LightScreen(
+          key: ValueKey('custom-auto-room'),
+          roomId: 'custom-room',
+          roomName: 'Nursery',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Custom · 7%'), findsOneWidget);
+    expect(
+      tester
+          .getSemantics(
+            find.byKey(const ValueKey('light-layer-preview-day_idle')),
+          )
+          .label,
+      contains('Custom, 7 percent, Day color'),
+    );
+
+    api.profileMode = RhythmModeResource.fromJson(
+      roomHello(explicitDayIdle: true)['mode'] as Map<String, dynamic>,
+    );
+    connection.emitHello(
+      RhythmHello.fromJson(roomHello(explicitDayIdle: true)),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const LightScreen(
+          key: ValueKey('inheriting-explicit-room'),
+          roomId: 'inheriting-room',
+          roomName: 'Kitchen',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Auto · 20%'), findsOneWidget);
+    expect(
+      tester
+          .getSemantics(
+            find.byKey(const ValueKey('light-layer-preview-day_idle')),
+          )
+          .label,
+      contains('Auto, 20 percent, custom color'),
+    );
+    await tester.tap(find.text('Low Glow'));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<Switch>(
+            find.byKey(
+              const ValueKey('day-low-glow-custom-brightness'),
+            ),
+          )
+          .value,
+      isTrue,
+      reason: 'an explicit mapping must load the stored custom profile',
+    );
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const LightScreen(
+          key: ValueKey('custom-explicit-room'),
+          roomId: 'custom-room',
+          roomName: 'Nursery',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Custom · 7%'), findsOneWidget);
+    expect(
+      tester
+          .getSemantics(
+            find.byKey(const ValueKey('light-layer-preview-day_idle')),
+          )
+          .label,
+      contains('Custom, 7 percent, custom color'),
+    );
+    await tester.tap(find.text('Low Glow'));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<Slider>(
+            find.byKey(const ValueKey('day-low-glow-brightness')),
+          )
+          .value,
+      7,
+      reason: 'the room delta must remain isolated atop explicit inheritance',
+    );
+    expect(api.profileConfigs, initialProfiles);
   });
 }

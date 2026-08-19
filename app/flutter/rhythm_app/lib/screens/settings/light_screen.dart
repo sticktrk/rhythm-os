@@ -396,6 +396,17 @@ class _LightScreenState extends State<LightScreen> {
     return overrides[id]?.applyTo(global) ?? global;
   }
 
+  RhythmCurveConfig _automaticDayLowGlowConfig() => RhythmCurveConfig(
+        id: 'day_idle',
+        name: 'Low Glow',
+        curve: const RhythmInheritActiveCurve(),
+        minColorTemp: 0,
+        maxColorTemp: 0,
+        minBrightness: 1,
+        maxBrightness: 1,
+        maxDimSteps: 1,
+      );
+
   _LayerPreview _dayLowGlowPreview(
     ServerSyncProvider sync, {
     required Map<String, RhythmLightProfileNodeOverride> roomOverrides,
@@ -424,10 +435,9 @@ class _LightScreenState extends State<LightScreen> {
       );
     }
 
-    final globalLowGlow = _configFor(
-      sync,
-      customId != null && customId.isNotEmpty ? customId : 'day_idle',
-    );
+    final globalLowGlow = customId != null && customId.isNotEmpty
+        ? _configFor(sync, customId)
+        : _automaticDayLowGlowConfig();
     final roomOverride = roomOverrides['day_idle'];
     final effective = draft ??
         (globalLowGlow == null
@@ -441,8 +451,8 @@ class _LightScreenState extends State<LightScreen> {
         : effective;
     final visual = _previewFor(visualConfig);
     final pendingOverride = draft != null && draft != globalLowGlow;
-    final custom = pendingOverride ||
-        (draft == null && !(roomOverride?.isEmpty ?? true));
+    final custom =
+        pendingOverride || (draft == null && !(roomOverride?.isEmpty ?? true));
     final scope = custom ? 'Custom' : 'Auto';
     final brightness = effective.maxBrightness.clamp(1, 100);
     return _LayerPreview(

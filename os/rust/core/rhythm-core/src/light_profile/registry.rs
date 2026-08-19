@@ -304,24 +304,26 @@ impl LightProfileRegistry {
             .expect("Active profile must exist in registry")
     }
 
-    /// Resolve a profile module for a room state inside the given high-level mode.
+    /// Resolve the effective profile config for a room state inside the given
+    /// high-level mode.
     ///
     /// `active` continues to honor the room's selected profile override and timer
     /// overrides. Other states resolve through the mode mapping, apply their
     /// own room-scoped profile delta, and only inherit the active room profile
-    /// when the target profile itself is `inherit-active`.
-    pub fn profile_for_room_state(
+    /// when the target profile itself is `inherit-active`. A missing idle mapping
+    /// means Auto, so it starts from the factory idle config rather than a stale
+    /// stored custom config with the same ID.
+    pub fn profile_config_for_room_state(
         &self,
         mode: RhythmMode,
         state: RoomModeState,
         settings: Option<&RoomProfileSettings>,
-    ) -> Arc<dyn LightProfileModule> {
+    ) -> LightProfileConfig {
         let active_profile_id = self.active_profile_id_for_mode(mode);
         let active_config = self.active_profile_config_for_room_settings(mode, settings);
-        let active_profile = Arc::new(LightProfile::new(active_config.clone()));
 
         if state == RoomModeState::Active {
-            return active_profile;
+            return active_config;
         }
 
         let mode_config = self.mode_config_or_default(mode);
@@ -342,8 +344,7 @@ impl LightProfileRegistry {
                 state,
                 RoomModeState::Mood | RoomModeState::Standby | RoomModeState::HardOff
             ) {
-                self.profile_config_cloned(mode.default_idle_profile_id())
-                    .unwrap_or_else(|| Self::default_idle_profile_for_mode(mode))
+                Self::default_idle_profile_for_mode(mode)
             } else {
                 active_config.clone()
             }
@@ -353,6 +354,20 @@ impl LightProfileRegistry {
             let state_profile_id = state_config.id.clone();
             settings.apply_profile_override_to_config(&state_profile_id, &mut state_config);
         }
+
+        state_config
+    }
+
+    /// Resolve a profile module for a room state inside the given high-level mode.
+    pub fn profile_for_room_state(
+        &self,
+        mode: RhythmMode,
+        state: RoomModeState,
+        settings: Option<&RoomProfileSettings>,
+    ) -> Arc<dyn LightProfileModule> {
+        let active_config = self.active_profile_config_for_room_settings(mode, settings);
+        let active_profile = Arc::new(LightProfile::new(active_config));
+        let state_config = self.profile_config_for_room_state(mode, state, settings);
 
         self.profile_for_config_with_active(&state_config, active_profile)
     }
@@ -765,7 +780,7 @@ mod tests {
     }
 
     #[test]
-    fn null_idle_mapping_uses_global_and_room_day_idle_profiles() {
+    fn null_idle_mapping_uses_factory_auto_before_room_delta() {
         let mut registry = LightProfileRegistry::new();
         let ctx = test_context(12.0);
         let active = registry.active_profile().calculate(&ctx);
@@ -797,8 +812,8 @@ mod tests {
             .calculate(&ctx);
 
         assert_eq!(global_idle.brightness, 1);
-        assert_eq!(global_idle.rgb, crate::Rgb::new(38, 82, 255));
-        assert_ne!(global_idle.rgb, active.rgb);
+        assert_eq!(global_idle.rgb, active.rgb);
+        assert_ne!(global_idle.rgb, crate::Rgb::new(38, 82, 255));
 
         let mut settings = RoomProfileSettings::default();
         settings.profile_overrides.insert(
@@ -813,7 +828,7 @@ mod tests {
             .profile_for_room_state(RhythmMode::Day, RoomModeState::Standby, Some(&settings))
             .calculate(&ctx);
         assert_eq!(room_idle.brightness, 7);
-        assert_eq!(room_idle.rgb, crate::Rgb::new(38, 82, 255));
+        assert_eq!(room_idle.rgb, active.rgb);
 
         let other_room_idle = registry
             .profile_for_room_state(
@@ -823,6 +838,27 @@ mod tests {
             )
             .calculate(&ctx);
         assert_eq!(other_room_idle, global_idle);
+
+        registry.set_mode_configs(vec![ModeConfig {
+            mode: RhythmMode::Day,
+            active_profile_id: Some(RHYTHM_PROFILE_ID.into()),
+            idle_profile_id: Some(DAY_IDLE_PROFILE_ID.into()),
+            wake_profile_id: None,
+            warning_profile_id: None,
+            room_defaults: vec![],
+        }]);
+
+        let explicit_global_idle = registry
+            .profile_for_room_state(RhythmMode::Day, RoomModeState::Mood, None)
+            .calculate(&ctx);
+        assert_eq!(explicit_global_idle.brightness, 1);
+        assert_eq!(explicit_global_idle.rgb, crate::Rgb::new(38, 82, 255));
+
+        let explicit_room_idle = registry
+            .profile_for_room_state(RhythmMode::Day, RoomModeState::Standby, Some(&settings))
+            .calculate(&ctx);
+        assert_eq!(explicit_room_idle.brightness, 7);
+        assert_eq!(explicit_room_idle.rgb, crate::Rgb::new(38, 82, 255));
     }
 
     #[test]

@@ -479,6 +479,13 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
         for (final profile in settingsProfiles)
           if (profile.id.isNotEmpty) profile.id: profile,
       };
+      if (widget.dayLowGlowOnly && widget.isRoomScoped) {
+        final explicitIdleProfileId =
+            _modeConfigForMode(sdk.RhythmMode.day)?.idleProfileId;
+        if (explicitIdleProfileId == null || explicitIdleProfileId.isEmpty) {
+          profileConfigs['day_idle'] = _defaultIdleProfileConfig();
+        }
+      }
 
       final requestedProfileId = _selectedProfileId;
       var initialProfileId = requestedProfileId;
@@ -602,9 +609,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
   void _publishDayLowGlowDraftPreview() {
     if (!widget.dayLowGlowOnly || !widget.isRoomScoped) return;
     widget.onPreviewChanged?.call(
-      _curveConfigDirty
-          ? _effectiveRoomIdleDraft()
-          : null,
+      _curveConfigDirty ? _effectiveRoomIdleDraft() : null,
     );
   }
 
