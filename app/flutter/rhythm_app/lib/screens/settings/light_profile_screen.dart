@@ -122,6 +122,7 @@ class LightProfileScreen extends StatefulWidget {
   final String? roomId;
   final String? roomName;
   final String overrideScope;
+  final ValueChanged<sdk.RhythmCurveConfig?>? onPreviewChanged;
 
   const LightProfileScreen({
     super.key,
@@ -131,6 +132,7 @@ class LightProfileScreen extends StatefulWidget {
     this.roomId,
     this.roomName,
     this.overrideScope = 'room',
+    this.onPreviewChanged,
   });
 
   bool get isRoomScoped => roomId != null;
@@ -596,6 +598,13 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
     });
   }
 
+  void _publishDayLowGlowDraftPreview() {
+    if (!widget.dayLowGlowOnly || !widget.isRoomScoped) return;
+    widget.onPreviewChanged?.call(
+      _buildIdleDraftConfig() ?? _defaultIdleProfileConfig(),
+    );
+  }
+
   /// Recomputes [_curveConfigDirty] by comparing the current draft against the
   /// last loaded/saved baseline. Call after any state mutation that the user
   /// might want to revert; toggling a value back to its baseline clears dirty.
@@ -1018,6 +1027,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
       _profileConfigs[profileId] = globalConfig;
       if (widget.dayLowGlowOnly) {
         _applyIdleConfig(globalConfig);
+        widget.onPreviewChanged?.call(null);
       } else {
         _applyProfileConfig(globalConfig);
         _applyIdleFallback();
@@ -1773,6 +1783,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
                                   }
                                   _markDirty();
                                 });
+                                _publishDayLowGlowDraftPreview();
                               },
                               activeTrackColor: briColor,
                               activeThumbColor: _Palette.textPrimary,
@@ -1803,6 +1814,9 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
                                         overlayRadius: 16),
                                   ),
                                   child: Slider(
+                                    key: const ValueKey(
+                                      'day-low-glow-brightness',
+                                    ),
                                     value: _idleBrightness.clamp(1, 100),
                                     min: 1,
                                     max: 100,
@@ -1812,6 +1826,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
                                         _idleBrightness = v;
                                         _markDirty();
                                       });
+                                      _publishDayLowGlowDraftPreview();
                                     },
                                   ),
                                 ),
@@ -1860,6 +1875,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
                                   _idleCustomColor = v;
                                   _markDirty();
                                 });
+                                _publishDayLowGlowDraftPreview();
                               },
                               activeTrackColor: colorColor,
                               activeThumbColor: _Palette.textPrimary,
@@ -1933,11 +1949,13 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
       hue: _idleHue,
       selectedColor: _idleSelectedColor,
       isPresetSelected: _isPresetSelected,
+      spectrumKey: const ValueKey('day-low-glow-color-spectrum'),
       onHueChanged: (hue) {
         setState(() {
           _idleHue = hue;
           _markDirty();
         });
+        _publishDayLowGlowDraftPreview();
       },
     );
   }
@@ -1947,6 +1965,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
     required Color selectedColor,
     required bool Function(Color presetColor) isPresetSelected,
     required ValueChanged<double> onHueChanged,
+    Key? spectrumKey,
     bool showSelection = true,
   }) {
     return LayoutBuilder(
@@ -1957,6 +1976,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
         return Column(
           children: [
             GestureDetector(
+              key: spectrumKey,
               onTapDown: (d) => _onFixedColorSpectrumTap(
                   d.localPosition.dx, width, onHueChanged),
               onHorizontalDragUpdate: (d) => _onFixedColorSpectrumTap(
@@ -3223,6 +3243,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
       if (widget.dayLowGlowOnly && widget.isRoomScoped) {
         _applyIdleConfig(baseline);
         _curveConfigDirty = false;
+        widget.onPreviewChanged?.call(null);
         return;
       }
       _applyProfileConfig(baseline);
@@ -3473,12 +3494,14 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
         '$_scopeName light settings could not be saved.',
         error: true,
       );
+      widget.onPreviewChanged?.call(null);
       return;
     }
 
     _profileConfigs[profileId] = effectiveConfig;
     if (widget.dayLowGlowOnly) {
       _applyIdleConfig(effectiveConfig);
+      widget.onPreviewChanged?.call(null);
     } else {
       _applyProfileConfig(effectiveConfig);
       _applyIdleFallback();

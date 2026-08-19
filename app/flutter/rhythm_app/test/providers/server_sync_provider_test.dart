@@ -9586,12 +9586,56 @@ void main() {
     );
     await tester.tap(find.text('Low Glow'));
     await tester.pumpAndSettle();
+    expect(find.text('Auto · 1%'), findsOneWidget);
+    expect(
+      tester
+          .getSemantics(
+            find.byKey(const ValueKey('light-layer-preview-day_idle')),
+          )
+          .label,
+      contains('Auto, 1 percent, Day color'),
+    );
     await captureState('room-low-glow-inherited');
     await tester.tap(
       find.byKey(const ValueKey('day-low-glow-custom-brightness')),
     );
     await tester.pumpAndSettle();
+    expect(find.text('Custom · 1%'), findsOneWidget);
     await captureState('room-low-glow-custom');
+    tester
+        .widget<Slider>(
+          find.byKey(const ValueKey('day-low-glow-brightness')),
+        )
+        .onChanged!(80);
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey('day-low-glow-custom-color')),
+    );
+    await tester.pumpAndSettle();
+    final spectrum = find.byKey(
+      const ValueKey('day-low-glow-color-spectrum'),
+    );
+    final spectrumWidth = tester.getSize(spectrum).width;
+    final spectrumGesture = tester.widget<GestureDetector>(spectrum);
+    spectrumGesture.onTapDown!(
+      TapDownDetails(localPosition: Offset(spectrumWidth * 0.08, 12)),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Custom · 80%'), findsOneWidget);
+    await captureState('room-low-glow-warm-bright');
+    spectrumGesture.onTapDown!(
+      TapDownDetails(localPosition: Offset(spectrumWidth * 0.62, 12)),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .getSemantics(
+            find.byKey(const ValueKey('light-layer-preview-day_idle')),
+          )
+          .label,
+      contains('Custom, 80 percent, custom color'),
+    );
+    await captureState('room-low-glow-cool-bright');
     final pendingSave = Completer<bool>();
     api.nodeProfileOverridesCompleter = pendingSave;
     await tester.tap(find.text('Save'));
