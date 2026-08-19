@@ -147,6 +147,15 @@ fn mode_default_flip_emits_node_state_event_synchronously() {
         RoomModeState::Active,
         "the emitted NodeState event for master must report state=Active, matching the engine"
     );
+    assert_eq!(
+        last.observed_power.source.as_deref(),
+        Some("semantic_override"),
+        "the mode default is desired policy, not integration readback"
+    );
+    assert!(
+        !last.observed_power.fresh,
+        "desired mode state must not masquerade as fresh physical proof"
+    );
 }
 
 #[test]
