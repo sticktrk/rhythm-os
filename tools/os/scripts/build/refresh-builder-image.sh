@@ -57,6 +57,8 @@ done
 hash="$("$SCRIPT_DIR/compute-image-hash.sh")"
 tag="${TAG_PREFIX}${hash}"
 image_ref="$IMAGE_REPO:$tag"
+# Human-readable connectedhomeip pin (informational, not hashed).
+chip_info="$("$SCRIPT_DIR/compute-image-hash.sh" --chip-info)"
 
 echo "Input hash: $hash"
 echo "Target image: $image_ref"
@@ -109,17 +111,23 @@ fi
 # baked by build-rpiz-builder-image.sh, and RHYTHM_BAKED_OUTPUT_PREFIX remains
 # a manual override.
 current_ref=""
+current_chip_info=""
 if [ -f "$LOCK_FILE" ]; then
     current_ref="$(awk -F= '/^image=/ {print $2}' "$LOCK_FILE" 2>/dev/null || true)"
+    current_chip_info="$(grep -E '^chip_(rev|ref|diff)=' "$LOCK_FILE" 2>/dev/null || true)"
 fi
 
-if [ "$current_ref" != "$image_ref" ]; then
+if [ "$current_ref" != "$image_ref" ] || [ "$current_chip_info" != "$chip_info" ]; then
     mkdir -p "$(dirname "$LOCK_FILE")"
     {
         echo "# Managed by tools/os/scripts/build/refresh-builder-image.sh — do not edit by hand."
         echo "# Bump by rerunning the refresh script after changing any baked input."
         echo "image=$image_ref"
         echo "hash=$hash"
+        echo "# connectedhomeip baked into this image (informational; the SHA and"
+        echo "# local diff are already part of hash= above). chip_ref is git-describe"
+        echo "# output: pin the SDK to a release tag so it reads as a plain version."
+        echo "$chip_info"
     } > "$LOCK_FILE"
     echo "Updated $LOCK_FILE -> $image_ref"
 else
