@@ -213,7 +213,9 @@ class _LightScreenState extends State<LightScreen> {
                           const SizedBox(height: 12),
                         ],
                         for (final layer in _kProfileLayers)
-                          if (!layer.globalOnly || !widget.isRoomScoped)
+                          if (!layer.globalOnly ||
+                              !widget.isRoomScoped ||
+                              !_isBulbScoped)
                             _ProfileLayerCard(
                               layer: layer,
                               preview: layer.id == 'day_idle'
@@ -231,7 +233,9 @@ class _LightScreenState extends State<LightScreen> {
                               onToggle: () => _toggle(layer.id),
                               child: LightProfileScreen(
                                 initialProfile: layer.id == 'day_idle'
-                                    ? 'rhythm'
+                                    ? widget.isRoomScoped
+                                        ? 'day_idle'
+                                        : 'rhythm'
                                     : layer.id,
                                 embedded: true,
                                 dayLowGlowOnly: layer.id == 'day_idle',

@@ -226,12 +226,14 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
   @override
   void initState() {
     super.initState();
-    _selectedProfileId = switch (widget.initialProfile) {
-      'idle' || 'day_idle' => 'rhythm',
-      'sleep_idle' => 'sleep',
-      final profile? => profile,
-      null => 'rhythm',
-    };
+    _selectedProfileId = widget.dayLowGlowOnly && widget.isRoomScoped
+        ? 'day_idle'
+        : switch (widget.initialProfile) {
+            'idle' || 'day_idle' => 'rhythm',
+            'sleep_idle' => 'sleep',
+            final profile? => profile,
+            null => 'rhythm',
+          };
 
     _serverSync = context.read<ServerSyncProvider>();
     _serverSync.addListener(_handleServerSyncChanged);
@@ -353,8 +355,15 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
 
   bool get _isSleepProfile => _selectedProfileId == 'sleep';
 
+  String get _overrideProfileId => widget.dayLowGlowOnly && widget.isRoomScoped
+      ? 'day_idle'
+      : _selectedProfileId;
+
   bool get _usesRoomDayColorControl =>
-      widget.isRoomScoped && widget.overrideScope == 'room' && !_isSleepProfile;
+      widget.isRoomScoped &&
+      widget.overrideScope == 'room' &&
+      !widget.dayLowGlowOnly &&
+      !_isSleepProfile;
 
   sdk.RhythmMode _modeForProfileId(String profileId) =>
       profileId == 'sleep' ? sdk.RhythmMode.sleep : sdk.RhythmMode.day;
@@ -529,6 +538,16 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
       selectedConfig =
           effectiveProfileConfigs[selectedConfig.id] ?? selectedConfig;
       _applyProfileConfig(selectedConfig);
+      if (widget.dayLowGlowOnly && widget.isRoomScoped) {
+        _applyIdleConfig(selectedConfig);
+        setState(() {
+          _selectedProfileId = selectedConfig!.id;
+          _connected = syncProvider.hasBeenSynced;
+          _loading = false;
+          _serverConfigSignature = _currentServerConfigSignature();
+        });
+        return;
+      }
       final idleProfileId = _customIdleProfileIdForProfile(initialProfileId);
       final idleConfig = idleProfileId != null
           ? profileConfigs[idleProfileId] ??
@@ -587,6 +606,10 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
   bool _computeDirty() {
     final baseline = _profileConfigs[_selectedProfileId];
     if (baseline == null) return false;
+    if (widget.dayLowGlowOnly && widget.isRoomScoped) {
+      return (_buildIdleDraftConfig() ?? _defaultIdleProfileConfig()) !=
+          baseline;
+    }
     if (_buildDraftConfig() != baseline) return true;
 
     final baselineIdleId = _customIdleProfileIdForProfile(_selectedProfileId);
@@ -663,11 +686,10 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
 
     if (_usesRoomDayColorControl) {
       _roomDayBrightnessMode = roomDayBrightnessMode;
-      _roomDayFixedBrightness =
-          roomDayBrightnessMode == RoomDayBrightnessMode.fixed
-              ? config.minBrightness.toDouble().clamp(1, 100)
-              : ((config.minBrightness + config.maxBrightness) / 2)
-                  .clamp(1, 100);
+      _roomDayFixedBrightness = roomDayBrightnessMode ==
+              RoomDayBrightnessMode.fixed
+          ? config.minBrightness.toDouble().clamp(1, 100)
+          : ((config.minBrightness + config.maxBrightness) / 2).clamp(1, 100);
       _roomDayColorMode = roomDayMode;
       final editorRange = _colorTemperatureEditorRange;
       final fallbackWhite = 3500.0
@@ -979,22 +1001,27 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
   }
 
   Future<void> _resetRoomProfileToHome() async {
-    final globalConfig = _globalProfileConfigs[_selectedProfileId];
+    final profileId = _overrideProfileId;
+    final globalConfig = _globalProfileConfigs[profileId];
     if (globalConfig == null || widget.roomId == null) return;
     final journeyId = '${widget.overrideScope}-light-settings-${_uuid.v4()}';
     setState(() => _isSaving = true);
     final succeeded =
         await context.read<ServerSyncProvider>().setNodeLightProfileOverride(
               widget.roomId!,
-              profileId: _selectedProfileId,
+              profileId: profileId,
               profileOverride: null,
               correlationId: journeyId,
             );
     if (!mounted) return;
     if (succeeded) {
-      _profileConfigs[_selectedProfileId] = globalConfig;
-      _applyProfileConfig(globalConfig);
-      _applyIdleFallback();
+      _profileConfigs[profileId] = globalConfig;
+      if (widget.dayLowGlowOnly) {
+        _applyIdleConfig(globalConfig);
+      } else {
+        _applyProfileConfig(globalConfig);
+        _applyIdleFallback();
+      }
       _serverConfigSignature = _currentServerConfigSignature();
     }
     setState(() {
@@ -1003,7 +1030,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
     });
     AnalyticsService().logRoomLightSettingsResetCompleted(
       journeyId: journeyId,
-      profile: _selectedProfileId,
+      profile: profileId,
       outcome: succeeded ? 'succeeded' : 'failed',
       failureStage: succeeded ? null : 'request',
       scope: widget.overrideScope,
@@ -3193,6 +3220,11 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
     final baseline = _profileConfigs[_selectedProfileId];
     if (baseline == null) return;
     setState(() {
+      if (widget.dayLowGlowOnly && widget.isRoomScoped) {
+        _applyIdleConfig(baseline);
+        _curveConfigDirty = false;
+        return;
+      }
       _applyProfileConfig(baseline);
       final idleProfileId = _customIdleProfileIdForProfile(_selectedProfileId);
       final idleConfig =
@@ -3209,6 +3241,12 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
   Future<void> _saveCurveConfig() async {
     if (_isSaving) return;
     if (widget.dayLowGlowOnly) {
+      if (widget.isRoomScoped) {
+        await _saveRoomCurveConfig(
+          _buildIdleDraftConfig() ?? _defaultIdleProfileConfig(),
+        );
+        return;
+      }
       await _saveDayLowGlowConfig();
       return;
     }
@@ -3382,7 +3420,8 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
   Future<void> _saveRoomCurveConfig(
     sdk.RhythmCurveConfig effectiveConfig,
   ) async {
-    final globalConfig = _globalProfileConfigs[_selectedProfileId];
+    final profileId = _overrideProfileId;
+    final globalConfig = _globalProfileConfigs[profileId];
     if (globalConfig == null || widget.roomId == null) {
       _showSaveFeedback('Home light settings are still loading.', error: true);
       return;
@@ -3393,7 +3432,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
       raw: _serverSync
               .nodeById(widget.roomId!)
               ?.profileSettings
-              ?.profileOverrides[_selectedProfileId]
+              ?.profileOverrides[profileId]
               ?.raw ??
           const <String, dynamic>{},
     );
@@ -3406,7 +3445,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
     final succeeded =
         await context.read<ServerSyncProvider>().setNodeLightProfileOverride(
               widget.roomId!,
-              profileId: _selectedProfileId,
+              profileId: profileId,
               profileOverride: persistedOverride,
               correlationId: journeyId,
             );
@@ -3419,7 +3458,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
       });
       AnalyticsService().logRoomLightSettingsSaveCompleted(
         journeyId: journeyId,
-        profile: _selectedProfileId,
+        profile: profileId,
         outcome: 'failed',
         changedFieldCount: profileOverride.changedFields.length,
         dayColorMode:
@@ -3437,14 +3476,18 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
       return;
     }
 
-    _profileConfigs[_selectedProfileId] = effectiveConfig;
-    _applyProfileConfig(effectiveConfig);
-    _applyIdleFallback();
+    _profileConfigs[profileId] = effectiveConfig;
+    if (widget.dayLowGlowOnly) {
+      _applyIdleConfig(effectiveConfig);
+    } else {
+      _applyProfileConfig(effectiveConfig);
+      _applyIdleFallback();
+    }
     _serverConfigSignature = _currentServerConfigSignature();
     setState(() => _isSaving = false);
     AnalyticsService().logRoomLightSettingsSaveCompleted(
       journeyId: journeyId,
-      profile: _selectedProfileId,
+      profile: profileId,
       outcome: 'succeeded',
       changedFieldCount: profileOverride.changedFields.length,
       dayColorMode:
@@ -3463,12 +3506,13 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
   }
 
   Widget _buildResetToDefaultsButton() {
+    final profileId = _overrideProfileId;
     final roomOverride = widget.roomId == null
         ? null
         : _serverSync
             .nodeById(widget.roomId!)
             ?.profileSettings
-            ?.profileOverrides[_selectedProfileId];
+            ?.profileOverrides[profileId];
     if (widget.isRoomScoped && (roomOverride == null || roomOverride.isEmpty)) {
       return const SizedBox.shrink();
     }

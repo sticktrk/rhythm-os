@@ -9461,7 +9461,220 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    expect(find.text('Low Glow'), findsOneWidget);
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const LightScreen(
+          showBackButton: true,
+          roomId: 'bulb-1',
+          roomName: 'Desk Lamp',
+          overrideScope: LightOverrideScope.bulb,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
     expect(find.text('Low Glow'), findsNothing);
+  });
+
+  testWidgets(
+      'room Low Glow saves an isolated day_idle override and returns to Auto',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    const profiles = [
+      RhythmCurveConfig(id: 'rhythm', name: 'Day Profile'),
+      RhythmCurveConfig(id: 'sleep', name: 'Sleep Profile'),
+      RhythmCurveConfig(
+        id: 'day_idle',
+        name: 'Low Glow',
+        minColorTemp: 0,
+        maxColorTemp: 0,
+        minBrightness: 1,
+        maxBrightness: 1,
+        curve: RhythmInheritActiveCurve(),
+      ),
+    ];
+    final api = _FakeRhythmServerApi()
+      ..profileConfigs = profiles
+      ..profileMode = RhythmModeResource.fromJson({
+        'active': 'day',
+        'configs': [
+          {'mode': 'day', 'active_profile_id': 'rhythm'},
+          {'mode': 'sleep', 'active_profile_id': 'sleep'},
+        ],
+      });
+    final screenshotDir =
+        Platform.environment['RHYTHM_ROOM_LOW_GLOW_SCREENSHOT_DIR'];
+    Future<void> captureState(String name) async {
+      if (screenshotDir == null || screenshotDir.isEmpty) return;
+      await expectLater(
+        find.byType(LightScreen),
+        matchesGoldenFile('$screenshotDir/$name.png'),
+      );
+    }
+
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 1400));
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'version': '0.6.590-beta',
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': [RhythmFeature.roomLightProfileOverrides],
+          'hubs': const <dynamic>[],
+        },
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'profile_settings': {
+              'profile_overrides': {
+                'sleep': {
+                  'min_brightness': 7,
+                },
+              },
+            },
+          },
+        ],
+        'profiles': [for (final profile in profiles) profile.toJson()],
+        'mode': {
+          'active': 'day',
+          'configs': [
+            {'mode': 'day', 'active_profile_id': 'rhythm'},
+            {'mode': 'sleep', 'active_profile_id': 'sleep'},
+          ],
+        },
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const LightScreen(
+          showBackButton: true,
+          roomId: 'room-1',
+          roomName: 'Kitchen',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Low Glow'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('room-light-layer-custom-day_idle')),
+      findsNothing,
+    );
+    await tester.tap(find.text('Low Glow'));
+    await tester.pumpAndSettle();
+    await captureState('room-low-glow-inherited');
+    await tester.tap(
+      find.byKey(const ValueKey('day-low-glow-custom-brightness')),
+    );
+    await tester.pumpAndSettle();
+    await captureState('room-low-glow-custom');
+    final pendingSave = Completer<bool>();
+    api.nodeProfileOverridesCompleter = pendingSave;
+    await tester.tap(find.text('Save'));
+    await tester.pump();
+    await captureState('room-low-glow-pending');
+    pendingSave.complete(true);
+    await tester.pumpAndSettle();
+    api.nodeProfileOverridesCompleter = null;
+
+    expect(api.profileConfigSetCalls, isEmpty);
+    expect(api.profileModeSetCalls, isEmpty);
+    expect(api.nodeProfileOverrideCalls, hasLength(1));
+    expect(api.nodeProfileOverrideCalls.single.nodeId, 'room-1');
+    expect(
+      api.nodeProfileOverrideCalls.single.profileOverrides?.keys,
+      contains('day_idle'),
+    );
+    expect(
+      provider
+          .nodeById('room-1')
+          ?.profileSettings
+          ?.profileOverrides
+          .containsKey('sleep'),
+      isTrue,
+      reason: 'saving Low Glow must retain unrelated room overrides',
+    );
+
+    expect(
+      await provider.setNodeLightProfileOverride(
+        'room-1',
+        profileId: 'day_idle',
+        profileOverride: null,
+        correlationId: 'room-low-glow-auto',
+      ),
+      isTrue,
+    );
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 5));
+
+    expect(api.nodeProfileOverrideCalls, hasLength(2));
+    expect(api.nodeProfileOverrideCalls.last.profileOverrides, {
+      'day_idle': null,
+    });
+    expect(
+      provider
+          .nodeById('room-1')
+          ?.profileSettings
+          ?.profileOverrides
+          .containsKey('day_idle'),
+      isFalse,
+    );
+    expect(
+      provider
+          .nodeById('room-1')
+          ?.profileSettings
+          ?.profileOverrides
+          .containsKey('sleep'),
+      isTrue,
+    );
+
+    await tester.tap(
+      find.byKey(const ValueKey('day-low-glow-custom-brightness')),
+    );
+    await tester.pumpAndSettle();
+    api.nodeProfileOverridesSucceeds = false;
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    await captureState('room-low-glow-failed-retry');
+    expect(api.nodeProfileOverrideCalls, hasLength(3));
+    expect(
+      provider
+          .nodeById('room-1')
+          ?.profileSettings
+          ?.profileOverrides
+          .containsKey('day_idle'),
+      isFalse,
+      reason: 'a rejected retry must restore the authoritative Auto state',
+    );
+
+    api.nodeProfileOverridesSucceeds = true;
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect(api.nodeProfileOverrideCalls, hasLength(4));
   });
 
   testWidgets('returning Low Glow to Auto only clears the Day idle mapping',
