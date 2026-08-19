@@ -1549,6 +1549,7 @@ void main() {
   group('ServerSyncProvider room light profile overrides', () {
     RhythmHello roomLightHello({
       bool supported = true,
+      bool dayIdleSupported = false,
       bool motionActivationEnabled = false,
     }) {
       return RhythmHello.fromJson({
@@ -1556,7 +1557,11 @@ void main() {
         'capabilities': {
           'api_schema_version': 2,
           'features': supported
-              ? [RhythmFeature.roomLightProfileOverrides]
+              ? [
+                  RhythmFeature.roomLightProfileOverrides,
+                  if (dayIdleSupported)
+                    RhythmFeature.roomDayIdleProfileOverrides,
+                ]
               : <String>[],
           'hubs': const <dynamic>[],
         },
@@ -1652,6 +1657,58 @@ void main() {
           'max_brightness': 72,
         },
       });
+    });
+
+    testWidgets('day idle writes require the additive room capability', (
+      tester,
+    ) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi();
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(roomLightHello());
+      await tester.pump();
+      expect(
+        provider.roomDayIdleProfileOverridesSupportedForNode('room-1'),
+        isFalse,
+      );
+      expect(
+        await provider.setNodeLightProfileOverride(
+          'room-1',
+          profileId: 'day_idle',
+          profileOverride:
+              const RhythmLightProfileNodeOverride(maxBrightness: 8),
+          correlationId: 'room-low-glow-unsupported',
+        ),
+        isFalse,
+      );
+      expect(api.nodeProfileOverrideCalls, isEmpty);
+
+      connection.emitHello(roomLightHello(dayIdleSupported: true));
+      await tester.pump();
+      expect(
+        provider.roomDayIdleProfileOverridesSupportedForNode('room-1'),
+        isTrue,
+      );
+      expect(
+        await provider.setNodeLightProfileOverride(
+          'room-1',
+          profileId: 'day_idle',
+          profileOverride:
+              const RhythmLightProfileNodeOverride(maxBrightness: 8),
+          correlationId: 'room-low-glow-supported',
+        ),
+        isTrue,
+      );
+      expect(api.nodeProfileOverrideCalls, hasLength(1));
     });
 
     testWidgets('existing override contract accepts light-device nodes',
@@ -9533,7 +9590,10 @@ void main() {
         'version': '0.6.590-beta',
         'capabilities': {
           'api_schema_version': 2,
-          'features': [RhythmFeature.roomLightProfileOverrides],
+          'features': [
+            RhythmFeature.roomLightProfileOverrides,
+            RhythmFeature.roomDayIdleProfileOverrides,
+          ],
           'hubs': const <dynamic>[],
         },
         'nodes': [
@@ -9601,6 +9661,23 @@ void main() {
     );
     await tester.pumpAndSettle();
     expect(find.text('Custom · 1%'), findsOneWidget);
+    await tester.tap(
+      find.byKey(const ValueKey('day-low-glow-custom-brightness')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Auto · 1%'), findsOneWidget);
+    expect(
+      tester
+          .getSemantics(
+            find.byKey(const ValueKey('light-layer-preview-day_idle')),
+          )
+          .label,
+      contains('Auto, 1 percent, Day color'),
+    );
+    await tester.tap(
+      find.byKey(const ValueKey('day-low-glow-custom-brightness')),
+    );
+    await tester.pumpAndSettle();
     await captureState('room-low-glow-custom');
     tester
         .widget<Slider>(

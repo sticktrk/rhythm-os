@@ -1192,6 +1192,15 @@ class ServerSyncProvider extends ChangeNotifier {
     return true;
   }
 
+  bool roomDayIdleProfileOverridesSupportedForNode(String nodeId) {
+    if (HueServiceLocator.isDemoMode) return true;
+    return nodeById(nodeId)?.kind == RhythmNodeKind.room &&
+        _capabilities?.supportsFeature(
+              RhythmFeature.roomDayIdleProfileOverrides,
+            ) ==
+            true;
+  }
+
   bool hasNodeLightProfileOverrides(String nodeId) {
     final summary = lightProfileOverrideSummaryForNode(nodeId);
     return summary.brightnessRange ||
@@ -3813,6 +3822,8 @@ class ServerSyncProvider extends ChangeNotifier {
     final index = _helloNodes.indexWhere((node) => node.id == nodeId);
     if (index == -1 ||
         !lightProfileOverridesSupportedForNode(nodeId) ||
+        (profileId == 'day_idle' &&
+            !roomDayIdleProfileOverridesSupportedForNode(nodeId)) ||
         _lightProfileOverridePending.contains(nodeId) ||
         (!HueServiceLocator.isDemoMode &&
             (!_connection.connected || _receivingFromServer))) {

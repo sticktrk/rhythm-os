@@ -440,7 +440,9 @@ class _LightScreenState extends State<LightScreen> {
         ? day ?? effective
         : effective;
     final visual = _previewFor(visualConfig);
-    final custom = draft != null || !(roomOverride?.isEmpty ?? true);
+    final pendingOverride = draft != null && draft != globalLowGlow;
+    final custom = pendingOverride ||
+        (draft == null && !(roomOverride?.isEmpty ?? true));
     final scope = custom ? 'Custom' : 'Auto';
     final brightness = effective.maxBrightness.clamp(1, 100);
     return _LayerPreview(

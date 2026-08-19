@@ -542,6 +542,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
       _applyProfileConfig(selectedConfig);
       if (widget.dayLowGlowOnly && widget.isRoomScoped) {
         _applyIdleConfig(selectedConfig);
+        widget.onPreviewChanged?.call(null);
         setState(() {
           _selectedProfileId = selectedConfig!.id;
           _connected = syncProvider.hasBeenSynced;
@@ -601,9 +602,16 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
   void _publishDayLowGlowDraftPreview() {
     if (!widget.dayLowGlowOnly || !widget.isRoomScoped) return;
     widget.onPreviewChanged?.call(
-      _buildIdleDraftConfig() ?? _defaultIdleProfileConfig(),
+      _curveConfigDirty
+          ? _effectiveRoomIdleDraft()
+          : null,
     );
   }
+
+  sdk.RhythmCurveConfig _effectiveRoomIdleDraft() =>
+      _buildIdleDraftConfig() ??
+      _globalProfileConfigs[_overrideProfileId] ??
+      _defaultIdleProfileConfig();
 
   /// Recomputes [_curveConfigDirty] by comparing the current draft against the
   /// last loaded/saved baseline. Call after any state mutation that the user
@@ -616,8 +624,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
     final baseline = _profileConfigs[_selectedProfileId];
     if (baseline == null) return false;
     if (widget.dayLowGlowOnly && widget.isRoomScoped) {
-      return (_buildIdleDraftConfig() ?? _defaultIdleProfileConfig()) !=
-          baseline;
+      return _effectiveRoomIdleDraft() != baseline;
     }
     if (_buildDraftConfig() != baseline) return true;
 
@@ -1106,7 +1113,13 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
     }
     if (!_connected) return _buildDisconnected();
     if (widget.roomId != null &&
-        !_serverSync.lightProfileOverridesSupportedForNode(widget.roomId!)) {
+        (widget.dayLowGlowOnly
+            ? !_serverSync.roomDayIdleProfileOverridesSupportedForNode(
+                widget.roomId!,
+              )
+            : !_serverSync.lightProfileOverridesSupportedForNode(
+                widget.roomId!,
+              ))) {
       return _buildNodeOverridesUnsupported();
     }
     return _buildContent();
@@ -3263,9 +3276,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
     if (_isSaving) return;
     if (widget.dayLowGlowOnly) {
       if (widget.isRoomScoped) {
-        await _saveRoomCurveConfig(
-          _buildIdleDraftConfig() ?? _defaultIdleProfileConfig(),
-        );
+        await _saveRoomCurveConfig(_effectiveRoomIdleDraft());
         return;
       }
       await _saveDayLowGlowConfig();

@@ -8555,7 +8555,7 @@ fn resolved_profile_config_for_room_state_from_parts(
         None
     };
 
-    room_mood_config
+    let mut state_config = room_mood_config
         .or_else(|| {
             mode_config
                 .resolve_state_profile_id(room_state, active_profile_id.as_str())
@@ -8566,11 +8566,18 @@ fn resolved_profile_config_for_room_state_from_parts(
                 room_state,
                 RoomModeState::Mood | RoomModeState::Standby | RoomModeState::HardOff
             ) {
-                factory_default_idle_profile_config_for_mode(lighting.mode)
+                lighting
+                    .light_profile_configs
+                    .get(lighting.mode.default_idle_profile_id())
+                    .cloned()
+                    .unwrap_or_else(|| factory_default_idle_profile_config_for_mode(lighting.mode))
             } else {
                 active_config.clone()
             }
-        })
+        });
+    let state_profile_id = state_config.id.clone();
+    settings.apply_profile_override_to_config(&state_profile_id, &mut state_config);
+    state_config
 }
 
 fn resolve_mode_transition_duration_ms_for_room_from_parts(
@@ -9740,7 +9747,9 @@ fn validate_room_profile_settings(
         }
     }
     for profile_id in room_profile.profile_overrides.keys() {
-        if rhythm_core::is_builtin_state_profile_id(profile_id) {
+        if rhythm_core::is_builtin_state_profile_id(profile_id)
+            && profile_id != rhythm_core::DAY_IDLE_PROFILE_ID
+        {
             return Err(anyhow::anyhow!(
                 "Room '{}' cannot override built-in state profile '{}'",
                 room_id,
@@ -13463,7 +13472,7 @@ pub fn do_node_preferences_set(
         }
     }
     for profile_id in profile_settings.profile_overrides.keys() {
-        if rhythm_core::is_builtin_state_profile_id(profile_id) {
+        if !node_profile_override_id_allowed(snap.kind, profile_id) {
             return Err(anyhow::anyhow!(
                 "State profiles cannot be overridden per-node"
             ));
@@ -13666,8 +13675,14 @@ pub struct QueuedNodePreferencesPatch {
     pub room_profile: Option<RoomProfileSettingsPatch>,
 }
 
+fn node_profile_override_id_allowed(kind: LightNodeKind, profile_id: &str) -> bool {
+    !rhythm_core::is_builtin_state_profile_id(profile_id)
+        || (kind.is_room() && profile_id == rhythm_core::DAY_IDLE_PROFILE_ID)
+}
+
 fn validate_room_profile_settings_patch(
     room_profile: Option<&RoomProfileSettingsPatch>,
+    kind: LightNodeKind,
     valid_profile_ids: &HashSet<String>,
     valid_scene_ids: &HashSet<String>,
 ) -> Result<()> {
@@ -13708,7 +13723,7 @@ fn validate_room_profile_settings_patch(
         .and_then(|profile_overrides| profile_overrides.as_ref())
     {
         for profile_id in profile_overrides.keys() {
-            if rhythm_core::is_builtin_state_profile_id(profile_id) {
+            if !node_profile_override_id_allowed(kind, profile_id) {
                 return Err(anyhow::anyhow!(
                     "State profiles cannot be overridden per-node"
                 ));
@@ -13788,11 +13803,12 @@ pub fn queue_node_preferences_batch(
 
     let mut work_items = Vec::with_capacity(updates.len() + usize::from(persist_after));
     for update in updates {
-        runtime
+        let snapshot = runtime
             .engine_node_snapshot(&update.node_id)
             .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", update.node_id))?;
         validate_room_profile_settings_patch(
             update.room_profile.as_ref(),
+            snapshot.kind,
             &valid_profile_ids,
             &valid_scene_ids,
         )?;
@@ -21772,6 +21788,14 @@ mod tests {
                 ..Default::default()
             },
         );
+        source_room.profile_settings.profile_overrides.insert(
+            rhythm_core::DAY_IDLE_PROFILE_ID.to_string(),
+            LightProfileNodeOverride {
+                min_brightness: Some(5),
+                max_brightness: Some(5),
+                ..Default::default()
+            },
+        );
         let (source_state, _source_runtime) = setup_state(vec![source_room]);
 
         let bundle = build_backup_bundle_dto(&source_state, false).unwrap();
@@ -21783,6 +21807,14 @@ mod tests {
         assert_eq!(exported_override.min_brightness, Some(7));
         assert_eq!(exported_override.max_brightness, Some(63));
         assert_eq!(exported_override.max_color_temp, Some(4_100));
+        assert_eq!(
+            bundle.configuration.rooms[0]
+                .room_profile
+                .profile_overrides
+                .get(rhythm_core::DAY_IDLE_PROFILE_ID)
+                .and_then(|profile_override| profile_override.max_brightness),
+            Some(5)
+        );
 
         let (target_state, _target_runtime) =
             setup_state(vec![make_snapshot("room1", false, false)]);
@@ -21800,6 +21832,14 @@ mod tests {
         assert_eq!(restored_override.min_brightness, Some(7));
         assert_eq!(restored_override.max_brightness, Some(63));
         assert_eq!(restored_override.max_color_temp, Some(4_100));
+        assert_eq!(
+            restored
+                .profile_settings
+                .profile_overrides
+                .get(rhythm_core::DAY_IDLE_PROFILE_ID)
+                .and_then(|profile_override| profile_override.max_brightness),
+            Some(5)
+        );
 
         let reexported = build_backup_bundle_dto(&target_state, false).unwrap();
         let reexported_override = reexported.configuration.rooms[0]
@@ -29050,6 +29090,143 @@ mod tests {
         let s = state.lock().unwrap();
         assert_eq!(s.motion_snapshots.get("r1").unwrap().timeout_secs, 300);
         assert!(s.pending_motion_timeout_refresh.is_empty());
+    }
+
+    #[test]
+    fn room_day_idle_override_applies_immediately_and_auto_removes_it() {
+        let mut standby = make_snapshot("standby", false, true);
+        standby.standby_enabled = true;
+        let (state, runtime) = setup_state(vec![standby]);
+        let patch = profile_overrides_patch(vec![(
+            rhythm_core::DAY_IDLE_PROFILE_ID,
+            Some(LightProfileNodeOverride {
+                min_brightness: Some(8),
+                max_brightness: Some(8),
+                ..Default::default()
+            }),
+        )]);
+
+        do_node_preferences_set(
+            &state,
+            "standby",
+            None,
+            None,
+            None,
+            None,
+            Some(&patch),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(
+            runtime
+                .engine_room_snapshot("standby")
+                .unwrap()
+                .profile_settings
+                .profile_overrides
+                .get(rhythm_core::DAY_IDLE_PROFILE_ID)
+                .and_then(|profile_override| profile_override.max_brightness),
+            Some(8)
+        );
+        assert!(runtime.any_target_lights_on("standby"));
+
+        let mut auto = profile_overrides_patch(vec![(rhythm_core::DAY_IDLE_PROFILE_ID, None)]);
+        auto.replace_profile_overrides = true;
+        do_node_preferences_set(
+            &state,
+            "standby",
+            None,
+            None,
+            None,
+            None,
+            Some(&auto),
+            false,
+        )
+        .unwrap();
+        assert!(!runtime
+            .engine_room_snapshot("standby")
+            .unwrap()
+            .profile_settings
+            .profile_overrides
+            .contains_key(rhythm_core::DAY_IDLE_PROFILE_ID));
+
+        let mut mood = make_snapshot("mood", false, false);
+        mood.mood_active = true;
+        let (mood_state, mood_runtime) = setup_state(vec![mood]);
+        do_node_preferences_set(
+            &mood_state,
+            "mood",
+            None,
+            None,
+            None,
+            None,
+            Some(&patch),
+            false,
+        )
+        .unwrap();
+        assert!(mood_runtime.any_target_lights_on("mood"));
+    }
+
+    #[test]
+    fn day_idle_override_is_room_only_and_other_state_profiles_stay_reserved() {
+        let (state, runtime) = setup_state(vec![
+            make_snapshot("room", false, false),
+            make_standalone_light_snapshot("light"),
+        ]);
+        let day_idle = profile_overrides_patch(vec![(
+            rhythm_core::DAY_IDLE_PROFILE_ID,
+            Some(LightProfileNodeOverride {
+                max_brightness: Some(8),
+                ..Default::default()
+            }),
+        )]);
+        let sleep_idle = profile_overrides_patch(vec![(
+            rhythm_core::SLEEP_IDLE_PROFILE_ID,
+            Some(LightProfileNodeOverride {
+                max_brightness: Some(8),
+                ..Default::default()
+            }),
+        )]);
+
+        assert!(do_node_preferences_set(
+            &state,
+            "room",
+            None,
+            None,
+            None,
+            None,
+            Some(&day_idle),
+            false,
+        )
+        .is_ok());
+        assert!(do_node_preferences_set(
+            &state,
+            "light",
+            None,
+            None,
+            None,
+            None,
+            Some(&day_idle),
+            false,
+        )
+        .is_err());
+        assert!(do_node_preferences_set(
+            &state,
+            "room",
+            None,
+            None,
+            None,
+            None,
+            Some(&sleep_idle),
+            false,
+        )
+        .is_err());
+        assert!(runtime
+            .engine_node_snapshot("light")
+            .unwrap()
+            .profile_settings
+            .profile_overrides
+            .is_empty());
     }
 
     // ========================================================================
