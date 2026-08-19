@@ -1605,7 +1605,7 @@ mod tests {
             FEATURE_HUE_ROOM_TOPOLOGY_SYNC
         );
         assert_eq!(
-            json["capabilities"]["features"][8],
+            json["capabilities"]["features"][9],
             FEATURE_SCENE_MOTION_SUPPRESSION
         );
         assert_eq!(
