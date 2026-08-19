@@ -973,6 +973,143 @@ void main() {
     expect(find.text('Settings'), findsNothing);
   });
 
+  testWidgets(
+      'room Scene temporarily pauses motion without changing its preference',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await roomProvider.addRoom(
+      const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.hue,
+        kind: RoomNodeKind.room,
+        deviceIds: ['light-1', 'motion-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    roomProvider.markRoomHasSensor('room-1');
+    roomProvider.updateMotionTimer(
+      'room-1',
+      MotionTimerInfo(
+        motionActive: true,
+        motionOwned: true,
+        remainingSecs: 30,
+        timeoutSecs: 60,
+        receivedAt: DateTime.now(),
+      ),
+    );
+    final connection = _TestRhythmConnection();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _FakeHomeProvider(),
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    Map<String, dynamic> helloNode({required bool sceneActive}) => {
+          'id': 'room-1',
+          'name': 'Kitchen',
+          'kind': 'room',
+          'hub_types': ['hue'],
+          'device_ids': ['light-1', 'motion-1'],
+          'devices': [
+            {'id': 'motion-1', 'type': 'motion'},
+          ],
+          'rhythm_enabled': true,
+          'disabled': false,
+          'lights_on': true,
+          'time_offset': 0,
+          'brightness_offset': 0,
+          'state': sceneActive ? 'mood' : 'active',
+          'mood_active': sceneActive,
+          'profile_settings': {
+            'motion_activation_enabled': true,
+            'mood_scene_id': 'evening-glow',
+          },
+        };
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': [helloNode(sceneActive: true)],
+      }),
+    );
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'room-1',
+              globalConfig: defaultCurveConfig,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final motion = find.byKey(
+      const ValueKey('room-card-motion-room-1'),
+    );
+    expect(serverSync.motionActivationEnabledForNode('room-1'), isTrue);
+    expect(
+      serverSync.motionSuppressedByActiveSceneForNode('room-1'),
+      isTrue,
+    );
+    expect(find.byIcon(Icons.sensors_off_rounded), findsOneWidget);
+    expect(
+      tester.getSemantics(motion).label,
+      'Motion paused while a Scene is active in Kitchen',
+    );
+    expect(
+      tester
+          .getSemantics(motion)
+          .getSemanticsData()
+          .hasAction(SemanticsAction.tap),
+      isFalse,
+    );
+    await tester.tap(motion);
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(connection.api.motionActivationCalls, isEmpty);
+
+    if (const bool.fromEnvironment(
+      'RHYTHM_CAPTURE_SCENE_MOTION_EVIDENCE',
+    )) {
+      await expectLater(
+        find.byType(RoomCard),
+        matchesGoldenFile('goldens/room-scene-motion-paused.png'),
+      );
+    }
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': [helloNode(sceneActive: false)],
+      }),
+    );
+    await tester.pump();
+
+    expect(serverSync.motionActivationEnabledForNode('room-1'), isTrue);
+    expect(
+      serverSync.motionSuppressedByActiveSceneForNode('room-1'),
+      isFalse,
+    );
+    expect(find.byIcon(Icons.sensors_rounded), findsOneWidget);
+    expect(
+      tester.getSemantics(motion).label,
+      'Turn off motion activation for Kitchen',
+    );
+  });
+
   testWidgets('shows and clears a spinner while the room is transitioning',
       (tester) async {
     final roomProvider = RoomProvider();

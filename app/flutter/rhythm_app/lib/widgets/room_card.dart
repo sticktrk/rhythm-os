@@ -759,6 +759,10 @@ class _RoomCardState extends State<RoomCard> {
             context.select<ServerSyncProvider, bool>(
           (p) => p.motionActivationPendingForNode(widget.roomId),
         );
+        final motionSuppressedByActiveScene =
+            context.select<ServerSyncProvider, bool>(
+          (p) => p.motionSuppressedByActiveSceneForNode(widget.roomId),
+        );
         // A recent light command that failed to physically reach its target.
         // Shown in the spinner slot once the in-flight state clears.
         final dispatchFailure =
@@ -888,11 +892,15 @@ class _RoomCardState extends State<RoomCard> {
 
         final showActivitySpinner =
             _localActionPending || isTransitioning || isDispatchPending;
-        final VoidCallback? motionIndicatorTap = !motionActivationSupported
-            ? () => _showMotionActivationUnavailable(room.name)
-            : motionActivationEnabled
-                ? () => _setMotionActivationEnabled(false)
-                : null;
+        final motionEffectivelyEnabled =
+            motionActivationEnabled && !motionSuppressedByActiveScene;
+        final VoidCallback? motionIndicatorTap = motionSuppressedByActiveScene
+            ? null
+            : !motionActivationSupported
+                ? () => _showMotionActivationUnavailable(room.name)
+                : motionActivationEnabled
+                    ? () => _setMotionActivationEnabled(false)
+                    : null;
 
         // Blend directly from a neutral dark base toward the CCT color —
         // brightness scales the mix so hue stays clear at every level.
@@ -1217,7 +1225,8 @@ class _RoomCardState extends State<RoomCard> {
                                     ),
                                   ),
                                 )
-                              else if (motionTimer != null)
+                              else if (motionTimer != null &&
+                                  !motionSuppressedByActiveScene)
                                 Padding(
                                   padding: const EdgeInsets.only(left: 8),
                                   child: _MotionIndicator(
@@ -1237,26 +1246,31 @@ class _RoomCardState extends State<RoomCard> {
                                 Padding(
                                   padding: const EdgeInsets.only(left: 8),
                                   child: Semantics(
-                                    button: true,
-                                    label: motionActivationSupported
-                                        ? motionActivationEnabled
-                                            ? 'Turn off motion activation for ${room.name}'
-                                            : 'Turn on motion activation for ${room.name}'
-                                        : 'Motion control for ${room.name} '
-                                            'requires an appliance update',
+                                    button: !motionSuppressedByActiveScene,
+                                    label: motionSuppressedByActiveScene
+                                        ? 'Motion paused while a Scene is active in ${room.name}'
+                                        : motionActivationSupported
+                                            ? motionActivationEnabled
+                                                ? 'Turn off motion activation for ${room.name}'
+                                                : 'Turn on motion activation for ${room.name}'
+                                            : 'Motion control for ${room.name} '
+                                                'requires an appliance update',
                                     child: GestureDetector(
                                       key: ValueKey(
                                         'room-card-motion-${widget.roomId}',
                                       ),
                                       behavior: HitTestBehavior.opaque,
-                                      onTap: motionActivationSupported
-                                          ? () => _setMotionActivationEnabled(
-                                                !motionActivationEnabled,
-                                              )
-                                          : () =>
-                                              _showMotionActivationUnavailable(
-                                                room.name,
-                                              ),
+                                      onTap: motionSuppressedByActiveScene
+                                          ? null
+                                          : motionActivationSupported
+                                              ? () =>
+                                                  _setMotionActivationEnabled(
+                                                    !motionActivationEnabled,
+                                                  )
+                                              : () =>
+                                                  _showMotionActivationUnavailable(
+                                                    room.name,
+                                                  ),
                                       child: SizedBox(
                                         width: _roomHeaderActionHitSize,
                                         height: _roomHeaderActionHitSize,
@@ -1266,12 +1280,12 @@ class _RoomCardState extends State<RoomCard> {
                                             width: 28,
                                             height: 28,
                                             child: Icon(
-                                              motionActivationEnabled
+                                              motionEffectivelyEnabled
                                                   ? Icons.sensors_rounded
                                                   : Icons.sensors_off_rounded,
                                               size: 18,
                                               color: iconColor.withValues(
-                                                alpha: motionActivationEnabled
+                                                alpha: motionEffectivelyEnabled
                                                     ? motionActivationSupported
                                                         ? 0.45
                                                         : 0.18
