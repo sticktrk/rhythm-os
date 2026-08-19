@@ -106,11 +106,34 @@ List<ExistingRoomDeviceCandidate> existingRoomDeviceCandidates({
     );
   }
   candidates.sort(
-    (left, right) => left.device.displayName.toLowerCase().compareTo(
-          right.device.displayName.toLowerCase(),
-        ),
+    (left, right) => compareExistingRoomDeviceCandidates(
+      left,
+      right,
+      unassignedFirst: deviceType == RhythmDeviceType.light,
+    ),
   );
   return candidates;
+}
+
+@visibleForTesting
+int compareExistingRoomDeviceCandidates(
+  ExistingRoomDeviceCandidate left,
+  ExistingRoomDeviceCandidate right, {
+  required bool unassignedFirst,
+}) {
+  if (unassignedFirst) {
+    final leftAssignmentRank = left.parentNodeId.isEmpty ? 0 : 1;
+    final rightAssignmentRank = right.parentNodeId.isEmpty ? 0 : 1;
+    final assignmentComparison =
+        leftAssignmentRank.compareTo(rightAssignmentRank);
+    if (assignmentComparison != 0) return assignmentComparison;
+  }
+
+  final nameComparison = left.device.displayName
+      .toLowerCase()
+      .compareTo(right.device.displayName.toLowerCase());
+  if (nameComparison != 0) return nameComparison;
+  return left.device.id.compareTo(right.device.id);
 }
 
 Future<void> startRoomDeviceAddFlow(
