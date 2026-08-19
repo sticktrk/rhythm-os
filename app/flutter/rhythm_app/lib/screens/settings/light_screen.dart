@@ -164,6 +164,7 @@ class _LightScreenState extends State<LightScreen> {
   // Accordion: a single layer is expanded at a time. Defaults to the first.
   String? _expandedId = _kProfileLayers.first.id;
   bool _resettingRoom = false;
+  final Map<String, RhythmCurveConfig> _draftProfilePreviews = {};
 
   bool get _isBulbScoped => widget.overrideScope == LightOverrideScope.bulb;
   String get _scopeName =>
@@ -178,6 +179,19 @@ class _LightScreenState extends State<LightScreen> {
     if (opening) {
       unawaited(AnalyticsService().logLightProfileOpened(id));
     }
+  }
+
+  void _setDraftProfilePreview(
+    String profileId,
+    RhythmCurveConfig? config,
+  ) {
+    setState(() {
+      if (config == null) {
+        _draftProfilePreviews.remove(profileId);
+      } else {
+        _draftProfilePreviews[profileId] = config;
+      }
+    });
   }
 
   @override
@@ -213,11 +227,17 @@ class _LightScreenState extends State<LightScreen> {
                           const SizedBox(height: 12),
                         ],
                         for (final layer in _kProfileLayers)
-                          if (!layer.globalOnly || !widget.isRoomScoped)
+                          if (!layer.globalOnly ||
+                              !widget.isRoomScoped ||
+                              !_isBulbScoped)
                             _ProfileLayerCard(
                               layer: layer,
                               preview: layer.id == 'day_idle'
-                                  ? _dayLowGlowPreview(sync)
+                                  ? _dayLowGlowPreview(
+                                      sync,
+                                      roomOverrides: roomOverrides,
+                                      draft: _draftProfilePreviews[layer.id],
+                                    )
                                   : _previewFor(
                                       _effectiveConfigFor(
                                         sync,
@@ -225,19 +245,30 @@ class _LightScreenState extends State<LightScreen> {
                                         roomOverrides,
                                       ),
                                     ),
-                              customized:
+                              customized: _draftProfilePreviews[layer.id] !=
+                                      null ||
                                   !(roomOverrides[layer.id]?.isEmpty ?? true),
                               expanded: _expandedId == layer.id,
                               onToggle: () => _toggle(layer.id),
                               child: LightProfileScreen(
                                 initialProfile: layer.id == 'day_idle'
-                                    ? 'rhythm'
+                                    ? widget.isRoomScoped
+                                        ? 'day_idle'
+                                        : 'rhythm'
                                     : layer.id,
                                 embedded: true,
                                 dayLowGlowOnly: layer.id == 'day_idle',
                                 roomId: widget.roomId,
                                 roomName: widget.roomName,
                                 overrideScope: _analyticsScope,
+                                onPreviewChanged: layer.id == 'day_idle' &&
+                                        widget.isRoomScoped &&
+                                        !_isBulbScoped
+                                    ? (config) => _setDraftProfilePreview(
+                                          layer.id,
+                                          config,
+                                        )
+                                    : null,
                               ),
                             ),
                         // The Time Simulator scrubs the Day curve, so it only
@@ -365,7 +396,22 @@ class _LightScreenState extends State<LightScreen> {
     return overrides[id]?.applyTo(global) ?? global;
   }
 
-  _LayerPreview _dayLowGlowPreview(ServerSyncProvider sync) {
+  RhythmCurveConfig _automaticDayLowGlowConfig() => RhythmCurveConfig(
+        id: 'day_idle',
+        name: 'Low Glow',
+        curve: const RhythmInheritActiveCurve(),
+        minColorTemp: 0,
+        maxColorTemp: 0,
+        minBrightness: 1,
+        maxBrightness: 1,
+        maxDimSteps: 1,
+      );
+
+  _LayerPreview _dayLowGlowPreview(
+    ServerSyncProvider sync, {
+    required Map<String, RhythmLightProfileNodeOverride> roomOverrides,
+    RhythmCurveConfig? draft,
+  }) {
     RhythmModeConfig? dayMode;
     for (final config in sync.modeConfigs) {
       if (config.mode == RhythmMode.day) {
@@ -374,14 +420,46 @@ class _LightScreenState extends State<LightScreen> {
       }
     }
     final customId = dayMode?.idleProfileId;
-    if (customId != null && customId.isNotEmpty) {
-      return _previewFor(_configFor(sync, customId));
+    if (!widget.isRoomScoped) {
+      if (customId != null && customId.isNotEmpty) {
+        return _previewFor(_configFor(sync, customId));
+      }
+
+      final day = _configFor(sync, dayMode?.activeProfileId ?? 'rhythm');
+      if (day == null) return _previewFor(null);
+      final inherited = _previewFor(day);
+      return _LayerPreview(
+        inherited.gradient,
+        'Auto · 1%',
+        'Automatic, 1 percent, Day color',
+      );
     }
 
+    final globalLowGlow = customId != null && customId.isNotEmpty
+        ? _configFor(sync, customId)
+        : _automaticDayLowGlowConfig();
+    final roomOverride = roomOverrides['day_idle'];
+    final effective = draft ??
+        (globalLowGlow == null
+            ? null
+            : roomOverride?.applyTo(globalLowGlow) ?? globalLowGlow);
+    if (effective == null) return _previewFor(null);
+
     final day = _configFor(sync, dayMode?.activeProfileId ?? 'rhythm');
-    if (day == null) return _previewFor(null);
-    final inherited = _previewFor(day);
-    return _LayerPreview(inherited.gradient, 'Auto · 1%');
+    final visualConfig = effective.curve is RhythmInheritActiveCurve
+        ? day ?? effective
+        : effective;
+    final visual = _previewFor(visualConfig);
+    final pendingOverride = draft != null && draft != globalLowGlow;
+    final custom =
+        pendingOverride || (draft == null && !(roomOverride?.isEmpty ?? true));
+    final scope = custom ? 'Custom' : 'Auto';
+    final brightness = effective.maxBrightness.clamp(1, 100);
+    return _LayerPreview(
+      visual.gradient,
+      '$scope · $brightness%',
+      '$scope, $brightness percent, ${_lowGlowColorDescription(effective)}',
+    );
   }
 
   Widget _buildRoomScopeBanner(
@@ -546,8 +624,21 @@ class _LightScreenState extends State<LightScreen> {
 class _LayerPreview {
   final List<Color> gradient;
   final String summary;
+  final String semantics;
 
-  const _LayerPreview(this.gradient, this.summary);
+  const _LayerPreview(this.gradient, this.summary, [this.semantics = '']);
+}
+
+String _lowGlowColorDescription(RhythmCurveConfig config) {
+  if (_directColor(config) != null) return 'custom color';
+  if (config.curve is RhythmInheritActiveCurve) return 'Day color';
+  if (config.minColorTemp == config.maxColorTemp && config.minColorTemp > 0) {
+    return '${config.minColorTemp} kelvin';
+  }
+  if (config.minColorTemp > 0 && config.maxColorTemp > 0) {
+    return '${config.minColorTemp} to ${config.maxColorTemp} kelvin';
+  }
+  return 'neutral color';
 }
 
 Color? _directColor(RhythmCurveConfig config) {
@@ -614,44 +705,50 @@ class _ProfileLayerCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final accent = layer.accent;
-    return AnimatedContainer(
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeOutCubic,
-      margin: const EdgeInsets.only(bottom: 12),
-      decoration: BoxDecoration(
-        color: CelestialColors.backgroundCard,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(
-          color: expanded
-              ? accent.withValues(alpha: 0.32)
-              : CelestialColors.orbitRing.withValues(alpha: 0.5),
-        ),
-        boxShadow: expanded
-            ? [
-                BoxShadow(
-                  color: accent.withValues(alpha: 0.12),
-                  blurRadius: 26,
-                  spreadRadius: -6,
-                ),
-              ]
-            : const [],
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        children: [
-          _buildHeader(accent),
-          // Keep the editor mounted; reveal it with a clipped height factor so
-          // no state is lost when a layer collapses.
-          ClipRect(
-            child: AnimatedAlign(
-              alignment: Alignment.topCenter,
-              heightFactor: expanded ? 1 : 0,
-              duration: const Duration(milliseconds: 300),
-              curve: Curves.easeOutCubic,
-              child: child,
-            ),
+    return Semantics(
+      key: ValueKey('light-layer-preview-${layer.id}'),
+      container: true,
+      label:
+          '${layer.name} preview: ${preview.semantics.isEmpty ? preview.summary : preview.semantics}',
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOutCubic,
+        margin: const EdgeInsets.only(bottom: 12),
+        decoration: BoxDecoration(
+          color: CelestialColors.backgroundCard,
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: expanded
+                ? accent.withValues(alpha: 0.32)
+                : CelestialColors.orbitRing.withValues(alpha: 0.5),
           ),
-        ],
+          boxShadow: expanded
+              ? [
+                  BoxShadow(
+                    color: accent.withValues(alpha: 0.12),
+                    blurRadius: 26,
+                    spreadRadius: -6,
+                  ),
+                ]
+              : const [],
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          children: [
+            _buildHeader(accent),
+            // Keep the editor mounted; reveal it with a clipped height factor so
+            // no state is lost when a layer collapses.
+            ClipRect(
+              child: AnimatedAlign(
+                alignment: Alignment.topCenter,
+                heightFactor: expanded ? 1 : 0,
+                duration: const Duration(milliseconds: 300),
+                curve: Curves.easeOutCubic,
+                child: child,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }

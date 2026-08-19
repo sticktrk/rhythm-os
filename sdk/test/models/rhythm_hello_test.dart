@@ -375,6 +375,7 @@ void main() {
             'sse_event_ids',
             'async_dispatch_metadata',
             RhythmFeature.asyncDebugBundleUpload,
+            RhythmFeature.roomDayIdleProfileOverrides,
             RhythmFeature.guardedRoomLightProfileOverrides,
             RhythmFeature.targetGuardedRoomLightProfileOverrides,
             RhythmFeature.sceneMotionSuppression,
@@ -431,6 +432,12 @@ void main() {
       expect(
         hello.capabilities!
             .supportsFeature(RhythmFeature.asyncDebugBundleUpload),
+        isTrue,
+      );
+      expect(
+        hello.capabilities!.supportsFeature(
+          RhythmFeature.roomDayIdleProfileOverrides,
+        ),
         isTrue,
       );
       expect(

@@ -43,6 +43,8 @@ abstract final class RhythmFeature {
   static const String motionActivationToggle = 'motion_activation_toggle';
   static const String roomLightProfileOverrides =
       'room_light_profile_overrides';
+  static const String roomDayIdleProfileOverrides =
+      'room_day_idle_profile_overrides_v1';
   static const String guardedRoomLightProfileOverrides =
       'guarded_room_light_profile_overrides';
   static const String targetGuardedRoomLightProfileOverrides =

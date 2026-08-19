@@ -273,6 +273,7 @@ pub const API_SCHEMA_VERSION: u32 = 2;
 pub const FEATURE_ASYNC_DEBUG_BUNDLE_UPLOAD: &str = "async_debug_bundle_upload";
 pub const FEATURE_MOTION_ACTIVATION_TOGGLE: &str = "motion_activation_toggle";
 pub const FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES: &str = "room_light_profile_overrides";
+pub const FEATURE_ROOM_DAY_IDLE_PROFILE_OVERRIDES: &str = "room_day_idle_profile_overrides_v1";
 pub const FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES: &str =
     "guarded_room_light_profile_overrides";
 pub const FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES: &str =
@@ -300,6 +301,7 @@ impl Serialize for ApiCapabilitiesDto {
                 FEATURE_ASYNC_DEBUG_BUNDLE_UPLOAD,
                 FEATURE_MOTION_ACTIVATION_TOGGLE,
                 FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES,
+                FEATURE_ROOM_DAY_IDLE_PROFILE_OVERRIDES,
                 FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
                 FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
                 FEATURE_HUE_ROOM_AUTHORITY_CONSENT,
@@ -1580,22 +1582,26 @@ mod tests {
         );
         assert_eq!(
             json["capabilities"]["features"][3],
-            FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES
+            FEATURE_ROOM_DAY_IDLE_PROFILE_OVERRIDES
         );
         assert_eq!(
             json["capabilities"]["features"][4],
-            FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES
+            FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES
         );
         assert_eq!(
             json["capabilities"]["features"][5],
-            FEATURE_HUE_ROOM_AUTHORITY_CONSENT
+            FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES
         );
         assert_eq!(
             json["capabilities"]["features"][6],
-            FEATURE_MATTER_SETUP_CODE_RECOVERY
+            FEATURE_HUE_ROOM_AUTHORITY_CONSENT
         );
         assert_eq!(
             json["capabilities"]["features"][7],
+            FEATURE_MATTER_SETUP_CODE_RECOVERY
+        );
+        assert_eq!(
+            json["capabilities"]["features"][8],
             FEATURE_HUE_ROOM_TOPOLOGY_SYNC
         );
         assert_eq!(
