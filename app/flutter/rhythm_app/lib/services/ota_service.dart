@@ -484,14 +484,17 @@ class OtaService extends ChangeNotifier {
     Duration startUpdateReceiveTimeout = const Duration(minutes: 2),
     Duration startUpdateRecoveryWindow = const Duration(seconds: 20),
     Duration selfPullPollInterval = const Duration(seconds: 2),
+    Duration selfPullCompletionTimeout = const Duration(minutes: 10),
   })  : _startUpdateReceiveTimeout = startUpdateReceiveTimeout,
         _startUpdateRecoveryWindow = startUpdateRecoveryWindow,
-        _selfPullPollInterval = selfPullPollInterval;
+        _selfPullPollInterval = selfPullPollInterval,
+        _selfPullCompletionTimeout = selfPullCompletionTimeout;
 
   final sdk.RhythmOtaApi _legacyApi = sdk.RhythmOtaApi();
   final Duration _startUpdateReceiveTimeout;
   final Duration _startUpdateRecoveryWindow;
   final Duration _selfPullPollInterval;
+  final Duration _selfPullCompletionTimeout;
 
   Dio? _dio;
   String? _host;
@@ -867,7 +870,7 @@ class OtaService extends ChangeNotifier {
 
   Future<void> _pollSelfPullStatusUntilComplete() async {
     final token = ++_selfPullPollToken;
-    final deadline = DateTime.now().add(const Duration(minutes: 3));
+    final deadline = DateTime.now().add(_selfPullCompletionTimeout);
 
     while (!_disposed &&
         token == _selfPullPollToken &&

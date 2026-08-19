@@ -558,6 +558,39 @@ void main() {
       expect(service!.currentVersion, '1.1.0');
       expect(service!.errorMessage, isNull);
     });
+
+    test('keeps polling a slow rootfs update within the completion window',
+        () async {
+      server = await _FakeOtaServer.start(
+        initialVersion: '1.0.0',
+        latestVersion: '1.1.0',
+        scenario: _FakeOtaScenario.idleAfterRestart,
+        updatingStatusResponses: 12,
+      );
+      service = OtaService(
+        selfPullPollInterval: const Duration(milliseconds: 20),
+        selfPullCompletionTimeout: const Duration(milliseconds: 500),
+      );
+
+      await service!.initialize(
+        host: InternetAddress.loopbackIPv4.address,
+        port: server!.port,
+      );
+
+      await service!.startUpdate(
+        InternetAddress.loopbackIPv4.address,
+        port: server!.port,
+      );
+
+      await _waitFor(
+        () => service!.state == OtaState.complete,
+        description: 'slow rootfs update to finish within its wait budget',
+      );
+
+      expect(service!.currentVersion, '1.1.0');
+      expect(service!.errorMessage, isNull);
+      expect(server!.statusCallsAfterUpdate, greaterThan(12));
+    });
   });
 }
 
@@ -592,6 +625,7 @@ class _FakeOtaServer {
   final String stateVersionAfterUpdate;
   final _FakeOtaScenario scenario;
   final Duration startResponseDelay;
+  final int updatingStatusResponses;
   final bool initialUpdateAvailable;
   final String? updateReason;
   final String otaScope;
@@ -622,6 +656,7 @@ class _FakeOtaServer {
     required this.stateVersionAfterUpdate,
     required this.scenario,
     required this.startResponseDelay,
+    required this.updatingStatusResponses,
     required this.initialUpdateAvailable,
     required this.updateReason,
     required this.otaScope,
@@ -636,6 +671,7 @@ class _FakeOtaServer {
   }) : _server = server;
 
   int get port => _server.port;
+  int get statusCallsAfterUpdate => _statusCallsAfterUpdate;
 
   static Future<_FakeOtaServer> start({
     required String initialVersion,
@@ -647,6 +683,7 @@ class _FakeOtaServer {
     required _FakeOtaScenario scenario,
     String? stateVersionAfterUpdate,
     Duration startResponseDelay = Duration.zero,
+    int updatingStatusResponses = 0,
     bool initialUpdateAvailable = true,
     String? updateReason,
     String otaScope = 'component_bundle',
@@ -671,6 +708,7 @@ class _FakeOtaServer {
       stateVersionAfterUpdate: stateVersionAfterUpdate ?? latestVersion,
       scenario: scenario,
       startResponseDelay: startResponseDelay,
+      updatingStatusResponses: updatingStatusResponses,
       initialUpdateAvailable: initialUpdateAvailable,
       updateReason: updateReason,
       otaScope: otaScope,
@@ -800,24 +838,34 @@ class _FakeOtaServer {
 
     _statusCallsAfterUpdate++;
 
+    if (_statusCallsAfterUpdate <= updatingStatusResponses) {
+      return _otaPayload(
+        state: 'updating',
+        currentVersion: initialVersion,
+        latestVersion: latestVersion,
+        updateAvailable: initialUpdateAvailable,
+      );
+    }
+
     return switch (scenario) {
-      _FakeOtaScenario.idleAfterRestart => _statusCallsAfterUpdate == 1
-          ? _otaPayload(
-              state: 'restarting',
-              currentVersion: initialVersion,
-              latestVersion: latestVersion,
-              updateAvailable: initialUpdateAvailable,
-              includeUpdateReason: false,
-            )
-          : _otaPayload(
-              state: 'idle',
-              currentVersion: stateVersionAfterUpdate,
-              latestVersion: latestVersion,
-              updateAvailable: false,
-              includeUpdateReason: false,
-            ),
+      _FakeOtaScenario.idleAfterRestart =>
+        _statusCallsAfterUpdate == updatingStatusResponses + 1
+            ? _otaPayload(
+                state: 'restarting',
+                currentVersion: initialVersion,
+                latestVersion: latestVersion,
+                updateAvailable: initialUpdateAvailable,
+                includeUpdateReason: false,
+              )
+            : _otaPayload(
+                state: 'idle',
+                currentVersion: stateVersionAfterUpdate,
+                latestVersion: latestVersion,
+                updateAvailable: false,
+                includeUpdateReason: false,
+              ),
       _FakeOtaScenario.restartingThenStatusVersion =>
-        _statusCallsAfterUpdate == 1
+        _statusCallsAfterUpdate == updatingStatusResponses + 1
             ? _otaPayload(
                 state: 'restarting',
                 currentVersion: initialVersion,

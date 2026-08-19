@@ -1300,7 +1300,10 @@ fn observed_power_continuity_budget(s: &AppState) -> Duration {
 
 pub(crate) fn observed_power_is_fresh(s: &AppState, observed: &ObservedPowerState) -> bool {
     match observed.source {
-        ObservedPowerSource::SemanticOverride => true,
+        // Room HardOff/SoftOff semantics describe desired policy, not a
+        // physical integration observation. They remain explicit through the
+        // source field but must never be presented as fresh readback proof.
+        ObservedPowerSource::SemanticOverride => false,
         ObservedPowerSource::Command => false,
         ObservedPowerSource::Periodic
         | ObservedPowerSource::SyncPoll
@@ -1359,7 +1362,7 @@ fn observed_power_from_cache(
     if let Some(lights_on) = semantic_override {
         return ObservedPowerDto {
             lights_on,
-            fresh: true,
+            fresh: false,
             observed_at_epoch_ms: room_observed_power
                 .get(cache_key)
                 .filter(|observed| observed.source == ObservedPowerSource::SemanticOverride)
@@ -22810,6 +22813,29 @@ mod tests {
         let observed = app.room_observed_power.get("room1").unwrap();
         assert!(observed.lights_on);
         assert_eq!(observed.source, ObservedPowerSource::LiveSubscription);
+    }
+
+    #[test]
+    fn semantic_power_override_is_desired_state_not_fresh_physical_proof() {
+        let (state, _runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        let mut app = state.lock().unwrap();
+        let observed = ObservedPowerState::new(false, ObservedPowerSource::SemanticOverride);
+        app.room_observed_power
+            .insert("room1".to_string(), observed.clone());
+
+        let dto = observed_power_from_cache(
+            &app,
+            &app.room_observed_power,
+            "room1",
+            LightNodeKind::Room,
+            None,
+            Some(false),
+        );
+
+        assert!(!observed_power_is_fresh(&app, &observed));
+        assert!(!dto.lights_on);
+        assert!(!dto.fresh);
+        assert_eq!(dto.source.as_deref(), Some("semantic_override"));
     }
 
     #[test]
