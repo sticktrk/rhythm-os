@@ -27,8 +27,10 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tower_http::cors::CorsLayer;
 
 /// Create the Axum router with all API routes.
-pub fn create_router(state: SharedState) -> Router {
-    let ota_status = crate::self_update::OtaStatusHandle::new(crate::BUILD_VERSION);
+pub fn create_router(
+    state: SharedState,
+    ota_status: crate::self_update::OtaStatusHandle,
+) -> Router {
     let auth_state = state.clone();
 
     logging::with_http_observability(
@@ -76,7 +78,16 @@ pub fn create_router(state: SharedState) -> Router {
                     }
                 }),
             )
-            .route("/api/restart", post(restart_device))
+            .route(
+                "/api/restart",
+                post({
+                    let ota_status = ota_status.clone();
+                    move |State(state): State<SharedState>| {
+                        let ota_status = ota_status.clone();
+                        async move { restart_device(state, ota_status).await }
+                    }
+                }),
+            )
             .with_state(state)
             .layer(middleware::from_fn_with_state(
                 auth_state,
@@ -665,8 +676,11 @@ async fn check_update(
     state: SharedState,
     ota_status: crate::self_update::OtaStatusHandle,
 ) -> Response {
+    let operation = match ota_status.begin_operation() {
+        Ok(operation) => operation,
+        Err(error) => return err_409(error),
+    };
     let version = crate::BUILD_VERSION;
-    ota_status.mark_checking();
     emit_ota_progress(
         &state,
         rhythm_os::server_event::OtaUpdateStage::Checking,
@@ -685,7 +699,9 @@ async fn check_update(
         .await
     {
         Ok(Ok(info)) => {
-            ota_status.record_check_result(&info);
+            if let Err(error) = ota_status.record_check_result(&operation, &info) {
+                return err_500(error);
+            }
             let (stage, message) = if info.update_available {
                 (
                     rhythm_os::server_event::OtaUpdateStage::UpdateAvailable,
@@ -731,7 +747,7 @@ async fn check_update(
             json_ok(json.to_string())
         }
         Ok(Err(e)) => {
-            ota_status.mark_error(e.clone());
+            let _ = ota_status.mark_error(&operation, e.clone());
             emit_ota_progress(
                 &state,
                 rhythm_os::server_event::OtaUpdateStage::Failed,
@@ -748,7 +764,7 @@ async fn check_update(
             err_500(e)
         }
         Err(e) => {
-            ota_status.mark_error(e.to_string());
+            let _ = ota_status.mark_error(&operation, e.to_string());
             emit_ota_progress(
                 &state,
                 rhythm_os::server_event::OtaUpdateStage::Failed,
@@ -879,17 +895,33 @@ fn scan_mdns() -> Vec<serde_json::Value> {
     devices
 }
 
-async fn restart_device(State(state): State<SharedState>) -> Response {
-    log::info!(target: "http", "Restart requested via /api/restart");
-    if let Err(error) =
+async fn restart_device(
+    state: SharedState,
+    ota_status: crate::self_update::OtaStatusHandle,
+) -> Response {
+    restart_device_with_scheduler(state, ota_status, |state| {
         crate::self_update::schedule_user_initiated_restart_with_best_effort_persist(state)
-    {
+    })
+}
+
+fn restart_device_with_scheduler(
+    state: SharedState,
+    ota_status: crate::self_update::OtaStatusHandle,
+    schedule: impl FnOnce(SharedState) -> std::io::Result<()>,
+) -> Response {
+    let operation = match ota_status.begin_restart_operation() {
+        Ok(operation) => operation,
+        Err(error) => return err_409(error),
+    };
+    log::info!(target: "http", "Restart requested via /api/restart");
+    if let Err(error) = schedule(state) {
         log::warn!(
             target: "http",
             "Restart scheduled, but failed to spawn restart persistence worker: {}",
             error
         );
     }
+    operation.retain_for_restart();
     json_ok(r#"{"status":"ok","message":"Restart scheduled"}"#.to_string())
 }
 
@@ -976,17 +1008,12 @@ async fn do_update(
     state: SharedState,
     ota_status: crate::self_update::OtaStatusHandle,
 ) -> Response {
-    let snapshot = ota_status.snapshot();
-    if matches!(
-        snapshot.state,
-        crate::self_update::OtaUpdateState::Updating
-            | crate::self_update::OtaUpdateState::Restarting
-    ) {
-        return err_409("Update already in progress");
-    }
+    let operation = match ota_status.begin_operation() {
+        Ok(operation) => operation,
+        Err(error) => return err_409(error),
+    };
 
     let version = crate::BUILD_VERSION;
-    ota_status.mark_checking();
     emit_ota_progress(
         &state,
         rhythm_os::server_event::OtaUpdateStage::Checking,
@@ -1010,7 +1037,7 @@ async fn do_update(
     {
         Ok(Ok(info)) => info,
         Ok(Err(e)) => {
-            ota_status.mark_error(e.clone());
+            let _ = ota_status.mark_error(&operation, e.clone());
             emit_ota_progress(
                 &state,
                 rhythm_os::server_event::OtaUpdateStage::Failed,
@@ -1027,7 +1054,7 @@ async fn do_update(
             return err_500(e);
         }
         Err(e) => {
-            ota_status.mark_error(e.to_string());
+            let _ = ota_status.mark_error(&operation, e.to_string());
             emit_ota_progress(
                 &state,
                 rhythm_os::server_event::OtaUpdateStage::Failed,
@@ -1044,7 +1071,9 @@ async fn do_update(
             return err_500(e);
         }
     };
-    ota_status.record_check_result(&info);
+    if let Err(error) = ota_status.record_check_result(&operation, &info) {
+        return err_500(error);
+    }
 
     if !info.update_available {
         emit_ota_progress(
@@ -1076,10 +1105,35 @@ async fn do_update(
         None,
     );
 
-    if let Err(e) = ota_status.begin_update(&info.latest_version) {
+    if let Err(e) = ota_status.begin_update(&operation, &info.latest_version) {
         return err_409(e);
     }
 
+    let latest = info.latest_version.clone();
+    let previous = info.current_version.clone();
+    let worker_status = ota_status.clone();
+    let worker_state = state.clone();
+    tokio::spawn(async move {
+        apply_accepted_update(worker_state, worker_status, operation, info).await;
+    });
+
+    json_ok(
+        serde_json::json!({
+            "status": "accepted",
+            "message": format!("Update to v{} accepted", latest),
+            "previous_version": previous,
+            "new_version": latest,
+        })
+        .to_string(),
+    )
+}
+
+async fn apply_accepted_update(
+    state: SharedState,
+    ota_status: crate::self_update::OtaStatusHandle,
+    operation: crate::self_update::OtaOperationLease,
+    info: crate::self_update::UpdateInfo,
+) {
     let latest = info.latest_version.clone();
     let previous = info.current_version.clone();
     let apply_state = state.clone();
@@ -1096,7 +1150,7 @@ async fn do_update(
     {
         Ok(Ok(result)) => result,
         Ok(Err(e)) => {
-            ota_status.mark_error(e.clone());
+            let _ = ota_status.mark_error(&operation, e.clone());
             emit_ota_progress(
                 &state,
                 rhythm_os::server_event::OtaUpdateStage::Failed,
@@ -1110,10 +1164,10 @@ async fn do_update(
                 Vec::new(),
                 Some(e.clone()),
             );
-            return err_500(e);
+            return;
         }
         Err(e) => {
-            ota_status.mark_error(e.to_string());
+            let _ = ota_status.mark_error(&operation, e.to_string());
             emit_ota_progress(
                 &state,
                 rhythm_os::server_event::OtaUpdateStage::Failed,
@@ -1127,10 +1181,18 @@ async fn do_update(
                 Vec::new(),
                 Some(e.to_string()),
             );
-            return err_500(e);
+            return;
         }
     };
-    ota_status.mark_restarting(&previous, &latest, apply_result.checksum_verified);
+    if let Err(error) = ota_status.mark_restarting(
+        &operation,
+        &previous,
+        &latest,
+        apply_result.checksum_verified,
+    ) {
+        log::error!(target: "http", "Lost OTA operation ownership before restart: {}", error);
+        return;
+    }
     {
         let data_dir = state
             .lock()
@@ -1164,18 +1226,7 @@ async fn do_update(
             error
         );
     }
-
-    json_ok(format!(
-        r#"{{"status":"ok","message":"Updated to v{}, restarting...","previous_version":"{}","new_version":"{}","checksum_verified":{},"installed_targets":{}}}"#,
-        latest,
-        previous,
-        latest,
-        apply_result
-            .checksum_verified
-            .map(serde_json::Value::Bool)
-            .unwrap_or(serde_json::Value::Null),
-        serde_json::to_string(&apply_result.installed_targets).unwrap_or_else(|_| "[]".to_string())
-    ))
+    operation.retain_for_restart();
 }
 
 #[cfg(test)]
@@ -1187,7 +1238,8 @@ mod tests {
     use rhythm_os::storage::FileStorage;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::{Arc, Mutex, Once};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Barrier, Mutex, Once};
     use std::thread;
     use std::time::Duration;
     use tower::ServiceExt;
@@ -1232,16 +1284,26 @@ mod tests {
     }
 
     fn spawn_http_sequence(responses: Vec<(u16, String)>) -> String {
+        spawn_http_sequence_with_delays(
+            responses
+                .into_iter()
+                .map(|(status, body)| (status, body, Duration::ZERO))
+                .collect(),
+        )
+    }
+
+    fn spawn_http_sequence_with_delays(responses: Vec<(u16, String, Duration)>) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture");
         let port = listener.local_addr().unwrap().port();
         thread::spawn(move || {
-            for (status, body) in responses {
+            for (status, body, delay) in responses {
                 let Ok((mut stream, _)) = listener.accept() else {
                     return;
                 };
                 let mut request = [0_u8; 1024];
                 let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
                 let _ = stream.read(&mut request);
+                thread::sleep(delay);
                 let reason = match status {
                     200 => "OK",
                     404 => "Not Found",
@@ -1258,6 +1320,59 @@ mod tests {
         });
         thread::sleep(Duration::from_millis(10));
         format!("http://127.0.0.1:{port}/feeds/manifest.json")
+    }
+
+    type ResponseGate = Option<(Arc<Barrier>, Arc<Barrier>)>;
+
+    fn spawn_gated_http_sequence(
+        responses: Vec<(u16, String, ResponseGate)>,
+    ) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind fixture");
+        let port = listener.local_addr().unwrap().port();
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let worker_count = request_count.clone();
+        thread::spawn(move || {
+            for (status, body, gate) in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                worker_count.fetch_add(1, Ordering::SeqCst);
+                let mut request = [0_u8; 1024];
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+                let _ = stream.read(&mut request);
+                if let Some((entered, release)) = gate {
+                    entered.wait();
+                    release.wait();
+                }
+                let reason = match status {
+                    200 => "OK",
+                    404 => "Not Found",
+                    500 => "Internal Server Error",
+                    _ => "OK",
+                };
+                let headers = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(headers.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+            }
+        });
+        thread::sleep(Duration::from_millis(10));
+        (
+            format!("http://127.0.0.1:{port}/feeds/manifest.json"),
+            request_count,
+        )
+    }
+
+    async fn wait_for_ota_operation_release(ota_status: &crate::self_update::OtaStatusHandle) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while ota_status.operation_active() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("OTA operation gate should be released");
     }
 
     fn set_update_manifest_env(manifest_url: &str) {
@@ -1444,7 +1559,7 @@ mod tests {
         assert_eq!(capabilities["can_check"], true);
         assert_eq!(capabilities["requires_restart"], true);
 
-        ota_status.mark_checking();
+        let _operation = ota_status.begin_operation().unwrap();
         let status = ota_status_snapshot(state, ota_status).await;
         assert_eq!(status.status(), StatusCode::OK);
         let status = response_json(status).await;
@@ -1466,7 +1581,8 @@ mod tests {
     async fn do_update_rejects_when_update_is_already_in_progress() {
         let state: SharedState = Arc::new(Mutex::new(AppState::default()));
         let ota_status = crate::self_update::OtaStatusHandle::new("0.4.192-beta");
-        ota_status.begin_update("0.4.193-beta").unwrap();
+        let operation = ota_status.begin_operation().unwrap();
+        ota_status.begin_update(&operation, "0.4.193-beta").unwrap();
 
         let response = do_update(state, ota_status).await;
 
@@ -1474,6 +1590,215 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["status"], "error");
         assert_eq!(body["message"], "Update already in progress");
+    }
+
+    #[test]
+    fn simultaneous_update_requests_start_exactly_one_worker() {
+        let _guard = crate::self_update::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let check_entered = Arc::new(Barrier::new(2));
+            let release_check = Arc::new(Barrier::new(2));
+            let (manifest_url, request_count) = spawn_gated_http_sequence(vec![
+                (
+                    200,
+                    update_manifest("999.0.1", "release/missing-rhythm-server.tar.gz"),
+                    Some((check_entered.clone(), release_check.clone())),
+                ),
+                (404, String::new(), None),
+            ]);
+            set_update_manifest_env(&manifest_url);
+            let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+            let ota_status = crate::self_update::OtaStatusHandle::new(crate::BUILD_VERSION);
+
+            let first_state = state.clone();
+            let first_status = ota_status.clone();
+            let first = tokio::spawn(async move { do_update(first_state, first_status).await });
+
+            check_entered.wait();
+            let second = do_update(state, ota_status.clone()).await;
+            assert_eq!(second.status(), StatusCode::CONFLICT);
+            assert_eq!(
+                response_json(second).await["message"],
+                "Update already in progress"
+            );
+            release_check.wait();
+
+            let first = first.await.unwrap();
+            assert_eq!(first.status(), StatusCode::OK);
+            assert_eq!(response_json(first).await["status"], "accepted");
+            wait_for_ota_operation_release(&ota_status).await;
+            assert_eq!(
+                request_count.load(Ordering::SeqCst),
+                2,
+                "only one manifest check and one accepted worker download are allowed"
+            );
+            assert_eq!(
+                ota_status.snapshot().state,
+                crate::self_update::OtaUpdateState::Error
+            );
+        });
+
+        clear_update_manifest_env();
+    }
+
+    #[test]
+    fn active_apply_rejects_check_and_restart_then_releases_for_retry() {
+        let _guard = crate::self_update::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let apply_entered = Arc::new(Barrier::new(2));
+            let release_apply = Arc::new(Barrier::new(2));
+            let (manifest_url, request_count) = spawn_gated_http_sequence(vec![
+                (
+                    200,
+                    update_manifest("999.0.1", "release/missing-rhythm-server.tar.gz"),
+                    None,
+                ),
+                (
+                    404,
+                    String::new(),
+                    Some((apply_entered.clone(), release_apply.clone())),
+                ),
+            ]);
+            set_update_manifest_env(&manifest_url);
+            let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+            let ota_status = crate::self_update::OtaStatusHandle::new(crate::BUILD_VERSION);
+
+            let accepted = do_update(state.clone(), ota_status.clone()).await;
+            assert_eq!(accepted.status(), StatusCode::OK);
+            assert_eq!(response_json(accepted).await["status"], "accepted");
+            apply_entered.wait();
+            assert_eq!(
+                ota_status.snapshot().state,
+                crate::self_update::OtaUpdateState::Updating
+            );
+
+            let check = check_update(state.clone(), ota_status.clone()).await;
+            assert_eq!(check.status(), StatusCode::CONFLICT);
+            assert_eq!(
+                ota_status.snapshot().state,
+                crate::self_update::OtaUpdateState::Updating,
+                "a rejected check must not replace the accepted apply state"
+            );
+
+            let restart_scheduled = Arc::new(AtomicBool::new(false));
+            let scheduled_flag = restart_scheduled.clone();
+            let restart =
+                restart_device_with_scheduler(state.clone(), ota_status.clone(), move |_| {
+                    scheduled_flag.store(true, Ordering::SeqCst);
+                    Ok(())
+                });
+            assert_eq!(restart.status(), StatusCode::CONFLICT);
+            assert!(
+                !restart_scheduled.load(Ordering::SeqCst),
+                "restart scheduling must not run while an apply owns the lease"
+            );
+            assert_eq!(
+                ota_status.snapshot().state,
+                crate::self_update::OtaUpdateState::Updating
+            );
+
+            release_apply.wait();
+            wait_for_ota_operation_release(&ota_status).await;
+            assert_eq!(request_count.load(Ordering::SeqCst), 2);
+            assert_eq!(
+                ota_status.snapshot().state,
+                crate::self_update::OtaUpdateState::Error
+            );
+
+            let retry_url = spawn_http_sequence(vec![(
+                200,
+                update_manifest(crate::BUILD_VERSION, "release/rhythm-server.tar.gz"),
+            )]);
+            set_update_manifest_env(&retry_url);
+            let retry = do_update(state, ota_status.clone()).await;
+            assert_eq!(retry.status(), StatusCode::OK);
+            assert_eq!(response_json(retry).await["message"], "Already up to date");
+            assert!(!ota_status.operation_active());
+        });
+
+        clear_update_manifest_env();
+    }
+
+    #[test]
+    fn appliance_auto_update_apply_blocks_http_operations_and_failure_releases_gate() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        runtime.block_on(async {
+            let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+            state.lock().unwrap().platform_type = "appliance";
+            let ota_status = crate::self_update::OtaStatusHandle::new(crate::BUILD_VERSION);
+            let apply_entered = Arc::new(Barrier::new(2));
+            let release_apply = Arc::new(Barrier::new(2));
+            let worker_status = ota_status.clone();
+            let worker_entered = apply_entered.clone();
+            let worker_release = release_apply.clone();
+            let auto_update = thread::spawn(move || {
+                crate::auto_update::hold_failed_apply_for_test(
+                    worker_status,
+                    worker_entered,
+                    worker_release,
+                );
+            });
+
+            apply_entered.wait();
+            assert_eq!(
+                ota_status.snapshot().state,
+                crate::self_update::OtaUpdateState::Updating
+            );
+
+            let restart_scheduled = Arc::new(AtomicBool::new(false));
+            let scheduled_flag = restart_scheduled.clone();
+            let restart =
+                restart_device_with_scheduler(state.clone(), ota_status.clone(), move |_| {
+                    scheduled_flag.store(true, Ordering::SeqCst);
+                    Ok(())
+                });
+            assert_eq!(restart.status(), StatusCode::CONFLICT);
+            assert!(!restart_scheduled.load(Ordering::SeqCst));
+
+            let check = check_update(state.clone(), ota_status.clone()).await;
+            assert_eq!(check.status(), StatusCode::CONFLICT);
+
+            let update = do_update(state, ota_status.clone()).await;
+            assert_eq!(update.status(), StatusCode::CONFLICT);
+            assert_eq!(
+                ota_status.snapshot().state,
+                crate::self_update::OtaUpdateState::Updating,
+                "rejected HTTP operations must not replace auto-update status"
+            );
+
+            release_apply.wait();
+            auto_update.join().unwrap();
+            assert_eq!(
+                ota_status.snapshot().state,
+                crate::self_update::OtaUpdateState::Error
+            );
+            let retry = ota_status
+                .begin_operation()
+                .expect("terminal auto-update failure must release the shared gate");
+            drop(retry);
+            assert!(!ota_status.operation_active());
+        });
     }
 
     #[test]
@@ -1560,7 +1885,7 @@ mod tests {
     }
 
     #[test]
-    fn do_update_handler_reports_up_to_date_and_download_failure() {
+    fn do_update_handler_reports_up_to_date_and_accepts_background_apply() {
         let _guard = crate::self_update::ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1606,12 +1931,13 @@ mod tests {
                 }
             ));
 
-            let manifest_url = spawn_http_sequence(vec![
+            let manifest_url = spawn_http_sequence_with_delays(vec![
                 (
                     200,
                     update_manifest("999.0.1", "release/missing-rhythm-server.tar.gz"),
+                    Duration::ZERO,
                 ),
-                (404, String::new()),
+                (404, String::new(), Duration::from_millis(200)),
             ]);
             set_update_manifest_env(&manifest_url);
             let (tx, mut rx) = tokio::sync::broadcast::channel(16);
@@ -1621,9 +1947,15 @@ mod tests {
 
             let response = do_update(state, ota_status.clone()).await;
 
-            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-            let text = response_text(response).await;
-            assert!(text.contains("404"), "unexpected update error: {text}");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response_json(response).await;
+            assert_eq!(body["status"], "accepted");
+            assert_eq!(body["new_version"], "999.0.1");
+            assert_eq!(
+                ota_status.snapshot().state,
+                crate::self_update::OtaUpdateState::Updating,
+                "the server must own the accepted update after the client response"
+            );
             assert!(matches!(
                 rx.recv().await.unwrap(),
                 rhythm_os::server_event::ServerEvent::OtaUpdateProgress {
@@ -1638,21 +1970,25 @@ mod tests {
                     ..
                 }
             ));
-            let mut saw_failed = false;
-            while let Ok(event) = rx.try_recv() {
-                if matches!(
-                    event,
-                    rhythm_os::server_event::ServerEvent::OtaUpdateProgress {
-                        stage: rhythm_os::server_event::OtaUpdateStage::Failed,
-                        ..
+
+            let failed = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let event = rx.recv().await.unwrap();
+                    if matches!(
+                        event,
+                        rhythm_os::server_event::ServerEvent::OtaUpdateProgress {
+                            stage: rhythm_os::server_event::OtaUpdateStage::Failed,
+                            ..
+                        }
+                    ) {
+                        break;
                     }
-                ) {
-                    saw_failed = true;
                 }
-            }
+            })
+            .await;
             assert!(
-                saw_failed,
-                "download failure should emit failed OTA progress"
+                failed.is_ok(),
+                "background failure should emit OTA SSE progress"
             );
             assert!(ota_status.snapshot().last_error.is_some());
         });
@@ -1969,7 +2305,10 @@ mod tests {
         init_restart_dry_run();
 
         let state: SharedState = Arc::new(Mutex::new(AppState::default()));
-        let router = create_router(state);
+        let router = create_router(
+            state,
+            crate::self_update::OtaStatusHandle::new(crate::BUILD_VERSION),
+        );
 
         let request = Request::builder()
             .method("POST")
@@ -2017,7 +2356,10 @@ mod tests {
                 FileStorage::new(&state.data_dir).unwrap(),
             ));
         }
-        let router = create_router(state);
+        let router = create_router(
+            state,
+            crate::self_update::OtaStatusHandle::new(crate::BUILD_VERSION),
+        );
 
         let request = Request::builder()
             .method("POST")
