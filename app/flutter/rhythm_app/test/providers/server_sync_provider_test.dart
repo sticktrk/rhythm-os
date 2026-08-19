@@ -5668,6 +5668,12 @@ void main() {
       'room_id': 'room-2',
       'endpoints': const <Map<String, dynamic>>[],
     };
+    api.canonicalDevices['light-unassigned'] = {
+      'id': 'light-unassigned',
+      'name': 'Zulu Lamp',
+      'device_type': 'light',
+      'endpoints': const <Map<String, dynamic>>[],
+    };
     api.topologyNodes = [
       RhythmTopologyNode.fromJson({
         'id': 'room-1',
@@ -5719,7 +5725,32 @@ void main() {
       find.byKey(const ValueKey('existing-room-device-light-hall')),
       findsOneWidget,
     );
+    expect(
+      tester
+          .getTopLeft(
+            find.byKey(const ValueKey('existing-room-device-light-unassigned')),
+          )
+          .dy,
+      lessThan(
+        tester
+            .getTopLeft(
+              find.byKey(const ValueKey('existing-room-device-light-hall')),
+            )
+            .dy,
+      ),
+    );
+    expect(find.text('Unassigned'), findsOneWidget);
     expect(find.text('Wall Button'), findsNothing);
+    if (const bool.fromEnvironment(
+      'RHYTHM_CAPTURE_ROOM_DEVICE_ADD_EVIDENCE',
+    )) {
+      await expectLater(
+        find.byKey(const ValueKey('room-device-add-sheet')),
+        matchesGoldenFile(
+          'goldens/room-device-add-unassigned-first.png',
+        ),
+      );
+    }
 
     await tester.tap(find.byKey(const ValueKey('room-device-add-scan')));
     await tester.pumpAndSettle();
