@@ -309,6 +309,17 @@ pub trait MatterTransport: Send + Sync {
     /// Commission a light and return the fully probed device description.
     fn commission_light(&self, request: &MatterCommissionRequest) -> Result<CommissionedDevice>;
 
+    /// Commission with the initiating API request's deadline/cancellation
+    /// fence. Compatibility transports keep their existing synchronous
+    /// behavior; the native CHIP transport terminates abandoned sidecar work.
+    fn commission_light_with_context(
+        &self,
+        request: &MatterCommissionRequest,
+        _context: &rhythm_os::pairing::PairingRequestContext,
+    ) -> Result<CommissionedDevice> {
+        self.commission_light(request)
+    }
+
     /// Remove a device from the local fabric.
     fn decommission_device(&self, node_id: u64, force: bool) -> Result<()>;
 

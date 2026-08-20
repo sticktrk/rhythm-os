@@ -8,28 +8,44 @@ use rhythm_core::runtime::hub_registry::DeviceType;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Monotonic timing context captured when the API first accepts a pairing
 /// request. Integrations use this instead of starting a fresh budget after
 /// handler-side validation, locking, or durable idempotency writes.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct PairingRequestContext {
     accepted_at: Instant,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl PairingRequestContext {
     pub fn new(accepted_at: Instant) -> Self {
-        Self { accepted_at }
+        Self {
+            accepted_at,
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
     }
 
     pub fn accepted_now() -> Self {
         Self::new(Instant::now())
     }
 
-    pub fn deadline_after(self, budget: Duration) -> Instant {
+    pub fn deadline_after(&self, budget: Duration) -> Instant {
         self.accepted_at + budget
+    }
+
+    /// Signal that the initiating HTTP request no longer owns this operation.
+    /// Clones share the same flag so a dropped async request can stop its
+    /// blocking integration worker.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
     }
 }
 

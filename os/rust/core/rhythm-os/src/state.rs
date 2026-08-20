@@ -477,8 +477,9 @@ pub struct AppState {
     /// API-facing capability metadata for integrations available on this platform.
     pub hub_capabilities: Vec<crate::hub::HubIntegrationCapability>,
     /// Pairing sessions currently running, keyed by their exclusive resource
-    /// slot (normally hub type; appliance Matter, Hue BLE, and local BLE
-    /// clients share the adapter).
+    /// slot (normally hub type; appliance Matter BLE, Hue BLE, and local BLE
+    /// clients share the adapter, while all Matter modes share a separate
+    /// commissioner slot).
     pub pairing_in_progress: HashSet<String>,
     /// Optional platform bridge for applying the resource reservation below
     /// every integration and background observer.

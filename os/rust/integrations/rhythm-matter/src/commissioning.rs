@@ -8,7 +8,9 @@ use log::{error, info, warn};
 use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_os::canonical::identity::{HardwareId, HubKey};
 use rhythm_os::hub::HubType;
-use rhythm_os::pairing::{PairedDeviceInfo, PairingSession, PairingStage, PairingStatus};
+use rhythm_os::pairing::{
+    PairedDeviceInfo, PairingRequestContext, PairingSession, PairingStage, PairingStatus,
+};
 use rhythm_os::state::SharedState;
 use serde_json::Value;
 
@@ -156,6 +158,22 @@ pub fn pair_device(
     hub_data: Arc<MatterHubData>,
     request: &MatterPairingParams,
 ) -> Result<PairingSession> {
+    pair_device_with_context(
+        state,
+        transport,
+        hub_data,
+        request,
+        &PairingRequestContext::accepted_now(),
+    )
+}
+
+pub fn pair_device_with_context(
+    state: &SharedState,
+    transport: Arc<dyn MatterTransport>,
+    hub_data: Arc<MatterHubData>,
+    request: &MatterPairingParams,
+    request_context: &PairingRequestContext,
+) -> Result<PairingSession> {
     let recovery_targets = match registered_recovery_targets(
         state,
         &hub_data,
@@ -249,6 +267,7 @@ pub fn pair_device(
             Err(error) => {
                 return Ok(failed_recovery_session(
                     &error,
+                    request.rendezvous,
                     "Rhythm found this saved Matter device, but cannot recommission it until the appliance Wi-Fi credentials are available.",
                 ));
             }
@@ -265,7 +284,7 @@ pub fn pair_device(
             None,
         );
 
-        return match transport.commission_light(&commission_request) {
+        return match transport.commission_light_with_context(&commission_request, request_context) {
             Ok(device) => build_success_session(
                 state,
                 &hub_data,
@@ -283,6 +302,7 @@ pub fn pair_device(
                 );
                 Ok(failed_recovery_session(
                     &error,
+                    request.rendezvous,
                     "Rhythm found this saved Matter device, but could not restore its connection or recommission it. Put the light in Matter pairing mode, keep it powered, and try again.",
                 ))
             }
@@ -303,7 +323,7 @@ pub fn pair_device(
         None,
     );
 
-    match transport.commission_light(&commission_request) {
+    match transport.commission_light_with_context(&commission_request, request_context) {
         Ok(device) => build_success_session(
             state,
             &hub_data,
@@ -319,7 +339,10 @@ pub fn pair_device(
                 status: PairingStatus::Failed,
                 device: None,
                 devices: Vec::new(),
-                error: Some(summarize_commissioning_error(&error)),
+                error: Some(summarize_commissioning_error_for_rendezvous(
+                    &error,
+                    request.rendezvous,
+                )),
                 failure_stage: None,
                 warnings: Vec::new(),
                 details: None,
@@ -358,7 +381,11 @@ fn registered_recovery_targets(
         .collect())
 }
 
-fn failed_recovery_session(error: &anyhow::Error, message: &str) -> PairingSession {
+fn failed_recovery_session(
+    error: &anyhow::Error,
+    rendezvous: MatterCommissioningRendezvous,
+    message: &str,
+) -> PairingSession {
     PairingSession {
         hub_type: "matter".to_string(),
         status: PairingStatus::Failed,
@@ -367,7 +394,7 @@ fn failed_recovery_session(error: &anyhow::Error, message: &str) -> PairingSessi
         error: Some(format!(
             "{} {}",
             message,
-            summarize_commissioning_error(error)
+            summarize_commissioning_error_for_rendezvous(error, rendezvous)
         )),
         failure_stage: None,
         warnings: Vec::new(),
@@ -377,9 +404,34 @@ fn failed_recovery_session(error: &anyhow::Error, message: &str) -> PairingSessi
     }
 }
 
+#[cfg(test)]
 fn summarize_commissioning_error(error: &anyhow::Error) -> String {
+    summarize_commissioning_error_for_rendezvous(error, MatterCommissioningRendezvous::Auto)
+}
+
+fn summarize_commissioning_error_for_rendezvous(
+    error: &anyhow::Error,
+    rendezvous: MatterCommissioningRendezvous,
+) -> String {
     let detail = format!("{:#}", error);
     let lower = detail.to_ascii_lowercase();
+
+    if lower.contains("matter pairing request was cancelled") {
+        return "Matter pairing stopped because the initiating app request ended. Reopen the device's pairing window and try again.".to_string();
+    }
+
+    if lower.contains("matter pairing request exceeded its server deadline") {
+        return "Matter pairing stopped at the server deadline and released its resources. Reopen the device's pairing window and try again.".to_string();
+    }
+
+    if rendezvous == MatterCommissioningRendezvous::OnNetwork
+        && (lower.contains("network unreachable")
+            || lower.contains("os error 0x02000065")
+            || (lower.contains("discovery timed out")
+                && !lower.contains("operational discovery failed")))
+    {
+        return "On-network Matter pairing could not reach the device over local IPv6/IP. Keep its multi-admin pairing window open and verify the Rhythm Box accepts the Thread border router's IPv6 route; Bluetooth proximity or a factory reset will not repair a missing route.".to_string();
+    }
 
     if lower.contains("addressresolve") || lower.contains("operational discovery failed") {
         return "The light joined the Wi-Fi network, but Rhythm could not discover it over mDNS afterwards. Rhythm reset its Matter controller to recover; wait a few seconds and retry pairing without factory-resetting the light.".to_string();
@@ -1168,6 +1220,39 @@ mod tests {
         let message = summarize_commissioning_error(&error);
 
         assert!(message.contains("timed out while discovering the bulb"));
+    }
+
+    #[test]
+    fn on_network_route_failure_does_not_recommend_ble_recovery() {
+        for detail in [
+            "commissioning Matter light: OS Error 0x02000065: Network unreachable",
+            "commissioning Matter light: Discovery timed out",
+        ] {
+            let message = summarize_commissioning_error_for_rendezvous(
+                &anyhow::anyhow!(detail),
+                MatterCommissioningRendezvous::OnNetwork,
+            );
+
+            assert!(message.contains("local IPv6/IP"));
+            assert!(message.contains("Thread border router's IPv6 route"));
+            assert!(message.contains("Bluetooth proximity"));
+            assert!(!message.contains("keep it close"));
+        }
+    }
+
+    #[test]
+    fn stopped_pairing_reports_terminal_server_ownership() {
+        let cancelled = summarize_commissioning_error_for_rendezvous(
+            &anyhow::anyhow!("Matter pairing request was cancelled"),
+            MatterCommissioningRendezvous::OnNetwork,
+        );
+        assert!(cancelled.contains("initiating app request ended"));
+
+        let deadline = summarize_commissioning_error_for_rendezvous(
+            &anyhow::anyhow!("Matter pairing request exceeded its server deadline"),
+            MatterCommissioningRendezvous::OnNetwork,
+        );
+        assert!(deadline.contains("released its resources"));
     }
 
     /// Regression for issue #117: operational-discovery timeouts were
