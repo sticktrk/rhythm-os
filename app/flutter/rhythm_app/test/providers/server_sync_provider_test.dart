@@ -1034,6 +1034,10 @@ Widget _buildTestApp({
       ChangeNotifierProvider<SubscriptionProvider>(
         create: (_) => _TestSubscriptionProvider(),
       ),
+      // The room Schedule tab reads the home location for its orbital clock.
+      ChangeNotifierProvider<HomeProvider>(
+        create: (_) => _TestHomeProvider(const []),
+      ),
     ],
     child: MaterialApp(
       theme: ThemeData(fontFamily: fontFamily),
@@ -5880,7 +5884,7 @@ void main() {
     expect(find.byKey(const ValueKey('schedule')), findsOneWidget);
 
     expect(find.byKey(const ValueKey('schedule')), findsOneWidget);
-    expect(find.text('ALARM / SCHEDULE SOURCE'), findsOneWidget);
+    expect(find.text('SCHEDULE'), findsOneWidget);
     expect(find.text('WAKE / SLEEP PRESETS'), findsOneWidget);
     expect(find.text('TEST YOUR PRESETS'), findsOneWidget);
     expect(
@@ -5897,13 +5901,15 @@ void main() {
       find.byKey(const ValueKey('room-schedule-source-presets')),
       findsOneWidget,
     );
+    // Custom-times editor stays collapsed while the room follows the home
+    // schedule — the dial and steppers only mount for Custom times.
     expect(
       find.byKey(const ValueKey('room-schedule-time-dial')),
-      findsOneWidget,
+      findsNothing,
     );
     expect(
       find.byKey(const ValueKey('room-schedule-wake-later')),
-      findsOneWidget,
+      findsNothing,
     );
     expect(
         find.byKey(const ValueKey('room-schedule-test-wake')), findsOneWidget);
@@ -6116,7 +6122,13 @@ void main() {
 
     api.roomScheduleTestSucceeds = false;
     final wakeTest = find.byKey(const ValueKey('room-schedule-test-wake'));
-    await tester.ensureVisible(wakeTest);
+    // The test toggle sits at the bottom of the (lazy) tab list — scroll it
+    // into build range before interacting.
+    await tester.dragUntilVisible(
+      wakeTest,
+      find.byKey(const ValueKey('schedule')),
+      const Offset(0, -120),
+    );
     await tester.tap(wakeTest);
     await tester.pump();
     api.roomScheduleTestSucceeds = true;
@@ -6226,13 +6238,15 @@ void main() {
       RhythmHello.fromJson(hello(followTime: true, wakeTime: '07:45')),
     );
     await tester.pump(const Duration(milliseconds: 20));
-    expect(find.text('Wake 07:45'), findsOneWidget);
+    expect(find.text('07:45'), findsOneWidget);
+    // Let the custom-times editor finish expanding before tapping into it.
+    await tester.pumpAndSettle();
     await tester.tap(
       find.byKey(const ValueKey('room-schedule-wake-later')),
     );
     await tester.pumpAndSettle();
     expect(api.roomScheduleSetCalls.last.wakeTime, '08:00');
-    expect(find.text('Wake 08:00'), findsOneWidget);
+    expect(find.text('08:00'), findsOneWidget);
     expect(
       find.byKey(const ValueKey('room-schedule-presets-disabled')),
       findsOneWidget,
@@ -6255,8 +6269,10 @@ void main() {
     );
 
     api.roomScheduleTestCompleter = Completer<bool>();
-    await tester.ensureVisible(
+    await tester.dragUntilVisible(
       find.byKey(const ValueKey('room-schedule-test-wake')),
+      find.byKey(const ValueKey('schedule')),
+      const Offset(0, -120),
     );
     await tester.tap(find.byKey(const ValueKey('room-schedule-test-wake')));
     await tester.pump();
@@ -6277,8 +6293,10 @@ void main() {
     await tester.pump();
     api.roomScheduleTestCompleter = null;
     api.roomScheduleSetSucceeds = false;
-    await tester.ensureVisible(
+    await tester.dragUntilVisible(
       find.byKey(const ValueKey('room-schedule-source-presets')),
+      find.byKey(const ValueKey('schedule')),
+      const Offset(0, 120),
     );
     await tester.tap(
       find.byKey(const ValueKey('room-schedule-source-presets')),
