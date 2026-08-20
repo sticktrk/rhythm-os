@@ -8,6 +8,7 @@ WRITER="$APP_SCRIPTS/write-testflight-notes.sh"
 BUILD_SCRIPT="$APP_SCRIPTS/build-mobile.sh"
 WORKER="$APP_SCRIPTS/run-testflight-dispatch.sh"
 BATCH_DISPATCH="$APP_SCRIPTS/dispatch-testflight-batch.sh"
+BATCH_DISPATCH_TEST="$SCRIPT_DIR/testflight-batch-dispatch-test.sh"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/rhythm-testflight-notes-test.XXXXXX")"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
@@ -119,5 +120,6 @@ grep -Fq 'git merge-base --is-ancestor "$PR_MERGE" "$COMMIT_SHA"' "$BATCH_DISPAT
     fail "batch dispatcher does not prove every named PR is in the final commit"
 grep -Fq 'RHYTHM_TESTFLIGHT_BATCH_BASE="$BASE_SHA"' "$BATCH_DISPATCH" || \
     fail "batch dispatcher does not preserve the immutable batch base in its receipt"
+"$BATCH_DISPATCH_TEST" || fail "batch dispatcher remote-tag gate failed"
 
 echo "TestFlight notes tests passed"
