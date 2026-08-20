@@ -1736,7 +1736,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                     );
                     continue;
                 }
-                if !motion_activation_enabled_for_target(state, &target_node_id) {
+                if let Some(reason) = motion_suppression_reason_for_target(state, &target_node_id) {
                     tracing::info!(
                         target: "evt",
                         event = "motion_node_control_suppressed",
@@ -1745,8 +1745,8 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                         source_room_id = %room_id,
                         native_sensor_id = %sensor_id,
                         detected,
-                        reason = "motion_activation_disabled",
-                        "Motion node control suppressed for disabled target"
+                        reason,
+                        "Motion node control suppressed for target policy"
                     );
                     continue;
                 }
@@ -2439,6 +2439,7 @@ pub fn check_motion_timers(state: &SharedState, motion: &mut MotionTimerState) {
         .map(|source| source.target_node_id.clone())
         .filter(|target_node_id| {
             !commands::rhythm_automation_allowed_for_node(state, target_node_id)
+                || !motion_activation_enabled_for_target(state, target_node_id)
         })
         .collect::<HashSet<_>>();
     if !suppressed_targets.is_empty() {
@@ -3105,13 +3106,37 @@ fn motion_timeout_secs_for_target(state: &SharedState, target_node_id: &str) -> 
 }
 
 fn motion_activation_enabled_for_target(state: &SharedState, target_node_id: &str) -> bool {
+    motion_suppression_reason_for_target(state, target_node_id).is_none()
+}
+
+fn is_generated_mood_scene_id(scene_id: &str) -> bool {
+    scene_id.starts_with("node-mood-scene-") || scene_id.starts_with("node_mood_scene_")
+}
+
+fn motion_suppression_reason_for_target(
+    state: &SharedState,
+    target_node_id: &str,
+) -> Option<&'static str> {
     state
         .lock()
         .ok()
         .and_then(|s| s.hub_runtime())
         .and_then(|runtime| runtime.engine_node_snapshot(target_node_id))
-        .map(|snapshot| snapshot.profile_settings.motion_activation_enabled())
-        .unwrap_or(true)
+        .and_then(|snapshot| {
+            if !snapshot.profile_settings.motion_activation_enabled() {
+                return Some("motion_activation_disabled");
+            }
+            if snapshot.mood_active
+                && snapshot
+                    .profile_settings
+                    .mood_scene_id
+                    .as_deref()
+                    .is_some_and(|scene_id| !is_generated_mood_scene_id(scene_id))
+            {
+                return Some("active_scene");
+            }
+            None
+        })
 }
 
 fn observed_room_lights_on(state: &SharedState, target_node_id: &str) -> Option<bool> {
@@ -7146,6 +7171,92 @@ mod tests {
     }
 
     #[test]
+    fn active_scene_motion_does_not_claim_or_turn_on_target() {
+        let mut snapshot = room_snapshot_with_flags("room_a", false, false);
+        snapshot.mood_active = true;
+        snapshot.profile_settings.mood_scene_id = Some("evening-glow".into());
+        snapshot.profile_settings.motion_activation_enabled = Some(true);
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![snapshot]));
+        let turn_on_calls = runtime.turn_on_calls.clone();
+        let state = make_state_with_runtime(runtime);
+        let hub_key = only_hub_key(&state);
+        add_canonical_control_source(&state, &hub_key, "sensor_a", "room_a", DeviceType::Motion);
+        let mut motion = MotionTimerState::new();
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Motion {
+                hub_key: Some(hub_key),
+                room_id: "room_a".into(),
+                sensor_id: "sensor_a".into(),
+                detected: true,
+            },
+            &mut motion,
+        );
+
+        assert_eq!(
+            motion_suppression_reason_for_target(&state, "room_a"),
+            Some("active_scene")
+        );
+        assert!(motion.sensors.is_empty());
+        assert!(motion.motion_owned.is_empty());
+        assert!(turn_on_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn generated_custom_mood_scene_motion_claims_and_turns_on_target() {
+        for scene_id in ["node-mood-scene-room_a", "node_mood_scene_room_a"] {
+            let mut snapshot = room_snapshot_with_flags("room_a", false, false);
+            snapshot.mood_active = true;
+            snapshot.profile_settings.mood_scene_id = Some(scene_id.into());
+            snapshot.profile_settings.motion_activation_enabled = Some(true);
+            let turn_on_calls = Arc::new(AtomicUsize::new(0));
+            let state = make_state_with_counted_turn_on(snapshot, turn_on_calls.clone());
+            let hub_key = only_hub_key(&state);
+            add_canonical_control_source(
+                &state,
+                &hub_key,
+                "sensor_a",
+                "room_a",
+                DeviceType::Motion,
+            );
+            let mut motion = MotionTimerState::new();
+
+            handle_hub_event(
+                &state,
+                crate::hub::HubEvent::Motion {
+                    hub_key: Some(hub_key),
+                    room_id: "room_a".into(),
+                    sensor_id: "sensor_a".into(),
+                    detected: true,
+                },
+                &mut motion,
+            );
+
+            wait_for_atomic_at_least(&turn_on_calls, 1);
+            assert_eq!(
+                motion_suppression_reason_for_target(&state, "room_a"),
+                None,
+                "generated custom Mood scene {scene_id} must not suppress motion"
+            );
+            assert_eq!(motion.sensors.len(), 1);
+            assert!(motion.motion_owned.contains("room_a"));
+            assert_eq!(turn_on_calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[test]
+    fn saved_scene_outside_mood_does_not_suppress_motion() {
+        let mut snapshot = room_snapshot_with_flags("room_a", false, false);
+        snapshot.profile_settings.mood_scene_id = Some("evening-glow".into());
+        snapshot.profile_settings.motion_activation_enabled = Some(true);
+        let state = make_state_with_room_snapshot(snapshot);
+
+        assert_eq!(motion_suppression_reason_for_target(&state, "room_a"), None);
+        assert!(motion_activation_enabled_for_target(&state, "room_a"));
+    }
+
+    #[test]
     fn motion_event_fans_out_to_multiple_control_targets() {
         let turn_on_room_calls = Arc::new(AtomicUsize::new(0));
         let runtime: Arc<dyn RuntimeHandle> = Arc::new(SlowDispatchRuntime {
@@ -9377,6 +9488,14 @@ mod tests {
         snapshot
     }
 
+    fn active_scene_room_snapshot(id: &str) -> RoomSnapshot {
+        let mut snapshot = room_snapshot_with_flags(id, false, false);
+        snapshot.mood_active = true;
+        snapshot.profile_settings.mood_scene_id = Some("evening-glow".into());
+        snapshot.profile_settings.motion_activation_enabled = Some(true);
+        snapshot
+    }
+
     /// Boot-time motion seeding must skip rooms persisted as hard_off.
     /// Otherwise a motion timer starts for a room the user has explicitly
     /// switched off, and the timer survives across power cycles even though
@@ -9413,6 +9532,20 @@ mod tests {
     #[test]
     fn apply_seeds_skips_motion_disabled_room() {
         let state = make_state_with_room_snapshot(motion_disabled_room_snapshot("room_a"));
+        push_seed(&state, "sensor_1", "room_a", true);
+
+        let mut motion = MotionTimerState::new();
+        let dirty = apply_pending_motion_seeds(&state, &mut motion, Instant::now());
+
+        assert!(!dirty);
+        assert!(motion.sensors.is_empty());
+        assert!(motion.motion_owned.is_empty());
+        assert!(state.lock().unwrap().pending_motion_seed.is_empty());
+    }
+
+    #[test]
+    fn apply_seeds_skips_active_scene_room() {
+        let state = make_state_with_room_snapshot(active_scene_room_snapshot("room_a"));
         push_seed(&state, "sensor_1", "room_a", true);
 
         let mut motion = MotionTimerState::new();

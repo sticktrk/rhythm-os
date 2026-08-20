@@ -224,6 +224,21 @@ void main() {
         expect(room.lightCapabilities?.colorTemperature?.maxKelvin, 20000);
       });
 
+      test('keeps semantic desired power distinct from physical proof', () {
+        final room = RhythmRoom.fromJson({
+          'id': 'matter-room',
+          'observed_power': {
+            'lights_on': false,
+            'fresh': false,
+            'source': 'semantic_override',
+          },
+        });
+
+        expect(room.lightsOn, isFalse);
+        expect(room.powerFresh, isFalse);
+        expect(room.powerSource, 'semantic_override');
+      });
+
       test('normalizes explicit null pending dispatch constructor value', () {
         final room = Function.apply(RhythmRoom.new, const [], {
           #id: 'room-1',

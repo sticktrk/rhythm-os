@@ -277,6 +277,7 @@ pub const FEATURE_ASYNC_DEBUG_BUNDLE_UPLOAD: &str = "async_debug_bundle_upload";
 pub const FEATURE_MOTION_ACTIVATION_TOGGLE: &str = "motion_activation_toggle";
 pub const FEATURE_ROOM_SCHEDULE_V1: &str = "room_schedule_v1";
 pub const FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES: &str = "room_light_profile_overrides";
+pub const FEATURE_ROOM_DAY_IDLE_PROFILE_OVERRIDES: &str = "room_day_idle_profile_overrides_v1";
 pub const FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES: &str =
     "guarded_room_light_profile_overrides";
 pub const FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES: &str =
@@ -284,6 +285,7 @@ pub const FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES: &str =
 pub const FEATURE_HUE_ROOM_AUTHORITY_CONSENT: &str = "hue_room_authority_consent_v1";
 pub const FEATURE_MATTER_SETUP_CODE_RECOVERY: &str = "matter_setup_code_recovery_v1";
 pub const FEATURE_HUE_ROOM_TOPOLOGY_SYNC: &str = "hue_room_topology_sync_v1";
+pub const FEATURE_SCENE_MOTION_SUPPRESSION: &str = "scene_motion_suppression_v1";
 
 #[derive(Clone, Debug)]
 pub struct ApiCapabilitiesDto {
@@ -304,11 +306,13 @@ impl Serialize for ApiCapabilitiesDto {
                 FEATURE_MOTION_ACTIVATION_TOGGLE,
                 FEATURE_ROOM_SCHEDULE_V1,
                 FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES,
+                FEATURE_ROOM_DAY_IDLE_PROFILE_OVERRIDES,
                 FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
                 FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
                 FEATURE_HUE_ROOM_AUTHORITY_CONSENT,
                 FEATURE_MATTER_SETUP_CODE_RECOVERY,
                 FEATURE_HUE_ROOM_TOPOLOGY_SYNC,
+                FEATURE_SCENE_MOTION_SUPPRESSION,
             ],
         )?;
         state.serialize_field("hubs", &self.hubs)?;
@@ -1587,23 +1591,31 @@ mod tests {
         );
         assert_eq!(
             json["capabilities"]["features"][4],
-            FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES
+            FEATURE_ROOM_DAY_IDLE_PROFILE_OVERRIDES
         );
         assert_eq!(
             json["capabilities"]["features"][5],
-            FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES
+            FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES
         );
         assert_eq!(
             json["capabilities"]["features"][6],
-            FEATURE_HUE_ROOM_AUTHORITY_CONSENT
+            FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES
         );
         assert_eq!(
             json["capabilities"]["features"][7],
-            FEATURE_MATTER_SETUP_CODE_RECOVERY
+            FEATURE_HUE_ROOM_AUTHORITY_CONSENT
         );
         assert_eq!(
             json["capabilities"]["features"][8],
+            FEATURE_MATTER_SETUP_CODE_RECOVERY
+        );
+        assert_eq!(
+            json["capabilities"]["features"][9],
             FEATURE_HUE_ROOM_TOPOLOGY_SYNC
+        );
+        assert_eq!(
+            json["capabilities"]["features"][10],
+            FEATURE_SCENE_MOTION_SUPPRESSION
         );
         assert_eq!(
             json["capabilities"]["hubs"][0]["device_onboarding_methods"][0],

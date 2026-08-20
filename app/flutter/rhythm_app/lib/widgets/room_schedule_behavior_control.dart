@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmMode;
+import 'package:uuid/uuid.dart';
 
 import '../providers/server_sync_provider.dart';
 import '../services/analytics_service.dart';
@@ -27,7 +28,7 @@ String? stateForRoomScheduleBehavior(RoomScheduleBehavior behavior) =>
 String roomScheduleBehaviorLabel(RoomScheduleBehavior behavior) =>
     switch (behavior) {
       RoomScheduleBehavior.automatic => 'Auto',
-      RoomScheduleBehavior.standby => 'Standby',
+      RoomScheduleBehavior.standby => 'Low glow',
       RoomScheduleBehavior.off => 'Off',
       RoomScheduleBehavior.on => 'On',
     };
@@ -158,7 +159,7 @@ class _ScheduleModeMenu extends StatelessWidget {
       enabled: enabled,
       label: '$title schedule behavior',
       value: label,
-      hint: 'Choose Auto, Standby, Off, or On',
+      hint: 'Choose Auto, Low glow, Off, or On',
       excludeSemantics: true,
       child: PopupMenuButton<RoomScheduleBehavior>(
         key: ValueKey('$keyPrefix-$modeKey-$roomId'),
@@ -173,11 +174,21 @@ class _ScheduleModeMenu extends StatelessWidget {
                 mode: mode,
                 state: stateForRoomScheduleBehavior(selected),
               );
-          AnalyticsService().logLightProfileRoomDefaultChanged(
-            profile: mode == RhythmMode.sleep ? 'sleep' : 'rhythm',
-            cleared: selected == RoomScheduleBehavior.automatic,
-            source: analyticsSource,
-          );
+          if (analyticsSource == 'room_schedule_tab') {
+            AnalyticsService().logRoomScheduleInlinePresetChanged(
+              journeyId: 'room-schedule-preset-${const Uuid().v4()}',
+              attemptNumber: 1,
+              inputMethod: 'popup_menu',
+              mode: mode == RhythmMode.sleep ? 'sleep' : 'wake',
+              behavior: selected.name,
+            );
+          } else {
+            AnalyticsService().logLightProfileRoomDefaultChanged(
+              profile: mode == RhythmMode.sleep ? 'sleep' : 'rhythm',
+              cleared: selected == RoomScheduleBehavior.automatic,
+              source: analyticsSource,
+            );
+          }
         },
         itemBuilder: (_) => [
           for (final option in RoomScheduleBehavior.values)

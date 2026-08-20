@@ -1179,6 +1179,15 @@ impl RoomProfileSettings {
     /// Apply per-node overrides for a specific resolved profile.
     pub fn apply_to_config_for_profile(&self, profile_id: &str, config: &mut LightProfileConfig) {
         self.apply_to_config(config);
+        self.apply_profile_override_to_config(profile_id, config);
+    }
+
+    /// Apply only the delta scoped to one resolved profile.
+    pub fn apply_profile_override_to_config(
+        &self,
+        profile_id: &str,
+        config: &mut LightProfileConfig,
+    ) {
         if let Some(profile_override) = self.profile_overrides.get(profile_id) {
             profile_override.apply_to_config(config);
         }

@@ -350,7 +350,8 @@ fn main() -> Result<()> {
             })
             .expect("Failed to spawn periodic thread");
     }
-    spawn_appliance_background_workers(state.clone());
+    let ota_status = rhythm_server::self_update::OtaStatusHandle::new(VERSION);
+    spawn_appliance_background_workers(state.clone(), ota_status.clone());
 
     let provisioning = ble_provision::ProvisioningManager::new(VERSION.to_string(), state.clone());
     if let Err(e) = provisioning.ensure_running_if_needed("startup") {
@@ -370,12 +371,17 @@ fn main() -> Result<()> {
             args.port,
             provisioning,
             periodic_gate_heartbeat,
+            ota_status,
         ))
 }
 
-fn spawn_appliance_background_workers(state: SharedState) {
+fn spawn_appliance_background_workers(
+    state: SharedState,
+    ota_status: rhythm_server::self_update::OtaStatusHandle,
+) {
     spawn_appliance_background_workers_with(
         state,
+        ota_status,
         rhythm_server::liveness::spawn_periodic_watchdog,
         rhythm_server::auto_update::spawn,
     );
@@ -383,11 +389,12 @@ fn spawn_appliance_background_workers(state: SharedState) {
 
 fn spawn_appliance_background_workers_with(
     state: SharedState,
+    ota_status: rhythm_server::self_update::OtaStatusHandle,
     spawn_watchdog: impl FnOnce(SharedState),
-    spawn_auto_update: impl FnOnce(SharedState),
+    spawn_auto_update: impl FnOnce(SharedState, rhythm_server::self_update::OtaStatusHandle),
 ) {
     spawn_watchdog(state.clone());
-    spawn_auto_update(state);
+    spawn_auto_update(state, ota_status);
 }
 
 fn install_factory_reset_hook(state: &SharedState) -> Result<()> {
@@ -830,6 +837,7 @@ async fn run_server(
     port: u16,
     provisioning: ble_provision::ProvisioningManager,
     periodic_gate_heartbeat: PeriodicGateHeartbeat,
+    ota_status: rhythm_server::self_update::OtaStatusHandle,
 ) -> Result<()> {
     rhythm_os::state::capture_tokio_runtime_handle(&state);
     rhythm_server::support_bundle_jobs::resume_pending(state.clone());
@@ -837,7 +845,7 @@ async fn run_server(
     let addr = format!("0.0.0.0:{}", port);
     info!(target: "sys", "Starting HTTP server on {}", addr);
 
-    let server = http_server::create_router(state.clone(), provisioning);
+    let server = http_server::create_router(state.clone(), provisioning, ota_status);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .with_context(|| {
@@ -1300,13 +1308,14 @@ mod tests {
 
         spawn_appliance_background_workers_with(
             test_state(),
+            rhythm_server::self_update::OtaStatusHandle::new("test-version"),
             {
                 let watchdog_started = watchdog_started.clone();
                 move |_| watchdog_started.store(true, std::sync::atomic::Ordering::SeqCst)
             },
             {
                 let auto_update_started = auto_update_started.clone();
-                move |_| auto_update_started.store(true, std::sync::atomic::Ordering::SeqCst)
+                move |_, _| auto_update_started.store(true, std::sync::atomic::Ordering::SeqCst)
             },
         );
 

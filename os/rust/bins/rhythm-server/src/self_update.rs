@@ -205,31 +205,71 @@ pub struct OtaStatus {
 #[allow(dead_code)]
 #[derive(Clone)]
 pub struct OtaStatusHandle {
-    inner: Arc<Mutex<OtaStatus>>,
+    inner: Arc<Mutex<OtaStatusInner>>,
+}
+
+struct OtaStatusInner {
+    status: OtaStatus,
+    next_operation: u64,
+    active_operation: Option<u64>,
+}
+
+/// Generation-checked ownership of the one OTA operation allowed at a time.
+///
+/// Dropping a check or failed-update lease releases the gate. Successful update
+/// and restart paths retain it because the process is already committed to
+/// restarting and must not admit another operation in that window.
+pub struct OtaOperationLease {
+    inner: Arc<Mutex<OtaStatusInner>>,
+    generation: u64,
+    release_on_drop: bool,
+}
+
+impl OtaOperationLease {
+    pub fn retain_for_restart(mut self) {
+        self.release_on_drop = false;
+    }
+}
+
+impl Drop for OtaOperationLease {
+    fn drop(&mut self) {
+        if !self.release_on_drop {
+            return;
+        }
+        if let Ok(mut inner) = self.inner.lock() {
+            if inner.active_operation == Some(self.generation) {
+                inner.active_operation = None;
+            }
+        }
+    }
 }
 
 #[allow(dead_code)]
 impl OtaStatusHandle {
     pub fn new(current_version: &str) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(OtaStatus {
-                state: OtaUpdateState::Idle,
-                current_version: current_version.to_string(),
-                latest_version: None,
-                current_package_version: Some(current_version.to_string()),
-                latest_package_version: None,
-                current_image_version: appliance_image_base_version(),
-                latest_image_version: None,
-                target_version: None,
-                update_available: None,
-                update_reason: None,
-                checked_at_epoch_ms: None,
-                checksum_verified: None,
-                install_targets: Vec::new(),
-                image_assets: Vec::new(),
-                message: None,
-                last_error: None,
-                last_rollback: None,
+            inner: Arc::new(Mutex::new(OtaStatusInner {
+                status: OtaStatus {
+                    state: OtaUpdateState::Idle,
+                    current_version: current_version.to_string(),
+                    latest_version: None,
+                    current_package_version: Some(current_version.to_string()),
+                    latest_package_version: None,
+                    current_image_version: appliance_image_base_version(),
+                    latest_image_version: None,
+                    target_version: None,
+                    update_available: None,
+                    update_reason: None,
+                    checked_at_epoch_ms: None,
+                    checksum_verified: None,
+                    install_targets: Vec::new(),
+                    image_assets: Vec::new(),
+                    message: None,
+                    last_error: None,
+                    last_rollback: None,
+                },
+                next_operation: 1,
+                active_operation: None,
             })),
         }
     }
@@ -264,7 +304,7 @@ impl OtaStatusHandle {
         let mut snapshot = self
             .inner
             .lock()
-            .map(|status| status.clone())
+            .map(|inner| inner.status.clone())
             .unwrap_or_else(|_| OtaStatus {
                 state: OtaUpdateState::Error,
                 current_version: "unknown".to_string(),
@@ -290,26 +330,55 @@ impl OtaStatusHandle {
         snapshot
     }
 
-    pub fn mark_checking(&self) {
-        self.with_status(|status| {
-            status.state = OtaUpdateState::Checking;
-            status.checked_at_epoch_ms = Some(now_ms());
-            status.current_package_version = Some(status.current_version.clone());
-            status.latest_package_version = None;
-            status.current_image_version = appliance_image_base_version();
-            status.latest_image_version = None;
-            status.target_version = None;
-            status.update_reason = None;
-            status.checksum_verified = None;
-            status.install_targets.clear();
-            status.image_assets.clear();
-            status.message = Some("Checking for updates...".to_string());
-            status.last_error = None;
-        });
+    pub fn begin_operation(&self) -> Result<OtaOperationLease, String> {
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| "OTA state lock poisoned".to_string())?;
+        if inner.active_operation.is_some() {
+            return Err("Update already in progress".to_string());
+        }
+
+        let generation = inner.next_operation;
+        inner.next_operation = inner.next_operation.wrapping_add(1).max(1);
+        inner.active_operation = Some(generation);
+        let status = &mut inner.status;
+        status.state = OtaUpdateState::Checking;
+        status.checked_at_epoch_ms = Some(now_ms());
+        status.current_package_version = Some(status.current_version.clone());
+        status.latest_package_version = None;
+        status.current_image_version = appliance_image_base_version();
+        status.latest_image_version = None;
+        status.target_version = None;
+        status.update_reason = None;
+        status.checksum_verified = None;
+        status.install_targets.clear();
+        status.image_assets.clear();
+        status.message = Some("Checking for updates...".to_string());
+        status.last_error = None;
+
+        Ok(OtaOperationLease {
+            inner: self.inner.clone(),
+            generation,
+            release_on_drop: true,
+        })
     }
 
-    pub fn record_check_result(&self, info: &UpdateInfo) {
-        self.with_status(|status| {
+    pub fn begin_restart_operation(&self) -> Result<OtaOperationLease, String> {
+        let operation = self.begin_operation()?;
+        self.with_operation_status(&operation, |status| {
+            status.state = OtaUpdateState::Restarting;
+            status.message = Some("Restart scheduled".to_string());
+        })?;
+        Ok(operation)
+    }
+
+    pub fn record_check_result(
+        &self,
+        operation: &OtaOperationLease,
+        info: &UpdateInfo,
+    ) -> Result<(), String> {
+        self.with_operation_status(operation, |status| {
             status.state = if info.update_available {
                 OtaUpdateState::Ready
             } else {
@@ -345,37 +414,46 @@ impl OtaStatusHandle {
                 None => "Already up to date".to_string(),
             });
             status.last_error = None;
-        });
+        })
     }
 
-    pub fn begin_update(&self, target_version: &str) -> Result<(), String> {
-        let mut status = self
-            .inner
-            .lock()
-            .map_err(|_| "OTA state lock poisoned".to_string())?;
+    pub fn begin_update(
+        &self,
+        operation: &OtaOperationLease,
+        target_version: &str,
+    ) -> Result<(), String> {
+        self.with_operation_status(operation, |status| {
+            status.state = OtaUpdateState::Updating;
+            status.target_version = Some(target_version.to_string());
+            status.message = Some(format!("Installing v{}...", target_version));
+            status.last_error = None;
+            status.checksum_verified = None;
+        })
+    }
 
-        if matches!(
-            status.state,
-            OtaUpdateState::Updating | OtaUpdateState::Restarting
-        ) {
-            return Err("Update already in progress".to_string());
-        }
-
-        status.state = OtaUpdateState::Updating;
-        status.target_version = Some(target_version.to_string());
-        status.message = Some(format!("Installing v{}...", target_version));
-        status.last_error = None;
-        status.checksum_verified = None;
-        Ok(())
+    pub fn mark_skipped(
+        &self,
+        operation: &OtaOperationLease,
+        message: impl Into<String>,
+    ) -> Result<(), String> {
+        let message = message.into();
+        self.with_operation_status(operation, |status| {
+            status.state = OtaUpdateState::Idle;
+            status.update_available = Some(false);
+            status.target_version = None;
+            status.message = Some(message);
+            status.last_error = None;
+        })
     }
 
     pub fn mark_restarting(
         &self,
+        operation: &OtaOperationLease,
         previous_version: &str,
         new_version: &str,
         checksum_verified: Option<bool>,
-    ) {
-        self.with_status(|status| {
+    ) -> Result<(), String> {
+        self.with_operation_status(operation, |status| {
             status.state = OtaUpdateState::Restarting;
             status.latest_version = Some(new_version.to_string());
             status.current_package_version = Some(previous_version.to_string());
@@ -394,24 +472,49 @@ impl OtaStatusHandle {
                 )
             });
             status.last_error = None;
-        });
+        })
     }
 
-    pub fn mark_error(&self, error: impl Into<String>) {
+    pub fn mark_error(
+        &self,
+        operation: &OtaOperationLease,
+        error: impl Into<String>,
+    ) -> Result<(), String> {
         let error = error.into();
-        self.with_status(|status| {
+        self.with_operation_status(operation, |status| {
             status.state = OtaUpdateState::Error;
             status.checked_at_epoch_ms = Some(now_ms());
             status.checksum_verified = None;
             status.message = Some("Update failed".to_string());
             status.last_error = Some(error.clone());
-        });
+        })
     }
 
-    fn with_status(&self, f: impl FnOnce(&mut OtaStatus)) {
-        if let Ok(mut status) = self.inner.lock() {
-            f(&mut status);
+    #[cfg(test)]
+    pub fn operation_active(&self) -> bool {
+        self.inner
+            .lock()
+            .map(|inner| inner.active_operation.is_some())
+            .unwrap_or(true)
+    }
+
+    fn with_operation_status(
+        &self,
+        operation: &OtaOperationLease,
+        f: impl FnOnce(&mut OtaStatus),
+    ) -> Result<(), String> {
+        if !Arc::ptr_eq(&self.inner, &operation.inner) {
+            return Err("OTA operation lease belongs to another handle".to_string());
         }
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| "OTA state lock poisoned".to_string())?;
+        if inner.active_operation != Some(operation.generation) {
+            return Err("OTA operation lease is no longer active".to_string());
+        }
+        f(&mut inner.status);
+        Ok(())
     }
 }
 
@@ -5781,7 +5884,7 @@ mod tests {
         assert_eq!(capabilities.rollback, "backup_files");
         assert_eq!(capabilities.payloads, vec!["archive_bundle"]);
 
-        handle.mark_checking();
+        let operation = handle.begin_operation().unwrap();
         let checking = handle.snapshot();
         assert_eq!(checking.state, OtaUpdateState::Checking);
         assert_eq!(checking.message.as_deref(), Some("Checking for updates..."));
@@ -5821,7 +5924,7 @@ mod tests {
             resolved_install_targets: Vec::new(),
         };
 
-        handle.record_check_result(&update);
+        handle.record_check_result(&operation, &update).unwrap();
         let ready = handle.snapshot();
         assert_eq!(ready.state, OtaUpdateState::Ready);
         assert_eq!(ready.latest_version.as_deref(), Some("1.1.0"));
@@ -5836,17 +5939,19 @@ mod tests {
         assert_eq!(ready.image_assets, update.image_assets);
         assert_eq!(ready.checksum_verified, None);
 
-        handle.begin_update("1.1.0").unwrap();
+        handle.begin_update(&operation, "1.1.0").unwrap();
         let updating = handle.snapshot();
         assert_eq!(updating.state, OtaUpdateState::Updating);
         assert_eq!(updating.target_version.as_deref(), Some("1.1.0"));
         assert_eq!(updating.message.as_deref(), Some("Installing v1.1.0..."));
         assert_eq!(
-            handle.begin_update("1.1.0").unwrap_err(),
+            string_error(handle.begin_operation()),
             "Update already in progress"
         );
 
-        handle.mark_restarting("1.0.0", "1.1.0", Some(true));
+        handle
+            .mark_restarting(&operation, "1.0.0", "1.1.0", Some(true))
+            .unwrap();
         let restarting = handle.snapshot();
         assert_eq!(restarting.state, OtaUpdateState::Restarting);
         assert_eq!(restarting.latest_version.as_deref(), Some("1.1.0"));
@@ -5861,7 +5966,7 @@ mod tests {
         let mut drift = no_update_info("1.1.0");
         drift.update_available = true;
         drift.update_reason = Some(UpdateReason::ComponentDrift);
-        handle.record_check_result(&drift);
+        handle.record_check_result(&operation, &drift).unwrap();
         let repairing = handle.snapshot();
         assert_eq!(repairing.state, OtaUpdateState::Ready);
         assert_eq!(
@@ -5869,14 +5974,16 @@ mod tests {
             Some("Repairing OTA bundle for v1.1.0")
         );
 
-        handle.record_check_result(&no_update_info("1.1.0"));
+        handle
+            .record_check_result(&operation, &no_update_info("1.1.0"))
+            .unwrap();
         let idle = handle.snapshot();
         assert_eq!(idle.state, OtaUpdateState::Idle);
         assert_eq!(idle.update_available, Some(false));
         assert_eq!(idle.update_reason, None);
         assert_eq!(idle.message.as_deref(), Some("Already up to date"));
 
-        handle.mark_error("boom");
+        handle.mark_error(&operation, "boom").unwrap();
         let error = handle.snapshot();
         assert_eq!(error.state, OtaUpdateState::Error);
         assert_eq!(error.message.as_deref(), Some("Update failed"));
@@ -5905,10 +6012,9 @@ mod tests {
             Some("OTA state lock poisoned")
         );
         assert_eq!(
-            string_error(handle.begin_update("1.1.0")),
+            string_error(handle.begin_operation()),
             "OTA state lock poisoned"
         );
-        handle.mark_checking();
         assert_eq!(handle.snapshot().state, OtaUpdateState::Error);
     }
 

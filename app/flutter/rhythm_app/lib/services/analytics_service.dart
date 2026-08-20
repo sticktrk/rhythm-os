@@ -772,22 +772,34 @@ class AnalyticsService {
   }
 
   Future<void> logRoomScheduleSaveAttempted({
+    required String journeyId,
+    required int attemptNumber,
+    required String inputMethod,
     required String changeKind,
     required String source,
   }) async {
     await logEvent('room_schedule_save_attempted', {
+      'journey_id': journeyId,
+      'attempt_number': attemptNumber,
+      'input_method': inputMethod,
       'change_kind': changeKind,
       'source': source,
     });
   }
 
   Future<void> logRoomScheduleSaveCompleted({
+    required String journeyId,
+    required int attemptNumber,
+    required String inputMethod,
     required String changeKind,
     required String source,
     required String outcome,
     String? failureStage,
   }) async {
     await logEvent('room_schedule_save_completed', {
+      'journey_id': journeyId,
+      'attempt_number': attemptNumber,
+      'input_method': inputMethod,
       'change_kind': changeKind,
       'source': source,
       'outcome': outcome,
@@ -796,14 +808,38 @@ class AnalyticsService {
   }
 
   Future<void> logRoomScheduleTestCompleted({
+    required String journeyId,
+    required int attemptNumber,
+    required String inputMethod,
+    required String source,
     required String action,
     required String outcome,
     String? failureStage,
   }) async {
     await logEvent('room_schedule_test_completed', {
+      'journey_id': journeyId,
+      'attempt_number': attemptNumber,
+      'input_method': inputMethod,
+      'source': source,
       'action': action,
       'outcome': outcome,
       if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
+  Future<void> logRoomScheduleInlinePresetChanged({
+    required String journeyId,
+    required int attemptNumber,
+    required String inputMethod,
+    required String mode,
+    required String behavior,
+  }) async {
+    await logEvent('room_schedule_inline_preset_changed', {
+      'journey_id': journeyId,
+      'attempt_number': attemptNumber,
+      'input_method': inputMethod,
+      'mode': mode,
+      'behavior': behavior,
     });
   }
 

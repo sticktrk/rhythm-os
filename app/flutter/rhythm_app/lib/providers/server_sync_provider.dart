@@ -1175,6 +1175,23 @@ class ServerSyncProvider extends ChangeNotifier {
   bool motionActivationEnabledForNode(String nodeId) =>
       nodeById(nodeId)?.profileSettings?.isMotionActivationEnabled ?? true;
 
+  /// Whether committed Scene-backed Mood temporarily suppresses motion.
+  ///
+  /// This is derived from the optimistic/current Scene plus room mode. It must
+  /// never overwrite [motionActivationEnabledForNode], which remains the
+  /// user's durable preference and becomes effective again after the Scene.
+  bool motionSuppressedByActiveSceneForNode(String nodeId) {
+    final supported = HueServiceLocator.isDemoMode ||
+        _capabilities?.supportsFeature(
+              RhythmFeature.sceneMotionSuppression,
+            ) ==
+            true;
+    if (!supported) return false;
+    if (moodSceneIdForRoom(nodeId) == null) return false;
+    return _roomProvider.getDisplayRoomState(nodeId) == RoomModeState.mood ||
+        nodeById(nodeId)?.moodActive == true;
+  }
+
   bool motionActivationSupportedForNode(String nodeId) {
     if (HueServiceLocator.isDemoMode) return true;
     final node = nodeById(nodeId);
@@ -1203,8 +1220,9 @@ class ServerSyncProvider extends ChangeNotifier {
 
   Future<bool> setRoomSchedule(
     String roomId,
-    RhythmRoomSchedule schedule,
-  ) async {
+    RhythmRoomSchedule schedule, {
+    String? requestId,
+  }) async {
     final index = _helloNodes.indexWhere((node) => node.id == roomId);
     if (index == -1 ||
         !roomScheduleSupportedForNode(roomId) ||
@@ -1230,7 +1248,7 @@ class ServerSyncProvider extends ChangeNotifier {
         authoritative = await api.roomScheduleSet(
           roomId: roomId,
           schedule: schedule,
-          requestId: _uuid.v4(),
+          requestId: requestId ?? 'room-schedule-save-${_uuid.v4()}',
         );
         final applied = authoritative?.profileSettings?.roomSchedule;
         accepted = applied?.source == schedule.source &&
@@ -1270,7 +1288,11 @@ class ServerSyncProvider extends ChangeNotifier {
     return accepted;
   }
 
-  Future<bool> testRoomSchedule(String roomId, RhythmMode mode) async {
+  Future<bool> testRoomSchedule(
+    String roomId,
+    RhythmMode mode, {
+    String? requestId,
+  }) async {
     if (!roomScheduleSupportedForNode(roomId) ||
         _roomScheduleTestPending.contains(roomId) ||
         (!HueServiceLocator.isDemoMode && !_connection.connected)) {
@@ -1283,7 +1305,7 @@ class ServerSyncProvider extends ChangeNotifier {
           await api.roomScheduleTest(
             roomId: roomId,
             mode: mode,
-            requestId: _uuid.v4(),
+            requestId: requestId ?? 'room-schedule-test-${_uuid.v4()}',
           );
     } catch (error) {
       debugPrint('ServerSync: room schedule test failed: $error');
@@ -1324,6 +1346,15 @@ class ServerSyncProvider extends ChangeNotifier {
       return node?.lightCapabilities?.individualProfileOverrides == true;
     }
     return true;
+  }
+
+  bool roomDayIdleProfileOverridesSupportedForNode(String nodeId) {
+    if (HueServiceLocator.isDemoMode) return true;
+    return nodeById(nodeId)?.kind == RhythmNodeKind.room &&
+        _capabilities?.supportsFeature(
+              RhythmFeature.roomDayIdleProfileOverrides,
+            ) ==
+            true;
   }
 
   bool hasNodeLightProfileOverrides(String nodeId) {
@@ -3950,6 +3981,8 @@ class ServerSyncProvider extends ChangeNotifier {
     final index = _helloNodes.indexWhere((node) => node.id == nodeId);
     if (index == -1 ||
         !lightProfileOverridesSupportedForNode(nodeId) ||
+        (profileId == 'day_idle' &&
+            !roomDayIdleProfileOverridesSupportedForNode(nodeId)) ||
         _lightProfileOverridePending.contains(nodeId) ||
         (!HueServiceLocator.isDemoMode &&
             (!_connection.connected || _receivingFromServer))) {

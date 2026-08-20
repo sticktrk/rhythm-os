@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
+import 'package:uuid/uuid.dart';
 
 import '../providers/server_sync_provider.dart';
 import '../services/analytics_service.dart';
@@ -21,8 +22,15 @@ class RoomScheduleTab extends StatefulWidget {
 }
 
 class _RoomScheduleTabState extends State<RoomScheduleTab> {
+  final Uuid _uuid = const Uuid();
   String? _failure;
   RhythmMode? _testing;
+  String? _saveJourneyId;
+  String? _failedSaveSignature;
+  int _saveAttemptNumber = 0;
+  String? _testJourneyId;
+  RhythmMode? _failedTestMode;
+  int _testAttemptNumber = 0;
 
   @override
   void initState() {
@@ -34,38 +42,90 @@ class _RoomScheduleTabState extends State<RoomScheduleTab> {
   Future<void> _save(
     RhythmRoomSchedule schedule, {
     required String changeKind,
+    required String inputMethod,
   }) async {
+    final signature = [
+      schedule.source.wireValue,
+      schedule.wakeTime,
+      schedule.sleepTime,
+    ].join('|');
+    if (_failedSaveSignature == signature && _saveJourneyId != null) {
+      _saveAttemptNumber += 1;
+    } else {
+      _saveJourneyId = 'room-schedule-save-${_uuid.v4()}';
+      _saveAttemptNumber = 1;
+    }
+    final journeyId = _saveJourneyId!;
+    final attemptNumber = _saveAttemptNumber;
     setState(() => _failure = null);
     unawaited(AnalyticsService().logRoomScheduleSaveAttempted(
+      journeyId: journeyId,
+      attemptNumber: attemptNumber,
+      inputMethod: inputMethod,
       changeKind: changeKind,
       source: schedule.source.wireValue,
     ));
     final ok = await context.read<ServerSyncProvider>().setRoomSchedule(
-          widget.roomId,
-          schedule,
-        );
+      widget.roomId,
+      schedule,
+      requestId: journeyId,
+    );
     unawaited(AnalyticsService().logRoomScheduleSaveCompleted(
+      journeyId: journeyId,
+      attemptNumber: attemptNumber,
+      inputMethod: inputMethod,
       changeKind: changeKind,
       source: schedule.source.wireValue,
-      outcome: ok ? 'success' : 'failure',
+      outcome: ok ? 'succeeded' : 'failed',
       failureStage: ok ? null : 'appliance_ack',
     ));
+    if (ok) {
+      _saveJourneyId = null;
+      _failedSaveSignature = null;
+      _saveAttemptNumber = 0;
+    } else {
+      _failedSaveSignature = signature;
+    }
     if (mounted && !ok) setState(() => _failure = 'Could not save. Try again.');
   }
 
   Future<void> _test(RhythmMode mode) async {
+    if (_failedTestMode == mode && _testJourneyId != null) {
+      _testAttemptNumber += 1;
+    } else {
+      _testJourneyId = 'room-schedule-test-${_uuid.v4()}';
+      _testAttemptNumber = 1;
+    }
+    final journeyId = _testJourneyId!;
+    final attemptNumber = _testAttemptNumber;
+    final source = context
+        .read<ServerSyncProvider>()
+        .scheduleForRoom(widget.roomId)
+        .source
+        .wireValue;
     setState(() {
       _testing = mode;
       _failure = null;
     });
     final ok = await context
         .read<ServerSyncProvider>()
-        .testRoomSchedule(widget.roomId, mode);
+        .testRoomSchedule(widget.roomId, mode, requestId: journeyId);
     unawaited(AnalyticsService().logRoomScheduleTestCompleted(
+      journeyId: journeyId,
+      attemptNumber: attemptNumber,
+      inputMethod: 'button',
+      source: source,
       action: mode == RhythmMode.day ? 'wake' : 'sleep',
-      outcome: ok ? 'success' : 'failure',
+      outcome: ok ? 'succeeded' : 'failed',
       failureStage: ok ? null : 'output_apply',
     ));
+    if (ok) {
+      _testJourneyId = null;
+      _failedTestMode = null;
+      _testAttemptNumber = 0;
+    } else {
+      _failedTestMode = mode;
+    }
     if (!mounted) return;
     setState(() {
       _testing = null;
@@ -142,9 +202,10 @@ class _RoomScheduleTabState extends State<RoomScheduleTab> {
                               schedule.copyWith(
                                 source:
                                     RhythmRoomScheduleSource.wakeSleepPresets,
-                              ),
-                              changeKind: 'source',
                             ),
+                            changeKind: 'source',
+                            inputMethod: 'choice_chip',
+                          ),
                   ),
                   ChoiceChip(
                     key: const ValueKey('room-schedule-source-follow-time'),
@@ -155,9 +216,10 @@ class _RoomScheduleTabState extends State<RoomScheduleTab> {
                         : (_) => _save(
                               schedule.copyWith(
                                 source: RhythmRoomScheduleSource.followTime,
-                              ),
-                              changeKind: 'source',
                             ),
+                            changeKind: 'source',
+                            inputMethod: 'choice_chip',
+                          ),
                   ),
                 ],
               ),
@@ -173,9 +235,10 @@ class _RoomScheduleTabState extends State<RoomScheduleTab> {
                 wakeTime: schedule.wakeTime,
                 sleepTime: schedule.sleepTime,
                 enabled: followTime && !saving,
-                onChanged: (wake, sleep) => _save(
+                onChanged: (wake, sleep, inputMethod) => _save(
                   schedule.copyWith(wakeTime: wake, sleepTime: sleep),
                   changeKind: 'times',
+                  inputMethod: inputMethod,
                 ),
               ),
               if (saving)
@@ -322,7 +385,8 @@ class _RoomTimeDial extends StatefulWidget {
   final String wakeTime;
   final String sleepTime;
   final bool enabled;
-  final void Function(String wakeTime, String sleepTime) onChanged;
+  final void Function(String wakeTime, String sleepTime, String inputMethod)
+      onChanged;
 
   @override
   State<_RoomTimeDial> createState() => _RoomTimeDialState();
@@ -383,7 +447,7 @@ class _RoomTimeDialState extends State<_RoomTimeDial> {
         sleep = (sleep + delta) % 1440;
       }
     });
-    widget.onChanged(_display(wake), _display(sleep));
+    widget.onChanged(_display(wake), _display(sleep), 'step_button');
   }
 
   @override
@@ -403,7 +467,11 @@ class _RoomTimeDialState extends State<_RoomTimeDial> {
                 onPanStart: widget.enabled ? (d) => _start(d, size) : null,
                 onPanUpdate: widget.enabled ? (d) => _update(d, size) : null,
                 onPanEnd: widget.enabled
-                    ? (_) => widget.onChanged(_display(wake), _display(sleep))
+                    ? (_) => widget.onChanged(
+                          _display(wake),
+                          _display(sleep),
+                          'dial_drag',
+                        )
                     : null,
                 child: CustomPaint(
                   size: size,

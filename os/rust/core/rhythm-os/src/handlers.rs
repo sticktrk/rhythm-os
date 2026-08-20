@@ -2949,8 +2949,10 @@ pub fn handle_put_node_preferences(
         let request_id = items[0]
             .get("request_id")
             .and_then(Value::as_str)
-            .map(str::to_string);
-        if let Err(error) = commands::do_node_preferences_set(
+            .filter(|value| !value.is_empty() && value.len() <= 128)
+            .map(str::to_string)
+            .or_else(|| Some(crate::logging::next_command_id("room-schedule-save")));
+        let accepted_node = match commands::do_node_preferences_set(
             state,
             &node_id,
             None,
@@ -2960,24 +2962,7 @@ pub fn handle_put_node_preferences(
             Some(&patch),
             persist,
         ) {
-            let mut record =
-                crate::activity::LightActivityRecord::app(&node_id, "room_schedule_config_updated");
-            record.correlation_id = request_id;
-            record.payload = Some(json!({
-                "source": source,
-                "status": "failed",
-                "failure_stage": "persistence",
-            }));
-            crate::activity::record_light_activity(state, record);
-            return ApiResponse::server_error(error);
-        }
-        let output_applied = match commands::apply_room_schedule_configuration(
-            state,
-            &node_id,
-            previous_schedule,
-            schedule,
-        ) {
-            Ok(applied) => applied,
+            Ok(node) => node,
             Err(error) => {
                 let mut record = crate::activity::LightActivityRecord::app(
                     &node_id,
@@ -2987,27 +2972,46 @@ pub fn handle_put_node_preferences(
                 record.payload = Some(json!({
                     "source": source,
                     "status": "failed",
-                    "failure_stage": "output_apply",
+                    "failure_stage": "persistence",
                 }));
                 crate::activity::record_light_activity(state, record);
                 return ApiResponse::server_error(error);
             }
         };
+        let output_result = commands::apply_room_schedule_configuration(
+            state,
+            &node_id,
+            previous_schedule,
+            schedule,
+        );
+        if let Err(error) = &output_result {
+            tracing::warn!(
+                target: "cmd",
+                event = "room_schedule_config_updated",
+                node_id = %node_id,
+                status = "failed",
+                failure_stage = "output_apply",
+                error = %error,
+                "Room schedule was accepted but immediate output application failed"
+            );
+        }
         let mut record =
             crate::activity::LightActivityRecord::app(&node_id, "room_schedule_config_updated");
         record.correlation_id = request_id;
         record.payload = Some(json!({
             "source": source,
-            "status": if output_applied { "applied" } else { "accepted" },
-            "failure_stage": Value::Null,
+            "status": match &output_result {
+                Ok(true) => "applied",
+                Ok(false) => "accepted",
+                Err(_) => "failed",
+            },
+            "failure_stage": output_result.as_ref().err().map(|_| "output_apply"),
         }));
         crate::activity::record_light_activity(state, record);
-        return match commands::build_node_state(state, &node_id)
+        let authoritative_node = commands::build_node_state(state, &node_id)
             .and_then(|node| serde_json::to_string(&node).map_err(Into::into))
-        {
-            Ok(node) => ApiResponse::json_ok(format!(r#"{{"nodes":[{}]}}"#, node)),
-            Err(error) => ApiResponse::server_error(error),
-        };
+            .unwrap_or(accepted_node);
+        return ApiResponse::json_ok(format!(r#"{{"nodes":[{}]}}"#, authoritative_node));
     }
 
     let mut updates = Vec::with_capacity(items.len());
@@ -6371,6 +6375,69 @@ mod tests {
     }
 
     #[test]
+    fn room_schedule_output_failure_keeps_accepted_state_authoritative() {
+        let state = handler_state_with_runtime_options(true);
+        let temp_dir = TestDir::new("room-schedule-output-failure");
+        let storage: Arc<dyn crate::storage::Storage> =
+            Arc::new(crate::storage::FileStorage::new(temp_dir.path().to_str().unwrap()).unwrap());
+        state.lock().unwrap().storage = Some(storage.clone());
+
+        let response = handle_put_node_preferences(
+            &state,
+            &json!({
+                "node_id": "room1",
+                "profile_settings": {
+                    "room_schedule": {
+                        "source": "follow_time",
+                        "wake_time": "07:15",
+                        "sleep_time": "23:45"
+                    }
+                },
+                "request_id": "room-schedule-save-journey-1"
+            }),
+            true,
+        );
+
+        assert_eq!(response.status, 200, "{}", response.body);
+        let immediate: Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(
+            immediate["nodes"][0]["profile_settings"]["room_schedule"]["wake_time"],
+            "07:15"
+        );
+
+        let persisted = storage.load_rooms().unwrap();
+        let persisted_schedule = persisted
+            .get("room1")
+            .and_then(|room| room.profile_settings.room_schedule)
+            .unwrap();
+        assert_eq!(
+            persisted_schedule.wake_time,
+            rhythm_core::ModeTransitionTime::parse("07:15").unwrap()
+        );
+
+        let reconnect = commands::build_node_state(&state, "room1").unwrap();
+        assert_eq!(
+            reconnect.profile_settings.room_schedule.unwrap().wake_time,
+            persisted_schedule.wake_time
+        );
+        let state = state.lock().unwrap();
+        let activity = state
+            .light_activity
+            .iter()
+            .find(|event| event.action_id == "room_schedule_config_updated")
+            .unwrap();
+        assert_eq!(
+            activity.correlation_id.as_deref(),
+            Some("room-schedule-save-journey-1")
+        );
+        assert_eq!(activity.payload.as_ref().unwrap()["status"], "failed");
+        assert_eq!(
+            activity.payload.as_ref().unwrap()["failure_stage"],
+            "output_apply"
+        );
+    }
+
+    #[test]
     fn parse_profile_settings_patch_accepts_legacy_scene_alias() {
         let patch = parse_profile_settings_patch(
             Some(&json!({"active_light_scene_id": "icy-glow"})),
@@ -6903,6 +6970,10 @@ mod tests {
 
     // Helper: set up state with a mock runtime for handler tests
     fn handler_state_with_runtime() -> SharedState {
+        handler_state_with_runtime_options(false)
+    }
+
+    fn handler_state_with_runtime_options(fail_schedule_output_apply: bool) -> SharedState {
         use crate::hub::{ActiveHub, HubType};
         use rhythm_core::{
             ButtonAction, InputEvent, LightProfileConfig, RoomSnapshot, RuntimeHandle,
@@ -6910,6 +6981,7 @@ mod tests {
 
         struct HandlerMockRuntime {
             snapshots: std::sync::Mutex<Vec<RoomSnapshot>>,
+            fail_schedule_output_apply: bool,
         }
         impl RuntimeHandle for HandlerMockRuntime {
             fn handle_event(&self, event: &InputEvent) -> anyhow::Result<bool> {
@@ -6976,6 +7048,9 @@ mod tests {
                 _: &str,
                 _: rhythm_core::LightingCommand,
             ) -> anyhow::Result<()> {
+                if self.fail_schedule_output_apply {
+                    anyhow::bail!("simulated schedule output failure");
+                }
                 Ok(())
             }
             fn lights_off_room(&self, _: &str, _: Option<u32>) -> anyhow::Result<()> {
@@ -7020,6 +7095,7 @@ mod tests {
         }
 
         let runtime = std::sync::Arc::new(HandlerMockRuntime {
+            fail_schedule_output_apply,
             snapshots: std::sync::Mutex::new(vec![
                 RoomSnapshot {
                     id: "room1".into(),

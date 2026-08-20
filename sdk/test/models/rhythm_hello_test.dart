@@ -375,8 +375,10 @@ void main() {
             'sse_event_ids',
             'async_dispatch_metadata',
             RhythmFeature.asyncDebugBundleUpload,
+            RhythmFeature.roomDayIdleProfileOverrides,
             RhythmFeature.guardedRoomLightProfileOverrides,
             RhythmFeature.targetGuardedRoomLightProfileOverrides,
+            RhythmFeature.sceneMotionSuppression,
           ],
           'hubs': [
             {
@@ -433,6 +435,12 @@ void main() {
         isTrue,
       );
       expect(
+        hello.capabilities!.supportsFeature(
+          RhythmFeature.roomDayIdleProfileOverrides,
+        ),
+        isTrue,
+      );
+      expect(
         hello.capabilities!
             .supportsFeature(RhythmFeature.guardedRoomLightProfileOverrides),
         isTrue,
@@ -441,6 +449,11 @@ void main() {
         hello.capabilities!.supportsFeature(
           RhythmFeature.targetGuardedRoomLightProfileOverrides,
         ),
+        isTrue,
+      );
+      expect(
+        hello.capabilities!
+            .supportsFeature(RhythmFeature.sceneMotionSuppression),
         isTrue,
       );
       expect(hello.capabilities!.supportsFeature('missing'), isFalse);
