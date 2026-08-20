@@ -361,6 +361,65 @@ impl core::fmt::Display for ModeTransitionTime {
     }
 }
 
+/// Authority used to choose Day/Sleep behavior for one room.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum RoomScheduleSource {
+    /// Follow the appliance-wide Wake/Sleep transitions and room defaults.
+    #[default]
+    WakeSleepPresets,
+    /// Resolve Day/Sleep from this room's own local wall-clock times.
+    FollowTime,
+}
+
+/// Persisted schedule authority for one stable room ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct RoomScheduleConfig {
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source: RoomScheduleSource,
+    pub wake_time: ModeTransitionTime,
+    pub sleep_time: ModeTransitionTime,
+}
+
+impl Default for RoomScheduleConfig {
+    fn default() -> Self {
+        Self {
+            source: RoomScheduleSource::WakeSleepPresets,
+            wake_time: ModeTransitionTime::from_hour_minute(6, 30)
+                .expect("default wake time is valid"),
+            sleep_time: ModeTransitionTime::from_hour_minute(22, 30)
+                .expect("default sleep time is valid"),
+        }
+    }
+}
+
+impl RoomScheduleConfig {
+    pub const fn follows_time(self) -> bool {
+        matches!(self.source, RoomScheduleSource::FollowTime)
+    }
+
+    /// Resolve the current room mode across same-day and overnight windows.
+    pub fn effective_mode(self, local_hour: f32) -> RhythmMode {
+        let minute = ((local_hour.rem_euclid(24.0) * 60.0).floor() as u16).min(1439);
+        let wake = self.wake_time.minutes_since_midnight();
+        let sleep = self.sleep_time.minutes_since_midnight();
+        let is_day = if wake < sleep {
+            minute >= wake && minute < sleep
+        } else if wake > sleep {
+            minute >= wake || minute < sleep
+        } else {
+            false
+        };
+        if is_day {
+            RhythmMode::Day
+        } else {
+            RhythmMode::Sleep
+        }
+    }
+}
+
 #[cfg(feature = "serde")]
 impl Serialize for ModeTransitionTime {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -1054,6 +1113,13 @@ pub struct RoomProfileSettings {
     )]
     pub motion_activation_enabled: Option<bool>,
 
+    /// Optional room-local schedule. Absence preserves legacy preset behavior.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub room_schedule: Option<RoomScheduleConfig>,
+
     /// Optional per-profile node overrides keyed by light profile ID.
     #[cfg_attr(
         feature = "serde",
@@ -1072,6 +1138,7 @@ impl RoomProfileSettings {
             && self.fade_ms.is_none()
             && self.motion_timeout_secs.is_none()
             && self.motion_activation_enabled.is_none()
+            && self.room_schedule.is_none()
             && self.profile_overrides.is_empty()
     }
 
@@ -1079,6 +1146,13 @@ impl RoomProfileSettings {
     /// persisted before the explicit toggle existed.
     pub fn motion_activation_enabled(&self) -> bool {
         self.motion_activation_enabled.unwrap_or(true)
+    }
+
+    pub fn schedule_mode(&self, global_mode: RhythmMode, local_hour: f32) -> RhythmMode {
+        self.room_schedule
+            .filter(|schedule| schedule.follows_time())
+            .map(|schedule| schedule.effective_mode(local_hour))
+            .unwrap_or(global_mode)
     }
 
     /// Resolve legacy mood enablement for compatibility payloads.
@@ -1143,6 +1217,7 @@ impl RoomProfileSettings {
             motion_activation_enabled: self
                 .motion_activation_enabled
                 .or(parent.motion_activation_enabled),
+            room_schedule: self.room_schedule.or(parent.room_schedule),
             profile_overrides: {
                 let mut profile_overrides = parent.profile_overrides.clone();
                 profile_overrides.extend(self.profile_overrides.clone());
@@ -1766,6 +1841,7 @@ mod tests {
             fade_ms: Some(TimerSetting::Fixed { value: 250 }),
             motion_timeout_secs: Some(TimerSetting::Fixed { value: 42 }),
             motion_activation_enabled: Some(false),
+            room_schedule: None,
             profile_overrides: BTreeMap::new(),
         };
         let mut config = crate::default_rhythm_profile();
@@ -1833,6 +1909,27 @@ mod tests {
 
         let serialized = serde_json::to_value(RoomProfileSettings::default()).unwrap();
         assert!(serialized.get("motion_activation_enabled").is_none());
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
+    fn room_schedule_profile_settings_round_trip() {
+        let settings: RoomProfileSettings = serde_json::from_value(serde_json::json!({
+            "room_schedule": {
+                "source": "follow_time",
+                "wake_time": "07:15",
+                "sleep_time": "23:45"
+            }
+        }))
+        .unwrap();
+        let schedule = settings.room_schedule.unwrap();
+        assert_eq!(schedule.source, RoomScheduleSource::FollowTime);
+        assert_eq!(schedule.wake_time.display(), "07:15");
+        assert_eq!(schedule.sleep_time.display(), "23:45");
+        assert_eq!(
+            serde_json::to_value(settings).unwrap()["room_schedule"]["source"],
+            "follow_time"
+        );
     }
 
     #[test]
@@ -2705,5 +2802,44 @@ mod tests {
         assert!(ids.contains(&"a_room"));
         assert!(ids.contains(&"m_room"));
         assert!(ids.contains(&"z_room"));
+    }
+
+    #[test]
+    fn room_follow_time_resolves_same_day_and_overnight_windows() {
+        let same_day = RoomScheduleConfig {
+            source: RoomScheduleSource::FollowTime,
+            wake_time: ModeTransitionTime::parse("06:30").unwrap(),
+            sleep_time: ModeTransitionTime::parse("22:30").unwrap(),
+        };
+        assert_eq!(same_day.effective_mode(6.49), RhythmMode::Sleep);
+        assert_eq!(same_day.effective_mode(6.5), RhythmMode::Day);
+        assert_eq!(same_day.effective_mode(22.5), RhythmMode::Sleep);
+
+        let overnight = RoomScheduleConfig {
+            wake_time: ModeTransitionTime::parse("22:00").unwrap(),
+            sleep_time: ModeTransitionTime::parse("06:00").unwrap(),
+            ..same_day
+        };
+        assert_eq!(overnight.effective_mode(23.0), RhythmMode::Day);
+        assert_eq!(overnight.effective_mode(5.99), RhythmMode::Day);
+        assert_eq!(overnight.effective_mode(6.0), RhythmMode::Sleep);
+    }
+
+    #[test]
+    fn room_schedule_defaults_to_global_preset_authority() {
+        let settings = RoomProfileSettings::default();
+        assert_eq!(
+            settings.schedule_mode(RhythmMode::Day, 23.0),
+            RhythmMode::Day
+        );
+
+        let settings = RoomProfileSettings {
+            room_schedule: Some(RoomScheduleConfig::default()),
+            ..Default::default()
+        };
+        assert_eq!(
+            settings.schedule_mode(RhythmMode::Sleep, 12.0),
+            RhythmMode::Sleep
+        );
     }
 }

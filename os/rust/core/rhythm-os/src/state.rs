@@ -527,6 +527,12 @@ pub struct AppState {
     pub motion_timer_restores: HashMap<String, StoredMotionTimerEntry>,
     /// Rooms currently transitioning between global modes.
     pub room_mode_transitions: HashMap<String, RoomModeTransition>,
+    /// Last successfully applied room-local schedule interval per stable room ID.
+    ///
+    /// Values are opaque hashes of the schedule and its current local boundary.
+    /// Keeping this runtime-only makes a restart reconcile the current interval
+    /// once, while repeated ticks and DST fall-back hours stay idempotent.
+    pub room_schedule_evaluations: HashMap<String, String>,
     /// Queued or running light-dispatch work count per topology node.
     pub pending_node_dispatches: HashMap<String, usize>,
     /// Per-node guards that make preference compare-and-set checks atomic with
@@ -1018,6 +1024,7 @@ impl Default for AppState {
             motion_snapshots: HashMap::new(),
             motion_timer_restores: HashMap::new(),
             room_mode_transitions: HashMap::new(),
+            room_schedule_evaluations: HashMap::new(),
             pending_node_dispatches: HashMap::new(),
             node_preference_write_locks: HashMap::new(),
             pending_integration_dispatches: HashMap::new(),

@@ -766,6 +766,83 @@ class AnalyticsService {
     });
   }
 
+  /// Track room Schedule-tab entry without room identity or saved times.
+  Future<void> logRoomScheduleOpened({required String source}) async {
+    await logEvent('room_schedule_opened', {'source': source});
+  }
+
+  Future<void> logRoomScheduleSaveAttempted({
+    required String journeyId,
+    required int attemptNumber,
+    required String inputMethod,
+    required String changeKind,
+    required String source,
+  }) async {
+    await logEvent('room_schedule_save_attempted', {
+      'journey_id': journeyId,
+      'attempt_number': attemptNumber,
+      'input_method': inputMethod,
+      'change_kind': changeKind,
+      'source': source,
+    });
+  }
+
+  Future<void> logRoomScheduleSaveCompleted({
+    required String journeyId,
+    required int attemptNumber,
+    required String inputMethod,
+    required String changeKind,
+    required String source,
+    required String outcome,
+    String? failureStage,
+  }) async {
+    await logEvent('room_schedule_save_completed', {
+      'journey_id': journeyId,
+      'attempt_number': attemptNumber,
+      'input_method': inputMethod,
+      'change_kind': changeKind,
+      'source': source,
+      'outcome': outcome,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
+  Future<void> logRoomScheduleTestCompleted({
+    required String journeyId,
+    required int attemptNumber,
+    required String inputMethod,
+    required String source,
+    required String action,
+    required String outcome,
+    String? failureStage,
+  }) async {
+    await logEvent('room_schedule_test_completed', {
+      'journey_id': journeyId,
+      'attempt_number': attemptNumber,
+      'input_method': inputMethod,
+      'source': source,
+      'action': action,
+      'outcome': outcome,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
+  Future<void> logRoomScheduleInlinePresetChanged({
+    required String journeyId,
+    required int attemptNumber,
+    required String inputMethod,
+    required String mode,
+    required String behavior,
+  }) async {
+    await logEvent('room_schedule_inline_preset_changed', {
+      'journey_id': journeyId,
+      'attempt_number': attemptNumber,
+      'input_method': inputMethod,
+      'mode': mode,
+      'behavior': behavior,
+    });
+  }
+
   /// Track discovery of room-scoped Light settings without room identifiers.
   Future<void> logRoomLightSettingsOpened({
     required bool hasOverrides,
@@ -795,8 +872,7 @@ class AnalyticsService {
       'outcome': outcome,
       'changed_field_count': changedFieldCount,
       if (dayColorMode != null) 'day_color_mode': dayColorMode,
-      if (dayBrightnessMode != null)
-        'day_brightness_mode': dayBrightnessMode,
+      if (dayBrightnessMode != null) 'day_brightness_mode': dayBrightnessMode,
       if (failureStage != null) 'failure_stage': failureStage,
     });
   }
