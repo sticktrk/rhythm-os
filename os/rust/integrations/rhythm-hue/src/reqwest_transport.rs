@@ -1756,9 +1756,9 @@ mod tests {
             })
         );
         assert_eq!(
-            device_rename_body("Hue Zig Color Lamp 2 GuestBath"),
+            device_rename_body("Hue Hub Color Lamp 2 GuestBath"),
             serde_json::json!({
-                "metadata": {"name": "Hue Zig Color Lamp 2 GuestBath"}
+                "metadata": {"name": "Hue Hub Color Lamp 2 GuestBath"}
             })
         );
         assert_eq!(
