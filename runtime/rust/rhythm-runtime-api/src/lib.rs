@@ -68,10 +68,24 @@ pub enum DispatchTarget {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// An authoritative direct-color target carried across the runtime boundary.
+///
+/// Both representations are retained because integrations select the command
+/// family they support best. `xy` must not be reconstructed from `rgb`: app
+/// and scene inputs can supply a calibrated XY target alongside their display
+/// RGB value.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DirectColor {
+    pub rgb: [u8; 3],
+    pub xy: [f32; 2],
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LightingCommand {
     pub brightness: u8,
     pub kelvin: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_color: Option<DirectColor>,
     #[serde(default)]
     pub transition_ms: Option<u32>,
     #[serde(default)]
@@ -83,6 +97,17 @@ impl LightingCommand {
         Self {
             brightness,
             kelvin,
+            direct_color: None,
+            transition_ms: None,
+            purpose: None,
+        }
+    }
+
+    pub fn from_direct_color(brightness: u8, rgb: [u8; 3], xy: [f32; 2]) -> Self {
+        Self {
+            brightness,
+            kelvin: 0,
+            direct_color: Some(DirectColor { rgb, xy }),
             transition_ms: None,
             purpose: None,
         }
@@ -99,7 +124,7 @@ impl LightingCommand {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum DispatchCommand {
     TurnOn {
@@ -541,8 +566,34 @@ mod tests {
 
         assert_eq!(command.brightness, 73);
         assert_eq!(command.kelvin, 3100);
+        assert_eq!(command.direct_color, None);
         assert_eq!(command.transition_ms, Some(450));
         assert_eq!(command.purpose.as_deref(), Some("motion_turn_on"));
+    }
+
+    #[test]
+    fn direct_color_command_round_trips_and_old_payloads_default_to_kelvin() {
+        let command = LightingCommand::from_direct_color(1, [38, 62, 255], [0.1616, 0.087])
+            .with_transition(500);
+        let encoded = serde_json::to_value(&command).unwrap();
+        let decoded: LightingCommand = serde_json::from_value(encoded).unwrap();
+
+        assert_eq!(decoded, command);
+        assert_eq!(
+            decoded.direct_color,
+            Some(DirectColor {
+                rgb: [38, 62, 255],
+                xy: [0.1616, 0.087],
+            })
+        );
+
+        let previous_contract: LightingCommand = serde_json::from_value(serde_json::json!({
+            "brightness": 42,
+            "kelvin": 2700
+        }))
+        .unwrap();
+        assert_eq!(previous_contract.direct_color, None);
+        assert_eq!(previous_contract.kelvin, 2700);
     }
 
     #[test]

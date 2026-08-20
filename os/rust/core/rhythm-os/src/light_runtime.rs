@@ -1725,6 +1725,76 @@ mod tests {
     }
 
     #[test]
+    fn periodic_hue_group_dispatch_preserves_room_standby_direct_color() {
+        let fixture = mixed_hue_matter_fixture(true);
+        let direct = rhythm_core::LightDirectColor {
+            xy: rhythm_core::XyColor {
+                x: 0.1616,
+                y: 0.087,
+            },
+            rgb: rhythm_core::Rgb::new(38, 62, 255),
+        };
+        let mut profile_settings = RoomProfileSettings::default();
+        profile_settings.profile_overrides.insert(
+            rhythm_core::DAY_IDLE_PROFILE_ID.to_string(),
+            LightProfileNodeOverride {
+                curve: Some(rhythm_core::LightCurveShape::Constant {
+                    brightness: 1.0,
+                    color_temp: 0.0,
+                    direct_color: Some(direct),
+                }),
+                ..Default::default()
+            },
+        );
+        fixture.runtime.restore_room_state(
+            "hallway",
+            RestoredRoomState {
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: true,
+                mood_active: false,
+                standby_enabled: true,
+                hard_off: false,
+                profile_settings,
+            },
+        );
+        let grouped_node_id = {
+            let app = fixture.state.lock().unwrap();
+            app.topology
+                .periodic_light_nodes(&app.canonical_registry)
+                .into_iter()
+                .find(|node| node.source_node_id == "hallway")
+                .expect("Hue grouped route should exist")
+                .id
+        };
+
+        let report = run_selected_light_runtime_event(
+            &fixture.state,
+            RuntimeEvent::PeriodicTick(TickContext {
+                node_id: grouped_node_id,
+                hour: 19.0,
+                epoch_ms: None,
+                metadata: BTreeMap::from([("source_node_id".to_string(), json!("hallway"))]),
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(report.dispatch_count, 1);
+        let group_calls = fixture.group_controller.wait_for_turn_on_calls(1);
+        assert_eq!(group_calls.len(), 1);
+        assert!(group_calls[0].1.is_direct_color);
+        assert_eq!(group_calls[0].1.kelvin, 0);
+        assert_eq!(group_calls[0].1.rgb, rhythm_core::Rgb::new(38, 62, 255));
+        assert_eq!(
+            group_calls[0].1.xy,
+            rhythm_core::XyColor { x: 0.162, y: 0.087 }
+        );
+        assert!(fixture.matter_controller.turn_on_calls().is_empty());
+    }
+
+    #[test]
     fn offline_direct_matter_child_activation_is_persisted_and_dispatches_after_reconnect() {
         let fixture = mixed_hue_matter_fixture(false);
         let data_dir = std::env::temp_dir().join(format!(
