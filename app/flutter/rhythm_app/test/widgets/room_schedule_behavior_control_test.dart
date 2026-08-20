@@ -31,6 +31,8 @@ class _FakeRhythmServerApi extends RhythmServerApi {
 
   bool modeSetSucceeds = true;
   final List<List<RhythmModeConfig>> modeConfigCalls = [];
+  final List<({String nodeId, RoomModeState? state, bool? rhythmEnabled})>
+      nodePreferenceCalls = [];
 
   @override
   Future<bool> modeSet({
@@ -39,6 +41,23 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   }) async {
     modeConfigCalls.add(List<RhythmModeConfig>.of(configs ?? const []));
     return modeSetSucceeds;
+  }
+
+  @override
+  Future<void> nodePreferencesSet({
+    required String nodeId,
+    bool? rhythmEnabled,
+    bool? disabled,
+    bool? standbyEnabled,
+    RoomModeState? state,
+    bool? softOff,
+    Map<String, dynamic>? profileSettings,
+  }) async {
+    nodePreferenceCalls.add((
+      nodeId: nodeId,
+      state: state,
+      rhythmEnabled: rhythmEnabled,
+    ));
   }
 }
 
@@ -272,8 +291,13 @@ void main() {
     connection.emitHello(_helloWithRoomDefaults());
     await tester.pump(const Duration(milliseconds: 10));
     await tester.pumpWidget(
-      ChangeNotifierProvider<ServerSyncProvider>.value(
-        value: sync,
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: sync),
+          // The segments live-apply active-mode selections through
+          // RoomProvider's optimistic room state.
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+        ],
         child: const MaterialApp(
           home: Scaffold(
             body: RoomScheduleBehaviorSegments(
@@ -308,6 +332,15 @@ void main() {
     expect(event.properties, containsPair('input_method', 'segment'));
     expect(event.properties, containsPair('mode', 'wake'));
     expect(event.properties, containsPair('behavior', 'standby'));
+
+    // Day is the active mode, so the selection also moved the room's lights
+    // to Low glow immediately.
+    expect(connection.api.nodePreferenceCalls, hasLength(1));
+    expect(connection.api.nodePreferenceCalls.single.nodeId, 'room-1');
+    expect(
+      connection.api.nodePreferenceCalls.single.state,
+      RoomModeState.standby,
+    );
     expect(
       event.properties.keys,
       isNot(contains(anyOf('room_id', 'node_id', 'home_id', 'room_name'))),

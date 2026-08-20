@@ -318,33 +318,14 @@ class _RoomScheduleTabState extends State<RoomScheduleTab> {
         const AutomationSectionHeader(
           step: 2,
           title: 'Wake / Sleep Presets',
-          subtitle: 'Set what this room does once Wake or Sleep is triggered.',
+          subtitle: 'Set what this room does once Wake or Sleep is '
+              'triggered. Changes to the current mode apply right away.',
           accent: CelestialColors.sunWarm,
         ),
         _GroupCard(
           padding: const EdgeInsets.all(12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              RoomScheduleBehaviorSegments(
-                roomId: widget.roomId,
-                enabled: !followTime && !saving,
-              ),
-              if (followTime)
-                Padding(
-                  padding: const EdgeInsets.only(top: 10, left: 4, right: 4),
-                  child: Text(
-                    'Saved choices are not used while Custom times is selected.',
-                    key: const ValueKey('room-schedule-presets-disabled'),
-                    style: TextStyle(
-                      color:
-                          CelestialColors.textSecondary.withValues(alpha: 0.85),
-                      fontSize: 12.5,
-                      height: 1.35,
-                    ),
-                  ),
-                ),
-            ],
+          child: RoomScheduleBehaviorSegments(
+            roomId: widget.roomId,
           ),
         ),
         const AutomationSectionHeader(
@@ -358,20 +339,6 @@ class _RoomScheduleTabState extends State<RoomScheduleTab> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              if (followTime)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 10, left: 4, right: 4),
-                  child: Text(
-                    'Tests use your saved presets; the live schedule still follows your custom times.',
-                    key: const ValueKey('room-schedule-test-follow-time-help'),
-                    style: TextStyle(
-                      color:
-                          CelestialColors.textSecondary.withValues(alpha: 0.85),
-                      fontSize: 12.5,
-                      height: 1.35,
-                    ),
-                  ),
-                ),
               // One exclusive toggle, sharing the Presets screen's manual
               // Wake/Sleep control. The current mode reads as selected; a
               // running test swaps the spinner into that side's icon slot.
