@@ -55,12 +55,19 @@ Future<void> startMatterPairingFlow(
       final scanResult = await DevicePairingScannerScreen.show(
         context,
         journeyId: activeJourneyId,
+        matterOnNetworkAvailable: syncProvider.canAddMatterOnNetworkDevice,
       );
       if (!context.mounted || scanResult == null) return;
       intakeResult = scanResult.action == DevicePairingScannerAction.enterCode
           ? await DevicePairingCodeEntryScreen.show(
               context,
               journeyId: activeJourneyId,
+              matterOnNetworkAvailable:
+                  syncProvider.canAddMatterOnNetworkDevice,
+              matterAddMethod: scanResult.matterAddMethod ??
+                  (addMethod == MatterAddMethod.onNetworkSetupCode
+                      ? addMethod
+                      : null),
             )
           : scanResult;
       if (!context.mounted) return;
@@ -69,6 +76,9 @@ Future<void> startMatterPairingFlow(
       intakeResult = await DevicePairingCodeEntryScreen.show(
         context,
         journeyId: activeJourneyId,
+        matterOnNetworkAvailable: syncProvider.canAddMatterOnNetworkDevice,
+        matterAddMethod:
+            addMethod == MatterAddMethod.onNetworkSetupCode ? addMethod : null,
       );
       if (!context.mounted || intakeResult == null) return;
     }
@@ -81,7 +91,7 @@ Future<void> startMatterPairingFlow(
       context,
       endpoint: serverEndpoint.endpoint,
       authToken: serverEndpoint.hub.token,
-      addMethod: addMethod,
+      addMethod: intakeResult.matterAddMethod ?? addMethod,
       analyticsSource: analyticsSource,
       journeyId: activeJourneyId,
       initialSetupPayload: intakeResult.payload,

@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/backend/backend.dart';
 import 'package:rhythm_app/screens/hubs/device_pairing_code_entry_screen.dart';
 import 'package:rhythm_app/screens/hubs/device_pairing_scanner_screen.dart';
+import 'package:rhythm_app/screens/hubs/matter_add_method.dart';
 import 'package:rhythm_app/services/analytics_service.dart';
 import 'package:rhythm_app/services/hue_ble_auto_discovery_service.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
@@ -18,6 +19,7 @@ void main() {
   Widget buildScanner({
     bool hueBridgeSerialSearchAvailable = false,
     bool hueBridgeOnly = false,
+    bool matterOnNetworkAvailable = false,
     bool autoDiscoverHueBle = false,
     HueBleDiscoveryRequest? hueBleDiscoveryRequest,
   }) {
@@ -25,6 +27,7 @@ void main() {
       home: DevicePairingScannerScreen(
         hueBridgeSerialSearchAvailable: hueBridgeSerialSearchAvailable,
         hueBridgeOnly: hueBridgeOnly,
+        matterOnNetworkAvailable: matterOnNetworkAvailable,
         autoDiscoverHueBle: autoDiscoverHueBle,
         analyticsSource: 'device_camera',
         hueBleDiscoveryRequest: hueBleDiscoveryRequest,
@@ -60,6 +63,61 @@ void main() {
     expect(find.text('Add Device'), findsOneWidget);
     expect(find.byTooltip('Back to Add & Review'), findsOneWidget);
     expect(find.text('Enter a Code'), findsOneWidget);
+    expect(find.text('Already in another Matter app?'), findsNothing);
+  });
+
+  testWidgets('offers capability-gated existing Matter intake', (tester) async {
+    await tester.binding.setSurfaceSize(const Size(430, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    DevicePairingScannerResult? result;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => TextButton(
+            onPressed: () async {
+              result = await Navigator.of(context).push(
+                MaterialPageRoute<DevicePairingScannerResult>(
+                  builder: (_) => DevicePairingScannerScreen(
+                    matterOnNetworkAvailable: true,
+                    journeyId: 'existing-matter-entry',
+                    cameraBuilder: (context, onDetect) {
+                      detect = onDetect;
+                      return const ColoredBox(color: Colors.black);
+                    },
+                  ),
+                ),
+              );
+            },
+            child: const Text('Open scanner'),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Open scanner'));
+    await tester.pumpAndSettle();
+    expect(find.text('Already in another Matter app?'), findsOneWidget);
+
+    await tester.tap(
+      find.byKey(const ValueKey('add-existing-matter-device')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(result?.action, DevicePairingScannerAction.enterCode);
+    expect(
+      result?.matterAddMethod,
+      MatterAddMethod.onNetworkSetupCode,
+    );
+    final event = analyticsBackend.events.singleWhere(
+      (event) => event.name == 'device_pairing_code_detected',
+    );
+    expect(event.properties, {
+      'code_kind': 'matter',
+      'outcome': 'existing_matter_entry_selected',
+      'journey_id': 'existing-matter-entry',
+      'input_method': 'manual_code',
+    });
   });
 
   testWidgets('offers a nearby Hue bulb without blocking camera intake', (
@@ -166,10 +224,13 @@ void main() {
     await tester.binding.setSurfaceSize(const Size(320, 568));
     addTearDown(() => tester.binding.setSurfaceSize(null));
 
-    await tester.pumpWidget(buildScanner());
+    await tester.pumpWidget(
+      buildScanner(matterOnNetworkAvailable: true),
+    );
 
     expect(find.text('Scan any device QR code'), findsOneWidget);
     expect(find.text('Enter a Code'), findsOneWidget);
+    expect(find.text('Already in another Matter app?'), findsOneWidget);
     expect(tester.takeException(), isNull);
 
     detect(const ['X-HM://0023ISYWY8H2B']);
@@ -618,6 +679,63 @@ void main() {
     expect(result?.action, DevicePairingScannerAction.matter);
     expect(result?.payload, '3497-011-2332');
     expect(result?.inputMethod, 'manual_code');
+  });
+
+  testWidgets('existing Matter entry requires and returns a multi-admin code',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(430, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    DevicePairingScannerResult? result;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => TextButton(
+            onPressed: () async {
+              result = await Navigator.of(context).push(
+                MaterialPageRoute<DevicePairingScannerResult>(
+                  builder: (_) => const DevicePairingCodeEntryScreen(
+                    matterAddMethod: MatterAddMethod.onNetworkSetupCode,
+                    journeyId: 'existing-matter-code',
+                  ),
+                ),
+              );
+            },
+            child: const Text('Enter existing Matter code'),
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Enter existing Matter code'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Add from another Matter app'), findsOneWidget);
+    expect(find.textContaining('Turn On Pairing Mode'), findsOneWidget);
+    expect(find.textContaining('Thread network stay in place'), findsOneWidget);
+    expect(find.text('Add to Rhythm'), findsOneWidget);
+
+    await tester.enterText(
+      find.byKey(const ValueKey('device-pairing-code-input')),
+      '3497-011-2332',
+    );
+    tester.testTextInput.hide();
+    await tester.ensureVisible(find.text('Add to Rhythm'));
+    await tester.pump();
+    await tester.tap(find.text('Add to Rhythm'));
+    await tester.pumpAndSettle();
+
+    expect(result?.action, DevicePairingScannerAction.matter);
+    expect(result?.payload, '3497-011-2332');
+    expect(result?.inputMethod, 'manual_code');
+    expect(
+      result?.matterAddMethod,
+      MatterAddMethod.onNetworkSetupCode,
+    );
+    expect(
+      analyticsBackend.events.expand((event) => event.properties.values),
+      isNot(contains('3497-011-2332')),
+    );
   });
 
   testWidgets('manual local-BLE entry preserves journey and input method',

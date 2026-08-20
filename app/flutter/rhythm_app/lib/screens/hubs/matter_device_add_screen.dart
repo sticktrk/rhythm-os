@@ -314,7 +314,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
 
       final result = await _pairingApi.pairDevice(
         setupPayload: setupPayload,
-        rendezvous: 'auto',
+        rendezvous: widget.addMethod.rendezvous,
         network: 'wifi',
         receiveTimeout: _pairingRequestTimeout,
         sessionId: _sessionId,
@@ -584,7 +584,11 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
           accent: _teal,
           warning: _amber,
           helperText: _setupPayloadController.text.isEmpty
-              ? 'Paste the setup payload or the code printed on the device.'
+              ? (widget.addMethod == MatterAddMethod.onNetworkSetupCode
+                  ? 'Paste the new setup code from the Matter app that '
+                      'already controls this device.'
+                  : 'Paste the setup payload or the code printed on the '
+                      'device.')
               : (_looksLikeMatterPayload
                   ? 'Ready to send to the server.'
                   : 'Enter a Matter QR payload or the numeric Matter setup '
@@ -605,6 +609,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
   }
 
   Widget _buildDeviceReadinessCard() {
+    final isOnNetwork = widget.addMethod == MatterAddMethod.onNetworkSetupCode;
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
@@ -633,8 +638,8 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  'Ready the device',
+                Text(
+                  isOnNetwork ? 'Open Matter pairing mode' : 'Ready the device',
                   style: TextStyle(
                     color: CelestialColors.textPrimary,
                     fontSize: 16,
@@ -643,12 +648,23 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
                 ),
                 const SizedBox(height: 5),
                 Text(
-                  _hasFailedOnce
-                      ? 'Put the device back in pairing mode, then try its '
-                          'setup code again. Follow the device maker’s reset '
-                          'instructions if needed.'
-                      : 'Keep the device powered on and in pairing mode while '
-                          'Rhythm connects to it.',
+                  isOnNetwork
+                      ? (_hasFailedOnce
+                          ? 'Reopen pairing mode in the app that already '
+                              'controls this device and use the new code it '
+                              'provides. Keep the existing connection in place; '
+                              'do not factory-reset the device.'
+                          : 'In the app that already controls this device, '
+                              'choose “Turn On Pairing Mode” or “Add another '
+                              'controller,” then use the new Matter code it '
+                              'provides. Keep the device powered and on the '
+                              'same home network.')
+                      : (_hasFailedOnce
+                          ? 'Put the device back in pairing mode, then try its '
+                              'setup code again. Follow the device maker’s '
+                              'reset instructions if needed.'
+                          : 'Keep the device powered on and in pairing mode '
+                              'while Rhythm connects to it.'),
                   style: TextStyle(
                     color:
                         CelestialColors.textSecondary.withValues(alpha: 0.78),

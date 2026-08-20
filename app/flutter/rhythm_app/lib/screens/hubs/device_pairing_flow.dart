@@ -156,6 +156,8 @@ Future<void> startDevicePairingFlow(
       autoDiscoverHueBle: !hueBridgeOnly &&
           allowsLightPairing &&
           syncProvider.canAddHueBleDevice,
+      matterOnNetworkAvailable:
+          !hueBridgeOnly && syncProvider.canAddMatterOnNetworkDevice,
       analyticsSource: analyticsSource,
     );
     if (!context.mounted || intake == null) return;
@@ -303,6 +305,7 @@ Future<DevicePairingScannerResult?> _capturePairingCode(
   bool hueBridgeOnly = false,
   required String journeyId,
   required bool autoDiscoverHueBle,
+  required bool matterOnNetworkAvailable,
   required String analyticsSource,
 }) async {
   if (supportsDevicePairingCamera) {
@@ -313,6 +316,7 @@ Future<DevicePairingScannerResult?> _capturePairingCode(
       hueBridgeOnly: hueBridgeOnly,
       journeyId: journeyId,
       autoDiscoverHueBle: autoDiscoverHueBle,
+      matterOnNetworkAvailable: matterOnNetworkAvailable,
       analyticsSource: analyticsSource,
     );
     if (!context.mounted || scanned == null) return null;
@@ -322,6 +326,8 @@ Future<DevicePairingScannerResult?> _capturePairingCode(
         hueBridgeSerialSearchAvailable: hueBridgeSerialSearchAvailable,
         supportedLocalBleProfileIds: supportedLocalBleProfileIds,
         hueBridgeOnly: hueBridgeOnly,
+        matterOnNetworkAvailable: matterOnNetworkAvailable,
+        matterAddMethod: scanned.matterAddMethod,
         journeyId: journeyId,
       );
     }
@@ -332,6 +338,7 @@ Future<DevicePairingScannerResult?> _capturePairingCode(
     hueBridgeSerialSearchAvailable: hueBridgeSerialSearchAvailable,
     supportedLocalBleProfileIds: supportedLocalBleProfileIds,
     hueBridgeOnly: hueBridgeOnly,
+    matterOnNetworkAvailable: matterOnNetworkAvailable,
     journeyId: journeyId,
   );
 }

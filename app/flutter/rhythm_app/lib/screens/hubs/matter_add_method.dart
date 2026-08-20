@@ -15,11 +15,17 @@ extension MatterAddMethodCopy on MatterAddMethod {
         MatterAddMethod.automatic =>
           'Send a setup code or QR payload to the server and let it choose the add path.',
         MatterAddMethod.onNetworkSetupCode =>
-          'The device is already on IP/Wi-Fi. Add it with a setup code or QR payload.',
+          'The device is already in another Matter app. Add Rhythm with the new setup code from that app.',
         MatterAddMethod.bleWifiCommissioning =>
           'The device is not on Wi-Fi yet. Use BLE plus the server appliance\'s stored Wi-Fi credentials.',
       };
 
   bool get requiresWifiCommissioningPreflight =>
       this == MatterAddMethod.bleWifiCommissioning;
+
+  String get rendezvous => switch (this) {
+        MatterAddMethod.automatic => 'auto',
+        MatterAddMethod.onNetworkSetupCode => 'on_network',
+        MatterAddMethod.bleWifiCommissioning => 'ble',
+      };
 }
