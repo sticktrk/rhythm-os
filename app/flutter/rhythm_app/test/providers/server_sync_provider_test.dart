@@ -1034,6 +1034,10 @@ Widget _buildTestApp({
       ChangeNotifierProvider<SubscriptionProvider>(
         create: (_) => _TestSubscriptionProvider(),
       ),
+      // The room Schedule tab reads the home location for its orbital clock.
+      ChangeNotifierProvider<HomeProvider>(
+        create: (_) => _TestHomeProvider(const []),
+      ),
     ],
     child: MaterialApp(
       theme: ThemeData(fontFamily: fontFamily),
@@ -5880,7 +5884,7 @@ void main() {
     expect(find.byKey(const ValueKey('schedule')), findsOneWidget);
 
     expect(find.byKey(const ValueKey('schedule')), findsOneWidget);
-    expect(find.text('ALARM / SCHEDULE SOURCE'), findsOneWidget);
+    expect(find.text('SCHEDULE'), findsOneWidget);
     expect(find.text('WAKE / SLEEP PRESETS'), findsOneWidget);
     expect(find.text('TEST YOUR PRESETS'), findsOneWidget);
     expect(
@@ -5897,13 +5901,15 @@ void main() {
       find.byKey(const ValueKey('room-schedule-source-presets')),
       findsOneWidget,
     );
+    // Custom-times editor stays collapsed while the room follows the home
+    // schedule — the dial and steppers only mount for Custom times.
     expect(
       find.byKey(const ValueKey('room-schedule-time-dial')),
-      findsOneWidget,
+      findsNothing,
     );
     expect(
       find.byKey(const ValueKey('room-schedule-wake-later')),
-      findsOneWidget,
+      findsNothing,
     );
     expect(
         find.byKey(const ValueKey('room-schedule-test-wake')), findsOneWidget);
@@ -6116,7 +6122,19 @@ void main() {
 
     api.roomScheduleTestSucceeds = false;
     final wakeTest = find.byKey(const ValueKey('room-schedule-test-wake'));
-    await tester.ensureVisible(wakeTest);
+    // The test toggle sits at the bottom of the (lazy) tab list — scroll it
+    // into build range, then pin the list to its end so the toggle is fully
+    // inside the viewport (not clipped at its bottom edge).
+    await tester.dragUntilVisible(
+      wakeTest,
+      find.byKey(const ValueKey('schedule')),
+      const Offset(0, -120),
+    );
+    await tester.drag(
+      find.byKey(const ValueKey('schedule')),
+      const Offset(0, -200),
+    );
+    await tester.pump();
     await tester.tap(wakeTest);
     await tester.pump();
     api.roomScheduleTestSucceeds = true;
@@ -6131,6 +6149,132 @@ void main() {
       api.roomScheduleTestRequestIds.first,
       startsWith('room-schedule-test-'),
     );
+  });
+
+  testWidgets(
+      'room schedule presets stay live and apply the active mode to lights',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 1400));
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': [RhythmFeature.roomScheduleV1],
+          'hubs': const <dynamic>[],
+        },
+        'mode': {
+          'active': 'day',
+          'configs': [
+            {
+              'mode': 'day',
+              'active_profile_id': 'rhythm',
+              'room_defaults': const <Map<String, dynamic>>[],
+            },
+            {
+              'mode': 'sleep',
+              'active_profile_id': 'sleep',
+              'room_defaults': const <Map<String, dynamic>>[],
+            },
+          ],
+        },
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+            'profile_settings': {
+              'room_schedule': {
+                // Custom times must NOT freeze the presets — the schedule
+                // source is only the WHEN; presets are the WHAT.
+                'source': 'follow_time',
+                'wake_time': '06:30',
+                'sleep_time': '22:30',
+              },
+            },
+          },
+        ],
+      }),
+    );
+    await tester.pump();
+    await _pumpRoomSettingsSheet(
+      tester,
+      roomProvider: roomProvider,
+      provider: provider,
+      room: const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.matter,
+        deviceIds: [],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    await _selectRoomSettingsTab(tester, 'Schedule');
+    await tester.pumpAndSettle();
+
+    // Tapping On in the Wake row (the active mode) records the room default
+    // AND moves the room's lights immediately.
+    final wakeRow = find.byKey(const ValueKey('room-schedule-presets-day-room-1'));
+    await tester.dragUntilVisible(
+      wakeRow,
+      find.byKey(const ValueKey('schedule')),
+      const Offset(0, -120),
+    );
+    await tester.tap(
+      find.descendant(of: wakeRow, matching: find.text('On')),
+    );
+    await tester.pump();
+    expect(provider.roomDefaultStateForMode('room-1', RhythmMode.day), 'active');
+    expect(api.nodePreferenceCalls, hasLength(1));
+    expect(api.nodePreferenceCalls.single.nodeId, 'room-1');
+    expect(api.nodePreferenceCalls.single.state, RoomModeState.active);
+    expect(api.nodePreferenceCalls.single.rhythmEnabled, isTrue);
+
+    // Tapping Off in the Sleep row updates the default but leaves the lights
+    // alone — Sleep is not the current mode.
+    final sleepRow =
+        find.byKey(const ValueKey('room-schedule-presets-night-room-1'));
+    await tester.dragUntilVisible(
+      sleepRow,
+      find.byKey(const ValueKey('schedule')),
+      const Offset(0, -120),
+    );
+    await tester.tap(
+      find.descendant(of: sleepRow, matching: find.text('Off')),
+    );
+    await tester.pump();
+    expect(
+      provider.roomDefaultStateForMode('room-1', RhythmMode.sleep),
+      'hard_off',
+    );
+    expect(api.nodePreferenceCalls, hasLength(1));
+
+    // Let the debounced room-default persist fire before teardown.
+    await tester.pump(const Duration(milliseconds: 801));
+    await tester.pump();
   });
 
   testWidgets('room schedule renders deterministic visual evidence states',
@@ -6226,16 +6370,20 @@ void main() {
       RhythmHello.fromJson(hello(followTime: true, wakeTime: '07:45')),
     );
     await tester.pump(const Duration(milliseconds: 20));
-    expect(find.text('Wake 07:45'), findsOneWidget);
+    expect(find.text('07:45'), findsOneWidget);
+    // Let the custom-times editor finish expanding before tapping into it.
+    await tester.pumpAndSettle();
     await tester.tap(
       find.byKey(const ValueKey('room-schedule-wake-later')),
     );
     await tester.pumpAndSettle();
     expect(api.roomScheduleSetCalls.last.wakeTime, '08:00');
-    expect(find.text('Wake 08:00'), findsOneWidget);
+    expect(find.text('08:00'), findsOneWidget);
+    // Presets stay live under Custom times — the schedule source only picks
+    // WHEN triggers fire; presets are always the WHAT.
     expect(
       find.byKey(const ValueKey('room-schedule-presets-disabled')),
-      findsOneWidget,
+      findsNothing,
     );
     await _captureRoomScheduleEvidence(
       tester,
@@ -6255,8 +6403,10 @@ void main() {
     );
 
     api.roomScheduleTestCompleter = Completer<bool>();
-    await tester.ensureVisible(
+    await tester.dragUntilVisible(
       find.byKey(const ValueKey('room-schedule-test-wake')),
+      find.byKey(const ValueKey('schedule')),
+      const Offset(0, -120),
     );
     await tester.tap(find.byKey(const ValueKey('room-schedule-test-wake')));
     await tester.pump();
@@ -6277,8 +6427,10 @@ void main() {
     await tester.pump();
     api.roomScheduleTestCompleter = null;
     api.roomScheduleSetSucceeds = false;
-    await tester.ensureVisible(
+    await tester.dragUntilVisible(
       find.byKey(const ValueKey('room-schedule-source-presets')),
+      find.byKey(const ValueKey('schedule')),
+      const Offset(0, 120),
     );
     await tester.tap(
       find.byKey(const ValueKey('room-schedule-source-presets')),
