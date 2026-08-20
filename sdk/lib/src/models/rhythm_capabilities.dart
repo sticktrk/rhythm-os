@@ -41,6 +41,7 @@ abstract final class RhythmDeviceProfileId {
 abstract final class RhythmFeature {
   static const String asyncDebugBundleUpload = 'async_debug_bundle_upload';
   static const String motionActivationToggle = 'motion_activation_toggle';
+  static const String roomScheduleV1 = 'room_schedule_v1';
   static const String roomLightProfileOverrides =
       'room_light_profile_overrides';
   static const String roomDayIdleProfileOverrides =

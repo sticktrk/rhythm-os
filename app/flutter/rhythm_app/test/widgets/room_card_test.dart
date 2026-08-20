@@ -540,15 +540,15 @@ void main() {
     expect(button, findsOneWidget);
     expect(
       find.byKey(const ValueKey('room-settings-schedule-room-1')),
-      findsOneWidget,
+      findsNothing,
     );
     expect(
       find.byKey(const ValueKey('room-settings-schedule-day-room-1')),
-      findsOneWidget,
+      findsNothing,
     );
     expect(
       find.byKey(const ValueKey('room-settings-schedule-night-room-1')),
-      findsOneWidget,
+      findsNothing,
     );
     expect(find.text('Lighting'), findsOneWidget);
     expect(

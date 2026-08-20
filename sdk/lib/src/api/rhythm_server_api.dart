@@ -691,6 +691,50 @@ class RhythmServerApi {
     return null;
   }
 
+  /// Persist a room-local schedule and return authoritative post-apply state.
+  Future<RhythmRoomState?> roomScheduleSet({
+    required String roomId,
+    required RhythmRoomSchedule schedule,
+    required String requestId,
+  }) async {
+    try {
+      final response = await _dio.put(
+        'api/nodes/preferences',
+        data: {
+          'node_id': roomId,
+          'profile_settings': {'room_schedule': schedule.toJson()},
+          'request_id': requestId,
+        },
+      );
+      return _parseAndCacheSingleState(response.data);
+    } catch (e) {
+      _log.warning('roomScheduleSet failed requestId=$requestId', e);
+      return null;
+    }
+  }
+
+  /// Preview one room's configured Day/Sleep behavior without changing home mode.
+  Future<bool> roomScheduleTest({
+    required String roomId,
+    required RhythmMode mode,
+    required String requestId,
+  }) async {
+    try {
+      await _dio.put(
+        'api/nodes/preferences',
+        data: {
+          'node_id': roomId,
+          'schedule_test': mode.wireValue,
+          'request_id': requestId,
+        },
+      );
+      return true;
+    } catch (e) {
+      _log.warning('roomScheduleTest failed requestId=$requestId', e);
+      return false;
+    }
+  }
+
   /// Patch per-profile node overrides.
   ///
   /// Returns whether the server accepted the mutation. When [replace] is true,

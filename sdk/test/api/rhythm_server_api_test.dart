@@ -436,6 +436,90 @@ void main() {
           )).called(1);
     });
 
+    test('roomScheduleSet sends additive room profile patch', () async {
+      when(() => dio.put(any(), data: any(named: 'data'))).thenAnswer(
+        (_) async => Response(
+          requestOptions: RequestOptions(path: 'api/nodes/preferences'),
+          statusCode: 200,
+          data: {
+            'nodes': [
+              {
+                'node_id': 'room-1',
+                'rhythm_enabled': true,
+                'state': 'active',
+                'profile_settings': {
+                  'room_schedule': {
+                    'source': 'follow_time',
+                    'wake_time': '07:15',
+                    'sleep_time': '23:45',
+                  },
+                },
+              },
+            ],
+          },
+        ),
+      );
+
+      final authoritative = await api.roomScheduleSet(
+        roomId: 'room-1',
+        schedule: const RhythmRoomSchedule(
+          source: RhythmRoomScheduleSource.followTime,
+          wakeTime: '07:15',
+          sleepTime: '23:45',
+        ),
+        requestId: 'schedule-request-1',
+      );
+
+      expect(
+        authoritative?.profileSettings?.roomSchedule?.source,
+        RhythmRoomScheduleSource.followTime,
+      );
+      verify(
+        () => dio.put(
+          'api/nodes/preferences',
+          data: {
+            'node_id': 'room-1',
+            'profile_settings': {
+              'room_schedule': {
+                'source': 'follow_time',
+                'wake_time': '07:15',
+                'sleep_time': '23:45',
+              },
+            },
+            'request_id': 'schedule-request-1',
+          },
+        ),
+      ).called(1);
+    });
+
+    test('roomScheduleTest sends room-only preview request', () async {
+      when(() => dio.put(any(), data: any(named: 'data'))).thenAnswer(
+        (_) async => Response(
+          requestOptions: RequestOptions(path: 'api/nodes/preferences'),
+          statusCode: 200,
+        ),
+      );
+
+      expect(
+        await api.roomScheduleTest(
+          roomId: 'room-1',
+          mode: RhythmMode.sleep,
+          requestId: 'schedule-test-1',
+        ),
+        isTrue,
+      );
+      verify(
+        () => dio.put(
+          'api/nodes/preferences',
+          data: {
+            'node_id': 'room-1',
+            'schedule_test': 'sleep',
+            'request_id': 'schedule-test-1',
+          },
+        ),
+      ).called(1);
+    });
+
     test('nodeMotionActivationSet returns null on rejected write', () async {
       when(() => dio.put(any(), data: any(named: 'data'))).thenThrow(
         DioException(

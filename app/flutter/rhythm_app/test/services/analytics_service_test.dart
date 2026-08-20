@@ -240,6 +240,77 @@ void main() {
     );
   });
 
+  test('room schedule analytics exclude identity and exact times', () async {
+    await analytics.logRoomScheduleOpened(source: 'room_settings');
+    await analytics.logRoomScheduleSaveAttempted(
+      journeyId: 'room-schedule-save-journey-1',
+      attemptNumber: 2,
+      inputMethod: 'step_button',
+      changeKind: 'times',
+      source: 'follow_time',
+    );
+    await analytics.logRoomScheduleSaveCompleted(
+      journeyId: 'room-schedule-save-journey-1',
+      attemptNumber: 2,
+      inputMethod: 'step_button',
+      changeKind: 'times',
+      source: 'follow_time',
+      outcome: 'failed',
+      failureStage: 'appliance_ack',
+    );
+    await analytics.logRoomScheduleTestCompleted(
+      journeyId: 'room-schedule-test-journey-1',
+      attemptNumber: 1,
+      inputMethod: 'button',
+      source: 'wake_sleep_presets',
+      action: 'wake',
+      outcome: 'succeeded',
+    );
+    await analytics.logRoomScheduleInlinePresetChanged(
+      journeyId: 'room-schedule-preset-journey-1',
+      attemptNumber: 1,
+      inputMethod: 'popup_menu',
+      mode: 'sleep',
+      behavior: 'standby',
+    );
+
+    expect(backend.events.map((event) => event.name), [
+      'room_schedule_opened',
+      'room_schedule_save_attempted',
+      'room_schedule_save_completed',
+      'room_schedule_test_completed',
+      'room_schedule_inline_preset_changed',
+    ]);
+    expect(backend.events[1].properties, {
+      'journey_id': 'room-schedule-save-journey-1',
+      'attempt_number': 2,
+      'input_method': 'step_button',
+      'change_kind': 'times',
+      'source': 'follow_time',
+    });
+    expect(
+      backend.events[2].properties['journey_id'],
+      backend.events[1].properties['journey_id'],
+    );
+    expect(backend.events[3].properties, containsPair('attempt_number', 1));
+    expect(backend.events[4].properties, containsPair('behavior', 'standby'));
+    final serialized = backend.events
+        .map((event) => '${event.name}:${event.properties}')
+        .join('\n');
+    for (final forbidden in [
+      'room_id',
+      'room_name',
+      'device_id',
+      'wake_time',
+      'sleep_time',
+      '07:15',
+      '23:45',
+      'error',
+    ]) {
+      expect(serialized, isNot(contains(forbidden)));
+    }
+  });
+
   test('support report analytics correlate privacy-safe outcomes', () async {
     await analytics.logSupportReportAttempted(
       journeyId: 'support-report-123',

@@ -167,17 +167,17 @@ void main() {
       expect(find.text('Day'), findsOneWidget);
       expect(find.text('Night'), findsOneWidget);
       expect(find.text('Auto'), findsOneWidget);
-      expect(find.text('Standby'), findsOneWidget);
+      expect(find.text('Low glow'), findsOneWidget);
       expect(tester.getSize(day).height, greaterThanOrEqualTo(44));
       expect(tester.getSize(night).height, greaterThanOrEqualTo(44));
       expect(tester.getSemantics(day).label, 'Day schedule behavior');
       expect(tester.getSemantics(day).value, 'Auto');
-      expect(tester.getSemantics(night).value, 'Standby');
+      expect(tester.getSemantics(night).value, 'Low glow');
 
       await tester.tap(day);
       await tester.pumpAndSettle();
       expect(find.text('Auto'), findsNWidgets(2));
-      expect(find.text('Standby'), findsNWidgets(2));
+      expect(find.text('Low glow'), findsNWidgets(2));
       expect(find.text('Off'), findsOneWidget);
       expect(find.text('On'), findsOneWidget);
       await tester.tap(find.text('On'));
@@ -239,6 +239,73 @@ void main() {
       );
     },
   );
+
+  testWidgets('Schedule surface emits a typed privacy-safe preset event',
+      (tester) async {
+    final analyticsBackend = CapturingAnalyticsBackend();
+    await analyticsBackend.initialize();
+    BackendProvider.setInstanceForTesting(
+      auth: OfflineAuthBackend(),
+      analytics: analyticsBackend,
+    );
+    final analytics = AnalyticsService();
+    analytics.resetForTesting();
+    await analytics.initialize();
+
+    final roomProvider = RoomProvider();
+    final connection = _TestRhythmConnection();
+    final sync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _FakeHomeProvider(),
+    );
+    addTearDown(() {
+      sync.dispose();
+      roomProvider.dispose();
+      connection.dispose();
+      analytics.resetForTesting();
+      BackendProvider.resetForTesting();
+    });
+    connection.emitHello(_helloWithRoomDefaults());
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pumpWidget(
+      ChangeNotifierProvider<ServerSyncProvider>.value(
+        value: sync,
+        child: const MaterialApp(
+          home: Scaffold(
+            body: RoomScheduleBehaviorControl(
+              roomId: 'room-1',
+              foregroundColor: Colors.white,
+              keyPrefix: 'room-schedule-presets',
+              analyticsSource: 'room_schedule_tab',
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final day = find.byKey(
+      const ValueKey('room-schedule-presets-day-room-1'),
+    );
+    tester
+        .widget<PopupMenuButton<RoomScheduleBehavior>>(day)
+        .onSelected!(RoomScheduleBehavior.standby);
+    await tester.pump();
+
+    final event = analyticsBackend.events.singleWhere(
+      (event) => event.name == 'room_schedule_inline_preset_changed',
+    );
+    expect(event.properties['journey_id'], startsWith('room-schedule-preset-'));
+    expect(event.properties, containsPair('attempt_number', 1));
+    expect(event.properties, containsPair('input_method', 'popup_menu'));
+    expect(event.properties, containsPair('mode', 'wake'));
+    expect(event.properties, containsPair('behavior', 'standby'));
+    expect(
+      event.properties.keys,
+      isNot(contains(anyOf('room_id', 'node_id', 'home_id', 'room_name'))),
+    );
+    await tester.pump(const Duration(milliseconds: 801));
+  });
 
   testWidgets('rejected schedule behavior write restores the saved state',
       (tester) async {

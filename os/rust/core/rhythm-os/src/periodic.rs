@@ -335,12 +335,11 @@ pub(crate) fn effective_cycle_duration(
             continue;
         };
         let room_ctx = ctx.with_offset(room.time_offset_minutes);
+        let effective_mode = room
+            .profile_settings
+            .schedule_mode(profile_registry.active_mode(), room_ctx.current_hour);
         let suggested_secs = profile_registry
-            .profile_for_room_state(
-                profile_registry.active_mode(),
-                room_state,
-                Some(&room.profile_settings),
-            )
+            .profile_for_room_state(effective_mode, room_state, Some(&room.profile_settings))
             .calculate(&room_ctx)
             .suggested_tick_interval_secs
             .map(u64::from);
@@ -1046,6 +1045,21 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
             for (idx, node) in periodic_nodes.iter().enumerate() {
                 let room_hour = SystemTimeProvider::new(utc_offset).current_hour();
                 let started = Instant::now();
+                if crate::commands::reconcile_room_schedule_before_tick(
+                    &state,
+                    &node.settings_node_id,
+                    room_hour,
+                )
+                .is_err()
+                {
+                    tracing::warn!(
+                        target: "periodic",
+                        event = "room_schedule_reconcile_failed",
+                        failure_stage = "output_apply",
+                        "Room schedule reconciliation failed before inline periodic tick"
+                    );
+                    continue;
+                }
                 if let Err(e) =
                     runtime.periodic_tick_node(&node.node_id, &node.settings_node_id, room_hour)
                 {
