@@ -174,6 +174,7 @@ pub fn pair_device_with_context(
     request: &MatterPairingParams,
     request_context: &PairingRequestContext,
 ) -> Result<PairingSession> {
+    ensure_pairing_request_active(request_context)?;
     let recovery_targets = match registered_recovery_targets(
         state,
         &hub_data,
@@ -235,8 +236,13 @@ pub fn pair_device_with_context(
             None,
             None,
         );
-        match transport.recover_light_connection(target.node_id, target.endpoint) {
+        match transport.recover_light_connection_with_context(
+            target.node_id,
+            target.endpoint,
+            request_context,
+        ) {
             Ok(device) => {
+                ensure_pairing_request_active(request_context)?;
                 tracing::info!(
                     target: "pair",
                     event = "matter_repeat_pair_connection_recovered",
@@ -253,6 +259,7 @@ pub fn pair_device_with_context(
                 );
             }
             Err(error) => {
+                ensure_pairing_request_active(request_context)?;
                 tracing::warn!(
                     target: "pair",
                     event = "matter_repeat_pair_probe_failed",
@@ -272,6 +279,7 @@ pub fn pair_device_with_context(
                 ));
             }
         };
+        ensure_pairing_request_active(request_context)?;
         let commission_request = request.to_commission_request(target.node_id, wifi_credentials);
         rhythm_os::pairing::emit_pairing_progress(
             state,
@@ -285,14 +293,17 @@ pub fn pair_device_with_context(
         );
 
         return match transport.commission_light_with_context(&commission_request, request_context) {
-            Ok(device) => build_success_session(
-                state,
-                &hub_data,
-                device,
-                &request.setup_payload,
-                request.session_id.as_deref(),
-                PairingCompletion::ExistingNodeRecommissioned,
-            ),
+            Ok(device) => {
+                ensure_pairing_request_active(request_context)?;
+                build_success_session(
+                    state,
+                    &hub_data,
+                    device,
+                    &request.setup_payload,
+                    request.session_id.as_deref(),
+                    PairingCompletion::ExistingNodeRecommissioned,
+                )
+            }
             Err(error) => {
                 tracing::error!(
                     target: "pair",
@@ -309,6 +320,7 @@ pub fn pair_device_with_context(
         };
     }
 
+    ensure_pairing_request_active(request_context)?;
     let wifi_credentials = load_commissioning_wifi_credentials(state)?;
     let node_id = hub_data.reserve_node_id();
     let commission_request = request.to_commission_request(node_id, wifi_credentials);
@@ -324,14 +336,17 @@ pub fn pair_device_with_context(
     );
 
     match transport.commission_light_with_context(&commission_request, request_context) {
-        Ok(device) => build_success_session(
-            state,
-            &hub_data,
-            device,
-            &request.setup_payload,
-            request.session_id.as_deref(),
-            PairingCompletion::New,
-        ),
+        Ok(device) => {
+            ensure_pairing_request_active(request_context)?;
+            build_success_session(
+                state,
+                &hub_data,
+                device,
+                &request.setup_payload,
+                request.session_id.as_deref(),
+                PairingCompletion::New,
+            )
+        }
         Err(error) => {
             error!(target: "pair", "Matter commissioning error: {:#}", error);
             Ok(PairingSession {
@@ -349,6 +364,13 @@ pub fn pair_device_with_context(
             })
         }
     }
+}
+
+fn ensure_pairing_request_active(context: &PairingRequestContext) -> Result<()> {
+    if context.is_cancelled() {
+        anyhow::bail!("Matter pairing request was cancelled");
+    }
+    Ok(())
 }
 
 fn registered_recovery_targets(
@@ -831,6 +853,7 @@ mod tests {
         commission_error: Mutex<Option<String>>,
         recovery_requests: Mutex<Vec<(u64, u16)>>,
         recovery_error: Mutex<Option<String>>,
+        cancel_during_recovery: Mutex<Option<PairingRequestContext>>,
         subscribe_calls: AtomicUsize,
     }
 
@@ -897,6 +920,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((node_id, expected_endpoint));
+            if let Some(context) = self.cancel_during_recovery.lock().unwrap().take() {
+                context.cancel();
+            }
             if let Some(error) = self.recovery_error.lock().unwrap().clone() {
                 anyhow::bail!(error);
             }
@@ -1542,6 +1568,39 @@ mod tests {
         assert_eq!(recovered.id, original_canonical_id);
         assert_eq!(recovered.room_id.as_deref(), Some(room_id.as_str()));
         drop(state_guard);
+
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn cancelled_repeat_pair_recovery_cannot_finalize_device_state() {
+        let (state, path) = state_with_storage("repeat-cancelled");
+        let (hub_data, event_rx) = hub_data();
+        seed_saved_device(&state, &hub_data, 42, &pairing_request().setup_payload);
+        while event_rx.try_recv().is_ok() {}
+        let context = PairingRequestContext::accepted_now();
+        let transport = Arc::new(FakeMatterTransport::default());
+        *transport.cancel_during_recovery.lock().unwrap() = Some(context.clone());
+
+        let error = pair_device_with_context(
+            &state,
+            transport.clone() as Arc<dyn MatterTransport>,
+            hub_data,
+            &pairing_request(),
+            &context,
+        )
+        .expect_err("cancelled recovery must not produce a successful pairing session");
+
+        assert!(error.to_string().contains("request was cancelled"));
+        assert_eq!(
+            transport.recovery_requests.lock().unwrap().as_slice(),
+            &[(42, 2)]
+        );
+        assert!(transport.commission_requests.lock().unwrap().is_empty());
+        assert!(
+            event_rx.try_recv().is_err(),
+            "cancelled recovery must not emit a late device-paired event"
+        );
 
         std::fs::remove_dir_all(path).ok();
     }

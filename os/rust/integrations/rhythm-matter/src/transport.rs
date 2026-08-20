@@ -357,6 +357,26 @@ pub trait MatterTransport: Send + Sync {
         Ok(device)
     }
 
+    /// Recover an existing node while retaining ownership of the initiating
+    /// pairing request. Native transports override this to interrupt in-flight
+    /// controller RPCs; compatibility transports still fail closed before and
+    /// after their synchronous probe so cancellation cannot finalize state.
+    fn recover_light_connection_with_context(
+        &self,
+        node_id: u64,
+        expected_endpoint: u16,
+        context: &rhythm_os::pairing::PairingRequestContext,
+    ) -> Result<CommissionedDevice> {
+        if context.is_cancelled() {
+            anyhow::bail!("Matter pairing request was cancelled");
+        }
+        let device = self.recover_light_connection(node_id, expected_endpoint)?;
+        if context.is_cancelled() {
+            anyhow::bail!("Matter pairing request was cancelled");
+        }
+        Ok(device)
+    }
+
     /// Set the On/Off state of a light endpoint.
     fn set_on_off(&self, node_id: u64, endpoint: u16, on: bool) -> Result<()>;
 

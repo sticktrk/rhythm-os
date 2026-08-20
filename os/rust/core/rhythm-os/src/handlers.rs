@@ -632,12 +632,8 @@ pub fn handle_post_factory_reset(state: &SharedState) -> ApiResponse {
             )
         })
         .unwrap_or((false, None));
-    let mut bluetooth_reservation = if appliance_reset {
-        match try_acquire_pairing_guard(
-            state,
-            crate::hub::HubType::HUE_BLE,
-            &serde_json::Value::Null,
-        ) {
+    let mut reset_reservation = if appliance_reset {
+        match try_acquire_factory_reset_guard(state) {
             Ok(guard) => Some(guard),
             Err(response) => return response,
         }
@@ -657,7 +653,7 @@ pub fn handle_post_factory_reset(state: &SharedState) -> ApiResponse {
                     // the reboot grace period, even when platform cleanup
                     // fails: a new bond or association could recreate state
                     // that this reset just removed.
-                    if let Some(guard) = bluetooth_reservation.as_mut() {
+                    if let Some(guard) = reset_reservation.as_mut() {
                         guard.keep_reserved();
                     }
                     if let Some(recover) = post_barrier_recovery.as_ref() {
@@ -669,19 +665,19 @@ pub fn handle_post_factory_reset(state: &SharedState) -> ApiResponse {
                 }
             }
             // Once both shared reset and synchronous platform cleanup succeed,
-            // retain the adapter reservation until the scheduled reboot.
-            // Releasing it after the HTTP response would allow a new
-            // Matter/Hue BLE bond to appear in the reboot grace period.
-            if let Some(guard) = bluetooth_reservation.as_mut() {
+            // retain both pairing reservations until the scheduled reboot.
+            // Releasing either after the HTTP response would allow a new
+            // Matter association or Bluetooth bond in the reboot grace period.
+            if let Some(guard) = reset_reservation.as_mut() {
                 guard.keep_reserved();
             }
             ApiResponse::json_ok(json)
         }
         Err(e) if commands::factory_reset_error_is_post_barrier(&e) => {
             // Reset began and may already have removed credentials/state. Keep
-            // the shared adapter slot poisoned until the recovery reboot so a
-            // concurrent pairing request cannot repopulate it.
-            if let Some(guard) = bluetooth_reservation.as_mut() {
+            // both shared pairing slots poisoned until the recovery reboot so
+            // a concurrent pairing request cannot repopulate either one.
+            if let Some(guard) = reset_reservation.as_mut() {
                 guard.keep_reserved();
             }
             if let Some(recover) = post_barrier_recovery.as_ref() {
@@ -3474,11 +3470,42 @@ fn try_acquire_pairing_guard(
     hub_type: &str,
     params: &serde_json::Value,
 ) -> Result<PairingAttemptGuard, ApiResponse> {
+    try_acquire_pairing_guard_with(state, hub_type, |platform_type| {
+        pairing_slots(platform_type, hub_type, params)
+    })
+}
+
+fn try_acquire_factory_reset_guard(
+    state: &SharedState,
+) -> Result<PairingAttemptGuard, ApiResponse> {
+    try_acquire_pairing_guard_with(state, crate::hub::HubType::MATTER, |platform_type| {
+        if platform_type == "appliance" {
+            vec![
+                PairingReservation {
+                    pairing_slot: crate::hub::HubType::MATTER.to_string(),
+                    resource_activity: false,
+                },
+                PairingReservation {
+                    pairing_slot: "appliance_bluetooth_adapter".to_string(),
+                    resource_activity: false,
+                },
+            ]
+        } else {
+            Vec::new()
+        }
+    })
+}
+
+fn try_acquire_pairing_guard_with(
+    state: &SharedState,
+    hub_type: &str,
+    reservation_plan: impl FnOnce(&str) -> Vec<PairingReservation>,
+) -> Result<PairingAttemptGuard, ApiResponse> {
     let mut state_guard = match state.lock() {
         Ok(state) => state,
         Err(_) => return Err(ApiResponse::server_error("lock")),
     };
-    let reservations = pairing_slots(state_guard.platform_type, hub_type, params);
+    let reservations = reservation_plan(state_guard.platform_type);
     if let Some(conflict) = reservations.iter().find(|reservation| {
         state_guard
             .pairing_in_progress
@@ -7735,6 +7762,7 @@ mod tests {
             .unwrap()
             .pairing_in_progress
             .contains("appliance_bluetooth_adapter"));
+        assert!(state.lock().unwrap().pairing_in_progress.contains("matter"));
     }
 
     #[test]
@@ -7766,7 +7794,30 @@ mod tests {
     }
 
     #[test]
-    fn appliance_factory_reset_retains_adapter_reservation_until_reboot() {
+    fn appliance_factory_reset_rejects_an_in_flight_on_network_matter_pairing() {
+        let state = handler_state_with_runtime();
+        let invoked = Arc::new(AtomicBool::new(false));
+        {
+            let invoked = invoked.clone();
+            let mut state = state.lock().unwrap();
+            state.platform_type = "appliance";
+            state.pairing_in_progress.insert("matter".to_string());
+            state.before_factory_reset_fn = Some(Arc::new(move |_| {
+                invoked.store(true, Ordering::SeqCst);
+                Ok(())
+            }));
+        }
+
+        let response = handle_post_factory_reset(&state);
+
+        assert_eq!(response.status, 409);
+        assert_eq!(response.body, "Pairing already in progress for matter");
+        assert!(!invoked.load(Ordering::SeqCst));
+        assert!(state.lock().unwrap().pairing_in_progress.contains("matter"));
+    }
+
+    #[test]
+    fn appliance_factory_reset_retains_pairing_reservations_until_reboot() {
         let state = handler_state_with_runtime();
         let before_invoked = Arc::new(AtomicBool::new(false));
         let after_invoked = Arc::new(AtomicBool::new(false));
@@ -7795,10 +7846,23 @@ mod tests {
             .unwrap()
             .pairing_in_progress
             .contains("appliance_bluetooth_adapter"));
+        assert!(state.lock().unwrap().pairing_in_progress.contains("matter"));
+        let on_network = match try_acquire_pairing_guard(
+            &state,
+            crate::hub::HubType::MATTER,
+            &json!({
+                "setup_payload": "34970112332",
+                "rendezvous": "on_network",
+            }),
+        ) {
+            Ok(_) => panic!("reboot grace must exclude new on-network Matter pairing"),
+            Err(response) => response,
+        };
+        assert_eq!(on_network.status, 409);
     }
 
     #[test]
-    fn appliance_factory_reset_cleanup_failure_retains_adapter_for_reboot() {
+    fn appliance_factory_reset_cleanup_failure_retains_pairing_reservations() {
         let state = handler_state_with_runtime();
         let recovery_invoked = Arc::new(AtomicBool::new(false));
         {
@@ -7824,6 +7888,7 @@ mod tests {
             .unwrap()
             .pairing_in_progress
             .contains("appliance_bluetooth_adapter"));
+        assert!(state.lock().unwrap().pairing_in_progress.contains("matter"));
     }
 
     #[test]
