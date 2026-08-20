@@ -7,6 +7,7 @@ APP_SCRIPTS="$(cd "$SCRIPT_DIR/.." && pwd)"
 WRITER="$APP_SCRIPTS/write-testflight-notes.sh"
 BUILD_SCRIPT="$APP_SCRIPTS/build-mobile.sh"
 WORKER="$APP_SCRIPTS/run-testflight-dispatch.sh"
+BATCH_DISPATCH="$APP_SCRIPTS/dispatch-testflight-batch.sh"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/rhythm-testflight-notes-test.XXXXXX")"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
@@ -108,5 +109,15 @@ grep -Fq -- '--changelog "$TESTFLIGHT_CHANGELOG"' "$BUILD_SCRIPT" || \
     fail "Fastlane upload does not receive rendered changelog"
 grep -Fq 'RHYTHM_TESTFLIGHT_NOTES_FILE="$NOTES_FILE"' "$WORKER" || \
     fail "PR dispatch worker does not hand notes to the uploader"
+
+bash -n "$BATCH_DISPATCH" || fail "batch dispatcher has invalid shell syntax"
+grep -Fq 'if [ "$LIVE_MASTER" != "$COMMIT_SHA" ]; then' "$BATCH_DISPATCH" || \
+    fail "batch dispatcher does not bind the upload to current origin/master"
+grep -Fq 'git tag --points-at "$COMMIT_SHA"' "$BATCH_DISPATCH" || \
+    fail "batch dispatcher does not require an exact beta tag"
+grep -Fq 'git merge-base --is-ancestor "$PR_MERGE" "$COMMIT_SHA"' "$BATCH_DISPATCH" || \
+    fail "batch dispatcher does not prove every named PR is in the final commit"
+grep -Fq 'RHYTHM_TESTFLIGHT_BATCH_BASE="$BASE_SHA"' "$BATCH_DISPATCH" || \
+    fail "batch dispatcher does not preserve the immutable batch base in its receipt"
 
 echo "TestFlight notes tests passed"
