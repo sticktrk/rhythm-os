@@ -42,6 +42,10 @@ const RPC_TIMEOUT: Duration = Duration::from_secs(120);
 /// succeeded gets its sidecar killed mid-PASE at 120s and the whole
 /// CommissionLight is re-sent against a half-commissioned bulb.
 const RPC_COMMISSION_TIMEOUT: Duration = Duration::from_secs(200);
+/// Must remain below the app's four-minute receive deadline so the server can
+/// close its operation and persist a terminal result first.
+const MATTER_PAIRING_SERVER_SLA: Duration = Duration::from_secs(210);
+const PAIRING_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(100);
 #[cfg(not(test))]
 const RPC_CONTROL_TIMEOUT: Duration = Duration::from_secs(8);
 #[cfg(test)]
@@ -54,6 +58,30 @@ const OPERATIONAL_RECOVERY_MDNS_SCAN_TIMEOUT: Duration = Duration::from_secs(15)
 /// chipd's 180s kCommissioningTimeout, so the first attempt must have failed
 /// inside this budget for the retry to still fit the request window.
 const BLE_AUTO_RETRY_FIRST_ATTEMPT_BUDGET: Duration = Duration::from_secs(45);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MatterPairingStopReason {
+    Cancelled,
+    Deadline,
+}
+
+#[derive(Debug)]
+struct MatterPairingStopped(MatterPairingStopReason);
+
+impl std::fmt::Display for MatterPairingStopped {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            MatterPairingStopReason::Cancelled => {
+                formatter.write_str("Matter pairing request was cancelled")
+            }
+            MatterPairingStopReason::Deadline => {
+                formatter.write_str("Matter pairing request exceeded its server deadline")
+            }
+        }
+    }
+}
+
+impl std::error::Error for MatterPairingStopped {}
 
 fn rpc_timeout_for_request(request: &ChipRpcRequest) -> Duration {
     match request {
@@ -251,10 +279,76 @@ impl ChipTransport {
         }
     }
 
+    fn ensure_sidecar_locked_with_pairing_context(
+        &self,
+        context: &rhythm_os::pairing::PairingRequestContext,
+    ) -> Result<()> {
+        if let Some(error) = current_pairing_stop_error(Some(context)) {
+            return Err(error);
+        }
+        if self.initialized.load(Ordering::SeqCst)
+            && self.socket_path.exists()
+            && matches!(
+                self.sidecar_health(),
+                SidecarHealth::Ready | SidecarHealth::BleCooldown
+            )
+        {
+            return Ok(());
+        }
+
+        if self.can_connect().is_err() {
+            self.start_sidecar()?;
+            if let Some(error) = current_pairing_stop_error(Some(context)) {
+                return Err(error);
+            }
+        }
+
+        match self.initialize_controller_with_pairing_context(context) {
+            Ok(()) => Ok(()),
+            Err(first_error)
+                if self.sidecar_config.is_some()
+                    && is_uninitialized_controller_error(&first_error) =>
+            {
+                self.restart_sidecar().with_context(|| {
+                    format!("restarting CHIP sidecar after controller init error: {first_error:#}")
+                })?;
+                if let Some(error) = current_pairing_stop_error(Some(context)) {
+                    return Err(error);
+                }
+                self.initialize_controller_with_pairing_context(context)
+                    .with_context(|| {
+                        format!(
+                            "CHIP controller init retry failed after restarting sidecar: {first_error:#}"
+                        )
+                    })
+            }
+            Err(first_error) => {
+                self.set_sidecar_health(SidecarHealth::Unavailable);
+                Err(first_error)
+            }
+        }
+    }
+
     fn initialize_controller(&self) -> Result<()> {
         let response: ChipInitControllerResponse = self.decode_rpc_response(
             self.send_rpc_envelope(ChipRpcRequest::InitController(self.init_request.clone()))?,
         )?;
+        self.accept_initialized_controller(response)
+    }
+
+    fn initialize_controller_with_pairing_context(
+        &self,
+        context: &rhythm_os::pairing::PairingRequestContext,
+    ) -> Result<()> {
+        let response: ChipInitControllerResponse =
+            self.decode_rpc_response(self.send_rpc_envelope_with_pairing_context(
+                ChipRpcRequest::InitController(self.init_request.clone()),
+                Some(context),
+            )?)?;
+        self.accept_initialized_controller(response)
+    }
+
+    fn accept_initialized_controller(&self, response: ChipInitControllerResponse) -> Result<()> {
         if response.fabric_id != self.init_request.fabric_id {
             anyhow::bail!(
                 "CHIP sidecar initialized unexpected fabric '{}'",
@@ -290,6 +384,49 @@ impl ChipTransport {
             Err(first_error) => {
                 self.recover_transport_failure(request, first_error, request_generation)
             }
+        }
+    }
+
+    fn call_with_pairing_context<T: serde::de::DeserializeOwned>(
+        &self,
+        request: ChipRpcRequest,
+        context: &rhythm_os::pairing::PairingRequestContext,
+    ) -> Result<T> {
+        let result = (|| {
+            {
+                let _lifecycle = self
+                    .sidecar_lifecycle_lock
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("CHIP sidecar lifecycle lock poisoned"))?;
+                self.ensure_sidecar_locked_with_pairing_context(context)?;
+            }
+            let request_generation = self.sidecar_generation.load(Ordering::SeqCst);
+            match self.send_rpc_envelope_with_pairing_context(request.clone(), Some(context)) {
+                Ok(response) => match self.decode_rpc_response::<T>(response) {
+                    Ok(value) => Ok(value),
+                    Err(rpc_error) if is_uninitialized_controller_error(&rpc_error) => self
+                        .recover_uninitialized_controller_with_pairing_context(
+                            request,
+                            rpc_error,
+                            request_generation,
+                            context,
+                        ),
+                    Err(rpc_error) => Err(rpc_error),
+                },
+                Err(error) => Err(error),
+            }
+        })();
+
+        match result {
+            Err(error) if is_pairing_stopped(&error) => {
+                match self.terminate_stopped_pairing_sidecar(&error) {
+                    Ok(()) => Err(error),
+                    Err(recovery_error) => Err(error.context(format!(
+                        "Matter pairing stopped, but CHIP sidecar termination failed: {recovery_error:#}"
+                    ))),
+                }
+            }
+            other => other,
         }
     }
 
@@ -367,6 +504,42 @@ impl ChipTransport {
             })
     }
 
+    fn recover_uninitialized_controller_with_pairing_context<T: serde::de::DeserializeOwned>(
+        &self,
+        request: ChipRpcRequest,
+        first_error: anyhow::Error,
+        failed_generation: u64,
+        context: &rhythm_os::pairing::PairingRequestContext,
+    ) -> Result<T> {
+        let _lifecycle = self
+            .sidecar_lifecycle_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("CHIP sidecar lifecycle lock poisoned"))?;
+
+        if let Some(error) = current_pairing_stop_error(Some(context)) {
+            return Err(error);
+        }
+        if self.sidecar_generation.load(Ordering::SeqCst) == failed_generation {
+            self.initialized.store(false, Ordering::SeqCst);
+            self.set_sidecar_health(SidecarHealth::Recovering);
+            if self.sidecar_config.is_some() {
+                self.restart_sidecar().with_context(|| {
+                    format!("restarting CHIP sidecar after stuck-state error: {first_error:#}")
+                })?;
+            }
+        }
+        self.ensure_sidecar_locked_with_pairing_context(context)
+            .with_context(|| {
+                format!("re-initializing CHIP controller after stuck-state error: {first_error:#}")
+            })?;
+        self.decode_rpc_response(
+            self.send_rpc_envelope_with_pairing_context(request, Some(context))?,
+        )
+        .with_context(|| {
+            format!("CHIP RPC retry failed after re-initializing controller: {first_error:#}")
+        })
+    }
+
     fn decode_rpc_response<T: serde::de::DeserializeOwned>(
         &self,
         response: ChipRpcResponseEnvelope,
@@ -375,17 +548,46 @@ impl ChipTransport {
     }
 
     fn send_rpc_envelope(&self, request: ChipRpcRequest) -> Result<ChipRpcResponseEnvelope> {
+        self.send_rpc_envelope_with_pairing_context(request, None)
+    }
+
+    fn send_rpc_envelope_with_pairing_context(
+        &self,
+        request: ChipRpcRequest,
+        pairing_context: Option<&rhythm_os::pairing::PairingRequestContext>,
+    ) -> Result<ChipRpcResponseEnvelope> {
         let request_id = self.next_request_id.fetch_add(1, Ordering::SeqCst);
         let envelope = ChipRpcRequestEnvelope {
             id: request_id,
             request,
         };
         let rpc_timeout = rpc_timeout_for_request(&envelope.request);
+        let rpc_deadline = Instant::now() + rpc_timeout;
+        let pairing_stop_deadline = pairing_context.map(|context| {
+            let server_deadline = context.deadline_after(MATTER_PAIRING_SERVER_SLA);
+            if matches!(&envelope.request, ChipRpcRequest::CommissionLight(_)) {
+                // A CommissionLight RPC that outlives its own socket budget is
+                // abandoned controller work and needs the same sidecar
+                // termination as the end-to-end server deadline.
+                server_deadline.min(rpc_deadline)
+            } else {
+                server_deadline
+            }
+        });
+        if let Some(deadline) = pairing_stop_deadline {
+            if let Some(error) = pairing_stop_error(pairing_context, deadline) {
+                return Err(error);
+            }
+        }
 
         let mut stream = UnixStream::connect(&self.socket_path)
             .with_context(|| format!("connecting to {}", self.socket_path.display()))?;
         stream
-            .set_read_timeout(Some(rpc_timeout))
+            .set_read_timeout(Some(if pairing_context.is_some() {
+                PAIRING_CANCELLATION_POLL_INTERVAL
+            } else {
+                rpc_timeout
+            }))
             .context("setting CHIP RPC read timeout")?;
         stream
             .set_write_timeout(Some(rpc_timeout))
@@ -412,17 +614,51 @@ impl ChipTransport {
 
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
-        let bytes = reader.read_line(&mut line).with_context(|| {
-            format!(
-                "reading CHIP RPC response (chipd status: {})",
-                self.chipd_status_hint()
-            )
-        })?;
+        let bytes = loop {
+            match reader.read_line(&mut line) {
+                Ok(bytes) => break bytes,
+                Err(error)
+                    if pairing_context.is_some()
+                        && matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
+                {
+                    if let Some(deadline) = pairing_stop_deadline {
+                        if let Some(error) = pairing_stop_error(pairing_context, deadline) {
+                            return Err(error);
+                        }
+                    }
+                    if Instant::now() >= rpc_deadline {
+                        return Err(std::io::Error::new(
+                            ErrorKind::TimedOut,
+                            "CHIP RPC response timed out",
+                        ))
+                        .with_context(|| {
+                            format!(
+                                "reading CHIP RPC response (chipd status: {})",
+                                self.chipd_status_hint()
+                            )
+                        });
+                    }
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!(
+                            "reading CHIP RPC response (chipd status: {})",
+                            self.chipd_status_hint()
+                        )
+                    });
+                }
+            }
+        };
         if bytes == 0 {
             anyhow::bail!(
                 "CHIP sidecar closed the socket without a response (chipd status: {})",
                 self.chipd_status_hint()
             );
+        }
+        if let Some(deadline) = pairing_stop_deadline {
+            if let Some(error) = pairing_stop_error(pairing_context, deadline) {
+                return Err(error);
+            }
         }
 
         let response: ChipRpcResponseEnvelope =
@@ -529,6 +765,16 @@ impl ChipTransport {
         Ok(())
     }
 
+    fn terminate_stopped_pairing_sidecar(&self, error: &anyhow::Error) -> Result<()> {
+        // Production transports always own the managed sidecar. Test and
+        // compatibility transports may point at an external socket, where
+        // dropping this request's stream is the only available cancellation.
+        if self.sidecar_config.is_none() {
+            return Ok(());
+        }
+        self.recover_commissioning_sidecar(error, "Matter pairing cancellation/deadline")
+    }
+
     fn scan_operational_node(
         &self,
         node_id: u64,
@@ -544,6 +790,7 @@ impl ChipTransport {
         &self,
         node_id: u64,
         first_error: &anyhow::Error,
+        pairing_context: Option<&rhythm_os::pairing::PairingRequestContext>,
     ) -> Result<Option<CommissionedDevice>> {
         self.recover_commissioning_sidecar(first_error, "Matter operational discovery error")?;
         // The sidecar restart drops chipd's BLE connection to the bulb, so a
@@ -551,14 +798,29 @@ impl ChipTransport {
         // the BLE recovery path.
         self.mark_ble_recovery_cooldown(ble_recovery_cooldown(first_error));
 
-        let discovery =
-            self.scan_operational_node(node_id, OPERATIONAL_RECOVERY_MDNS_SCAN_TIMEOUT)?;
+        let discovery = match pairing_context {
+            Some(context) => self.call_with_pairing_context(
+                ChipRpcRequest::ScanOperationalNode {
+                    node_id,
+                    timeout_ms: OPERATIONAL_RECOVERY_MDNS_SCAN_TIMEOUT
+                        .as_millis()
+                        .try_into()
+                        .unwrap_or(u64::MAX),
+                },
+                context,
+            )?,
+            None => self.scan_operational_node(node_id, OPERATIONAL_RECOVERY_MDNS_SCAN_TIMEOUT)?,
+        };
         if discovery.fabrics.is_empty() {
             return Ok(None);
         }
 
-        let response: ChipRpcProbeLightResponse =
-            self.call(ChipRpcRequest::ProbeLight { node_id })?;
+        let response: ChipRpcProbeLightResponse = match pairing_context {
+            Some(context) => {
+                self.call_with_pairing_context(ChipRpcRequest::ProbeLight { node_id }, context)?
+            }
+            None => self.call(ChipRpcRequest::ProbeLight { node_id })?,
+        };
         Ok(Some(response.device))
     }
 
@@ -569,9 +831,13 @@ impl ChipTransport {
     fn commission_light_once(
         &self,
         request: &MatterCommissionRequest,
+        pairing_context: Option<&rhythm_os::pairing::PairingRequestContext>,
     ) -> Result<CommissionedDevice> {
-        let result: Result<ChipRpcCommissionLightResponse> =
-            self.call(ChipRpcRequest::CommissionLight(request.clone()));
+        let rpc_request = ChipRpcRequest::CommissionLight(request.clone());
+        let result: Result<ChipRpcCommissionLightResponse> = match pairing_context {
+            Some(context) => self.call_with_pairing_context(rpc_request, context),
+            None => self.call(rpc_request),
+        };
         match result {
             Ok(response) => Ok(response.device),
             // Operational discovery timed out after the device joined the
@@ -579,8 +845,17 @@ impl ChipTransport {
             // after a wlan0 address change, which only a sidecar restart
             // fixes. Applies to every rendezvous mode — mDNS resolution is
             // required for on-network commissioning too.
-            Err(error) if is_recoverable_operational_discovery_error(&error) => {
-                match self.recover_operational_discovery_failure(request.node_id, &error) {
+            Err(error)
+                if is_recoverable_operational_discovery_error(&error)
+                    && !(request.rendezvous
+                        == crate::transport::MatterCommissioningRendezvous::OnNetwork
+                        && is_on_network_route_or_discovery_error(&error)) =>
+            {
+                match self.recover_operational_discovery_failure(
+                    request.node_id,
+                    &error,
+                    pairing_context,
+                ) {
                     Ok(Some(device)) => Ok(device),
                     Ok(None) => Err(error.context(
                         "Matter operational discovery failed; reset CHIP sidecar and did not observe node advertising after recovery",
@@ -1025,12 +1300,206 @@ fn is_recoverable_operational_discovery_error(error: &anyhow::Error) -> bool {
         })
 }
 
+fn is_on_network_route_or_discovery_error(error: &anyhow::Error) -> bool {
+    let detail = format!("{error:#}").to_ascii_lowercase();
+    detail.contains("network unreachable")
+        || detail.contains("os error 0x02000065")
+        || detail.contains("discovery timed out")
+}
+
+fn is_pairing_stopped(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<MatterPairingStopped>().is_some()
+}
+
+fn pairing_stop_error(
+    context: Option<&rhythm_os::pairing::PairingRequestContext>,
+    deadline: Instant,
+) -> Option<anyhow::Error> {
+    let context = context?;
+    if context.is_cancelled() {
+        return Some(anyhow::Error::new(MatterPairingStopped(
+            MatterPairingStopReason::Cancelled,
+        )));
+    }
+    (Instant::now() >= deadline)
+        .then(|| anyhow::Error::new(MatterPairingStopped(MatterPairingStopReason::Deadline)))
+}
+
+fn current_pairing_stop_error(
+    context: Option<&rhythm_os::pairing::PairingRequestContext>,
+) -> Option<anyhow::Error> {
+    let context = context?;
+    pairing_stop_error(
+        Some(context),
+        context.deadline_after(MATTER_PAIRING_SERVER_SLA),
+    )
+}
+
 fn ble_recovery_cooldown(error: &anyhow::Error) -> Duration {
     error
         .downcast_ref::<ChipRpcError>()
         .and_then(|rpc_error| rpc_error.retry_after_ms)
         .map(Duration::from_millis)
         .unwrap_or(BLE_RECOVERY_COOLDOWN)
+}
+
+impl ChipTransport {
+    fn commission_light_bounded(
+        &self,
+        request: &MatterCommissionRequest,
+        pairing_context: Option<&rhythm_os::pairing::PairingRequestContext>,
+    ) -> Result<CommissionedDevice> {
+        let _guard = self
+            .commissioning_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Matter commissioning lock poisoned"))?;
+
+        self.prepare_ble_commissioning(request)?;
+
+        let first_attempt_started = Instant::now();
+        match self.commission_light_once(request, pairing_context) {
+            Err(error)
+                if uses_ble_commissioning(request)
+                    && is_recoverable_ble_commissioning_error(&error) =>
+            {
+                if let Err(recovery_error) =
+                    self.recover_ble_commissioning_stack(&error, ble_recovery_cooldown(&error))
+                {
+                    return Err(error.context(format!(
+                        "Matter BLE commissioning failed and CHIP sidecar recovery failed: {recovery_error:#}"
+                    )));
+                }
+
+                // BLE discovery can lose a race against CHIP's fixed scan
+                // window. Retry only quick failures so the second attempt
+                // still fits inside the request-owned deadline.
+                if first_attempt_started.elapsed() > self.ble_auto_retry_first_attempt_budget {
+                    return Err(error.context(
+                        "Matter BLE commissioning failed; reset CHIP sidecar before next attempt",
+                    ));
+                }
+
+                tracing::warn!(
+                    target: "pair",
+                    event = "matter_ble_commission_auto_retry",
+                    node_id = request.node_id,
+                    error = %format!("{error:#}"),
+                    "Matter BLE commissioning failed; reset CHIP sidecar and retrying once"
+                );
+
+                if let Err(prepare_error) = self.prepare_ble_commissioning(request) {
+                    return Err(error.context(format!(
+                        "Matter BLE commissioning failed; reset CHIP sidecar but the BLE stack was not ready for the automatic retry: {prepare_error:#}"
+                    )));
+                }
+
+                match self.commission_light_once(request, pairing_context) {
+                    Ok(device) => Ok(device),
+                    Err(retry_error)
+                        if is_recoverable_ble_commissioning_error(&retry_error) =>
+                    {
+                        match self.recover_ble_commissioning_stack(
+                            &retry_error,
+                            ble_recovery_cooldown(&retry_error),
+                        ) {
+                            Ok(()) => Err(retry_error.context(
+                                "Matter BLE commissioning failed after automatic retry; reset CHIP sidecar before next attempt",
+                            )),
+                            Err(recovery_error) => Err(retry_error.context(format!(
+                                "Matter BLE commissioning failed after automatic retry and CHIP sidecar recovery failed: {recovery_error:#}"
+                            ))),
+                        }
+                    }
+                    Err(retry_error) => Err(
+                        retry_error.context("Matter BLE commissioning failed after automatic retry")
+                    ),
+                }
+            }
+            other => other,
+        }
+    }
+
+    fn recover_light_connection_bounded(
+        &self,
+        node_id: u64,
+        expected_endpoint: u16,
+        pairing_context: Option<&rhythm_os::pairing::PairingRequestContext>,
+    ) -> Result<CommissionedDevice> {
+        let _guard = self
+            .commissioning_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Matter commissioning lock poisoned"))?;
+        if let Some(error) = current_pairing_stop_error(pairing_context) {
+            return Err(error);
+        }
+
+        let probe: Result<ChipRpcProbeLightResponse> = match pairing_context {
+            Some(context) => {
+                self.call_with_pairing_context(ChipRpcRequest::ProbeLight { node_id }, context)
+            }
+            None => self.call(ChipRpcRequest::ProbeLight { node_id }),
+        };
+        let device = match probe {
+            Ok(response) => response.device,
+            Err(error) if is_recoverable_operational_discovery_error(&error) => self
+                .recover_operational_discovery_failure(node_id, &error, pairing_context)?
+                .ok_or_else(|| {
+                    error.context(
+                        "Matter connection recovery reset the controller but did not rediscover the saved node",
+                    )
+                })?,
+            Err(error) => return Err(error),
+        };
+        if let Some(error) = current_pairing_stop_error(pairing_context) {
+            return Err(error);
+        }
+
+        if device.light_endpoint != expected_endpoint {
+            anyhow::bail!(
+                "Matter recovery probe returned endpoint {} instead of expected endpoint {}",
+                device.light_endpoint,
+                expected_endpoint
+            );
+        }
+
+        let targets = [MatterSubscriptionTarget {
+            node_id,
+            endpoint: expected_endpoint,
+        }];
+        let subscription = match pairing_context {
+            Some(context) => self
+                .call_with_pairing_context::<crate::chip_rpc::ChipRpcEmpty>(
+                    ChipRpcRequest::SubscribeOnOff {
+                        targets: targets.to_vec(),
+                        min_interval_secs: DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
+                        max_interval_secs: DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS,
+                    },
+                    context,
+                )
+                .map(|_| ()),
+            None => self.subscribe_on_off(
+                &targets,
+                DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
+                DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS,
+            ),
+        };
+        if let Err(error) = subscription {
+            if is_pairing_stopped(&error) {
+                return Err(error);
+            }
+            tracing::warn!(
+                target: "pair",
+                event = "matter_repeat_pair_subscription_refresh_failed",
+                error = %format!("{error:#}"),
+                "Matter repeat-pair probe succeeded but observed-state subscription refresh will rely on the background retry"
+            );
+        }
+        if let Some(error) = current_pairing_stop_error(pairing_context) {
+            return Err(error);
+        }
+
+        Ok(device)
+    }
 }
 
 impl Drop for ChipTransport {
@@ -1070,81 +1539,15 @@ impl MatterTransport for ChipTransport {
     }
 
     fn commission_light(&self, request: &MatterCommissionRequest) -> Result<CommissionedDevice> {
-        let _guard = self
-            .commissioning_lock
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Matter commissioning lock poisoned"))?;
+        self.commission_light_bounded(request, None)
+    }
 
-        self.prepare_ble_commissioning(request)?;
-
-        let first_attempt_started = Instant::now();
-        match self.commission_light_once(request) {
-            Err(error)
-                if uses_ble_commissioning(request)
-                    && is_recoverable_ble_commissioning_error(&error) =>
-            {
-                if let Err(recovery_error) =
-                    self.recover_ble_commissioning_stack(&error, ble_recovery_cooldown(&error))
-                {
-                    return Err(error.context(format!(
-                        "Matter BLE commissioning failed and CHIP sidecar recovery failed: {:#}",
-                        recovery_error
-                    )));
-                }
-
-                // BLE discovery can lose a race against CHIP's fixed scan
-                // window: the bulb is matched right as the window expires and
-                // the in-flight connect is cancelled (issue #123). The same
-                // request succeeds once the sidecar is reset and BlueZ has
-                // settled, so retry once here instead of making the user do
-                // it — but only when the failed attempt was quick enough that
-                // a full retry still fits the app's pairing-request window.
-                if first_attempt_started.elapsed() > self.ble_auto_retry_first_attempt_budget {
-                    return Err(error.context(
-                        "Matter BLE commissioning failed; reset CHIP sidecar before next attempt",
-                    ));
-                }
-
-                tracing::warn!(
-                    target: "pair",
-                    event = "matter_ble_commission_auto_retry",
-                    node_id = request.node_id,
-                    error = %format!("{:#}", error),
-                    "Matter BLE commissioning failed; reset CHIP sidecar and retrying once"
-                );
-
-                if let Err(prepare_error) = self.prepare_ble_commissioning(request) {
-                    return Err(error.context(format!(
-                        "Matter BLE commissioning failed; reset CHIP sidecar but the BLE stack was not ready for the automatic retry: {:#}",
-                        prepare_error
-                    )));
-                }
-
-                match self.commission_light_once(request) {
-                    Ok(device) => Ok(device),
-                    Err(retry_error)
-                        if is_recoverable_ble_commissioning_error(&retry_error) =>
-                    {
-                        match self.recover_ble_commissioning_stack(
-                            &retry_error,
-                            ble_recovery_cooldown(&retry_error),
-                        ) {
-                            Ok(()) => Err(retry_error.context(
-                                "Matter BLE commissioning failed after automatic retry; reset CHIP sidecar before next attempt",
-                            )),
-                            Err(recovery_error) => Err(retry_error.context(format!(
-                                "Matter BLE commissioning failed after automatic retry and CHIP sidecar recovery failed: {:#}",
-                                recovery_error
-                            ))),
-                        }
-                    }
-                    Err(retry_error) => Err(
-                        retry_error.context("Matter BLE commissioning failed after automatic retry")
-                    ),
-                }
-            }
-            other => other,
-        }
+    fn commission_light_with_context(
+        &self,
+        request: &MatterCommissionRequest,
+        context: &rhythm_os::pairing::PairingRequestContext,
+    ) -> Result<CommissionedDevice> {
+        self.commission_light_bounded(request, Some(context))
     }
 
     fn decommission_device(&self, node_id: u64, force: bool) -> Result<()> {
@@ -1174,50 +1577,16 @@ impl MatterTransport for ChipTransport {
         node_id: u64,
         expected_endpoint: u16,
     ) -> Result<CommissionedDevice> {
-        let _guard = self
-            .commissioning_lock
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Matter commissioning lock poisoned"))?;
+        self.recover_light_connection_bounded(node_id, expected_endpoint, None)
+    }
 
-        let probe: Result<ChipRpcProbeLightResponse> =
-            self.call(ChipRpcRequest::ProbeLight { node_id });
-        let device = match probe {
-            Ok(response) => response.device,
-            Err(error) if is_recoverable_operational_discovery_error(&error) => self
-                .recover_operational_discovery_failure(node_id, &error)?
-                .ok_or_else(|| {
-                    error.context(
-                        "Matter connection recovery reset the controller but did not rediscover the saved node",
-                    )
-                })?,
-            Err(error) => return Err(error),
-        };
-
-        if device.light_endpoint != expected_endpoint {
-            anyhow::bail!(
-                "Matter recovery probe returned endpoint {} instead of expected endpoint {}",
-                device.light_endpoint,
-                expected_endpoint
-            );
-        }
-
-        if let Err(error) = self.subscribe_on_off(
-            &[MatterSubscriptionTarget {
-                node_id,
-                endpoint: expected_endpoint,
-            }],
-            DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
-            DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS,
-        ) {
-            tracing::warn!(
-                target: "pair",
-                event = "matter_repeat_pair_subscription_refresh_failed",
-                error = %format!("{error:#}"),
-                "Matter repeat-pair probe succeeded but observed-state subscription refresh will rely on the background retry"
-            );
-        }
-
-        Ok(device)
+    fn recover_light_connection_with_context(
+        &self,
+        node_id: u64,
+        expected_endpoint: u16,
+        context: &rhythm_os::pairing::PairingRequestContext,
+    ) -> Result<CommissionedDevice> {
+        self.recover_light_connection_bounded(node_id, expected_endpoint, Some(context))
     }
 
     fn set_on_off(&self, node_id: u64, endpoint: u16, on: bool) -> Result<()> {
@@ -3242,6 +3611,156 @@ mod tests {
             ChipRpcRequest::CommissionLight(_)
         ));
 
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn on_network_discovery_timeout_does_not_reset_sidecar_or_enter_ble_cooldown() {
+        let socket_path = temp_socket_path("on-network-route-timeout");
+        let server = spawn_fake_server_multi(socket_path.clone(), 1, |request| {
+            assert!(matches!(
+                request.request,
+                ChipRpcRequest::CommissionLight(_)
+            ));
+            legacy_rpc_error(
+                request.id,
+                "commissioning Matter light: Discovery timed out",
+            )
+        });
+
+        let transport = ChipTransport::for_test(socket_path.clone());
+        let error = transport
+            .commission_light(&on_network_commission_request())
+            .expect_err("missing IPv6 route should surface without controller recovery");
+
+        assert!(format!("{error:#}").contains("Discovery timed out"));
+        assert_eq!(transport.sidecar_health_for_test(), SidecarHealth::Ready);
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(
+            requests[0].request,
+            ChipRpcRequest::CommissionLight(_)
+        ));
+
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn cancelled_pairing_context_interrupts_hanging_commission_rpc() {
+        let socket_path = temp_socket_path("cancelled-commission");
+        let server = spawn_hanging_server(socket_path.clone(), Duration::from_millis(500));
+        let transport = ChipTransport::for_test(socket_path.clone());
+        let context = rhythm_os::pairing::PairingRequestContext::accepted_now();
+        let cancel_context = context.clone();
+        let cancel = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(25));
+            cancel_context.cancel();
+        });
+
+        let started = Instant::now();
+        let error = transport
+            .send_rpc_envelope_with_pairing_context(
+                ChipRpcRequest::CommissionLight(on_network_commission_request()),
+                Some(&context),
+            )
+            .expect_err("cancelled pairing must stop a hanging commissioning RPC");
+
+        assert!(format!("{error:#}").contains("request was cancelled"));
+        assert!(
+            started.elapsed() < Duration::from_millis(350),
+            "cancellation should not wait for the normal commissioning timeout"
+        );
+
+        cancel.join().unwrap();
+        server.join().unwrap();
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn context_bound_commission_reinitializes_uninitialized_controller_once() {
+        let socket_path = temp_socket_path("pairing-recover-incorrect-state");
+        let commission_attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_attempts = commission_attempts.clone();
+        let server = spawn_fake_server_multi(socket_path.clone(), 3, move |request| match &request
+            .request
+        {
+            ChipRpcRequest::CommissionLight(_) => {
+                if observed_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ChipRpcResponseEnvelope::error(
+                        request.id,
+                        "commissioning Matter light: native/chip_bridge.cc:1014: \
+                             CHIP Error 0x00000003: Incorrect state",
+                    )
+                } else {
+                    ChipRpcResponseEnvelope::ok(
+                        request.id,
+                        ChipRpcCommissionLightResponse {
+                            device: commissioned_test_device(100),
+                        },
+                    )
+                }
+            }
+            ChipRpcRequest::InitController(_) => ChipRpcResponseEnvelope::ok(
+                request.id,
+                ChipInitControllerResponse {
+                    fabric_id: "test".to_string(),
+                    operational_fabric_id: 1,
+                    compressed_fabric_id: None,
+                },
+            ),
+            other => panic!("unexpected RPC during pairing recovery test: {other:?}"),
+        });
+
+        let transport = ChipTransport::for_test(socket_path.clone());
+        let context = rhythm_os::pairing::PairingRequestContext::accepted_now();
+        let device = transport
+            .commission_light_with_context(&on_network_commission_request(), &context)
+            .expect("context-bound commissioning should self-heal an uninitialized controller");
+
+        assert_eq!(device.node_id, 100);
+        assert_eq!(commission_attempts.load(Ordering::SeqCst), 2);
+        let requests = server.join().unwrap();
+        let kinds = requests
+            .iter()
+            .map(|request| match request.request {
+                ChipRpcRequest::CommissionLight(_) => "commission_light",
+                ChipRpcRequest::InitController(_) => "init_controller",
+                _ => "other",
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec!["commission_light", "init_controller", "commission_light"]
+        );
+
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn cancelled_pairing_context_interrupts_hanging_repeat_pair_probe() {
+        let socket_path = temp_socket_path("cancelled-repeat-pair-probe");
+        let server = spawn_hanging_server(socket_path.clone(), Duration::from_millis(500));
+        let transport = ChipTransport::for_test(socket_path.clone());
+        let context = rhythm_os::pairing::PairingRequestContext::accepted_now();
+        let cancel_context = context.clone();
+        let cancel = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(25));
+            cancel_context.cancel();
+        });
+
+        let started = Instant::now();
+        let error = transport
+            .recover_light_connection_with_context(42, 1, &context)
+            .expect_err("cancelled repeat-pair recovery must stop its probe RPC");
+
+        assert!(format!("{error:#}").contains("request was cancelled"));
+        assert!(
+            started.elapsed() < Duration::from_millis(350),
+            "repeat-pair cancellation should not wait for the normal probe timeout"
+        );
+
+        cancel.join().unwrap();
+        server.join().unwrap();
         let _ = fs::remove_file(socket_path);
     }
 

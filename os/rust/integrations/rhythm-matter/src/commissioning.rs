@@ -8,7 +8,9 @@ use log::{error, info, warn};
 use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_os::canonical::identity::{HardwareId, HubKey};
 use rhythm_os::hub::HubType;
-use rhythm_os::pairing::{PairedDeviceInfo, PairingSession, PairingStage, PairingStatus};
+use rhythm_os::pairing::{
+    PairedDeviceInfo, PairingRequestContext, PairingSession, PairingStage, PairingStatus,
+};
 use rhythm_os::state::SharedState;
 use serde_json::Value;
 
@@ -156,6 +158,23 @@ pub fn pair_device(
     hub_data: Arc<MatterHubData>,
     request: &MatterPairingParams,
 ) -> Result<PairingSession> {
+    pair_device_with_context(
+        state,
+        transport,
+        hub_data,
+        request,
+        &PairingRequestContext::accepted_now(),
+    )
+}
+
+pub fn pair_device_with_context(
+    state: &SharedState,
+    transport: Arc<dyn MatterTransport>,
+    hub_data: Arc<MatterHubData>,
+    request: &MatterPairingParams,
+    request_context: &PairingRequestContext,
+) -> Result<PairingSession> {
+    ensure_pairing_request_active(request_context)?;
     let recovery_targets = match registered_recovery_targets(
         state,
         &hub_data,
@@ -217,8 +236,13 @@ pub fn pair_device(
             None,
             None,
         );
-        match transport.recover_light_connection(target.node_id, target.endpoint) {
+        match transport.recover_light_connection_with_context(
+            target.node_id,
+            target.endpoint,
+            request_context,
+        ) {
             Ok(device) => {
+                ensure_pairing_request_active(request_context)?;
                 tracing::info!(
                     target: "pair",
                     event = "matter_repeat_pair_connection_recovered",
@@ -235,6 +259,7 @@ pub fn pair_device(
                 );
             }
             Err(error) => {
+                ensure_pairing_request_active(request_context)?;
                 tracing::warn!(
                     target: "pair",
                     event = "matter_repeat_pair_probe_failed",
@@ -249,10 +274,12 @@ pub fn pair_device(
             Err(error) => {
                 return Ok(failed_recovery_session(
                     &error,
+                    request.rendezvous,
                     "Rhythm found this saved Matter device, but cannot recommission it until the appliance Wi-Fi credentials are available.",
                 ));
             }
         };
+        ensure_pairing_request_active(request_context)?;
         let commission_request = request.to_commission_request(target.node_id, wifi_credentials);
         rhythm_os::pairing::emit_pairing_progress(
             state,
@@ -265,15 +292,18 @@ pub fn pair_device(
             None,
         );
 
-        return match transport.commission_light(&commission_request) {
-            Ok(device) => build_success_session(
-                state,
-                &hub_data,
-                device,
-                &request.setup_payload,
-                request.session_id.as_deref(),
-                PairingCompletion::ExistingNodeRecommissioned,
-            ),
+        return match transport.commission_light_with_context(&commission_request, request_context) {
+            Ok(device) => {
+                ensure_pairing_request_active(request_context)?;
+                build_success_session(
+                    state,
+                    &hub_data,
+                    device,
+                    &request.setup_payload,
+                    request.session_id.as_deref(),
+                    PairingCompletion::ExistingNodeRecommissioned,
+                )
+            }
             Err(error) => {
                 tracing::error!(
                     target: "pair",
@@ -283,12 +313,14 @@ pub fn pair_device(
                 );
                 Ok(failed_recovery_session(
                     &error,
+                    request.rendezvous,
                     "Rhythm found this saved Matter device, but could not restore its connection or recommission it. Put the light in Matter pairing mode, keep it powered, and try again.",
                 ))
             }
         };
     }
 
+    ensure_pairing_request_active(request_context)?;
     let wifi_credentials = load_commissioning_wifi_credentials(state)?;
     let node_id = hub_data.reserve_node_id();
     let commission_request = request.to_commission_request(node_id, wifi_credentials);
@@ -303,15 +335,18 @@ pub fn pair_device(
         None,
     );
 
-    match transport.commission_light(&commission_request) {
-        Ok(device) => build_success_session(
-            state,
-            &hub_data,
-            device,
-            &request.setup_payload,
-            request.session_id.as_deref(),
-            PairingCompletion::New,
-        ),
+    match transport.commission_light_with_context(&commission_request, request_context) {
+        Ok(device) => {
+            ensure_pairing_request_active(request_context)?;
+            build_success_session(
+                state,
+                &hub_data,
+                device,
+                &request.setup_payload,
+                request.session_id.as_deref(),
+                PairingCompletion::New,
+            )
+        }
         Err(error) => {
             error!(target: "pair", "Matter commissioning error: {:#}", error);
             Ok(PairingSession {
@@ -319,13 +354,23 @@ pub fn pair_device(
                 status: PairingStatus::Failed,
                 device: None,
                 devices: Vec::new(),
-                error: Some(summarize_commissioning_error(&error)),
+                error: Some(summarize_commissioning_error_for_rendezvous(
+                    &error,
+                    request.rendezvous,
+                )),
                 failure_stage: None,
                 warnings: Vec::new(),
                 details: None,
             })
         }
     }
+}
+
+fn ensure_pairing_request_active(context: &PairingRequestContext) -> Result<()> {
+    if context.is_cancelled() {
+        anyhow::bail!("Matter pairing request was cancelled");
+    }
+    Ok(())
 }
 
 fn registered_recovery_targets(
@@ -358,7 +403,11 @@ fn registered_recovery_targets(
         .collect())
 }
 
-fn failed_recovery_session(error: &anyhow::Error, message: &str) -> PairingSession {
+fn failed_recovery_session(
+    error: &anyhow::Error,
+    rendezvous: MatterCommissioningRendezvous,
+    message: &str,
+) -> PairingSession {
     PairingSession {
         hub_type: "matter".to_string(),
         status: PairingStatus::Failed,
@@ -367,7 +416,7 @@ fn failed_recovery_session(error: &anyhow::Error, message: &str) -> PairingSessi
         error: Some(format!(
             "{} {}",
             message,
-            summarize_commissioning_error(error)
+            summarize_commissioning_error_for_rendezvous(error, rendezvous)
         )),
         failure_stage: None,
         warnings: Vec::new(),
@@ -377,9 +426,34 @@ fn failed_recovery_session(error: &anyhow::Error, message: &str) -> PairingSessi
     }
 }
 
+#[cfg(test)]
 fn summarize_commissioning_error(error: &anyhow::Error) -> String {
+    summarize_commissioning_error_for_rendezvous(error, MatterCommissioningRendezvous::Auto)
+}
+
+fn summarize_commissioning_error_for_rendezvous(
+    error: &anyhow::Error,
+    rendezvous: MatterCommissioningRendezvous,
+) -> String {
     let detail = format!("{:#}", error);
     let lower = detail.to_ascii_lowercase();
+
+    if lower.contains("matter pairing request was cancelled") {
+        return "Matter pairing stopped because the initiating app request ended. Reopen the device's pairing window and try again.".to_string();
+    }
+
+    if lower.contains("matter pairing request exceeded its server deadline") {
+        return "Matter pairing stopped at the server deadline and released its resources. Reopen the device's pairing window and try again.".to_string();
+    }
+
+    if rendezvous == MatterCommissioningRendezvous::OnNetwork
+        && (lower.contains("network unreachable")
+            || lower.contains("os error 0x02000065")
+            || (lower.contains("discovery timed out")
+                && !lower.contains("operational discovery failed")))
+    {
+        return "On-network Matter pairing could not reach the device over local IPv6/IP. Keep its multi-admin pairing window open and verify the Rhythm Box accepts the Thread border router's IPv6 route; Bluetooth proximity or a factory reset will not repair a missing route.".to_string();
+    }
 
     if lower.contains("addressresolve") || lower.contains("operational discovery failed") {
         return "The light joined the Wi-Fi network, but Rhythm could not discover it over mDNS afterwards. Rhythm reset its Matter controller to recover; wait a few seconds and retry pairing without factory-resetting the light.".to_string();
@@ -779,6 +853,7 @@ mod tests {
         commission_error: Mutex<Option<String>>,
         recovery_requests: Mutex<Vec<(u64, u16)>>,
         recovery_error: Mutex<Option<String>>,
+        cancel_during_recovery: Mutex<Option<PairingRequestContext>>,
         subscribe_calls: AtomicUsize,
     }
 
@@ -845,6 +920,9 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((node_id, expected_endpoint));
+            if let Some(context) = self.cancel_during_recovery.lock().unwrap().take() {
+                context.cancel();
+            }
             if let Some(error) = self.recovery_error.lock().unwrap().clone() {
                 anyhow::bail!(error);
             }
@@ -1170,6 +1248,39 @@ mod tests {
         assert!(message.contains("timed out while discovering the bulb"));
     }
 
+    #[test]
+    fn on_network_route_failure_does_not_recommend_ble_recovery() {
+        for detail in [
+            "commissioning Matter light: OS Error 0x02000065: Network unreachable",
+            "commissioning Matter light: Discovery timed out",
+        ] {
+            let message = summarize_commissioning_error_for_rendezvous(
+                &anyhow::anyhow!(detail),
+                MatterCommissioningRendezvous::OnNetwork,
+            );
+
+            assert!(message.contains("local IPv6/IP"));
+            assert!(message.contains("Thread border router's IPv6 route"));
+            assert!(message.contains("Bluetooth proximity"));
+            assert!(!message.contains("keep it close"));
+        }
+    }
+
+    #[test]
+    fn stopped_pairing_reports_terminal_server_ownership() {
+        let cancelled = summarize_commissioning_error_for_rendezvous(
+            &anyhow::anyhow!("Matter pairing request was cancelled"),
+            MatterCommissioningRendezvous::OnNetwork,
+        );
+        assert!(cancelled.contains("initiating app request ended"));
+
+        let deadline = summarize_commissioning_error_for_rendezvous(
+            &anyhow::anyhow!("Matter pairing request exceeded its server deadline"),
+            MatterCommissioningRendezvous::OnNetwork,
+        );
+        assert!(deadline.contains("released its resources"));
+    }
+
     /// Regression for issue #117: operational-discovery timeouts were
     /// summarized with the BLE-discovery message telling the user to
     /// factory-reset the bulb and keep it close — advice that cannot help
@@ -1457,6 +1568,39 @@ mod tests {
         assert_eq!(recovered.id, original_canonical_id);
         assert_eq!(recovered.room_id.as_deref(), Some(room_id.as_str()));
         drop(state_guard);
+
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn cancelled_repeat_pair_recovery_cannot_finalize_device_state() {
+        let (state, path) = state_with_storage("repeat-cancelled");
+        let (hub_data, event_rx) = hub_data();
+        seed_saved_device(&state, &hub_data, 42, &pairing_request().setup_payload);
+        while event_rx.try_recv().is_ok() {}
+        let context = PairingRequestContext::accepted_now();
+        let transport = Arc::new(FakeMatterTransport::default());
+        *transport.cancel_during_recovery.lock().unwrap() = Some(context.clone());
+
+        let error = pair_device_with_context(
+            &state,
+            transport.clone() as Arc<dyn MatterTransport>,
+            hub_data,
+            &pairing_request(),
+            &context,
+        )
+        .expect_err("cancelled recovery must not produce a successful pairing session");
+
+        assert!(error.to_string().contains("request was cancelled"));
+        assert_eq!(
+            transport.recovery_requests.lock().unwrap().as_slice(),
+            &[(42, 2)]
+        );
+        assert!(transport.commission_requests.lock().unwrap().is_empty());
+        assert!(
+            event_rx.try_recv().is_err(),
+            "cancelled recovery must not emit a late device-paired event"
+        );
 
         std::fs::remove_dir_all(path).ok();
     }
