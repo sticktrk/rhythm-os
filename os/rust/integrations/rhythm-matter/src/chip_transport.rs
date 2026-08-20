@@ -279,10 +279,76 @@ impl ChipTransport {
         }
     }
 
+    fn ensure_sidecar_locked_with_pairing_context(
+        &self,
+        context: &rhythm_os::pairing::PairingRequestContext,
+    ) -> Result<()> {
+        if let Some(error) = current_pairing_stop_error(Some(context)) {
+            return Err(error);
+        }
+        if self.initialized.load(Ordering::SeqCst)
+            && self.socket_path.exists()
+            && matches!(
+                self.sidecar_health(),
+                SidecarHealth::Ready | SidecarHealth::BleCooldown
+            )
+        {
+            return Ok(());
+        }
+
+        if self.can_connect().is_err() {
+            self.start_sidecar()?;
+            if let Some(error) = current_pairing_stop_error(Some(context)) {
+                return Err(error);
+            }
+        }
+
+        match self.initialize_controller_with_pairing_context(context) {
+            Ok(()) => Ok(()),
+            Err(first_error)
+                if self.sidecar_config.is_some()
+                    && is_uninitialized_controller_error(&first_error) =>
+            {
+                self.restart_sidecar().with_context(|| {
+                    format!("restarting CHIP sidecar after controller init error: {first_error:#}")
+                })?;
+                if let Some(error) = current_pairing_stop_error(Some(context)) {
+                    return Err(error);
+                }
+                self.initialize_controller_with_pairing_context(context)
+                    .with_context(|| {
+                        format!(
+                            "CHIP controller init retry failed after restarting sidecar: {first_error:#}"
+                        )
+                    })
+            }
+            Err(first_error) => {
+                self.set_sidecar_health(SidecarHealth::Unavailable);
+                Err(first_error)
+            }
+        }
+    }
+
     fn initialize_controller(&self) -> Result<()> {
         let response: ChipInitControllerResponse = self.decode_rpc_response(
             self.send_rpc_envelope(ChipRpcRequest::InitController(self.init_request.clone()))?,
         )?;
+        self.accept_initialized_controller(response)
+    }
+
+    fn initialize_controller_with_pairing_context(
+        &self,
+        context: &rhythm_os::pairing::PairingRequestContext,
+    ) -> Result<()> {
+        let response: ChipInitControllerResponse =
+            self.decode_rpc_response(self.send_rpc_envelope_with_pairing_context(
+                ChipRpcRequest::InitController(self.init_request.clone()),
+                Some(context),
+            )?)?;
+        self.accept_initialized_controller(response)
+    }
+
+    fn accept_initialized_controller(&self, response: ChipInitControllerResponse) -> Result<()> {
         if response.fabric_id != self.init_request.fabric_id {
             anyhow::bail!(
                 "CHIP sidecar initialized unexpected fabric '{}'",
@@ -326,9 +392,32 @@ impl ChipTransport {
         request: ChipRpcRequest,
         context: &rhythm_os::pairing::PairingRequestContext,
     ) -> Result<T> {
-        self.ensure_sidecar()?;
-        match self.send_rpc_envelope_with_pairing_context(request, Some(context)) {
-            Ok(response) => self.decode_rpc_response(response),
+        let result = (|| {
+            {
+                let _lifecycle = self
+                    .sidecar_lifecycle_lock
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("CHIP sidecar lifecycle lock poisoned"))?;
+                self.ensure_sidecar_locked_with_pairing_context(context)?;
+            }
+            let request_generation = self.sidecar_generation.load(Ordering::SeqCst);
+            match self.send_rpc_envelope_with_pairing_context(request.clone(), Some(context)) {
+                Ok(response) => match self.decode_rpc_response::<T>(response) {
+                    Ok(value) => Ok(value),
+                    Err(rpc_error) if is_uninitialized_controller_error(&rpc_error) => self
+                        .recover_uninitialized_controller_with_pairing_context(
+                            request,
+                            rpc_error,
+                            request_generation,
+                            context,
+                        ),
+                    Err(rpc_error) => Err(rpc_error),
+                },
+                Err(error) => Err(error),
+            }
+        })();
+
+        match result {
             Err(error) if is_pairing_stopped(&error) => {
                 match self.terminate_stopped_pairing_sidecar(&error) {
                     Ok(()) => Err(error),
@@ -337,7 +426,7 @@ impl ChipTransport {
                     ))),
                 }
             }
-            Err(error) => Err(error),
+            other => other,
         }
     }
 
@@ -413,6 +502,42 @@ impl ChipTransport {
                     first_error
                 )
             })
+    }
+
+    fn recover_uninitialized_controller_with_pairing_context<T: serde::de::DeserializeOwned>(
+        &self,
+        request: ChipRpcRequest,
+        first_error: anyhow::Error,
+        failed_generation: u64,
+        context: &rhythm_os::pairing::PairingRequestContext,
+    ) -> Result<T> {
+        let _lifecycle = self
+            .sidecar_lifecycle_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("CHIP sidecar lifecycle lock poisoned"))?;
+
+        if let Some(error) = current_pairing_stop_error(Some(context)) {
+            return Err(error);
+        }
+        if self.sidecar_generation.load(Ordering::SeqCst) == failed_generation {
+            self.initialized.store(false, Ordering::SeqCst);
+            self.set_sidecar_health(SidecarHealth::Recovering);
+            if self.sidecar_config.is_some() {
+                self.restart_sidecar().with_context(|| {
+                    format!("restarting CHIP sidecar after stuck-state error: {first_error:#}")
+                })?;
+            }
+        }
+        self.ensure_sidecar_locked_with_pairing_context(context)
+            .with_context(|| {
+                format!("re-initializing CHIP controller after stuck-state error: {first_error:#}")
+            })?;
+        self.decode_rpc_response(
+            self.send_rpc_envelope_with_pairing_context(request, Some(context))?,
+        )
+        .with_context(|| {
+            format!("CHIP RPC retry failed after re-initializing controller: {first_error:#}")
+        })
     }
 
     fn decode_rpc_response<T: serde::de::DeserializeOwned>(
@@ -529,6 +654,11 @@ impl ChipTransport {
                 "CHIP sidecar closed the socket without a response (chipd status: {})",
                 self.chipd_status_hint()
             );
+        }
+        if let Some(deadline) = pairing_stop_deadline {
+            if let Some(error) = pairing_stop_error(pairing_context, deadline) {
+                return Err(error);
+            }
         }
 
         let response: ChipRpcResponseEnvelope =
@@ -705,12 +835,7 @@ impl ChipTransport {
     ) -> Result<CommissionedDevice> {
         let rpc_request = ChipRpcRequest::CommissionLight(request.clone());
         let result: Result<ChipRpcCommissionLightResponse> = match pairing_context {
-            Some(context) => {
-                self.ensure_sidecar()?;
-                self.decode_rpc_response(
-                    self.send_rpc_envelope_with_pairing_context(rpc_request, Some(context))?,
-                )
-            }
+            Some(context) => self.call_with_pairing_context(rpc_request, context),
             None => self.call(rpc_request),
         };
         match result {
@@ -1233,14 +1358,6 @@ impl ChipTransport {
 
         let first_attempt_started = Instant::now();
         match self.commission_light_once(request, pairing_context) {
-            Err(error) if is_pairing_stopped(&error) => {
-                if let Err(recovery_error) = self.terminate_stopped_pairing_sidecar(&error) {
-                    return Err(error.context(format!(
-                        "Matter pairing stopped, but CHIP sidecar termination failed: {recovery_error:#}"
-                    )));
-                }
-                Err(error)
-            }
             Err(error)
                 if uses_ble_commissioning(request)
                     && is_recoverable_ble_commissioning_error(&error) =>
@@ -1278,16 +1395,6 @@ impl ChipTransport {
 
                 match self.commission_light_once(request, pairing_context) {
                     Ok(device) => Ok(device),
-                    Err(retry_error) if is_pairing_stopped(&retry_error) => {
-                        if let Err(recovery_error) =
-                            self.terminate_stopped_pairing_sidecar(&retry_error)
-                        {
-                            return Err(retry_error.context(format!(
-                                "Matter pairing stopped, but CHIP sidecar termination failed: {recovery_error:#}"
-                            )));
-                        }
-                        Err(retry_error)
-                    }
                     Err(retry_error)
                         if is_recoverable_ble_commissioning_error(&retry_error) =>
                     {
@@ -3566,6 +3673,66 @@ mod tests {
 
         cancel.join().unwrap();
         server.join().unwrap();
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn context_bound_commission_reinitializes_uninitialized_controller_once() {
+        let socket_path = temp_socket_path("pairing-recover-incorrect-state");
+        let commission_attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_attempts = commission_attempts.clone();
+        let server = spawn_fake_server_multi(socket_path.clone(), 3, move |request| match &request
+            .request
+        {
+            ChipRpcRequest::CommissionLight(_) => {
+                if observed_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    ChipRpcResponseEnvelope::error(
+                        request.id,
+                        "commissioning Matter light: native/chip_bridge.cc:1014: \
+                             CHIP Error 0x00000003: Incorrect state",
+                    )
+                } else {
+                    ChipRpcResponseEnvelope::ok(
+                        request.id,
+                        ChipRpcCommissionLightResponse {
+                            device: commissioned_test_device(100),
+                        },
+                    )
+                }
+            }
+            ChipRpcRequest::InitController(_) => ChipRpcResponseEnvelope::ok(
+                request.id,
+                ChipInitControllerResponse {
+                    fabric_id: "test".to_string(),
+                    operational_fabric_id: 1,
+                    compressed_fabric_id: None,
+                },
+            ),
+            other => panic!("unexpected RPC during pairing recovery test: {other:?}"),
+        });
+
+        let transport = ChipTransport::for_test(socket_path.clone());
+        let context = rhythm_os::pairing::PairingRequestContext::accepted_now();
+        let device = transport
+            .commission_light_with_context(&on_network_commission_request(), &context)
+            .expect("context-bound commissioning should self-heal an uninitialized controller");
+
+        assert_eq!(device.node_id, 100);
+        assert_eq!(commission_attempts.load(Ordering::SeqCst), 2);
+        let requests = server.join().unwrap();
+        let kinds = requests
+            .iter()
+            .map(|request| match request.request {
+                ChipRpcRequest::CommissionLight(_) => "commission_light",
+                ChipRpcRequest::InitController(_) => "init_controller",
+                _ => "other",
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            kinds,
+            vec!["commission_light", "init_controller", "commission_light"]
+        );
+
         let _ = fs::remove_file(socket_path);
     }
 
