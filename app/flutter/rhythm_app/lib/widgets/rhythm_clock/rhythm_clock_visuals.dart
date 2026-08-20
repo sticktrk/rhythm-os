@@ -3,8 +3,49 @@ import 'package:rhythm_core/rhythm_core.dart' hide Home, Hub, HubType;
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 import '../../api/hybrid_client.dart' show sdkCurveConfigToDto;
+import '../../utils/app_color_temperature.dart';
 import '../solar_clock/solar_clock_exports.dart';
 import 'rhythm_schedule_clock.dart';
+
+/// Fallback mode colors when no profile color can be resolved — warm amber
+/// for Day, warm red for Sleep (never the cool UI accents: the clock's halves
+/// represent light output, and sleep light is warm/dim).
+const Color fallbackDayColor = Color(0xFFF9A825);
+const Color fallbackSleepColor = Color(0xFFE57373);
+
+/// Maps each [RhythmMode] to the dominant color of its active profile, used
+/// to tint the orbital clock's ring, orbs, and summary chips. Shared by the
+/// whole-house Presets/Alarm screens and the room Schedule tab so the same
+/// profile renders the same color everywhere.
+Map<RhythmMode, Color> resolveProfileColors(
+  List<RhythmModeConfig> modeConfigs,
+  List<RhythmCurveConfig> profiles,
+) {
+  final colors = <RhythmMode, Color>{};
+  for (final mc in modeConfigs) {
+    final profile = profiles.cast<RhythmCurveConfig?>().firstWhere(
+          (p) => p!.id == mc.activeProfileId,
+          orElse: () => null,
+        );
+    if (profile == null) continue;
+    colors[mc.mode] = _colorFromProfile(profile);
+  }
+  return colors;
+}
+
+Color _colorFromProfile(RhythmCurveConfig profile) {
+  final curve = profile.curve;
+  if (curve is RhythmConstantCurve && curve.directColor != null) {
+    final rgb = curve.directColor!.rgb;
+    return Color.fromARGB(255, rgb.r, rgb.g, rgb.b);
+  }
+  if (curve is RhythmSuperGaussianCurve && curve.directColor != null) {
+    final rgb = curve.directColor!.rgb;
+    return Color.fromARGB(255, rgb.r, rgb.g, rgb.b);
+  }
+  final midCct = (profile.minColorTemp + profile.maxColorTemp) ~/ 2;
+  return AppColorTemperature.toColor(midCct);
+}
 
 /// Today's solar clock data (sun + twilight times) for a location, or null
 /// when the computation fails. Shared by the alarm editor and the room

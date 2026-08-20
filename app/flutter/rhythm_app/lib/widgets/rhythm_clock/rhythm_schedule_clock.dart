@@ -364,6 +364,8 @@ class _RhythmScheduleClockState extends State<RhythmScheduleClock>
             GestureRecognizerFactoryWithHandlers<_ClockPanGestureRecognizer>(
           () => _ClockPanGestureRecognizer(),
           (recognizer) {
+            recognizer.hitTestHandle = (position) =>
+                _hitTestHandle(position, geometry, handleByMode) != null;
             recognizer.onStart = (details) {
               _handleClockPanStart(
                   details.localPosition, geometry, handleByMode);
@@ -1397,12 +1399,38 @@ class _RhythmClockRingPainter extends CustomPainter {
   }
 }
 
-/// A `PanGestureRecognizer` that refuses to lose the gesture arena. Used
-/// for the orbital clock so the orbs stay draggable even when an ancestor
-/// scroll view tries to claim vertical drags.
+/// A `PanGestureRecognizer` tuned for the orbital clock's gesture-arena
+/// fight with ancestor scroll views.
+///
+/// A pointer that goes DOWN on one of the orbs claims the arena immediately —
+/// before the scroll view can start moving — so a drag can never scroll the
+/// page and rotate the orb at the same time (which made landing on a specific
+/// time nearly impossible). A pointer that goes down anywhere else behaves
+/// like a normal pan and loses to the scroll view, keeping the page
+/// scrollable across the clock face.
 class _ClockPanGestureRecognizer extends PanGestureRecognizer {
+  /// Whether a pointer-down position grabs an orb. Wired by the overlay on
+  /// every build so it always sees the current geometry.
+  bool Function(Offset localPosition)? hitTestHandle;
+  bool _downOnHandle = false;
+
+  @override
+  void addAllowedPointer(PointerDownEvent event) {
+    _downOnHandle = hitTestHandle?.call(event.localPosition) ?? false;
+    super.addAllowedPointer(event);
+    if (_downOnHandle) {
+      resolve(GestureDisposition.accepted);
+    }
+  }
+
   @override
   void rejectGesture(int pointer) {
-    acceptGesture(pointer);
+    // Belt and braces: even if something else wins the arena first, a drag
+    // that started on an orb still takes over.
+    if (_downOnHandle) {
+      acceptGesture(pointer);
+    } else {
+      super.rejectGesture(pointer);
+    }
   }
 }

@@ -509,14 +509,19 @@ class _RoomTimeEditorState extends State<_RoomTimeEditor> {
   RhythmMode _clockMode = RhythmMode.day;
   RhythmClockDragPreview? _preview;
 
-  // Memoized solar data + per-mode curve visuals — the solar/curve math is
-  // native work that must not rerun on every drag-frame rebuild.
+  // Memoized solar data + per-mode colors/curve visuals — the solar/curve
+  // math is native work that must not rerun on every drag-frame rebuild.
   String? _visualsKey;
   SolarClockData? _solarClockData;
+  // Mode colors come from the active lighting profiles (direct color or
+  // midpoint CCT), exactly like the Alarm Schedule screen — a 1800 K sleep
+  // profile renders warm red, never the cool UI accent.
+  Color _dayColor = fallbackDayColor;
+  Color _sleepColor = fallbackSleepColor;
   ModeCurveVisual _dayVisual =
-      const ModeCurveVisual(fallbackColor: _wakeAccent);
+      const ModeCurveVisual(fallbackColor: fallbackDayColor);
   ModeCurveVisual _sleepVisual =
-      const ModeCurveVisual(fallbackColor: _sleepAccent);
+      const ModeCurveVisual(fallbackColor: fallbackSleepColor);
 
   @override
   void didUpdateWidget(covariant _RoomTimeEditor oldWidget) {
@@ -588,6 +593,12 @@ class _RoomTimeEditorState extends State<_RoomTimeEditor> {
   }
 
   void _ensureVisuals(HomeProvider homeProvider, ServerSyncProvider sync) {
+    // Profile colors apply even without a location — the time chips carry
+    // them whether or not the clock can render.
+    final profileColors = resolveProfileColors(sync.modeConfigs, sync.profiles);
+    _dayColor = profileColors[RhythmMode.day] ?? fallbackDayColor;
+    _sleepColor = profileColors[RhythmMode.sleep] ?? fallbackSleepColor;
+
     final home = homeProvider.currentHome;
     final loc = home?.location;
     if (loc == null) {
@@ -612,14 +623,14 @@ class _RoomTimeEditorState extends State<_RoomTimeEditor> {
     if (_solarClockData == null) return;
     _dayVisual = buildProfileCurveVisual(
       profile: dayProfile,
-      fallbackColor: _wakeAccent,
+      fallbackColor: _dayColor,
       latitude: loc.latitude,
       longitude: loc.longitude,
       timezone: tz,
     );
     _sleepVisual = buildProfileCurveVisual(
       profile: sleepProfile,
-      fallbackColor: _sleepAccent,
+      fallbackColor: _sleepColor,
       latitude: loc.latitude,
       longitude: loc.longitude,
       timezone: tz,
@@ -648,7 +659,7 @@ class _RoomTimeEditorState extends State<_RoomTimeEditor> {
                   child: _TimeChip(
                     label: 'Wake',
                     icon: Icons.wb_sunny_rounded,
-                    accent: _wakeAccent,
+                    accent: _dayColor,
                     time: _display(_chipMinutes(RhythmMode.day)),
                     enabled: widget.enabled,
                     earlierKey: const ValueKey('room-schedule-wake-earlier'),
@@ -664,7 +675,7 @@ class _RoomTimeEditorState extends State<_RoomTimeEditor> {
                   child: _TimeChip(
                     label: 'Sleep',
                     icon: Icons.bedtime_rounded,
-                    accent: _sleepAccent,
+                    accent: _sleepColor,
                     time: _display(_chipMinutes(RhythmMode.sleep)),
                     enabled: widget.enabled,
                     earlierKey: const ValueKey('room-schedule-sleep-earlier'),
@@ -704,8 +715,8 @@ class _RoomTimeEditorState extends State<_RoomTimeEditor> {
                   data: data,
                   dayHour: wake / 60.0,
                   sleepHour: sleep / 60.0,
-                  dayColor: _wakeAccent,
-                  sleepColor: _sleepAccent,
+                  dayColor: _dayColor,
+                  sleepColor: _sleepColor,
                   dayVisual: _dayVisual,
                   sleepVisual: _sleepVisual,
                   selectedMode: _clockMode,

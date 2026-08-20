@@ -3,9 +3,9 @@ import 'package:provider/provider.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 import '../../providers/server_sync_provider.dart';
-import '../../utils/app_color_temperature.dart';
 import '../../widgets/automation_section_header.dart';
 import '../../widgets/celestial_segmented_control.dart';
+import '../../widgets/rhythm_clock/rhythm_clock_visuals.dart';
 import '../../widgets/header_close_button.dart';
 import '../../widgets/mode_room_behavior_section.dart';
 import '../../widgets/settings_row.dart';
@@ -387,38 +387,4 @@ class AutomationDetailHeader extends StatelessWidget {
       ),
     );
   }
-}
-
-// ── Profile color resolution (shared with the orbital-clock detail) ─────────
-
-/// Maps each [RhythmMode] to the dominant color of its active profile, used to
-/// tint the orbital clock in the Automatic detail.
-Map<RhythmMode, Color> resolveProfileColors(
-  List<RhythmModeConfig> modeConfigs,
-  List<RhythmCurveConfig> profiles,
-) {
-  final colors = <RhythmMode, Color>{};
-  for (final mc in modeConfigs) {
-    final profile = profiles.cast<RhythmCurveConfig?>().firstWhere(
-          (p) => p!.id == mc.activeProfileId,
-          orElse: () => null,
-        );
-    if (profile == null) continue;
-    colors[mc.mode] = _colorFromProfile(profile);
-  }
-  return colors;
-}
-
-Color _colorFromProfile(RhythmCurveConfig profile) {
-  final curve = profile.curve;
-  if (curve is RhythmConstantCurve && curve.directColor != null) {
-    final rgb = curve.directColor!.rgb;
-    return Color.fromARGB(255, rgb.r, rgb.g, rgb.b);
-  }
-  if (curve is RhythmSuperGaussianCurve && curve.directColor != null) {
-    final rgb = curve.directColor!.rgb;
-    return Color.fromARGB(255, rgb.r, rgb.g, rgb.b);
-  }
-  final midCct = (profile.minColorTemp + profile.maxColorTemp) ~/ 2;
-  return AppColorTemperature.toColor(midCct);
 }
