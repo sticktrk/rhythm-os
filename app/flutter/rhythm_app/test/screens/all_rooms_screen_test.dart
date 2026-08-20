@@ -405,6 +405,26 @@ void main() {
     expect(find.text('Bedroom').hitTestable(), findsOneWidget);
   });
 
+  testWidgets('room cards stay alphabetical in normal page presentation',
+      (tester) async {
+    final harness = await _pumpAllRooms(
+      tester,
+      rooms: const [_room1, _bedroom, _garage],
+    );
+    harness.roomPageProvider.reconcileRooms(
+      const [_room1, _bedroom, _garage],
+    );
+    harness.roomPageProvider.reorderInPage(_room1.id, 0, 0);
+    await tester.pump();
+
+    final bedroom = tester.getRect(_roomCardContainer(_bedroom.id));
+    final garage = tester.getRect(_roomCardContainer(_garage.id));
+    final kitchen = tester.getRect(_roomCardContainer(_room1.id));
+
+    expect(bedroom.top, lessThan(garage.top));
+    expect(garage.top, lessThan(kitchen.top));
+  });
+
   testWidgets(
       'global actions target only adaptive-on nodes and collapse child bulbs',
       (tester) async {

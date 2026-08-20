@@ -234,7 +234,11 @@ class RoomPageProvider extends ChangeNotifier {
     return 0;
   }
 
-  /// Get rooms for a specific page in their stored order.
+  /// Get rooms for a specific page.
+  ///
+  /// Normal presentation is alphabetical within each swipeable page. Edit mode
+  /// keeps the stored order so drag targets remain stable while page membership
+  /// and positions are being changed.
   List<RoomDto> getRoomsForPage(int pageIndex, List<RoomDto> allRooms) {
     final roomMap = {for (final r in allRooms) r.id: r};
 
@@ -242,8 +246,7 @@ class RoomPageProvider extends ChangeNotifier {
     // reconciled into explicit pages.
     if (_pages.isEmpty) {
       if (pageIndex != 0) return [];
-      final fallback = List<RoomDto>.from(allRooms)
-        ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+      final fallback = List<RoomDto>.from(allRooms)..sort(_compareRoomsByName);
       return fallback;
     }
 
@@ -252,6 +255,9 @@ class RoomPageProvider extends ChangeNotifier {
       for (final id in _pages[pageIndex]) {
         final room = roomMap[id];
         if (room != null) ordered.add(room);
+      }
+      if (!_editMode) {
+        ordered.sort(_compareRoomsByName);
       }
       return ordered;
     }
@@ -471,6 +477,14 @@ class RoomPageProvider extends ChangeNotifier {
   static String _roomSignature(List<RoomDto> rooms) {
     final ids = rooms.map((room) => room.id).toList()..sort();
     return ids.join('|');
+  }
+
+  static int _compareRoomsByName(RoomDto left, RoomDto right) {
+    final folded = left.name.toLowerCase().compareTo(right.name.toLowerCase());
+    if (folded != 0) return folded;
+    final exact = left.name.compareTo(right.name);
+    if (exact != 0) return exact;
+    return left.id.compareTo(right.id);
   }
 
   static String _hubFingerprint(Hub hub) {
