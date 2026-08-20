@@ -12,6 +12,7 @@ import '../../providers/home_provider.dart';
 import '../../providers/server_sync_provider.dart';
 import '../../providers/subscription_provider.dart';
 import '../../widgets/info_tooltip.dart';
+import '../../widgets/mode_summary_chip.dart';
 import '../../widgets/plan_tier_modal.dart';
 import '../../widgets/rhythm_clock/rhythm_clock_visuals.dart';
 import '../../widgets/rhythm_clock/rhythm_schedule_clock.dart';
@@ -1313,49 +1314,20 @@ class _DefaultTransitionEditorScreenState
       valueLine = timeText ?? triggerLabel;
     }
 
-    return Container(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
-      decoration: BoxDecoration(
-        color: modeColor.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: modeColor.withValues(alpha: 0.18)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Row(
-            children: [
-              Icon(_modeIcon(mode), size: 14, color: modeColor),
-              const SizedBox(width: 6),
-              Flexible(
-                child: Text(
-                  '${_modeLabel(mode)} Start',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: modeColor,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.4,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 4),
-          Text(
-            valueLine,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: TextStyle(
-              color: CelestialColors.textPrimary.withValues(alpha: 0.88),
-              fontSize: 12.5,
-              fontWeight: FontWeight.w600,
-              letterSpacing: 0.1,
-            ),
-          ),
-        ],
+    return ModeSummaryChip(
+      icon: _modeIcon(mode),
+      label: '${_modeLabel(mode)} Start',
+      accent: modeColor,
+      child: Text(
+        valueLine,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          color: CelestialColors.textPrimary.withValues(alpha: 0.88),
+          fontSize: 12.5,
+          fontWeight: FontWeight.w600,
+          letterSpacing: 0.1,
+        ),
       ),
     );
   }

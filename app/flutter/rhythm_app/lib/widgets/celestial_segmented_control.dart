@@ -132,6 +132,7 @@ class CelestialSegmentedControl<T> extends StatelessWidget {
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 250),
               curve: Curves.easeOut,
+              constraints: const BoxConstraints(minHeight: 44),
               padding: EdgeInsets.symmetric(vertical: compact ? 8 : 11),
               decoration: BoxDecoration(
                 borderRadius: BorderRadius.circular(compact ? 8 : 9),

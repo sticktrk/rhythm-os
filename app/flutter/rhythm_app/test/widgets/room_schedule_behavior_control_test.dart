@@ -242,6 +242,9 @@ void main() {
 
   testWidgets('Schedule surface emits a typed privacy-safe preset event',
       (tester) async {
+    await tester.binding.setSurfaceSize(const Size(390, 700));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
     final analyticsBackend = CapturingAnalyticsBackend();
     await analyticsBackend.initialize();
     BackendProvider.setInstanceForTesting(
@@ -273,23 +276,28 @@ void main() {
         value: sync,
         child: const MaterialApp(
           home: Scaffold(
-            body: RoomScheduleBehaviorControl(
+            body: RoomScheduleBehaviorSegments(
               roomId: 'room-1',
-              foregroundColor: Colors.white,
-              keyPrefix: 'room-schedule-presets',
-              analyticsSource: 'room_schedule_tab',
             ),
           ),
         ),
       ),
     );
 
-    final day = find.byKey(
-      const ValueKey('room-schedule-presets-day-room-1'),
+    final dayAuto = find.byKey(
+      const ValueKey('room-schedule-presets-day-automatic-room-1'),
     );
-    tester
-        .widget<PopupMenuButton<RoomScheduleBehavior>>(day)
-        .onSelected!(RoomScheduleBehavior.standby);
+    final dayLowGlow = find.byKey(
+      const ValueKey('room-schedule-presets-day-standby-room-1'),
+    );
+    final sleepLowGlow = find.byKey(
+      const ValueKey('room-schedule-presets-night-standby-room-1'),
+    );
+    expect(tester.getSize(dayAuto).height, greaterThanOrEqualTo(44));
+    expect(tester.getSize(dayLowGlow).height, greaterThanOrEqualTo(44));
+    expect(tester.getSize(sleepLowGlow).height, greaterThanOrEqualTo(44));
+
+    await tester.tap(dayLowGlow);
     await tester.pump();
 
     final event = analyticsBackend.events.singleWhere(
@@ -297,7 +305,7 @@ void main() {
     );
     expect(event.properties['journey_id'], startsWith('room-schedule-preset-'));
     expect(event.properties, containsPair('attempt_number', 1));
-    expect(event.properties, containsPair('input_method', 'popup_menu'));
+    expect(event.properties, containsPair('input_method', 'segment'));
     expect(event.properties, containsPair('mode', 'wake'));
     expect(event.properties, containsPair('behavior', 'standby'));
     expect(

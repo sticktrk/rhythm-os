@@ -324,6 +324,7 @@ class RoomScheduleBehaviorSegments extends StatelessWidget {
               accent: const Color(0xFFF9A825),
               state: defaults.$1,
               enabled: enabled,
+              keyPrefix: keyPrefix,
               analyticsSource: analyticsSource,
             ),
             const SizedBox(height: 12),
@@ -336,6 +337,7 @@ class RoomScheduleBehaviorSegments extends StatelessWidget {
               accent: const Color(0xFF7C83FF),
               state: defaults.$2,
               enabled: enabled,
+              keyPrefix: keyPrefix,
               analyticsSource: analyticsSource,
             ),
           ],
@@ -355,6 +357,7 @@ class _BehaviorSegmentRow extends StatelessWidget {
     required this.accent,
     required this.state,
     required this.enabled,
+    required this.keyPrefix,
     required this.analyticsSource,
   });
 
@@ -365,6 +368,7 @@ class _BehaviorSegmentRow extends StatelessWidget {
   final Color accent;
   final String? state;
   final bool enabled;
+  final String keyPrefix;
   final String analyticsSource;
 
   @override
@@ -408,6 +412,10 @@ class _BehaviorSegmentRow extends StatelessWidget {
                 value: option,
                 label: roomScheduleBehaviorLabel(option),
                 accent: accent,
+                key: ValueKey(
+                  '$keyPrefix-${mode == RhythmMode.day ? 'day' : 'night'}-'
+                  '${option.name}-$roomId',
+                ),
                 semanticLabel: '$title ${roomScheduleBehaviorLabel(option)}',
               ),
           ],
