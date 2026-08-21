@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -8,8 +9,8 @@ import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmMode;
 
 import '../solar_clock/solar_clock_exports.dart';
 
-/// A draggable schedule point the orb can snap to — a solar event (sunrise,
-/// civil dusk, …) with its resolved hour for the current day and location.
+/// A schedule point the orb can pin to — a solar event (sunrise, civil dusk,
+/// …) with its resolved hour for the current day and location.
 class TriggerAnchor {
   final String event;
   final String label;
@@ -137,13 +138,20 @@ List<TriggerAnchor> solarAnchorsForMode(RhythmMode mode, SolarClockData data) {
   ];
 }
 
-/// The interactive orbital schedule editor extracted from the Alarm Schedule
-/// screen: the 24-hour rhythm ring painted from each mode's lighting curve,
-/// two draggable Day/Sleep orbs with solar-anchor snapping, twilight anchor
-/// ticks, and the breathing/flow animations. The whole-house alarm editor and
-/// the per-room Schedule tab render the exact same widget; only what a commit
-/// *means* differs (solar/scheduled trigger vs. fixed room times), which the
-/// host decides in [onHourCommitted].
+/// The interactive orbital schedule editor shared by the whole-house Alarm
+/// Schedule screen and the per-room Schedule tab: the 24-hour rhythm ring
+/// painted from each mode's lighting curve, two draggable Day/Sleep orbs, and
+/// the solar marker ladder. Only what a commit *means* differs between hosts
+/// (solar/scheduled trigger vs. fixed room times), decided in
+/// [onHourCommitted].
+///
+/// Markers are first-class targets: dragging near one snaps onto it, and
+/// **tapping a marker pins the selected orb to it exactly** — no drag
+/// precision needed. The pinned marker renders with a filled label pill.
+///
+/// Performance: the widget is fully static at rest — no animation tickers,
+/// no repaints. During a drag it repaints a single-pass ring and a cached
+/// label ladder (no blur filters, no per-frame text layout).
 class RhythmScheduleClock extends StatefulWidget {
   const RhythmScheduleClock({
     super.key,
@@ -187,18 +195,19 @@ class RhythmScheduleClock extends StatefulWidget {
   final RhythmMode selectedMode;
   final ValueChanged<RhythmMode> onModeSelected;
 
-  /// Fired when a drag ends: the final hour (already ratcheted to
-  /// [dragStepHours]) and the solar anchor it snapped onto, if any.
+  /// Fired when a drag ends or a marker is tapped: the final hour and the
+  /// solar anchor it snapped/pinned onto, if any.
   final void Function(RhythmMode mode, double hour, TriggerAnchor? snapped)
       onHourCommitted;
 
-  /// Solar events the orb snaps to while dragging. Empty lists disable
-  /// snapping for that mode.
+  /// Solar events the orb snaps to while dragging and pins to on tap. Empty
+  /// lists disable both for that mode.
   final List<TriggerAnchor> dayAnchors;
   final List<TriggerAnchor> sleepAnchors;
 
   /// The solar event a mode is currently bound to, when the host's trigger is
-  /// solar — renders as the active pulsing anchor dot. Null for fixed times.
+  /// solar — renders as the pinned marker. Hosts with fixed times leave these
+  /// null; a handle sitting exactly on a marker still renders pinned.
   final String? activeDayEvent;
   final String? activeSleepEvent;
 
@@ -219,43 +228,35 @@ class RhythmScheduleClock extends StatefulWidget {
   State<RhythmScheduleClock> createState() => _RhythmScheduleClockState();
 }
 
-class _RhythmScheduleClockState extends State<RhythmScheduleClock>
-    with TickerProviderStateMixin {
-  late final AnimationController _breatheController;
-  late final Animation<double> _breatheAnimation;
-  late final AnimationController _flowController;
-  late final Animation<double> _flowAnimation;
+class _RhythmScheduleClockState extends State<RhythmScheduleClock> {
+  /// A committed hour within one minute of a marker renders as pinned.
+  static const double _pinEpsilonHours = 1.0 / 60.0;
+
+  /// Tap radius around a marker's tick on the ring.
+  static const double _anchorTapRadius = 30.0;
 
   RhythmMode? _dragMode;
+
+  /// Whether the current gesture actually changed the hour. A press-and-lift
+  /// on an orb is a selection, not an edit — it must not commit (on the
+  /// alarm that would rewrite a solar trigger as a fixed time).
+  bool _dragMoved = false;
+  double _gestureStartHour = 0.0;
   double? _dragPreviewHour;
   TriggerAnchor? _proximateAnchor;
   double _anchorProximity = 0.0;
   final Map<RhythmMode, double> _dragHours = {};
 
-  @override
-  void initState() {
-    super.initState();
-    _breatheController = AnimationController(
-      duration: const Duration(milliseconds: 3500),
-      vsync: this,
-    )..repeat(reverse: true);
-    _breatheAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _breatheController, curve: Curves.easeInOut),
-    );
-    _flowController = AnimationController(
-      duration: const Duration(milliseconds: 2800),
-      vsync: this,
-    )..repeat();
-    _flowAnimation = CurvedAnimation(
-      parent: _flowController,
-      curve: Curves.easeInOut,
-    );
-  }
+  /// Laid-out label painters, keyed by text + style bucket. Text layout is
+  /// the most expensive part of painting the ladder; labels are stable, so
+  /// they are laid out exactly once.
+  final Map<String, TextPainter> _labelCache = {};
 
   @override
   void dispose() {
-    _breatheController.dispose();
-    _flowController.dispose();
+    for (final painter in _labelCache.values) {
+      painter.dispose();
+    }
     super.dispose();
   }
 
@@ -294,6 +295,21 @@ class _RhythmScheduleClockState extends State<RhythmScheduleClock>
   String? _activeEventForMode(RhythmMode mode) =>
       mode == RhythmMode.day ? widget.activeDayEvent : widget.activeSleepEvent;
 
+  /// The marker this mode is pinned to: the host's solar trigger when it has
+  /// one, otherwise any marker the committed hour sits exactly on (fixed-time
+  /// hosts pin by value).
+  String? _pinnedEventForMode(RhythmMode mode) {
+    final declared = _activeEventForMode(mode);
+    if (declared != null) return declared;
+    final hour = _hourForMode(mode);
+    for (final anchor in _anchorsForMode(mode)) {
+      if ((hour - anchor.hour).abs() <= _pinEpsilonHours) {
+        return anchor.event;
+      }
+    }
+    return null;
+  }
+
   String _fmtTime(double h) {
     return SolarUtils.formatHour(
       h,
@@ -304,27 +320,22 @@ class _RhythmScheduleClockState extends State<RhythmScheduleClock>
   @override
   Widget build(BuildContext context) {
     final use24 = MediaQuery.alwaysUse24HourFormatOf(context);
-    final clock = AnimatedBuilder(
-      animation: Listenable.merge([_flowAnimation, _breatheAnimation]),
-      builder: (context, _) {
-        return SizedBox.expand(
-          child: SolarClock(
-            data: widget.data,
-            use24: use24,
-            showUpperArc: false,
-            showEventMarkers: false,
-            showHourLabels: false,
-            showLowerArc: false,
-            horizonFactor: 0.58,
-            radiusWidthFactor: 0.35,
-            radiusHeightFactor: 0.92,
-            underlayBuilder: (context, geometry) =>
-                _buildClockRing(geometry: geometry, use24: use24),
-            overlayBuilder: (context, geometry) =>
-                _buildClockOverlay(geometry: geometry),
-          ),
-        );
-      },
+    final clock = SizedBox.expand(
+      child: SolarClock(
+        data: widget.data,
+        use24: use24,
+        showUpperArc: false,
+        showEventMarkers: false,
+        showHourLabels: false,
+        showLowerArc: false,
+        horizonFactor: 0.58,
+        radiusWidthFactor: 0.35,
+        radiusHeightFactor: 0.92,
+        underlayBuilder: (context, geometry) =>
+            _buildClockRing(geometry: geometry, use24: use24),
+        overlayBuilder: (context, geometry) =>
+            _buildClockOverlay(geometry: geometry),
+      ),
     );
     if (widget.enabled) return clock;
     return IgnorePointer(
@@ -336,15 +347,18 @@ class _RhythmScheduleClockState extends State<RhythmScheduleClock>
     required SolarClockGeometry geometry,
     required bool use24,
   }) {
-    return CustomPaint(
-      painter: _RhythmClockRingPainter(
-        geometry: geometry,
-        dayStartHour: _displayHourForMode(RhythmMode.day),
-        sleepStartHour: _displayHourForMode(RhythmMode.sleep),
-        dayVisual: widget.dayVisual,
-        sleepVisual: widget.sleepVisual,
-        selectedMode: _dragMode ?? widget.selectedMode,
-        use24: use24,
+    return RepaintBoundary(
+      child: CustomPaint(
+        painter: _RhythmClockRingPainter(
+          geometry: geometry,
+          dayStartHour: _displayHourForMode(RhythmMode.day),
+          sleepStartHour: _displayHourForMode(RhythmMode.sleep),
+          dayVisual: widget.dayVisual,
+          sleepVisual: widget.sleepVisual,
+          selectedMode: _dragMode ?? widget.selectedMode,
+          use24: use24,
+          labelCache: _labelCache,
+        ),
       ),
     );
   }
@@ -352,11 +366,12 @@ class _RhythmScheduleClockState extends State<RhythmScheduleClock>
   Widget _buildClockOverlay({required SolarClockGeometry geometry}) {
     final handles = _handleSpecs();
     final handleByMode = {for (final handle in handles) handle.mode: handle};
+    final anchorMode = _dragMode ?? widget.selectedMode;
+    final anchorModeColor = _colorForMode(anchorMode);
+    final anchorBase = anchorMode == RhythmMode.day
+        ? SolarClockData.dawnColor
+        : SolarClockData.duskColor;
 
-    // Use a `RawGestureDetector` with an overriding pan recognizer so the
-    // orbit drag always wins the gesture arena. Without this, once an
-    // ancestor scroll view starts competing for vertical pans, the orbs
-    // become un-draggable.
     return RawGestureDetector(
       behavior: HitTestBehavior.translucent,
       gestures: <Type, GestureRecognizerFactory>{
@@ -393,16 +408,37 @@ class _RhythmScheduleClockState extends State<RhythmScheduleClock>
         clipBehavior: Clip.none,
         children: [
           Positioned.fill(
-            child: CustomPaint(
-              painter: _ClockHandlesPainter(
-                geometry: geometry,
-                handles: handles,
-                selectedMode: widget.selectedMode,
-                flowProgress: _flowAnimation.value,
+            child: IgnorePointer(
+              child: RepaintBoundary(
+                child: CustomPaint(
+                  painter: _ClockSolarAnchorPainter(
+                    geometry: geometry,
+                    anchors: _anchorsForMode(anchorMode),
+                    accentColor: Color.lerp(anchorBase, anchorModeColor, 0.45)!,
+                    pinnedEvent: _pinnedEventForMode(anchorMode),
+                    proximateAnchor: _proximateAnchor,
+                    anchorProximity: _anchorProximity,
+                    handleHour: _displayHourForMode(anchorMode),
+                    handleWidth:
+                        anchorMode == widget.selectedMode ? 70.0 : 62.0,
+                    isDragging: _dragMode != null,
+                    labelCache: _labelCache,
+                  ),
+                ),
               ),
             ),
           ),
-          ..._buildTwilightAnchorIndicators(geometry: geometry),
+          Positioned.fill(
+            child: IgnorePointer(
+              child: CustomPaint(
+                painter: _ClockHandlesPainter(
+                  geometry: geometry,
+                  handles: handles,
+                  selectedMode: widget.selectedMode,
+                ),
+              ),
+            ),
+          ),
           for (final handle in handles)
             _buildPositionedHandle(handle: handle, geometry: geometry),
         ],
@@ -431,96 +467,6 @@ class _RhythmScheduleClockState extends State<RhythmScheduleClock>
     );
   }
 
-  List<Widget> _buildTwilightAnchorIndicators({
-    required SolarClockGeometry geometry,
-  }) {
-    final mode = _dragMode ?? widget.selectedMode;
-    final isDragging = _dragMode != null;
-    final modeColor = _colorForMode(mode);
-    final isDawn = mode == RhythmMode.day;
-    final baseColor =
-        isDawn ? SolarClockData.dawnColor : SolarClockData.duskColor;
-    final anchors = _anchorsForMode(mode);
-    final handleHour = _displayHourForMode(mode);
-    final activeSolarEvent = _activeEventForMode(mode);
-
-    final widgets = <Widget>[
-      Positioned.fill(
-        child: IgnorePointer(
-          child: CustomPaint(
-            painter: _ClockSolarAnchorPainter(
-              geometry: geometry,
-              anchors: anchors,
-              accentColor: Color.lerp(baseColor, modeColor, 0.45)!,
-              activeEvent: activeSolarEvent,
-              proximateAnchor: _proximateAnchor,
-              anchorProximity: _anchorProximity,
-              handleHour: handleHour,
-              handleWidth: mode == widget.selectedMode ? 70.0 : 62.0,
-              dragHour: _dragPreviewHour,
-              pulse: _breatheAnimation.value,
-              isDragging: isDragging,
-            ),
-          ),
-        ),
-      ),
-    ];
-
-    for (final anchor in anchors) {
-      final isProximate = isDragging && _proximateAnchor?.event == anchor.event;
-      final isActive = !isDragging && activeSolarEvent == anchor.event;
-      final proximity = isProximate ? _anchorProximity : 0.0;
-
-      if (!isDragging && !isActive) continue;
-
-      final pos = geometry.positionForHour(anchor.hour);
-
-      // Dot sizing: active pulses gently, dragging scales with proximity
-      final breathe = _breatheAnimation.value;
-      final dotSize = isActive ? 7.0 + breathe * 1.5 : 4.0 + proximity * 7.0;
-      final dotAlpha = isActive ? 0.65 : 0.2 + proximity * 0.8;
-      final glowRadius = isActive ? 6.0 + breathe * 3.0 : proximity * 16.0;
-      final effectiveColor =
-          isActive ? modeColor : Color.lerp(baseColor, modeColor, proximity)!;
-
-      final totalSize = dotSize + glowRadius * 2;
-      widgets.add(
-        Positioned(
-          left: pos.dx - totalSize / 2,
-          top: pos.dy - totalSize / 2,
-          child: IgnorePointer(
-            child: SizedBox(
-              width: totalSize,
-              height: totalSize,
-              child: Center(
-                child: Container(
-                  width: dotSize,
-                  height: dotSize,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: effectiveColor.withValues(alpha: dotAlpha),
-                    boxShadow: [
-                      if (glowRadius > 0)
-                        BoxShadow(
-                          color: effectiveColor.withValues(
-                            alpha: dotAlpha * 0.5,
-                          ),
-                          blurRadius: glowRadius,
-                          spreadRadius: 1,
-                        ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      );
-    }
-
-    return widgets;
-  }
-
   List<_TransitionHandleSpec> _handleSpecs() {
     return [
       for (final mode in [RhythmMode.day, RhythmMode.sleep])
@@ -538,10 +484,38 @@ class _RhythmScheduleClockState extends State<RhythmScheduleClock>
     Map<RhythmMode, _TransitionHandleSpec> handleByMode,
   ) {
     final mode = _hitTestHandle(position, geometry, handleByMode);
-    if (mode != null && mode != widget.selectedMode) {
-      HapticFeedback.selectionClick();
-      widget.onModeSelected(mode);
+    if (mode != null) {
+      if (mode != widget.selectedMode) {
+        HapticFeedback.selectionClick();
+        widget.onModeSelected(mode);
+      }
+      return;
     }
+
+    // Tap a marker to pin the selected orb to it exactly.
+    final anchor = _hitTestAnchor(position, geometry);
+    if (anchor != null &&
+        _isHourAllowedForMode(widget.selectedMode, anchor.hour)) {
+      HapticFeedback.mediumImpact();
+      widget.onHourCommitted(widget.selectedMode, anchor.hour, anchor);
+    }
+  }
+
+  TriggerAnchor? _hitTestAnchor(Offset position, SolarClockGeometry geometry) {
+    TriggerAnchor? nearest;
+    var nearestDistance = double.infinity;
+    for (final anchor in _anchorsForMode(widget.selectedMode)) {
+      final tick = geometry.positionForHour(anchor.hour);
+      final distance = (position - tick).distance;
+      if (distance < nearestDistance) {
+        nearestDistance = distance;
+        nearest = anchor;
+      }
+    }
+    if (nearest != null && nearestDistance <= _anchorTapRadius) {
+      return nearest;
+    }
+    return null;
   }
 
   void _handleClockPanStart(
@@ -555,6 +529,8 @@ class _RhythmScheduleClockState extends State<RhythmScheduleClock>
     final initialHour = _hourForMode(mode);
     setState(() {
       _dragMode = mode;
+      _dragMoved = false;
+      _gestureStartHour = initialHour;
       _dragPreviewHour = initialHour;
       _computeDragProximity(mode, initialHour);
     });
@@ -581,10 +557,13 @@ class _RhythmScheduleClockState extends State<RhythmScheduleClock>
 
     final previousProximate = _proximateAnchor;
     final previousDraggedHour = _dragHours[mode];
-    final stepChanged = previousDraggedHour == null ||
-        (draggedHour - previousDraggedHour).abs() > 0.0001;
+    final referenceHour = previousDraggedHour ?? _gestureStartHour;
+    final stepChanged = (draggedHour - referenceHour).abs() > 0.0001;
+
+    if (!stepChanged && _proximateAnchor == previousProximate) return;
 
     setState(() {
+      if (stepChanged) _dragMoved = true;
       _dragPreviewHour = displayHour;
       _dragHours[mode] = draggedHour;
       _computeDragProximity(mode, draggedHour);
@@ -604,6 +583,21 @@ class _RhythmScheduleClockState extends State<RhythmScheduleClock>
   void _handleClockPanEnd() {
     final mode = _dragMode;
     if (mode == null) return;
+
+    // A press-and-lift that never moved the hour is a selection, not an
+    // edit — clear the drag state and commit nothing.
+    if (!_dragMoved) {
+      setState(() {
+        _dragMode = null;
+        _dragPreviewHour = null;
+        _proximateAnchor = null;
+        _anchorProximity = 0.0;
+        _dragHours.remove(mode);
+      });
+      widget.onDragPreview?.call(null);
+      return;
+    }
+
     final finalHour = _dragPreviewHour ?? _hourForMode(mode);
     final snappedAnchor = _snappedAnchorForMode(mode, finalHour);
 
@@ -749,6 +743,21 @@ class _TransitionHandleSpec {
   });
 }
 
+/// Returns a laid-out label painter from [cache], building it once. The key
+/// must uniquely describe both the text and its style.
+TextPainter _cachedLabel(
+  Map<String, TextPainter> cache,
+  String key,
+  TextSpan Function() build,
+) {
+  return cache.putIfAbsent(key, () {
+    return TextPainter(
+      text: build(),
+      textDirection: TextDirection.ltr,
+    )..layout();
+  });
+}
+
 class _ClockModeOrb extends StatelessWidget {
   final RhythmMode mode;
   final Color color;
@@ -821,13 +830,11 @@ class _ClockHandlesPainter extends CustomPainter {
   final SolarClockGeometry geometry;
   final List<_TransitionHandleSpec> handles;
   final RhythmMode selectedMode;
-  final double flowProgress;
 
   const _ClockHandlesPainter({
     required this.geometry,
     required this.handles,
     required this.selectedMode,
-    required this.flowProgress,
   });
 
   @override
@@ -852,37 +859,38 @@ class _ClockHandlesPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _ClockHandlesPainter oldDelegate) {
     return geometry != oldDelegate.geometry ||
-        handles != oldDelegate.handles ||
-        selectedMode != oldDelegate.selectedMode ||
-        flowProgress != oldDelegate.flowProgress;
+        !listEquals(handles, oldDelegate.handles) ||
+        selectedMode != oldDelegate.selectedMode;
   }
 }
 
+/// The solar marker ladder: a tick on the ring per marker, a leader line to
+/// its label, a filled pill on the pinned marker, and proximity emphasis
+/// while an orb is dragged nearby. Labels come pre-laid-out from the shared
+/// cache — this painter performs no text layout and no blur filters.
 class _ClockSolarAnchorPainter extends CustomPainter {
   final SolarClockGeometry geometry;
   final List<TriggerAnchor> anchors;
   final Color accentColor;
-  final String? activeEvent;
+  final String? pinnedEvent;
   final TriggerAnchor? proximateAnchor;
   final double anchorProximity;
   final double handleHour;
   final double handleWidth;
-  final double? dragHour;
-  final double pulse;
   final bool isDragging;
+  final Map<String, TextPainter> labelCache;
 
   const _ClockSolarAnchorPainter({
     required this.geometry,
     required this.anchors,
     required this.accentColor,
-    required this.activeEvent,
+    required this.pinnedEvent,
     required this.proximateAnchor,
     required this.anchorProximity,
     required this.handleHour,
     required this.handleWidth,
-    required this.dragHour,
-    required this.pulse,
     required this.isDragging,
+    required this.labelCache,
   });
 
   @override
@@ -890,6 +898,7 @@ class _ClockSolarAnchorPainter extends CustomPainter {
     if (anchors.isEmpty) return;
 
     final layouts = <_ClockSolarAnchorLayout>[];
+    final tickColor = Color.lerp(accentColor, Colors.white, 0.20)!;
 
     for (final anchor in anchors) {
       final anchorPoint = geometry.positionForHour(anchor.hour);
@@ -898,43 +907,12 @@ class _ClockSolarAnchorPainter extends CustomPainter {
       if (radialDistance == 0) continue;
 
       final normal = radial / radialDistance;
-      final isActive = !isDragging && activeEvent == anchor.event;
+      final isPinned = !isDragging && pinnedEvent == anchor.event;
       final isProximate = isDragging && proximateAnchor?.event == anchor.event;
-      final dragFocus = isDragging && dragHour != null
-          ? (1.0 - (dragHour! - anchor.hour).abs() / 1.35).clamp(0.0, 1.0)
-          : 0.0;
-      final emphasis = isActive
-          ? 1.0
-          : math.max(
-              isProximate ? anchorProximity : 0.0,
-              dragFocus * 0.92,
-            );
-      final zoom = 1.0 + emphasis * (0.75 + pulse * 0.35);
-      final tickExtent = 9.0 + zoom * 4.2;
-      final strokeWidth = 2.6 + emphasis * 2.0;
-      final tickColor = Color.lerp(
-        accentColor,
-        Colors.white,
-        0.14 + emphasis * 0.26,
-      )!;
-      final textPainter = TextPainter(
-        text: TextSpan(
-          text: anchor.label,
-          style: TextStyle(
-            color: tickColor.withValues(alpha: 0.68 + emphasis * 0.28),
-            fontSize: 8.8 + emphasis * 1.2,
-            fontWeight: FontWeight.w700,
-            letterSpacing: 0.1,
-            shadows: [
-              Shadow(
-                color: Colors.black.withValues(alpha: 0.45),
-                blurRadius: 6,
-              ),
-            ],
-          ),
-        ),
-        textDirection: TextDirection.ltr,
-      )..layout();
+      final emphasis = isPinned ? 1.0 : (isProximate ? anchorProximity : 0.0);
+      final tickExtent = 10.0 + emphasis * 6.0;
+      final strokeWidth = 2.4 + emphasis * 1.8;
+
       final inner = geometry.center + normal * (geometry.radius - tickExtent);
       final outer = geometry.center + normal * (geometry.radius + tickExtent);
       final innerLeader =
@@ -944,36 +922,35 @@ class _ClockSolarAnchorPainter extends CustomPainter {
         inner,
         outer,
         Paint()
-          ..color = tickColor.withValues(alpha: 0.16 + emphasis * 0.18)
-          ..strokeWidth = strokeWidth * (3.8 + emphasis * 0.5)
-          ..strokeCap = StrokeCap.round
-          ..maskFilter = MaskFilter.blur(
-            BlurStyle.normal,
-            5 + emphasis * 4,
-          ),
-      );
-      canvas.drawLine(
-        inner,
-        outer,
-        Paint()
-          ..color = tickColor.withValues(alpha: 0.82 + emphasis * 0.18)
+          ..color = tickColor.withValues(alpha: 0.55 + emphasis * 0.40)
           ..strokeWidth = strokeWidth
           ..strokeCap = StrokeCap.round,
       );
       canvas.drawCircle(
         outer,
-        2.2 + emphasis * (3.6 + pulse * 1.8),
-        Paint()
-          ..color = tickColor.withValues(alpha: 0.16 + emphasis * 0.16)
-          ..maskFilter = MaskFilter.blur(
-            BlurStyle.normal,
-            4 + emphasis * 4,
-          ),
+        1.6 + emphasis * 2.2,
+        Paint()..color = tickColor.withValues(alpha: 0.75 + emphasis * 0.25),
       );
-      canvas.drawCircle(
-        outer,
-        1.2 + emphasis * 1.4,
-        Paint()..color = tickColor.withValues(alpha: 0.75 + emphasis * 0.20),
+
+      final label = _cachedLabel(
+        labelCache,
+        'anchor|${accentColor.toARGB32()}|${anchor.label}',
+        () => TextSpan(
+          text: anchor.label,
+          style: TextStyle(
+            color: Color.lerp(tickColor, Colors.white, 0.25)!
+                .withValues(alpha: 0.9),
+            fontSize: 9.2,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 0.1,
+            shadows: [
+              Shadow(
+                color: Colors.black.withValues(alpha: 0.45),
+                blurRadius: 4,
+              ),
+            ],
+          ),
+        ),
       );
 
       layouts.add(
@@ -982,8 +959,9 @@ class _ClockSolarAnchorPainter extends CustomPainter {
           normal: normal,
           tickColor: tickColor,
           emphasis: emphasis,
-          textPainter: textPainter,
-          preferredTop: anchorPoint.dy - textPainter.height / 2,
+          pinned: isPinned,
+          textPainter: label,
+          preferredTop: anchorPoint.dy - label.height / 2,
         ),
       );
     }
@@ -1002,6 +980,7 @@ class _ClockSolarAnchorPainter extends CustomPainter {
       layouts: leftLayouts,
       handleHour: handleHour,
       handleWidth: handleWidth,
+      accentColor: accentColor,
       isRightSide: false,
     );
     _paintClockSolarAnchorSide(
@@ -1011,6 +990,7 @@ class _ClockSolarAnchorPainter extends CustomPainter {
       layouts: rightLayouts,
       handleHour: handleHour,
       handleWidth: handleWidth,
+      accentColor: accentColor,
       isRightSide: true,
     );
   }
@@ -1018,15 +998,13 @@ class _ClockSolarAnchorPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _ClockSolarAnchorPainter oldDelegate) {
     return geometry != oldDelegate.geometry ||
-        anchors != oldDelegate.anchors ||
+        !listEquals(anchors, oldDelegate.anchors) ||
         accentColor != oldDelegate.accentColor ||
-        activeEvent != oldDelegate.activeEvent ||
+        pinnedEvent != oldDelegate.pinnedEvent ||
         proximateAnchor != oldDelegate.proximateAnchor ||
         anchorProximity != oldDelegate.anchorProximity ||
         handleHour != oldDelegate.handleHour ||
         handleWidth != oldDelegate.handleWidth ||
-        dragHour != oldDelegate.dragHour ||
-        pulse != oldDelegate.pulse ||
         isDragging != oldDelegate.isDragging;
   }
 }
@@ -1036,6 +1014,7 @@ class _ClockSolarAnchorLayout {
   final Offset normal;
   final Color tickColor;
   final double emphasis;
+  final bool pinned;
   final TextPainter textPainter;
   final double preferredTop;
   double top;
@@ -1045,6 +1024,7 @@ class _ClockSolarAnchorLayout {
     required this.normal,
     required this.tickColor,
     required this.emphasis,
+    required this.pinned,
     required this.textPainter,
     required this.preferredTop,
   }) : top = preferredTop;
@@ -1057,6 +1037,7 @@ void _paintClockSolarAnchorSide(
   required List<_ClockSolarAnchorLayout> layouts,
   required double handleHour,
   required double handleWidth,
+  required Color accentColor,
   required bool isRightSide,
 }) {
   if (layouts.isEmpty) return;
@@ -1118,11 +1099,37 @@ void _paintClockSolarAnchorSide(
       connectorEnd,
       Paint()
         ..color = layout.tickColor.withValues(
-          alpha: 0.16 + layout.emphasis * 0.14,
+          alpha: 0.18 + layout.emphasis * 0.16,
         )
         ..strokeWidth = 1.2 + layout.emphasis * 0.7
         ..strokeCap = StrokeCap.round,
     );
+
+    // The pinned marker's label sits in a filled pill so the bound event is
+    // unmistakable at a glance.
+    if (layout.pinned) {
+      final pillRect = Rect.fromLTWH(
+        labelLeft - 7,
+        layout.top - 4,
+        layout.textPainter.width + 14,
+        layout.textPainter.height + 8,
+      );
+      final pill = RRect.fromRectAndRadius(
+        pillRect,
+        const Radius.circular(999),
+      );
+      canvas.drawRRect(
+        pill,
+        Paint()..color = accentColor.withValues(alpha: 0.18),
+      );
+      canvas.drawRRect(
+        pill,
+        Paint()
+          ..color = accentColor.withValues(alpha: 0.55)
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1,
+      );
+    }
 
     layout.textPainter.paint(canvas, Offset(labelLeft, layout.top));
   }
@@ -1178,6 +1185,7 @@ class _RhythmClockRingPainter extends CustomPainter {
   final ModeCurveVisual sleepVisual;
   final RhythmMode selectedMode;
   final bool use24;
+  final Map<String, TextPainter> labelCache;
 
   const _RhythmClockRingPainter({
     required this.geometry,
@@ -1187,6 +1195,7 @@ class _RhythmClockRingPainter extends CustomPainter {
     required this.sleepVisual,
     required this.selectedMode,
     required this.use24,
+    required this.labelCache,
   });
 
   @override
@@ -1196,21 +1205,16 @@ class _RhythmClockRingPainter extends CustomPainter {
     _drawHourLabels(canvas);
   }
 
+  /// Single-pass segmented ring. The curve colors ARE the visual — the old
+  /// per-segment glow + accent passes tripled the draw calls and forced
+  /// blur-filter compositing for a subtle effect, which made dragging laggy
+  /// on device.
   void _drawRing(Canvas canvas) {
-    const segments = 144;
+    const segments = 96;
     final rect = geometry.arcRect;
     final paint = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 16
-      ..strokeCap = StrokeCap.round;
-    final glowPaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 24
-      ..strokeCap = StrokeCap.round
-      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 10);
-    final accentPaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 18
       ..strokeCap = StrokeCap.round;
     const hourStep = 24.0 / segments;
     final sweep = (2 * math.pi) / segments;
@@ -1228,49 +1232,19 @@ class _RhythmClockRingPainter extends CustomPainter {
           (isDayHour ? dayVisual : sleepVisual).styleAt(midHour);
       final baseOpacity = isDayHour ? opacity : math.max(opacity, 0.38);
       final isSelectedSegment = isDayHour == selectedIsDay;
-      // Let the curve color render at its natural opacity on both halves so
-      // the ring actually reads as the rhythm curve. Selected gets a small
-      // brightness bump on top; differentiation also comes from the glow +
-      // accent stroke layers below.
+      // Selected half reads brighter; the other half recedes slightly.
       final effectiveOpacity = isSelectedSegment
-          ? math.min(0.98, baseOpacity * 1.05 + 0.08)
-          : baseOpacity;
-      final accentColor = Color.lerp(color, Colors.white, 0.10)!;
-      final startAngle = geometry.angleForHour(startHour);
-
-      if (isSelectedSegment) {
-        glowPaint.color =
-            color.withValues(alpha: math.min(0.24, 0.06 + baseOpacity * 0.18));
-        canvas.drawArc(
-          rect,
-          startAngle,
-          sweep + 0.02,
-          false,
-          glowPaint,
-        );
-      }
+          ? math.min(0.98, baseOpacity * 1.05 + 0.10)
+          : baseOpacity * 0.85;
 
       paint.color = color.withValues(alpha: effectiveOpacity);
       canvas.drawArc(
         rect,
-        startAngle,
+        geometry.angleForHour(startHour),
         sweep + 0.02,
         false,
         paint,
       );
-
-      if (isSelectedSegment) {
-        accentPaint.color = accentColor.withValues(
-          alpha: math.min(0.34, 0.12 + baseOpacity * 0.18),
-        );
-        canvas.drawArc(
-          rect,
-          startAngle,
-          sweep + 0.02,
-          false,
-          accentPaint,
-        );
-      }
     }
   }
 
@@ -1349,8 +1323,10 @@ class _RhythmClockRingPainter extends CustomPainter {
                       ? '$hour AM'
                       : '${hour - 12} PM';
 
-      final textPainter = TextPainter(
-        text: TextSpan(
+      final textPainter = _cachedLabel(
+        labelCache,
+        'hour|$isCardinal|$label',
+        () => TextSpan(
           text: label,
           style: TextStyle(
             color: Colors.white.withValues(alpha: isCardinal ? 0.72 : 0.42),
@@ -1359,8 +1335,7 @@ class _RhythmClockRingPainter extends CustomPainter {
             letterSpacing: 0.3,
           ),
         ),
-        textDirection: TextDirection.ltr,
-      )..layout();
+      );
 
       final distance = geometry.radius + 22;
       textPainter.paint(
