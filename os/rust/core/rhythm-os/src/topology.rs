@@ -4754,6 +4754,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn button_multi_room_controls_survive_roundtrip_and_clear_to_parent() {
+        let mut store = RoomTopologyStore::new();
+        let source_room_id = store.create_room("Office");
+        let hall_id = store.create_room("Hall");
+        let stairs_id = store.create_room("Stairs");
+        let mut registry = CanonicalRegistry::new();
+
+        let button_id = register_identity(
+            &mut registry,
+            &hue_key(),
+            make_identity(
+                "button-1",
+                "office-native",
+                "Office",
+                "Office Button",
+                DeviceType::Button,
+            ),
+        );
+
+        assert!(store.attach_device_user_override(&source_room_id, &button_id));
+        assert!(store.set_control_targets(
+            &button_id,
+            NodeControlKind::Button,
+            &[hall_id.as_str(), stairs_id.as_str()],
+        ));
+
+        let serialized = serde_json::to_value(&store).expect("serialize topology");
+        let mut restored: RoomTopologyStore =
+            serde_json::from_value(serialized).expect("restore topology");
+        let mut expected_targets = vec![hall_id, stairs_id];
+        expected_targets.sort();
+        assert_eq!(
+            restored.effective_control_targets(&button_id, &NodeControlKind::Button),
+            expected_targets
+        );
+
+        assert!(restored.set_control_targets(&button_id, NodeControlKind::Button, &[],));
+        assert_eq!(
+            restored.effective_control_targets(&button_id, &NodeControlKind::Button),
+            vec![source_room_id]
+        );
+    }
+
     // ---- cross-hub triage detection tests ----
 
     #[test]

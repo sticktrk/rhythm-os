@@ -100,6 +100,13 @@ void main() {
       outcome: 'failed',
       failureStage: 'not_available',
     );
+    await analytics.logButtonControlTargetsSaveCompleted(
+      journeyId: 'button-control-targets-123',
+      source: 'device_detail',
+      targetCountBucket: 'two_to_three',
+      outcome: 'failed',
+      failureStage: 'request_or_refresh',
+    );
 
     expect(
       backend.events.map((event) => event.name),
@@ -118,6 +125,7 @@ void main() {
         'device_room_move_completed',
         'matter_setup_code_recovery_attempted',
         'matter_setup_code_recovery_completed',
+        'button_control_targets_save_completed',
       ],
     );
     expect(backend.events.first.properties, {
@@ -181,6 +189,13 @@ void main() {
       'source': 'device_network',
       'outcome': 'failed',
       'failure_stage': 'not_available',
+    });
+    expect(backend.events[14].properties, {
+      'journey_id': 'button-control-targets-123',
+      'source': 'device_detail',
+      'target_count_bucket': 'two_to_three',
+      'outcome': 'failed',
+      'failure_stage': 'request_or_refresh',
     });
 
     final serialized = backend.events

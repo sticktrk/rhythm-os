@@ -379,6 +379,7 @@ void main() {
             RhythmFeature.guardedRoomLightProfileOverrides,
             RhythmFeature.targetGuardedRoomLightProfileOverrides,
             RhythmFeature.sceneMotionSuppression,
+            RhythmFeature.buttonMultiRoomControls,
           ],
           'hubs': [
             {
@@ -454,6 +455,11 @@ void main() {
       expect(
         hello.capabilities!
             .supportsFeature(RhythmFeature.sceneMotionSuppression),
+        isTrue,
+      );
+      expect(
+        hello.capabilities!
+            .supportsFeature(RhythmFeature.buttonMultiRoomControls),
         isTrue,
       );
       expect(hello.capabilities!.supportsFeature('missing'), isFalse);

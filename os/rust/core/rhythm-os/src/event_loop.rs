@@ -1499,11 +1499,12 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                 return;
             }
 
-            let Some(node_id) = commands::resolve_node_control_target_for_source(
+            let target_node_ids = commands::resolve_node_control_targets_for_source(
                 state,
                 &source_node_id,
                 &crate::topology::NodeControlKind::Button,
-            ) else {
+            );
+            if target_node_ids.is_empty() {
                 emit_button_input_event(
                     state,
                     hub_key.as_ref(),
@@ -1521,49 +1522,23 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                     device_id.as_deref()
                 );
                 return;
-            };
-            let effective_action = effective_unbound_button_action(key, action);
-            emit_button_input_event(
-                state,
-                hub_key.as_ref(),
-                Some(source_node_id.as_str()),
-                Some(node_id.as_str()),
-                Some(room_id.as_str()),
-                Some(native_device_id),
-                None,
-                Some(action),
-                InputEventRoute::NodeControl,
-            );
-            tracing::info!(
-                target: "evt",
-                event = "button_ingress",
-                command_id = %command_id,
-                action = ?action,
-                effective_action = ?effective_action,
-                node_id = %node_id,
-                source_node_id = %source_node_id,
-                source_room_id = %room_id,
-                device_id = ?device_id.as_deref(),
-                hub_present = hub_key.is_some(),
-                "Button event received"
-            );
-            if !commands::rhythm_automation_allowed_for_node(state, &node_id) {
-                tracing::info!(
-                    target: "evt",
-                    event = "button_node_control_suppressed",
-                    command_id = %command_id,
-                    action = ?action,
-                    node_id = %node_id,
-                    source_node_id = %source_node_id,
-                    reason = "external_room_authority",
-                    "Button target left to the room's external controller"
-                );
-                return;
             }
-            if !light_breaker_enabled {
+            let effective_action = effective_unbound_button_action(key, action);
+            for node_id in target_node_ids {
+                emit_button_input_event(
+                    state,
+                    hub_key.as_ref(),
+                    Some(source_node_id.as_str()),
+                    Some(node_id.as_str()),
+                    Some(room_id.as_str()),
+                    Some(native_device_id),
+                    None,
+                    Some(action),
+                    InputEventRoute::NodeControl,
+                );
                 tracing::info!(
                     target: "evt",
-                    event = "button_node_control_suppressed",
+                    event = "button_ingress",
                     command_id = %command_id,
                     action = ?action,
                     effective_action = ?effective_action,
@@ -1571,39 +1546,67 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                     source_node_id = %source_node_id,
                     source_room_id = %room_id,
                     device_id = ?device_id.as_deref(),
-                    reason = "light_breaker_disabled",
-                    "Button node control suppressed while light breaker is disabled"
+                    hub_present = hub_key.is_some(),
+                    "Button event received"
                 );
-                return;
-            }
-            if !motion.admit_button(&node_id, action, device_id.as_deref()) {
-                tracing::info!(
-                    target: "evt",
-                    event = "button_debounced",
-                    command_id = %command_id,
-                    action = ?action,
-                    node_id = %node_id,
-                    device_id = ?device_id.as_deref(),
-                    debounce_ms = BUTTON_DEBOUNCE_WINDOW.as_millis() as u64,
-                    "Dropping bounce-duplicate button event"
-                );
-                return;
-            }
-            motion.motion_owned.remove(&node_id);
-            motion.motion_turn_on_requested.remove(&node_id);
-            motion.warning_active.remove(&node_id);
-            motion
-                .sensors
-                .retain(|_, source| source.target_node_id != node_id);
+                if !commands::rhythm_automation_allowed_for_node(state, &node_id) {
+                    tracing::info!(
+                        target: "evt",
+                        event = "button_node_control_suppressed",
+                        command_id = %command_id,
+                        action = ?action,
+                        node_id = %node_id,
+                        source_node_id = %source_node_id,
+                        reason = "external_room_authority",
+                        "Button target left to the room's external controller"
+                    );
+                    continue;
+                }
+                if !light_breaker_enabled {
+                    tracing::info!(
+                        target: "evt",
+                        event = "button_node_control_suppressed",
+                        command_id = %command_id,
+                        action = ?action,
+                        effective_action = ?effective_action,
+                        node_id = %node_id,
+                        source_node_id = %source_node_id,
+                        source_room_id = %room_id,
+                        device_id = ?device_id.as_deref(),
+                        reason = "light_breaker_disabled",
+                        "Button node control suppressed while light breaker is disabled"
+                    );
+                    continue;
+                }
+                if !motion.admit_button(&node_id, action, device_id.as_deref()) {
+                    tracing::info!(
+                        target: "evt",
+                        event = "button_debounced",
+                        command_id = %command_id,
+                        action = ?action,
+                        node_id = %node_id,
+                        device_id = ?device_id.as_deref(),
+                        debounce_ms = BUTTON_DEBOUNCE_WINDOW.as_millis() as u64,
+                        "Dropping bounce-duplicate button event"
+                    );
+                    continue;
+                }
+                motion.motion_owned.remove(&node_id);
+                motion.motion_turn_on_requested.remove(&node_id);
+                motion.warning_active.remove(&node_id);
+                motion
+                    .sensors
+                    .retain(|_, source| source.target_node_id != node_id);
 
-            spawn_button_ingress_action(
-                state,
-                node_id,
-                effective_action,
-                device_id.clone(),
-                command_id,
-                true,
-            );
+                spawn_button_ingress_action(
+                    state,
+                    node_id,
+                    effective_action,
+                    device_id.clone(),
+                    command_id.clone(),
+                    true,
+                );
+            }
         }
 
         HubEvent::Motion {
@@ -5687,6 +5690,13 @@ mod tests {
         {
             let mut s = state.lock().unwrap();
             s.set_mode_transition_configs(rhythm_core::default_mode_transition_configs());
+            s.topology
+                .insert_room(TopologyRoom::new("room_b", "Room B"));
+            assert!(s.topology.set_control_targets(
+                &source_id,
+                NodeControlKind::Button,
+                &["room_a", "room_b"],
+            ));
             s.topology.set_input_binding(InputBinding::day_sleep_toggle(
                 source_id.clone(),
                 Some(ButtonAction::OnPress),
@@ -5735,7 +5745,7 @@ mod tests {
         assert_eq!(
             handle_event_calls.load(Ordering::SeqCst),
             0,
-            "input binding should not fall through to ordinary node control"
+            "input binding should execute once without topology fan-out"
         );
 
         wait_for_light_activity_len(&state, 1);
@@ -6188,6 +6198,81 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(handle_event_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn button_event_fans_out_to_multiple_control_targets() {
+        let handle_event_calls = Arc::new(AtomicUsize::new(0));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(SlowDispatchRuntime {
+            handle_event_delay: Duration::ZERO,
+            turn_on_room_delay: Duration::ZERO,
+            handle_event_calls: handle_event_calls.clone(),
+            turn_on_room_calls: Arc::new(AtomicUsize::new(0)),
+        });
+        let state = make_state_with_runtime(runtime);
+        let hub_key = only_hub_key(&state);
+        let source_id = add_canonical_control_source(
+            &state,
+            &hub_key,
+            "button_a",
+            "room_a",
+            DeviceType::Button,
+        );
+        {
+            let mut s = state.lock().unwrap();
+            s.topology
+                .insert_room(TopologyRoom::new("room_b", "Room B"));
+            assert!(s.topology.set_control_targets(
+                &source_id,
+                NodeControlKind::Button,
+                &["room_a", "room_b"],
+            ));
+        }
+        let mut event_rx = subscribe_events(&state);
+        let mut motion = MotionTimerState::new();
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Button {
+                hub_key: Some(hub_key),
+                room_id: "room_a".into(),
+                action: ButtonAction::OnPress,
+                device_id: Some("button_a".into()),
+            },
+            &mut motion,
+        );
+
+        let mut targets = Vec::new();
+        for _ in 0..2 {
+            match event_rx.try_recv().expect("expected button input event") {
+                crate::server_event::ServerEvent::InputEvent(InputEventResource::Button {
+                    route,
+                    source_node_id,
+                    target_node_id,
+                    native_device_id,
+                    button_action,
+                    ..
+                }) => {
+                    assert_eq!(route, InputEventRoute::NodeControl);
+                    assert_eq!(source_node_id.as_deref(), Some(source_id.as_str()));
+                    assert_eq!(native_device_id.as_deref(), Some("button_a"));
+                    assert_eq!(button_action, Some(ButtonAction::OnPress));
+                    targets.push(target_node_id.expect("target node id"));
+                }
+                other => panic!("unexpected event: {:?}", other),
+            }
+        }
+        targets.sort();
+        assert_eq!(targets, vec!["room_a".to_string(), "room_b".to_string()]);
+        assert_eq!(motion.button_debounce.len(), 2);
+
+        for _ in 0..50 {
+            if handle_event_calls.load(Ordering::SeqCst) == 2 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(handle_event_calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]

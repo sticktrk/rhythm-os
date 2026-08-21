@@ -903,6 +903,15 @@ class ServerSyncProvider extends ChangeNotifier {
       HueServiceLocator.isDemoMode ||
       _capabilities?.supportsFeature(RhythmFeature.hueRoomTopologySync) == true;
 
+  /// Button fan-out must fail closed because older appliances persist the
+  /// additive target list but execute only its first entry.
+  bool get buttonMultiRoomControlsSupported =>
+      HueServiceLocator.isDemoMode ||
+      _capabilities?.supportsFeature(
+            RhythmFeature.buttonMultiRoomControls,
+          ) ==
+          true;
+
   /// Whether the host explicitly advertised supported hub types.
   bool get hasExplicitHubCapabilities => _capabilities != null;
 
@@ -4986,10 +4995,8 @@ class ServerSyncProvider extends ChangeNotifier {
       controlKind: controlKind,
       targetIds: normalizedTargetNodeIds,
     );
-    if (success) {
-      await _refreshTopologyNodes();
-    }
-    return success;
+    if (!success) return false;
+    return _refreshTopologyNodesWithResult();
   }
 
   Future<void> _refreshDemoState() async {
