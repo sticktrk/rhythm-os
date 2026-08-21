@@ -3994,12 +3994,12 @@ mod tests {
             .get(&paired_id)
             .unwrap()
             .name
-            .starts_with("Hue Zig "));
+            .starts_with("Hue Hub "));
         assert_eq!(
             state.canonical_registry.get(&unrelated_id).unwrap().name,
             "Test Hue lamp"
         );
-        assert!(paired_devices[0].name.starts_with("Hue Zig "));
+        assert!(paired_devices[0].name.starts_with("Hue Hub "));
         assert_eq!(
             renamed_native_ids.lock().unwrap().as_slice(),
             ["hue-paired"]
