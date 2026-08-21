@@ -921,6 +921,23 @@ class AnalyticsService {
     });
   }
 
+  /// Track the terminal app-observed result of saving button room targets.
+  Future<void> logButtonControlTargetsSaveCompleted({
+    required String journeyId,
+    required String source,
+    required String targetCountBucket,
+    required String outcome,
+    String? failureStage,
+  }) async {
+    await logEvent('button_control_targets_save_completed', {
+      'journey_id': journeyId,
+      'source': source,
+      'target_count_bucket': targetCountBucket,
+      'outcome': outcome,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
   // ===========================================================================
   // Hub Recovery Events
   // ===========================================================================

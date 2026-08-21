@@ -18,6 +18,7 @@ import 'segmented_tab_bar.dart';
 import 'solar_orbit.dart'; // For CelestialColors
 
 const _deviceRoomMoveUuid = Uuid();
+const _deviceControlTargetsUuid = Uuid();
 
 /// Request the server's existing physical Identify behavior for one bulb.
 ///
@@ -367,6 +368,37 @@ Future<bool> showMotionTargetRoomsFlow(
   BuildContext context, {
   required RhythmDevice device,
   required String currentParentNodeId,
+}) =>
+    _showControlTargetRoomsFlow(
+      context,
+      device: device,
+      currentParentNodeId: currentParentNodeId,
+      controlKind: 'motion',
+      title: 'Motion Controls',
+      description: 'Turn on every selected room when motion is detected.',
+    );
+
+Future<bool> showButtonTargetRoomsFlow(
+  BuildContext context, {
+  required RhythmDevice device,
+  required String currentParentNodeId,
+}) =>
+    _showControlTargetRoomsFlow(
+      context,
+      device: device,
+      currentParentNodeId: currentParentNodeId,
+      controlKind: 'button',
+      title: 'Button Controls',
+      description: 'Apply each button press to every selected room.',
+    );
+
+Future<bool> _showControlTargetRoomsFlow(
+  BuildContext context, {
+  required RhythmDevice device,
+  required String currentParentNodeId,
+  required String controlKind,
+  required String title,
+  required String description,
 }) async {
   final syncProvider = context.read<ServerSyncProvider>();
   final roomSummariesById = {
@@ -400,7 +432,7 @@ Future<bool> showMotionTargetRoomsFlow(
 
   final currentTargets = syncProvider.controlTargetNodeIds(
     sourceNodeId: device.id,
-    controlKind: 'motion',
+    controlKind: controlKind,
   );
   final initialTargets = <String>{...currentTargets};
   if (initialTargets.isEmpty && currentParentNodeId.isNotEmpty) {
@@ -409,10 +441,10 @@ Future<bool> showMotionTargetRoomsFlow(
 
   final selectedTargets = await showMultiRoomPickerSheet(
     context,
-    title: 'Motion Controls',
+    title: title,
     rooms: rooms,
     selectedRoomIds: initialTargets,
-    description: 'Turn on every selected room when motion is detected.',
+    description: description,
   );
   if (selectedTargets == null || !context.mounted) return false;
   if (selectedTargets.length == initialTargets.length &&
@@ -422,22 +454,40 @@ Future<bool> showMotionTargetRoomsFlow(
 
   final success = await syncProvider.setNodeControlTargets(
     sourceNodeId: device.id,
-    controlKind: 'motion',
+    controlKind: controlKind,
     targetNodeIds: selectedTargets,
   );
+  if (controlKind == 'button') {
+    unawaited(
+      AnalyticsService().logButtonControlTargetsSaveCompleted(
+        journeyId: 'button-control-targets-${_deviceControlTargetsUuid.v4()}',
+        source: 'device_detail',
+        targetCountBucket: _targetCountBucket(selectedTargets.length),
+        outcome: success ? 'succeeded' : 'failed',
+        failureStage: success ? null : 'request_or_refresh',
+      ),
+    );
+  }
   if (!context.mounted) return success;
 
   ScaffoldMessenger.of(context).showSnackBar(
     SnackBar(
       content: Text(
         success
-            ? 'Updated ${device.displayName} motion controls'
+            ? 'Updated ${device.displayName} $controlKind controls'
             : 'Failed to update ${device.displayName}',
       ),
     ),
   );
   return success;
 }
+
+String _targetCountBucket(int count) => switch (count) {
+      <= 0 => 'none',
+      1 => 'one',
+      2 || 3 => 'two_to_three',
+      _ => 'four_plus',
+    };
 
 /// Bottom sheet showing canonical device details + connections.
 ///
@@ -789,6 +839,10 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     final standbyEnabled = context.select<ServerSyncProvider, bool>(
       (sync) => sync.standbyEnabledForNode(device.id),
     );
+    final buttonMultiRoomControlsSupported =
+        context.select<ServerSyncProvider, bool>(
+      (sync) => sync.buttonMultiRoomControlsSupported,
+    );
     return ListView(
       key: const ValueKey('settings'),
       padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
@@ -819,6 +873,11 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
         ],
         if (device.type == RhythmDeviceType.motion) ...[
           _buildMotionTargetsButton(context),
+          const SizedBox(height: 12),
+        ],
+        if (device.type == RhythmDeviceType.button &&
+            buttonMultiRoomControlsSupported) ...[
+          _buildButtonTargetsButton(context),
           const SizedBox(height: 12),
         ],
         if (_loading)
@@ -1134,11 +1193,40 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   }
 
   Widget _buildMotionTargetsButton(BuildContext context) {
+    return _buildControlTargetsButton(
+      context,
+      controlKind: 'motion',
+      label: 'Motion controls',
+      icon: Icons.sensor_occupied_outlined,
+      iconColor: const Color(0xFF81C784),
+      onTap: () => _showMotionTargetsDialog(context),
+    );
+  }
+
+  Widget _buildButtonTargetsButton(BuildContext context) {
+    return _buildControlTargetsButton(
+      context,
+      controlKind: 'button',
+      label: 'Button controls',
+      icon: Icons.smart_button_outlined,
+      iconColor: CelestialColors.sunWarm,
+      onTap: () => _showButtonTargetsDialog(context),
+    );
+  }
+
+  Widget _buildControlTargetsButton(
+    BuildContext context, {
+    required String controlKind,
+    required String label,
+    required IconData icon,
+    required Color iconColor,
+    required VoidCallback onTap,
+  }) {
     final targetCount = context.select<ServerSyncProvider, int>(
       (sync) => sync
           .controlTargetNodeIds(
             sourceNodeId: widget.device.id,
-            controlKind: 'motion',
+            controlKind: controlKind,
           )
           .length,
     );
@@ -1150,9 +1238,9 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
 
     return Semantics(
       button: true,
-      label: 'Motion controls, $targetSummary',
+      label: '$label, $targetSummary',
       child: InkWell(
-        onTap: () => _showMotionTargetsDialog(context),
+        onTap: onTap,
         borderRadius: BorderRadius.circular(14),
         child: Ink(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
@@ -1166,15 +1254,15 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
           child: Row(
             children: [
               Icon(
-                Icons.sensor_occupied_outlined,
-                color: const Color(0xFF81C784).withValues(alpha: 0.9),
+                icon,
+                color: iconColor.withValues(alpha: 0.9),
                 size: 20,
               ),
               const SizedBox(width: 12),
-              const Expanded(
+              Expanded(
                 child: Text(
-                  'Motion controls',
-                  style: TextStyle(
+                  label,
+                  style: const TextStyle(
                     color: CelestialColors.textPrimary,
                     fontSize: 15,
                   ),
@@ -1883,6 +1971,14 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
 
   Future<void> _showMotionTargetsDialog(BuildContext context) async {
     await showMotionTargetRoomsFlow(
+      context,
+      device: widget.device,
+      currentParentNodeId: widget.roomId,
+    );
+  }
+
+  Future<void> _showButtonTargetsDialog(BuildContext context) async {
+    await showButtonTargetRoomsFlow(
       context,
       device: widget.device,
       currentParentNodeId: widget.roomId,

@@ -2932,6 +2932,42 @@ void main() {
       expect(api.lastControlTargetIds, ['room-1', 'room-2']);
     });
 
+    test('control target save fails when authoritative refresh fails',
+        () async {
+      api.topologyNodes = [
+        RhythmTopologyNode.fromJson({
+          'id': 'button-1',
+          'name': 'Kitchen Button',
+          'kind': 'button',
+          'parent_id': 'room-1',
+        }),
+      ];
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'nodes': const <Map<String, dynamic>>[],
+          'location': const <String, dynamic>{},
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(provider.topologyNodes, hasLength(1));
+
+      api.topologyNodes = const [];
+      final success = await provider.setNodeControlTargets(
+        sourceNodeId: 'button-1',
+        controlKind: 'button',
+        targetNodeIds: const ['room-1', 'room-2'],
+      );
+
+      expect(success, isFalse);
+      expect(provider.topologyNodes.single.id, 'button-1');
+    });
+
     test('keeps roomless light-device nodes in the room provider', () async {
       final homeProvider = _TestHomeProvider(const []);
       final provider = ServerSyncProvider(
@@ -9267,6 +9303,149 @@ void main() {
     expect(find.text('2 rooms'), findsOneWidget);
     expect(
       find.text('Updated Kitchen Motion motion controls'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets(
+      'button controls require capability and save multiple room targets',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.binding.setSurfaceSize(const Size(390, 900));
+    api.topologyNodes = [
+      RhythmTopologyNode.fromJson({
+        'id': 'room-1',
+        'name': 'Kitchen',
+        'kind': 'room',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'room-2',
+        'name': 'Hall',
+        'kind': 'room',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'button-1',
+        'name': 'Kitchen Button',
+        'kind': 'button',
+        'parent_id': 'room-1',
+        'controls': [
+          {
+            'kind': 'button',
+            'target_id': 'room-1',
+            'inherited': true,
+          },
+        ],
+      }),
+    ];
+    api.canonicalDevices['button-1'] = {
+      'id': 'button-1',
+      'name': 'Kitchen Button',
+      'endpoints': const <Map<String, dynamic>>[],
+    };
+    final helloJson = {
+      'nodes': [
+        {
+          'id': 'room-1',
+          'name': 'Kitchen',
+          'kind': 'room',
+          'state': 'active',
+          'rhythm_enabled': true,
+          'disabled': false,
+          'time_offset': 0.0,
+          'brightness_offset': 0.0,
+          'lights_on': true,
+        },
+        {
+          'id': 'room-2',
+          'name': 'Hall',
+          'kind': 'room',
+          'state': 'active',
+          'rhythm_enabled': true,
+          'disabled': false,
+          'time_offset': 0.0,
+          'brightness_offset': 0.0,
+          'lights_on': true,
+        },
+      ],
+      'location': const <String, dynamic>{},
+    };
+    connection.emitHello(RhythmHello.fromJson(helloJson));
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const DeviceDetailSheet(
+          device: RhythmDevice(
+            id: 'button-1',
+            type: RhythmDeviceType.button,
+            name: 'Kitchen Button',
+          ),
+          roomId: 'room-1',
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(provider.buttonMultiRoomControlsSupported, isFalse);
+    expect(find.text('Button controls'), findsNothing);
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        ...helloJson,
+        'capabilities': {
+          'features': [RhythmFeature.buttonMultiRoomControls],
+        },
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    expect(provider.buttonMultiRoomControlsSupported, isTrue);
+    expect(find.text('Button controls'), findsOneWidget);
+    expect(find.text('1 room'), findsOneWidget);
+
+    await tester.tap(find.text('Button controls'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.text('Button Controls'), findsOneWidget);
+    expect(
+      tester
+          .widget<CheckboxListTile>(
+            find.widgetWithText(CheckboxListTile, 'Kitchen'),
+          )
+          .value,
+      isTrue,
+    );
+
+    await tester.tap(find.text('Hall'));
+    await tester.pump();
+    await tester.tap(find.widgetWithText(ElevatedButton, 'SAVE'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(api.setTopologyNodeControlTargetsCalls, 1);
+    expect(api.lastControlSourceNodeId, 'button-1');
+    expect(api.lastControlKind, 'button');
+    expect(api.lastControlTargetIds, ['room-1', 'room-2']);
+    expect(find.text('2 rooms'), findsOneWidget);
+    expect(
+      find.text('Updated Kitchen Button button controls'),
       findsOneWidget,
     );
   });
