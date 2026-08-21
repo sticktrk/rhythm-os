@@ -8799,13 +8799,26 @@ pub(crate) fn reconcile_room_schedule_before_tick(
     } else {
         "restart_reconcile"
     };
-    let apply_result =
-        apply_room_schedule_target(state, room_id, mode, RoomModeState::Active, true, true);
+    let target_state = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let mode_configs = s.mode_configs();
+        mode_config_for_mode(&mode_configs, mode)
+            .and_then(|config| {
+                config
+                    .room_defaults
+                    .iter()
+                    .find(|default| default.room_id == room_id)
+                    .map(|default| default.state)
+            })
+            .unwrap_or(RoomModeState::Active)
+    };
+    let apply_result = apply_room_schedule_target(state, room_id, mode, target_state, true, true);
     let mut activity = crate::activity::LightActivityRecord::app(room_id, "room_schedule_boundary");
     activity.correlation_id = Some(evaluation_id.clone());
     activity.payload = Some(serde_json::json!({
         "source": "follow_time",
         "target_mode": if mode == RhythmMode::Day { "day" } else { "sleep" },
+        "target_state": target_state,
         "status": if apply_result.is_ok() { "applied" } else { "failed" },
         "failure_stage": apply_result.as_ref().err().map(|_| "output_apply"),
         "reconciliation": reason,
@@ -29929,14 +29942,13 @@ mod tests {
     }
 
     #[test]
-    fn room_schedule_authority_resets_only_target_and_reconciles_once() {
+    fn room_schedule_authority_applies_each_mode_preset_only_to_target() {
         let schedule = rhythm_core::RoomScheduleConfig {
             source: rhythm_core::RoomScheduleSource::FollowTime,
             wake_time: rhythm_core::ModeTransitionTime::parse("06:30").unwrap(),
             sleep_time: rhythm_core::ModeTransitionTime::parse("22:30").unwrap(),
         };
         let mut target = make_snapshot("r1", false, false);
-        target.hard_off = true;
         target.profile_settings.room_schedule = Some(schedule);
         let mut other = make_snapshot("r2", false, false);
         other.hard_off = true;
@@ -29944,54 +29956,51 @@ mod tests {
         {
             let mut s = state.lock().unwrap();
             s.active_mode = RhythmMode::Day;
-            s.set_mode_configs(vec![ModeConfig {
-                mode: RhythmMode::Day,
-                active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
-                idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
-                wake_profile_id: None,
-                warning_profile_id: None,
-                room_defaults: vec![rhythm_core::RoomModeDefault {
-                    room_id: "r1".into(),
-                    state: RoomModeState::HardOff,
-                }],
-            }]);
+            s.set_mode_configs(vec![
+                ModeConfig {
+                    mode: RhythmMode::Day,
+                    active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+                    idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+                    wake_profile_id: None,
+                    warning_profile_id: None,
+                    room_defaults: vec![rhythm_core::RoomModeDefault {
+                        room_id: "r1".into(),
+                        state: RoomModeState::HardOff,
+                    }],
+                },
+                ModeConfig {
+                    mode: RhythmMode::Sleep,
+                    active_profile_id: Some(rhythm_core::SLEEP_PROFILE_ID.into()),
+                    idle_profile_id: Some(rhythm_core::SLEEP_IDLE_PROFILE_ID.into()),
+                    wake_profile_id: None,
+                    warning_profile_id: None,
+                    room_defaults: vec![rhythm_core::RoomModeDefault {
+                        room_id: "r1".into(),
+                        state: RoomModeState::Active,
+                    }],
+                },
+            ]);
         }
 
-        assert!(apply_room_schedule_configuration(
-            &state,
-            "r1",
-            Some(rhythm_core::RoomScheduleConfig::default()),
-            schedule,
-        )
-        .unwrap());
-        assert!(!runtime.engine_room_snapshot("r1").unwrap().hard_off);
+        let wake = reconcile_room_schedule_before_tick(&state, "r1", 12.0)
+            .unwrap()
+            .expect("initial custom-time interval should reconcile");
+        assert_eq!(wake.mode, RhythmMode::Day);
+        assert!(runtime.engine_room_snapshot("r1").unwrap().hard_off);
         assert!(runtime.engine_room_snapshot("r2").unwrap().hard_off);
         assert_eq!(state.lock().unwrap().active_mode, RhythmMode::Day);
-        assert_eq!(runtime.applied_commands().len(), 1);
+        assert_eq!(runtime.lights_off_calls().len(), 1);
         assert!(reconcile_room_schedule_before_tick(&state, "r1", 12.0)
             .unwrap()
             .is_none());
 
-        let presets = rhythm_core::RoomScheduleConfig::default();
-        let mut snapshot = runtime.engine_room_snapshot("r1").unwrap();
-        snapshot.profile_settings.room_schedule = Some(presets);
-        runtime.restore_node_state(
-            "r1",
-            RestoredNodeState {
-                rhythm_enabled: snapshot.rhythm_enabled,
-                disabled: snapshot.disabled,
-                time_offset_minutes: snapshot.time_offset_minutes,
-                brightness_offset: snapshot.brightness_offset,
-                soft_off: snapshot.soft_off,
-                mood_active: snapshot.mood_active,
-                standby_enabled: snapshot.standby_enabled,
-                hard_off: snapshot.hard_off,
-                profile_settings: snapshot.profile_settings,
-            },
-        );
-        assert!(apply_room_schedule_configuration(&state, "r1", Some(schedule), presets,).unwrap());
-        assert!(runtime.engine_room_snapshot("r1").unwrap().hard_off);
+        let sleep = reconcile_room_schedule_before_tick(&state, "r1", 23.0)
+            .unwrap()
+            .expect("sleep boundary should reconcile");
+        assert_eq!(sleep.mode, RhythmMode::Sleep);
+        assert!(!runtime.engine_room_snapshot("r1").unwrap().hard_off);
         assert!(runtime.engine_room_snapshot("r2").unwrap().hard_off);
+        assert_eq!(runtime.applied_commands().len(), 1);
     }
 
     #[test]
