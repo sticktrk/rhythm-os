@@ -31,6 +31,8 @@ class _FakeRhythmServerApi extends RhythmServerApi {
 
   bool modeSetSucceeds = true;
   final List<List<RhythmModeConfig>> modeConfigCalls = [];
+  final List<({String nodeId, RoomModeState? state, bool? rhythmEnabled})>
+      nodePreferenceCalls = [];
 
   @override
   Future<bool> modeSet({
@@ -39,6 +41,23 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   }) async {
     modeConfigCalls.add(List<RhythmModeConfig>.of(configs ?? const []));
     return modeSetSucceeds;
+  }
+
+  @override
+  Future<void> nodePreferencesSet({
+    required String nodeId,
+    bool? rhythmEnabled,
+    bool? disabled,
+    bool? standbyEnabled,
+    RoomModeState? state,
+    bool? softOff,
+    Map<String, dynamic>? profileSettings,
+  }) async {
+    nodePreferenceCalls.add((
+      nodeId: nodeId,
+      state: state,
+      rhythmEnabled: rhythmEnabled,
+    ));
   }
 }
 
@@ -242,6 +261,9 @@ void main() {
 
   testWidgets('Schedule surface emits a typed privacy-safe preset event',
       (tester) async {
+    await tester.binding.setSurfaceSize(const Size(390, 700));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
     final analyticsBackend = CapturingAnalyticsBackend();
     await analyticsBackend.initialize();
     BackendProvider.setInstanceForTesting(
@@ -269,27 +291,37 @@ void main() {
     connection.emitHello(_helloWithRoomDefaults());
     await tester.pump(const Duration(milliseconds: 10));
     await tester.pumpWidget(
-      ChangeNotifierProvider<ServerSyncProvider>.value(
-        value: sync,
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: sync),
+          // The segments live-apply active-mode selections through
+          // RoomProvider's optimistic room state.
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+        ],
         child: const MaterialApp(
           home: Scaffold(
-            body: RoomScheduleBehaviorControl(
+            body: RoomScheduleBehaviorSegments(
               roomId: 'room-1',
-              foregroundColor: Colors.white,
-              keyPrefix: 'room-schedule-presets',
-              analyticsSource: 'room_schedule_tab',
             ),
           ),
         ),
       ),
     );
 
-    final day = find.byKey(
-      const ValueKey('room-schedule-presets-day-room-1'),
+    final dayAuto = find.byKey(
+      const ValueKey('room-schedule-presets-day-automatic-room-1'),
     );
-    tester
-        .widget<PopupMenuButton<RoomScheduleBehavior>>(day)
-        .onSelected!(RoomScheduleBehavior.standby);
+    final dayLowGlow = find.byKey(
+      const ValueKey('room-schedule-presets-day-standby-room-1'),
+    );
+    final sleepLowGlow = find.byKey(
+      const ValueKey('room-schedule-presets-night-standby-room-1'),
+    );
+    expect(tester.getSize(dayAuto).height, greaterThanOrEqualTo(44));
+    expect(tester.getSize(dayLowGlow).height, greaterThanOrEqualTo(44));
+    expect(tester.getSize(sleepLowGlow).height, greaterThanOrEqualTo(44));
+
+    await tester.tap(dayLowGlow);
     await tester.pump();
 
     final event = analyticsBackend.events.singleWhere(
@@ -297,9 +329,18 @@ void main() {
     );
     expect(event.properties['journey_id'], startsWith('room-schedule-preset-'));
     expect(event.properties, containsPair('attempt_number', 1));
-    expect(event.properties, containsPair('input_method', 'popup_menu'));
+    expect(event.properties, containsPair('input_method', 'segment'));
     expect(event.properties, containsPair('mode', 'wake'));
     expect(event.properties, containsPair('behavior', 'standby'));
+
+    // Day is the active mode, so the selection also moved the room's lights
+    // to Low glow immediately.
+    expect(connection.api.nodePreferenceCalls, hasLength(1));
+    expect(connection.api.nodePreferenceCalls.single.nodeId, 'room-1');
+    expect(
+      connection.api.nodePreferenceCalls.single.state,
+      RoomModeState.standby,
+    );
     expect(
       event.properties.keys,
       isNot(contains(anyOf('room_id', 'node_id', 'home_id', 'room_name'))),
