@@ -373,9 +373,12 @@ start() {
 
     log "using interface $iface"
 
+    ifconfig "$iface" up 2>/dev/null || true
+    # The kernel can expose the per-interface IPv6 sysctls only after the
+    # driver-backed interface is up. Configure RA/RIO acceptance afterwards
+    # so Thread border-router routes are not silently left at the default 0.
     configure_ipv6_ra_rio "$iface" ||
         log "ipv6: Thread route acceptance is incomplete on $iface"
-    ifconfig "$iface" up 2>/dev/null || true
     disable_wifi_power_save "$iface"
 
     if ! pid_is_running "$WPA_PIDFILE"; then
