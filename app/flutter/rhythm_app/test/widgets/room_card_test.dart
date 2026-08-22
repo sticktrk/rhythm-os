@@ -537,14 +537,7 @@ void main() {
     final button = find.byKey(
       const ValueKey('room-settings-light-settings-room-1'),
     );
-    expect(button, findsNothing);
-    await tester.tap(
-      find.descendant(
-        of: find.byKey(const ValueKey('room-settings-tabs')),
-        matching: find.text('Lighting'),
-      ),
-    );
-    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.byKey(const ValueKey('lighting')), findsOneWidget);
     expect(button, findsOneWidget);
     expect(
       find.byKey(const ValueKey('room-settings-schedule-room-1')),
@@ -1023,7 +1016,8 @@ void main() {
     Map<String, dynamic> helloNode({
       required bool sceneActive,
       String sceneId = 'evening-glow',
-    }) => {
+    }) =>
+        {
           'id': 'room-1',
           'name': 'Kitchen',
           'kind': 'room',

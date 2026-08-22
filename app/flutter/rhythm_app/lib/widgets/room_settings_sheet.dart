@@ -52,10 +52,10 @@ class RoomSettingsSheet extends StatefulWidget {
   State<RoomSettingsSheet> createState() => _RoomSettingsSheetState();
 }
 
-enum _SheetTab { bulbs, motion, buttons, lighting }
+enum _SheetTab { lighting, bulbs, motion, buttons }
 
 class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
-  _SheetTab _selectedTab = _SheetTab.bulbs;
+  _SheetTab _selectedTab = _SheetTab.lighting;
   late String _roomName;
   final Map<String, RhythmTimerSetting> _motionTimeoutDrafts = {};
 
@@ -165,10 +165,10 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
                     selected: _selectedTab,
                     onChanged: (tab) => setState(() => _selectedTab = tab),
                     tabs: const [
+                      SegmentedTab('Lighting', _SheetTab.lighting),
                       SegmentedTab('Bulbs', _SheetTab.bulbs),
                       SegmentedTab('Motion', _SheetTab.motion),
                       SegmentedTab('Buttons', _SheetTab.buttons),
-                      SegmentedTab('Lighting', _SheetTab.lighting),
                     ],
                   ),
                 ),

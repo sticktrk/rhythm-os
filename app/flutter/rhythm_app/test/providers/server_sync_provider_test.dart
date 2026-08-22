@@ -1776,11 +1776,9 @@ void main() {
 
       connection.emitHello(scheduleHello());
       await tester.pump();
-      final firstWrite =
-          provider.setRoomSchedule('room-1', schedule('07:15'));
+      final firstWrite = provider.setRoomSchedule('room-1', schedule('07:15'));
       await tester.pump();
-      final secondWrite =
-          provider.setRoomSchedule('room-1', schedule('08:00'));
+      final secondWrite = provider.setRoomSchedule('room-1', schedule('08:00'));
       await tester.pump();
 
       first.complete(RhythmRoomState.fromJson({
@@ -1823,8 +1821,8 @@ void main() {
       connection.emitHello(scheduleHello());
       await tester.pump();
 
-      expect(await provider.setRoomSchedule('room-1', schedule('07:15')),
-          isFalse);
+      expect(
+          await provider.setRoomSchedule('room-1', schedule('07:15')), isFalse);
       expect(provider.scheduleForRoom('room-1').wakeTime, '06:30');
       expect(provider.roomSchedulePendingForRoom('room-1'), isFalse);
     });
@@ -5753,8 +5751,31 @@ void main() {
     expect(find.text('Bulbs'), findsOneWidget);
     expect(find.text('Motion'), findsOneWidget);
     expect(find.text('Buttons'), findsOneWidget);
-    expect(find.text('Lighting'), findsOneWidget);
+    expect(find.text('Lighting'), findsNWidgets(2));
     expect(find.text('Info'), findsNothing);
+    final lightingTab = find.descendant(
+      of: find.byKey(const ValueKey('room-settings-tabs')),
+      matching: find.text('Lighting'),
+    );
+    final bulbsTab = find.descendant(
+      of: find.byKey(const ValueKey('room-settings-tabs')),
+      matching: find.text('Bulbs'),
+    );
+    final motionTab = find.descendant(
+      of: find.byKey(const ValueKey('room-settings-tabs')),
+      matching: find.text('Motion'),
+    );
+    final buttonsTab = find.descendant(
+      of: find.byKey(const ValueKey('room-settings-tabs')),
+      matching: find.text('Buttons'),
+    );
+    expect(tester.getTopLeft(lightingTab).dx,
+        lessThan(tester.getTopLeft(bulbsTab).dx));
+    expect(tester.getTopLeft(bulbsTab).dx,
+        lessThan(tester.getTopLeft(motionTab).dx));
+    expect(tester.getTopLeft(motionTab).dx,
+        lessThan(tester.getTopLeft(buttonsTab).dx));
+    expect(find.byKey(const ValueKey('lighting')), findsOneWidget);
     expect(
       find.byKey(const ValueKey('room-settings-rename')),
       findsOneWidget,
@@ -5766,7 +5787,13 @@ void main() {
     expect(find.text('Matter'), findsOneWidget);
     expect(find.text('Hide this room'), findsNothing);
     expect(find.text('Hide this light'), findsNothing);
-    expect(find.text('Low glow'), findsNothing);
+    await _selectRoomSettingsTab(tester, 'Bulbs');
+    await tester.pumpAndSettle();
+    final bulbsContent = find.byKey(const ValueKey('bulbs'));
+    expect(
+      find.descendant(of: bulbsContent, matching: find.text('Low glow')),
+      findsNothing,
+    );
     expect(find.text('Add Bulb'), findsOneWidget);
     expect(find.text('BULBS'), findsOneWidget);
     expect(find.text('Ceiling Light'), findsOneWidget);
@@ -5778,7 +5805,6 @@ void main() {
       find.byKey(const ValueKey('light-profile-override-badge-light-1')),
       findsNothing,
     );
-    final bulbsContent = find.byKey(const ValueKey('bulbs'));
     expect(
       find.descendant(
         of: bulbsContent,
@@ -5786,9 +5812,11 @@ void main() {
       ),
       findsOneWidget,
     );
-    final addBulbSemantics = tester.getSemantics(
-      find.byKey(const ValueKey('room-settings-add-bulb')),
-    );
+    final addBulbSemantics = tester
+        .widget<Semantics>(
+          find.byKey(const ValueKey('room-settings-add-bulb')),
+        )
+        .properties;
     expect(addBulbSemantics.label, 'Add Bulb');
     expect(addBulbSemantics.hint, 'Choose Scan or Select from existing');
     expect(find.text('Delete Room'), findsNothing);
@@ -6299,7 +6327,8 @@ void main() {
 
     // Tapping On in the Wake row (the active mode) records the room default
     // AND moves the room's lights immediately.
-    final wakeRow = find.byKey(const ValueKey('room-schedule-presets-day-room-1'));
+    final wakeRow =
+        find.byKey(const ValueKey('room-schedule-presets-day-room-1'));
     await tester.dragUntilVisible(
       wakeRow,
       find.byKey(const ValueKey('lighting')),
@@ -6309,7 +6338,8 @@ void main() {
       find.descendant(of: wakeRow, matching: find.text('On')),
     );
     await tester.pump();
-    expect(provider.roomDefaultStateForMode('room-1', RhythmMode.day), 'active');
+    expect(
+        provider.roomDefaultStateForMode('room-1', RhythmMode.day), 'active');
     expect(api.nodePreferenceCalls, hasLength(1));
     expect(api.nodePreferenceCalls.single.nodeId, 'room-1');
     expect(api.nodePreferenceCalls.single.state, RoomModeState.active);
@@ -6360,7 +6390,8 @@ void main() {
     Map<String, dynamic> hello({
       bool followTime = false,
       String wakeTime = '06:30',
-    }) => {
+    }) =>
+        {
           'capabilities': {
             'api_schema_version': 2,
             'features': [RhythmFeature.roomScheduleV1],
@@ -6618,6 +6649,7 @@ void main() {
       ),
     );
 
+    await _selectRoomSettingsTab(tester, 'Bulbs');
     final addBulb = find.byKey(const ValueKey('room-settings-add-bulb'));
     expect(addBulb, findsOneWidget);
     expect(find.text('Add Bulb'), findsOneWidget);
@@ -7453,6 +7485,8 @@ void main() {
       ),
     );
 
+    await _selectRoomSettingsTab(tester, 'Bulbs');
+    await tester.pumpAndSettle();
     final row = find.byKey(const ValueKey('room-device-row-light-1'));
     expect(row, findsOneWidget);
     expect(
@@ -7461,7 +7495,7 @@ void main() {
     );
     expect(find.text('BRI · CCT'), findsOneWidget);
     expect(
-      tester.getSemantics(row).hint,
+      tester.widget<Semantics>(row).properties.hint,
       'Tap for settings. Touch and hold to identify.',
     );
 
