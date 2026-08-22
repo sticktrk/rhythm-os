@@ -4979,10 +4979,8 @@ class ServerSyncProvider extends ChangeNotifier {
       controlKind: controlKind,
       targetId: targetNodeId,
     );
-    if (success) {
-      await _refreshTopologyNodes();
-    }
-    return success;
+    if (!success) return false;
+    return refreshAfterTopologyMutation();
   }
 
   Future<bool> setNodeControlTargets({
@@ -5003,7 +5001,7 @@ class ServerSyncProvider extends ChangeNotifier {
       targetIds: normalizedTargetNodeIds,
     );
     if (!success) return false;
-    return _refreshTopologyNodesWithResult();
+    return refreshAfterTopologyMutation();
   }
 
   Future<void> _refreshDemoState() async {
