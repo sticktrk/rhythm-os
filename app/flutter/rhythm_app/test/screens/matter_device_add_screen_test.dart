@@ -230,7 +230,7 @@ void main() {
       MaterialApp(
         home: MatterDeviceAddScreen(
           endpoint: const HubEndpoint(host: '127.0.0.1', port: 0),
-          addMethod: MatterAddMethod.onNetworkSetupCode,
+          addMethod: MatterAddMethod.automatic,
           initialSetupPayload: '3497-011-2332',
           pairingApi: api,
         ),
@@ -240,12 +240,44 @@ void main() {
     await tester.pump(const Duration(milliseconds: 10));
 
     expect(
-      find.textContaining('The device stopped responding before setup finished'),
+      find.textContaining(
+          'The device stopped responding before setup finished'),
       findsOneWidget,
     );
     expect(find.textContaining('BlueZ'), findsNothing);
     expect(find.textContaining('CHIP Error'), findsNothing);
     expect(find.textContaining('.cpp'), findsNothing);
+  });
+
+  testWidgets('explains on-network transport failures without BLE advice',
+      (tester) async {
+    final api = _FakeRhythmMatterApi(
+      onPair: (_) async => const RhythmMatterPairingResponse(
+        httpStatus: 200,
+        status: 'failed',
+        error: 'CHIP sidecar closed the socket without a response '
+            '(chipd status: running)',
+      ),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: MatterDeviceAddScreen(
+          endpoint: const HubEndpoint(host: '127.0.0.1', port: 0),
+          addMethod: MatterAddMethod.onNetworkSetupCode,
+          initialSetupPayload: '3497-011-2332',
+          pairingApi: api,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+
+    expect(find.textContaining('local Matter network'), findsOneWidget);
+    expect(find.textContaining('Thread border router'), findsOneWidget);
+    expect(find.textContaining('keep it near'), findsNothing);
+    expect(find.textContaining('CHIP sidecar'), findsNothing);
+    expect(find.textContaining('chipd'), findsNothing);
   });
 
   testWidgets('retry starts a new durable Matter pairing session',

@@ -410,6 +410,12 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       'chip rpc',
     ];
     if (technicalMarkers.any(lower.contains)) {
+      if (widget.addMethod == MatterAddMethod.onNetworkSetupCode) {
+        return 'Rhythm could not reach the device over your local Matter '
+            'network. Keep its sharing window open and check that the Rhythm '
+            'Box can use your Thread border router\'s IPv6 route, then try '
+            'again.';
+      }
       return 'The device stopped responding before setup finished. Put it '
           'back in pairing mode, keep it near the Rhythm Box, and try again.';
     }
