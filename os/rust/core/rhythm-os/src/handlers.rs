@@ -2921,9 +2921,17 @@ pub fn handle_put_node_preferences(
             .and_then(|locked| locked.hub_runtime())
             .and_then(|runtime| runtime.engine_node_snapshot(&node_id))
         {
-            Some(snapshot) if snapshot.kind.is_room() => snapshot.profile_settings.room_schedule,
-            Some(_) => return ApiResponse::bad_request("Room schedules require a room node"),
-            None => return ApiResponse::bad_request("Room schedule target was not found"),
+            Some(snapshot)
+                if snapshot.kind.is_light_addressable() && snapshot.parent_id.is_none() =>
+            {
+                snapshot.profile_settings.room_schedule
+            }
+            Some(_) => {
+                return ApiResponse::bad_request(
+                    "Schedules require a room or unassigned light node",
+                )
+            }
+            None => return ApiResponse::bad_request("Schedule target was not found"),
         };
         let patch = match parse_profile_settings_patch(
             items[0].get("profile_settings"),
@@ -3037,6 +3045,14 @@ pub fn handle_put_node_preferences(
                 Ok(patch) => patch,
                 Err(e) => return ApiResponse::bad_request(&e),
             };
+        if room_profile
+            .as_ref()
+            .is_some_and(|patch| patch.room_schedule.is_some())
+        {
+            return ApiResponse::bad_request(
+                "Schedule updates must target one room or unassigned light node per request",
+            );
+        }
         updates.push(commands::QueuedNodePreferencesPatch {
             node_id,
             rhythm_enabled,
@@ -6611,6 +6627,34 @@ mod tests {
         assert_eq!(
             parsed["nodes"][0]["profile_settings"]["room_schedule"]["source"],
             "follow_time"
+        );
+        assert!(rx.recv_timeout(Duration::from_millis(25)).is_err());
+    }
+
+    #[test]
+    fn unassigned_light_schedule_returns_authoritative_state_without_queue() {
+        let state = handler_state_with_runtime();
+        let rx = attach_work_queue(&state);
+        let response = handle_put_node_preferences(
+            &state,
+            &json!({
+                "node_id": "standalone-light",
+                "profile_settings": {
+                    "room_schedule": {
+                        "source": "follow_time",
+                        "wake_time": "07:15",
+                        "sleep_time": "23:45"
+                    }
+                }
+            }),
+            false,
+        );
+
+        assert_eq!(response.status, 200, "{}", response.body);
+        let parsed: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(
+            parsed["nodes"][0]["profile_settings"]["room_schedule"]["wake_time"],
+            "07:15"
         );
         assert!(rx.recv_timeout(Duration::from_millis(25)).is_err());
     }

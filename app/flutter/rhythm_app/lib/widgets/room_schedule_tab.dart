@@ -162,10 +162,12 @@ class _RoomScheduleTabState extends State<RoomScheduleTab> {
       if (!ok) _failureScope = _FailureScope.test;
     });
     if (ok) {
+      final node = context.read<ServerSyncProvider>().nodeById(widget.roomId);
+      final target = node?.kind == RhythmNodeKind.lightDevice ? 'light' : 'room';
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
             content: Text(
-                '${mode == RhythmMode.day ? 'Wake' : 'Sleep'} test applied to this room')),
+                '${mode == RhythmMode.day ? 'Wake' : 'Sleep'} test applied to this $target')),
       );
     }
   }
@@ -173,32 +175,48 @@ class _RoomScheduleTabState extends State<RoomScheduleTab> {
   @override
   Widget build(BuildContext context) {
     final sync = context.watch<ServerSyncProvider>();
+    final node = sync.nodeById(widget.roomId);
+    final isLightNode = node?.kind == RhythmNodeKind.lightDevice;
+    final target = isLightNode ? 'light' : 'room';
     if (!sync.roomScheduleSupportedForNode(widget.roomId)) {
+      final parentId = node?.parentId;
+      final inheritsFromRoom =
+          isLightNode && parentId != null && parentId.isNotEmpty;
+      final parentName = inheritsFromRoom ? sync.nodeById(parentId)?.name : null;
       return ListView(
         key: const ValueKey('schedule'),
         padding: const EdgeInsets.symmetric(horizontal: 20),
-        children: const [
-          SizedBox(height: 30),
+        children: [
+          const SizedBox(height: 30),
           _GroupCard(
-            padding: EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
             child: Column(
               children: [
-                Icon(Icons.system_update_alt,
-                    color: CelestialColors.sunWarm, size: 32),
-                SizedBox(height: 10),
+                Icon(
+                  inheritsFromRoom
+                      ? Icons.account_tree_outlined
+                      : Icons.system_update_alt,
+                  color: CelestialColors.sunWarm,
+                  size: 32,
+                ),
+                const SizedBox(height: 10),
                 Text(
-                  'Update required',
-                  key: ValueKey('room-schedule-update-required'),
-                  style: TextStyle(
+                  inheritsFromRoom ? 'Inherited from room' : 'Update required',
+                  key: ValueKey(inheritsFromRoom
+                      ? 'light-schedule-inherited'
+                      : 'room-schedule-update-required'),
+                  style: const TextStyle(
                     color: CelestialColors.textPrimary,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
-                SizedBox(height: 6),
+                const SizedBox(height: 6),
                 Text(
-                  'Update this Rhythm appliance to set a schedule for this room.',
+                  inheritsFromRoom
+                      ? 'This bulb uses the custom light settings from ${parentName ?? 'its assigned room'}.'
+                      : 'Update this Rhythm appliance to set a schedule for this $target.',
                   textAlign: TextAlign.center,
-                  style: TextStyle(color: CelestialColors.textSecondary),
+                  style: const TextStyle(color: CelestialColors.textSecondary),
                 ),
               ],
             ),
@@ -216,10 +234,10 @@ class _RoomScheduleTabState extends State<RoomScheduleTab> {
       key: const ValueKey('schedule'),
       padding: const EdgeInsets.symmetric(horizontal: 20),
       children: [
-        const AutomationSectionHeader(
+        AutomationSectionHeader(
           step: 1,
           title: 'Schedule',
-          subtitle: 'Choose what sets this room’s Wake and Sleep times.',
+          subtitle: 'Choose what sets this $target’s Wake and Sleep times.',
           accent: _scheduleAccent,
         ),
         _GroupCard(
@@ -245,8 +263,8 @@ class _RoomScheduleTabState extends State<RoomScheduleTab> {
                 padding: const EdgeInsets.symmetric(horizontal: 4),
                 child: Text(
                   followTime
-                      ? 'Only this room follows the times below. The rest of the home is unchanged.'
-                      : 'This room wakes and sleeps with the whole-home Alarm schedule.',
+                      ? 'Only this $target follows the times below. The rest of the home is unchanged.'
+                      : 'This $target wakes and sleeps with the whole-home Alarm schedule.',
                   style: TextStyle(
                     color:
                         CelestialColors.textSecondary.withValues(alpha: 0.85),
@@ -315,10 +333,10 @@ class _RoomScheduleTabState extends State<RoomScheduleTab> {
             ],
           ),
         ),
-        const AutomationSectionHeader(
+        AutomationSectionHeader(
           step: 2,
           title: 'Wake / Sleep Presets',
-          subtitle: 'Set what this room does once Wake or Sleep is '
+          subtitle: 'Set what this $target does once Wake or Sleep is '
               'triggered. Changes to the current mode apply right away.',
           accent: CelestialColors.sunWarm,
         ),
@@ -328,10 +346,10 @@ class _RoomScheduleTabState extends State<RoomScheduleTab> {
             roomId: widget.roomId,
           ),
         ),
-        const AutomationSectionHeader(
+        AutomationSectionHeader(
           step: 3,
           title: 'Test your presets',
-          subtitle: 'Preview this room’s Wake or Sleep preset now.',
+          subtitle: 'Preview this $target’s Wake or Sleep preset now.',
           accent: _testAccent,
         ),
         _GroupCard(

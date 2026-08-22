@@ -1047,7 +1047,7 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
                 let started = Instant::now();
                 if crate::commands::reconcile_room_schedule_before_tick(
                     &state,
-                    &node.settings_node_id,
+                    &node.emit_node_id,
                     room_hour,
                 )
                 .is_err()
