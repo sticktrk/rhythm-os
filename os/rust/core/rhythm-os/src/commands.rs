@@ -898,7 +898,7 @@ fn clear_removed_node_ephemeral_state(s: &mut AppState, node_id: &str) {
         .retain(|seed| seed.source_node_id != node_id && seed.target_node_id != node_id);
 }
 
-fn clear_removed_node_mode_defaults(s: &mut AppState, node_id: &str) -> bool {
+fn clear_node_mode_defaults(s: &mut AppState, node_id: &str) -> bool {
     let mut changed = false;
 
     for config in s.mode_configs.values_mut() {
@@ -11858,7 +11858,7 @@ pub fn do_device_hard_remove(
     let mut mode_config_propagation = None;
     if let Some(canonical_id) = canonical_id.as_deref() {
         clear_removed_node_ephemeral_state(&mut s, canonical_id);
-        if clear_removed_node_mode_defaults(&mut s, canonical_id) {
+        if clear_node_mode_defaults(&mut s, canonical_id) {
             let configs = s.mode_configs();
             let runtimes = s
                 .hubs
@@ -14511,7 +14511,7 @@ fn schedule_topology_group_sync_for_integrations(state: &SharedState) {
     }
 }
 
-fn clear_runtime_node_off_flags(state: &SharedState, node_id: &str) -> Result<()> {
+fn clear_runtime_node_standalone_state(state: &SharedState, node_id: &str) -> Result<()> {
     let runtime = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.hub_runtime()
@@ -14522,9 +14522,13 @@ fn clear_runtime_node_off_flags(state: &SharedState, node_id: &str) -> Result<()
     let Some(snap) = runtime.engine_node_snapshot(node_id) else {
         return Ok(());
     };
-    if !snap.soft_off && !snap.hard_off {
+    let clear_off_state = snap.soft_off || snap.hard_off;
+    if !clear_off_state && snap.profile_settings.room_schedule.is_none() {
         return Ok(());
     }
+
+    let mut profile_settings = snap.profile_settings;
+    profile_settings.room_schedule = None;
 
     runtime.restore_node_state(
         node_id,
@@ -14534,10 +14538,14 @@ fn clear_runtime_node_off_flags(state: &SharedState, node_id: &str) -> Result<()
             time_offset_minutes: snap.time_offset_minutes,
             brightness_offset: snap.brightness_offset,
             soft_off: false,
-            mood_active: false,
+            mood_active: if clear_off_state {
+                false
+            } else {
+                snap.mood_active
+            },
             standby_enabled: snap.standby_enabled,
             hard_off: false,
-            profile_settings: snap.profile_settings,
+            profile_settings,
         },
     );
     Ok(())
@@ -15651,7 +15659,24 @@ pub fn do_canonical_assign_room_with_precondition(
             error,
         ));
     }
+    let mode_config_propagation =
+        if assigning_standalone_light_child && clear_node_mode_defaults(&mut s, device_id) {
+            let configs = s.mode_configs();
+            let runtimes = s
+                .hubs
+                .values()
+                .filter_map(|hub| hub.runtime.clone())
+                .collect::<Vec<_>>();
+            persist_settings_locked(&s);
+            Some((configs, runtimes))
+        } else {
+            None
+        };
     drop(s);
+
+    if let Some((configs, runtimes)) = mode_config_propagation {
+        propagate_mode_configs_to_runtimes(runtimes, configs);
+    }
 
     if let (Some(old), Some(new)) = (old_motion_target, new_motion_target) {
         if old != new {
@@ -15678,7 +15703,7 @@ pub fn do_canonical_assign_room_with_precondition(
     }
     reconcile_runtime_from_state(state)?;
     if assigning_standalone_light_child {
-        clear_runtime_node_off_flags(state, device_id)?;
+        clear_runtime_node_standalone_state(state, device_id)?;
         persist_rooms(state);
     }
     if matches!(device_type, DeviceType::Light)
@@ -33283,18 +33308,62 @@ mod tests {
     }
 
     #[test]
-    fn canonical_assign_room_clears_standalone_light_off_flags() {
+    fn canonical_assign_room_clears_standalone_light_schedule_authority() {
         let (state, runtime, hub_key) = setup_state_with_deferred_runtime();
         let storage = TestStorage::default();
         state.lock().unwrap().storage = Some(std::sync::Arc::new(storage.clone()));
         let room_id = state.lock().unwrap().topology.create_room("Office");
         let device_id = insert_canonical_device(&state, hub_key, "matter-100", "Desk Lamp", "", "");
+        let schedule = rhythm_core::RoomScheduleConfig {
+            source: rhythm_core::RoomScheduleSource::FollowTime,
+            wake_time: rhythm_core::ModeTransitionTime::parse("07:15").unwrap(),
+            sleep_time: rhythm_core::ModeTransitionTime::parse("23:45").unwrap(),
+        };
 
         {
             let mut s = state.lock().unwrap();
             s.topology.ensure_standalone_device(&device_id);
+            s.set_mode_configs(vec![
+                ModeConfig {
+                    mode: RhythmMode::Day,
+                    active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+                    idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+                    wake_profile_id: None,
+                    warning_profile_id: None,
+                    room_defaults: vec![
+                        rhythm_core::RoomModeDefault {
+                            room_id: device_id.clone(),
+                            state: RoomModeState::HardOff,
+                        },
+                        rhythm_core::RoomModeDefault {
+                            room_id: room_id.clone(),
+                            state: RoomModeState::Active,
+                        },
+                    ],
+                },
+                ModeConfig {
+                    mode: RhythmMode::Sleep,
+                    active_profile_id: Some(rhythm_core::SLEEP_PROFILE_ID.into()),
+                    idle_profile_id: Some(rhythm_core::SLEEP_IDLE_PROFILE_ID.into()),
+                    wake_profile_id: None,
+                    warning_profile_id: None,
+                    room_defaults: vec![
+                        rhythm_core::RoomModeDefault {
+                            room_id: device_id.clone(),
+                            state: RoomModeState::Active,
+                        },
+                        rhythm_core::RoomModeDefault {
+                            room_id: room_id.clone(),
+                            state: RoomModeState::HardOff,
+                        },
+                    ],
+                },
+            ]);
         }
         reconcile_runtime_from_state(&state).unwrap();
+        let mut standalone_settings = RoomProfileSettings::default();
+        standalone_settings.room_schedule = Some(schedule);
+        standalone_settings.motion_activation_enabled = Some(true);
         runtime.restore_node_state(
             &device_id,
             RestoredNodeState {
@@ -33306,7 +33375,7 @@ mod tests {
                 mood_active: false,
                 standby_enabled: false,
                 hard_off: true,
-                profile_settings: RoomProfileSettings::default(),
+                profile_settings: standalone_settings,
             },
         );
         let before = runtime
@@ -33324,6 +33393,18 @@ mod tests {
         assert_eq!(after.parent_id.as_deref(), Some(room_id.as_str()));
         assert!(!after.soft_off);
         assert!(!after.hard_off);
+        assert_eq!(after.profile_settings.room_schedule, None);
+        assert_eq!(after.profile_settings.motion_activation_enabled, Some(true));
+
+        let mode_configs = state.lock().unwrap().mode_configs();
+        assert!(mode_configs.iter().all(|config| config
+            .room_defaults
+            .iter()
+            .all(|default| default.room_id != device_id)));
+        assert!(mode_configs.iter().all(|config| config
+            .room_defaults
+            .iter()
+            .any(|default| default.room_id == room_id)));
 
         let saved = storage.inner.lock().unwrap();
         let saved_child = saved
@@ -33332,6 +33413,21 @@ mod tests {
             .expect("assigned light child should be persisted");
         assert!(!saved_child.soft_off);
         assert!(!saved_child.hard_off);
+        assert_eq!(saved_child.profile_settings.room_schedule, None);
+        assert_eq!(
+            saved_child.profile_settings.motion_activation_enabled,
+            Some(true)
+        );
+        assert!(saved
+            .settings
+            .as_ref()
+            .expect("mode defaults should be persisted")
+            .modes
+            .iter()
+            .all(|config| config
+                .room_defaults
+                .iter()
+                .all(|default| default.room_id != device_id)));
     }
 
     #[test]
