@@ -625,6 +625,16 @@ fn translate_event_entity_with_hooks(
     registry: &Arc<Mutex<HaDeviceRegistry>>,
     on_unknown_button: Option<&dyn Fn(&RawButtonEvent)>,
 ) -> Vec<HubEvent> {
+    let device_class = event_data
+        .get("new_state")
+        .or_else(|| event_data.get("old_state"))
+        .and_then(|s| s.get("attributes"))
+        .and_then(|a| a.get("device_class"))
+        .and_then(|v| v.as_str());
+    if !is_button_event_device_class(device_class) {
+        return Vec::new();
+    }
+
     // Extract event_type from new_state.attributes.event_type
     let event_type = match event_data
         .get("new_state")
@@ -701,6 +711,12 @@ fn is_contact_device_class(device_class: Option<&str>) -> bool {
         device_class,
         Some("door") | Some("window") | Some("opening") | Some("garage_door")
     )
+}
+
+fn is_button_event_device_class(device_class: Option<&str>) -> bool {
+    // Preserve compatibility with integrations that omit the optional class,
+    // while rejecting explicit camera-motion and other non-button events.
+    device_class.is_none_or(|class| class == "button")
 }
 
 /// Translate a raw HA WebSocket event into hub-agnostic events.
@@ -1420,6 +1436,35 @@ mod tests {
         // Verify button was auto-registered
         let reg = registry.lock().unwrap();
         assert!(reg.get_device_for_button("event.dimmer_button_2").is_some());
+    }
+
+    #[test]
+    fn test_camera_motion_event_is_not_registered_as_button() {
+        let (registry, cache) = make_registry_and_cache();
+        cache.lock().unwrap().insert(
+            "event.front_door_bullet_vehicle".to_string(),
+            "entrance".to_string(),
+        );
+
+        let event_data = json!({
+            "entity_id": "event.front_door_bullet_vehicle",
+            "new_state": {
+                "state": "2026-08-22T15:30:00+00:00",
+                "attributes": {
+                    "event_type": "vehicle",
+                    "device_class": "motion"
+                }
+            }
+        });
+
+        let results = translate_state_changed(&event_data, &registry, &cache);
+
+        assert!(results.is_empty());
+        assert!(registry
+            .lock()
+            .unwrap()
+            .get_device_for_button("event.front_door_bullet_vehicle")
+            .is_none());
     }
 
     #[test]
