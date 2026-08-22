@@ -75,7 +75,7 @@ pub struct AreaDiscoveryResult {
     /// don't set `original_device_class` in the entity registry — the device_class
     /// only appears in state attributes at event time.
     pub binary_sensor_areas: HashMap<String, String>,
-    /// entity_id → area_id for ALL `event.*` entities.
+    /// entity_id → area_id for button-compatible `event.*` entities.
     ///
     /// Used to populate the event cache for on-demand button discovery from
     /// HA event entities (universal button support across all integrations:
@@ -482,10 +482,30 @@ async fn discover_full_async(config: &HaConnectionConfig) -> Result<FullRegistry
         })
         .collect();
 
-    // Build entity_id → area_id for ALL event.* entities (button events).
+    let event_state_device_classes: HashMap<String, String> = states_json
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|state| {
+            let entity_id = state.get("entity_id")?.as_str()?;
+            let device_class = state.get("attributes")?.get("device_class")?.as_str()?;
+            Some((entity_id.to_string(), device_class.to_string()))
+        })
+        .collect();
+
+    // Build entity_id → area_id for button-compatible event entities. HA also
+    // uses event.* for camera motion/object detections and doorbells; those are
+    // not physical controls and must not enter Rhythm's button registry.
     let event_entity_areas: HashMap<String, String> = entities
         .iter()
-        .filter(|e| e.entity_id.starts_with("event."))
+        .filter(|e| {
+            e.entity_id.starts_with("event.")
+                && is_button_event_device_class(e.original_device_class.as_deref().or_else(|| {
+                    event_state_device_classes
+                        .get(&e.entity_id)
+                        .map(String::as_str)
+                }))
+        })
         .filter_map(|e| {
             let area_id = e
                 .area_id
@@ -1090,6 +1110,13 @@ fn is_contact_device_class(device_class: Option<&str>) -> bool {
     )
 }
 
+fn is_button_event_device_class(device_class: Option<&str>) -> bool {
+    // Older integrations can omit the event device class, so retain the
+    // existing event-type based compatibility path. Explicit non-button
+    // classes (notably camera `motion` events) are authoritative exclusions.
+    device_class.is_none_or(|class| class == "button")
+}
+
 /// Look up the parent device for an entity and return enriched fields.
 ///
 /// Returns `(name, hardware_ids, manufacturer, model)`. Entities without
@@ -1285,7 +1312,8 @@ mod tests {
                     {"entity_id": "binary_sensor.office_hue_motion", "device_id": "dev-hue-motion"},
                     {"entity_id": "binary_sensor.office_window", "device_id": "dev-window"},
                     {"entity_id": "event.kitchen_remote_button_1", "device_id": "dev-remote", "platform": "zha"},
-                    {"entity_id": "event.kitchen_remote_button_2", "device_id": "dev-remote", "platform": "zha"}
+                    {"entity_id": "event.kitchen_remote_button_2", "device_id": "dev-remote", "platform": "zha"},
+                    {"entity_id": "event.front_door_bullet_vehicle", "device_id": "dev-camera", "platform": "unifiprotect"}
                 ]),
             )))
             .await
@@ -1350,6 +1378,14 @@ mod tests {
                         "manufacturer": "Lutron",
                         "model": "Pico Remote",
                         "serial_number": "switch-456"
+                    },
+                    {
+                        "id": "dev-camera",
+                        "area_id": "office",
+                        "name": "Front Door Bullet",
+                        "manufacturer": "Ubiquiti",
+                        "model": "G6 Bullet",
+                        "connections": [["mac", "00:11:22:33:44:55"]]
                     }
                 ]),
             )))
@@ -1382,6 +1418,11 @@ mod tests {
                         "entity_id": "binary_sensor.office_window",
                         "state": "on",
                         "attributes": {"device_class": "window"}
+                    },
+                    {
+                        "entity_id": "event.front_door_bullet_vehicle",
+                        "state": "2026-08-22T15:30:00+00:00",
+                        "attributes": {"device_class": "motion", "event_type": "vehicle"}
                     }
                 ]),
             )))
@@ -1510,6 +1551,9 @@ mod tests {
                 && device.device_id == "dev-scene-switch"
                 && device.buttons.is_empty()
         }));
+        assert!(!devices
+            .iter()
+            .any(|device| device.device_id == "dev-camera"));
 
         let identities = discovery.discover_identities().unwrap();
         assert!(identities.iter().any(|identity| {
@@ -1552,6 +1596,9 @@ mod tests {
                 && identity.native_id == "00:17:88:01:0a:b2:c3:d4"
                 && identity.name == "Kitchen Remote"
         }));
+        assert!(!identities
+            .iter()
+            .any(|identity| identity.native_id == "dev-camera"));
 
         let mut motion = discovery.discover_motion_state().unwrap();
         motion.sort_by(|left, right| left.sensor_id.cmp(&right.sensor_id));
@@ -1709,6 +1756,34 @@ mod tests {
             devices[0].buttons,
             vec![("event.hue_dimmer_button_2".to_string(), 2)]
         );
+    }
+
+    #[test]
+    fn test_build_button_devices_excludes_camera_motion_event_entities() {
+        let entities = vec![EntityEntry {
+            entity_id: "event.front_door_bullet_vehicle".to_string(),
+            area_id: None,
+            device_id: Some("camera-1".to_string()),
+            original_device_class: Some("motion".to_string()),
+            platform: Some("unifiprotect".to_string()),
+        }];
+        let device_area_map = HashMap::from([("camera-1".to_string(), "entrance".to_string())]);
+        let device_info = HashMap::from([(
+            "camera-1".to_string(),
+            named_device_info("Front Door Bullet", "G6 Bullet"),
+        )]);
+
+        let devices = build_button_devices(
+            &entities,
+            &device_area_map,
+            &device_info,
+            &HashMap::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+
+        assert!(devices.is_empty());
     }
 
     #[test]
