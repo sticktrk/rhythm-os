@@ -613,6 +613,17 @@ fn translate_event_entity(
     registry: &Arc<Mutex<HaDeviceRegistry>>,
     cache: &Arc<Mutex<HashMap<String, String>>>,
 ) -> Vec<HubEvent> {
+    // Full discovery owns admission for event entities. In particular, it
+    // omits camera/object events whose parent device already exposes a typed
+    // binary sensor. Require that admission even when an older persisted hub
+    // registry still contains a button mapping for the event entity.
+    if !cache
+        .lock()
+        .is_ok_and(|cache| cache.contains_key(entity_id))
+    {
+        return Vec::new();
+    }
+
     let on_unknown = |evt: &RawButtonEvent| {
         register_unknown_button_from_cache(evt, registry, cache);
     };
@@ -1468,7 +1479,35 @@ mod tests {
     }
 
     #[test]
-    fn test_event_entity_not_in_cache_returns_unroutable() {
+    fn test_event_entity_absent_from_admission_cache_ignores_stale_button_mapping() {
+        let (registry, cache) = make_registry_and_cache();
+        registry.lock().unwrap().upsert_device(
+            "camera-1",
+            Some("living_room"),
+            &[("event.front_door_bullet_vehicle".to_string(), 1)],
+            DeviceType::Button,
+        );
+
+        let event_data = json!({
+            "entity_id": "event.front_door_bullet_vehicle",
+            "new_state": {
+                "state": "2026-08-22T15:30:00+00:00",
+                "attributes": {"event_type": "vehicle"}
+            }
+        });
+
+        let results = translate_state_changed(&event_data, &registry, &cache);
+
+        assert!(results.is_empty());
+        assert!(registry
+            .lock()
+            .unwrap()
+            .get_device_for_button("event.front_door_bullet_vehicle")
+            .is_some());
+    }
+
+    #[test]
+    fn test_event_entity_not_in_cache_is_ignored() {
         let (registry, cache) = make_registry_and_cache();
         // Cache is empty
 
@@ -1481,11 +1520,7 @@ mod tests {
         });
 
         let results = translate_state_changed(&event_data, &registry, &cache);
-        assert_eq!(results.len(), 1);
-        assert!(
-            matches!(&results[0], HubEvent::UnroutableButton { .. }),
-            "Unresolvable button should produce UnroutableButton"
-        );
+        assert!(results.is_empty());
     }
 
     #[test]
