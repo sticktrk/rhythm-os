@@ -15,10 +15,9 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RhythmNodeProfileSettings,
         RhythmTimerSetting;
 import '../screens/hubs/room_device_add_flow.dart';
-import '../screens/settings/light_screen.dart';
 import '../utils/app_color_temperature.dart';
 import 'device_detail_sheet.dart';
-import 'low_glow_switch.dart';
+import 'low_glow_switch.dart' show LightProfileOverrideBadge;
 import 'segmented_tab_bar.dart';
 import 'light_output_display.dart';
 import 'auto_slider_setting_row.dart';
@@ -53,10 +52,10 @@ class RoomSettingsSheet extends StatefulWidget {
   State<RoomSettingsSheet> createState() => _RoomSettingsSheetState();
 }
 
-enum _SheetTab { light, motion, buttons, schedule }
+enum _SheetTab { lighting, bulbs, motion, buttons }
 
 class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
-  _SheetTab _selectedTab = _SheetTab.light;
+  _SheetTab _selectedTab = _SheetTab.lighting;
   late String _roomName;
   final Map<String, RhythmTimerSetting> _motionTimeoutDrafts = {};
 
@@ -92,28 +91,6 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
         context.read<ServerSyncProvider>().ensureRoomPreviewStateFresh(room.id),
       );
     });
-  }
-
-  void _openRoomLightSettings() {
-    HapticFeedback.lightImpact();
-    LightScreen.showForRoom(
-      context,
-      roomId: room.id,
-      roomName: _roomName,
-    );
-  }
-
-  void _showRoomLightSettingsUnavailable() {
-    HapticFeedback.lightImpact();
-    final version = context.read<ServerSyncProvider>().firmwareVersion;
-    final versionSuffix = version == '0.0.0' ? '' : ' ($version)';
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          'Update the Rhythm appliance$versionSuffix to customize light settings for $_roomName.',
-        ),
-      ),
-    );
   }
 
   @override
@@ -188,10 +165,10 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
                     selected: _selectedTab,
                     onChanged: (tab) => setState(() => _selectedTab = tab),
                     tabs: const [
-                      SegmentedTab('Light', _SheetTab.light),
+                      SegmentedTab('Lighting', _SheetTab.lighting),
+                      SegmentedTab('Bulbs', _SheetTab.bulbs),
                       SegmentedTab('Motion', _SheetTab.motion),
                       SegmentedTab('Buttons', _SheetTab.buttons),
-                      SegmentedTab('Schedule', _SheetTab.schedule),
                     ],
                   ),
                 ),
@@ -201,10 +178,14 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
                   child: AnimatedSwitcher(
                     duration: const Duration(milliseconds: 200),
                     child: switch (_selectedTab) {
-                      _SheetTab.light => _buildLightContent(context),
+                      _SheetTab.bulbs => _buildBulbsContent(context),
                       _SheetTab.motion => _buildMotionContent(context),
                       _SheetTab.buttons => _buildButtonsContent(context),
-                      _SheetTab.schedule => RoomScheduleTab(roomId: room.id),
+                      _SheetTab.lighting => RoomScheduleTab(
+                          roomId: room.id,
+                          roomName: _roomName,
+                          showRoomLightingOverride: room.kind.isRoom,
+                        ),
                     },
                   ),
                 ),
@@ -379,20 +360,15 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
     );
   }
 
-  Widget _buildLightContent(BuildContext context) {
+  Widget _buildBulbsContent(BuildContext context) {
     final syncProvider = context.watch<ServerSyncProvider>();
-    final standbyEnabled = syncProvider.standbyEnabledForNode(room.id);
-    final lightSettingsSupported =
-        syncProvider.lightProfileOverridesSupportedForNode(room.id);
-    final hasLightOverrides =
-        syncProvider.hasNodeLightProfileOverrides(room.id);
     final lights = syncProvider
         .devicesForRoom(room.id)
         .where((device) => device.type == RhythmDeviceType.light)
         .toList(growable: false);
 
     return ListView(
-      key: const ValueKey('light'),
+      key: const ValueKey('bulbs'),
       padding: const EdgeInsets.symmetric(horizontal: 20),
       children: [
         if (room.kind.isRoom) ...[
@@ -408,27 +384,8 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
           ]),
           const SizedBox(height: 16),
         ],
-        // Low glow is the user-facing name for the room's existing Standby
-        // preference, independent of the Day/Sleep profile selection.
-        _buildSettingsGroup('', [
-          if (room.kind.isRoom)
-            LightingOverrideRow(
-              nodeId: room.id,
-              supported: lightSettingsSupported,
-              customized: hasLightOverrides,
-              settingsKeyPrefix: 'room-settings-light',
-              onPressed: lightSettingsSupported
-                  ? _openRoomLightSettings
-                  : _showRoomLightSettingsUnavailable,
-            ),
-          LowGlowSettingRow(
-            value: standbyEnabled,
-            onChanged: (val) => _setStandbyEnabled(context, val),
-          ),
-        ]),
         if (lights.isNotEmpty) ...[
-          const SizedBox(height: 16),
-          _buildDeviceGroup('Lights', lights),
+          _buildDeviceGroup('Bulbs', lights),
         ],
       ],
     );
@@ -757,13 +714,6 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
     if (secs == 0) return 'Off';
     if (secs >= 60) return '${(secs / 60).round()}m';
     return '${secs}s';
-  }
-
-  void _setStandbyEnabled(BuildContext context, bool enabled) {
-    final syncProvider = context.read<ServerSyncProvider>();
-    syncProvider.setNodeStandbyEnabledLocal(room.id, enabled);
-    syncProvider.pushNodePreferences(room.id, standbyEnabled: enabled);
-    HapticFeedback.selectionClick();
   }
 
   Future<void> _showRenameDialog(BuildContext context) async {

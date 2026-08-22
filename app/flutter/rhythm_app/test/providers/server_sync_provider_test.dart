@@ -1738,7 +1738,11 @@ void main() {
       await tester.pumpWidget(_buildTestApp(
         roomProvider: roomProvider,
         provider: provider,
-        child: const RoomScheduleTab(roomId: 'room-1'),
+        child: const RoomScheduleTab(
+          roomId: 'room-1',
+          roomName: 'Porch Bulb',
+          showRoomLightingOverride: false,
+        ),
       ));
       await tester.pump();
 
@@ -1848,11 +1852,9 @@ void main() {
 
       connection.emitHello(scheduleHello());
       await tester.pump();
-      final firstWrite =
-          provider.setRoomSchedule('room-1', schedule('07:15'));
+      final firstWrite = provider.setRoomSchedule('room-1', schedule('07:15'));
       await tester.pump();
-      final secondWrite =
-          provider.setRoomSchedule('room-1', schedule('08:00'));
+      final secondWrite = provider.setRoomSchedule('room-1', schedule('08:00'));
       await tester.pump();
 
       first.complete(RhythmRoomState.fromJson({
@@ -1895,8 +1897,8 @@ void main() {
       connection.emitHello(scheduleHello());
       await tester.pump();
 
-      expect(await provider.setRoomSchedule('room-1', schedule('07:15')),
-          isFalse);
+      expect(
+          await provider.setRoomSchedule('room-1', schedule('07:15')), isFalse);
       expect(provider.scheduleForRoom('room-1').wakeTime, '06:30');
       expect(provider.roomSchedulePendingForRoom('room-1'), isFalse);
     });
@@ -5822,11 +5824,34 @@ void main() {
       ),
     );
 
-    expect(find.text('Light'), findsNWidgets(2));
+    expect(find.text('Bulbs'), findsOneWidget);
     expect(find.text('Motion'), findsOneWidget);
     expect(find.text('Buttons'), findsOneWidget);
-    expect(find.text('Schedule'), findsOneWidget);
+    expect(find.text('Lighting'), findsNWidgets(2));
     expect(find.text('Info'), findsNothing);
+    final lightingTab = find.descendant(
+      of: find.byKey(const ValueKey('room-settings-tabs')),
+      matching: find.text('Lighting'),
+    );
+    final bulbsTab = find.descendant(
+      of: find.byKey(const ValueKey('room-settings-tabs')),
+      matching: find.text('Bulbs'),
+    );
+    final motionTab = find.descendant(
+      of: find.byKey(const ValueKey('room-settings-tabs')),
+      matching: find.text('Motion'),
+    );
+    final buttonsTab = find.descendant(
+      of: find.byKey(const ValueKey('room-settings-tabs')),
+      matching: find.text('Buttons'),
+    );
+    expect(tester.getTopLeft(lightingTab).dx,
+        lessThan(tester.getTopLeft(bulbsTab).dx));
+    expect(tester.getTopLeft(bulbsTab).dx,
+        lessThan(tester.getTopLeft(motionTab).dx));
+    expect(tester.getTopLeft(motionTab).dx,
+        lessThan(tester.getTopLeft(buttonsTab).dx));
+    expect(find.byKey(const ValueKey('lighting')), findsOneWidget);
     expect(
       find.byKey(const ValueKey('room-settings-rename')),
       findsOneWidget,
@@ -5838,10 +5863,15 @@ void main() {
     expect(find.text('Matter'), findsOneWidget);
     expect(find.text('Hide this room'), findsNothing);
     expect(find.text('Hide this light'), findsNothing);
-    expect(find.text('Lighting'), findsOneWidget);
-    expect(find.text('Low glow'), findsOneWidget);
+    await _selectRoomSettingsTab(tester, 'Bulbs');
+    await tester.pumpAndSettle();
+    final bulbsContent = find.byKey(const ValueKey('bulbs'));
+    expect(
+      find.descendant(of: bulbsContent, matching: find.text('Low glow')),
+      findsNothing,
+    );
     expect(find.text('Add Bulb'), findsOneWidget);
-    expect(find.text('LIGHTS'), findsOneWidget);
+    expect(find.text('BULBS'), findsOneWidget);
     expect(find.text('Ceiling Light'), findsOneWidget);
     expect(
       find.byKey(const ValueKey('light-profile-override-badge-room-1')),
@@ -5851,35 +5881,31 @@ void main() {
       find.byKey(const ValueKey('light-profile-override-badge-light-1')),
       findsNothing,
     );
-    final lightContent = find.byKey(const ValueKey('light'));
     expect(
       find.descendant(
-        of: lightContent,
+        of: bulbsContent,
         matching: find.byKey(const ValueKey('room-settings-add-bulb')),
       ),
       findsOneWidget,
     );
-    final addBulbSemantics = tester.getSemantics(
-      find.byKey(const ValueKey('room-settings-add-bulb')),
-    );
+    final addBulbSemantics = tester
+        .widget<Semantics>(
+          find.byKey(const ValueKey('room-settings-add-bulb')),
+        )
+        .properties;
     expect(addBulbSemantics.label, 'Add Bulb');
     expect(addBulbSemantics.hint, 'Choose Scan or Select from existing');
     expect(find.text('Delete Room'), findsNothing);
     expect(find.text('Entry Motion'), findsNothing);
     expect(find.text('Wall Button'), findsNothing);
     expect(
-      tester
-          .widget<Text>(
-            find.byKey(
-              const ValueKey('room-settings-light-status-room-1'),
-            ),
-          )
-          .data,
-      'Auto',
-    );
-    expect(
-      tester.getTopLeft(find.text('Lighting')).dy,
-      lessThan(tester.getTopLeft(find.text('LIGHTS')).dy),
+      find.descendant(
+        of: bulbsContent,
+        matching: find.byKey(
+          const ValueKey('room-settings-light-settings-room-1'),
+        ),
+      ),
+      findsNothing,
     );
     final roomNameRect = tester.getRect(
       find.byKey(const ValueKey('room-settings-room-name')),
@@ -5893,14 +5919,6 @@ void main() {
     expect(renameRect.left, greaterThanOrEqualTo(roomNameRect.right));
     expect(renameRect.left - roomNameRect.right, lessThanOrEqualTo(8));
     expect(sourceRect.top, lessThan(roomNameRect.top));
-
-    final lightingSemantics = tester.getSemantics(
-      find.byKey(
-        const ValueKey('room-settings-light-settings-room-1'),
-      ),
-    );
-    expect(lightingSemantics.label, 'Lighting');
-    expect(lightingSemantics.value, 'Using automatic settings');
 
     await _selectRoomSettingsTab(tester, 'Motion');
 
@@ -5988,17 +6006,57 @@ void main() {
       findsNothing,
     );
 
-    await _selectRoomSettingsTab(tester, 'Schedule');
-    expect(find.byKey(const ValueKey('schedule')), findsOneWidget);
+    await _selectRoomSettingsTab(tester, 'Lighting');
+    final lightingContent = find.byKey(const ValueKey('lighting'));
+    expect(lightingContent, findsOneWidget);
+    expect(
+      find.descendant(
+        of: lightingContent,
+        matching: find.byKey(
+          const ValueKey('room-settings-light-settings-room-1'),
+        ),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: lightingContent,
+        matching: find.byKey(const ValueKey('room-settings-add-bulb')),
+      ),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey('room-settings-low-glow-room-1')),
+      findsOneWidget,
+    );
+    expect(
+      tester
+          .widget<Text>(
+            find.byKey(
+              const ValueKey('room-settings-light-status-room-1'),
+            ),
+          )
+          .data,
+      'Auto',
+    );
+    final lightingSemantics = tester.widget<Semantics>(
+      find.byKey(
+        const ValueKey('room-settings-light-settings-room-1'),
+      ),
+    );
+    expect(lightingSemantics.properties.label, 'Lighting');
+    expect(
+      lightingSemantics.properties.value,
+      'Using automatic settings',
+    );
 
-    expect(find.byKey(const ValueKey('schedule')), findsOneWidget);
     expect(find.text('SCHEDULE'), findsOneWidget);
     expect(find.text('WAKE / SLEEP PRESETS'), findsOneWidget);
     expect(find.text('TEST YOUR PRESETS'), findsOneWidget);
     expect(
       tester
           .getSemantics(
-            find.byKey(const ValueKey('segmented-tab-schedule')),
+            find.byKey(const ValueKey('segmented-tab-lighting')),
           )
           .getSemanticsData()
           .flagsCollection
@@ -6137,7 +6195,7 @@ void main() {
       ),
     );
 
-    await _selectRoomSettingsTab(tester, 'Schedule');
+    await _selectRoomSettingsTab(tester, 'Lighting');
     expect(
       find.byKey(const ValueKey('room-schedule-update-required')),
       findsOneWidget,
@@ -6211,7 +6269,7 @@ void main() {
         brightnessOffset: 0,
       ),
     );
-    await _selectRoomSettingsTab(tester, 'Schedule');
+    await _selectRoomSettingsTab(tester, 'Lighting');
 
     final presets = find.byKey(const ValueKey('room-schedule-source-presets'));
     await tester.tap(presets);
@@ -6235,11 +6293,11 @@ void main() {
     // inside the viewport (not clipped at its bottom edge).
     await tester.dragUntilVisible(
       wakeTest,
-      find.byKey(const ValueKey('schedule')),
+      find.byKey(const ValueKey('lighting')),
       const Offset(0, -120),
     );
     await tester.drag(
-      find.byKey(const ValueKey('schedule')),
+      find.byKey(const ValueKey('lighting')),
       const Offset(0, -200),
     );
     await tester.pump();
@@ -6340,22 +6398,24 @@ void main() {
         brightnessOffset: 0,
       ),
     );
-    await _selectRoomSettingsTab(tester, 'Schedule');
+    await _selectRoomSettingsTab(tester, 'Lighting');
     await tester.pumpAndSettle();
 
     // Tapping On in the Wake row (the active mode) records the room default
     // AND moves the room's lights immediately.
-    final wakeRow = find.byKey(const ValueKey('room-schedule-presets-day-room-1'));
+    final wakeRow =
+        find.byKey(const ValueKey('room-schedule-presets-day-room-1'));
     await tester.dragUntilVisible(
       wakeRow,
-      find.byKey(const ValueKey('schedule')),
+      find.byKey(const ValueKey('lighting')),
       const Offset(0, -120),
     );
     await tester.tap(
       find.descendant(of: wakeRow, matching: find.text('On')),
     );
     await tester.pump();
-    expect(provider.roomDefaultStateForMode('room-1', RhythmMode.day), 'active');
+    expect(
+        provider.roomDefaultStateForMode('room-1', RhythmMode.day), 'active');
     expect(api.nodePreferenceCalls, hasLength(1));
     expect(api.nodePreferenceCalls.single.nodeId, 'room-1');
     expect(api.nodePreferenceCalls.single.state, RoomModeState.active);
@@ -6367,7 +6427,7 @@ void main() {
         find.byKey(const ValueKey('room-schedule-presets-night-room-1'));
     await tester.dragUntilVisible(
       sleepRow,
-      find.byKey(const ValueKey('schedule')),
+      find.byKey(const ValueKey('lighting')),
       const Offset(0, -120),
     );
     await tester.tap(
@@ -6406,7 +6466,8 @@ void main() {
     Map<String, dynamic> hello({
       bool followTime = false,
       String wakeTime = '06:30',
-    }) => {
+    }) =>
+        {
           'capabilities': {
             'api_schema_version': 2,
             'features': [RhythmFeature.roomScheduleV1],
@@ -6466,7 +6527,7 @@ void main() {
       ),
     );
     await tester.pump(const Duration(milliseconds: 10));
-    await _selectRoomSettingsTab(tester, 'Schedule');
+    await _selectRoomSettingsTab(tester, 'Lighting');
     await tester.pump(const Duration(milliseconds: 250));
     await _captureRoomScheduleEvidence(
       tester,
@@ -6500,7 +6561,7 @@ void main() {
     );
 
     await tester.drag(
-      find.byKey(const ValueKey('schedule')),
+      find.byKey(const ValueKey('lighting')),
       const Offset(0, -180),
     );
     await tester.pump();
@@ -6513,7 +6574,7 @@ void main() {
     api.roomScheduleTestCompleter = Completer<bool>();
     await tester.dragUntilVisible(
       find.byKey(const ValueKey('room-schedule-test-wake')),
-      find.byKey(const ValueKey('schedule')),
+      find.byKey(const ValueKey('lighting')),
       const Offset(0, -120),
     );
     await tester.tap(find.byKey(const ValueKey('room-schedule-test-wake')));
@@ -6537,7 +6598,7 @@ void main() {
     api.roomScheduleSetSucceeds = false;
     await tester.dragUntilVisible(
       find.byKey(const ValueKey('room-schedule-source-presets')),
-      find.byKey(const ValueKey('schedule')),
+      find.byKey(const ValueKey('lighting')),
       const Offset(0, 120),
     );
     await tester.tap(
@@ -6664,6 +6725,7 @@ void main() {
       ),
     );
 
+    await _selectRoomSettingsTab(tester, 'Bulbs');
     final addBulb = find.byKey(const ValueKey('room-settings-add-bulb'));
     expect(addBulb, findsOneWidget);
     expect(find.text('Add Bulb'), findsOneWidget);
@@ -6893,7 +6955,7 @@ void main() {
       find.byKey(const ValueKey('room-settings-add-button')),
       findsNothing,
     );
-    await _selectRoomSettingsTab(tester, 'Light');
+    await _selectRoomSettingsTab(tester, 'Bulbs');
     expect(
       find.byKey(const ValueKey('room-settings-add-bulb')),
       findsNothing,
@@ -7499,6 +7561,8 @@ void main() {
       ),
     );
 
+    await _selectRoomSettingsTab(tester, 'Bulbs');
+    await tester.pumpAndSettle();
     final row = find.byKey(const ValueKey('room-device-row-light-1'));
     expect(row, findsOneWidget);
     expect(
@@ -7507,7 +7571,7 @@ void main() {
     );
     expect(find.text('BRI · CCT'), findsOneWidget);
     expect(
-      tester.getSemantics(row).hint,
+      tester.widget<Semantics>(row).properties.hint,
       'Tap for settings. Touch and hold to identify.',
     );
 
@@ -9740,7 +9804,7 @@ void main() {
       ),
     );
 
-    await _selectRoomSettingsTab(tester, 'Light');
+    await _selectRoomSettingsTab(tester, 'Bulbs');
     await tester.tap(find.text('Desk Lamp').last);
     await tester.pumpAndSettle();
 
@@ -9935,7 +9999,7 @@ void main() {
     expect(api.lastDeletedRoomId, 'room-1');
   });
 
-  testWidgets('room page explains unavailable Light settings capability',
+  testWidgets('room page explains unavailable Lighting settings capability',
       (tester) async {
     _registerWidgetCleanup(tester);
     final semantics = tester.ensureSemantics();
@@ -9993,6 +10057,7 @@ void main() {
       ),
     );
 
+    await _selectRoomSettingsTab(tester, 'Lighting');
     final lightSettings = find.byKey(
       const ValueKey('room-settings-light-settings-room-1'),
     );
@@ -10007,9 +10072,12 @@ void main() {
           .data,
       'Update required',
     );
-    final lightSettingsSemantics = tester.getSemantics(lightSettings);
-    expect(lightSettingsSemantics.label, 'Lighting');
-    expect(lightSettingsSemantics.value, 'Appliance update required');
+    final lightSettingsSemantics = tester.widget<Semantics>(lightSettings);
+    expect(lightSettingsSemantics.properties.label, 'Lighting');
+    expect(
+      lightSettingsSemantics.properties.value,
+      'Appliance update required',
+    );
 
     await tester.tap(lightSettings);
     await tester.pump();
@@ -10079,8 +10147,15 @@ void main() {
       ),
     );
 
-    await _selectRoomSettingsTab(tester, 'Light');
-    await tester.tap(find.text('Low glow'));
+    await _selectRoomSettingsTab(tester, 'Lighting');
+    await tester.tap(
+      find.descendant(
+        of: find.byKey(
+          const ValueKey('room-settings-low-glow-room-1'),
+        ),
+        matching: find.text('Low glow'),
+      ),
+    );
     await tester.pump();
 
     expect(api.nodePreferenceCalls, hasLength(1));
@@ -10200,9 +10275,12 @@ void main() {
       ),
     );
 
-    await _selectRoomSettingsTab(tester, 'Light');
+    await _selectRoomSettingsTab(tester, 'Lighting');
 
-    expect(find.text('Low glow'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('room-settings-low-glow-room-1')),
+      findsOneWidget,
+    );
     expect(find.text('DAY PROFILE'), findsNothing);
     expect(find.text('SLEEP PROFILE'), findsNothing);
     expect(find.text('Motion Timeout'), findsNothing);

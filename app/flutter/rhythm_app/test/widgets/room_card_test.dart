@@ -537,6 +537,7 @@ void main() {
     final button = find.byKey(
       const ValueKey('room-settings-light-settings-room-1'),
     );
+    expect(find.byKey(const ValueKey('lighting')), findsOneWidget);
     expect(button, findsOneWidget);
     expect(
       find.byKey(const ValueKey('room-settings-schedule-room-1')),
@@ -550,7 +551,7 @@ void main() {
       find.byKey(const ValueKey('room-settings-schedule-night-room-1')),
       findsNothing,
     );
-    expect(find.text('Lighting'), findsOneWidget);
+    expect(find.text('Lighting'), findsNWidgets(2));
     expect(
       tester
           .widget<Text>(
@@ -561,9 +562,9 @@ void main() {
           .data,
       'Custom',
     );
-    final semantics = tester.getSemantics(button);
-    expect(semantics.label, 'Lighting');
-    expect(semantics.value, 'Custom light settings');
+    final semantics = tester.widget<Semantics>(button);
+    expect(semantics.properties.label, 'Lighting');
+    expect(semantics.properties.value, 'Custom light settings');
 
     await tester.tap(button);
     await tester.pumpAndSettle();
@@ -1015,7 +1016,8 @@ void main() {
     Map<String, dynamic> helloNode({
       required bool sceneActive,
       String sceneId = 'evening-glow',
-    }) => {
+    }) =>
+        {
           'id': 'room-1',
           'name': 'Kitchen',
           'kind': 'room',
