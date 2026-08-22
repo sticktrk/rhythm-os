@@ -3751,9 +3751,16 @@ fn process_work_item_inner(state: &SharedState, item: WorkItem) {
                 );
                 return;
             }
+            // Direct composite routes render per-device settings, but their
+            // custom schedule belongs to the public parent room. Reconcile
+            // that room identity on the final fan-out tick instead of asking
+            // the room-only reconciler to inspect a light-device ID.
+            let schedule_node_id = emit_parent_node_id
+                .as_deref()
+                .unwrap_or(settings_node_id.as_str());
             if crate::commands::reconcile_room_schedule_before_tick(
                 state,
-                &settings_node_id,
+                schedule_node_id,
                 current_hour,
             )
             .is_err()
@@ -6323,6 +6330,88 @@ mod tests {
         assert_eq!(
             calls.lock().unwrap().as_slice(),
             &[(internal_node_id.to_string(), "room_a".to_string(), 20.25)]
+        );
+    }
+
+    #[test]
+    fn periodic_worker_reconciles_composite_child_schedule_on_parent_room() {
+        let periodic_calls = Arc::new(Mutex::new(Vec::new()));
+        let apply_calls = Arc::new(AtomicUsize::new(0));
+        let schedule = rhythm_core::RoomScheduleConfig {
+            source: rhythm_core::RoomScheduleSource::FollowTime,
+            wake_time: rhythm_core::ModeTransitionTime::parse("06:00").unwrap(),
+            sleep_time: rhythm_core::ModeTransitionTime::parse("22:00").unwrap(),
+        };
+        let scheduled_settings = RoomProfileSettings {
+            room_schedule: Some(schedule),
+            ..Default::default()
+        };
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(PeriodicWorkerTestRuntime {
+            snapshots: vec![
+                RoomSnapshot {
+                    id: "porch".into(),
+                    name: "Porch".into(),
+                    kind: rhythm_core::LightNodeKind::Room,
+                    parent_id: None,
+                    rhythm_enabled: true,
+                    disabled: false,
+                    time_offset_minutes: 0.0,
+                    brightness_offset: 0.0,
+                    soft_off: false,
+                    mood_active: false,
+                    standby_enabled: false,
+                    hard_off: false,
+                    profile_settings: scheduled_settings.clone(),
+                },
+                RoomSnapshot {
+                    id: "porch-light".into(),
+                    name: "Porch light".into(),
+                    kind: rhythm_core::LightNodeKind::LightDevice,
+                    parent_id: Some("porch".into()),
+                    rhythm_enabled: true,
+                    disabled: false,
+                    time_offset_minutes: 0.0,
+                    brightness_offset: 0.0,
+                    soft_off: false,
+                    mood_active: false,
+                    standby_enabled: false,
+                    hard_off: false,
+                    profile_settings: scheduled_settings,
+                },
+            ],
+            periodic_tick_node_calls: periodic_calls.clone(),
+            apply_room_command_calls: apply_calls.clone(),
+            handle_event_calls: Arc::new(AtomicUsize::new(0)),
+            turn_on_room_calls: Arc::new(AtomicUsize::new(0)),
+            set_room_brightness_calls: Arc::new(AtomicUsize::new(0)),
+            periodic_entered_tx: None,
+            periodic_release_rx: None,
+        });
+        let state = make_state_with_runtime(runtime);
+        let dispatch_generation = state.lock().unwrap().light_dispatch_generation;
+
+        process_work_item(
+            &state,
+            WorkItem::PeriodicNodeTick {
+                command_id: "periodic-composite-schedule".into(),
+                node_id: "porch-light".into(),
+                settings_node_id: "porch-light".into(),
+                current_hour: 12.0,
+                emit_parent_node_id: Some("porch".into()),
+                dispatch_spacing: Duration::ZERO,
+                dispatch_generation,
+            },
+        );
+
+        assert_eq!(apply_calls.load(Ordering::SeqCst), 1);
+        assert!(state
+            .lock()
+            .unwrap()
+            .room_schedule_evaluations
+            .contains_key("porch"));
+        assert_eq!(
+            periodic_calls.lock().unwrap().as_slice(),
+            &[("porch-light".to_string(), "porch-light".to_string(), 12.0)]
         );
     }
 
