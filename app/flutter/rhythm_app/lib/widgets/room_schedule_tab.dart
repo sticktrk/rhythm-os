@@ -9,10 +9,12 @@ import 'package:uuid/uuid.dart';
 
 import '../providers/home_provider.dart';
 import '../providers/server_sync_provider.dart';
+import '../screens/settings/light_screen.dart';
 import '../services/analytics_service.dart';
 import 'automation_section_header.dart';
 import 'celestial_segmented_control.dart';
 import 'mode_summary_chip.dart';
+import 'low_glow_switch.dart';
 import 'rhythm_clock/rhythm_clock_visuals.dart';
 import 'rhythm_clock/rhythm_schedule_clock.dart';
 import 'room_schedule_behavior_control.dart';
@@ -27,15 +29,23 @@ const Color _sleepAccent = Color(0xFF7C83FF);
 const Color _scheduleAccent = CelestialColors.accentBlue;
 const Color _testAccent = Color(0xFF9C8CFF);
 
-/// Capability-gated, room-scoped schedule editor.
+/// Room-scoped lighting settings and capability-gated schedule editor.
 ///
-/// Deliberately shares its visual grammar with the whole-house Presets screen
-/// (numbered step headers, segmented toggles, mode summary chips) so the
-/// per-room schedule reads as the same feature at room scope.
+/// The room-level Lighting override and Low glow preference lead into a
+/// schedule editor that deliberately shares its visual grammar with the
+/// whole-house Presets screen (numbered step headers, segmented toggles, mode
+/// summary chips).
 class RoomScheduleTab extends StatefulWidget {
-  const RoomScheduleTab({super.key, required this.roomId});
+  const RoomScheduleTab({
+    super.key,
+    required this.roomId,
+    required this.roomName,
+    required this.showRoomLightingOverride,
+  });
 
   final String roomId;
+  final String roomName;
+  final bool showRoomLightingOverride;
 
   @override
   State<RoomScheduleTab> createState() => _RoomScheduleTabState();
@@ -170,16 +180,85 @@ class _RoomScheduleTabState extends State<RoomScheduleTab> {
     }
   }
 
+  void _openRoomLightSettings() {
+    HapticFeedback.lightImpact();
+    LightScreen.showForRoom(
+      context,
+      roomId: widget.roomId,
+      roomName: widget.roomName,
+    );
+  }
+
+  void _showRoomLightSettingsUnavailable() {
+    HapticFeedback.lightImpact();
+    final version = context.read<ServerSyncProvider>().firmwareVersion;
+    final versionSuffix = version == '0.0.0' ? '' : ' ($version)';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          'Update the Rhythm appliance$versionSuffix to customize light settings for ${widget.roomName}.',
+        ),
+      ),
+    );
+  }
+
+  void _setStandbyEnabled(bool enabled) {
+    final sync = context.read<ServerSyncProvider>();
+    sync.setNodeStandbyEnabledLocal(widget.roomId, enabled);
+    sync.pushNodePreferences(widget.roomId, standbyEnabled: enabled);
+    HapticFeedback.selectionClick();
+  }
+
+  Widget _buildLightingSettings(ServerSyncProvider sync) {
+    final lightSettingsSupported =
+        sync.lightProfileOverridesSupportedForNode(widget.roomId);
+    final children = <Widget>[
+      if (widget.showRoomLightingOverride)
+        LightingOverrideRow(
+          nodeId: widget.roomId,
+          supported: lightSettingsSupported,
+          customized: sync.hasNodeLightProfileOverrides(widget.roomId),
+          settingsKeyPrefix: 'room-settings-light',
+          onPressed: lightSettingsSupported
+              ? _openRoomLightSettings
+              : _showRoomLightSettingsUnavailable,
+        ),
+      LowGlowSettingRow(
+        key: ValueKey('room-settings-low-glow-${widget.roomId}'),
+        value: sync.standbyEnabledForNode(widget.roomId),
+        onChanged: _setStandbyEnabled,
+      ),
+    ];
+
+    return _GroupCard(
+      padding: EdgeInsets.zero,
+      child: Column(
+        children: [
+          for (var index = 0; index < children.length; index++) ...[
+            children[index],
+            if (index < children.length - 1)
+              Divider(
+                height: 1,
+                indent: 48,
+                color: CelestialColors.orbitRing.withValues(alpha: 0.2),
+              ),
+          ],
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final sync = context.watch<ServerSyncProvider>();
     if (!sync.roomScheduleSupportedForNode(widget.roomId)) {
       return ListView(
-        key: const ValueKey('schedule'),
+        key: const ValueKey('lighting'),
         padding: const EdgeInsets.symmetric(horizontal: 20),
-        children: const [
-          SizedBox(height: 30),
-          _GroupCard(
+        children: [
+          _buildLightingSettings(sync),
+          const SizedBox(height: 16),
+          const _GroupCard(
             padding: EdgeInsets.symmetric(horizontal: 20, vertical: 24),
             child: Column(
               children: [
@@ -213,9 +292,11 @@ class _RoomScheduleTabState extends State<RoomScheduleTab> {
     final activeMode = sync.activeMode;
 
     return ListView(
-      key: const ValueKey('schedule'),
+      key: const ValueKey('lighting'),
       padding: const EdgeInsets.symmetric(horizontal: 20),
       children: [
+        _buildLightingSettings(sync),
+        const SizedBox(height: 4),
         const AutomationSectionHeader(
           step: 1,
           title: 'Schedule',
@@ -419,7 +500,7 @@ class _FailureBanner extends StatelessWidget {
   }
 }
 
-/// The sheet's shared card surface — same geometry as the Light/Motion/Buttons
+/// The sheet's shared card surface — same geometry as the Bulbs/Motion/Buttons
 /// tabs' settings groups so all four tabs read as one surface.
 class _GroupCard extends StatelessWidget {
   const _GroupCard({required this.child, required this.padding});

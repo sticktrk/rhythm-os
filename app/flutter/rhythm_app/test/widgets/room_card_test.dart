@@ -537,6 +537,14 @@ void main() {
     final button = find.byKey(
       const ValueKey('room-settings-light-settings-room-1'),
     );
+    expect(button, findsNothing);
+    await tester.tap(
+      find.descendant(
+        of: find.byKey(const ValueKey('room-settings-tabs')),
+        matching: find.text('Lighting'),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 250));
     expect(button, findsOneWidget);
     expect(
       find.byKey(const ValueKey('room-settings-schedule-room-1')),
@@ -550,7 +558,7 @@ void main() {
       find.byKey(const ValueKey('room-settings-schedule-night-room-1')),
       findsNothing,
     );
-    expect(find.text('Lighting'), findsOneWidget);
+    expect(find.text('Lighting'), findsNWidgets(2));
     expect(
       tester
           .widget<Text>(
@@ -561,9 +569,9 @@ void main() {
           .data,
       'Custom',
     );
-    final semantics = tester.getSemantics(button);
-    expect(semantics.label, 'Lighting');
-    expect(semantics.value, 'Custom light settings');
+    final semantics = tester.widget<Semantics>(button);
+    expect(semantics.properties.label, 'Lighting');
+    expect(semantics.properties.value, 'Custom light settings');
 
     await tester.tap(button);
     await tester.pumpAndSettle();
