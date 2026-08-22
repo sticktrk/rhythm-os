@@ -7213,6 +7213,8 @@ void main() {
     addTearDown(connection.dispose);
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.binding.setSurfaceSize(const Size(390, 1200));
+    final screenshotPath =
+        Platform.environment['RHYTHM_MOTION_SOURCE_SCREENSHOT'];
 
     api.topologyNodes = [
       RhythmTopologyNode.fromJson({
@@ -7301,6 +7303,12 @@ void main() {
       find.text('Added Camera Motion as additional motion for Kitchen'),
       findsOneWidget,
     );
+    if (screenshotPath != null && screenshotPath.isNotEmpty) {
+      await expectLater(
+        find.byType(RoomSettingsSheet),
+        matchesGoldenFile(screenshotPath),
+      );
+    }
   });
 
   testWidgets(
