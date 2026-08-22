@@ -302,6 +302,7 @@ fn is_controller_uninitialized_message(lower_message: &str) -> bool {
 fn is_ble_commissioning_stack_message(lower_message: &str) -> bool {
     let has_ble_source = [
         "blemanagerimpl.cpp",
+        "bluezconnection.cpp",
         "bluezendpoint.cpp",
         "bluezobjectmanager.cpp",
         "pasesession.cpp",
@@ -317,6 +318,7 @@ fn is_ble_commissioning_stack_message(lower_message: &str) -> bool {
         "chip error 0x00000032",
         "chip error 0x000000ac",
         "ble error 0x00000401",
+        "ble error 0x0000040f",
         "timeout",
         "internal error",
         "connection refused",
@@ -474,6 +476,7 @@ mod tests {
             "commissioning Matter light: src/protocols/secure_channel/PASESession.cpp:310: CHIP Error 0x00000032: Timeout",
             "commissioning Matter light: src/platform/Linux/bluez/BluezObjectManager.cpp:118: CHIP Error 0x000000AC: Internal error",
             "commissioning Matter light: src/platform/Linux/bluez/BluezEndpoint.cpp:493: Operation was cancelled",
+            "commissioning Matter light: src/platform/Linux/bluez/BluezConnection.cpp:109: Ble Error 0x0000040F: BLE device doesn't seem to support chip",
         ] {
             let error = ChipRpcError::from_message(message);
 

@@ -479,7 +479,7 @@ fn summarize_commissioning_error_for_rendezvous(
         || lower.contains("chip error 0x000000ac")
         || lower.contains("ble device doesn't seem to support chip")
     {
-        return "Matter BLE pairing reached the appliance Bluetooth stack, but BlueZ/CHIP lost the BLE connection during commissioning. Rhythm reset the Matter controller; wait a few seconds, keep the light close, and retry pairing.".to_string();
+        return "Pairing lost its Bluetooth connection before setup finished. Rhythm reset the Matter controller; put the light back in pairing mode, keep it near the Rhythm Box, wait a few seconds, and try again.".to_string();
     }
 
     if lower.contains("matter wi-fi commissioning requires stored appliance wi-fi credentials") {
@@ -1325,11 +1325,11 @@ mod tests {
 
             let message = summarize_commissioning_error(&error);
 
-            assert!(
-                message.contains("BlueZ/CHIP lost the BLE connection"),
-                "expected BlueZ summary for {detail}"
-            );
-            assert!(message.contains("retry pairing"));
+            assert!(message.contains("lost its Bluetooth connection"));
+            assert!(message.contains("put the light back in pairing mode"));
+            assert!(!message.contains("BlueZ"));
+            assert!(!message.contains("CHIP"));
+            assert!(message.contains("try again"));
         }
     }
 
@@ -1341,7 +1341,9 @@ mod tests {
 
         let message = summarize_commissioning_error(&error);
 
-        assert!(message.contains("BlueZ"));
+        assert!(message.contains("lost its Bluetooth connection"));
+        assert!(!message.contains("BlueZ"));
+        assert!(!message.contains("CHIP"));
         assert!(!message.contains("BluezEndpoint.cpp"));
     }
 
