@@ -152,6 +152,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   String? lastControlKind;
   List<String>? lastControlTargetIds;
   bool setTopologyNodeControlTargetsResult = true;
+  FutureOr<void> Function()? beforeSetTopologyNodeControlTargets;
   int createTopologyRoomCalls = 0;
   String? lastCreatedRoomName;
   int topologyDeleteRoomCalls = 0;
@@ -692,6 +693,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     lastControlSourceNodeId = nodeId;
     lastControlKind = controlKind;
     lastControlTargetIds = List<String>.of(targetIds);
+    await beforeSetTopologyNodeControlTargets?.call();
     if (!setTopologyNodeControlTargetsResult) return false;
 
     topologyNodes = [
@@ -834,6 +836,7 @@ class _FakeRhythmConnection extends RhythmConnection {
   bool isConnected = true;
   int reconnectCalls = 0;
   bool? lastReconnectAuthoritative;
+  FutureOr<void> Function(bool authoritative)? reconnectHandler;
   final List<
       ({
         String host,
@@ -869,6 +872,7 @@ class _FakeRhythmConnection extends RhythmConnection {
   Future<void> reconnect({bool authoritative = false}) async {
     reconnectCalls++;
     lastReconnectAuthoritative = authoritative;
+    await reconnectHandler?.call(authoritative);
   }
 }
 
@@ -916,6 +920,7 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
       StreamController<RhythmSettings>.broadcast();
   final _lightBreakerChangedController =
       StreamController<RhythmLightBreaker>.broadcast();
+  final _newNodesController = StreamController<void>.broadcast();
   final _connectionStateController =
       StreamController<RhythmConnectionState>.broadcast();
   RhythmHello? helloOnReconnect;
@@ -958,7 +963,7 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
       _lightBreakerChangedController.stream;
 
   @override
-  Stream<void> get newNodesDetected => const Stream<void>.empty();
+  Stream<void> get newNodesDetected => _newNodesController.stream;
 
   @override
   Stream<Map<String, dynamic>> get triageChangedEvents =>
@@ -1008,6 +1013,10 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
     _lightBreakerChangedController.add(lightBreaker);
   }
 
+  void emitNewNodesDetected() {
+    _newNodesController.add(null);
+  }
+
   @override
   void dispose() {
     _helloController.close();
@@ -1017,6 +1026,7 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
     _modeChangedController.close();
     _settingsChangedController.close();
     _lightBreakerChangedController.close();
+    _newNodesController.close();
     _connectionStateController.close();
     super.dispose();
   }
@@ -3040,6 +3050,62 @@ void main() {
 
       expect(success, isFalse);
       expect(provider.topologyNodes.single.id, 'button-1');
+    });
+
+    test('control target save survives the nodes-changed reconnect race',
+        () async {
+      api.topologyNodes = [
+        RhythmTopologyNode.fromJson({
+          'id': 'room-1',
+          'name': 'Kitchen',
+          'kind': 'room',
+        }),
+        RhythmTopologyNode.fromJson({
+          'id': 'button-1',
+          'name': 'Kitchen Button',
+          'kind': 'button',
+          'parent_id': 'room-1',
+        }),
+      ];
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'nodes': const <Map<String, dynamic>>[],
+          'location': const <String, dynamic>{},
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      connection.reconnectHandler = (authoritative) {
+        connection.isConnected = authoritative;
+      };
+      api.beforeSetTopologyNodeControlTargets = () async {
+        connection.emitNewNodesDetected();
+        await Future<void>.delayed(Duration.zero);
+        expect(connection.isConnected, isFalse);
+      };
+
+      final success = await provider.setNodeControlTargets(
+        sourceNodeId: 'button-1',
+        controlKind: 'button',
+        targetNodeIds: const ['room-1'],
+      );
+
+      expect(success, isTrue);
+      expect(connection.reconnectCalls, 2);
+      expect(connection.lastReconnectAuthoritative, isTrue);
+      expect(
+        provider.controlTargetNodeIds(
+          sourceNodeId: 'button-1',
+          controlKind: 'button',
+        ),
+        ['room-1'],
+      );
     });
 
     test('keeps roomless light-device nodes in the room provider', () async {
@@ -9435,7 +9501,8 @@ void main() {
     expect(api.lastControlSourceNodeId, 'sensor-1');
     expect(api.lastControlKind, 'motion');
     expect(api.lastControlTargetIds, ['room-1', 'room-2']);
-    expect(connection.reconnectCalls, 0);
+    expect(connection.reconnectCalls, 1);
+    expect(connection.lastReconnectAuthoritative, isTrue);
     expect(find.text('2 rooms'), findsOneWidget);
     expect(
       find.text('Updated Kitchen Motion motion controls'),
