@@ -7197,6 +7197,113 @@ void main() {
   });
 
   testWidgets(
+      'room sheet materializes canonical-only motion before adding it',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 1200));
+
+    api.topologyNodes = [
+      RhythmTopologyNode.fromJson({
+        'id': 'room-1',
+        'name': 'Kitchen',
+        'kind': 'room',
+      }),
+    ];
+    api.canonicalDevices['motion-unassigned'] = {
+      'id': 'motion-unassigned',
+      'name': 'Camera Motion',
+      'device_type': 'motion',
+      'endpoints': const <Map<String, dynamic>>[],
+    };
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'capabilities': {'hubs': const <dynamic>[]},
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': false,
+          },
+        ],
+        'location': const <String, dynamic>{},
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await _pumpRoomSettingsSheet(
+      tester,
+      roomProvider: roomProvider,
+      provider: provider,
+      room: const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.unknown,
+        deviceIds: [],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: false,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    await _selectRoomSettingsTab(tester, 'Motion');
+    await tester.tap(
+      find.byKey(const ValueKey('room-settings-add-motion')),
+    );
+    await tester.pumpAndSettle();
+
+    final assignment = Completer<bool>();
+    api.assignDeviceParentCompleter = assignment;
+    await tester.tap(
+      find.byKey(const ValueKey('existing-room-device-motion-unassigned')),
+    );
+    await tester.pump();
+
+    expect(api.assignDeviceParentCalls, 1);
+    expect(api.lastAssignedDeviceId, 'motion-unassigned');
+    expect(api.lastAssignedParentId, 'room-1');
+
+    // The real server creates this source node as part of the canonical room
+    // assignment. Publish that authoritative result before completing the
+    // fake request so the app's mandatory refresh observes it.
+    api.topologyNodes = [
+      ...api.topologyNodes,
+      RhythmTopologyNode.fromJson({
+        'id': 'motion-unassigned',
+        'name': 'Camera Motion',
+        'kind': 'motion_sensor',
+        'parent_id': 'room-1',
+      }),
+    ];
+    assignment.complete(true);
+    await tester.pumpAndSettle();
+
+    expect(api.setTopologyNodeControlTargetsCalls, 0);
+    expect(
+      find.text('Added Camera Motion as additional motion for Kitchen'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets(
       'repeat scan resolves the existing canonical device before room assignment',
       (tester) async {
     _registerWidgetCleanup(tester);

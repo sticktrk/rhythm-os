@@ -193,19 +193,64 @@ Future<void> startRoomDeviceAddFlow(
   final selected = selection.candidate!;
   if (deviceType == RhythmDeviceType.motion) {
     final syncProvider = context.read<ServerSyncProvider>();
+    var physicalParentNodeId = selected.parentNodeId;
+    var materializedInTargetRoom = false;
+
+    // Canonical discovery can retain a dismissed/unassigned motion sensor
+    // without exposing it as a topology node. A control link cannot refer to
+    // that canonical-only ID, so first turn the user's selection into an
+    // authoritative room assignment. This also resolves the unassigned triage
+    // decision and lets the server create the runtime/topology source node.
+    if (syncProvider.topologyNodeById(selected.device.id) == null) {
+      final materializationParentId = physicalParentNodeId.isEmpty
+          ? roomId
+          : physicalParentNodeId;
+      final assigned = await syncProvider.api.assignDeviceParent(
+        selected.device.id,
+        materializationParentId,
+      );
+      if (!context.mounted) return;
+      if (!assigned) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Failed to add ${selected.device.displayName}'),
+          ),
+        );
+        return;
+      }
+
+      final refreshed = await syncProvider.refreshAfterTopologyMutation();
+      if (!context.mounted) return;
+      if (!refreshed ||
+          syncProvider.topologyNodeById(selected.device.id) == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '${selected.device.displayName} was assigned, but rooms could not refresh. '
+              'Pull to refresh and confirm its motion room.',
+            ),
+          ),
+        );
+        return;
+      }
+      physicalParentNodeId = materializationParentId;
+      materializedInTargetRoom = materializationParentId == roomId;
+    }
+
     final targetRoomIds = additionalMotionTargetRoomIds(
       existingTargetRoomIds: syncProvider.controlTargetNodeIds(
         sourceNodeId: selected.device.id,
         controlKind: 'motion',
       ),
-      physicalParentNodeId: selected.parentNodeId,
+      physicalParentNodeId: physicalParentNodeId,
       additionalRoomId: roomId,
     );
-    final success = await syncProvider.setNodeControlTargets(
-      sourceNodeId: selected.device.id,
-      controlKind: 'motion',
-      targetNodeIds: targetRoomIds,
-    );
+    final success = materializedInTargetRoom ||
+        await syncProvider.setNodeControlTargets(
+          sourceNodeId: selected.device.id,
+          controlKind: 'motion',
+          targetNodeIds: targetRoomIds,
+        );
     if (!context.mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
