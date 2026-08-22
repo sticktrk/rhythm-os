@@ -97,12 +97,13 @@ pub fn fetch_ha_config(state: &SharedState, transport: &dyn HaTransport) {
         tz_name, !location_already_set);
 }
 
-/// Populate the device→area cache for on-demand button/motion discovery.
+/// Populate discovery-backed routing metadata for live HA events.
 ///
 /// Queries HA for all devices and their area assignments, then writes
-/// the mapping into `HaHubData.device_area_cache`. This enables
+/// the mapping into `HaHubData.event_routing_cache`. This enables
 /// `hue_event` button events to auto-register unknown buttons by
-/// looking up which area the device belongs to.
+/// looking up which area the device belongs to, and maps smart-camera
+/// classification events onto their one sibling motion binary sensor.
 pub fn populate_device_area_cache(state: &SharedState) {
     let config = match config_from_state(state) {
         Some(c) => c,
@@ -120,10 +121,6 @@ pub fn populate_device_area_cache(state: &SharedState) {
         }
     };
 
-    if result.device_area_map.is_empty() {
-        return;
-    }
-
     let cache_arc = {
         let s = match state.lock() {
             Ok(s) => s,
@@ -131,7 +128,7 @@ pub fn populate_device_area_cache(state: &SharedState) {
         };
         let ha_data = s.hubs.values().find_map(|h| h.data::<HaHubData>());
         match ha_data {
-            Some(d) => d.device_area_cache.clone(),
+            Some(d) => d.event_routing_cache.clone(),
             None => return,
         }
     };
@@ -142,23 +139,26 @@ pub fn populate_device_area_cache(state: &SharedState) {
     };
     let device_count = result.device_area_map.len();
     let sensor_count = result.binary_sensor_areas.len();
-    *cache = result.device_area_map;
+    cache.device_areas = result.device_area_map;
 
     // Also add entity_id → area_id for all binary_sensor entities.
     // The event translator filters for motion/occupancy device_class at event time,
     // so we cache broadly here (some integrations don't set original_device_class
     // in the entity registry).
-    cache.extend(result.binary_sensor_areas);
+    cache.device_areas.extend(result.binary_sensor_areas);
 
     // Also add entity_id → area_id for all event.* entities (button events).
     // Enables on-demand button discovery from HA event entities (universal
     // button support across Zigbee2MQTT, deCONZ, Matter, native Hue, etc.).
     let event_count = result.event_entity_areas.len();
-    cache.extend(result.event_entity_areas);
+    cache.device_areas.extend(result.event_entity_areas);
+
+    let motion_subevent_count = result.event_motion_sensors.len();
+    cache.motion_subevents = result.event_motion_sensors;
 
     info!(target: "sys",
-        "Populated event cache with {} device + {} binary_sensor + {} event entries",
-        device_count, sensor_count, event_count);
+        "Populated event cache with {} device + {} binary_sensor + {} button event + {} motion sub-event entries",
+        device_count, sensor_count, event_count, motion_subevent_count);
 }
 
 #[cfg(test)]

@@ -206,14 +206,11 @@ void main() {
       expect(connection.connectionState, RhythmConnectionState.disconnected);
     });
 
-    test('only the newest overlapping reconnect may publish its hello',
-        () async {
+    test('overlapping reconnect callers await the same hello', () async {
       final reconnectServer =
           await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      final olderRequestStarted = Completer<void>();
-      final newerRequestStarted = Completer<void>();
-      final releaseOlderResponse = Completer<void>();
-      final releaseNewerResponse = Completer<void>();
+      final reconnectRequestStarted = Completer<void>();
+      final releaseReconnectResponse = Completer<void>();
       var stateRequests = 0;
       reconnectServer.listen((request) async {
         if (request.uri.path != '/api/state') {
@@ -227,22 +224,18 @@ void main() {
             await _writeHello(request, 'srv-initial');
             return;
           case 2:
-            olderRequestStarted.complete();
-            await releaseOlderResponse.future;
-            await _writeHello(request, 'srv-stale-reconnect');
-            return;
-          case 3:
-            newerRequestStarted.complete();
-            await releaseNewerResponse.future;
-            await _writeHello(request, 'srv-current-reconnect');
+            reconnectRequestStarted.complete();
+            await releaseReconnectResponse.future;
+            await _writeHello(request, 'srv-reconnected');
             return;
           default:
             await _writeHello(request, 'srv-unexpected');
         }
       });
       addTearDown(() async {
-        if (!releaseOlderResponse.isCompleted) releaseOlderResponse.complete();
-        if (!releaseNewerResponse.isCompleted) releaseNewerResponse.complete();
+        if (!releaseReconnectResponse.isCompleted) {
+          releaseReconnectResponse.complete();
+        }
         await reconnectServer.close(force: true);
       });
 
@@ -257,21 +250,70 @@ void main() {
       await Future<void>.delayed(Duration.zero);
       expect(hellos, ['srv-initial']);
 
-      final olderReconnect = connection.reconnect();
-      await olderRequestStarted.future.timeout(const Duration(seconds: 2));
-      final newerReconnect = connection.reconnect();
-      await newerRequestStarted.future.timeout(const Duration(seconds: 2));
+      final authoritativeReconnect = connection.reconnect(authoritative: true);
+      await reconnectRequestStarted.future.timeout(const Duration(seconds: 2));
+      final overlappingReconnect = connection.reconnect();
 
-      releaseNewerResponse.complete();
-      await newerReconnect.timeout(const Duration(seconds: 2));
-      await Future<void>.delayed(Duration.zero);
-      expect(hellos, ['srv-initial', 'srv-current-reconnect']);
+      var overlappingCompleted = false;
+      overlappingReconnect.whenComplete(() => overlappingCompleted = true);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(overlappingCompleted, isFalse);
+      expect(stateRequests, 2);
 
-      releaseOlderResponse.complete();
-      await olderReconnect.timeout(const Duration(seconds: 2));
+      releaseReconnectResponse.complete();
+      await Future.wait([authoritativeReconnect, overlappingReconnect])
+          .timeout(const Duration(seconds: 2));
       await Future<void>.delayed(const Duration(milliseconds: 20));
 
-      expect(hellos, ['srv-initial', 'srv-current-reconnect']);
+      expect(hellos, ['srv-initial', 'srv-reconnected']);
+      expect(connection.connectionState, RhythmConnectionState.connected);
+    });
+
+    test('authoritative reconnect follows an in-flight normal reconnect',
+        () async {
+      final reconnectServer =
+          await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      final normalRequestStarted = Completer<void>();
+      final releaseNormalResponse = Completer<void>();
+      var stateRequests = 0;
+      final authoritativeRequests = <bool>[];
+      reconnectServer.listen((request) async {
+        if (request.uri.path != '/api/state') {
+          request.response.statusCode = HttpStatus.notFound;
+          await request.response.close();
+          return;
+        }
+        stateRequests += 1;
+        authoritativeRequests.add(
+          request.uri.queryParameters['authoritative'] == 'true',
+        );
+        if (stateRequests == 2) {
+          normalRequestStarted.complete();
+          await releaseNormalResponse.future;
+        }
+        await _writeHello(request, 'srv-request-$stateRequests');
+      });
+      addTearDown(() async {
+        if (!releaseNormalResponse.isCompleted) {
+          releaseNormalResponse.complete();
+        }
+        await reconnectServer.close(force: true);
+      });
+
+      final connection = RhythmConnection();
+      addTearDown(connection.dispose);
+      await connection.connect('127.0.0.1', port: reconnectServer.port);
+
+      final normalReconnect = connection.reconnect();
+      await normalRequestStarted.future.timeout(const Duration(seconds: 2));
+      final authoritativeReconnect = connection.reconnect(authoritative: true);
+
+      releaseNormalResponse.complete();
+      await Future.wait([normalReconnect, authoritativeReconnect])
+          .timeout(const Duration(seconds: 2));
+
+      expect(stateRequests, 3);
+      expect(authoritativeRequests, [false, false, true]);
       expect(connection.connectionState, RhythmConnectionState.connected);
     });
 

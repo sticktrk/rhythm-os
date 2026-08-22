@@ -3,7 +3,6 @@
 //! Converts Home Assistant WebSocket events into hub-agnostic `HubEvent`s
 //! that the main event loop can process.
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use log::info;
@@ -16,6 +15,7 @@ use rhythm_os::hub::HubEvent;
 use rhythm_os::hue_buttons::map_hue_button_str;
 use serde_json::Value;
 
+use crate::hub_state::HaEventRoutingCache;
 use crate::registry::HaDeviceRegistry;
 
 /// Translate a `rhythm_service_event` from the custom integration.
@@ -61,7 +61,7 @@ pub fn translate_service_event(event_data: &Value, _registry: &HaDeviceRegistry)
 pub(crate) fn register_unknown_button_from_cache(
     evt: &RawButtonEvent,
     registry: &Arc<Mutex<HaDeviceRegistry>>,
-    device_area_cache: &Arc<Mutex<HashMap<String, String>>>,
+    event_routing_cache: &Arc<Mutex<HaEventRoutingCache>>,
 ) {
     let (cache_key, device_id, controls): (&str, String, Vec<(String, u8)>) =
         match (evt.device_hint, evt.fallback_control_id) {
@@ -82,10 +82,10 @@ pub(crate) fn register_unknown_button_from_cache(
             (None, None) => (evt.button_id, evt.button_id.to_string(), Vec::new()),
         };
 
-    let area_id = match device_area_cache
+    let area_id = match event_routing_cache
         .lock()
         .ok()
-        .and_then(|c| c.get(cache_key).cloned())
+        .and_then(|c| c.device_areas.get(cache_key).cloned())
     {
         Some(a) => a,
         None => {
@@ -124,12 +124,12 @@ pub(crate) fn register_unknown_button_from_cache(
 pub(crate) fn register_unknown_motion_from_cache(
     sensor_id: &str,
     registry: &Arc<Mutex<HaDeviceRegistry>>,
-    device_area_cache: &Arc<Mutex<HashMap<String, String>>>,
+    event_routing_cache: &Arc<Mutex<HaEventRoutingCache>>,
 ) {
-    let area_id = match device_area_cache
+    let area_id = match event_routing_cache
         .lock()
         .ok()
-        .and_then(|c| c.get(sensor_id).cloned())
+        .and_then(|c| c.device_areas.get(sensor_id).cloned())
     {
         Some(a) => a,
         None => {
@@ -156,12 +156,12 @@ pub(crate) fn register_unknown_motion_from_cache(
 pub(crate) fn register_unknown_contact_from_cache(
     sensor_id: &str,
     registry: &Arc<Mutex<HaDeviceRegistry>>,
-    device_area_cache: &Arc<Mutex<HashMap<String, String>>>,
+    event_routing_cache: &Arc<Mutex<HaEventRoutingCache>>,
 ) {
-    let area_id = match device_area_cache
+    let area_id = match event_routing_cache
         .lock()
         .ok()
-        .and_then(|c| c.get(sensor_id).cloned())
+        .and_then(|c| c.device_areas.get(sensor_id).cloned())
     {
         Some(a) => a,
         None => {
@@ -202,10 +202,10 @@ pub(crate) fn register_unknown_contact_from_cache(
 pub fn translate_zha_event(
     event_data: &Value,
     registry: &Arc<Mutex<HaDeviceRegistry>>,
-    device_area_cache: &Arc<Mutex<HashMap<String, String>>>,
+    event_routing_cache: &Arc<Mutex<HaEventRoutingCache>>,
 ) -> Vec<HubEvent> {
     let on_unknown = |evt: &RawButtonEvent| {
-        register_unknown_button_from_cache(evt, registry, device_area_cache);
+        register_unknown_button_from_cache(evt, registry, event_routing_cache);
     };
     translate_zha_event_with_hooks(event_data, registry, None, Some(&on_unknown))
 }
@@ -318,7 +318,7 @@ fn extract_area_ids(data: &Value) -> Vec<String> {
 /// Translate a `hue_event` from HA's native Hue integration.
 ///
 /// Uses the shared `resolve_button_event` pattern for lookup → discover → map → emit.
-/// When the button is unknown and a `device_area_cache` is available, performs
+/// When the button is unknown and an event routing cache is available, performs
 /// on-demand registration: looks up the HA device_id in the cache to find the
 /// area, then registers the button in the registry.
 ///
@@ -335,10 +335,10 @@ fn extract_area_ids(data: &Value) -> Vec<String> {
 pub fn translate_hue_event(
     event_data: &Value,
     registry: &Arc<Mutex<HaDeviceRegistry>>,
-    device_area_cache: &Arc<Mutex<HashMap<String, String>>>,
+    event_routing_cache: &Arc<Mutex<HaEventRoutingCache>>,
 ) -> Vec<HubEvent> {
     let on_unknown = |evt: &RawButtonEvent| {
-        register_unknown_button_from_cache(evt, registry, device_area_cache);
+        register_unknown_button_from_cache(evt, registry, event_routing_cache);
     };
     translate_hue_event_with_hooks(event_data, registry, None, Some(&on_unknown))
 }
@@ -404,19 +404,21 @@ fn translate_hue_event_with_hooks(
 fn translate_state_changed(
     event_data: &Value,
     registry: &Arc<Mutex<HaDeviceRegistry>>,
-    cache: &Arc<Mutex<HashMap<String, String>>>,
+    cache: &Arc<Mutex<HaEventRoutingCache>>,
 ) -> Vec<HubEvent> {
-    if event_data
+    if let Some(entity_id) = event_data
         .get("entity_id")
-        .and_then(|v| v.as_str())
-        .is_some_and(|entity_id| entity_id.starts_with("event."))
+        .and_then(|value| value.as_str())
+        .filter(|entity_id| entity_id.starts_with("event."))
     {
-        return translate_event_entity(
-            event_data["entity_id"].as_str().unwrap_or_default(),
-            event_data,
-            registry,
-            cache,
-        );
+        if let Some(sensor_id) = cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.motion_subevents.get(entity_id).cloned())
+        {
+            return translate_motion_subevent(entity_id, &sensor_id, event_data, registry);
+        }
+        return translate_event_entity(entity_id, event_data, registry, cache);
     }
 
     let on_unknown_button = |evt: &RawButtonEvent| {
@@ -431,6 +433,7 @@ fn translate_state_changed(
     translate_state_changed_with_hooks(
         event_data,
         registry,
+        cache,
         None,
         Some(&on_unknown_button),
         Some(&on_unknown_motion),
@@ -441,6 +444,7 @@ fn translate_state_changed(
 fn translate_state_changed_with_hooks(
     event_data: &Value,
     registry: &Arc<Mutex<HaDeviceRegistry>>,
+    cache: &Arc<Mutex<HaEventRoutingCache>>,
     on_activity: Option<&dyn Fn()>,
     on_unknown_button: Option<&dyn Fn(&RawButtonEvent)>,
     on_unknown_motion: Option<&dyn Fn(&str)>,
@@ -455,6 +459,19 @@ fn translate_state_changed_with_hooks(
     if entity_id.starts_with("event.") {
         if let Some(cb) = on_activity {
             cb();
+        }
+        if let Some(sensor_id) = cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.motion_subevents.get(entity_id).cloned())
+        {
+            return translate_motion_subevent(entity_id, &sensor_id, event_data, registry);
+        }
+        if !cache
+            .lock()
+            .is_ok_and(|cache| cache.device_areas.contains_key(entity_id))
+        {
+            return Vec::new();
         }
         return translate_event_entity_with_hooks(
             entity_id,
@@ -586,6 +603,55 @@ fn translate_state_changed_with_hooks(
     }
 }
 
+/// Translate a smart-camera classification event through its one motion sensor.
+///
+/// HA `event.*` states are instantaneous: any state change refreshes motion as
+/// detected. The sibling binary sensor still supplies the eventual `off`
+/// transition, so all classifications share one source identity and timer.
+fn translate_motion_subevent(
+    event_entity_id: &str,
+    sensor_id: &str,
+    event_data: &Value,
+    registry: &Arc<Mutex<HaDeviceRegistry>>,
+) -> Vec<HubEvent> {
+    if event_data
+        .get("new_state")
+        .and_then(|state| state.get("state"))
+        .and_then(|state| state.as_str())
+        .is_none()
+    {
+        return Vec::new();
+    }
+
+    let room_id = registry
+        .lock()
+        .ok()
+        .and_then(|registry| registry.get_room_for_motion_sensor(sensor_id));
+    let Some(room_id) = room_id else {
+        info!(
+            target: "evt",
+            "Motion sub-event {} maps to unassigned sensor {}, ignoring",
+            event_entity_id,
+            sensor_id
+        );
+        return Vec::new();
+    };
+
+    info!(
+        target: "evt",
+        "Motion sub-event {} -> sensor {} detected=true for room {}",
+        event_entity_id,
+        sensor_id,
+        room_id
+    );
+    vec![HubEvent::Motion {
+        hub_key: None,
+        room_id,
+        sensor_id: sensor_id.to_string(),
+        detected: true,
+    }]
+}
+
 /// Translate a `state_changed` event for an `event.*` entity (HA button event).
 ///
 /// HA 2023.8+ introduced `event.*` entities that standardize button presses
@@ -611,8 +677,19 @@ fn translate_event_entity(
     entity_id: &str,
     event_data: &Value,
     registry: &Arc<Mutex<HaDeviceRegistry>>,
-    cache: &Arc<Mutex<HashMap<String, String>>>,
+    cache: &Arc<Mutex<HaEventRoutingCache>>,
 ) -> Vec<HubEvent> {
+    // Full discovery owns admission for event entities. In particular, it
+    // omits camera/object events whose parent device already exposes a typed
+    // binary sensor. Require that admission even when an older persisted hub
+    // registry still contains a button mapping for the event entity.
+    if !cache
+        .lock()
+        .is_ok_and(|cache| cache.device_areas.contains_key(entity_id))
+    {
+        return Vec::new();
+    }
+
     let on_unknown = |evt: &RawButtonEvent| {
         register_unknown_button_from_cache(evt, registry, cache);
     };
@@ -730,12 +807,12 @@ pub fn translate_ws_event(
     event_type: &str,
     event_data: &Value,
     registry: &Arc<Mutex<HaDeviceRegistry>>,
-    device_area_cache: &Arc<Mutex<HashMap<String, String>>>,
+    event_routing_cache: &Arc<Mutex<HaEventRoutingCache>>,
 ) -> Vec<HubEvent> {
     match event_type {
-        "hue_event" => translate_hue_event(event_data, registry, device_area_cache),
-        "zha_event" => translate_zha_event(event_data, registry, device_area_cache),
-        "state_changed" => translate_state_changed(event_data, registry, device_area_cache),
+        "hue_event" => translate_hue_event(event_data, registry, event_routing_cache),
+        "zha_event" => translate_zha_event(event_data, registry, event_routing_cache),
+        "state_changed" => translate_state_changed(event_data, registry, event_routing_cache),
         _ => {
             let reg = match registry.lock() {
                 Ok(r) => r,
@@ -753,6 +830,7 @@ pub(crate) fn translate_ws_event_with_hooks(
     event_type: &str,
     event_data: &Value,
     registry: &Arc<Mutex<HaDeviceRegistry>>,
+    event_routing_cache: &Arc<Mutex<HaEventRoutingCache>>,
     on_activity: Option<&dyn Fn()>,
     on_unknown_button: Option<&dyn Fn(&RawButtonEvent)>,
     on_unknown_motion: Option<&dyn Fn(&str)>,
@@ -768,6 +846,7 @@ pub(crate) fn translate_ws_event_with_hooks(
         "state_changed" => translate_state_changed_with_hooks(
             event_data,
             registry,
+            event_routing_cache,
             on_activity,
             on_unknown_button,
             on_unknown_motion,
@@ -796,12 +875,12 @@ mod tests {
     #[allow(clippy::type_complexity)]
     fn make_registry_and_cache() -> (
         Arc<Mutex<HaDeviceRegistry>>,
-        Arc<Mutex<HashMap<String, String>>>,
+        Arc<Mutex<HaEventRoutingCache>>,
     ) {
         let mut reg = HaDeviceRegistry::with_options(true);
         reg.upsert_room("living_room", "Living Room", "living_room", &[]);
         let registry = Arc::new(Mutex::new(reg));
-        let cache = Arc::new(Mutex::new(HashMap::new()));
+        let cache = Arc::new(Mutex::new(HaEventRoutingCache::default()));
         (registry, cache)
     }
 
@@ -1439,21 +1518,81 @@ mod tests {
     }
 
     #[test]
-    fn test_camera_motion_event_is_not_registered_as_button() {
+    fn test_camera_classification_events_share_one_motion_sensor() {
         let (registry, cache) = make_registry_and_cache();
-        cache.lock().unwrap().insert(
-            "event.front_door_bullet_vehicle".to_string(),
-            "entrance".to_string(),
+        registry.lock().unwrap().upsert_device(
+            "binary_sensor.g6_bullet_motion",
+            Some("living_room"),
+            &[],
+            DeviceType::Motion,
+        );
+        cache.lock().unwrap().motion_subevents.extend([
+            (
+                "event.front_door_bullet_vehicle".to_string(),
+                "binary_sensor.g6_bullet_motion".to_string(),
+            ),
+            (
+                "event.front_door_bullet_person".to_string(),
+                "binary_sensor.g6_bullet_motion".to_string(),
+            ),
+        ]);
+
+        for (entity_id, event_type) in [
+            ("event.front_door_bullet_vehicle", "vehicle"),
+            ("event.front_door_bullet_person", "person"),
+        ] {
+            let event_data = json!({
+                "entity_id": entity_id,
+                "new_state": {
+                    "state": "2026-08-22T15:30:00+00:00",
+                    "attributes": {"event_type": event_type}
+                }
+            });
+
+            let results = translate_state_changed_with_hooks(
+                &event_data,
+                &registry,
+                &cache,
+                None,
+                None,
+                None,
+                None,
+            );
+            assert_eq!(results.len(), 1);
+            assert!(matches!(
+                &results[0],
+                HubEvent::Motion {
+                    room_id,
+                    sensor_id,
+                    detected: true,
+                    ..
+                } if room_id == "living_room"
+                    && sensor_id == "binary_sensor.g6_bullet_motion"
+            ));
+        }
+
+        assert!(registry
+            .lock()
+            .unwrap()
+            .get_device_for_button("event.front_door_bullet_vehicle")
+            .is_none());
+    }
+
+    #[test]
+    fn test_event_entity_absent_from_admission_cache_ignores_stale_button_mapping() {
+        let (registry, cache) = make_registry_and_cache();
+        registry.lock().unwrap().upsert_device(
+            "camera-1",
+            Some("living_room"),
+            &[("event.front_door_bullet_vehicle".to_string(), 1)],
+            DeviceType::Button,
         );
 
         let event_data = json!({
             "entity_id": "event.front_door_bullet_vehicle",
             "new_state": {
                 "state": "2026-08-22T15:30:00+00:00",
-                "attributes": {
-                    "event_type": "vehicle",
-                    "device_class": "motion"
-                }
+                "attributes": {"event_type": "vehicle"}
             }
         });
 
@@ -1464,11 +1603,11 @@ mod tests {
             .lock()
             .unwrap()
             .get_device_for_button("event.front_door_bullet_vehicle")
-            .is_none());
+            .is_some());
     }
 
     #[test]
-    fn test_event_entity_not_in_cache_returns_unroutable() {
+    fn test_event_entity_not_in_cache_is_ignored() {
         let (registry, cache) = make_registry_and_cache();
         // Cache is empty
 
@@ -1481,11 +1620,7 @@ mod tests {
         });
 
         let results = translate_state_changed(&event_data, &registry, &cache);
-        assert_eq!(results.len(), 1);
-        assert!(
-            matches!(&results[0], HubEvent::UnroutableButton { .. }),
-            "Unresolvable button should produce UnroutableButton"
-        );
+        assert!(results.is_empty());
     }
 
     #[test]
