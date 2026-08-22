@@ -1185,11 +1185,18 @@ fn registry_room_id_for_discovered_device(
     }
 
     state.lock().ok().and_then(|s| {
-        s.canonical_registry
-            .find_by_native_id(hub_key, &device.device_id)
-            .and_then(|canonical| canonical.room_id.as_ref())
+        let canonical = s
+            .canonical_registry
+            .find_by_native_id(hub_key, &device.device_id)?;
+        canonical
+            .room_id
+            .as_ref()
             .filter(|room_id| s.topology.get(room_id).is_some())
             .cloned()
+            .or_else(|| {
+                crate::topology::NodeControlKind::default_for_device_type(&device.device_type)
+                    .and_then(|kind| s.topology.effective_control_target(&canonical.id, &kind))
+            })
     })
 }
 
@@ -2160,6 +2167,129 @@ mod tests {
                 "repaired motion routing must survive authority-state reload"
             );
         }
+    }
+
+    /// Issue #516 field reproducer: a Hue motion sensor can remain intentionally
+    /// wired to a Rhythm room through the topology control graph even after its
+    /// source-room projection and canonical parent are absent. Discovery must
+    /// keep the native registry routable so the event loop can apply that link.
+    #[test]
+    fn roomless_motion_with_explicit_control_target_remains_routable() {
+        let (hub_key, state) = install_test_hub();
+        let source_room_id = "mud-room-hue-id";
+        let motion_native_id = "mud-motion";
+        let rooms = || {
+            vec![DiscoveredRoom {
+                id: source_room_id.to_string(),
+                name: "Mud Room".to_string(),
+                grouped_light_id: "mud-room-gl".to_string(),
+                device_ids: vec!["mud-room-light".to_string()],
+            }]
+        };
+        let initial_discovery = IdentityDiscovery {
+            rooms: rooms(),
+            identities: vec![
+                make_identity(
+                    "mud-room-light",
+                    source_room_id,
+                    "Mud Room",
+                    "Mud Room light",
+                    DeviceType::Light,
+                ),
+                make_identity(
+                    motion_native_id,
+                    source_room_id,
+                    "Mud Room",
+                    "Mud Motion",
+                    DeviceType::Motion,
+                ),
+            ],
+        };
+        sync_with_discovery(
+            &state,
+            &hub_key,
+            &initial_discovery,
+            true,
+            SyncFailurePolicy::BestEffort,
+        )
+        .unwrap();
+
+        let (canonical_id, rhythm_room_id) = {
+            let mut s = state.lock().unwrap();
+            let canonical_id = s
+                .canonical_registry
+                .find_by_native_id(&hub_key, motion_native_id)
+                .expect("motion should resolve canonically")
+                .id
+                .clone();
+            let rhythm_room_id = s
+                .topology
+                .find_by_hub_room(&hub_key, source_room_id)
+                .expect("source room should resolve into topology")
+                .id
+                .clone();
+            s.canonical_registry.assign_room(&canonical_id, None);
+            s.topology.ensure_standalone_device(&canonical_id);
+            assert!(s.topology.set_control_target(
+                &canonical_id,
+                crate::topology::NodeControlKind::Motion,
+                Some(&rhythm_room_id),
+            ));
+            (canonical_id, rhythm_room_id)
+        };
+
+        let roomless_discovery = IdentityDiscovery {
+            rooms: rooms(),
+            identities: vec![
+                make_identity(
+                    "mud-room-light",
+                    source_room_id,
+                    "Mud Room",
+                    "Mud Room light",
+                    DeviceType::Light,
+                ),
+                crate::canonical::identity::DiscoveredIdentity {
+                    native_id: motion_native_id.to_string(),
+                    room_id: None,
+                    room_name: None,
+                    name: "Mud Motion".to_string(),
+                    device_type: DeviceType::Motion,
+                    hardware_ids: vec![],
+                    manufacturer: None,
+                    model: None,
+                },
+            ],
+        };
+        sync_with_discovery(
+            &state,
+            &hub_key,
+            &roomless_discovery,
+            true,
+            SyncFailurePolicy::BestEffort,
+        )
+        .unwrap();
+
+        {
+            let s = state.lock().unwrap();
+            assert_eq!(
+                s.canonical_registry
+                    .get(&canonical_id)
+                    .and_then(|device| device.room_id.as_deref()),
+                None,
+                "control routing must not invent a canonical room assignment"
+            );
+            assert_eq!(
+                s.topology.effective_control_target(
+                    &canonical_id,
+                    &crate::topology::NodeControlKind::Motion,
+                ),
+                Some(rhythm_room_id.clone())
+            );
+        }
+        assert!(
+            registry_devices_for_room_contains(&state, &hub_key, &rhythm_room_id, motion_native_id,),
+            "native Hue motion must reach its explicit topology control target"
+        );
     }
 
     #[test]
