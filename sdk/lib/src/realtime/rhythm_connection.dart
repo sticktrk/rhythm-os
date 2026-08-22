@@ -184,6 +184,16 @@ class RhythmConnection {
   /// A's identity for requests that will be sent to B.
   int _transportGeneration = 0;
 
+  /// The current hello request for this transport.
+  ///
+  /// Reconnect triggers can arrive together from topology refreshes, SSE, and
+  /// hub events. Letting each trigger replace the previous request means an
+  /// awaited reconnect can finish as stale while its replacement is still
+  /// connecting. Coalescing them keeps every caller attached to the request
+  /// that will establish the connection.
+  Future<void>? _activeConnect;
+  bool _activeConnectAuthoritative = false;
+
   // Optional web base URL (consumer passes Uri.base.toString() on web).
   String? _webBaseUrl;
   String? _authToken;
@@ -336,7 +346,7 @@ class RhythmConnection {
         RhythmRuntimeApi(_dio!, onStatesReceived: _updateCacheFromStates);
 
     _log.config('Connecting to $host:$port');
-    await _connectInternal();
+    await _connectInternal(supersede: true);
   }
 
   /// Force a full reconnect.
@@ -366,6 +376,8 @@ class RhythmConnection {
     // Invalidate an in-flight hello before clearing the client. The old Dio
     // request may still complete because Dio closes non-forcibly by default.
     _transportGeneration++;
+    _activeConnect = null;
+    _activeConnectAuthoritative = false;
     _stopPolling();
     _disconnectSse();
     _sseReconnectTimer?.cancel();
@@ -466,7 +478,39 @@ class RhythmConnection {
   // Internal: connect
   // --------------------------------------------------------------------------
 
-  Future<void> _connectInternal({bool authoritative = false}) async {
+  Future<void> _connectInternal({
+    bool authoritative = false,
+    bool supersede = false,
+  }) {
+    final activeConnect = _activeConnect;
+    if (!supersede && activeConnect != null) {
+      if (!authoritative || _activeConnectAuthoritative) {
+        return activeConnect;
+      }
+
+      // A non-authoritative hello cannot satisfy a topology mutation refresh.
+      // Wait for it instead of invalidating it, then perform the required
+      // authoritative hello. Concurrent authoritative callers will coalesce
+      // when this continuation runs.
+      return activeConnect.then(
+        (_) => _connectInternal(authoritative: true),
+      );
+    }
+
+    final attempt = _runConnectInternal(authoritative: authoritative);
+    late final Future<void> trackedAttempt;
+    trackedAttempt = attempt.whenComplete(() {
+      if (identical(_activeConnect, trackedAttempt)) {
+        _activeConnect = null;
+        _activeConnectAuthoritative = false;
+      }
+    });
+    _activeConnect = trackedAttempt;
+    _activeConnectAuthoritative = authoritative;
+    return trackedAttempt;
+  }
+
+  Future<void> _runConnectInternal({bool authoritative = false}) async {
     final dio = _dio;
     if (dio == null || _host == null) return;
     final transportGeneration = ++_transportGeneration;
