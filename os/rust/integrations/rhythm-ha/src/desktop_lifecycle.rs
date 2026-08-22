@@ -4,7 +4,6 @@
 //! `connect_and_start`, `ensure_runtime`, `get_hub_provider`.
 //! No platform-specific code needed in the consuming crate.
 
-use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
@@ -422,18 +421,18 @@ fn start_event_stream(
     config: HaConnectionConfig,
     registry: Arc<Mutex<HaDeviceRegistry>>,
     shutdown: Arc<AtomicBool>,
-    device_area_cache: Arc<Mutex<HashMap<String, String>>>,
+    event_routing_cache: Arc<Mutex<crate::hub_state::HaEventRoutingCache>>,
 ) -> Receiver<HubEvent> {
     let ws_rx = start_ha_ws(config, shutdown.clone());
     let button_registry = registry.clone();
-    let button_cache = device_area_cache.clone();
+    let button_cache = event_routing_cache.clone();
     let on_unknown_button: Arc<dyn Fn(&RawButtonEvent) + Send + Sync> =
         Arc::new(move |evt: &RawButtonEvent| {
             crate::events::register_unknown_button_from_cache(evt, &button_registry, &button_cache);
         });
 
     let motion_registry = registry.clone();
-    let motion_cache = device_area_cache.clone();
+    let motion_cache = event_routing_cache.clone();
     let on_unknown_motion: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |sensor_id: &str| {
         crate::events::register_unknown_motion_from_cache(
             sensor_id,
@@ -443,7 +442,7 @@ fn start_event_stream(
     });
 
     let contact_registry = registry.clone();
-    let contact_cache = device_area_cache;
+    let contact_cache = event_routing_cache.clone();
     let on_unknown_contact: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |sensor_id: &str| {
         crate::events::register_unknown_contact_from_cache(
             sensor_id,
@@ -456,6 +455,7 @@ fn start_event_stream(
         ws_rx,
         registry,
         shutdown,
+        event_routing_cache,
         None,
         Some(on_unknown_button),
         Some(on_unknown_motion),
@@ -632,7 +632,9 @@ mod tests {
         HaHubData {
             config: ha_config(),
             registry: Arc::new(Mutex::new(HaDeviceRegistry::new())),
-            device_area_cache: Arc::new(Mutex::new(HashMap::new())),
+            event_routing_cache: Arc::new(Mutex::new(
+                crate::hub_state::HaEventRoutingCache::default(),
+            )),
         }
     }
 

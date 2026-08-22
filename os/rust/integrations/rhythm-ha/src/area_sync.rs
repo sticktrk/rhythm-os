@@ -81,6 +81,13 @@ pub struct AreaDiscoveryResult {
     /// HA event entities (universal button support across all integrations:
     /// Zigbee2MQTT, deCONZ, Matter, native Hue, etc.).
     pub event_entity_areas: HashMap<String, String>,
+    /// event entity_id → its sole sibling motion binary_sensor entity_id.
+    ///
+    /// Smart-camera integrations expose classifications such as vehicle or
+    /// person as `event.*` entities alongside one `binary_sensor.*` motion
+    /// source on the same HA parent device. These events refresh that one
+    /// motion source rather than becoming independent buttons or sensors.
+    pub event_motion_sensors: HashMap<String, String>,
 }
 
 /// Discover areas that contain light entities via HA WebSocket.
@@ -571,15 +578,47 @@ async fn discover_full_async(config: &HaConnectionConfig) -> Result<FullRegistry
             .filter_map(|(entity_id, _, _)| entity_device_map.get(entity_id).cloned()),
     );
 
-    // A parent device that exposes a typed binary sensor is a sensor source,
-    // not an event-button source. Camera integrations commonly publish both a
-    // binary_sensor.* motion entity and event.* object detections, sometimes
-    // without a device_class on the event. Keep only the binary sensor in that
-    // case so metadata-free camera detections cannot become controls.
-    event_entity_areas.retain(|entity_id, _| {
-        entity_device_map.get(entity_id).is_none_or(|device_id| {
-            !motion_device_ids.contains(device_id) && !contact_device_ids.contains(device_id)
+    let mut motion_entities_by_device: HashMap<String, Vec<String>> = HashMap::new();
+    for entity_id in motion_sensors
+        .iter()
+        .map(|sensor| &sensor.entity_id)
+        .chain(prefetched_motion.iter().map(|(entity_id, _, _)| entity_id))
+    {
+        if let Some(device_id) = entity_device_map.get(entity_id) {
+            motion_entities_by_device
+                .entry(device_id.clone())
+                .or_default()
+                .push(entity_id.clone());
+        }
+    }
+    for entity_ids in motion_entities_by_device.values_mut() {
+        entity_ids.sort();
+        entity_ids.dedup();
+    }
+
+    // Every event exposed by a device with exactly one motion binary sensor
+    // is a classification/sub-event of that sensor. Keep the explicit HA
+    // parent-device relationship so all classifications share one canonical
+    // motion source identity.
+    let event_motion_sensors: HashMap<String, String> = entities
+        .iter()
+        .filter(|entity| entity.entity_id.starts_with("event."))
+        .filter_map(|entity| {
+            let device_id = entity.device_id.as_ref()?;
+            let motion_entities = motion_entities_by_device.get(device_id)?;
+            (motion_entities.len() == 1)
+                .then(|| (entity.entity_id.clone(), motion_entities[0].clone()))
         })
+        .collect();
+
+    // A parent device that exposes a typed binary sensor is a sensor source,
+    // not an event-button source. Motion sub-events are routed through the
+    // single sibling binary sensor above; contact-device events remain ignored.
+    event_entity_areas.retain(|entity_id, _| {
+        !event_motion_sensors.contains_key(entity_id)
+            && entity_device_map
+                .get(entity_id)
+                .is_none_or(|device_id| !contact_device_ids.contains(device_id))
     });
 
     let button_devices = build_button_devices(
@@ -593,8 +632,8 @@ async fn discover_full_async(config: &HaConnectionConfig) -> Result<FullRegistry
     );
 
     info!(target: "area_sync",
-        "Discovered {} areas with lights, {} device-area mappings, {} motion sensors, {} contact sensors, {} binary_sensor entities, {} event entities, {} prefetched motion states, {} prefetched contact states",
-        result.len(), device_area_map.len(), motion_sensors.len(), contact_sensors.len(), binary_sensor_areas.len(), event_entity_areas.len(), prefetched_motion.len(), prefetched_contact.len());
+        "Discovered {} areas with lights, {} device-area mappings, {} motion sensors, {} contact sensors, {} binary_sensor entities, {} button event entities, {} motion sub-events, {} prefetched motion states, {} prefetched contact states",
+        result.len(), device_area_map.len(), motion_sensors.len(), contact_sensors.len(), binary_sensor_areas.len(), event_entity_areas.len(), event_motion_sensors.len(), prefetched_motion.len(), prefetched_contact.len());
     Ok(FullRegistryData {
         result: AreaDiscoveryResult {
             areas: result,
@@ -603,6 +642,7 @@ async fn discover_full_async(config: &HaConnectionConfig) -> Result<FullRegistry
             contact_sensors,
             binary_sensor_areas,
             event_entity_areas,
+            event_motion_sensors,
         },
         area_names: area_map,
         device_info: device_info_map,
@@ -1330,7 +1370,8 @@ mod tests {
                     {"entity_id": "event.kitchen_remote_button_1", "device_id": "dev-remote", "platform": "zha"},
                     {"entity_id": "event.kitchen_remote_button_2", "device_id": "dev-remote", "platform": "zha"},
                     {"entity_id": "binary_sensor.front_door_bullet_motion", "device_id": "dev-camera"},
-                    {"entity_id": "event.front_door_bullet_vehicle", "device_id": "dev-camera", "platform": "unifiprotect"}
+                    {"entity_id": "event.front_door_bullet_vehicle", "device_id": "dev-camera", "platform": "unifiprotect"},
+                    {"entity_id": "event.front_door_bullet_person", "device_id": "dev-camera", "platform": "unifiprotect"}
                 ]),
             )))
             .await
@@ -1445,6 +1486,11 @@ mod tests {
                         "entity_id": "event.front_door_bullet_vehicle",
                         "state": "2026-08-22T15:30:00+00:00",
                         "attributes": {"event_type": "vehicle"}
+                    },
+                    {
+                        "entity_id": "event.front_door_bullet_person",
+                        "state": "2026-08-22T15:31:00+00:00",
+                        "attributes": {"event_type": "person"}
                     }
                 ]),
             )))
@@ -1547,6 +1593,20 @@ mod tests {
             .result
             .event_entity_areas
             .contains_key("event.front_door_bullet_vehicle"));
+        assert_eq!(
+            full.result
+                .event_motion_sensors
+                .get("event.front_door_bullet_vehicle")
+                .map(String::as_str),
+            Some("binary_sensor.front_door_bullet_motion")
+        );
+        assert_eq!(
+            full.result
+                .event_motion_sensors
+                .get("event.front_door_bullet_person")
+                .map(String::as_str),
+            Some("binary_sensor.front_door_bullet_motion")
+        );
 
         let devices = discovery.discover_devices().unwrap();
         assert!(devices.iter().any(|device| {
