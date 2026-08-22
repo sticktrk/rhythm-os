@@ -26,6 +26,7 @@ import 'package:rhythm_app/screens/hubs/room_device_add_flow.dart';
 import 'package:rhythm_app/widgets/device_detail_sheet.dart';
 import 'package:rhythm_app/widgets/hub_picker_screen.dart';
 import 'package:rhythm_app/widgets/room_settings_sheet.dart';
+import 'package:rhythm_app/widgets/room_schedule_tab.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
@@ -1644,6 +1645,8 @@ void main() {
     RhythmHello scheduleHello({
       String wakeTime = '06:30',
       String name = 'Kitchen',
+      String kind = 'room',
+      String? parentId,
     }) {
       return RhythmHello.fromJson({
         'capabilities': {
@@ -1655,7 +1658,8 @@ void main() {
           {
             'id': 'room-1',
             'name': name,
-            'kind': 'room',
+            'kind': kind,
+            if (parentId != null) 'parent_id': parentId,
             'state': 'active',
             'rhythm_enabled': true,
             'disabled': false,
@@ -1678,6 +1682,74 @@ void main() {
           wakeTime: wakeTime,
           sleepTime: '22:30',
         );
+
+    testWidgets('supports rooms and unassigned bulbs but not assigned bulbs',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final connection = _HelloRhythmConnection(_FakeRhythmServerApi());
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(scheduleHello());
+      await tester.pump();
+      expect(provider.roomScheduleSupportedForNode('room-1'), isTrue);
+
+      connection.emitHello(scheduleHello(
+        kind: 'light_device',
+        name: 'Porch Bulb',
+      ));
+      await tester.pump();
+      expect(provider.roomScheduleSupportedForNode('room-1'), isTrue);
+
+      connection.emitHello(scheduleHello(
+        kind: 'light_device',
+        name: 'Porch Bulb',
+        parentId: 'porch-room',
+      ));
+      await tester.pump();
+      expect(provider.roomScheduleSupportedForNode('room-1'), isFalse);
+    });
+
+    testWidgets('explains that an assigned bulb inherits room settings',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final connection = _HelloRhythmConnection(_FakeRhythmServerApi());
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(scheduleHello(
+        kind: 'light_device',
+        name: 'Porch Bulb',
+        parentId: 'porch-room',
+      ));
+      await tester.pump();
+      await tester.pumpWidget(_buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const RoomScheduleTab(roomId: 'room-1'),
+      ));
+      await tester.pump();
+
+      expect(find.byKey(const ValueKey('light-schedule-inherited')),
+          findsOneWidget);
+      expect(
+        find.text(
+            'This bulb uses the custom light settings from its assigned room.'),
+        findsOneWidget,
+      );
+    });
 
     testWidgets('installs the full authoritative write response',
         (tester) async {
@@ -6343,8 +6415,8 @@ void main() {
           'nodes': [
             {
               'id': 'mock-room',
-              'name': 'Sample Room',
-              'kind': 'room',
+              'name': 'Sample Bulb',
+              'kind': 'light_device',
               'state': 'active',
               'rhythm_enabled': true,
               'disabled': false,
@@ -6368,7 +6440,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 10));
     const room = RoomDto(
       id: 'mock-room',
-      name: 'Sample Room',
+      name: 'Sample Bulb',
       source: RoomSourceDto.matter,
       deviceIds: [],
       rhythmEnabled: true,

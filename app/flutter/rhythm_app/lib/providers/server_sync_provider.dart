@@ -1212,8 +1212,15 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   bool roomScheduleSupportedForNode(String nodeId) {
-    if (HueServiceLocator.isDemoMode) return true;
-    return nodeById(nodeId)?.kind == RhythmNodeKind.room &&
+    final node = nodeById(nodeId);
+    final parentId = node?.parentId;
+    final independentLightTarget = node?.kind == RhythmNodeKind.room ||
+        (node?.kind == RhythmNodeKind.lightDevice &&
+            (parentId == null || parentId.isEmpty));
+    if (HueServiceLocator.isDemoMode) {
+      return node == null || independentLightTarget;
+    }
+    return independentLightTarget &&
         _capabilities?.supportsFeature(RhythmFeature.roomScheduleV1) == true;
   }
 

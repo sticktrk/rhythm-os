@@ -8696,10 +8696,12 @@ fn apply_room_schedule_target(
     };
     let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
     let snapshot = runtime
-        .engine_room_snapshot(room_id)
-        .ok_or_else(|| anyhow::anyhow!("Room not found in engine"))?;
-    if !snapshot.kind.is_room() {
-        return Err(anyhow::anyhow!("Room schedule target must be a room node"));
+        .engine_node_snapshot(room_id)
+        .ok_or_else(|| anyhow::anyhow!("Schedule target not found in engine"))?;
+    if !snapshot.kind.is_light_addressable() || snapshot.parent_id.is_some() {
+        return Err(anyhow::anyhow!(
+            "Schedule target must be a room or unassigned light node"
+        ));
     }
     let (soft_off, mood_active, hard_off) = room_flags_for_target_state(target_state)?;
 
@@ -8770,10 +8772,10 @@ pub(crate) fn reconcile_room_schedule_before_tick(
         let runtime = s
             .hub_runtime()
             .ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
-        let Some(snapshot) = runtime.engine_room_snapshot(room_id) else {
+        let Some(snapshot) = runtime.engine_node_snapshot(room_id) else {
             return Ok(None);
         };
-        if !snapshot.kind.is_room() {
+        if !snapshot.kind.is_light_addressable() || snapshot.parent_id.is_some() {
             return Ok(None);
         }
         (snapshot.profile_settings.room_schedule, s.utc_offset_hours)
@@ -8894,10 +8896,12 @@ pub fn do_room_schedule_test(
     };
     let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
     let snapshot = runtime
-        .engine_room_snapshot(room_id)
-        .ok_or_else(|| anyhow::anyhow!("Room not found in engine"))?;
-    if !snapshot.kind.is_room() {
-        return Err(anyhow::anyhow!("Room schedule target must be a room node"));
+        .engine_node_snapshot(room_id)
+        .ok_or_else(|| anyhow::anyhow!("Schedule target not found in engine"))?;
+    if !snapshot.kind.is_light_addressable() || snapshot.parent_id.is_some() {
+        return Err(anyhow::anyhow!(
+            "Schedule target must be a room or unassigned light node"
+        ));
     }
     let target_state = mode_config_for_mode(&mode_configs, mode)
         .and_then(|config| {
@@ -30004,9 +30008,52 @@ mod tests {
     }
 
     #[test]
-    fn room_schedule_rejects_device_targets_and_forgets_deleted_rooms() {
+    fn room_schedule_supports_unassigned_lights_and_rejects_assigned_children() {
+        let schedule = rhythm_core::RoomScheduleConfig {
+            source: rhythm_core::RoomScheduleSource::FollowTime,
+            wake_time: rhythm_core::ModeTransitionTime::parse("06:30").unwrap(),
+            sleep_time: rhythm_core::ModeTransitionTime::parse("22:30").unwrap(),
+        };
+        let mut standalone = make_standalone_light_snapshot("standalone-light");
+        standalone.profile_settings.room_schedule = Some(schedule);
+        let (standalone_state, standalone_runtime) = setup_state(vec![standalone]);
+        {
+            let mut state = standalone_state.lock().unwrap();
+            state.set_mode_configs(vec![ModeConfig {
+                mode: RhythmMode::Day,
+                active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+                idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![rhythm_core::RoomModeDefault {
+                    room_id: "standalone-light".into(),
+                    state: RoomModeState::HardOff,
+                }],
+            }]);
+        }
+
+        let reconciled =
+            reconcile_room_schedule_before_tick(&standalone_state, "standalone-light", 12.0)
+                .unwrap()
+                .expect("an unassigned light should reconcile like a room");
+        assert_eq!(reconciled.mode, RhythmMode::Day);
+        assert!(
+            standalone_runtime
+                .engine_node_snapshot("standalone-light")
+                .unwrap()
+                .hard_off
+        );
+
         let (state, _runtime) = setup_state(vec![make_light_child_snapshot("light-1", "r1")]);
         assert!(do_room_schedule_test(&state, "light-1", RhythmMode::Day).is_err());
+        assert!(reconcile_room_schedule_before_tick(&state, "light-1", 12.0)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn room_schedule_forgets_deleted_nodes() {
+        let (state, _runtime) = setup_state(vec![]);
         {
             let mut s = state.lock().unwrap();
             s.room_schedule_evaluations
