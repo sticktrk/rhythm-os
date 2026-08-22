@@ -3113,6 +3113,78 @@ mod tests {
         let _ = fs::remove_file(socket_path);
     }
 
+    /// Regression for issue #514: CHIP matched the device discriminator and
+    /// connected over BLE, but BlueZ then reported that the Matter GATT
+    /// service was missing. The error was not classified as a recoverable BLE
+    /// stack failure, so the controller was neither reset nor retried.
+    #[test]
+    fn bluez_missing_gatt_service_auto_retry_recovers_commissioning() {
+        const BLUEZ_MISSING_SERVICE_ERROR: &str = concat!(
+            "commissioning Matter light: ",
+            "src/platform/Linux/bluez/BluezConnection.cpp:109: ",
+            "Ble Error 0x0000040F: BLE device doesn't seem to support chip"
+        );
+
+        let socket_path = temp_socket_path("bluez-missing-service-auto-retry");
+        let commission_attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_attempts = commission_attempts.clone();
+        let handler = move |request: &ChipRpcRequestEnvelope| -> ChipRpcResponseEnvelope {
+            match &request.request {
+                ChipRpcRequest::CommissionLight(_) => {
+                    let attempt =
+                        observed_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    if attempt == 0 {
+                        ChipRpcResponseEnvelope::error(request.id, BLUEZ_MISSING_SERVICE_ERROR)
+                    } else {
+                        ChipRpcResponseEnvelope::ok(
+                            request.id,
+                            ChipRpcCommissionLightResponse {
+                                device: commissioned_test_device(107),
+                            },
+                        )
+                    }
+                }
+                ChipRpcRequest::InitController(_) => ChipRpcResponseEnvelope::ok(
+                    request.id,
+                    ChipInitControllerResponse {
+                        fabric_id: "test".to_string(),
+                        operational_fabric_id: 1,
+                        compressed_fabric_id: None,
+                    },
+                ),
+                other => panic!("unexpected RPC during auto-retry test: {:?}", other),
+            }
+        };
+        let server = spawn_fake_server_multi(socket_path.clone(), 3, handler);
+
+        let transport = ChipTransport::for_test(socket_path.clone());
+        let device = transport
+            .commission_light(&ble_commission_request())
+            .expect("a missing Matter GATT service should reset and retry once");
+        assert_eq!(device.node_id, 107);
+        assert_eq!(transport.sidecar_health_for_test(), SidecarHealth::Ready);
+
+        let requests = server.join().unwrap();
+        let kinds: Vec<&'static str> = requests
+            .iter()
+            .map(|envelope| match envelope.request {
+                ChipRpcRequest::CommissionLight(_) => "commission_light",
+                ChipRpcRequest::InitController(_) => "init_controller",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(
+            kinds,
+            vec!["commission_light", "init_controller", "commission_light"]
+        );
+        assert_eq!(
+            commission_attempts.load(std::sync::atomic::Ordering::SeqCst),
+            2
+        );
+
+        let _ = fs::remove_file(socket_path);
+    }
+
     #[test]
     fn slow_ble_commissioning_failure_is_not_auto_retried() {
         let socket_path = temp_socket_path("slow-ble-failure-no-retry");
