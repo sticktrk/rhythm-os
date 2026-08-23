@@ -578,7 +578,12 @@ void main() {
       'from_cache': 1,
       'room_count_bucket': '2_4',
       'presentation_state': 'cached_read_only',
+      'orientation_policy': 'landscape',
     });
+    expect(
+      backend.events.last.properties,
+      containsPair('orientation_policy', 'landscape'),
+    );
     final serialized = backend.events
         .map((event) => '${event.name}:${event.properties}')
         .join('\n');

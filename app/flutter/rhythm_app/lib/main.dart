@@ -35,6 +35,7 @@ import 'providers/room_page_provider.dart';
 import 'providers/home_provider.dart';
 import 'providers/server_sync_provider.dart';
 import 'providers/subscription_provider.dart';
+import 'config/app_orientation_policy.dart';
 import 'config/feature_flags.dart';
 import 'config/platform_capabilities.dart';
 import 'config/supabase_config.dart';
@@ -54,8 +55,7 @@ void main() {
   // launch screen while storage, account, and local-brain startup continues.
   runApp(RhythmBootstrap(capabilities: caps));
 
-  // Force portrait orientation by default on mobile
-  // (Designer screen overrides this to landscape)
+  // Keep every mobile Flutter surface in the app's landscape-only contract.
   if (!kIsWeb) {
     unawaited(_configurePreferredOrientations());
   }
@@ -63,12 +63,7 @@ void main() {
 
 Future<void> _configurePreferredOrientations() async {
   try {
-    await SystemChrome.setPreferredOrientations([
-      DeviceOrientation.portraitUp,
-      DeviceOrientation.portraitDown,
-      DeviceOrientation.landscapeLeft,
-      DeviceOrientation.landscapeRight,
-    ]);
+    await SystemChrome.setPreferredOrientations(appPreferredOrientations);
   } catch (e) {
     debugPrint('Could not set orientation: $e');
   }
@@ -809,59 +804,69 @@ class _InitErrorScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(32),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(
-                Icons.error_outline,
-                size: 80,
-                color: Colors.red.shade400,
+      body: SafeArea(
+        child: LayoutBuilder(
+          builder: (context, constraints) => SingleChildScrollView(
+            padding: const EdgeInsets.all(32),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                minHeight:
+                    constraints.maxHeight > 64 ? constraints.maxHeight - 64 : 0,
               ),
-              const SizedBox(height: 24),
-              Text(
-                'Initialization Failed',
-                style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.error_outline,
+                    size: 80,
+                    color: Colors.red.shade400,
+                  ),
+                  const SizedBox(height: 24),
+                  Text(
+                    'Initialization Failed',
+                    style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                        ),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    error,
+                    style: const TextStyle(color: Colors.white70, fontSize: 16),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 32),
+                  Container(
+                    padding: const EdgeInsets.all(16),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.05),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.white24),
                     ),
-              ),
-              const SizedBox(height: 16),
-              Text(
-                error,
-                style: const TextStyle(color: Colors.white70, fontSize: 16),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 32),
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.05),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: Colors.white24),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: const [
-                    Text(
-                      'To fix this, build the WASM module:',
-                      style: TextStyle(
-                          color: Colors.white70, fontWeight: FontWeight.bold),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: const [
+                        Text(
+                          'To fix this, build the WASM module:',
+                          style: TextStyle(
+                              color: Colors.white70,
+                              fontWeight: FontWeight.bold),
+                        ),
+                        SizedBox(height: 8),
+                        Text(
+                          '1. Install wasm-pack: cargo install wasm-pack\n'
+                          '2. Build WASM: dart run flutter_rust_bridge build-web\n'
+                          '3. Rebuild Flutter web: flutter build web',
+                          style: TextStyle(
+                              color: Colors.white54, fontFamily: 'monospace'),
+                        ),
+                      ],
                     ),
-                    SizedBox(height: 8),
-                    Text(
-                      '1. Install wasm-pack: cargo install wasm-pack\n'
-                      '2. Build WASM: dart run flutter_rust_bridge build-web\n'
-                      '3. Rebuild Flutter web: flutter build web',
-                      style: TextStyle(
-                          color: Colors.white54, fontFamily: 'monospace'),
-                    ),
-                  ],
-                ),
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
         ),
       ),

@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../backend/backend.dart';
+import '../config/app_orientation_policy.dart';
 
 /// Singleton service for analytics tracking.
 ///
@@ -141,6 +142,7 @@ class AnalyticsService {
       'from_cache': fromCache ? 1 : 0,
       'room_count_bucket': roomCountBucket,
       'presentation_state': fromCache ? 'cached_read_only' : 'authoritative',
+      'orientation_policy': appOrientationPolicyAnalyticsValue,
     });
   }
 
@@ -155,6 +157,7 @@ class AnalyticsService {
       'showed_cached_rooms': showedCachedRooms ? 1 : 0,
       'room_count_bucket': roomCountBucket,
       'presentation_state': 'authoritative_interactive',
+      'orientation_policy': appOrientationPolicyAnalyticsValue,
     });
   }
 
