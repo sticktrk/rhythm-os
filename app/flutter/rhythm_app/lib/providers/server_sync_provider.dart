@@ -89,6 +89,8 @@ typedef RemoteAccessAutoEnableScheduler = void Function({
   RemoteAccessEnabledCallback? onEnabled,
 });
 
+typedef ActivityCloudCanProvision = bool Function();
+
 List<RhythmSceneDefinition> _userVisibleScenes(
   Iterable<RhythmSceneDefinition> scenes,
 ) =>
@@ -139,6 +141,7 @@ class ServerSyncProvider extends ChangeNotifier {
   final Future<List<ConnectivityResult>> Function()? _connectivityCheck;
   final ServerAuthApiFactory _authApiFactory;
   final RemoteAccessAutoEnableScheduler _remoteAccessAutoEnableScheduler;
+  final ActivityCloudCanProvision _activityCloudCanProvision;
 
   StreamSubscription<RhythmHello>? _helloSub;
   StreamSubscription<RhythmRoomState>? _rhythmStateSub;
@@ -2117,6 +2120,8 @@ class ServerSyncProvider extends ChangeNotifier {
     @visibleForTesting ServerAuthApiFactory? authApiFactory,
     @visibleForTesting
     RemoteAccessAutoEnableScheduler? remoteAccessAutoEnableScheduler,
+    @visibleForTesting ActivityCloudCanProvision? activityCloudCanProvision,
+    @visibleForTesting Stream<AuthUser?>? authStateChanges,
   })  : _connection = connection,
         _roomProvider = roomProvider,
         _homeProvider = homeProvider,
@@ -2124,7 +2129,10 @@ class ServerSyncProvider extends ChangeNotifier {
         _connectivityCheck = connectivityCheck,
         _authApiFactory = authApiFactory ?? _defaultAuthApiFactory,
         _remoteAccessAutoEnableScheduler = remoteAccessAutoEnableScheduler ??
-            RemoteAccessService.instance.scheduleAutoEnableForHub {
+            RemoteAccessService.instance.scheduleAutoEnableForHub,
+        _activityCloudCanProvision = activityCloudCanProvision ??
+            (() =>
+                ServerActivityCloudProvisioningService.instance.canProvision) {
     // Listen for connection events
     _helloSub = _connection.helloEvents.listen(_onHello);
     _rhythmStateSub = _connection.rhythmStateEvents.listen(_onRhythmState);
@@ -2154,7 +2162,8 @@ class ServerSyncProvider extends ChangeNotifier {
       unawaited(_refreshDemoState());
     });
 
-    _authStateSub = AuthService().authStateChanges.listen(_onAuthStateChanged);
+    _authStateSub = (authStateChanges ?? AuthService().authStateChanges)
+        .listen(_onAuthStateChanged);
   }
 
   void _beginRoomReadinessRefresh() {
@@ -3031,16 +3040,20 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   void _onAuthStateChanged(AuthUser? user) {
-    if (user == null || user.isAnonymous) return;
+    if (user == null || user.isAnonymous) {
+      _stopActivityCloudProvisioningTimer();
+      return;
+    }
     _ensureServerActivityCloudConfigured(
       serverInstanceId: _lastServerInstanceId,
     );
+    _startActivityCloudProvisioningTimer();
   }
 
   void _startActivityCloudProvisioningTimer() {
     if (!_connection.connected ||
         HueServiceLocator.isDemoMode ||
-        !ServerActivityCloudProvisioningService.instance.canProvision) {
+        !_activityCloudCanProvision()) {
       return;
     }
     _activityCloudProvisioningTimer ??= Timer.periodic(
@@ -3056,12 +3069,16 @@ class ServerSyncProvider extends ChangeNotifier {
     _activityCloudProvisioningTimer = null;
   }
 
+  @visibleForTesting
+  bool get activityCloudProvisioningTimerActive =>
+      _activityCloudProvisioningTimer != null;
+
   void _ensureServerActivityCloudConfigured({String? serverInstanceId}) {
     if (!_connection.connected) return;
     final serverHub = _serverHub ?? _homeProvider.activeServerHub;
     if (serverHub == null ||
         HueServiceLocator.isDemoMode ||
-        !ServerActivityCloudProvisioningService.instance.canProvision) {
+        !_activityCloudCanProvision()) {
       return;
     }
     unawaited(

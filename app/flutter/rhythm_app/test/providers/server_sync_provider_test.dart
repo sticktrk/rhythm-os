@@ -11,11 +11,12 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
+import 'package:rhythm_app/backend/backend.dart' show AuthUser;
+import 'package:rhythm_app/models/plan_tier.dart';
 import 'package:rhythm_app/providers/home_provider.dart';
 import 'package:rhythm_app/providers/room_provider.dart';
 import 'package:rhythm_app/providers/server_sync_provider.dart';
 import 'package:rhythm_app/providers/subscription_provider.dart';
-import 'package:rhythm_app/models/plan_tier.dart';
 import 'package:rhythm_app/services/account_cloud_sync_service.dart';
 import 'package:rhythm_app/services/demo_server_api.dart';
 import 'package:rhythm_app/services/hue/hue_service_locator.dart';
@@ -1232,6 +1233,46 @@ void main() {
       ),
       {'room-explicit', 'room-new'},
     );
+  });
+
+  test('account sign-in arms periodic activity cloud recovery', () async {
+    final roomProvider = RoomProvider();
+    final connection = _FakeRhythmConnection(_FakeRhythmServerApi());
+    final authStates = StreamController<AuthUser?>.broadcast();
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+      activityCloudCanProvision: () => true,
+      authStateChanges: authStates.stream,
+    );
+
+    expect(provider.activityCloudProvisioningTimerActive, isFalse);
+
+    authStates.add(const AuthUser(
+      id: 'signed-in-owner',
+      isAnonymous: false,
+    ));
+    await Future<void>.delayed(Duration.zero);
+
+    expect(
+      provider.activityCloudProvisioningTimerActive,
+      isTrue,
+      reason: 'transient bootstrap failures must receive later retries',
+    );
+
+    authStates.add(null);
+    await Future<void>.delayed(Duration.zero);
+    expect(
+      provider.activityCloudProvisioningTimerActive,
+      isFalse,
+      reason: 'sign-out must release the periodic recovery timer',
+    );
+
+    provider.dispose();
+    roomProvider.dispose();
+    connection.dispose();
+    await authStates.close();
   });
 
   group('ServerSyncProvider.applyProfileConfig', () {
