@@ -113,7 +113,7 @@ class AppStateRefresh {
       homeProvider: homeProvider,
       serverSync: serverSync,
     );
-    await _restoreCloudAppSettingsIfAvailable(context, homeProvider);
+    await restoreCloudAppSettingsIfAvailable(context, homeProvider);
     _scheduleCloudBackupIfAvailable(homeProvider);
 
     // Step 2: Sync location into API client for accurate solar calculations
@@ -195,7 +195,12 @@ class AppStateRefresh {
     return null;
   }
 
-  static Future<void> _restoreCloudAppSettingsIfAvailable(
+  /// Restore the signed-in user's layout for the currently selected home.
+  ///
+  /// App startup calls this from [sync]. Live home switches call it directly
+  /// so each appliance's saved layout follows the selection without requiring
+  /// an app restart.
+  static Future<void> restoreCloudAppSettingsIfAvailable(
     BuildContext context,
     HomeProvider homeProvider,
   ) async {
@@ -250,13 +255,18 @@ class AppStateRefresh {
       final snapshot =
           await CloudBackupService.instance.getSnapshotForCurrentUser();
       if (snapshot == null) return;
+      if (!context.mounted || roomPageProvider?.scopeKey != scopeKey) return;
 
-      final restored = await SettingsService.instance.applyCloudSettingsBundle(
-        snapshot.appSettingsBundle,
-        roomLayoutScopeKey: scopeKey,
-        roomLayoutHubKey: hubKey,
-        roomLayoutHubKeyAliases: hubKeyAliases,
-        overwrite: true,
+      final restored = await completeCloudLayoutRestoreForTesting(
+        apply: () => SettingsService.instance.applyCloudSettingsBundle(
+          snapshot.appSettingsBundle,
+          roomLayoutScopeKey: scopeKey,
+          roomLayoutHubKey: hubKey,
+          roomLayoutHubKeyAliases: hubKeyAliases,
+          overwrite: true,
+        ),
+        isCurrentScope: () =>
+            context.mounted && roomPageProvider?.scopeKey == scopeKey,
       );
       if (!restored) return;
 
@@ -291,6 +301,20 @@ class AppStateRefresh {
         ),
       );
     }
+  }
+
+  /// Complete a cloud layout write only while its initiating scope is current.
+  ///
+  /// The write is asynchronous, so a second home switch may happen while it is
+  /// in flight. Re-checking after completion prevents the stale restore from
+  /// selecting or reloading the previous appliance scope.
+  @visibleForTesting
+  static Future<bool> completeCloudLayoutRestoreForTesting({
+    required Future<bool> Function() apply,
+    required bool Function() isCurrentScope,
+  }) async {
+    if (!await apply()) return false;
+    return isCurrentScope();
   }
 
   static void _scheduleCloudBackupIfAvailable(HomeProvider homeProvider) {

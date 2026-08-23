@@ -166,6 +166,20 @@ void main() {
   });
 
   group('RoomPageProvider', () {
+    test('requests restoration when an initialized layout scope changes', () {
+      final restoredScopes = <String?>[];
+      final provider = RoomPageProvider(
+        layoutStore: _FakeRoomPageLayoutStore(),
+      );
+      provider.configureLayoutScopeChanged(restoredScopes.add);
+
+      provider.setLayoutScope('scope-a');
+      provider.setLayoutScope('scope-a');
+      provider.setLayoutScope('scope-b');
+
+      expect(restoredScopes, ['scope-b']);
+    });
+
     test('loads a different layout for each scope', () {
       final store = _FakeRoomPageLayoutStore(
         scopedLayouts: {
