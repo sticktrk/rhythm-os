@@ -113,7 +113,7 @@ class AppStateRefresh {
       homeProvider: homeProvider,
       serverSync: serverSync,
     );
-    await _restoreCloudAppSettingsIfAvailable(context, homeProvider);
+    await restoreCloudAppSettingsIfAvailable(context, homeProvider);
     _scheduleCloudBackupIfAvailable(homeProvider);
 
     // Step 2: Sync location into API client for accurate solar calculations
@@ -195,7 +195,12 @@ class AppStateRefresh {
     return null;
   }
 
-  static Future<void> _restoreCloudAppSettingsIfAvailable(
+  /// Restore the signed-in user's layout for the currently selected home.
+  ///
+  /// App startup calls this from [sync]. Live home switches call it directly
+  /// so each appliance's saved layout follows the selection without requiring
+  /// an app restart.
+  static Future<void> restoreCloudAppSettingsIfAvailable(
     BuildContext context,
     HomeProvider homeProvider,
   ) async {
@@ -250,6 +255,7 @@ class AppStateRefresh {
       final snapshot =
           await CloudBackupService.instance.getSnapshotForCurrentUser();
       if (snapshot == null) return;
+      if (!context.mounted || roomPageProvider?.scopeKey != scopeKey) return;
 
       final restored = await SettingsService.instance.applyCloudSettingsBundle(
         snapshot.appSettingsBundle,
