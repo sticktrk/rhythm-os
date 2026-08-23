@@ -27,6 +27,7 @@ import 'package:rhythm_app/widgets/device_detail_sheet.dart';
 import 'package:rhythm_app/widgets/hub_picker_screen.dart';
 import 'package:rhythm_app/widgets/room_settings_sheet.dart';
 import 'package:rhythm_app/widgets/room_schedule_tab.dart';
+import 'package:rhythm_app/widgets/solar_clock/solar_clock_exports.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
@@ -6509,6 +6510,149 @@ void main() {
     // Let the debounced room-default persist fire before teardown.
     await tester.pump(const Duration(milliseconds: 801));
     await tester.pump();
+  });
+
+  testWidgets(
+      'custom-time chips name exact solar anchors and fall back after a step',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 1200));
+    final captureEvidence =
+        (Platform.environment['CODEX_UI_SCREENSHOT_DIR'] ?? '').isNotEmpty;
+    if (captureEvidence) {
+      await tester.runAsync(_loadRoomScheduleEvidenceFont);
+    }
+    final boundaryKey = GlobalKey();
+
+    const solarData = SolarClockData(
+      sunTimes: SunTimesDto(
+        sunrise: 6.5,
+        sunset: 18.5,
+        solarNoon: 12.5,
+        solarMidnight: 0.5,
+        dayLength: 12,
+      ),
+      twilightTimes: TwilightTimesDto(
+        dawn: TwilightPhaseDto(
+          civil: 6,
+          nautical: 5.5,
+          astronomical: 5,
+        ),
+        dusk: TwilightPhaseDto(
+          civil: 19,
+          nautical: 19.5,
+          astronomical: 20,
+        ),
+      ),
+    );
+
+    String fixedTime(double hour) {
+      final minute = (hour * 60).round() % 1440;
+      return '${(minute ~/ 60).toString().padLeft(2, '0')}:'
+          '${(minute % 60).toString().padLeft(2, '0')}';
+    }
+
+    final wakeTime = fixedTime(solarData.sunrise);
+    final sleepTime = fixedTime(solarData.sunset);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+
+    connection.emitHello(RhythmHello.fromJson({
+      'capabilities': {
+        'api_schema_version': 2,
+        'features': [RhythmFeature.roomScheduleV1],
+        'hubs': const <dynamic>[],
+      },
+      'nodes': [
+        {
+          'id': 'room-1',
+          'name': 'Kitchen',
+          'kind': 'room',
+          'state': 'active',
+          'rhythm_enabled': true,
+          'disabled': false,
+          'time_offset': 0.0,
+          'brightness_offset': 0.0,
+          'profile_settings': {
+            'room_schedule': {
+              'source': 'follow_time',
+              'wake_time': wakeTime,
+              'sleep_time': sleepTime,
+            },
+          },
+        },
+      ],
+      'location': const <String, dynamic>{},
+    }));
+    await tester.pump();
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        fontFamily: captureEvidence ? 'CodexReadableRoboto' : null,
+        child: RepaintBoundary(
+          key: boundaryKey,
+          child: const RoomScheduleTab(
+            roomId: 'room-1',
+            roomName: 'Kitchen',
+            showRoomLightingOverride: false,
+            solarClockDataOverride: solarData,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      tester
+          .widget<Text>(
+            find.byKey(const ValueKey('room-schedule-wake-value')),
+          )
+          .data,
+      'Sunrise',
+    );
+    expect(
+      tester
+          .widget<Text>(
+            find.byKey(const ValueKey('room-schedule-sleep-value')),
+          )
+          .data,
+      'Sunset',
+    );
+    await _captureRoomScheduleEvidence(
+      tester,
+      boundaryKey,
+      '05-solar-preset-labels.png',
+    );
+
+    await tester.tap(
+      find.byKey(const ValueKey('room-schedule-wake-later')),
+    );
+    await tester.pumpAndSettle();
+
+    final steppedWakeMinutes = ((solarData.sunrise * 60).round() + 15) % 1440;
+    final steppedWake =
+        '${(steppedWakeMinutes ~/ 60).toString().padLeft(2, '0')}:'
+        '${(steppedWakeMinutes % 60).toString().padLeft(2, '0')}';
+    expect(api.roomScheduleSetCalls.single.wakeTime, steppedWake);
+    expect(
+      tester
+          .widget<Text>(
+            find.byKey(const ValueKey('room-schedule-wake-value')),
+          )
+          .data,
+      steppedWake,
+    );
   });
 
   testWidgets('room schedule renders deterministic visual evidence states',

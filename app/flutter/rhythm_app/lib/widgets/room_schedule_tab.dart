@@ -41,11 +41,16 @@ class RoomScheduleTab extends StatefulWidget {
     required this.roomId,
     required this.roomName,
     required this.showRoomLightingOverride,
+    this.solarClockDataOverride,
   });
 
   final String roomId;
   final String roomName;
   final bool showRoomLightingOverride;
+
+  /// Deterministic solar fixture for widget evidence. Production callers use
+  /// the current home's location-derived data.
+  final SolarClockData? solarClockDataOverride;
 
   @override
   State<RoomScheduleTab> createState() => _RoomScheduleTabState();
@@ -365,6 +370,8 @@ class _RoomScheduleTabState extends State<RoomScheduleTab> {
                           wakeTime: schedule.wakeTime,
                           sleepTime: schedule.sleepTime,
                           enabled: !saving,
+                          solarClockDataOverride:
+                              widget.solarClockDataOverride,
                           onChanged: (wake, sleep, inputMethod) => _save(
                             schedule.copyWith(wakeTime: wake, sleepTime: sleep),
                             changeKind: 'times',
@@ -590,11 +597,13 @@ class _RoomTimeEditor extends StatefulWidget {
     required this.wakeTime,
     required this.sleepTime,
     required this.enabled,
+    required this.solarClockDataOverride,
     required this.onChanged,
   });
   final String wakeTime;
   final String sleepTime;
   final bool enabled;
+  final SolarClockData? solarClockDataOverride;
   final void Function(String wakeTime, String sleepTime, String inputMethod)
       onChanged;
 
@@ -676,6 +685,18 @@ class _RoomTimeEditorState extends State<_RoomTimeEditor> {
     return mode == RhythmMode.day ? wake : sleep;
   }
 
+  String _chipValue(RhythmMode mode) {
+    final minutes = _chipMinutes(mode);
+    final data = _solarClockData;
+    if (data != null) {
+      for (final anchor in solarAnchorsForMode(mode, data)) {
+        final anchorMinutes = (anchor.hour * 60).round() % 1440;
+        if (anchorMinutes == minutes) return anchor.label;
+      }
+    }
+    return _display(minutes);
+  }
+
   RhythmCurveConfig? _activeProfile(ServerSyncProvider sync, RhythmMode mode) {
     String? id;
     for (final config in sync.modeConfigs) {
@@ -697,6 +718,13 @@ class _RoomTimeEditorState extends State<_RoomTimeEditor> {
     final profileColors = resolveProfileColors(sync.modeConfigs, sync.profiles);
     _dayColor = profileColors[RhythmMode.day] ?? fallbackDayColor;
     _sleepColor = profileColors[RhythmMode.sleep] ?? fallbackSleepColor;
+
+    final solarClockDataOverride = widget.solarClockDataOverride;
+    if (solarClockDataOverride != null) {
+      _visualsKey = null;
+      _solarClockData = solarClockDataOverride;
+      return;
+    }
 
     final home = homeProvider.currentHome;
     final loc = home?.location;
@@ -759,7 +787,8 @@ class _RoomTimeEditorState extends State<_RoomTimeEditor> {
                     label: 'Wake',
                     icon: Icons.wb_sunny_rounded,
                     accent: _dayColor,
-                    time: _display(_chipMinutes(RhythmMode.day)),
+                    value: _chipValue(RhythmMode.day),
+                    valueKey: const ValueKey('room-schedule-wake-value'),
                     enabled: widget.enabled,
                     earlierKey: const ValueKey('room-schedule-wake-earlier'),
                     laterKey: const ValueKey('room-schedule-wake-later'),
@@ -775,7 +804,8 @@ class _RoomTimeEditorState extends State<_RoomTimeEditor> {
                     label: 'Sleep',
                     icon: Icons.bedtime_rounded,
                     accent: _sleepColor,
-                    time: _display(_chipMinutes(RhythmMode.sleep)),
+                    value: _chipValue(RhythmMode.sleep),
+                    valueKey: const ValueKey('room-schedule-sleep-value'),
                     enabled: widget.enabled,
                     earlierKey: const ValueKey('room-schedule-sleep-earlier'),
                     laterKey: const ValueKey('room-schedule-sleep-later'),
@@ -846,7 +876,8 @@ class _TimeChip extends StatelessWidget {
     required this.label,
     required this.icon,
     required this.accent,
-    required this.time,
+    required this.value,
+    required this.valueKey,
     required this.enabled,
     required this.earlierKey,
     required this.laterKey,
@@ -859,7 +890,8 @@ class _TimeChip extends StatelessWidget {
   final String label;
   final IconData icon;
   final Color accent;
-  final String time;
+  final String value;
+  final Key valueKey;
   final bool enabled;
   final Key earlierKey;
   final Key laterKey;
@@ -886,15 +918,20 @@ class _TimeChip extends StatelessWidget {
             onPressed: enabled ? onEarlier : null,
           ),
           Expanded(
-            child: Text(
-              time,
-              textAlign: TextAlign.center,
-              style: TextStyle(
-                color: CelestialColors.textPrimary.withValues(alpha: 0.92),
-                fontSize: 18,
-                fontWeight: FontWeight.w600,
-                fontFeatures: const [FontFeature.tabularFigures()],
-                letterSpacing: 0.5,
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Text(
+                value,
+                key: valueKey,
+                maxLines: 1,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: CelestialColors.textPrimary.withValues(alpha: 0.92),
+                  fontSize: 18,
+                  fontWeight: FontWeight.w600,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                  letterSpacing: 0.5,
+                ),
               ),
             ),
           ),
