@@ -257,12 +257,16 @@ class AppStateRefresh {
       if (snapshot == null) return;
       if (!context.mounted || roomPageProvider?.scopeKey != scopeKey) return;
 
-      final restored = await SettingsService.instance.applyCloudSettingsBundle(
-        snapshot.appSettingsBundle,
-        roomLayoutScopeKey: scopeKey,
-        roomLayoutHubKey: hubKey,
-        roomLayoutHubKeyAliases: hubKeyAliases,
-        overwrite: true,
+      final restored = await completeCloudLayoutRestoreForTesting(
+        apply: () => SettingsService.instance.applyCloudSettingsBundle(
+          snapshot.appSettingsBundle,
+          roomLayoutScopeKey: scopeKey,
+          roomLayoutHubKey: hubKey,
+          roomLayoutHubKeyAliases: hubKeyAliases,
+          overwrite: true,
+        ),
+        isCurrentScope: () =>
+            context.mounted && roomPageProvider?.scopeKey == scopeKey,
       );
       if (!restored) return;
 
@@ -297,6 +301,20 @@ class AppStateRefresh {
         ),
       );
     }
+  }
+
+  /// Complete a cloud layout write only while its initiating scope is current.
+  ///
+  /// The write is asynchronous, so a second home switch may happen while it is
+  /// in flight. Re-checking after completion prevents the stale restore from
+  /// selecting or reloading the previous appliance scope.
+  @visibleForTesting
+  static Future<bool> completeCloudLayoutRestoreForTesting({
+    required Future<bool> Function() apply,
+    required bool Function() isCurrentScope,
+  }) async {
+    if (!await apply()) return false;
+    return isCurrentScope();
   }
 
   static void _scheduleCloudBackupIfAvailable(HomeProvider homeProvider) {
