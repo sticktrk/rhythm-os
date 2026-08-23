@@ -981,20 +981,25 @@ impl CanonicalRegistry {
         Some((canonical_id, remove_whole_device))
     }
 
-    /// Backfill UnassignedDevice triage entries for existing devices with no room.
+    /// Normalize UnassignedDevice triage for existing devices with no room.
     ///
-    /// Called on startup after loading the registry to handle devices that
-    /// predate this feature.
+    /// Called on startup after loading the registry. Retired identities may
+    /// carry a pending entry written by an older runtime, so resolve those
+    /// before backfilling entries for reachable devices that predate triage.
     pub fn backfill_unassigned_triage(&mut self, now: u64) {
-        let ids: Vec<_> = self
+        let devices: Vec<_> = self
             .devices
             .values()
             .filter(|d| d.room_id.is_none() && !d.is_removed())
-            .map(|d| d.id.clone())
+            .map(|d| (d.id.clone(), d.has_active_endpoint()))
             .collect();
 
-        for id in ids {
-            self.queue_unassigned(&id, now);
+        for (id, has_active_endpoint) in devices {
+            if has_active_endpoint {
+                self.queue_unassigned(&id, now);
+            } else {
+                self.triage.resolve_unassigned_for_device(&id, now);
+            }
         }
     }
 }

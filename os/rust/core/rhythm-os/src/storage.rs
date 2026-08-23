@@ -3545,6 +3545,58 @@ mod tests {
     }
 
     #[test]
+    fn load_persisted_state_resolves_stale_unassigned_triage_for_inactive_device() {
+        let mut registry = crate::canonical::registry::CanonicalRegistry::new();
+        let hub_key = HubKey::new(crate::hub::HubType::new("ha"), "local");
+        let identity = crate::canonical::identity::DiscoveredIdentity {
+            native_id: "event.front_door".to_string(),
+            room_id: None,
+            room_name: None,
+            name: "Front Door Camera".to_string(),
+            device_type: rhythm_core::runtime::hub_registry::DeviceType::Button,
+            hardware_ids: vec![],
+            manufacturer: None,
+            model: None,
+        };
+        let canonical_id = match registry.resolve(&identity, &hub_key, 1000) {
+            crate::canonical::registry::ResolveResult::Created { canonical_id } => canonical_id,
+            other => panic!("unexpected resolve result: {:?}", other),
+        };
+        registry.queue_unassigned(&canonical_id, 1000);
+        registry.deactivate_missing_endpoints_for_hub(&hub_key, &std::collections::HashSet::new());
+        assert_eq!(registry.triage().pending_unassigned_count(), 1);
+        assert!(!registry.get(&canonical_id).unwrap().has_active_endpoint());
+
+        let storage = TestStorage {
+            canonical_registry: Some(serde_json::to_value(&registry).unwrap()),
+            topology: Some(
+                serde_json::to_value(crate::topology::RoomTopologyStore::new()).unwrap(),
+            ),
+            ..Default::default()
+        };
+        let mut app = crate::state::AppState {
+            storage: Some(std::sync::Arc::new(storage)),
+            ..Default::default()
+        };
+
+        load_persisted_state(&mut app);
+
+        assert_eq!(
+            app.canonical_registry.triage().pending_unassigned_count(),
+            0
+        );
+        assert!(matches!(
+            app.canonical_registry.resolve(&identity, &hub_key, 2000),
+            crate::canonical::registry::ResolveResult::AlreadyKnown { .. }
+        ));
+        app.canonical_registry.queue_unassigned(&canonical_id, 2000);
+        assert_eq!(
+            app.canonical_registry.triage().pending_unassigned_count(),
+            1
+        );
+    }
+
+    #[test]
     fn load_persisted_state_grandfathers_hue_bridge_configured_before_consent() {
         use crate::topology::{DiscoveredTopologyRoom, ExternalRoomAutomationOwner, SyncAction};
 
