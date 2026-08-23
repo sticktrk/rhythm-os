@@ -53,6 +53,7 @@ class SettingsRoomPageLayoutStore implements RoomPageLayoutStore {
 class RoomPageProvider extends ChangeNotifier {
   final RoomPageLayoutStore _layoutStore;
   void Function(String? scopeKey)? _onUserLayoutChanged;
+  void Function(String? scopeKey)? _onLayoutScopeChanged;
 
   /// Ordered room IDs per page. Index = page number.
   List<List<String>> _pages = [];
@@ -81,6 +82,17 @@ class RoomPageProvider extends ChangeNotifier {
     void Function(String? scopeKey)? onUserLayoutChanged,
   ) {
     _onUserLayoutChanged = onUserLayoutChanged;
+  }
+
+  /// Configure a lifecycle callback for switches between physical layouts.
+  ///
+  /// Initial app startup is restored by AppStateRefresh. This callback only
+  /// fires for later scope changes, such as selecting another home while the
+  /// app is already running.
+  void configureLayoutScopeChanged(
+    void Function(String? scopeKey)? onLayoutScopeChanged,
+  ) {
+    _onLayoutScopeChanged = onLayoutScopeChanged;
   }
 
   /// Load saved page layout from persistent storage.
@@ -198,6 +210,7 @@ class RoomPageProvider extends ChangeNotifier {
       return;
     }
 
+    final wasInitialized = _initialized;
     _initialized = true;
     _scopeKey = normalizedScopeKey;
     _scopeKeyAliases = normalizedAliases;
@@ -210,6 +223,9 @@ class RoomPageProvider extends ChangeNotifier {
 
     if (notify) {
       notifyListeners();
+    }
+    if (wasInitialized) {
+      _onLayoutScopeChanged?.call(_scopeKey);
     }
   }
 
