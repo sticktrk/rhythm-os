@@ -1438,6 +1438,52 @@ mod tests {
     }
 
     #[test]
+    fn lifx_everyday_lightstrip_uses_hue_saturation_for_color_temperature() {
+        let (controller, spy, registry) = make_controller();
+        registry.lock().unwrap().upsert_room(
+            "lifx-room",
+            "LIFX room",
+            "matter-group-62000",
+            &["matter-100".to_string()],
+        );
+        let mut lifx = profiled_color_bulb(100, "LIFX", "LIFX Everyday Lightstrip");
+        lifx.vendor_id = 5155;
+        lifx.product_id = 207;
+        lifx.color_modes = vec![
+            crate::transport::MatterColorMode::HueSaturation,
+            crate::transport::MatterColorMode::Xy,
+            crate::transport::MatterColorMode::ColorTemperature,
+        ];
+        let expected = rhythm_os::controller_helpers::adapt_lighting_command(
+            &crate::commissioning::build_device_capabilities(&lifx),
+            &LightingCommand::new(100, 5500),
+            ColorPreference::PreferHueSaturation,
+        );
+        spy.set_probe_device(lifx);
+
+        block_on(controller.turn_on("lifx-room", LightingCommand::new(100, 5500))).unwrap();
+
+        assert_eq!(
+            operations_for_node(&spy.operations(), 100),
+            vec![
+                RecordedOperation::SetHueSaturation {
+                    node_id: 100,
+                    endpoint: 1,
+                    hue: expected.hue_saturation.unwrap().0,
+                    saturation: expected.hue_saturation.unwrap().1,
+                    transition_ms: None,
+                },
+                RecordedOperation::SetBrightness {
+                    node_id: 100,
+                    endpoint: 1,
+                    level: clusters::brightness_to_level(100),
+                    transition_ms: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn turn_on_group_target_uses_authoritative_endpoint_plans() {
         let (mut controller, spy, _) = make_controller();
         controller.group_fanout_only = false;
