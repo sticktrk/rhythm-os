@@ -46,7 +46,8 @@ pub enum HubEvent {
         action: ButtonAction,
         device_id: Option<String>,
     },
-    /// Motion detected or cleared in a room.
+    /// Motion detected or cleared by a known sensor. `room_id` is empty when
+    /// the integration has no native room mapping and topology must route it.
     Motion {
         hub_key: Option<HubKey>,
         room_id: String,

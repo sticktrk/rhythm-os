@@ -7673,6 +7673,68 @@ mod tests {
     }
 
     #[test]
+    fn roomless_motion_event_uses_explicit_topology_target() {
+        let turn_on_room_calls = Arc::new(AtomicUsize::new(0));
+        let runtime: Arc<dyn RuntimeHandle> = Arc::new(SlowDispatchRuntime {
+            handle_event_delay: Duration::ZERO,
+            turn_on_room_delay: Duration::ZERO,
+            handle_event_calls: Arc::new(AtomicUsize::new(0)),
+            turn_on_room_calls: turn_on_room_calls.clone(),
+        });
+        let state = make_state_with_runtime(runtime);
+        let hub_key = only_hub_key(&state);
+        let source_id = add_canonical_standalone_control_source(
+            &state,
+            &hub_key,
+            "sensor_a",
+            DeviceType::Motion,
+        );
+        {
+            let mut s = state.lock().unwrap();
+            s.topology
+                .insert_room(TopologyRoom::new("room_a", "Room A"));
+            assert!(s.topology.set_control_target(
+                &source_id,
+                NodeControlKind::Motion,
+                Some("room_a"),
+            ));
+        }
+        let mut event_rx = subscribe_events(&state);
+        let mut motion = MotionTimerState::new();
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Motion {
+                hub_key: Some(hub_key),
+                room_id: String::new(),
+                sensor_id: "sensor_a".into(),
+                detected: true,
+            },
+            &mut motion,
+        );
+
+        let event = event_rx.try_recv().expect("expected input event broadcast");
+        match event {
+            crate::server_event::ServerEvent::InputEvent(InputEventResource::Motion {
+                route,
+                source_node_id,
+                target_node_id,
+                source_room_id,
+                ..
+            }) => {
+                assert_eq!(route, InputEventRoute::NodeControl);
+                assert_eq!(source_node_id.as_deref(), Some(source_id.as_str()));
+                assert_eq!(target_node_id.as_deref(), Some("room_a"));
+                assert_eq!(source_room_id.as_deref(), Some(""));
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+        assert!(motion.has_active_sources_for_target("room_a"));
+        wait_for_atomic_at_least(&turn_on_room_calls, 1);
+        assert_eq!(turn_on_room_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
     fn motion_event_for_unknown_source_broadcasts_unresolved() {
         let turn_on_room_calls = Arc::new(AtomicUsize::new(0));
         let runtime: Arc<dyn RuntimeHandle> = Arc::new(SlowDispatchRuntime {
