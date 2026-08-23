@@ -551,6 +551,18 @@
     }
   },
   {
+    "manufacturer": "LIFX",
+    "model": "LIFX Everyday Lightstrip",
+    "name": "LIFX Everyday Lightstrip",
+    "light_type": "extended_color",
+    "color_modes": ["hue_saturation", "xy", "color_temperature"],
+    "matter": {
+      "vendor_id": 5155,
+      "product_id": 207,
+      "quirks": ["needs_hue_saturation_not_ct"]
+    }
+  },
+  {
     "manufacturer": "Savant Systems, Inc.",
     "model": "93128984",
     "name": "GE Cync Tunable White A19",

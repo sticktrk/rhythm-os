@@ -214,6 +214,26 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "serde")]
+    #[test]
+    fn test_lookup_lifx_everyday_lightstrip_by_matter_id() {
+        let db = DeviceDatabase::builtin();
+        let entry = db
+            .lookup_matter(5155, 207)
+            .expect("LIFX Everyday Lightstrip Matter IDs should match");
+
+        assert_eq!(entry.manufacturer, "LIFX");
+        assert_eq!(entry.model, "LIFX Everyday Lightstrip");
+        assert_eq!(
+            entry
+                .matter
+                .as_ref()
+                .map(|matter| matter.quirks.clone())
+                .unwrap_or_default(),
+            vec![crate::quirks::DeviceQuirk::NeedsHueSaturationNotCt]
+        );
+    }
+
     #[test]
     fn test_lookup_matter_from_entries() {
         use crate::capabilities::{ColorMode, LightType};
