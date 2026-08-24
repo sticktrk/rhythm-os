@@ -1107,6 +1107,7 @@ mod tests {
             metadata.device_quirks.get("matter-107"),
             Some(&vec![
                 DeviceQuirk::NeedsExplicitOn,
+                DeviceQuirk::NeedsXyNotCt,
                 DeviceQuirk::CommandThrottleMs(250),
             ])
         );
@@ -1234,6 +1235,7 @@ mod tests {
             data.device_quirks.lock().unwrap().get("matter-107"),
             Some(&vec![
                 DeviceQuirk::NeedsExplicitOn,
+                DeviceQuirk::NeedsXyNotCt,
                 DeviceQuirk::CommandThrottleMs(250),
             ])
         );
@@ -1416,6 +1418,7 @@ mod tests {
             data.device_quirks.lock().unwrap().get("matter-107"),
             Some(&vec![
                 DeviceQuirk::NeedsExplicitOn,
+                DeviceQuirk::NeedsXyNotCt,
                 DeviceQuirk::CommandThrottleMs(250),
             ])
         );
