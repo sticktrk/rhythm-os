@@ -164,6 +164,10 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   String? lastRenamedRoomId;
   String? lastRenamedRoomName;
   bool topologyRenameRoomResult = true;
+  int renameCanonicalDeviceCalls = 0;
+  String? lastRenamedDeviceId;
+  String? lastRenamedDeviceName;
+  bool renameCanonicalDeviceResult = true;
   int triggerSyncCalls = 0;
   final Map<String, Map<String, dynamic>?> canonicalDevices = {};
   int getCanonicalDevicesCalls = 0;
@@ -753,6 +757,14 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     lastRenamedRoomId = roomId;
     lastRenamedRoomName = name;
     return topologyRenameRoomResult;
+  }
+
+  @override
+  Future<bool> renameCanonicalDevice(String id, String name) async {
+    renameCanonicalDeviceCalls++;
+    lastRenamedDeviceId = id;
+    lastRenamedDeviceName = name;
+    return renameCanonicalDeviceResult;
   }
 
   @override
@@ -8432,6 +8444,62 @@ void main() {
 
     final headerText = tester.widget<Text>(find.text(deviceName));
     expect(headerText.textAlign, TextAlign.center);
+  });
+
+  testWidgets('motion sensors expose canonical rename in Device Info',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+
+    api.canonicalDevices['motion-1'] = {
+      'id': 'motion-1',
+      'name': 'Motion Sensor',
+      'device_type': 'motion',
+      'endpoints': const <Map<String, dynamic>>[],
+    };
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const DeviceDetailSheet(
+          device: RhythmDevice(
+            id: 'motion-1',
+            type: RhythmDeviceType.motion,
+            name: 'Motion Sensor',
+          ),
+          roomId: 'room-1',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Info'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Name'), findsOneWidget);
+    await tester.tap(find.text('Name'));
+    await tester.pumpAndSettle();
+    expect(find.text('Rename Motion Sensor'), findsOneWidget);
+
+    await tester.enterText(find.byType(TextField), 'Mud Room Motion');
+    await tester.tap(find.widgetWithText(TextButton, 'Rename'));
+    await tester.pumpAndSettle();
+
+    expect(api.renameCanonicalDeviceCalls, 1);
+    expect(api.lastRenamedDeviceId, 'motion-1');
+    expect(api.lastRenamedDeviceName, 'Mud Room Motion');
+    expect(find.text('Mud Room Motion'), findsNWidgets(2));
+    expect(api.triggerSyncCalls, 1);
   });
 
   testWidgets('Hue Bluetooth lights expose their removable connection',

@@ -790,8 +790,8 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     final rhythmId = _canonicalData?['id'] as String?;
 
     return _buildGroup('Device Info', [
-      // Editable name (lights only) — the pencil is the rename affordance.
-      if (device.type == RhythmDeviceType.light) _buildNameEditRow(context),
+      // The canonical rename endpoint owns names for every device type.
+      _buildNameEditRow(context),
       _InfoRow(label: 'Type', value: typeLabel),
       if (device.manufacturer != null)
         _InfoRow(label: 'Manufacturer', value: device.manufacturer!),
@@ -974,7 +974,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   }
 
   /// Editable "Name" row for the Device Info group — value plus a pencil that
-  /// opens the rename dialog. Lights only.
+  /// opens the canonical-device rename dialog.
   Widget _buildNameEditRow(BuildContext context) {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
@@ -1044,21 +1044,27 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       );
 
   Future<void> _showRenameDialog(BuildContext context) async {
+    final deviceLabel = switch (widget.device.type) {
+      RhythmDeviceType.light => 'Bulb',
+      RhythmDeviceType.button => 'Button',
+      RhythmDeviceType.motion => 'Motion Sensor',
+      RhythmDeviceType.contact => 'Contact Sensor',
+    };
     final controller = TextEditingController(text: _deviceDisplayName);
     final newName = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: CelestialColors.backgroundCard,
-        title: const Text(
-          'Rename Bulb',
-          style: TextStyle(color: CelestialColors.textPrimary),
+        title: Text(
+          'Rename $deviceLabel',
+          style: const TextStyle(color: CelestialColors.textPrimary),
         ),
         content: TextField(
           controller: controller,
           autofocus: true,
           style: const TextStyle(color: CelestialColors.textPrimary),
           decoration: InputDecoration(
-            hintText: 'Bulb name',
+            hintText: '$deviceLabel name',
             hintStyle: TextStyle(
               color: CelestialColors.textSecondary.withValues(alpha: 0.5),
             ),
@@ -1108,7 +1114,9 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
 
     if (!success) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Failed to rename bulb')),
+        SnackBar(
+          content: Text('Failed to rename ${deviceLabel.toLowerCase()}'),
+        ),
       );
       return;
     }
