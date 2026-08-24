@@ -2321,6 +2321,7 @@ class RhythmServerApi {
       await _dio.put(
         'api/devices/canonical/$deviceId/parent',
         data: {'parent_id': parentId},
+        options: Options(receiveTimeout: const Duration(seconds: 30)),
       );
       return true;
     } catch (e) {
