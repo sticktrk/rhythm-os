@@ -8080,6 +8080,17 @@ void main() {
 
     expect(api.flashCanonicalDeviceCalls, 1);
     expect(find.text('Move to Room'), findsOneWidget);
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+
+    expect(find.byType(DeviceDetailSheet), findsOneWidget);
+    expect(find.text('Move to Room...'), findsOneWidget);
+    expect(api.assignDeviceParentCalls, 0);
+
+    await tester.tap(find.text('Move to Room...'));
+    await tester.pumpAndSettle();
+    expect(api.flashCanonicalDeviceCalls, 2);
+    expect(find.text('Move to Room'), findsOneWidget);
     await tester.tap(find.text('Dining'));
     await tester.pump(const Duration(milliseconds: 300));
 
