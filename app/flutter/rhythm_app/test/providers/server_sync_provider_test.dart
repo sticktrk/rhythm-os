@@ -7905,6 +7905,9 @@ void main() {
             'time_offset': 0.0,
             'brightness_offset': 0.0,
             'lights_on': true,
+            'light_capabilities': {
+              'individual_profile_overrides': true,
+            },
             'profile_settings': {
               'profile_overrides': {
                 'rhythm': {
