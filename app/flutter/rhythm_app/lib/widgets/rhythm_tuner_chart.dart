@@ -630,13 +630,32 @@ class _RhythmTunerChartState extends State<RhythmTunerChart>
         '\u2190${c.widthLeftCct.toStringAsFixed(2)} '
         '${c.widthRightCct.toStringAsFixed(2)}\u2192';
     return _readoutContainer(
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          _rdGroup('BRI', briText, false, const Color(0xFFFFB74D)),
-          const SizedBox(width: 20),
-          _rdGroup('CCT', cctText, false, const Color(0xFF4DD0E1)),
-        ],
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final bri =
+              _rdGroup('BRI', briText, false, const Color(0xFFFFB74D));
+          final cct =
+              _rdGroup('CCT', cctText, false, const Color(0xFF4DD0E1));
+
+          if (constraints.maxWidth < 600) {
+            return Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                FittedBox(fit: BoxFit.scaleDown, child: bri),
+                FittedBox(fit: BoxFit.scaleDown, child: cct),
+              ],
+            );
+          }
+
+          return Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              bri,
+              const SizedBox(width: 20),
+              cct,
+            ],
+          );
+        },
       ),
     );
   }
