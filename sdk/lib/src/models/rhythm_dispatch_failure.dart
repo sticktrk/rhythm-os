@@ -12,6 +12,14 @@ class RhythmDispatchFailure {
   /// Topology node the command addressed.
   final String nodeId;
 
+  /// Canonical light-device node whose physical endpoint failed, when the
+  /// appliance could resolve the hub-native target exactly.
+  ///
+  /// Older appliances omit this additive field. Clients must not infer the
+  /// device from [target], which is scoped to one integration and is not a
+  /// durable identity.
+  final String? targetNodeId;
+
   /// Hub-native dispatch target label.
   final String target;
 
@@ -36,6 +44,7 @@ class RhythmDispatchFailure {
     required this.hubType,
     required this.hubKey,
     required this.nodeId,
+    this.targetNodeId,
     required this.target,
     required this.kind,
     required this.status,
@@ -50,15 +59,16 @@ class RhythmDispatchFailure {
       hubType: json['hub_type'] as String? ?? '',
       hubKey: json['hub_key'] as String? ?? '',
       nodeId: json['node_id'] as String? ?? '',
+      targetNodeId: json['target_node_id'] as String?,
       target: json['target'] as String? ?? '',
       kind: json['kind'] as String? ?? '',
       status: json['status'] as String? ?? '',
       detail: json['detail'] as String?,
       queuedMs:
           jsonInt(json['queued_ms'], preferredKeys: const ['queued_ms']) ?? 0,
-      dispatchMs: jsonInt(json['dispatch_ms'],
-              preferredKeys: const ['dispatch_ms']) ??
-          0,
+      dispatchMs:
+          jsonInt(json['dispatch_ms'], preferredKeys: const ['dispatch_ms']) ??
+              0,
       epochMs:
           jsonInt(json['epoch_ms'], preferredKeys: const ['epoch_ms']) ?? 0,
     );

@@ -120,6 +120,32 @@ int? _sceneRepresentativeBrightness(RhythmSceneDefinition scene) {
   return brightness?.clamp(1, 100).toInt();
 }
 
+/// One recent physical light-delivery problem prepared for app presentation.
+///
+/// [targetNodeId] and [bulbName] are present only when the appliance supplied
+/// exact canonical identity (or the command directly addressed a bulb node).
+/// The app deliberately never displays the hub-native dispatch target.
+@immutable
+class LightDeliveryWarning {
+  const LightDeliveryWarning({
+    required this.failure,
+    required this.receivedAt,
+    this.targetNodeId,
+    this.bulbName,
+  });
+
+  final RhythmDispatchFailure failure;
+  final DateTime receivedAt;
+  final String? targetNodeId;
+  final String? bulbName;
+
+  bool get hasExactBulb => targetNodeId != null;
+
+  DateTime get occurredAt => failure.epochMs > 0
+      ? DateTime.fromMillisecondsSinceEpoch(failure.epochMs)
+      : receivedAt;
+}
+
 /// Syncs app state with a server (bridge, rhythm-server, addon) via
 /// [RhythmConnection] from the SDK.
 ///
@@ -3284,16 +3310,18 @@ class ServerSyncProvider extends ChangeNotifier {
   /// pending flag still clears and the UI would otherwise read as success.
   void _onDispatchFailure(RhythmDispatchFailure failure) {
     debugPrint('ServerSync: dispatch failure node=${failure.nodeId} $failure');
-    _recentDispatchFailures[failure.nodeId] = (
+    final entryKey = _dispatchFailureEntryKey(failure);
+    _recentDispatchFailures[entryKey] = (
       failure: failure,
       receivedAt: DateTime.now(),
     );
-    // Re-notify at window expiry so the failure badge disappears on its own.
-    _dispatchFailureExpiryTimers[failure.nodeId]?.cancel();
-    _dispatchFailureExpiryTimers[failure.nodeId] =
-        Timer(_dispatchFailureWindow, () {
-      _dispatchFailureExpiryTimers.remove(failure.nodeId);
-      if (_recentDispatchFailures.remove(failure.nodeId) != null) {
+    // Each physical target owns its own expiry. A second failing bulb must not
+    // overwrite the first one's explanation, while a repeat for one bulb
+    // simply refreshes that bulb's warning window.
+    _dispatchFailureExpiryTimers[entryKey]?.cancel();
+    _dispatchFailureExpiryTimers[entryKey] = Timer(_dispatchFailureWindow, () {
+      _dispatchFailureExpiryTimers.remove(entryKey);
+      if (_recentDispatchFailures.remove(entryKey) != null) {
         notifyListeners();
       }
     });
@@ -3305,25 +3333,102 @@ class ServerSyncProvider extends ChangeNotifier {
       _recentDispatchFailures = {};
   final Map<String, Timer> _dispatchFailureExpiryTimers = {};
 
-  /// The most recent dispatch failure for [nodeId], if it happened within
-  /// the last [_dispatchFailureWindow]. Cards use this to show delivery
-  /// problems in place of the in-flight spinner.
-  RhythmDispatchFailure? recentDispatchFailureForNode(String nodeId) {
-    final entry = _recentDispatchFailures[nodeId];
-    if (entry == null) return null;
-    if (DateTime.now().difference(entry.receivedAt) > _dispatchFailureWindow) {
-      return null;
+  String _dispatchFailureEntryKey(RhythmDispatchFailure failure) {
+    final targetNodeId = failure.targetNodeId?.trim();
+    if (targetNodeId != null && targetNodeId.isNotEmpty) {
+      return 'node:$targetNodeId';
     }
-    return entry.failure;
+    return '${failure.nodeId}\u0000native:${failure.hubKey}:${failure.target}';
   }
 
-  /// Drop the stored failure for [nodeId] — a new command attempt supersedes
-  /// it (the spinner takes over; a repeat failure arrives as a fresh event).
-  void _clearRecentDispatchFailure(String nodeId) {
-    _dispatchFailureExpiryTimers.remove(nodeId)?.cancel();
-    if (_recentDispatchFailures.remove(nodeId) != null) {
-      notifyListeners();
+  String? _warningTargetNodeId(RhythmDispatchFailure failure) {
+    final targetNodeId = failure.targetNodeId?.trim();
+    if (targetNodeId != null && targetNodeId.isNotEmpty) return targetNodeId;
+    // Previous appliances cannot identify a room fan-out target, but a command
+    // addressed directly to a canonical bulb node is still exact.
+    return isNodeLightDevice(failure.nodeId) ? failure.nodeId : null;
+  }
+
+  String? _warningBulbName(String? targetNodeId) {
+    if (targetNodeId == null) return null;
+    final helloName = nodeById(targetNodeId)?.name.trim();
+    if (helloName != null && helloName.isNotEmpty) return helloName;
+    final topologyName = topologyNodeById(targetNodeId)?.name.trim();
+    if (topologyName != null && topologyName.isNotEmpty) return topologyName;
+    for (final room in _helloRooms) {
+      for (final device in room.devices) {
+        if (device.id == targetNodeId) return device.displayName;
+      }
     }
+    return null;
+  }
+
+  String? _warningTargetParentId(String? targetNodeId) {
+    if (targetNodeId == null) return null;
+    return topologyNodeById(targetNodeId)?.parentId ??
+        nodeById(targetNodeId)?.parentId;
+  }
+
+  /// Recent delivery problems relevant to a room or canonical bulb node.
+  ///
+  /// Room callers receive every target in that room; bulb callers receive only
+  /// their own exact target. Returned records are stable-sorted by bulb name so
+  /// multi-bulb warning copy does not jump as events arrive.
+  List<LightDeliveryWarning> recentLightDeliveryWarningsForNode(String nodeId) {
+    final now = DateTime.now();
+    final warnings = <LightDeliveryWarning>[];
+    for (final entry in _recentDispatchFailures.values) {
+      if (now.difference(entry.receivedAt) > _dispatchFailureWindow) continue;
+      final targetNodeId = _warningTargetNodeId(entry.failure);
+      final targetParentId = _warningTargetParentId(targetNodeId);
+      if (entry.failure.nodeId != nodeId &&
+          targetNodeId != nodeId &&
+          targetParentId != nodeId) {
+        continue;
+      }
+      warnings.add(
+        LightDeliveryWarning(
+          failure: entry.failure,
+          receivedAt: entry.receivedAt,
+          targetNodeId: targetNodeId,
+          bulbName: _warningBulbName(targetNodeId),
+        ),
+      );
+    }
+    warnings.sort((left, right) {
+      final leftName = left.bulbName?.toLowerCase() ?? '\uffff';
+      final rightName = right.bulbName?.toLowerCase() ?? '\uffff';
+      final byName = leftName.compareTo(rightName);
+      if (byName != 0) return byName;
+      return left.occurredAt.compareTo(right.occurredAt);
+    });
+    return List.unmodifiable(warnings);
+  }
+
+  /// Compatibility accessor for callers that only need one failure.
+  RhythmDispatchFailure? recentDispatchFailureForNode(String nodeId) {
+    final warnings = recentLightDeliveryWarningsForNode(nodeId);
+    return warnings.isEmpty ? null : warnings.last.failure;
+  }
+
+  /// Drop warnings superseded by a new command for [nodeId]. Room commands
+  /// clear all children; bulb commands clear only that exact bulb.
+  void _clearRecentDispatchFailure(String nodeId) {
+    final keysToRemove = <String>[];
+    for (final entry in _recentDispatchFailures.entries) {
+      final targetNodeId = _warningTargetNodeId(entry.value.failure);
+      if (entry.value.failure.nodeId == nodeId ||
+          targetNodeId == nodeId ||
+          _warningTargetParentId(targetNodeId) == nodeId) {
+        keysToRemove.add(entry.key);
+      }
+    }
+    if (keysToRemove.isEmpty) return;
+    for (final key in keysToRemove) {
+      _dispatchFailureExpiryTimers.remove(key)?.cancel();
+      _recentDispatchFailures.remove(key);
+    }
+    notifyListeners();
   }
 
   /// Handle motion timer updates from server.

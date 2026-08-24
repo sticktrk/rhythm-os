@@ -391,6 +391,23 @@ class AnalyticsService {
     });
   }
 
+  /// Track an explicit request to understand a physical delivery warning.
+  ///
+  /// This intentionally excludes room, bulb, hub, and endpoint identity.
+  Future<void> logLightDeliveryWarningOpened({
+    required String surface,
+    required int affectedBulbCount,
+    required bool hasUnresolvedTarget,
+    required String failureKind,
+  }) async {
+    await logEvent('light_delivery_warning_opened', {
+      'surface': surface,
+      'affected_bulb_count': affectedBulbCount,
+      'has_unresolved_target': hasUnresolvedTarget ? 1 : 0,
+      'failure_kind': failureKind,
+    });
+  }
+
   /// Track resetting an individual room back to its adaptive curve.
   Future<void> logRoomResetToCurve({required String roomId}) async {
     await logEvent('room_reset_to_curve', {'room_id': roomId});
