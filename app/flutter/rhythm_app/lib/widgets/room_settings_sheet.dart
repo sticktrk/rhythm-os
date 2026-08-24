@@ -409,11 +409,12 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
     )) {
       final device = syncProvider.deviceForNode(sourceNode.id);
       if (device == null || device.type != RhythmDeviceType.motion) continue;
+      final parentId = sourceNode.parentId?.trim();
+      // Roomless devices belong only in hub-wide/general device surfaces,
+      // even when a retained control link still targets this room.
+      if (parentId == null || parentId.isEmpty) continue;
       motionSensorsById[device.id] = device;
-      final parentId = sourceNode.parentId;
-      if (parentId != null && parentId.isNotEmpty) {
-        motionParentIds[device.id] = parentId;
-      }
+      motionParentIds[device.id] = parentId;
     }
     final motionSensors = motionSensorsById.values.toList(growable: false)
       ..sort(

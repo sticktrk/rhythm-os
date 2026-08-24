@@ -10229,6 +10229,96 @@ void main() {
     );
   });
 
+  testWidgets('room motion tab hides an unassigned controlling sensor',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.binding.setSurfaceSize(const Size(390, 900));
+    api.topologyNodes = [
+      RhythmTopologyNode.fromJson({
+        'id': 'room-1',
+        'name': 'Porch',
+        'kind': 'room',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'sensor-1',
+        'name': 'Front Door Motion',
+        'kind': 'motion_sensor',
+        'controls': [
+          {'kind': 'motion', 'target_id': 'room-1', 'inherited': false},
+        ],
+      }),
+    ];
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Porch',
+            'kind': 'room',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+          },
+          {
+            'id': 'sensor-1',
+            'name': 'Front Door Motion',
+            'kind': 'motion_sensor',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': false,
+          },
+        ],
+        'location': const <String, dynamic>{},
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const RoomSettingsSheet(
+          enableLivePreview: false,
+          room: RoomDto(
+            id: 'room-1',
+            name: 'Porch',
+            source: RoomSourceDto.matter,
+            deviceIds: [],
+            rhythmEnabled: true,
+            disabled: false,
+            lightsOn: true,
+            timeOffsetMinutes: 0,
+            brightnessOffset: 0,
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+    await _selectRoomSettingsTab(tester, 'Motion');
+    await tester.pumpAndSettle();
+
+    expect(find.text('Front Door Motion', skipOffstage: false), findsNothing);
+  });
+
   testWidgets('Room card device flow offers Remove from Room for Matter bulbs',
       (tester) async {
     _registerWidgetCleanup(tester);
