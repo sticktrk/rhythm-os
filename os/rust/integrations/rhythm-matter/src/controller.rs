@@ -1438,6 +1438,40 @@ mod tests {
     }
 
     #[test]
+    fn h6004_uses_xy_to_match_warm_room_color() {
+        let (controller, spy, _) = make_controller();
+        let mut h6004 = profiled_color_bulb(42, "Shenzhen Qianyan Technology", "H6004");
+        h6004.vendor_id = 4999;
+        h6004.product_id = 24580;
+        h6004.min_kelvin = None;
+        h6004.max_kelvin = None;
+        let caps = crate::commissioning::build_device_capabilities(&h6004);
+        let quirks = crate::commissioning::build_device_quirks(&h6004);
+        controller
+            .hub_data
+            .device_caps
+            .lock()
+            .unwrap()
+            .insert("matter-42".to_string(), caps);
+        controller
+            .hub_data
+            .device_quirks
+            .lock()
+            .unwrap()
+            .insert("matter-42".to_string(), quirks);
+
+        block_on(controller.turn_on("kitchen", LightingCommand::new(100, 1800))).unwrap();
+
+        let operations = operations_for_node(&spy.operations(), 42);
+        assert!(operations
+            .iter()
+            .any(|operation| matches!(operation, RecordedOperation::SetXy { .. })));
+        assert!(!operations
+            .iter()
+            .any(|operation| matches!(operation, RecordedOperation::SetColorTemperature { .. })));
+    }
+
+    #[test]
     fn lifx_everyday_lightstrip_uses_hue_saturation_for_color_temperature() {
         let (controller, spy, registry) = make_controller();
         registry.lock().unwrap().upsert_room(
