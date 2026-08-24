@@ -138,8 +138,10 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   int assignDeviceParentCalls = 0;
   String? lastAssignedDeviceId;
   String? lastAssignedParentId;
-  bool assignDeviceParentResult = true;
+  bool assignDeviceParentSucceeds = true;
   Completer<bool>? assignDeviceParentCompleter;
+  RhythmRoomProjectionStatus assignDeviceProjectionStatus =
+      RhythmRoomProjectionStatus.notApplicable;
   int flashCanonicalDeviceCalls = 0;
   bool flashCanonicalDeviceResult = true;
   Completer<bool>? flashCanonicalDeviceCompleter;
@@ -656,7 +658,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     lastAssignedParentId = parentId;
     final pending = assignDeviceParentCompleter;
     final result =
-        pending == null ? assignDeviceParentResult : await pending.future;
+        pending == null ? assignDeviceParentSucceeds : await pending.future;
     if (result) {
       topologyNodes = [
         for (final node in topologyNodes)
@@ -679,6 +681,19 @@ class _FakeRhythmServerApi extends RhythmServerApi {
       ];
     }
     return result;
+  }
+
+  @override
+  Future<RhythmDeviceRoomAssignmentResult?> assignDeviceParentResult(
+    String deviceId,
+    String? parentId,
+  ) async {
+    final committed = await assignDeviceParent(deviceId, parentId);
+    if (!committed) return null;
+    return RhythmDeviceRoomAssignmentResult(
+      canonicalCommitted: true,
+      projectionStatus: assignDeviceProjectionStatus,
+    );
   }
 
   @override
@@ -6954,6 +6969,8 @@ void main() {
       'name': 'Hall Lamp',
       'device_type': 'light',
       'room_id': 'room-2',
+      'manufacturer': 'Signify',
+      'model': 'LCA001',
       'endpoints': const <Map<String, dynamic>>[],
     };
     api.canonicalDevices['light-unassigned'] = {
@@ -7029,6 +7046,7 @@ void main() {
       ),
     );
     expect(find.text('Unassigned'), findsOneWidget);
+    expect(find.textContaining('Signify · LCA001'), findsOneWidget);
     expect(find.text('Wall Button'), findsNothing);
     if (const bool.fromEnvironment(
       'RHYTHM_CAPTURE_ROOM_DEVICE_ADD_EVIDENCE',
@@ -7054,16 +7072,51 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
 
+    api.assignDeviceProjectionStatus = RhythmRoomProjectionStatus.attention;
     await tester.tap(addBulb);
     await tester.pumpAndSettle();
     await tester.tap(
+      find.byKey(
+        const ValueKey('existing-room-device-identify-light-hall'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(api.flashCanonicalDeviceCalls, 1);
+    expect(find.text('Identified Hall Lamp'), findsOneWidget);
+
+    await tester.tap(
       find.byKey(const ValueKey('existing-room-device-light-hall')),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('confirm-existing-room-device-move')),
+      findsOneWidget,
+    );
+    final confirmationMessage = tester.widget<Text>(
+      find.byKey(const ValueKey('confirm-device-move-message')),
+    );
+    expect(
+      confirmationMessage.data,
+      contains(
+          'This removes the bulb from Another room and adds it to Kitchen.'),
+    );
+    expect(api.assignDeviceParentCalls, 0);
+
+    await tester.tap(
+      find.byKey(const ValueKey('confirm-device-move-action')),
     );
     await tester.pumpAndSettle();
     expect(api.assignDeviceParentCalls, 1);
     expect(api.lastAssignedDeviceId, 'light-hall');
     expect(api.lastAssignedParentId, 'room-1');
-    expect(find.text('Moved Hall Lamp to Kitchen'), findsOneWidget);
+    expect(
+      find.text(
+        'Moved Hall Lamp to Kitchen. Hue room sync needs attention; '
+        'individual bulb control remains available.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Moved Hall Lamp to Kitchen'), findsNothing);
     await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
     api.getCanonicalDevicesCalls = 0;
@@ -7403,8 +7456,7 @@ void main() {
     );
   });
 
-  testWidgets(
-      'room sheet materializes canonical-only motion before adding it',
+  testWidgets('room sheet materializes canonical-only motion before adding it',
       (tester) async {
     _registerWidgetCleanup(tester);
     final roomProvider = RoomProvider();

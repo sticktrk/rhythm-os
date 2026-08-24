@@ -67,6 +67,13 @@ pub enum HubEvent {
         device_id: String,
         lights_on: bool,
     },
+    /// The integration observed an upstream resource add/delete that requires
+    /// fresh room/device discovery before live routing can remain authoritative.
+    TopologyChanged {
+        hub_key: Option<HubKey>,
+        resource_id: String,
+        resource_type: String,
+    },
     /// Terminal outcome for controller-owned asynchronous physical work.
     CommandOutcome {
         hub_key: Option<HubKey>,
@@ -140,6 +147,7 @@ impl HubEvent {
             HubEvent::Motion { hub_key, .. } => hub_key.as_ref(),
             HubEvent::Contact { hub_key, .. } => hub_key.as_ref(),
             HubEvent::LightPower { hub_key, .. } => hub_key.as_ref(),
+            HubEvent::TopologyChanged { hub_key, .. } => hub_key.as_ref(),
             HubEvent::CommandOutcome { hub_key, .. } => hub_key.as_ref(),
             HubEvent::CommandStreamReset { hub_key, .. } => hub_key.as_ref(),
             HubEvent::Heartbeat { hub_key } => hub_key.as_ref(),
@@ -157,6 +165,7 @@ impl HubEvent {
             HubEvent::Motion { hub_key, .. } => *hub_key = Some(key),
             HubEvent::Contact { hub_key, .. } => *hub_key = Some(key),
             HubEvent::LightPower { hub_key, .. } => *hub_key = Some(key),
+            HubEvent::TopologyChanged { hub_key, .. } => *hub_key = Some(key),
             HubEvent::CommandOutcome { hub_key, .. } => *hub_key = Some(key),
             HubEvent::CommandStreamReset { hub_key, .. } => *hub_key = Some(key),
             HubEvent::Heartbeat { hub_key } => *hub_key = Some(key),

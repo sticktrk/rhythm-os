@@ -4,7 +4,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show RhythmDevice, RhythmDeviceType, RhythmPairingRecoverySecret;
+    show
+        RhythmDevice,
+        RhythmDeviceType,
+        RhythmPairingRecoverySecret,
+        RhythmRoomProjectionStatus;
 import 'package:uuid/uuid.dart';
 import '../providers/server_sync_provider.dart';
 import '../screens/hubs/matter_bulb_tester_screen.dart';
@@ -20,6 +24,25 @@ import 'solar_orbit.dart'; // For CelestialColors
 
 const _deviceRoomMoveUuid = Uuid();
 const _deviceControlTargetsUuid = Uuid();
+
+bool _roomProjectionIsUnresolved(RhythmRoomProjectionStatus status) =>
+    status == RhythmRoomProjectionStatus.pending ||
+    status == RhythmRoomProjectionStatus.attention ||
+    status == RhythmRoomProjectionStatus.blocked;
+
+String _roomProjectionMessage(
+  String committedMessage,
+  RhythmRoomProjectionStatus status,
+) =>
+    switch (status) {
+      RhythmRoomProjectionStatus.pending =>
+        '$committedMessage. Hue room sync is still pending; individual bulb control remains available.',
+      RhythmRoomProjectionStatus.attention =>
+        '$committedMessage. Hue room sync needs attention; individual bulb control remains available.',
+      RhythmRoomProjectionStatus.blocked =>
+        '$committedMessage. Hue room sync is blocked until room ownership is reviewed.',
+      _ => committedMessage,
+    };
 
 /// Request the server's existing physical Identify behavior for one bulb.
 ///
@@ -70,13 +93,13 @@ Future<bool> assignCanonicalDeviceToRoom(
 
   final syncProvider = context.read<ServerSyncProvider>();
   final journeyId = 'device-room-move-${_deviceRoomMoveUuid.v4()}';
-  final assigned = await syncProvider.api.assignDeviceParent(
+  final assignment = await syncProvider.api.assignDeviceParentResult(
     device.id,
     targetRoomId,
   );
   if (!context.mounted) return false;
 
-  if (!assigned) {
+  if (assignment?.canonicalCommitted != true) {
     unawaited(
       AnalyticsService().logDeviceRoomMoveCompleted(
         journeyId: journeyId,
@@ -115,21 +138,28 @@ Future<bool> assignCanonicalDeviceToRoom(
     return false;
   }
 
+  final committedMessage = normalizedCurrentParentNodeId.isEmpty
+      ? 'Assigned ${device.displayName} to $targetRoomName'
+      : 'Moved ${device.displayName} to $targetRoomName';
+  final projectionStatus = assignment!.projectionStatus;
+  final projectionUnresolved = _roomProjectionIsUnresolved(projectionStatus);
   unawaited(
     AnalyticsService().logDeviceRoomMoveCompleted(
       journeyId: journeyId,
       source: analyticsSource,
       destination: 'room',
-      outcome: 'succeeded',
+      outcome: projectionUnresolved ? 'partial' : 'succeeded',
+      failureStage: projectionUnresolved
+          ? 'external_projection_${projectionStatus.name}'
+          : null,
     ),
   );
   ScaffoldMessenger.of(context).showSnackBar(
     SnackBar(
-      content: Text(
-        normalizedCurrentParentNodeId.isEmpty
-            ? 'Assigned ${device.displayName} to $targetRoomName'
-            : 'Moved ${device.displayName} to $targetRoomName',
-      ),
+      content: Text(_roomProjectionMessage(
+        committedMessage,
+        projectionStatus,
+      )),
     ),
   );
   return true;
@@ -241,10 +271,16 @@ Future<bool> showDeviceNodeAssignmentFlow(
   var success = true;
   var refreshed = false;
   var failureStage = 'assignment_request';
+  var projectionStatus = RhythmRoomProjectionStatus.notReported;
   try {
     if (assignmentChanged) {
-      success = await syncProvider.api
-          .assignDeviceParent(device.id, targetParentNodeId);
+      final assignment = await syncProvider.api.assignDeviceParentResult(
+        device.id,
+        targetParentNodeId,
+      );
+      success = assignment?.canonicalCommitted == true;
+      projectionStatus = assignment?.projectionStatus ??
+          RhythmRoomProjectionStatus.notReported;
     }
 
     if (success && activatesStandalone) {
@@ -307,6 +343,33 @@ Future<bool> showDeviceNodeAssignmentFlow(
       ),
     );
     return false;
+  }
+
+  final projectionUnresolved = _roomProjectionIsUnresolved(projectionStatus);
+  if (projectionUnresolved) {
+    unawaited(
+      AnalyticsService().logDeviceRoomMoveCompleted(
+        journeyId: journeyId,
+        source: analyticsSource,
+        destination: destination,
+        outcome: 'partial',
+        failureStage: 'external_projection_${projectionStatus.name}',
+      ),
+    );
+    final committedMessage = selectedIsUnassigned
+        ? 'Removed ${device.displayName} from its room'
+        : isUnassigned
+            ? 'Assigned ${device.displayName} to $selectedLabel'
+            : 'Moved ${device.displayName} to $selectedLabel';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(_roomProjectionMessage(
+          committedMessage,
+          projectionStatus,
+        )),
+      ),
+    );
+    return true;
   }
 
   unawaited(

@@ -1345,8 +1345,10 @@ impl HueTransport for ReqwestHueTransport {
         let status = resp.status();
         let body = resp.text().unwrap_or_default();
         if !status.is_success() {
-            return Err(anyhow::anyhow!(
-                "Hue room membership update failed with HTTP status {status}"
+            return Err(hue_v2_http_error(
+                "Hue room membership update",
+                status,
+                &body,
             ));
         }
 
@@ -1462,6 +1464,25 @@ mod tests {
         assert!(message.contains("resource_missing,schema_validation"));
         assert!(!message.contains("8d3e0c54"));
         assert!(!message.contains("private room name"));
+    }
+
+    #[test]
+    fn hue_room_membership_error_keeps_bounded_validation_detail() {
+        let error = hue_v2_http_error(
+            "Hue room membership update",
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{
+                "data": [],
+                "errors": [{
+                    "description": "error: 'json-schema validation', private room payload"
+                }]
+            }"#,
+        );
+        let message = error.to_string();
+
+        assert!(message.contains("Hue room membership update"));
+        assert!(message.contains("schema_validation"));
+        assert!(!message.contains("private room payload"));
     }
 
     #[test]

@@ -246,6 +246,43 @@ pub fn sync_from_hub_for_key_wait(
     discover_devices: bool,
     timeout: Duration,
 ) -> Result<SyncReport> {
+    sync_from_hub_for_key_wait_with_policy(
+        state,
+        hub_key,
+        discover_devices,
+        timeout,
+        SyncFailurePolicy::BestEffort,
+    )
+}
+
+/// Run a fresh sync that fails unless the complete authoritative discovery
+/// snapshot is applied.
+///
+/// Upstream topology mutations are one-shot invalidation events. Their worker
+/// must not consume an add/delete after a partial device or identity discovery
+/// pass, because the bridge may never repeat that event.
+pub(crate) fn sync_from_hub_for_key_wait_fail_closed(
+    state: &SharedState,
+    hub_key: &HubKey,
+    discover_devices: bool,
+    timeout: Duration,
+) -> Result<SyncReport> {
+    sync_from_hub_for_key_wait_with_policy(
+        state,
+        hub_key,
+        discover_devices,
+        timeout,
+        SyncFailurePolicy::FailClosedBeforeAuthority,
+    )
+}
+
+fn sync_from_hub_for_key_wait_with_policy(
+    state: &SharedState,
+    hub_key: &HubKey,
+    discover_devices: bool,
+    timeout: Duration,
+    failure_policy: SyncFailurePolicy,
+) -> Result<SyncReport> {
     let transaction_lock = state
         .lock()
         .map_err(|_| anyhow::anyhow!("lock"))?
@@ -256,12 +293,7 @@ pub fn sync_from_hub_for_key_wait(
             .lock()
             .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
         let _guard = acquire_hub_sync_guard_with_timeout(state, hub_key, timeout)?;
-        sync_from_hub_for_key_acquired(
-            state,
-            hub_key,
-            discover_devices,
-            SyncFailurePolicy::BestEffort,
-        )?
+        sync_from_hub_for_key_acquired(state, hub_key, discover_devices, failure_policy)?
     };
     reconcile_external_controller_authority_after_sync(state, hub_key)?;
     Ok(report)

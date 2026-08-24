@@ -1038,6 +1038,19 @@ class DemoServerApi extends RhythmServerApi {
   }
 
   @override
+  Future<RhythmDeviceRoomAssignmentResult?> assignDeviceParentResult(
+    String deviceId,
+    String? parentId,
+  ) async {
+    final committed = await assignDeviceParent(deviceId, parentId);
+    if (!committed) return null;
+    return const RhythmDeviceRoomAssignmentResult(
+      canonicalCommitted: true,
+      projectionStatus: RhythmRoomProjectionStatus.notApplicable,
+    );
+  }
+
+  @override
   Future<Map<String, dynamic>?> createTopologyRoom(String name) async {
     ensureSeeded();
     final trimmed = name.trim();
