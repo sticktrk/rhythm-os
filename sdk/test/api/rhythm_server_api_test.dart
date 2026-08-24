@@ -1277,8 +1277,13 @@ void main() {
           )).called(1);
     });
 
-    test('assignDeviceParent sends parent_id including null', () async {
-      when(() => dio.put(any(), data: any(named: 'data')))
+    test('assignDeviceParent sends parent_id with the mutation timeout',
+        () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          ))
           .thenAnswer((_) async => Response(
                 requestOptions: RequestOptions(
                   path: 'api/devices/canonical/device-1/parent',
@@ -1289,10 +1294,12 @@ void main() {
       final saved = await api.assignDeviceParent('device-1', null);
 
       expect(saved, isTrue);
-      verify(() => dio.put(
+      final options = verify(() => dio.put(
             'api/devices/canonical/device-1/parent',
             data: {'parent_id': null},
-          )).called(1);
+            options: captureAny(named: 'options'),
+          )).captured.single as Options;
+      expect(options.receiveTimeout, const Duration(seconds: 30));
     });
   });
 
