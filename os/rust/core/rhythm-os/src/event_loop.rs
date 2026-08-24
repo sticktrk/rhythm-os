@@ -36,6 +36,8 @@ const HUE_RECONNECT_RESYNC_COOLDOWN: Duration = Duration::from_secs(24 * 60 * 60
 const TOPOLOGY_CHANGE_RESYNC_DEBOUNCE: Duration = Duration::from_millis(250);
 /// Bound how long a topology-change worker waits behind another same-hub sync.
 const TOPOLOGY_CHANGE_RESYNC_TIMEOUT: Duration = Duration::from_secs(30);
+/// Retain the one-shot mutation generation while transient discovery recovers.
+const TOPOLOGY_CHANGE_RESYNC_RETRY_BACKOFF: Duration = Duration::from_secs(5);
 /// Delay app-visible hub loss so brief SSE reconnects do not flash unavailable.
 const HUB_DISCONNECT_GRACE: Duration = Duration::from_secs(120);
 /// How often the idle event loop wakes to check for new hub events.
@@ -1029,7 +1031,7 @@ fn spawn_topology_change_sync(state: &SharedState, hub_key: &crate::canonical::i
                 (state.platform.full_device_discovery, generation)
             };
 
-            match crate::room_sync::sync_from_hub_for_key_wait(
+            match crate::room_sync::sync_from_hub_for_key_wait_fail_closed(
                 &sync_state,
                 &sync_hub_key,
                 discover_devices,
@@ -1048,16 +1050,14 @@ fn spawn_topology_change_sync(state: &SharedState, hub_key: &crate::canonical::i
                     crate::room_sync::poll_initial_light_state(&sync_state);
                 }
                 Err(error) => {
-                    if let Ok(mut state) = sync_state.lock() {
-                        state.abort_hub_topology_resync(&sync_hub_key);
-                    }
                     warn!(
                         target: "conn",
-                        "Hub {} topology-change resync failed: {}",
+                        "Hub {} topology-change resync failed; retrying: {}",
                         sync_hub_key,
                         error
                     );
-                    return;
+                    std::thread::sleep(TOPOLOGY_CHANGE_RESYNC_RETRY_BACKOFF);
+                    continue;
                 }
             }
 
@@ -5162,6 +5162,32 @@ mod tests {
         }
     }
 
+    struct FlakyTopologyIdentityDiscovery {
+        discover_identity_calls: Arc<AtomicUsize>,
+    }
+
+    impl HubDiscovery for FlakyTopologyIdentityDiscovery {
+        fn discover_rooms(&self) -> anyhow::Result<Vec<DiscoveredRoom>> {
+            Ok(vec![DiscoveredRoom {
+                id: "room_a".into(),
+                name: "Room A".into(),
+                grouped_light_id: "gl_room_a".into(),
+                device_ids: vec!["light-1".into()],
+            }])
+        }
+
+        fn discover_devices(&self) -> anyhow::Result<Vec<DiscoveredDevice>> {
+            Ok(vec![])
+        }
+
+        fn discover_identities(&self) -> anyhow::Result<Vec<DiscoveredIdentity>> {
+            if self.discover_identity_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                anyhow::bail!("simulated transient identity discovery failure");
+            }
+            Ok(vec![])
+        }
+    }
+
     struct EmptyAuthoritativeReconnectDiscovery;
 
     impl HubDiscovery for EmptyAuthoritativeReconnectDiscovery {
@@ -8414,6 +8440,65 @@ mod tests {
             discover_rooms_calls.load(Ordering::SeqCst),
             1,
             "one add/delete burst should produce one full discovery pass"
+        );
+        assert!(!state
+            .lock()
+            .unwrap()
+            .hub_topology_resync_pending
+            .contains(&hub_key));
+    }
+
+    #[test]
+    fn topology_change_resync_retries_until_identity_snapshot_is_complete() {
+        let state = make_state();
+        let hub_type = HubType::new(HubType::HUE);
+        let hub_key = HubKey::new(hub_type.clone(), "192.0.2.21:443");
+        let discover_identity_calls = Arc::new(AtomicUsize::new(0));
+        let registry: Arc<Mutex<dyn HubRegistry>> =
+            Arc::new(Mutex::new(crate::registry::HubDeviceRegistry::new()));
+
+        state.lock().unwrap().hubs.insert(
+            hub_key.clone(),
+            ActiveHub {
+                hub_type,
+                hub_key: hub_key.clone(),
+                runtime: None,
+                hub_data: Box::new(()),
+                registry: Some(registry),
+                discovery: Some(Arc::new(FlakyTopologyIdentityDiscovery {
+                    discover_identity_calls: discover_identity_calls.clone(),
+                })),
+                shutdown: Arc::new(AtomicBool::new(false)),
+            },
+        );
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::TopologyChanged {
+                hub_key: Some(hub_key.clone()),
+                resource_id: "light-1".to_string(),
+                resource_type: "light".to_string(),
+            },
+            &mut MotionTimerState::new(),
+        );
+
+        for _ in 0..400 {
+            if discover_identity_calls.load(Ordering::SeqCst) >= 2
+                && !state
+                    .lock()
+                    .unwrap()
+                    .hub_topology_resync_pending
+                    .contains(&hub_key)
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert_eq!(
+            discover_identity_calls.load(Ordering::SeqCst),
+            2,
+            "the one-shot mutation must survive a transient identity discovery failure"
         );
         assert!(!state
             .lock()
