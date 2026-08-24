@@ -463,13 +463,17 @@ fn parse_sse_data(data: &str, event_tx: &SyncSender<HueSseEvent>, state: &mut Ss
         }
 
         if let Some((resource_id, resource_type)) = topology_resource {
-            if let Err(error) = event_tx.try_send(HueSseEvent::TopologyChanged {
+            // Add/delete envelopes are one-shot topology invalidations. Apply
+            // backpressure here instead of dropping one on a full bounded
+            // queue; the dedicated translator thread drains this channel and
+            // already propagates backpressure to the main event loop.
+            if let Err(error) = event_tx.send(HueSseEvent::TopologyChanged {
                 resource_id: resource_id.clone(),
                 resource_type: resource_type.clone(),
             }) {
                 warn!(
                     target: "conn",
-                    "SSE: Dropped topology change (type={}, id={}): {}",
+                    "SSE: Failed to deliver topology change (type={}, id={}): {}",
                     resource_type,
                     resource_id,
                     error
@@ -660,6 +664,30 @@ mod tests {
             }) if resource_id == "light-1" && resource_type == "light"
         ));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn sse_light_delete_waits_for_capacity_instead_of_being_dropped() {
+        let (tx, rx) = mpsc::sync_channel::<HueSseEvent>(1);
+        tx.send(HueSseEvent::Heartbeat).unwrap();
+
+        let parser = std::thread::spawn(move || {
+            let line = r#"data: [{"type":"delete","data":[{"id":"light-1","type":"light"}]}]"#;
+            process_sse_line(line, &tx, &mut SseParseState::new());
+        });
+
+        assert!(matches!(
+            rx.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(HueSseEvent::Heartbeat)
+        ));
+        assert!(matches!(
+            rx.recv_timeout(std::time::Duration::from_secs(1)),
+            Ok(HueSseEvent::TopologyChanged {
+                resource_id,
+                resource_type,
+            }) if resource_id == "light-1" && resource_type == "light"
+        ));
+        parser.join().unwrap();
     }
 
     #[test]
