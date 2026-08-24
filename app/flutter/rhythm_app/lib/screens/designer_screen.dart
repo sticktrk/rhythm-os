@@ -1,7 +1,5 @@
 import 'dart:async';
-import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import '../api/hybrid_client.dart';
@@ -30,34 +28,7 @@ class _DesignerScreenState extends State<DesignerScreen> {
   @override
   void initState() {
     super.initState();
-    _setLandscapeMode();
     _loadData();
-  }
-
-  @override
-  void dispose() {
-    _restoreOrientation();
-    super.dispose();
-  }
-
-  void _setLandscapeMode() {
-    if (!kIsWeb) {
-      SystemChrome.setPreferredOrientations([
-        DeviceOrientation.landscapeLeft,
-        DeviceOrientation.landscapeRight,
-      ]).catchError((_) {});
-    }
-  }
-
-  void _restoreOrientation() {
-    if (!kIsWeb) {
-      SystemChrome.setPreferredOrientations([
-        DeviceOrientation.portraitUp,
-        DeviceOrientation.portraitDown,
-        DeviceOrientation.landscapeLeft,
-        DeviceOrientation.landscapeRight,
-      ]).catchError((_) {});
-    }
   }
 
   Future<void> _loadData() async {
