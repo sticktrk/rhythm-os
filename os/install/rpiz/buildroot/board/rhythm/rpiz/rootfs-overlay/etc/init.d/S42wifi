@@ -72,6 +72,10 @@ pid_is_running() {
     [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null
 }
 
+start_wpa_supplicant() {
+    /usr/sbin/wpa_supplicant "$@"
+}
+
 status_field() {
     local iface="$1"
     local field="$2"
@@ -374,15 +378,10 @@ start() {
     log "using interface $iface"
 
     ifconfig "$iface" up 2>/dev/null || true
-    # The kernel can expose the per-interface IPv6 sysctls only after the
-    # driver-backed interface is up. Configure RA/RIO acceptance afterwards
-    # so Thread border-router routes are not silently left at the default 0.
-    configure_ipv6_ra_rio "$iface" ||
-        log "ipv6: Thread route acceptance is incomplete on $iface"
     disable_wifi_power_save "$iface"
 
     if ! pid_is_running "$WPA_PIDFILE"; then
-        if /usr/sbin/wpa_supplicant -B -i "$iface" -c "$WPA_CONF" -P "$WPA_PIDFILE"; then
+        if start_wpa_supplicant -B -i "$iface" -c "$WPA_CONF" -P "$WPA_PIDFILE"; then
             log "wpa_supplicant started"
         else
             log "wpa_supplicant failed to start"
@@ -390,6 +389,13 @@ start() {
             return 0
         fi
     fi
+
+    # Some brcmfmac boots do not expose the per-interface IPv6 sysctls until
+    # wpa_supplicant has initialized the raised interface. Configure RA/RIO
+    # acceptance after that point so Thread routes are not left at the Linux
+    # default of accept_ra_rt_info_max_plen=0.
+    configure_ipv6_ra_rio "$iface" ||
+        log "ipv6: Thread route acceptance is incomplete on $iface"
 
     if [ "$configured" -eq 0 ]; then
         log "wpa_supplicant ready for local Wi-Fi scanning"
