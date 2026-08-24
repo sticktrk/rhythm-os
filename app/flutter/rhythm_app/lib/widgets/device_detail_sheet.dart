@@ -1961,6 +1961,11 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       if (success && context.mounted) {
         dismissing = true;
         Navigator.of(context).pop();
+      } else if (context.mounted) {
+        // The shared ScaffoldMessenger lives below this modal sheet. Dismiss
+        // the sheet so its failure snackbar cannot be hidden behind the card.
+        dismissing = true;
+        Navigator.of(context).pop();
       }
     } finally {
       if (!dismissing && mounted && _moving) {
