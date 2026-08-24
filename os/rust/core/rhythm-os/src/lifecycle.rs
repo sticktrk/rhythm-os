@@ -605,18 +605,9 @@ pub fn start_event_translator<E: Send + 'static>(
                     cb();
                 }
                 for hub_event in translate(&raw_event) {
-                    match hub_tx.try_send(hub_event) {
-                        Ok(()) => {}
-                        Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                            warn!(
-                                target: "evt",
-                                "Hub event channel full (capacity={}), dropping event",
-                                HUB_EVENT_CHANNEL_CAPACITY
-                            );
-                        }
-                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                            return;
-                        }
+                    if !forward_translated_hub_event(&hub_tx, hub_event, HUB_EVENT_CHANNEL_CAPACITY)
+                    {
+                        return;
                     }
                 }
             }
@@ -626,6 +617,35 @@ pub fn start_event_translator<E: Send + 'static>(
     }
 
     hub_rx
+}
+
+/// Forward one translated event without losing a one-shot topology invalidation.
+///
+/// Most high-volume hub events retain the existing lossy behavior when the
+/// consumer is saturated. Add/delete topology events are different: the hub
+/// might never repeat them, so backpressure until the event is accepted or the
+/// receiver disconnects.
+fn forward_translated_hub_event(
+    hub_tx: &std::sync::mpsc::SyncSender<HubEvent>,
+    hub_event: HubEvent,
+    capacity: usize,
+) -> bool {
+    match hub_tx.try_send(hub_event) {
+        Ok(()) => true,
+        Err(std::sync::mpsc::TrySendError::Full(hub_event)) => {
+            if matches!(&hub_event, HubEvent::TopologyChanged { .. }) {
+                hub_tx.send(hub_event).is_ok()
+            } else {
+                warn!(
+                    target: "evt",
+                    "Hub event channel full (capacity={}), dropping event",
+                    capacity
+                );
+                true
+            }
+        }
+        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => false,
+    }
 }
 
 // ============================================================================
@@ -1437,6 +1457,42 @@ mod tests {
             assert_eq!(event.hub_key(), Some(&hub_key));
         }
         done_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        producer.join().unwrap();
+    }
+
+    #[test]
+    fn topology_event_backpressures_translator_queue_instead_of_being_dropped() {
+        let (hub_tx, hub_rx) = mpsc::sync_channel(1);
+        hub_tx.send(HubEvent::Heartbeat { hub_key: None }).unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+
+        let producer = std::thread::spawn(move || {
+            let delivered = forward_translated_hub_event(
+                &hub_tx,
+                HubEvent::TopologyChanged {
+                    hub_key: None,
+                    resource_id: "light-1".to_string(),
+                    resource_type: "light".to_string(),
+                },
+                1,
+            );
+            done_tx.send(delivered).unwrap();
+        });
+
+        assert!(done_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        assert!(matches!(
+            hub_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(HubEvent::Heartbeat { .. })
+        ));
+        assert!(done_rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        assert!(matches!(
+            hub_rx.recv_timeout(Duration::from_secs(1)),
+            Ok(HubEvent::TopologyChanged {
+                resource_id,
+                resource_type,
+                ..
+            }) if resource_id == "light-1" && resource_type == "light"
+        ));
         producer.join().unwrap();
     }
 
