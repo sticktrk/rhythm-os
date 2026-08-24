@@ -209,6 +209,7 @@ mod tests {
                 .unwrap_or_default(),
             vec![
                 crate::quirks::DeviceQuirk::NeedsExplicitOn,
+                crate::quirks::DeviceQuirk::NeedsXyNotCt,
                 crate::quirks::DeviceQuirk::CommandThrottleMs(250),
             ]
         );

@@ -618,7 +618,11 @@
     "matter": {
       "vendor_id": 4999,
       "product_id": 24580,
-      "quirks": ["needs_explicit_on", { "command_throttle_ms": 250 }]
+      "quirks": [
+        "needs_explicit_on",
+        "needs_xy_not_ct",
+        { "command_throttle_ms": 250 }
+      ]
     }
   }
 ]
