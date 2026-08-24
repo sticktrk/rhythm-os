@@ -1783,31 +1783,44 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                     );
 
                     if is_new_activation {
-                        motion.motion_owned.insert(target_node_id.clone());
+                        let target_was_already_on =
+                            !was_motion_owned && observed_lights_on == Some(true);
 
-                        let should_turn_on = !was_motion_owned
-                            || observed_lights_on == Some(false)
-                            || (observed_lights_on.is_none() && !prior_motion_turn_on_requested);
-
-                        if should_turn_on {
-                            motion
-                                .motion_turn_on_requested
-                                .insert(target_node_id.clone());
+                        if target_was_already_on {
                             info!(
                                 target: "evt",
-                                "Motion: new activation source {} -> target {} (owned=true)",
+                                "Motion: new activation source {} -> target {} already on; tracking without ownership or turn_on",
                                 source_node_id,
                                 target_node_id
                             );
-
-                            spawn_motion_turn_on_action(state, target_node_id.clone());
                         } else {
-                            info!(
-                                target: "evt",
-                                "Motion: reactivated source {} -> target {} during owned countdown; refreshed without turn_on",
-                                source_node_id,
-                                target_node_id
-                            );
+                            motion.motion_owned.insert(target_node_id.clone());
+
+                            let should_turn_on = !was_motion_owned
+                                || observed_lights_on == Some(false)
+                                || (observed_lights_on.is_none()
+                                    && !prior_motion_turn_on_requested);
+
+                            if should_turn_on {
+                                motion
+                                    .motion_turn_on_requested
+                                    .insert(target_node_id.clone());
+                                info!(
+                                    target: "evt",
+                                    "Motion: new activation source {} -> target {} (owned=true)",
+                                    source_node_id,
+                                    target_node_id
+                                );
+
+                                spawn_motion_turn_on_action(state, target_node_id.clone());
+                            } else {
+                                info!(
+                                    target: "evt",
+                                    "Motion: reactivated source {} -> target {} during owned countdown; refreshed without turn_on",
+                                    source_node_id,
+                                    target_node_id
+                                );
+                            }
                         }
                     } else {
                         info!(
@@ -3126,6 +3139,9 @@ fn motion_suppression_reason_for_target(
         .and_then(|s| s.hub_runtime())
         .and_then(|runtime| runtime.engine_node_snapshot(target_node_id))
         .and_then(|snapshot| {
+            if snapshot.hard_off {
+                return Some("hard_off");
+            }
             if !snapshot.profile_settings.motion_activation_enabled() {
                 return Some("motion_activation_disabled");
             }
@@ -7342,6 +7358,105 @@ mod tests {
         assert!(motion.sensors.is_empty());
         assert!(motion.motion_owned.is_empty());
         assert!(turn_on_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn hard_off_target_does_not_claim_or_turn_on_from_live_motion() {
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![
+            hard_off_room_snapshot("room_a"),
+        ]));
+        let turn_on_calls = runtime.turn_on_calls.clone();
+        let state = make_state_with_runtime(runtime);
+        let hub_key = only_hub_key(&state);
+        add_canonical_control_source(&state, &hub_key, "sensor_a", "room_a", DeviceType::Motion);
+        let mut motion = MotionTimerState::new();
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Motion {
+                hub_key: Some(hub_key),
+                room_id: "room_a".into(),
+                sensor_id: "sensor_a".into(),
+                detected: true,
+            },
+            &mut motion,
+        );
+
+        assert_eq!(
+            motion_suppression_reason_for_target(&state, "room_a"),
+            Some("hard_off")
+        );
+        assert!(motion.sensors.is_empty());
+        assert!(motion.motion_owned.is_empty());
+        assert!(turn_on_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn live_motion_does_not_claim_or_dim_an_already_on_target() {
+        let mut snapshot = room_snapshot_with_flags("room_a", false, false);
+        snapshot.profile_settings.motion_timeout_secs = Some(TimerSetting::Fixed { value: 120 });
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![snapshot]));
+        let turn_on_calls = runtime.turn_on_calls.clone();
+        let dim_calls = runtime.dim_calls.clone();
+        let lights_off_calls = runtime.lights_off_calls.clone();
+        let state = make_state_with_runtime(runtime);
+        set_observed_lights_on_with_source(
+            &state,
+            "room_a",
+            true,
+            crate::state::ObservedPowerSource::Command,
+        );
+        state.lock().unwrap().default_motion_timeout_secs = 120;
+        let hub_key = only_hub_key(&state);
+        let source_id = add_canonical_control_source(
+            &state,
+            &hub_key,
+            "sensor_a",
+            "room_a",
+            DeviceType::Motion,
+        );
+        let mut motion = MotionTimerState::new();
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Motion {
+                hub_key: Some(hub_key.clone()),
+                room_id: "room_a".into(),
+                sensor_id: "sensor_a".into(),
+                detected: true,
+            },
+            &mut motion,
+        );
+
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(turn_on_calls.lock().unwrap().is_empty());
+        assert!(!motion.motion_owned.contains("room_a"));
+        assert!(!motion.motion_turn_on_requested.contains("room_a"));
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Motion {
+                hub_key: Some(hub_key),
+                room_id: "room_a".into(),
+                sensor_id: "sensor_a".into(),
+                detected: false,
+            },
+            &mut motion,
+        );
+        motion.sensors.get_mut(&source_id).unwrap().stopped_at =
+            Some(Instant::now() - Duration::from_secs(70));
+
+        check_motion_timers(&state, &mut motion);
+
+        assert!(dim_calls.lock().unwrap().is_empty());
+        assert!(!motion.warning_active.contains("room_a"));
+
+        motion.sensors.get_mut(&source_id).unwrap().stopped_at =
+            Some(Instant::now() - Duration::from_secs(130));
+        check_motion_timers(&state, &mut motion);
+
+        assert!(motion.sensors.is_empty());
+        assert!(lights_off_calls.lock().unwrap().is_empty());
     }
 
     #[test]
