@@ -2043,6 +2043,12 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       if (success && context.mounted) {
         dismissing = true;
         Navigator.of(context).pop();
+      } else if (_moving && context.mounted) {
+        // The shared ScaffoldMessenger lives below this modal sheet. Dismiss
+        // the sheet after a started assignment fails so its snackbar cannot be
+        // hidden behind the card. A cancelled room picker leaves it open.
+        dismissing = true;
+        Navigator.of(context).pop();
       }
     } finally {
       if (!dismissing && mounted && _moving) {
