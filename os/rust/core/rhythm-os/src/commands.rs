@@ -927,6 +927,15 @@ pub(crate) fn reconcile_hub_endpoint_visibility(
         }
 
         let hidden_ids = report.hidden_device_ids.clone();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        for device_id in &hidden_ids {
+            s.canonical_registry
+                .triage_mut()
+                .resolve_unassigned_for_device(device_id, now);
+        }
         let mut topology_changed = false;
         for device_id in &hidden_ids {
             // `remove_device_everywhere` reports affected parent rooms, so a
@@ -23771,6 +23780,8 @@ mod tests {
             let mut s = state.lock().unwrap();
             s.storage = Some(storage.clone());
             s.topology.ensure_standalone_device(&device_id);
+            s.canonical_registry.queue_unassigned(&device_id, 1000);
+            assert_eq!(s.canonical_registry.triage().pending_unassigned_count(), 1);
             persist_topology(&s);
         }
 
@@ -23783,6 +23794,12 @@ mod tests {
             .topology
             .get_device_node(&device_id)
             .is_none());
+        {
+            let mut s = state.lock().unwrap();
+            assert_eq!(s.canonical_registry.triage().pending_unassigned_count(), 0);
+            s.canonical_registry.queue_unassigned(&device_id, 2000);
+            assert_eq!(s.canonical_registry.triage().pending_unassigned_count(), 0);
+        }
 
         let persisted = storage
             .load_topology()

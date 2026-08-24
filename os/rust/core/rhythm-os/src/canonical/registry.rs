@@ -608,20 +608,26 @@ impl CanonicalRegistry {
     ///
     /// Call this when a device is known to have no room assignment and the user
     /// should be prompted to assign one (e.g. after Matter commissioning).
-    /// No-op if the device already has a pending or durable unassigned-device
-    /// decision. This keeps explicit standalone/ignore choices stable across
-    /// hub re-syncs.
+    /// No-op if the device has no active integration endpoint or already has a
+    /// pending or durable unassigned-device decision. This keeps retired
+    /// identities out of triage and explicit standalone/ignore choices stable
+    /// across hub re-syncs.
     pub fn queue_unassigned(&mut self, device_id: &str, now: u64) {
         if self.triage.has_unassigned_decision(device_id) {
             return;
         }
         let (name, device_type, hub_key, native_id) = match self.devices.get(device_id) {
-            Some(d) if !d.is_removed() => (
-                d.name.clone(),
-                d.device_type.clone(),
-                d.endpoints.first().map(|ep| ep.hub_key.clone()),
-                d.endpoints.first().map(|ep| ep.native_id.clone()),
-            ),
+            Some(d) if !d.is_removed() => {
+                let Some(endpoint) = d.active_endpoints().next() else {
+                    return;
+                };
+                (
+                    d.name.clone(),
+                    d.device_type.clone(),
+                    Some(endpoint.hub_key.clone()),
+                    Some(endpoint.native_id.clone()),
+                )
+            }
             _ => return,
         };
         self.triage.add(super::triage::TriageEntry {
@@ -975,20 +981,25 @@ impl CanonicalRegistry {
         Some((canonical_id, remove_whole_device))
     }
 
-    /// Backfill UnassignedDevice triage entries for existing devices with no room.
+    /// Normalize UnassignedDevice triage for existing devices with no room.
     ///
-    /// Called on startup after loading the registry to handle devices that
-    /// predate this feature.
+    /// Called on startup after loading the registry. Retired identities may
+    /// carry a pending entry written by an older runtime, so resolve those
+    /// before backfilling entries for reachable devices that predate triage.
     pub fn backfill_unassigned_triage(&mut self, now: u64) {
-        let ids: Vec<_> = self
+        let devices: Vec<_> = self
             .devices
             .values()
             .filter(|d| d.room_id.is_none() && !d.is_removed())
-            .map(|d| d.id.clone())
+            .map(|d| (d.id.clone(), d.has_active_endpoint()))
             .collect();
 
-        for id in ids {
-            self.queue_unassigned(&id, now);
+        for (id, has_active_endpoint) in devices {
+            if has_active_endpoint {
+                self.queue_unassigned(&id, now);
+            } else {
+                self.triage.resolve_unassigned_for_device(&id, now);
+            }
         }
     }
 }
@@ -1525,6 +1536,37 @@ mod tests {
         let device = reg.get(&canonical_id).unwrap();
         assert!(!device.endpoints[0].active);
         assert!(reg.find_by_native_id(&hue_key(), "hue-light-1").is_some());
+    }
+
+    #[test]
+    fn inactive_device_is_not_requeued_as_unassigned_but_can_reenter_after_discovery() {
+        let mut reg = CanonicalRegistry::new();
+        let mut identity = make_identity("event.front_door", "Front Door Camera", vec![]);
+        identity.room_id = None;
+        identity.room_name = None;
+        identity.device_type = DeviceType::Button;
+        let canonical_id = match reg.resolve(&identity, &ha_key(), 1000) {
+            ResolveResult::Created { canonical_id } => canonical_id,
+            _ => panic!("expected Created"),
+        };
+
+        reg.assign_room(&canonical_id, None);
+        assert_eq!(reg.triage().pending_unassigned_count(), 1);
+
+        let report = reg.deactivate_missing_endpoints_for_hub(&ha_key(), &HashSet::new());
+        assert_eq!(report.hidden_device_ids, vec![canonical_id.clone()]);
+        reg.triage
+            .resolve_unassigned_for_device(&canonical_id, 2000);
+
+        reg.queue_unassigned(&canonical_id, 3000);
+        assert_eq!(reg.triage().pending_unassigned_count(), 0);
+
+        assert!(matches!(
+            reg.resolve(&identity, &ha_key(), 4000),
+            ResolveResult::AlreadyKnown { .. }
+        ));
+        reg.assign_room(&canonical_id, None);
+        assert_eq!(reg.triage().pending_unassigned_count(), 1);
     }
 
     #[test]
