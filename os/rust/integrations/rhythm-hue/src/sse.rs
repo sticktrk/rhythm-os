@@ -81,6 +81,11 @@ pub enum HueSseEvent {
         motion_id: String,
         motion_detected: bool,
     },
+    /// A Hue resource add/delete changed the bridge topology.
+    TopologyChanged {
+        resource_id: String,
+        resource_type: String,
+    },
     /// SSE heartbeat received (connection is alive).
     Heartbeat,
     /// Connection was lost.
@@ -92,6 +97,8 @@ pub enum HueSseEvent {
 struct SseEventData {
     #[serde(default)]
     creationtime: Option<String>,
+    #[serde(default, rename = "type")]
+    event_type: Option<String>,
     #[serde(default)]
     data: Vec<SseResource>,
 }
@@ -244,9 +251,14 @@ pub fn process_sse_line(line: &str, event_tx: &SyncSender<HueSseEvent>, state: &
 
     // Data line ("data: [...]")
     if let Some(data) = line.strip_prefix("data: ") {
-        // Fast pre-filter: skip JSON parse for non-button/motion events.
-        // Light/grouped_light updates can be 1-5KB — no need to parse them.
-        if !data.contains("\"button\"") && !data.contains("\"motion\"") {
+        // Fast pre-filter: skip JSON parse for ordinary light updates while
+        // retaining add/delete envelopes that can invalidate live routing.
+        // Light/grouped_light updates can be 1-5KB.
+        if !data.contains("\"button\"")
+            && !data.contains("\"motion\"")
+            && !data.contains("\"add\"")
+            && !data.contains("\"delete\"")
+        {
             return;
         }
         debug!(
@@ -331,6 +343,9 @@ fn parse_sse_data(data: &str, event_tx: &SyncSender<HueSseEvent>, state: &mut Ss
     let now = now_epoch_secs();
 
     for event in events {
+        let topology_changed = matches!(event.event_type.as_deref(), Some("add") | Some("delete"));
+        let mut topology_resource = None;
+
         // Compute event age from the envelope's creationtime (fail-open if missing)
         let event_age_secs = event
             .creationtime
@@ -341,6 +356,16 @@ fn parse_sse_data(data: &str, event_tx: &SyncSender<HueSseEvent>, state: &mut Ss
         for resource in event.data {
             let resource_type = resource.resource_type.as_deref().unwrap_or("");
             let id = resource.id.unwrap_or_default();
+
+            if topology_changed
+                && topology_resource.is_none()
+                && matches!(
+                    resource_type,
+                    "device" | "light" | "room" | "zone" | "grouped_light" | "button" | "motion"
+                )
+            {
+                topology_resource = Some((id.clone(), resource_type.to_string()));
+            }
 
             match resource_type {
                 "button" => {
@@ -434,6 +459,21 @@ fn parse_sse_data(data: &str, event_tx: &SyncSender<HueSseEvent>, state: &mut Ss
                 // any_lights_on() check in periodic_update instead.
                 "grouped_light" => {}
                 _ => {}
+            }
+        }
+
+        if let Some((resource_id, resource_type)) = topology_resource {
+            if let Err(error) = event_tx.try_send(HueSseEvent::TopologyChanged {
+                resource_id: resource_id.clone(),
+                resource_type: resource_type.clone(),
+            }) {
+                warn!(
+                    target: "conn",
+                    "SSE: Dropped topology change (type={}, id={}): {}",
+                    resource_type,
+                    resource_id,
+                    error
+                );
             }
         }
     }
@@ -603,6 +643,37 @@ mod tests {
     fn sse_non_button_motion_filtered() {
         let (tx, rx) = mpsc::sync_channel::<HueSseEvent>(16);
         let line = r#"data: [{"data":[{"id":"x","type":"light"}]}]"#;
+        process_sse_line(line, &tx, &mut SseParseState::new());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn sse_light_delete_emits_topology_change() {
+        let (tx, rx) = mpsc::sync_channel::<HueSseEvent>(16);
+        let line = r#"data: [{"type":"delete","data":[{"id":"light-1","type":"light"}]}]"#;
+        process_sse_line(line, &tx, &mut SseParseState::new());
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(HueSseEvent::TopologyChanged {
+                resource_id,
+                resource_type,
+            }) if resource_id == "light-1" && resource_type == "light"
+        ));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn sse_light_update_does_not_emit_topology_change() {
+        let (tx, rx) = mpsc::sync_channel::<HueSseEvent>(16);
+        let line = r#"data: [{"type":"update","data":[{"id":"light-1","type":"light"}]}]"#;
+        process_sse_line(line, &tx, &mut SseParseState::new());
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn sse_scene_delete_does_not_emit_topology_change() {
+        let (tx, rx) = mpsc::sync_channel::<HueSseEvent>(16);
+        let line = r#"data: [{"type":"delete","data":[{"id":"scene-1","type":"scene"}]}]"#;
         process_sse_line(line, &tx, &mut SseParseState::new());
         assert!(rx.try_recv().is_err());
     }

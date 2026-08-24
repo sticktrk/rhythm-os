@@ -117,6 +117,20 @@ fn translate_sse_event_with_hooks(
             }]
         }
 
+        HueSseEvent::TopologyChanged {
+            resource_id,
+            resource_type,
+        } => {
+            if let Some(cb) = on_activity {
+                cb();
+            }
+            vec![HubEvent::TopologyChanged {
+                hub_key: None,
+                resource_id,
+                resource_type,
+            }]
+        }
+
         HueSseEvent::Heartbeat => {
             vec![HubEvent::Heartbeat { hub_key: None }]
         }
@@ -289,5 +303,29 @@ mod tests {
             }
             other => panic!("expected motion event, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn topology_change_is_forwarded_for_resync() {
+        let registry = Arc::new(Mutex::new(HubDeviceRegistry::new()));
+        let events = translate_sse_event(
+            &registry,
+            crate::sse::HueSseEvent::TopologyChanged {
+                resource_id: "light-1".to_string(),
+                resource_type: "light".to_string(),
+            },
+            None,
+            None,
+            None,
+        );
+
+        assert!(matches!(
+            events.as_slice(),
+            [HubEvent::TopologyChanged {
+                hub_key: None,
+                resource_id,
+                resource_type,
+            }] if resource_id == "light-1" && resource_type == "light"
+        ));
     }
 }

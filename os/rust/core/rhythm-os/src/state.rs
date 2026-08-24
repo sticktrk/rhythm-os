@@ -463,6 +463,11 @@ pub struct AppState {
     /// Rapid SSE reconnect churn should refresh live light state, but it
     /// should not keep re-running full room/device discovery every time.
     pub hub_reconnect_sync_at: HashMap<HubKey, Instant>,
+    /// Hubs with a coalesced upstream topology-change resync worker running.
+    pub hub_topology_resync_pending: HashSet<HubKey>,
+    /// Monotonic topology-change observations used to rerun discovery when a
+    /// second add/delete arrives while the first resync is still in flight.
+    pub hub_topology_change_generation: HashMap<HubKey, u64>,
     /// Pending API-visible disconnect deadlines keyed by HubKey.
     ///
     /// Event streams can recycle briefly while the hub is still reachable.
@@ -1007,6 +1012,8 @@ impl Default for AppState {
             hub_disconnect_generation: HashMap::new(),
             hub_sync_in_progress: HashSet::new(),
             hub_reconnect_sync_at: HashMap::new(),
+            hub_topology_resync_pending: HashSet::new(),
+            hub_topology_change_generation: HashMap::new(),
             hub_pending_disconnect_at: HashMap::new(),
             hub_credentials: HashMap::new(),
             hub_startup_retry: HashMap::new(),
@@ -1487,6 +1494,8 @@ impl AppState {
         self.external_controller_authority_pending.remove(key);
         self.hub_seen_connected_once.remove(key);
         self.hub_reconnect_sync_at.remove(key);
+        self.hub_topology_resync_pending.remove(key);
+        self.hub_topology_change_generation.remove(key);
         self.hub_pending_disconnect_at.remove(key);
     }
 
@@ -1541,6 +1550,45 @@ impl AppState {
     /// Clear reconnect-sync timing so the next reconnect can try again.
     pub fn clear_hub_reconnect_sync(&mut self, key: &HubKey) {
         self.hub_reconnect_sync_at.remove(key);
+    }
+
+    /// Record an upstream topology add/delete.
+    ///
+    /// Returns `true` when the caller must start the single coalescing resync
+    /// worker for this hub. Later observations only advance the generation so
+    /// that worker performs one more discovery pass if necessary.
+    pub fn note_hub_topology_change(&mut self, key: &HubKey) -> bool {
+        let generation = self
+            .hub_topology_change_generation
+            .entry(key.clone())
+            .or_default();
+        *generation = generation.wrapping_add(1);
+        self.hub_topology_resync_pending.insert(key.clone())
+    }
+
+    pub fn hub_topology_change_generation(&self, key: &HubKey) -> Option<u64> {
+        self.hub_topology_change_generation.get(key).copied()
+    }
+
+    /// Complete one topology resync pass.
+    ///
+    /// Returns `true` when no newer observation arrived and the worker can
+    /// exit. A missing generation means the hub was cleared while it ran.
+    pub fn finish_hub_topology_resync(&mut self, key: &HubKey, observed_generation: u64) -> bool {
+        let settled = self
+            .hub_topology_change_generation
+            .get(key)
+            .is_none_or(|current| *current == observed_generation);
+        if settled {
+            self.hub_topology_resync_pending.remove(key);
+            self.hub_topology_change_generation.remove(key);
+        }
+        settled
+    }
+
+    pub fn abort_hub_topology_resync(&mut self, key: &HubKey) {
+        self.hub_topology_resync_pending.remove(key);
+        self.hub_topology_change_generation.remove(key);
     }
 
     /// Start the delayed API-visible disconnect deadline.
@@ -1737,6 +1785,24 @@ mod tests {
         assert!(state.server_instance_id.starts_with("srv-"));
         assert_eq!(state.platform_type, "desktop");
         assert_eq!(state.platform_context, "server");
+    }
+
+    #[test]
+    fn topology_change_generation_keeps_one_worker_until_latest_pass_settles() {
+        let mut state = AppState::default();
+        let key = HubKey::new(HubType::new(HubType::HUE), "bridge.local");
+
+        assert!(state.note_hub_topology_change(&key));
+        let first_generation = state.hub_topology_change_generation(&key).unwrap();
+        assert!(!state.note_hub_topology_change(&key));
+        let latest_generation = state.hub_topology_change_generation(&key).unwrap();
+        assert_ne!(first_generation, latest_generation);
+
+        assert!(!state.finish_hub_topology_resync(&key, first_generation));
+        assert!(state.hub_topology_resync_pending.contains(&key));
+        assert!(state.finish_hub_topology_resync(&key, latest_generation));
+        assert!(!state.hub_topology_resync_pending.contains(&key));
+        assert!(state.hub_topology_change_generation(&key).is_none());
     }
 
     #[test]
