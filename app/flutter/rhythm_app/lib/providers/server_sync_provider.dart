@@ -1393,7 +1393,16 @@ class ServerSyncProvider extends ChangeNotifier {
     bool colorTemperatureRange,
     bool otherVisual,
   }) lightProfileOverrideSummaryForNode(String nodeId) {
-    final overrides = nodeById(nodeId)?.profileSettings?.profileOverrides;
+    final node = nodeById(nodeId);
+    if (node?.kind == RhythmNodeKind.lightDevice &&
+        node?.lightCapabilities?.individualProfileOverrides != true) {
+      return (
+        brightnessRange: false,
+        colorTemperatureRange: false,
+        otherVisual: false,
+      );
+    }
+    final overrides = node?.profileSettings?.profileOverrides;
     if (overrides == null || overrides.isEmpty) {
       return (
         brightnessRange: false,

@@ -2219,6 +2219,11 @@ void main() {
               'light_capabilities': {
                 'individual_profile_overrides': false,
               },
+              'profile_settings': {
+                'profile_overrides': {
+                  'rhythm': {'max_brightness': 31},
+                },
+              },
             },
           ],
         }),
@@ -2228,6 +2233,11 @@ void main() {
       expect(
         provider.lightProfileOverridesSupportedForNode('hue-light-1'),
         isFalse,
+      );
+      expect(
+        provider.hasNodeLightProfileOverrides('hue-light-1'),
+        isFalse,
+        reason: 'stored overrides are not effective on a grouped light route',
       );
       expect(
         await provider.setNodeLightProfileOverride(
