@@ -614,13 +614,13 @@
     "model": "H6004",
     "name": "Shenzhen Qianyan H6004",
     "light_type": "extended_color",
-    "color_modes": ["xy", "color_temperature"],
+    "color_modes": ["hue_saturation", "color_temperature"],
     "matter": {
       "vendor_id": 4999,
       "product_id": 24580,
       "quirks": [
         "needs_explicit_on",
-        "needs_xy_not_ct",
+        "needs_hue_saturation_not_ct",
         { "command_throttle_ms": 250 }
       ]
     }

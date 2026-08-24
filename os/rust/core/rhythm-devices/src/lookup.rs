@@ -201,6 +201,10 @@ mod tests {
             entry.light_type,
             crate::capabilities::LightType::ExtendedColor
         );
+        let capabilities = entry.capabilities();
+        assert!(capabilities.supports_hue_saturation());
+        assert!(!capabilities.supports_xy_color());
+        assert!(capabilities.supports_color_temp());
         assert_eq!(
             entry
                 .matter
@@ -209,7 +213,7 @@ mod tests {
                 .unwrap_or_default(),
             vec![
                 crate::quirks::DeviceQuirk::NeedsExplicitOn,
-                crate::quirks::DeviceQuirk::NeedsXyNotCt,
+                crate::quirks::DeviceQuirk::NeedsHueSaturationNotCt,
                 crate::quirks::DeviceQuirk::CommandThrottleMs(250),
             ]
         );

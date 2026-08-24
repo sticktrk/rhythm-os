@@ -3,6 +3,11 @@
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
+/// Forward-compatible [`DeviceQuirk::Other`] value used when a tested device
+/// should retain native color-temperature control instead of the Matter
+/// Hue/Saturation fallback.
+pub const PREFER_COLOR_TEMPERATURE_QUIRK: &str = "prefer_color_temperature";
+
 /// Known device quirks that affect command generation or behavior.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
