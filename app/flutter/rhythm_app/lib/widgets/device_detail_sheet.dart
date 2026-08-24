@@ -12,6 +12,7 @@ import '../screens/settings/light_screen.dart';
 import '../services/analytics_service.dart';
 import '../services/matter_removal_flow.dart';
 import 'low_glow_switch.dart';
+import 'blocking_operation_overlay.dart';
 import 'matter_setup_code_dialog.dart';
 import 'room_picker_sheet.dart';
 import 'segmented_tab_bar.dart';
@@ -231,21 +232,34 @@ Future<bool> showDeviceNodeAssignmentFlow(
   }
 
   onAssignmentStarted?.call();
+  final assignmentOverlay = showBlockingOperationOverlay(
+    context,
+    message: 'Saving room assignment…',
+  );
   final journeyId = 'device-room-move-${_deviceRoomMoveUuid.v4()}';
   final destination = selectedIsUnassigned ? 'unassigned' : 'room';
   var success = true;
+  var refreshed = false;
   var failureStage = 'assignment_request';
-  if (assignmentChanged) {
-    success = await syncProvider.api
-        .assignDeviceParent(device.id, targetParentNodeId);
-  }
+  try {
+    if (assignmentChanged) {
+      success = await syncProvider.api
+          .assignDeviceParent(device.id, targetParentNodeId);
+    }
 
-  if (success && activatesStandalone) {
-    failureStage = 'standalone_activation';
-    success = await _resolveUnassignedDeviceAsStandalone(
-      syncProvider,
-      device.id,
-    );
+    if (success && activatesStandalone) {
+      failureStage = 'standalone_activation';
+      success = await _resolveUnassignedDeviceAsStandalone(
+        syncProvider,
+        device.id,
+      );
+    }
+
+    if (success) {
+      refreshed = await syncProvider.refreshAfterTopologyMutation();
+    }
+  } finally {
+    assignmentOverlay.remove();
   }
 
   if (!context.mounted) return false;
@@ -273,9 +287,6 @@ Future<bool> showDeviceNodeAssignmentFlow(
     );
     return false;
   }
-
-  final refreshed = await syncProvider.refreshAfterTopologyMutation();
-  if (!context.mounted) return refreshed;
 
   if (!refreshed) {
     unawaited(
