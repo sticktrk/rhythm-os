@@ -1438,11 +1438,16 @@ mod tests {
     }
 
     #[test]
-    fn h6004_uses_xy_to_match_warm_room_color() {
+    fn h6004_uses_hue_saturation_for_direct_and_adaptive_color() {
         let (controller, spy, _) = make_controller();
         let mut h6004 = profiled_color_bulb(42, "Shenzhen Qianyan Technology", "H6004");
         h6004.vendor_id = 4999;
         h6004.product_id = 24580;
+        h6004.color_modes = vec![
+            crate::transport::MatterColorMode::HueSaturation,
+            crate::transport::MatterColorMode::Xy,
+            crate::transport::MatterColorMode::ColorTemperature,
+        ];
         h6004.min_kelvin = None;
         h6004.max_kelvin = None;
         let caps = crate::commissioning::build_device_capabilities(&h6004);
@@ -1460,10 +1465,27 @@ mod tests {
             .unwrap()
             .insert("matter-42".to_string(), quirks);
 
+        block_on(controller.turn_on(
+            "kitchen",
+            LightingCommand::from_color(
+                31,
+                rhythm_core::Rgb::new(129, 56, 255),
+                rhythm_core::XyColor { x: 0.205, y: 0.106 },
+                None,
+            ),
+        ))
+        .unwrap();
         block_on(controller.turn_on("kitchen", LightingCommand::new(100, 1800))).unwrap();
 
         let operations = operations_for_node(&spy.operations(), 42);
-        assert!(operations
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|operation| matches!(operation, RecordedOperation::SetHueSaturation { .. }))
+                .count(),
+            2
+        );
+        assert!(!operations
             .iter()
             .any(|operation| matches!(operation, RecordedOperation::SetXy { .. })));
         assert!(!operations
