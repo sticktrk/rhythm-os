@@ -10222,14 +10222,16 @@ void main() {
       find.byWidgetPredicate(
         (widget) =>
             widget.runtimeType.toString() == '_DeviceRow' &&
-            (widget as dynamic).roomId == 'room-2',
+            (widget as dynamic).currentRoomId == 'room-1' &&
+            (widget as dynamic).parentRoomId == 'room-2',
         skipOffstage: false,
       ),
       findsOneWidget,
     );
+    expect(find.text('PARENT', skipOffstage: false), findsNothing);
   });
 
-  testWidgets('room motion tab hides an unassigned controlling sensor',
+  testWidgets('room motion tab shows a parentless controlling sensor',
       (tester) async {
     _registerWidgetCleanup(tester);
     final roomProvider = RoomProvider();
@@ -10261,6 +10263,12 @@ void main() {
         ],
       }),
     ];
+    api.canonicalDevices['sensor-1'] = {
+      'id': 'sensor-1',
+      'name': 'Front Door Motion',
+      'device_type': 'motion',
+      'endpoints': const <Map<String, dynamic>>[],
+    };
     connection.emitHello(
       RhythmHello.fromJson({
         'nodes': [
@@ -10316,7 +10324,43 @@ void main() {
     await _selectRoomSettingsTab(tester, 'Motion');
     await tester.pumpAndSettle();
 
-    expect(find.text('Front Door Motion', skipOffstage: false), findsNothing);
+    expect(
+      find.text('Front Door Motion', skipOffstage: false),
+      findsOneWidget,
+    );
+    expect(find.text('PARENT', skipOffstage: false), findsNothing);
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget.runtimeType.toString() == '_DeviceRow' &&
+            (widget as dynamic).currentRoomId == 'room-1' &&
+            (widget as dynamic).parentRoomId == '',
+        skipOffstage: false,
+      ),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Front Door Motion').last);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Move or Remove...'), findsOneWidget);
+    await tester.tap(find.text('Move or Remove...'));
+    await tester.pumpAndSettle();
+    expect(find.text('Remove from Room'), findsOneWidget);
+
+    await tester.tap(find.text('Remove from Room'));
+    await tester.pumpAndSettle();
+
+    expect(api.assignDeviceParentCalls, 0);
+    expect(api.setTopologyNodeControlTargetsCalls, 1);
+    expect(api.lastControlSourceNodeId, 'sensor-1');
+    expect(api.lastControlKind, 'motion');
+    expect(api.lastControlTargetIds, isEmpty);
+    expect(find.text('Removed Front Door Motion from Porch'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('room-device-row-sensor-1')),
+      findsNothing,
+    );
   });
 
   testWidgets('Room card device flow offers Remove from Room for Matter bulbs',
@@ -10502,6 +10546,7 @@ void main() {
     );
 
     await _selectRoomSettingsTab(tester, 'Motion');
+    expect(find.text('PARENT', skipOffstage: false), findsOneWidget);
     await tester.tap(find.text('Kitchen Motion').last);
     await tester.pumpAndSettle();
 

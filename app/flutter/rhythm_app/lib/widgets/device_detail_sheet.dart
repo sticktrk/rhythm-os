@@ -397,6 +397,119 @@ Future<bool> showDeviceNodeAssignmentFlow(
   return true;
 }
 
+/// Moves or removes one room-control relationship without changing the
+/// device's parent room or its other control targets.
+Future<bool> showDeviceControlRoomRelationshipFlow(
+  BuildContext context, {
+  required RhythmDevice device,
+  required String currentRoomId,
+  required String controlKind,
+  VoidCallback? onAssignmentStarted,
+  String analyticsSource = 'device_detail',
+}) async {
+  final syncProvider = context.read<ServerSyncProvider>();
+  final roomSummariesById = {
+    for (final room in syncProvider.helloRooms) room.id: room,
+  };
+  final topologyRooms = syncProvider.topologyNodes
+      .where((node) => node.isRoom && node.id.isNotEmpty)
+      .map(
+        (node) => RoomPickerOption(
+          id: node.id,
+          name: node.name,
+          subtitle: roomSummariesById[node.id]?.deviceSummary,
+        ),
+      )
+      .toList();
+  final rooms = (topologyRooms.isNotEmpty
+          ? topologyRooms
+          : syncProvider.helloRooms.map(
+              (room) => RoomPickerOption(
+                id: room.id,
+                name: room.name,
+                subtitle: room.deviceSummary,
+              ),
+            ))
+      .toList()
+    ..sort(
+      (left, right) => left.name.toLowerCase().compareTo(
+            right.name.toLowerCase(),
+          ),
+    );
+  RoomPickerOption? createdRoom;
+
+  final targetRoomId = await showRoomPickerSheet(
+    context,
+    title: 'Move to Room',
+    currentRoomId: currentRoomId,
+    rooms: rooms,
+    allowUnassigned: true,
+    allowCreateRoom: true,
+    unassignedLabel: 'Remove from Room',
+    unassignedSubtitle: 'Stop this device from controlling this room.',
+    emptyMessage: 'No other rooms exist yet.',
+    onCreateRoom: () async {
+      createdRoom = await createTopologyRoomOptionFromPrompt(context);
+      return createdRoom?.id;
+    },
+  );
+  if (targetRoomId == null || !context.mounted) return false;
+
+  final currentTargets = syncProvider.controlTargetNodeIds(
+    sourceNodeId: device.id,
+    controlKind: controlKind,
+  );
+  final updatedTargets = <String>{...currentTargets}..remove(currentRoomId);
+  if (targetRoomId.isNotEmpty) updatedTargets.add(targetRoomId);
+  if (updatedTargets.length == currentTargets.length &&
+      updatedTargets.containsAll(currentTargets)) {
+    return true;
+  }
+
+  onAssignmentStarted?.call();
+  final assignmentOverlay = showBlockingOperationOverlay(
+    context,
+    message: 'Saving room assignment…',
+  );
+  final success = await syncProvider.setNodeControlTargets(
+    sourceNodeId: device.id,
+    controlKind: controlKind,
+    targetNodeIds: updatedTargets,
+  );
+  assignmentOverlay.remove();
+  if (!context.mounted) return success;
+
+  final destination = targetRoomId.isEmpty ? 'unassigned' : 'room';
+  unawaited(
+    AnalyticsService().logDeviceRoomMoveCompleted(
+      journeyId: 'device-room-move-${_deviceRoomMoveUuid.v4()}',
+      source: analyticsSource,
+      destination: destination,
+      outcome: success ? 'succeeded' : 'failed',
+      failureStage: success ? null : 'control_targets_request_or_refresh',
+    ),
+  );
+
+  final roomNamesById = {
+    for (final room in rooms) room.id: room.name,
+    if (createdRoom != null) createdRoom!.id: createdRoom!.name,
+  };
+  final currentRoomName = roomNamesById[currentRoomId] ?? 'this room';
+  final targetRoomName = roomNamesById[targetRoomId] ?? 'the selected room';
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+      content: Text(
+        success
+            ? targetRoomId.isEmpty
+                ? 'Removed ${device.displayName} from $currentRoomName'
+                : 'Moved ${device.displayName} to $targetRoomName'
+            : 'Failed to update ${device.displayName}',
+      ),
+    ),
+  );
+  return success;
+}
+
 Future<bool> _resolveUnassignedDeviceAsStandalone(
   ServerSyncProvider syncProvider,
   String deviceId,
@@ -580,18 +693,21 @@ typedef _DeviceEndpoint = ({
 class DeviceDetailSheet extends StatefulWidget {
   final RhythmDevice device;
   final String roomId;
+  final String? parentRoomId;
 
   const DeviceDetailSheet({
     super.key,
     required this.device,
     required this.roomId,
+    this.parentRoomId,
   });
 
   static Future<void> show(
     BuildContext context,
     RhythmDevice device,
-    String roomId,
-  ) {
+    String roomId, {
+    String? parentRoomId,
+  }) {
     HapticFeedback.lightImpact();
     return showModalBottomSheet(
       context: context,
@@ -600,6 +716,7 @@ class DeviceDetailSheet extends StatefulWidget {
       builder: (context) => DeviceDetailSheet(
         device: device,
         roomId: roomId,
+        parentRoomId: parentRoomId,
       ),
     );
   }
@@ -2030,15 +2147,39 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
 
     var dismissing = false;
     try {
-      final success = await showDeviceNodeAssignmentFlow(
-        context,
-        device: widget.device,
-        currentParentNodeId: widget.roomId,
-        allowNoRoom: _canLeaveUnassigned(syncProvider),
-        onAssignmentStarted: () {
-          if (mounted) setState(() => _moving = true);
-        },
-      );
+      final parentRoomId = widget.parentRoomId ?? widget.roomId;
+      final isControlledRoomRelationship =
+          widget.device.type == RhythmDeviceType.motion &&
+              widget.roomId.isNotEmpty &&
+              widget.roomId != parentRoomId &&
+              syncProvider
+                  .controlTargetNodeIds(
+                    sourceNodeId: widget.device.id,
+                    controlKind: 'motion',
+                  )
+                  .contains(widget.roomId);
+      late final bool success;
+      if (isControlledRoomRelationship) {
+        success = await showDeviceControlRoomRelationshipFlow(
+          context,
+          device: widget.device,
+          currentRoomId: widget.roomId,
+          controlKind: 'motion',
+          onAssignmentStarted: () {
+            if (mounted) setState(() => _moving = true);
+          },
+        );
+      } else {
+        success = await showDeviceNodeAssignmentFlow(
+          context,
+          device: widget.device,
+          currentParentNodeId: parentRoomId,
+          allowNoRoom: _canLeaveUnassigned(syncProvider),
+          onAssignmentStarted: () {
+            if (mounted) setState(() => _moving = true);
+          },
+        );
+      }
 
       if (success && context.mounted) {
         dismissing = true;
@@ -2061,7 +2202,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     await showMotionTargetRoomsFlow(
       context,
       device: widget.device,
-      currentParentNodeId: widget.roomId,
+      currentParentNodeId: widget.parentRoomId ?? widget.roomId,
     );
   }
 
@@ -2069,7 +2210,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     await showButtonTargetRoomsFlow(
       context,
       device: widget.device,
-      currentParentNodeId: widget.roomId,
+      currentParentNodeId: widget.parentRoomId ?? widget.roomId,
     );
   }
 
