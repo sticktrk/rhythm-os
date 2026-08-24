@@ -4140,8 +4140,11 @@ pub fn handle_put_device_room(state: &SharedState, device_id: &str, body: &Value
         .get("room_id")
         .and_then(|v| v.as_str())
         .map(|raw_room_id| commands::resolve_node_id(state, raw_room_id));
-    match commands::do_canonical_assign_room(state, device_id, room_id.as_deref()) {
-        Ok(()) => ApiResponse::no_content(),
+    match commands::do_canonical_assign_room_with_outcome(state, device_id, room_id.as_deref()) {
+        Ok(outcome) => match serde_json::to_string(&outcome) {
+            Ok(json) => ApiResponse::json_ok(json),
+            Err(error) => ApiResponse::server_error(error),
+        },
         Err(e) => ApiResponse::server_error(e),
     }
 }
@@ -4151,8 +4154,11 @@ pub fn handle_put_device_parent(state: &SharedState, device_id: &str, body: &Val
         .get("parent_id")
         .and_then(|v| v.as_str())
         .map(|raw_parent_id| commands::resolve_node_id(state, raw_parent_id));
-    match commands::do_canonical_assign_room(state, device_id, parent_id.as_deref()) {
-        Ok(()) => ApiResponse::no_content(),
+    match commands::do_canonical_assign_room_with_outcome(state, device_id, parent_id.as_deref()) {
+        Ok(outcome) => match serde_json::to_string(&outcome) {
+            Ok(json) => ApiResponse::json_ok(json),
+            Err(error) => ApiResponse::server_error(error),
+        },
         Err(e) => ApiResponse::server_error(e),
     }
 }
@@ -8366,7 +8372,7 @@ mod tests {
     }
 
     #[test]
-    fn put_device_parent_returns_204() {
+    fn put_device_parent_reports_canonical_and_projection_outcomes() {
         let state = handler_state_with_runtime();
         let (canonical_id, target_room_id) = {
             let mut state = state.lock().unwrap();
@@ -8403,8 +8409,11 @@ mod tests {
             &canonical_id,
             &json!({"parent_id": target_room_id.clone()}),
         );
-        assert_eq!(r.status, 204);
-        assert!(r.body.is_empty());
+        assert_eq!(r.status, 200);
+        let outcome: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(outcome["schema_version"], 1);
+        assert_eq!(outcome["canonical_committed"], true);
+        assert_eq!(outcome["projection_status"], "not_applicable");
 
         let state = state.lock().unwrap();
         assert_eq!(

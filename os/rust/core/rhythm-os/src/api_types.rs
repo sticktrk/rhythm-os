@@ -727,6 +727,28 @@ pub struct HueAuthorityResponse {
     pub bridges: Vec<HueBridgeAuthorityDto>,
 }
 
+/// Best-known external room projection state after a canonical device move.
+///
+/// The canonical mutation is committed before optional external projections
+/// run. Keeping this state explicit prevents clients from treating request
+/// acceptance as proof that every external controller already converged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceRoomProjectionStatus {
+    NotApplicable,
+    Blocked,
+    Pending,
+    Attention,
+    Synced,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DeviceRoomAssignmentResponse {
+    pub schema_version: u32,
+    pub canonical_committed: bool,
+    pub projection_status: DeviceRoomProjectionStatus,
+}
+
 // ---------------------------------------------------------------------------
 // Curve visualization responses
 // ---------------------------------------------------------------------------

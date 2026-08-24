@@ -922,7 +922,18 @@ pub(crate) fn reconcile_hub_endpoint_visibility(
         let report = s
             .canonical_registry
             .deactivate_missing_endpoints_for_hub(hub_key, discovered_native_ids);
-        if report.affected_device_ids.is_empty() {
+        let mut orphan_topology_ids = s
+            .topology
+            .device_nodes()
+            .filter(|node| {
+                s.canonical_registry
+                    .get(&node.canonical_device_id)
+                    .is_none()
+            })
+            .map(|node| node.id.clone())
+            .collect::<Vec<_>>();
+        orphan_topology_ids.sort();
+        if report.affected_device_ids.is_empty() && orphan_topology_ids.is_empty() {
             return Ok((0, 0));
         }
 
@@ -937,6 +948,19 @@ pub(crate) fn reconcile_hub_endpoint_visibility(
             let affected_rooms = s.topology.remove_device_everywhere(device_id);
             topology_changed |= existed || !affected_rooms.is_empty();
             clear_removed_node_ephemeral_state(&mut s, device_id);
+        }
+        for device_id in &orphan_topology_ids {
+            let existed = s.topology.get_device_node(device_id).is_some();
+            let affected_rooms = s.topology.remove_device_everywhere(device_id);
+            topology_changed |= existed || !affected_rooms.is_empty();
+            clear_removed_node_ephemeral_state(&mut s, device_id);
+        }
+        if !orphan_topology_ids.is_empty() {
+            warn!(
+                target: "cmd",
+                "Removed {} topology device node(s) without canonical identity during authoritative hub reconciliation",
+                orphan_topology_ids.len()
+            );
         }
         for device_id in &report.affected_device_ids {
             if hidden_ids.iter().any(|hidden_id| hidden_id == device_id) {
@@ -965,7 +989,9 @@ pub(crate) fn reconcile_hub_endpoint_visibility(
             }
         }
 
-        persist_canonical(&s);
+        if !report.affected_device_ids.is_empty() {
+            persist_canonical(&s);
+        }
         if topology_changed {
             persist_topology(&s);
         }
@@ -15366,7 +15392,17 @@ pub fn do_canonical_assign_room(
     device_id: &str,
     room_id: Option<&str>,
 ) -> Result<()> {
-    do_canonical_assign_room_with_precondition(state, device_id, room_id, None)
+    do_canonical_assign_room_with_outcome(state, device_id, room_id).map(|_| ())
+}
+
+/// Assign a canonical device and report the best-known external projection
+/// state without waiting for the asynchronous integration worker.
+pub fn do_canonical_assign_room_with_outcome(
+    state: &SharedState,
+    device_id: &str,
+    room_id: Option<&str>,
+) -> Result<crate::api_types::DeviceRoomAssignmentResponse> {
+    do_canonical_assign_room_with_precondition_outcome(state, device_id, room_id, None)
 }
 
 #[derive(Clone, Debug)]
@@ -15413,6 +15449,16 @@ pub fn do_canonical_assign_room_with_precondition(
     room_id: Option<&str>,
     precondition: Option<TopologyAssignmentPrecondition>,
 ) -> Result<()> {
+    do_canonical_assign_room_with_precondition_outcome(state, device_id, room_id, precondition)
+        .map(|_| ())
+}
+
+fn do_canonical_assign_room_with_precondition_outcome(
+    state: &SharedState,
+    device_id: &str,
+    room_id: Option<&str>,
+    precondition: Option<TopologyAssignmentPrecondition>,
+) -> Result<crate::api_types::DeviceRoomAssignmentResponse> {
     let transaction_lock = state
         .lock()
         .map_err(|_| anyhow::anyhow!("lock"))?
@@ -15635,6 +15681,32 @@ pub fn do_canonical_assign_room_with_precondition(
         sync_endpoint_device_rooms(&mut s, &active_endpoints, room_id);
     }
 
+    let mut projection_hub_keys = if matches!(device_type, DeviceType::Light) {
+        assignments
+            .iter()
+            .filter(|assignment| {
+                s.topology
+                    .external_room_topology_sync_is_enabled(&assignment.hub_key)
+            })
+            .map(|assignment| assignment.hub_key.clone())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    projection_hub_keys.sort_by(|left, right| left.to_string().cmp(&right.to_string()));
+    projection_hub_keys.dedup();
+    for hub_key in &projection_hub_keys {
+        if s.topology.external_hub_has_full_rhythm_consent(hub_key) {
+            // Publish a durable pending state in the same commit as the
+            // canonical move. The asynchronous Hue worker will replace it
+            // with either exact read-back success or durable attention.
+            s.topology
+                .set_external_grouped_dispatch_suspended(hub_key, true);
+            s.topology
+                .set_external_room_topology_sync_attention(hub_key, false);
+        }
+    }
+
     let new_motion_target = old_motion_target.as_ref().map(|_| {
         s.topology
             .effective_control_target(device_id, &NodeControlKind::Motion)
@@ -15727,7 +15799,63 @@ pub fn do_canonical_assign_room_with_precondition(
         emit_triage_changed(state);
         crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
     }
-    Ok(())
+    let projection_status = state
+        .lock()
+        .map(|state| device_room_projection_status(&state, &projection_hub_keys))
+        .unwrap_or_else(|_| {
+            if projection_hub_keys.is_empty() {
+                crate::api_types::DeviceRoomProjectionStatus::NotApplicable
+            } else {
+                crate::api_types::DeviceRoomProjectionStatus::Pending
+            }
+        });
+    Ok(crate::api_types::DeviceRoomAssignmentResponse {
+        schema_version: 1,
+        canonical_committed: true,
+        projection_status,
+    })
+}
+
+fn device_room_projection_status(
+    state: &AppState,
+    hub_keys: &[crate::canonical::identity::HubKey],
+) -> crate::api_types::DeviceRoomProjectionStatus {
+    use crate::api_types::DeviceRoomProjectionStatus;
+
+    let mut status = DeviceRoomProjectionStatus::NotApplicable;
+    for hub_key in hub_keys {
+        let candidate = if !state
+            .topology
+            .external_room_topology_sync_is_enabled(hub_key)
+        {
+            DeviceRoomProjectionStatus::NotApplicable
+        } else if !state.topology.external_hub_has_full_rhythm_consent(hub_key) {
+            DeviceRoomProjectionStatus::Blocked
+        } else if state
+            .topology
+            .external_room_topology_sync_needs_attention(hub_key)
+        {
+            DeviceRoomProjectionStatus::Attention
+        } else if state
+            .topology
+            .external_grouped_dispatch_is_suspended(hub_key)
+        {
+            DeviceRoomProjectionStatus::Pending
+        } else {
+            DeviceRoomProjectionStatus::Synced
+        };
+        let rank = |status| match status {
+            DeviceRoomProjectionStatus::NotApplicable => 0,
+            DeviceRoomProjectionStatus::Synced => 1,
+            DeviceRoomProjectionStatus::Pending => 2,
+            DeviceRoomProjectionStatus::Blocked => 3,
+            DeviceRoomProjectionStatus::Attention => 4,
+        };
+        if rank(candidate) > rank(status) {
+            status = candidate;
+        }
+    }
+    status
 }
 
 /// Set the preferred endpoint for a canonical device.
@@ -23681,6 +23809,7 @@ mod tests {
 
         {
             let mut s = state.lock().unwrap();
+            s.canonical_registry.assign_room(&hidden_id, Some("room1"));
             assert!(s.topology.attach_device_user_override("room1", &hidden_id));
             s.canonical_registry
                 .get_mut(&surviving_room_id)
@@ -23729,6 +23858,9 @@ mod tests {
 
         let s = state.lock().unwrap();
         assert!(s.topology.get_device_node(&hidden_id).is_none());
+        let hidden = s.canonical_registry.get(&hidden_id).unwrap();
+        assert_eq!(hidden.room_id.as_deref(), Some("room1"));
+        assert_eq!(hidden.active_endpoints().count(), 0);
         assert_eq!(
             s.topology
                 .device_parent_room_id(&surviving_room_id)
@@ -23791,6 +23923,35 @@ mod tests {
         let restored: crate::topology::RoomTopologyStore =
             serde_json::from_value(persisted).unwrap();
         assert!(restored.get_device_node(&device_id).is_none());
+    }
+
+    #[test]
+    fn endpoint_visibility_reconcile_removes_persisted_topology_orphans() {
+        let (state, _runtime) = setup_state(vec![]);
+        let storage = Arc::new(TestStorage::default());
+        let hue_key = HubKey::new(HubType::new("hue"), "bridge");
+        {
+            let mut s = state.lock().unwrap();
+            s.storage = Some(storage.clone());
+            s.topology
+                .ensure_standalone_device("orphan-topology-device");
+            persist_topology(&s);
+        }
+
+        let (affected, hidden) =
+            reconcile_hub_endpoint_visibility(&state, &hue_key, &HashSet::new()).unwrap();
+
+        assert_eq!((affected, hidden), (0, 0));
+        assert!(state
+            .lock()
+            .unwrap()
+            .topology
+            .get_device_node("orphan-topology-device")
+            .is_none());
+        let persisted = storage.load_topology().unwrap().unwrap();
+        let restored: crate::topology::RoomTopologyStore =
+            serde_json::from_value(persisted).unwrap();
+        assert!(restored.get_device_node("orphan-topology-device").is_none());
     }
 
     #[test]
@@ -34228,6 +34389,69 @@ mod tests {
         );
         wait_for_sync_count(&sync_started, 1);
         wait_for_sync_count(&sync_finished, 1);
+    }
+
+    #[test]
+    fn canonical_assign_room_reports_external_projection_pending() {
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+
+        let created: serde_json::Value =
+            serde_json::from_str(&do_topology_create_room(&state, "Office").unwrap()).unwrap();
+        let room_id = created["id"].as_str().unwrap().to_string();
+        let device_id = insert_canonical_device(
+            &state,
+            hub_key.clone(),
+            "hue-device-100",
+            "Desk Lamp",
+            "",
+            "",
+        );
+        let sync_started = Arc::new(AtomicUsize::new(0));
+        {
+            let sync_started = sync_started.clone();
+            let mut app = state.lock().unwrap();
+            assert!(app.topology.upsert_room_binding(
+                &room_id,
+                crate::topology::HubRoomBinding {
+                    hub_key: hub_key.clone(),
+                    hub_room_id: "hue-office".to_string(),
+                    control_id: "hue-office-group".to_string(),
+                    light_device_ids: Vec::new(),
+                },
+            ));
+            app.topology
+                .replace_external_room_automation_decisions(
+                    &hub_key,
+                    &[(
+                        room_id.clone(),
+                        crate::topology::ExternalRoomAutomationOwner::Rhythm,
+                    )],
+                )
+                .unwrap();
+            app.topology
+                .set_external_room_topology_sync_enabled(&hub_key, true);
+            app.sync_topology_groups_fn = Some(Arc::new(move |_| {
+                sync_started.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(500));
+                Ok(())
+            }));
+        }
+
+        let outcome =
+            do_canonical_assign_room_with_outcome(&state, &device_id, Some(&room_id)).unwrap();
+
+        assert!(outcome.canonical_committed);
+        assert_eq!(
+            outcome.projection_status,
+            crate::api_types::DeviceRoomProjectionStatus::Pending
+        );
+        assert!(state
+            .lock()
+            .unwrap()
+            .topology
+            .external_grouped_dispatch_is_suspended(&hub_key));
+        wait_for_sync_count(&sync_started, 1);
+        wait_for_topology_group_sync_idle(&state);
     }
 
     #[test]

@@ -1283,13 +1283,12 @@ void main() {
             any(),
             data: any(named: 'data'),
             options: any(named: 'options'),
-          ))
-          .thenAnswer((_) async => Response(
-                requestOptions: RequestOptions(
-                  path: 'api/devices/canonical/device-1/parent',
-                ),
-                statusCode: 204,
-              ));
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(
+              path: 'api/devices/canonical/device-1/parent',
+            ),
+            statusCode: 204,
+          ));
 
       final saved = await api.assignDeviceParent('device-1', null);
 
@@ -1300,6 +1299,34 @@ void main() {
             options: captureAny(named: 'options'),
           )).captured.single as Options;
       expect(options.receiveTimeout, const Duration(seconds: 30));
+    });
+
+    test('assignDeviceParentResult parses qualified projection attention',
+        () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(
+              path: 'api/devices/canonical/device-1/parent',
+            ),
+            statusCode: 200,
+            data: {
+              'schema_version': 1,
+              'canonical_committed': true,
+              'projection_status': 'attention',
+            },
+          ));
+
+      final result = await api.assignDeviceParentResult('device-1', 'room-2');
+
+      expect(result, isNotNull);
+      expect(result!.canonicalCommitted, isTrue);
+      expect(
+        result.projectionStatus,
+        RhythmRoomProjectionStatus.attention,
+      );
     });
   });
 

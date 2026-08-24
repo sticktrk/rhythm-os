@@ -25,6 +25,20 @@ class ExistingRoomDeviceCandidate {
   final String parentLabel;
 }
 
+@visibleForTesting
+String existingRoomDeviceIdentityLabel(RhythmDevice device) {
+  final parts = <String>[
+    if (device.manufacturer?.trim().isNotEmpty == true)
+      device.manufacturer!.trim(),
+    if (device.model?.trim().isNotEmpty == true) device.model!.trim(),
+  ];
+  final stableId = device.id.trim();
+  final shortId =
+      stableId.length <= 8 ? stableId : stableId.substring(stableId.length - 8);
+  parts.add('ID $shortId');
+  return parts.join(' · ');
+}
+
 class RoomDeviceAddSelection {
   const RoomDeviceAddSelection.scan() : candidate = null;
 
@@ -202,9 +216,8 @@ Future<void> startRoomDeviceAddFlow(
     // authoritative room assignment. This also resolves the unassigned triage
     // decision and lets the server create the runtime/topology source node.
     if (syncProvider.topologyNodeById(selected.device.id) == null) {
-      final materializationParentId = physicalParentNodeId.isEmpty
-          ? roomId
-          : physicalParentNodeId;
+      final materializationParentId =
+          physicalParentNodeId.isEmpty ? roomId : physicalParentNodeId;
       final assigned = await syncProvider.api.assignDeviceParent(
         selected.device.id,
         materializationParentId,
@@ -310,6 +323,7 @@ class _RoomDeviceAddSheet extends StatefulWidget {
 
 class _RoomDeviceAddSheetState extends State<_RoomDeviceAddSheet> {
   late Future<List<ExistingRoomDeviceCandidate>?> _candidates;
+  final Set<String> _identifyingDeviceIds = {};
 
   @override
   void initState() {
@@ -340,6 +354,72 @@ class _RoomDeviceAddSheetState extends State<_RoomDeviceAddSheet> {
     setState(() {
       _candidates = candidates;
     });
+  }
+
+  Future<void> _identify(ExistingRoomDeviceCandidate candidate) async {
+    if (_identifyingDeviceIds.contains(candidate.device.id)) return;
+    setState(() => _identifyingDeviceIds.add(candidate.device.id));
+    final identified = await identifyCanonicalBulb(
+      context,
+      device: candidate.device,
+      source: 'room_existing_picker',
+    );
+    if (!mounted) return;
+    setState(() => _identifyingDeviceIds.remove(candidate.device.id));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          identified
+              ? 'Identified ${candidate.device.displayName}'
+              : 'Could not identify ${candidate.device.displayName}',
+        ),
+      ),
+    );
+  }
+
+  Future<void> _selectCandidate(ExistingRoomDeviceCandidate candidate) async {
+    final movesAssignedBulb = widget.deviceType == RhythmDeviceType.light &&
+        candidate.parentNodeId.isNotEmpty &&
+        candidate.parentNodeId != widget.roomId;
+    if (movesAssignedBulb) {
+      final confirmed = await showDialog<bool>(
+            context: context,
+            builder: (dialogContext) => AlertDialog(
+              key: const ValueKey('confirm-existing-room-device-move'),
+              backgroundColor: CelestialColors.backgroundCard,
+              title: Text('Move ${candidate.device.displayName}?'),
+              content: Text(
+                '${existingRoomDeviceIdentityLabel(candidate.device)}\n\n'
+                'This removes the bulb from ${candidate.parentLabel} and adds it to ${widget.roomName}. '
+                'Use Identify first if you are not certain which bulb this is.',
+                key: const ValueKey('confirm-device-move-message'),
+                style: const TextStyle(
+                  color: CelestialColors.textSecondary,
+                ),
+              ),
+              actions: [
+                TextButton(
+                  key: const ValueKey('confirm-device-move-identify'),
+                  onPressed: () => unawaited(_identify(candidate)),
+                  child: const Text('Identify'),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  key: const ValueKey('confirm-device-move-action'),
+                  onPressed: () => Navigator.of(dialogContext).pop(true),
+                  child: const Text('Move bulb'),
+                ),
+              ],
+            ),
+          ) ??
+          false;
+      if (!mounted || !confirmed) return;
+    }
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    Navigator.of(context).pop(RoomDeviceAddSelection.existing(candidate));
   }
 
   @override
@@ -495,9 +575,7 @@ class _RoomDeviceAddSheetState extends State<_RoomDeviceAddSheet> {
                           ),
                           clipBehavior: Clip.antiAlias,
                           child: InkWell(
-                            onTap: () => Navigator.of(context).pop(
-                              RoomDeviceAddSelection.existing(candidate),
-                            ),
+                            onTap: () => unawaited(_selectCandidate(candidate)),
                             child: Padding(
                               padding: const EdgeInsets.symmetric(
                                 horizontal: 14,
@@ -536,6 +614,22 @@ class _RoomDeviceAddSheetState extends State<_RoomDeviceAddSheet> {
                                         ),
                                         const SizedBox(height: 3),
                                         Text(
+                                          existingRoomDeviceIdentityLabel(
+                                            candidate.device,
+                                          ),
+                                          key: ValueKey(
+                                            'existing-room-device-identity-${candidate.device.id}',
+                                          ),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                            color:
+                                                CelestialColors.textSecondary,
+                                            fontSize: 11,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 3),
+                                        Text(
                                           status,
                                           maxLines: 1,
                                           overflow: TextOverflow.ellipsis,
@@ -549,6 +643,34 @@ class _RoomDeviceAddSheetState extends State<_RoomDeviceAddSheet> {
                                     ),
                                   ),
                                   const SizedBox(width: 8),
+                                  if (widget.deviceType ==
+                                      RhythmDeviceType.light)
+                                    IconButton(
+                                      key: ValueKey(
+                                        'existing-room-device-identify-${candidate.device.id}',
+                                      ),
+                                      tooltip:
+                                          'Identify ${candidate.device.displayName}',
+                                      onPressed: _identifyingDeviceIds
+                                              .contains(candidate.device.id)
+                                          ? null
+                                          : () =>
+                                              unawaited(_identify(candidate)),
+                                      icon: _identifyingDeviceIds
+                                              .contains(candidate.device.id)
+                                          ? const SizedBox(
+                                              width: 18,
+                                              height: 18,
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2,
+                                              ),
+                                            )
+                                          : const Icon(
+                                              Icons.lightbulb_outline_rounded,
+                                              size: 21,
+                                            ),
+                                      color: accent,
+                                    ),
                                   Icon(
                                     alreadyInRoom
                                         ? Icons.check_circle_rounded

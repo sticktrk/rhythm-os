@@ -809,6 +809,13 @@ class CloudBackedServerApi {
     return _delegate.assignDeviceParent(deviceId, parentId);
   }
 
+  Future<RhythmDeviceRoomAssignmentResult?> assignDeviceParentResult(
+    String deviceId,
+    String? parentId,
+  ) {
+    return _delegate.assignDeviceParentResult(deviceId, parentId);
+  }
+
   Future<Map<String, dynamic>?> createTopologyRoom(String name) {
     return _delegate.createTopologyRoom(name);
   }
