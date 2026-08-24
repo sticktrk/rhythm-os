@@ -35,6 +35,7 @@ import 'providers/room_page_provider.dart';
 import 'providers/home_provider.dart';
 import 'providers/server_sync_provider.dart';
 import 'providers/subscription_provider.dart';
+import 'config/app_orientation_policy.dart';
 import 'config/feature_flags.dart';
 import 'config/platform_capabilities.dart';
 import 'config/supabase_config.dart';
@@ -54,8 +55,7 @@ void main() {
   // launch screen while storage, account, and local-brain startup continues.
   runApp(RhythmBootstrap(capabilities: caps));
 
-  // Force portrait orientation by default on mobile
-  // (Designer screen overrides this to landscape)
+  // Keep every mobile Flutter surface in the app's portrait-up contract.
   if (!kIsWeb) {
     unawaited(_configurePreferredOrientations());
   }
@@ -63,12 +63,7 @@ void main() {
 
 Future<void> _configurePreferredOrientations() async {
   try {
-    await SystemChrome.setPreferredOrientations([
-      DeviceOrientation.portraitUp,
-      DeviceOrientation.portraitDown,
-      DeviceOrientation.landscapeLeft,
-      DeviceOrientation.landscapeRight,
-    ]);
+    await SystemChrome.setPreferredOrientations(appPreferredOrientations);
   } catch (e) {
     debugPrint('Could not set orientation: $e');
   }
