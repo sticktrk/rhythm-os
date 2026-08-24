@@ -1783,8 +1783,11 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                     );
 
                     if is_new_activation {
-                        let target_was_already_on =
-                            !was_motion_owned && observed_lights_on == Some(true);
+                        let target_is_semantically_idle =
+                            target_is_semantically_idle_for_motion(state, &target_node_id);
+                        let target_was_already_on = !was_motion_owned
+                            && observed_lights_on == Some(true)
+                            && !target_is_semantically_idle;
 
                         if target_was_already_on {
                             info!(
@@ -3139,9 +3142,6 @@ fn motion_suppression_reason_for_target(
         .and_then(|s| s.hub_runtime())
         .and_then(|runtime| runtime.engine_node_snapshot(target_node_id))
         .and_then(|snapshot| {
-            if snapshot.hard_off {
-                return Some("hard_off");
-            }
             if !snapshot.profile_settings.motion_activation_enabled() {
                 return Some("motion_activation_disabled");
             }
@@ -3179,6 +3179,15 @@ fn observed_room_lights_on_for_motion_reactivation(
             _ => None,
         }
     })
+}
+
+fn target_is_semantically_idle_for_motion(state: &SharedState, target_node_id: &str) -> bool {
+    state
+        .lock()
+        .ok()
+        .and_then(|s| s.hub_runtime())
+        .and_then(|runtime| runtime.engine_node_snapshot(target_node_id))
+        .is_some_and(|snapshot| snapshot.hard_off || snapshot.soft_off || snapshot.mood_active)
 }
 
 fn target_room_flags(state: &SharedState, target_node_id: &str) -> Option<(bool, bool)> {
@@ -7361,12 +7370,12 @@ mod tests {
     }
 
     #[test]
-    fn hard_off_target_does_not_claim_or_turn_on_from_live_motion() {
-        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![
+    fn live_motion_activates_hard_off_mode_default() {
+        let turn_on_room_calls = Arc::new(AtomicUsize::new(0));
+        let state = make_state_with_counted_turn_on(
             hard_off_room_snapshot("room_a"),
-        ]));
-        let turn_on_calls = runtime.turn_on_calls.clone();
-        let state = make_state_with_runtime(runtime);
+            turn_on_room_calls.clone(),
+        );
         let hub_key = only_hub_key(&state);
         add_canonical_control_source(&state, &hub_key, "sensor_a", "room_a", DeviceType::Motion);
         let mut motion = MotionTimerState::new();
@@ -7382,13 +7391,11 @@ mod tests {
             &mut motion,
         );
 
-        assert_eq!(
-            motion_suppression_reason_for_target(&state, "room_a"),
-            Some("hard_off")
-        );
-        assert!(motion.sensors.is_empty());
-        assert!(motion.motion_owned.is_empty());
-        assert!(turn_on_calls.lock().unwrap().is_empty());
+        wait_for_atomic_at_least(&turn_on_room_calls, 1);
+        assert_eq!(turn_on_room_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(motion.sensors.len(), 1);
+        assert!(motion.motion_owned.contains("room_a"));
+        assert!(motion.motion_turn_on_requested.contains("room_a"));
     }
 
     #[test]
@@ -7457,6 +7464,75 @@ mod tests {
 
         assert!(motion.sensors.is_empty());
         assert!(lights_off_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn live_motion_activates_standby_even_when_low_glow_is_observed_on() {
+        let turn_on_room_calls = Arc::new(AtomicUsize::new(0));
+        let state = make_state_with_counted_turn_on(
+            soft_off_room_snapshot("room_a"),
+            turn_on_room_calls.clone(),
+        );
+        set_observed_lights_on_with_source(
+            &state,
+            "room_a",
+            true,
+            crate::state::ObservedPowerSource::Command,
+        );
+        let hub_key = only_hub_key(&state);
+        add_canonical_control_source(&state, &hub_key, "sensor_a", "room_a", DeviceType::Motion);
+        let mut motion = MotionTimerState::new();
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Motion {
+                hub_key: Some(hub_key),
+                room_id: "room_a".into(),
+                sensor_id: "sensor_a".into(),
+                detected: true,
+            },
+            &mut motion,
+        );
+
+        wait_for_atomic_at_least(&turn_on_room_calls, 1);
+        assert_eq!(turn_on_room_calls.load(Ordering::SeqCst), 1);
+        assert!(motion.motion_owned.contains("room_a"));
+        assert!(motion.motion_turn_on_requested.contains("room_a"));
+    }
+
+    #[test]
+    fn live_motion_activates_generated_mood_even_when_scene_is_observed_on() {
+        let mut snapshot = room_snapshot_with_flags("room_a", false, false);
+        snapshot.mood_active = true;
+        snapshot.profile_settings.mood_scene_id = Some("node-mood-scene-room_a".into());
+        snapshot.profile_settings.motion_activation_enabled = Some(true);
+        let turn_on_room_calls = Arc::new(AtomicUsize::new(0));
+        let state = make_state_with_counted_turn_on(snapshot, turn_on_room_calls.clone());
+        set_observed_lights_on_with_source(
+            &state,
+            "room_a",
+            true,
+            crate::state::ObservedPowerSource::Command,
+        );
+        let hub_key = only_hub_key(&state);
+        add_canonical_control_source(&state, &hub_key, "sensor_a", "room_a", DeviceType::Motion);
+        let mut motion = MotionTimerState::new();
+
+        handle_hub_event(
+            &state,
+            crate::hub::HubEvent::Motion {
+                hub_key: Some(hub_key),
+                room_id: "room_a".into(),
+                sensor_id: "sensor_a".into(),
+                detected: true,
+            },
+            &mut motion,
+        );
+
+        wait_for_atomic_at_least(&turn_on_room_calls, 1);
+        assert_eq!(turn_on_room_calls.load(Ordering::SeqCst), 1);
+        assert!(motion.motion_owned.contains("room_a"));
+        assert!(motion.motion_turn_on_requested.contains("room_a"));
     }
 
     #[test]
