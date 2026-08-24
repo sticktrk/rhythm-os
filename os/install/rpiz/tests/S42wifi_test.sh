@@ -29,15 +29,16 @@ configure_ipv6_ra_rio wlan0
 grep -qx 2 "$IPV6_CONF_ROOT/wlan0/accept_ra"
 grep -q 'RIO prefixes through /64' "$LOGFILE"
 
-# Regression for issue #515: the per-interface IPv6 sysctls may not exist
-# until wlan0 is up. The startup path must raise the interface before trying
-# to enable Thread Route Information Option acceptance.
+# Regressions for issues #515 and #557: the per-interface IPv6 sysctls may not
+# exist until wlan0 is up and wpa_supplicant has initialized it. The startup
+# path must enable Thread Route Information Option acceptance afterwards.
 START_ORDER="$TEST_ROOT/start-order"
 INTERFACE_UP="$TEST_ROOT/interface-up"
+WPA_READY="$TEST_ROOT/wpa-ready"
 has_wifi_config() { return 1; }
 modprobe_logged() { :; }
 find_wifi_iface() { printf '%s\n' wlan0; }
-pid_is_running() { return 0; }
+pid_is_running() { return 1; }
 ifconfig() {
     if [ "$1" = wlan0 ] && [ "$2" = up ]; then
         : >"$INTERFACE_UP"
@@ -46,10 +47,16 @@ ifconfig() {
 }
 configure_ipv6_ra_rio() {
     [ -f "$INTERFACE_UP" ]
+    [ -f "$WPA_READY" ]
     printf '%s\n' configure-ipv6 >>"$START_ORDER"
 }
 disable_wifi_power_save() { :; }
+start_wpa_supplicant() {
+    : >"$WPA_READY"
+    printf '%s\n' wpa-started >>"$START_ORDER"
+}
 
 start
 test "$(sed -n '1p' "$START_ORDER")" = interface-up
-test "$(sed -n '2p' "$START_ORDER")" = configure-ipv6
+test "$(sed -n '2p' "$START_ORDER")" = wpa-started
+test "$(sed -n '3p' "$START_ORDER")" = configure-ipv6
