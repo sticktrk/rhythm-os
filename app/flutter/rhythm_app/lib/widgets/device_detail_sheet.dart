@@ -143,8 +143,9 @@ Future<bool> showDeviceNodeAssignmentFlow(
   String analyticsSource = 'device_detail',
 }) async {
   final syncProvider = context.read<ServerSyncProvider>();
-  final normalizedCurrentParentNodeId =
-      currentParentNodeId.isEmpty ? null : currentParentNodeId;
+  final normalizedCurrentParentNodeId = currentParentNodeId.isEmpty
+      ? null
+      : currentParentNodeId;
   final roomSummariesById = {
     for (final room in syncProvider.helloRooms) room.id: room,
   };
@@ -158,22 +159,22 @@ Future<bool> showDeviceNodeAssignmentFlow(
         ),
       )
       .toList();
-  final rooms = (topologyRooms.isNotEmpty
-          ? topologyRooms
-          : syncProvider.helloRooms.map(
-              (room) => RoomPickerOption(
-                id: room.id,
-                name: room.name,
-                subtitle: room.deviceSummary,
-              ),
-            ))
-      .where((room) => room.id != normalizedCurrentParentNodeId)
-      .toList()
-    ..sort(
-      (left, right) => left.name.toLowerCase().compareTo(
-            right.name.toLowerCase(),
-          ),
-    );
+  final rooms =
+      (topologyRooms.isNotEmpty
+              ? topologyRooms
+              : syncProvider.helloRooms.map(
+                  (room) => RoomPickerOption(
+                    id: room.id,
+                    name: room.name,
+                    subtitle: room.deviceSummary,
+                  ),
+                ))
+          .where((room) => room.id != normalizedCurrentParentNodeId)
+          .toList()
+        ..sort(
+          (left, right) =>
+              left.name.toLowerCase().compareTo(right.name.toLowerCase()),
+        );
 
   final isUnassigned = normalizedCurrentParentNodeId == null;
   final title = isUnassigned ? 'Assign to Room' : 'Move to Room';
@@ -203,7 +204,8 @@ Future<bool> showDeviceNodeAssignmentFlow(
   final targetParentNodeId = targetRoomId.isEmpty ? null : targetRoomId;
   final selectedIsUnassigned = targetParentNodeId == null;
   final assignmentChanged = targetParentNodeId != normalizedCurrentParentNodeId;
-  final activatesStandalone = selectedIsUnassigned &&
+  final activatesStandalone =
+      selectedIsUnassigned &&
       allowNoRoom &&
       device.type == RhythmDeviceType.light;
   final roomNamesById = {
@@ -212,7 +214,8 @@ Future<bool> showDeviceNodeAssignmentFlow(
   };
   var selectedLabel = 'Unassigned';
   if (targetParentNodeId != null) {
-    selectedLabel = roomNamesById[targetParentNodeId] ??
+    selectedLabel =
+        roomNamesById[targetParentNodeId] ??
         roomSummariesById[targetParentNodeId]?.name ??
         'selected room';
   }
@@ -236,8 +239,10 @@ Future<bool> showDeviceNodeAssignmentFlow(
   var success = true;
   var failureStage = 'assignment_request';
   if (assignmentChanged) {
-    success = await syncProvider.api
-        .assignDeviceParent(device.id, targetParentNodeId);
+    success = await syncProvider.api.assignDeviceParent(
+      device.id,
+      targetParentNodeId,
+    );
   }
 
   if (success && activatesStandalone) {
@@ -266,8 +271,8 @@ Future<bool> showDeviceNodeAssignmentFlow(
           activatesStandalone
               ? 'Failed to activate ${device.displayName} as standalone'
               : isUnassigned
-                  ? 'Failed to assign ${device.displayName}'
-                  : 'Failed to move ${device.displayName}',
+              ? 'Failed to assign ${device.displayName}'
+              : 'Failed to move ${device.displayName}',
         ),
       ),
     );
@@ -313,10 +318,10 @@ Future<bool> showDeviceNodeAssignmentFlow(
         activatesStandalone
             ? '${device.displayName} is ready to use standalone'
             : selectedIsUnassigned
-                ? 'Removed ${device.displayName} from its room'
-                : isUnassigned
-                    ? 'Assigned ${device.displayName} to $selectedLabel'
-                    : 'Moved ${device.displayName} to $selectedLabel',
+            ? 'Removed ${device.displayName} from its room'
+            : isUnassigned
+            ? 'Assigned ${device.displayName} to $selectedLabel'
+            : 'Moved ${device.displayName} to $selectedLabel',
       ),
     ),
   );
@@ -368,29 +373,27 @@ Future<bool> showMotionTargetRoomsFlow(
   BuildContext context, {
   required RhythmDevice device,
   required String currentParentNodeId,
-}) =>
-    _showControlTargetRoomsFlow(
-      context,
-      device: device,
-      currentParentNodeId: currentParentNodeId,
-      controlKind: 'motion',
-      title: 'Motion Controls',
-      description: 'Turn on every selected room when motion is detected.',
-    );
+}) => _showControlTargetRoomsFlow(
+  context,
+  device: device,
+  currentParentNodeId: currentParentNodeId,
+  controlKind: 'motion',
+  title: 'Motion Controls',
+  description: 'Turn on every selected room when motion is detected.',
+);
 
 Future<bool> showButtonTargetRoomsFlow(
   BuildContext context, {
   required RhythmDevice device,
   required String currentParentNodeId,
-}) =>
-    _showControlTargetRoomsFlow(
-      context,
-      device: device,
-      currentParentNodeId: currentParentNodeId,
-      controlKind: 'button',
-      title: 'Button Controls',
-      description: 'Apply each button press to every selected room.',
-    );
+}) => _showControlTargetRoomsFlow(
+  context,
+  device: device,
+  currentParentNodeId: currentParentNodeId,
+  controlKind: 'button',
+  title: 'Button Controls',
+  description: 'Apply each button press to every selected room.',
+);
 
 Future<bool> _showControlTargetRoomsFlow(
   BuildContext context, {
@@ -414,21 +417,21 @@ Future<bool> _showControlTargetRoomsFlow(
         ),
       )
       .toList();
-  final rooms = (topologyRooms.isNotEmpty
-          ? topologyRooms
-          : syncProvider.helloRooms.map(
-              (room) => RoomPickerOption(
-                id: room.id,
-                name: room.name,
-                subtitle: room.deviceSummary,
-              ),
-            ))
-      .toList()
-    ..sort(
-      (left, right) => left.name.toLowerCase().compareTo(
-            right.name.toLowerCase(),
-          ),
-    );
+  final rooms =
+      (topologyRooms.isNotEmpty
+              ? topologyRooms
+              : syncProvider.helloRooms.map(
+                  (room) => RoomPickerOption(
+                    id: room.id,
+                    name: room.name,
+                    subtitle: room.deviceSummary,
+                  ),
+                ))
+          .toList()
+        ..sort(
+          (left, right) =>
+              left.name.toLowerCase().compareTo(right.name.toLowerCase()),
+        );
 
   final currentTargets = syncProvider.controlTargetNodeIds(
     sourceNodeId: device.id,
@@ -483,11 +486,11 @@ Future<bool> _showControlTargetRoomsFlow(
 }
 
 String _targetCountBucket(int count) => switch (count) {
-      <= 0 => 'none',
-      1 => 'one',
-      2 || 3 => 'two_to_three',
-      _ => 'four_plus',
-    };
+  <= 0 => 'none',
+  1 => 'one',
+  2 || 3 => 'two_to_three',
+  _ => 'four_plus',
+};
 
 /// Bottom sheet showing canonical device details + connections.
 ///
@@ -523,10 +526,7 @@ class DeviceDetailSheet extends StatefulWidget {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (context) => DeviceDetailSheet(
-        device: device,
-        roomId: roomId,
-      ),
+      builder: (context) => DeviceDetailSheet(device: device, roomId: roomId),
     );
   }
 
@@ -591,11 +591,13 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     // Low glow and profile overrides are node-level settings. Only expose
     // them for bulbs that the server reports as independently addressable
     // light nodes.
-    final isLightNode = device.type == RhythmDeviceType.light &&
+    final isLightNode =
+        device.type == RhythmDeviceType.light &&
         context.select<ServerSyncProvider, bool>(
           (sync) => sync.nodeById(device.id) != null,
         );
-    final lightSettingsSupported = isLightNode &&
+    final lightSettingsSupported =
+        isLightNode &&
         context.select<ServerSyncProvider, bool>(
           (sync) => sync.lightProfileOverridesSupportedForNode(device.id),
         );
@@ -608,7 +610,8 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
           )
         : null;
     final groupedLightSettings = isLightNode && individualProfileRoute == false;
-    final hasLightOverrides = isLightNode &&
+    final hasLightOverrides =
+        isLightNode &&
         context.select<ServerSyncProvider, bool>(
           (sync) => sync.hasNodeLightProfileOverrides(device.id),
         );
@@ -664,10 +667,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                     const SizedBox(height: 12),
                     // The name is a plain title here; renaming lives on the
                     // Device Info row (Info tab) with a pencil.
-                    _DeviceNameButton(
-                      label: deviceDisplayName,
-                      onTap: null,
-                    ),
+                    _DeviceNameButton(label: deviceDisplayName, onTap: null),
                     if (device.productInfo != null)
                       Padding(
                         padding: const EdgeInsets.only(top: 4),
@@ -675,8 +675,9 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                           device.productInfo!,
                           textAlign: TextAlign.center,
                           style: TextStyle(
-                            color: CelestialColors.textSecondary
-                                .withValues(alpha: 0.7),
+                            color: CelestialColors.textSecondary.withValues(
+                              alpha: 0.7,
+                            ),
                             fontSize: 13,
                           ),
                         ),
@@ -705,22 +706,22 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                   duration: const Duration(milliseconds: 200),
                   child: switch (_selectedTab) {
                     _DeviceTab.settings => _buildSettingsTab(
-                        context,
-                        device,
-                        isLightNode,
-                        lightSettingsSupported,
-                        hasLightOverrides,
-                        groupedLightSettings,
-                      ),
+                      context,
+                      device,
+                      isLightNode,
+                      lightSettingsSupported,
+                      hasLightOverrides,
+                      groupedLightSettings,
+                    ),
                     _DeviceTab.network => _buildNetworkTab(
-                        context,
-                        device,
-                        canUnpairMatter,
-                        canRecoverMatterSetupCode,
-                        canUnpairHueBle,
-                        canUnpairLocalBle,
-                        canUnpairHueBridge,
-                      ),
+                      context,
+                      device,
+                      canUnpairMatter,
+                      canRecoverMatterSetupCode,
+                      canUnpairHueBle,
+                      canUnpairLocalBle,
+                      canUnpairHueBridge,
+                    ),
                     _DeviceTab.info => _buildInfoTab(context, device),
                   },
                 ),
@@ -739,8 +740,8 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                   child: ElevatedButton(
                     onPressed: _removingEndpoint == null
                         ? _moving
-                            ? null
-                            : () => Navigator.of(context).pop()
+                              ? null
+                              : () => Navigator.of(context).pop()
                         : null,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: CelestialColors.sunWarm,
@@ -779,8 +780,8 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     final rhythmId = _canonicalData?['id'] as String?;
 
     return _buildGroup('Device Info', [
-      // Editable name (lights only) — the pencil is the rename affordance.
-      if (device.type == RhythmDeviceType.light) _buildNameEditRow(context),
+      // The canonical rename endpoint owns names for every device type.
+      _buildNameEditRow(context),
       _InfoRow(label: 'Type', value: typeLabel),
       if (device.manufacturer != null)
         _InfoRow(label: 'Manufacturer', value: device.manufacturer!),
@@ -839,10 +840,10 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     final standbyEnabled = context.select<ServerSyncProvider, bool>(
       (sync) => sync.standbyEnabledForNode(device.id),
     );
-    final buttonMultiRoomControlsSupported =
-        context.select<ServerSyncProvider, bool>(
-      (sync) => sync.buttonMultiRoomControlsSupported,
-    );
+    final buttonMultiRoomControlsSupported = context
+        .select<ServerSyncProvider, bool>(
+          (sync) => sync.buttonMultiRoomControlsSupported,
+        );
     return ListView(
       key: const ValueKey('settings'),
       padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
@@ -855,14 +856,15 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
               customized: hasLightOverrides,
               settingsKeyPrefix: 'device-settings-light',
               unsupportedStatus: groupedLightSettings ? 'Room only' : null,
-              unsupportedSemanticsValue:
-                  groupedLightSettings ? 'Controlled by room' : null,
+              unsupportedSemanticsValue: groupedLightSettings
+                  ? 'Controlled by room'
+                  : null,
               unsupportedIcon: groupedLightSettings ? Icons.home_rounded : null,
               onPressed: lightSettingsSupported
                   ? () => _openBulbLightSettings(device)
                   : groupedLightSettings
-                      ? null
-                      : _showBulbLightSettingsUnavailable,
+                  ? null
+                  : _showBulbLightSettingsUnavailable,
             ),
             LowGlowSettingRow(
               value: standbyEnabled,
@@ -900,15 +902,17 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     bool canUnpairHueBridge,
   ) {
     final isLight = device.type == RhythmDeviceType.light;
-    final removableEndpoints = _removableEndpoints.where((endpoint) {
-      return switch (endpoint.hubType) {
-        'matter' => canUnpairMatter,
-        'hue_ble' => canUnpairHueBle,
-        'local_ble' => canUnpairLocalBle,
-        'hue' => canUnpairHueBridge,
-        _ => false,
-      };
-    }).toList(growable: false);
+    final removableEndpoints = _removableEndpoints
+        .where((endpoint) {
+          return switch (endpoint.hubType) {
+            'matter' => canUnpairMatter,
+            'hue_ble' => canUnpairHueBle,
+            'local_ble' => canUnpairLocalBle,
+            'hue' => canUnpairHueBridge,
+            _ => false,
+          };
+        })
+        .toList(growable: false);
     final hasMultipleConnections = _allEndpoints.length > 1;
     return ListView(
       key: const ValueKey('network'),
@@ -956,14 +960,12 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     return ListView(
       key: const ValueKey('info'),
       padding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
-      children: [
-        _buildInfoSection(context, device),
-      ],
+      children: [_buildInfoSection(context, device)],
     );
   }
 
   /// Editable "Name" row for the Device Info group — value plus a pencil that
-  /// opens the rename dialog. Lights only.
+  /// opens the canonical-device rename dialog.
   Widget _buildNameEditRow(BuildContext context) {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
@@ -1005,49 +1007,55 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   }
 
   Widget _tabLoadingIndicator() => const Center(
-        child: Padding(
-          padding: EdgeInsets.all(20),
-          child: SizedBox(
-            width: 20,
-            height: 20,
-            child: CircularProgressIndicator(
-              strokeWidth: 2,
-              color: CelestialColors.sunWarm,
-            ),
-          ),
+    child: Padding(
+      padding: EdgeInsets.all(20),
+      child: SizedBox(
+        width: 20,
+        height: 20,
+        child: CircularProgressIndicator(
+          strokeWidth: 2,
+          color: CelestialColors.sunWarm,
         ),
-      );
+      ),
+    ),
+  );
 
   Widget _tabHint(String text) => Padding(
-        padding: const EdgeInsets.all(20),
-        child: Center(
-          child: Text(
-            text,
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              color: CelestialColors.textSecondary.withValues(alpha: 0.5),
-              fontSize: 13,
-            ),
-          ),
+    padding: const EdgeInsets.all(20),
+    child: Center(
+      child: Text(
+        text,
+        textAlign: TextAlign.center,
+        style: TextStyle(
+          color: CelestialColors.textSecondary.withValues(alpha: 0.5),
+          fontSize: 13,
         ),
-      );
+      ),
+    ),
+  );
 
   Future<void> _showRenameDialog(BuildContext context) async {
+    final deviceLabel = switch (widget.device.type) {
+      RhythmDeviceType.light => 'Bulb',
+      RhythmDeviceType.button => 'Button',
+      RhythmDeviceType.motion => 'Motion Sensor',
+      RhythmDeviceType.contact => 'Contact Sensor',
+    };
     final controller = TextEditingController(text: _deviceDisplayName);
     final newName = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: CelestialColors.backgroundCard,
-        title: const Text(
-          'Rename Bulb',
-          style: TextStyle(color: CelestialColors.textPrimary),
+        title: Text(
+          'Rename $deviceLabel',
+          style: const TextStyle(color: CelestialColors.textPrimary),
         ),
         content: TextField(
           controller: controller,
           autofocus: true,
           style: const TextStyle(color: CelestialColors.textPrimary),
           decoration: InputDecoration(
-            hintText: 'Bulb name',
+            hintText: '$deviceLabel name',
             hintStyle: TextStyle(
               color: CelestialColors.textSecondary.withValues(alpha: 0.5),
             ),
@@ -1091,22 +1099,23 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     }
 
     final syncProvider = context.read<ServerSyncProvider>();
-    final success =
-        await syncProvider.api.renameCanonicalDevice(widget.device.id, newName);
+    final success = await syncProvider.api.renameCanonicalDevice(
+      widget.device.id,
+      newName,
+    );
     if (!context.mounted) return;
 
     if (!success) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Failed to rename bulb')),
+        SnackBar(
+          content: Text('Failed to rename ${deviceLabel.toLowerCase()}'),
+        ),
       );
       return;
     }
 
     setState(() {
-      _canonicalData = {
-        ...?_canonicalData,
-        'name': newName,
-      };
+      _canonicalData = {...?_canonicalData, 'name': newName};
     });
     syncProvider.api.triggerSync();
   }
@@ -1131,8 +1140,8 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     final canLeaveUnassigned = isAssigned && _canLeaveUnassigned(syncProvider);
     final label = isAssigned
         ? canLeaveUnassigned
-            ? 'Move or Remove...'
-            : 'Move to Room...'
+              ? 'Move or Remove...'
+              : 'Move to Room...'
         : 'Assign to Room...';
 
     return Semantics(
@@ -1253,11 +1262,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
           ),
           child: Row(
             children: [
-              Icon(
-                icon,
-                color: iconColor.withValues(alpha: 0.9),
-                size: 20,
-              ),
+              Icon(icon, color: iconColor.withValues(alpha: 0.9), size: 20),
               const SizedBox(width: 12),
               Expanded(
                 child: Text(
@@ -1400,10 +1405,9 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     RhythmPairingRecoverySecret? secret;
     String? failureStage;
     try {
-      secret = await context
-          .read<ServerSyncProvider>()
-          .api
-          .getMatterSetupCode(nativeId);
+      secret = await context.read<ServerSyncProvider>().api.getMatterSetupCode(
+        nativeId,
+      );
       if (secret == null) failureStage = 'not_available';
     } catch (_) {
       failureStage = 'request';
@@ -1422,8 +1426,9 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       );
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content:
-              Text('No saved Matter setup code is available for this device.'),
+          content: Text(
+            'No saved Matter setup code is available for this device.',
+          ),
         ),
       );
       return;
@@ -1469,11 +1474,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       final hubAddress = hubKey['address']?.toString() ?? '';
       final nativeId = endpoint['native_id']?.toString() ?? '';
       if (nativeId.isNotEmpty) {
-        return (
-          hubType: hubType,
-          hubAddress: hubAddress,
-          nativeId: nativeId,
-        );
+        return (hubType: hubType, hubAddress: hubAddress, nativeId: nativeId);
       }
     }
     return null;
@@ -1509,25 +1510,25 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   }
 
   String _endpointLabel(_DeviceEndpoint endpoint) => switch (endpoint.hubType) {
-        'hue' => 'Hue Bridge',
-        'hue_ble' => 'Hue Bluetooth',
-        'local_ble' => 'Local Bluetooth',
-        _ => 'Matter',
-      };
+    'hue' => 'Hue Bridge',
+    'hue_ble' => 'Hue Bluetooth',
+    'local_ble' => 'Local Bluetooth',
+    _ => 'Matter',
+  };
 
   String get _deviceTypeAnalyticsLabel => switch (widget.device.type) {
-        RhythmDeviceType.light => 'light',
-        RhythmDeviceType.button => 'button',
-        RhythmDeviceType.motion => 'motion',
-        RhythmDeviceType.contact => 'contact',
-      };
+    RhythmDeviceType.light => 'light',
+    RhythmDeviceType.button => 'button',
+    RhythmDeviceType.motion => 'motion',
+    RhythmDeviceType.contact => 'contact',
+  };
 
   String get _hueRemovalNoun => switch (widget.device.type) {
-        RhythmDeviceType.light => 'bulb',
-        RhythmDeviceType.button => 'switch',
-        RhythmDeviceType.motion => 'motion sensor',
-        RhythmDeviceType.contact => 'contact sensor',
-      };
+    RhythmDeviceType.light => 'bulb',
+    RhythmDeviceType.button => 'switch',
+    RhythmDeviceType.motion => 'motion sensor',
+    RhythmDeviceType.contact => 'contact sensor',
+  };
 
   String _removeConfirmation(
     _DeviceEndpoint endpoint, {
@@ -1548,8 +1549,8 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     if (removesConnectionOnly) {
       final handoffNote = endpoint.hubType == 'hue_ble'
           ? '\n\nKeep the bulb powered on and nearby while Rhythm performs an '
-              'authenticated Bluetooth release. The bulb will become '
-              'discoverable and can be paired again without a factory reset.'
+                'authenticated Bluetooth release. The bulb will become '
+                'discoverable and can be paired again without a factory reset.'
           : '';
       return 'This will remove the $connectionLabel connection from "$name". '
           'The device will remain in Rhythm through its other '
@@ -1587,18 +1588,16 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       onTap: removalInProgress
           ? null
           : () => _confirmRemoveDevice(
-                context,
-                endpoint,
-                removesConnectionOnly: removesConnectionOnly,
-              ),
+              context,
+              endpoint,
+              removesConnectionOnly: removesConnectionOnly,
+            ),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         decoration: BoxDecoration(
           color: Colors.red.shade900.withValues(alpha: 0.3),
           borderRadius: BorderRadius.circular(14),
-          border: Border.all(
-            color: Colors.red.shade400.withValues(alpha: 0.4),
-          ),
+          border: Border.all(color: Colors.red.shade400.withValues(alpha: 0.4)),
         ),
         child: Row(
           children: [
@@ -1612,19 +1611,12 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                 ),
               )
             else
-              Icon(
-                Icons.delete_outline,
-                color: Colors.red.shade300,
-                size: 20,
-              ),
+              Icon(Icons.delete_outline, color: Colors.red.shade300, size: 20),
             const SizedBox(width: 12),
             Expanded(
               child: Text(
                 isRemoving ? 'Removing...' : idleLabel,
-                style: TextStyle(
-                  color: Colors.red.shade300,
-                  fontSize: 15,
-                ),
+                style: TextStyle(color: Colors.red.shade300, fontSize: 15),
               ),
             ),
           ],
@@ -1703,8 +1695,8 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
             deviceId: endpoint.nativeId,
             hubAddress:
                 endpoint.hubType == 'hue' && endpoint.hubAddress.isNotEmpty
-                    ? endpoint.hubAddress
-                    : null,
+                ? endpoint.hubAddress
+                : null,
             deviceType: _deviceTypeAnalyticsLabel,
             correlationId: hueJourneyId,
             force: force,
@@ -1736,18 +1728,21 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                 ),
                 actions: [
                   TextButton(
-                    onPressed: () => Navigator.of(ctx)
-                        .pop(_HueBleRemovalFailureChoice.cancel),
+                    onPressed: () => Navigator.of(
+                      ctx,
+                    ).pop(_HueBleRemovalFailureChoice.cancel),
                     child: const Text('Cancel'),
                   ),
                   TextButton(
-                    onPressed: () => Navigator.of(ctx)
-                        .pop(_HueBleRemovalFailureChoice.retry),
+                    onPressed: () => Navigator.of(
+                      ctx,
+                    ).pop(_HueBleRemovalFailureChoice.retry),
                     child: const Text('Try Again'),
                   ),
                   TextButton(
-                    onPressed: () => Navigator.of(ctx)
-                        .pop(_HueBleRemovalFailureChoice.forget),
+                    onPressed: () => Navigator.of(
+                      ctx,
+                    ).pop(_HueBleRemovalFailureChoice.forget),
                     child: Text(
                       'Forget Anyway',
                       style: TextStyle(color: Colors.red.shade300),
@@ -1771,11 +1766,11 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
           final isHueBridge = endpoint.hubType == 'hue';
           final forceRemovalExplanation = isHueBridge
               ? 'Check the Hue Bridge and finish removal? Rhythm will clean '
-                  'up its connection only after the bridge confirms the '
-                  '$_hueRemovalNoun is absent. If the bridge still owns it, '
-                  'this fails safely.'
+                    'up its connection only after the bridge confirms the '
+                    '$_hueRemovalNoun is absent. If the bridge still owns it, '
+                    'this fails safely.'
               : 'Force remove? This cleans up local state without contacting '
-                  'the device.';
+                    'the device.';
           final forceRemove = await showDialog<bool>(
             context: context,
             builder: (ctx) => AlertDialog(
@@ -1796,8 +1791,9 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                 TextButton(
                   onPressed: () => Navigator.of(ctx).pop(true),
                   child: Text(
-                      isHueBridge ? 'Check and Finish Removal' : 'Force Remove',
-                      style: TextStyle(color: Colors.red.shade300)),
+                    isHueBridge ? 'Check and Finish Removal' : 'Force Remove',
+                    style: TextStyle(color: Colors.red.shade300),
+                  ),
                 ),
               ],
             ),
@@ -1872,9 +1868,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
         final messenger = ScaffoldMessenger.of(context);
         Navigator.of(context).pop();
         messenger.showSnackBar(
-          SnackBar(
-            content: Text('Removed ${widget.device.displayName}'),
-          ),
+          SnackBar(content: Text('Removed ${widget.device.displayName}')),
         );
       }
     } else {
@@ -1989,17 +1983,16 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     return switch (widget.device.type) {
       RhythmDeviceType.button ||
       RhythmDeviceType.motion ||
-      RhythmDeviceType.contact =>
-        true,
+      RhythmDeviceType.contact => true,
       RhythmDeviceType.light => _removableEndpoints.any(
-          (endpoint) => switch (endpoint.hubType) {
-            'matter' => syncProvider.supportsMatterRoomlessDevices,
-            'hue_ble' => syncProvider.supportsHueBleRoomlessDevices,
-            'local_ble' => syncProvider.supportsLocalBleRoomlessDevices,
-            'hue' => false,
-            _ => false,
-          },
-        ),
+        (endpoint) => switch (endpoint.hubType) {
+          'matter' => syncProvider.supportsMatterRoomlessDevices,
+          'hue_ble' => syncProvider.supportsHueBleRoomlessDevices,
+          'local_ble' => syncProvider.supportsLocalBleRoomlessDevices,
+          'hue' => false,
+          _ => false,
+        },
+      ),
     };
   }
 
@@ -2048,33 +2041,30 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   }
 
   (IconData, Color) _iconForType(RhythmDeviceType type) => switch (type) {
-        RhythmDeviceType.light => (
-            Icons.lightbulb_outline,
-            const Color(0xFFFFB74D)
-          ),
-        RhythmDeviceType.button => (
-            Icons.touch_app_outlined,
-            const Color(0xFF64B5F6)
-          ),
-        RhythmDeviceType.motion => (
-            Icons.sensors_outlined,
-            const Color(0xFF81C784)
-          ),
-        RhythmDeviceType.contact => (
-            Icons.sensor_door_outlined,
-            const Color(0xFFFFB74D)
-          ),
-      };
+    RhythmDeviceType.light => (
+      Icons.lightbulb_outline,
+      const Color(0xFFFFB74D),
+    ),
+    RhythmDeviceType.button => (
+      Icons.touch_app_outlined,
+      const Color(0xFF64B5F6),
+    ),
+    RhythmDeviceType.motion => (
+      Icons.sensors_outlined,
+      const Color(0xFF81C784),
+    ),
+    RhythmDeviceType.contact => (
+      Icons.sensor_door_outlined,
+      const Color(0xFFFFB74D),
+    ),
+  };
 }
 
 class _DeviceNameButton extends StatelessWidget {
   final String label;
   final VoidCallback? onTap;
 
-  const _DeviceNameButton({
-    required this.label,
-    required this.onTap,
-  });
+  const _DeviceNameButton({required this.label, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -2171,10 +2161,7 @@ class _FlashButton extends StatefulWidget {
   final String deviceLabel;
   final Future<bool> Function() onFlash;
 
-  const _FlashButton({
-    required this.deviceLabel,
-    required this.onFlash,
-  });
+  const _FlashButton({required this.deviceLabel, required this.onFlash});
 
   @override
   State<_FlashButton> createState() => _FlashButtonState();
