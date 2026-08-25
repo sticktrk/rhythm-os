@@ -410,10 +410,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
       final device = syncProvider.deviceForNode(sourceNode.id);
       if (device == null || device.type != RhythmDeviceType.motion) continue;
       motionSensorsById[device.id] = device;
-      final parentId = sourceNode.parentId;
-      if (parentId != null && parentId.isNotEmpty) {
-        motionParentIds[device.id] = parentId;
-      }
+      motionParentIds[device.id] = sourceNode.parentId?.trim() ?? '';
     }
     final motionSensors = motionSensorsById.values.toList(growable: false)
       ..sort(
@@ -911,7 +908,8 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
       for (final device in devices)
         _DeviceRow(
           device: device,
-          roomId: parentNodeIdsByDevice[device.id] ?? room.id,
+          currentRoomId: room.id,
+          parentRoomId: parentNodeIdsByDevice[device.id] ?? room.id,
         ),
     ]);
   }
@@ -935,9 +933,14 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
 /// A device row in the matching room settings device section.
 class _DeviceRow extends StatefulWidget {
   final RhythmDevice device;
-  final String roomId;
+  final String currentRoomId;
+  final String parentRoomId;
 
-  const _DeviceRow({required this.device, required this.roomId});
+  const _DeviceRow({
+    required this.device,
+    required this.currentRoomId,
+    required this.parentRoomId,
+  });
 
   @override
   State<_DeviceRow> createState() => _DeviceRowState();
@@ -975,6 +978,9 @@ class _DeviceRowState extends State<_DeviceRow> {
       RhythmDeviceType.motion => 'Motion',
       RhythmDeviceType.contact => 'Contact',
     };
+    final isParentRoom = device.type == RhythmDeviceType.motion &&
+        widget.parentRoomId.isNotEmpty &&
+        widget.parentRoomId == widget.currentRoomId;
     final profileOverride = context.select<
             ServerSyncProvider,
             ({
@@ -996,16 +1002,27 @@ class _DeviceRowState extends State<_DeviceRow> {
     return Semantics(
       key: ValueKey('room-device-row-${device.id}'),
       button: true,
-      label: '${device.displayName}, $typeLabel$customProfileLabel',
+      label:
+          '${device.displayName}, $typeLabel${isParentRoom ? ', parent room' : ''}$customProfileLabel',
       hint: isLight
           ? 'Tap for settings. Touch and hold to identify.'
           : 'Tap for settings.',
-      onTap: () => DeviceDetailSheet.show(context, device, widget.roomId),
+      onTap: () => DeviceDetailSheet.show(
+        context,
+        device,
+        widget.currentRoomId,
+        parentRoomId: widget.parentRoomId,
+      ),
       onLongPress: isLight && !_identifying ? _identify : null,
       excludeSemantics: true,
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: () => DeviceDetailSheet.show(context, device, widget.roomId),
+        onTap: () => DeviceDetailSheet.show(
+          context,
+          device,
+          widget.currentRoomId,
+          parentRoomId: widget.parentRoomId,
+        ),
         onLongPress: isLight && !_identifying ? _identify : null,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
@@ -1069,7 +1086,7 @@ class _DeviceRowState extends State<_DeviceRow> {
                     color: Color(0xFFFFB74D),
                   ),
                 )
-              else
+              else ...[
                 Text(
                   typeLabel,
                   style: const TextStyle(
@@ -1077,6 +1094,31 @@ class _DeviceRowState extends State<_DeviceRow> {
                     fontSize: 12,
                   ),
                 ),
+                if (isParentRoom) ...[
+                  const SizedBox(width: 6),
+                  Container(
+                    key: ValueKey('room-device-parent-badge-${device.id}'),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: CelestialColors.sunWarm.withValues(alpha: 0.14),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(
+                        color: CelestialColors.sunWarm.withValues(alpha: 0.35),
+                      ),
+                    ),
+                    child: const Text(
+                      'PARENT',
+                      style: TextStyle(
+                        color: CelestialColors.sunWarm,
+                        fontSize: 9,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
             ],
           ),
         ),
