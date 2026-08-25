@@ -5,8 +5,8 @@
 //! resources with color_temperature.mirek (no xy conversion needed).
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use log::debug;
@@ -25,6 +25,39 @@ use crate::transport::HueTransport;
 
 const DISPATCH_INFO_MS: u128 = 250;
 const DISPATCH_WARN_MS: u128 = 1000;
+/// Leave enough room inside the composite's 10-second dispatch supervision
+/// window to report a blocked Hue authority handoff and retire the mailbox
+/// slot. A plain `Mutex::lock` can outlive both the request and dispatch
+/// timeouts because those timers cannot cancel a blocking lock waiter.
+const AUTHORITY_LOCK_TIMEOUT: Duration = Duration::from_secs(4);
+const AUTHORITY_LOCK_RETRY: Duration = Duration::from_millis(10);
+
+fn lock_before_deadline<'a>(
+    lock: &'a Mutex<()>,
+    deadline: Instant,
+    unavailable_message: &'static str,
+    timeout_message: &'static str,
+) -> LightControlResult<MutexGuard<'a, ()>> {
+    loop {
+        match lock.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(TryLockError::Poisoned(_)) => {
+                return Err(LightControlError::CommandFailed(
+                    unavailable_message.to_string(),
+                ));
+            }
+            Err(TryLockError::WouldBlock) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return Err(LightControlError::Timeout(timeout_message.to_string()));
+                }
+                std::thread::sleep(
+                    AUTHORITY_LOCK_RETRY.min(deadline.saturating_duration_since(now)),
+                );
+            }
+        }
+    }
+}
 
 /// Light controller implementation using Hue V2 API.
 ///
@@ -41,6 +74,7 @@ pub struct HueLightController<H: HueTransport> {
     sse_liveness: Option<Arc<HueSseLiveness>>,
     external_topology_transaction_lock: Option<Arc<Mutex<()>>>,
     controller_operation_lock: Option<Arc<Mutex<()>>>,
+    authority_lock_timeout: Duration,
 }
 
 impl<H: HueTransport> HueLightController<H> {
@@ -62,6 +96,7 @@ impl<H: HueTransport> HueLightController<H> {
             sse_liveness: None,
             external_topology_transaction_lock: None,
             controller_operation_lock: None,
+            authority_lock_timeout: AUTHORITY_LOCK_TIMEOUT,
         }
     }
 
@@ -90,32 +125,42 @@ impl<H: HueTransport> HueLightController<H> {
         self
     }
 
+    #[cfg(test)]
+    fn with_authority_lock_timeout(mut self, timeout: Duration) -> Self {
+        self.authority_lock_timeout = timeout;
+        self
+    }
+
     fn lock_controller_operations(
         &self,
+        deadline: Instant,
     ) -> LightControlResult<Option<std::sync::MutexGuard<'_, ()>>> {
         self.controller_operation_lock
             .as_ref()
             .map(|lock| {
-                lock.lock().map_err(|_| {
-                    LightControlError::CommandFailed(
-                        "Hue controller operations are temporarily unavailable".to_string(),
-                    )
-                })
+                lock_before_deadline(
+                    lock,
+                    deadline,
+                    "Hue controller operations are temporarily unavailable",
+                    "Hue controller operation lock timed out",
+                )
             })
             .transpose()
     }
 
     fn lock_topology_transaction(
         &self,
+        deadline: Instant,
     ) -> LightControlResult<Option<std::sync::MutexGuard<'_, ()>>> {
         self.external_topology_transaction_lock
             .as_ref()
             .map(|lock| {
-                lock.lock().map_err(|_| {
-                    LightControlError::CommandFailed(
-                        "Hue topology is temporarily unavailable".to_string(),
-                    )
-                })
+                lock_before_deadline(
+                    lock,
+                    deadline,
+                    "Hue topology is temporarily unavailable",
+                    "Hue authority handoff lock timed out",
+                )
             })
             .transpose()
     }
@@ -152,9 +197,13 @@ impl<H: HueTransport> HueLightController<H> {
         // The topology transaction is the authority hand-off barrier. Recheck
         // readiness only after crossing it so a command queued behind release
         // cannot write to a bridge Rhythm has just restored to the user.
-        let topology = self.lock_topology_transaction()?;
+        // Keep one deadline across both locks. Timed-out callers must leave the
+        // composite mailbox instead of lingering as uncancellable blocking
+        // tasks and starving every later Hue command until process restart.
+        let deadline = Instant::now() + self.authority_lock_timeout;
+        let topology = self.lock_topology_transaction(deadline)?;
         self.ensure_authority_ready()?;
-        let operation = self.lock_controller_operations()?;
+        let operation = self.lock_controller_operations(deadline)?;
         Ok((topology, operation))
     }
 
@@ -890,6 +939,41 @@ mod tests {
             .to_string()
             .contains("Hue topology is temporarily unavailable"));
         assert_eq!(controller.client.set_grouped_light_count(), 0);
+    }
+
+    #[test]
+    fn timed_out_authority_barrier_does_not_require_a_restart() {
+        let state = Arc::new(Mutex::new(AppState::default()));
+        let key = HubKey::new(HubType::new(HubType::HUE), "192.0.2.1");
+        state
+            .lock()
+            .unwrap()
+            .mark_external_controller_authority_ready(&key);
+
+        let (controller, _) = make_spy_controller();
+        let controller = controller
+            .with_capability_source(state.clone(), key)
+            .with_authority_lock_timeout(Duration::from_millis(25));
+        let topology_lock = state
+            .lock()
+            .unwrap()
+            .external_topology_transaction_lock
+            .clone();
+        let topology_guard = topology_lock.lock().unwrap();
+        let target = HubDispatchTarget::Group {
+            room_id: "room1".to_string(),
+            control_id: "gl1".to_string(),
+        };
+
+        let error = block_on(controller.turn_on_target(&target, LightingCommand::new(80, 4000)))
+            .unwrap_err();
+
+        assert!(matches!(error, LightControlError::Timeout(_)));
+        assert_eq!(controller.client.set_grouped_light_count(), 0);
+
+        drop(topology_guard);
+        block_on(controller.turn_on_target(&target, LightingCommand::new(80, 4000))).unwrap();
+        assert_eq!(controller.client.set_grouped_light_count(), 1);
     }
 
     #[test]
