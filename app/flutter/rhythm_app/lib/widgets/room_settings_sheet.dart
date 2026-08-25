@@ -17,6 +17,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
 import '../screens/hubs/room_device_add_flow.dart';
 import '../utils/app_color_temperature.dart';
 import 'device_detail_sheet.dart';
+import 'light_delivery_warning_signal.dart';
 import 'low_glow_switch.dart' show LightProfileOverrideBadge;
 import 'segmented_tab_bar.dart';
 import 'light_output_display.dart';
@@ -990,6 +991,11 @@ class _DeviceRowState extends State<_DeviceRow> {
             })>(
         (provider) => provider.lightProfileOverrideSummaryForNode(device.id));
     final isLight = device.type == RhythmDeviceType.light;
+    final hasDeliveryWarning =
+        context.select<ServerSyncProvider, bool>((provider) {
+      if (!isLight) return false;
+      return provider.recentLightDeliveryWarningsForNode(device.id).isNotEmpty;
+    });
     final customProfileParts = <String>[
       if (profileOverride.brightnessRange) 'brightness range',
       if (profileOverride.colorTemperatureRange) 'color temperature range',
@@ -1003,7 +1009,7 @@ class _DeviceRowState extends State<_DeviceRow> {
       key: ValueKey('room-device-row-${device.id}'),
       button: true,
       label:
-          '${device.displayName}, $typeLabel${isParentRoom ? ', parent room' : ''}$customProfileLabel',
+          '${device.displayName}, $typeLabel${isParentRoom ? ', parent room' : ''}$customProfileLabel${hasDeliveryWarning ? ', delivery warning, could not reach this bulb' : ''}',
       hint: isLight
           ? 'Tap for settings. Touch and hold to identify.'
           : 'Tap for settings.',
@@ -1061,6 +1067,20 @@ class _DeviceRowState extends State<_DeviceRow> {
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
+                    if (hasDeliveryWarning)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 3),
+                        child: Text(
+                          'Couldn\u2019t reach this bulb',
+                          style: TextStyle(
+                            color: lightDeliveryWarningColor,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -1076,6 +1096,13 @@ class _DeviceRowState extends State<_DeviceRow> {
                 ),
               ],
               const SizedBox(width: 8),
+              if (hasDeliveryWarning) ...[
+                LightDeliveryWarningSignal(
+                  key: ValueKey('room-device-delivery-warning-${device.id}'),
+                  size: 18,
+                ),
+                const SizedBox(width: 8),
+              ],
               if (_identifying)
                 const SizedBox(
                   key: ValueKey('room-device-identify-progress'),

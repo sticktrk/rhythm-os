@@ -939,6 +939,8 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
 
   final _helloController = StreamController<RhythmHello>.broadcast();
   final _rhythmStateController = StreamController<RhythmRoomState>.broadcast();
+  final _dispatchFailureController =
+      StreamController<RhythmDispatchFailure>.broadcast();
   final _hubEventController = StreamController<
       ({String event, String? hubType, String? address})>.broadcast();
   final _motionTimerController =
@@ -970,6 +972,10 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
   @override
   Stream<RhythmRoomState> get rhythmStateEvents =>
       _rhythmStateController.stream;
+
+  @override
+  Stream<RhythmDispatchFailure> get dispatchFailureEvents =>
+      _dispatchFailureController.stream;
 
   @override
   Stream<({String event, String? hubType, String? address})> get hubEvents =>
@@ -1014,6 +1020,10 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
     _rhythmStateController.add(state);
   }
 
+  void emitDispatchFailure(RhythmDispatchFailure failure) {
+    _dispatchFailureController.add(failure);
+  }
+
   void emitHubEvent({
     required String event,
     String? hubType,
@@ -1050,6 +1060,7 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
   void dispose() {
     _helloController.close();
     _rhythmStateController.close();
+    _dispatchFailureController.close();
     _hubEventController.close();
     _motionTimerController.close();
     _modeChangedController.close();
@@ -10361,6 +10372,223 @@ void main() {
       find.byKey(const ValueKey('room-device-row-sensor-1')),
       findsNothing,
     );
+  });
+
+  testWidgets(
+      'delivery failures aggregate by bulb, mark bulb rows, and expire independently',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    api.topologyNodes = [
+      RhythmTopologyNode.fromJson({
+        'id': 'room-1',
+        'name': 'Porch',
+        'kind': 'room',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'bulb-1',
+        'name': 'Aqara Porch Bulb',
+        'kind': 'light_device',
+        'parent_id': 'room-1',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'bulb-2',
+        'name': 'Door Sconce',
+        'kind': 'light_device',
+        'parent_id': 'room-1',
+      }),
+    ];
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Porch',
+            'kind': 'room',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+          },
+          {
+            'id': 'bulb-1',
+            'name': 'Aqara Porch Bulb',
+            'kind': 'light_device',
+            'parent_id': 'room-1',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+          },
+          {
+            'id': 'bulb-2',
+            'name': 'Door Sconce',
+            'kind': 'light_device',
+            'parent_id': 'room-1',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+          },
+        ],
+        'location': const <String, dynamic>{},
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    connection.emitDispatchFailure(const RhythmDispatchFailure(
+      hubType: 'matter',
+      hubKey: 'matter@local',
+      nodeId: 'room-1',
+      targetNodeId: 'bulb-1',
+      target: 'matter-113',
+      kind: 'matter_controller_command',
+      status: 'timed_out',
+    ));
+    connection.emitDispatchFailure(const RhythmDispatchFailure(
+      hubType: 'matter',
+      hubKey: 'matter@local',
+      nodeId: 'bulb-1',
+      targetNodeId: 'bulb-1',
+      target: 'matter-113',
+      kind: 'matter_controller_command',
+      status: 'timed_out',
+    ));
+    await tester.pump();
+    expect(
+      provider.recentLightDeliveryWarningsForNode('room-1'),
+      hasLength(1),
+      reason: 'the same canonical bulb is one warning across command scopes',
+    );
+    await tester.pump(const Duration(seconds: 5));
+    connection.emitDispatchFailure(const RhythmDispatchFailure(
+      hubType: 'matter',
+      hubKey: 'matter@local',
+      nodeId: 'room-1',
+      targetNodeId: 'bulb-2',
+      target: 'matter-114',
+      kind: 'matter_controller_command',
+      status: 'timed_out',
+    ));
+    await tester.pump();
+
+    expect(
+      provider
+          .recentLightDeliveryWarningsForNode('room-1')
+          .map((warning) => warning.bulbName),
+      ['Aqara Porch Bulb', 'Door Sconce'],
+    );
+    expect(
+      provider.recentLightDeliveryWarningsForNode('bulb-1'),
+      hasLength(1),
+    );
+    expect(
+      provider.recentLightDeliveryWarningsForNode('bulb-2'),
+      hasLength(1),
+    );
+
+    await _pumpRoomSettingsSheet(
+      tester,
+      roomProvider: roomProvider,
+      provider: provider,
+      room: const RoomDto(
+        id: 'room-1',
+        name: 'Porch',
+        source: RoomSourceDto.matter,
+        deviceIds: ['bulb-1', 'bulb-2'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    await _selectRoomSettingsTab(tester, 'Bulbs');
+    expect(
+      find.byKey(const ValueKey('room-device-delivery-warning-bulb-1')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('room-device-delivery-warning-bulb-2')),
+      findsOneWidget,
+    );
+    expect(find.text('Couldn\u2019t reach this bulb'), findsNWidgets(2));
+    expect(
+      tester
+          .widget<Semantics>(
+            find.byKey(const ValueKey('room-device-row-bulb-1')),
+          )
+          .properties
+          .label,
+      contains('delivery warning, could not reach this bulb'),
+    );
+
+    // The first bulb's timer started five seconds earlier, so it disappears
+    // without clearing the still-relevant second bulb warning.
+    await tester.pump(const Duration(seconds: 26));
+    expect(
+      provider.recentLightDeliveryWarningsForNode('bulb-1'),
+      isEmpty,
+    );
+    expect(
+      provider.recentLightDeliveryWarningsForNode('bulb-2'),
+      hasLength(1),
+    );
+    expect(
+      find.byKey(const ValueKey('room-device-delivery-warning-bulb-1')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey('room-device-delivery-warning-bulb-2')),
+      findsOneWidget,
+    );
+
+    await tester.pump(const Duration(seconds: 5));
+    expect(provider.recentLightDeliveryWarningsForNode('room-1'), isEmpty);
+
+    // Previous appliances omit target_node_id. When they directly address a
+    // canonical bulb, multiple endpoint outcomes must still collapse to that
+    // one physical bulb instead of inflating the affected-bulb count.
+    connection.emitDispatchFailure(const RhythmDispatchFailure(
+      hubType: 'matter',
+      hubKey: 'matter@local',
+      nodeId: 'bulb-1',
+      target: 'matter-113',
+      kind: 'matter_controller_command',
+      status: 'timed_out',
+    ));
+    connection.emitDispatchFailure(const RhythmDispatchFailure(
+      hubType: 'hue',
+      hubKey: 'hue@bridge.local',
+      nodeId: 'bulb-1',
+      target: 'hue-light-22',
+      kind: 'turn_on',
+      status: 'failed',
+    ));
+    await tester.pump();
+    expect(
+      provider.recentLightDeliveryWarningsForNode('bulb-1'),
+      hasLength(1),
+      reason: 'previous-appliance endpoint failures name one canonical bulb',
+    );
+    await tester.pump(const Duration(seconds: 31));
   });
 
   testWidgets('Room card device flow offers Remove from Room for Matter bulbs',

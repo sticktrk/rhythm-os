@@ -2712,6 +2712,30 @@ pub(crate) fn resolve_input_source_node_id(
         .map(|device| device.id.clone())
 }
 
+/// Resolve one hub-native dispatch target to its durable canonical node ID.
+///
+/// The dispatch queue carries a formatted hub-key label rather than a
+/// [`HubKey`]. Match that complete scoped label against canonical endpoints so
+/// repeated native IDs on different hubs cannot be confused. Grouped-light
+/// and stream labels intentionally return `None`.
+pub(crate) fn resolve_dispatch_target_node_id(
+    state: &SharedState,
+    hub_key_label: &str,
+    native_id: &str,
+) -> Option<String> {
+    let s = state.lock().ok()?;
+    let target_node_id = s
+        .canonical_registry
+        .devices()
+        .find(|device| {
+            device.endpoints.iter().any(|endpoint| {
+                endpoint.hub_key.to_string() == hub_key_label && endpoint.native_id == native_id
+            })
+        })
+        .map(|device| device.id.clone());
+    target_node_id
+}
+
 /// Promote a hub-recognized button that has no canonical device yet so its
 /// presses can route.
 ///
@@ -35025,6 +35049,32 @@ mod tests {
             target_node, "room-a",
             "motion event should route to the room the user assigned, \
              not the room bound to the Hue-native source room"
+        );
+    }
+
+    #[test]
+    fn dispatch_target_resolution_requires_exact_hub_scoped_endpoint() {
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+        let canonical_id = insert_canonical_device(
+            &state,
+            hub_key.clone(),
+            "matter-113",
+            "Porch Bulb",
+            "room-1",
+            "Porch",
+        );
+
+        assert_eq!(
+            resolve_dispatch_target_node_id(&state, &hub_key.to_string(), "matter-113"),
+            Some(canonical_id),
+        );
+        assert_eq!(
+            resolve_dispatch_target_node_id(&state, "matter@another-hub", "matter-113"),
+            None,
+        );
+        assert_eq!(
+            resolve_dispatch_target_node_id(&state, &hub_key.to_string(), "matter-controller"),
+            None,
         );
     }
 

@@ -69,6 +69,11 @@ pub enum ServerEvent {
         hub_key: String,
         /// Topology node the command addressed.
         node_id: String,
+        /// Exact canonical light-device node for the failed endpoint.
+        ///
+        /// Grouped and stream-level failures omit this instead of guessing.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_node_id: Option<String>,
         /// Hub-native dispatch target label.
         target: String,
         /// Command kind: "turn_on" or "turn_off".
@@ -423,6 +428,43 @@ mod tests {
             "settings payload must not include light breaker state, got {}",
             json
         );
+    }
+
+    #[test]
+    fn dispatch_failure_serializes_optional_canonical_target_node() {
+        let event = ServerEvent::DispatchFailure {
+            hub_type: "matter".into(),
+            hub_key: "matter@local".into(),
+            node_id: "room-1".into(),
+            target_node_id: Some("bulb-1".into()),
+            target: "matter-113".into(),
+            kind: "matter_controller_command".into(),
+            status: "timed_out".into(),
+            detail: None,
+            queued_ms: 12,
+            dispatch_ms: 4500,
+            epoch_ms: 1_778_000_000_000,
+        };
+
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "dispatch_failure");
+        assert_eq!(json["data"]["target_node_id"], "bulb-1");
+
+        let unresolved = ServerEvent::DispatchFailure {
+            hub_type: "hue".into(),
+            hub_key: "hue@bridge.local".into(),
+            node_id: "room-1".into(),
+            target_node_id: None,
+            target: "grouped_light/abc".into(),
+            kind: "turn_on".into(),
+            status: "failed".into(),
+            detail: None,
+            queued_ms: 0,
+            dispatch_ms: 20,
+            epoch_ms: 1_778_000_000_000,
+        };
+        let unresolved_json = serde_json::to_value(&unresolved).unwrap();
+        assert!(unresolved_json["data"].get("target_node_id").is_none());
     }
 
     #[test]

@@ -545,6 +545,36 @@ void main() {
     );
   });
 
+  test('light delivery warning analytics excludes bulb and hub identity',
+      () async {
+    await analytics.logLightDeliveryWarningOpened(
+      surface: 'room_card',
+      affectedBulbCount: 2,
+      hasUnresolvedTarget: false,
+      failureKind: 'light_update',
+    );
+
+    final event = backend.events.single;
+    expect(event.name, 'light_delivery_warning_opened');
+    expect(event.properties, {
+      'surface': 'room_card',
+      'affected_bulb_count': 2,
+      'has_unresolved_target': 0,
+      'failure_kind': 'light_update',
+    });
+    expect(
+      event.properties.keys,
+      isNot(contains(anyOf(
+        'room_id',
+        'bulb_id',
+        'bulb_name',
+        'hub_key',
+        'target',
+        'detail',
+      ))),
+    );
+  });
+
   test('startup milestones queue until the analytics backend is ready',
       () async {
     analytics.resetForTesting();

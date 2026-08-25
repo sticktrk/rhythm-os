@@ -74,6 +74,12 @@ pub fn install_dispatch_outcome_listener(
                                     hub_type: outcome.hub_type.clone(),
                                     hub_key: outcome.hub_key.clone(),
                                     node_id: outcome.node_id.clone(),
+                                    target_node_id:
+                                        crate::commands::resolve_dispatch_target_node_id(
+                                            &state,
+                                            &outcome.hub_key,
+                                            &early.device_id,
+                                        ),
                                     target: early.device_id,
                                     kind: "matter_controller_command".to_string(),
                                     status: early.status.as_str().to_string(),
@@ -96,6 +102,11 @@ pub fn install_dispatch_outcome_listener(
                             hub_type: outcome.hub_type.clone(),
                             hub_key: outcome.hub_key.clone(),
                             node_id: outcome.node_id.clone(),
+                            target_node_id: crate::commands::resolve_dispatch_target_node_id(
+                                &state,
+                                &outcome.hub_key,
+                                &outcome.target_label,
+                            ),
                             target: outcome.target_label.clone(),
                             kind: outcome.kind.as_str().to_string(),
                             status: "acceptance_invalid".to_string(),
@@ -120,6 +131,11 @@ pub fn install_dispatch_outcome_listener(
                     hub_type: outcome.hub_type.clone(),
                     hub_key: outcome.hub_key.clone(),
                     node_id: outcome.node_id.clone(),
+                    target_node_id: crate::commands::resolve_dispatch_target_node_id(
+                        &state,
+                        &outcome.hub_key,
+                        &outcome.target_label,
+                    ),
                     target: outcome.target_label.clone(),
                     kind: outcome.kind.as_str().to_string(),
                     status: outcome.status.as_str().to_string(),
