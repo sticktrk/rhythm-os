@@ -10562,6 +10562,33 @@ void main() {
 
     await tester.pump(const Duration(seconds: 5));
     expect(provider.recentLightDeliveryWarningsForNode('room-1'), isEmpty);
+
+    // Previous appliances omit target_node_id. When they directly address a
+    // canonical bulb, multiple endpoint outcomes must still collapse to that
+    // one physical bulb instead of inflating the affected-bulb count.
+    connection.emitDispatchFailure(const RhythmDispatchFailure(
+      hubType: 'matter',
+      hubKey: 'matter@local',
+      nodeId: 'bulb-1',
+      target: 'matter-113',
+      kind: 'matter_controller_command',
+      status: 'timed_out',
+    ));
+    connection.emitDispatchFailure(const RhythmDispatchFailure(
+      hubType: 'hue',
+      hubKey: 'hue@bridge.local',
+      nodeId: 'bulb-1',
+      target: 'hue-light-22',
+      kind: 'turn_on',
+      status: 'failed',
+    ));
+    await tester.pump();
+    expect(
+      provider.recentLightDeliveryWarningsForNode('bulb-1'),
+      hasLength(1),
+      reason: 'previous-appliance endpoint failures name one canonical bulb',
+    );
+    await tester.pump(const Duration(seconds: 31));
   });
 
   testWidgets('Room card device flow offers Remove from Room for Matter bulbs',

@@ -3334,7 +3334,11 @@ class ServerSyncProvider extends ChangeNotifier {
   final Map<String, Timer> _dispatchFailureExpiryTimers = {};
 
   String _dispatchFailureEntryKey(RhythmDispatchFailure failure) {
-    final targetNodeId = failure.targetNodeId?.trim();
+    // Use the same exact canonical identity as presentation, including the
+    // previous-appliance fallback where a command directly addressed a known
+    // light-device node. Endpoint labels are only a fallback for unresolved
+    // room fan-out failures.
+    final targetNodeId = _warningTargetNodeId(failure);
     if (targetNodeId != null && targetNodeId.isNotEmpty) {
       return 'node:$targetNodeId';
     }
