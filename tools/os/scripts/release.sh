@@ -13,6 +13,8 @@
 
 set -euo pipefail
 
+ORIGINAL_ARGS=("$@")
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../os" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -53,7 +55,7 @@ Usage: $0 [OPTIONS]
 Create a release tag. By default this pushes the release commit and tag so the
 GitHub release workflow can publish the assets. With --upload, the script keeps
 the release local, builds the rpiz artifact, packages the OTA feed, and uploads
-it directly using credentials loaded from .env.
+it directly using the external release credential profile.
 
 Options:
   --version X.Y.Z   Use an explicit base version instead of auto-bumping
@@ -235,26 +237,16 @@ require_env_value() {
 }
 
 load_project_env() {
-    local env_file=""
-    local candidate
+    local config_dir="${RHYTHM_CONFIG_DIR:-$HOME/.config/rhythm}"
+    local env_file="${RHYTHM_RELEASE_ENV_FILE:-$config_dir/release.env}"
 
-    for candidate in "$PROJECT_ROOT/.env" "$REPO_ROOT/.env" "$REPO_ROOT/admin-api/.env"; do
-        if [ -f "$candidate" ]; then
-            env_file="$candidate"
-            break
-        fi
-    done
-
-    if [ -z "$env_file" ]; then
-        echo "Error: --upload requires os/.env, .env, or admin-api/.env" >&2
-        exit 1
+    if [ "${RHYTHM_RELEASE_PROFILE_LOADED:-}" != "1" ]; then
+        exec env \
+            RHYTHM_RELEASE_ENV_FILE="$env_file" \
+            RHYTHM_RELEASE_PROFILE_LOADED=1 \
+            python3 "$REPO_ROOT/tools/config/run.py" --profile release -- \
+                "$REPO_ROOT/tools/os/scripts/release.sh" "${ORIGINAL_ARGS[@]}"
     fi
-
-    echo "Loading environment from ${env_file#"$REPO_ROOT"/}"
-    set -a
-    # shellcheck disable=SC1090
-    source "$env_file"
-    set +a
 }
 
 ensure_upload_env() {

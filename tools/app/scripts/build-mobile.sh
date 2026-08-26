@@ -869,9 +869,22 @@ FLUTTER_BUILD_ARGS=()
 if [ -n "$RELEASE" ]; then
     FLUTTER_BUILD_ARGS+=("$RELEASE")
 fi
-if [ -f "$FLUTTER_APP/.env" ]; then
-    FLUTTER_BUILD_ARGS+=("--dart-define-from-file=$FLUTTER_APP/.env")
-    echo "Using Supabase config from .env"
+APP_BUILD_ENV_FILE="${RHYTHM_APP_BUILD_ENV_FILE:-${RHYTHM_CONFIG_DIR:-$HOME/.config/rhythm}/app-build.env}"
+APP_BUILD_ENV_IS_EXTERNAL=true
+if [ ! -f "$APP_BUILD_ENV_FILE" ] && [ -z "${RHYTHM_APP_BUILD_ENV_FILE:-}" ] && \
+    [ -z "${RHYTHM_CONFIG_DIR:-}" ] && [ -f "$FLUTTER_APP/.env" ]; then
+    APP_BUILD_ENV_FILE="$FLUTTER_APP/.env"
+    APP_BUILD_ENV_IS_EXTERNAL=false
+fi
+if [ -f "$APP_BUILD_ENV_FILE" ]; then
+    if [ "$APP_BUILD_ENV_IS_EXTERNAL" = true ] && \
+        ! RHYTHM_APP_BUILD_ENV_FILE="$APP_BUILD_ENV_FILE" \
+            python3 "$PROJECT_ROOT/../tools/config/validate.py" --profile app-build; then
+        echo "Error: the external app-build profile is not ready." >&2
+        exit 1
+    fi
+    FLUTTER_BUILD_ARGS+=("--dart-define-from-file=$APP_BUILD_ENV_FILE")
+    echo "Using the configured app-build profile"
 fi
 if [ -n "$BUILD_METADATA_ARGS" ]; then
     FLUTTER_BUILD_ARGS+=("$BUILD_METADATA_ARGS")

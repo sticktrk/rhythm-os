@@ -15,7 +15,7 @@ The five profiles are intentionally separated by capability:
 | `staff` | `staff.env` | Read-only bundle, fleet, and support tools |
 | `analytics` | `analytics.env` | Aggregate PostHog reporting |
 | `admin-api` | `admin-api.env` | Local Admin API service |
-| `app-build` | `app-build.env` | Flutter compile-time configuration |
+| `app-build` | `app-build.env` | Flutter and local Admin UI browser-safe configuration |
 | `release` | `release.env` | Explicit local Cloudflare R2 upload |
 
 Every live profile must be a regular, current-user-owned file with mode `0600`
@@ -66,10 +66,13 @@ also has one explicit absolute-path override documented in `profiles.toml`.
 Validation reports only profile state and key names; it never prints credential
 values or resolved local paths.
 
-## Migration status
+## Migrated consumers
 
-The schema/loader foundation and external-profile provisioning are now in
-place. Existing application, Admin API, release, fleet, and scheduled-task
-consumers still use their legacy locations until they are migrated and tested
-separately. Do not remove those files or assume this validator has changed
-runtime behavior yet.
+Bundle resolution, fleet inspection, customer lighting tuning, the local Admin
+API, TestFlight/build dispatch, and explicit local OTA uploads now load their
+declared external profiles. App build helpers retain the repository app `.env`
+only as an explicit local-development compatibility fallback when no external
+profile or override has been configured. Scheduled automation prompts set both
+new profile overrides and temporary legacy aliases so they remain safe across
+the merge boundary; the aliases may be removed after all installed tasks run
+from a revision containing this migration.
