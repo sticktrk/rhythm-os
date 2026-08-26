@@ -1,7 +1,11 @@
 #include "chip_bridge.h"
 
 #include <app-common/zap-generated/cluster-objects.h>
+#include <app/AttributePathParams.h>
 #include <app/InteractionModelEngine.h>
+#include <app/ReadClient.h>
+#include <app/ReadPrepareParams.h>
+#include <app/data-model/Decode.h>
 #include <controller/CHIPCluster.h>
 #include <controller/CHIPDeviceController.h>
 #include <controller/CHIPDeviceControllerFactory.h>
@@ -29,6 +33,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -40,9 +45,11 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 using chip::Controller::DeviceCommissioner;
@@ -67,6 +74,13 @@ using chip::Controller::WiFiCredentials;
 // no host wall-clock deadline is allowed to destroy controller-owned state or
 // restart unrelated healthy endpoints.
 constexpr std::chrono::seconds kCommissioningTimeout(180);
+// Last-resort bound on a single blocking controller operation. It sits above
+// everything this daemon legitimately waits for — the SDK's own operational
+// discovery (~45s) plus CASE retries, and the 180s commissioning timeout below
+// — so an ordinary slow endpoint, or an unrelated operation running while a
+// commission is in flight, can never trip it. It only fires when the SDK
+// violates its own timeout contract and leaves a caller wedged forever.
+constexpr std::chrono::seconds kOperationWedgeDeadline(240);
 constexpr EndpointId kRootEndpoint = kRootEndpointId;
 constexpr VendorId kDefaultControllerVendorId = VendorId::TestVendor1;
 constexpr const char * kBypassAttestationEnv = "RHYTHM_MATTER_BYPASS_DEVICE_ATTESTATION";
@@ -552,17 +566,59 @@ CHIP_ERROR ExecuteOnMatterThread(const std::function<void()> & callback)
     return CHIP_NO_ERROR;
 }
 
+// Runs a cleanup action unless it is disarmed first. Used to release
+// Matter-thread bookkeeping on every early return of a multi-step RPC.
+template <typename Fn>
+class ScopeGuard
+{
+public:
+    explicit ScopeGuard(Fn fn) : mFn(std::move(fn)) {}
+    ~ScopeGuard()
+    {
+        if (mArmed)
+        {
+            mFn();
+        }
+    }
+
+    ScopeGuard(const ScopeGuard &)             = delete;
+    ScopeGuard & operator=(const ScopeGuard &) = delete;
+
+    void Disarm() { mArmed = false; }
+
+private:
+    Fn mFn;
+    bool mArmed = true;
+};
+
 class BlockingOperationBase
 {
 public:
     CHIP_ERROR WaitForCompletion()
     {
         std::unique_lock<std::mutex> lock(mMutex);
-        mCondition.wait(lock, [this] { return mDone; });
+        // The operation object and its callback captures live on the caller's
+        // stack, so returning early would be a use-after-free once a late
+        // callback runs. Waiting is therefore unbounded for every timeout the
+        // SDK owns; the deadline below only catches an SDK that never reports
+        // a terminal result at all, and exits for supervisor restart exactly
+        // like the ScheduleWork wedge guard above.
+        if (!mCondition.wait_for(lock, kOperationWedgeDeadline, [this] { return mDone; }))
+        {
+            ChipLogError(Controller,
+                         "Matter %s operation did not report a terminal result within its wedge deadline; "
+                         "exiting for supervisor restart",
+                         mLabel);
+            std::_Exit(70); // EX_SOFTWARE; skip destructors that could also hang
+        }
         return mStatus;
     }
 
 protected:
+    /// Names the operation kind in the wedge-guard log. Set once at
+    /// construction, before the operation is started.
+    void SetOperationLabel(const char * label) { mLabel = label; }
+
     void Finish(CHIP_ERROR status)
     {
         std::lock_guard<std::mutex> lock(mMutex);
@@ -581,6 +637,7 @@ private:
     std::condition_variable mCondition;
     bool mDone       = false;
     CHIP_ERROR mStatus = CHIP_NO_ERROR;
+    const char * mLabel = "controller";
 };
 
 class DeviceConnectionOperation : public BlockingOperationBase
@@ -633,7 +690,9 @@ class BlockingInvokeCommandOperation final : public DeviceConnectionOperation
 public:
     BlockingInvokeCommandOperation(NodeId nodeId, EndpointId endpoint, const RequestT & request) :
         DeviceConnectionOperation(nodeId), mEndpoint(endpoint), mRequest(request)
-    {}
+    {
+        SetOperationLabel("invoke-command");
+    }
 
 protected:
     CHIP_ERROR HandleConnected(Messaging::ExchangeManager & exchangeMgr, const SessionHandle & sessionHandle) override
@@ -671,7 +730,9 @@ public:
 
     BlockingReadAttributeOperation(NodeId nodeId, EndpointId endpoint, CopyFn onValue) :
         DeviceConnectionOperation(nodeId), mEndpoint(endpoint), mOnValue(std::move(onValue))
-    {}
+    {
+        SetOperationLabel("read-attribute");
+    }
 
 protected:
     CHIP_ERROR HandleConnected(Messaging::ExchangeManager & exchangeMgr, const SessionHandle & sessionHandle) override
@@ -708,7 +769,9 @@ public:
 
     BlockingWriteAttributeOperation(NodeId nodeId, EndpointId endpoint, const ValueType & value) :
         DeviceConnectionOperation(nodeId), mEndpoint(endpoint), mValue(value)
-    {}
+    {
+        SetOperationLabel("write-attribute");
+    }
 
 protected:
     CHIP_ERROR HandleConnected(Messaging::ExchangeManager & exchangeMgr, const SessionHandle & sessionHandle) override
@@ -758,58 +821,152 @@ private:
     CHIP_ERROR mWriteStatus = CHIP_NO_ERROR;
 };
 
-class OnOffSubscriptionOperation final : public DeviceConnectionOperation
+// Map a terminal CHIP error onto the coarse, identifier-free class Rust uses to
+// pick a backoff. Only error constants this translation unit (or the core SDK
+// header it already pulls in) is known to define are matched; anything else is
+// reported as OTHER and the raw code travels alongside for diagnostics.
+//
+// New CHIP_ERROR constants referenced by this file: CHIP_ERROR_BUSY,
+// CHIP_ERROR_NOT_CONNECTED, CHIP_ERROR_CONNECTION_CLOSED_UNEXPECTEDLY. If a
+// release-host build fails to resolve one of them, it belongs here and nowhere
+// else in the bridge — drop it to OTHER rather than guessing a replacement.
+// There is deliberately no ADDRESS_RESOLUTION or CASE_SESSION mapping: both
+// surface as CHIP_ERROR_TIMEOUT through OperationalSessionSetup, so the native
+// side cannot tell them apart (see chip_bridge.h).
+uint8_t ClassifySubscriptionFailure(CHIP_ERROR error)
+{
+    if (error == CHIP_ERROR_TIMEOUT)
+    {
+        return static_cast<uint8_t>(RHYTHM_CHIP_BRIDGE_SUB_FAIL_TIMEOUT);
+    }
+    if (error == CHIP_ERROR_BUSY)
+    {
+        return static_cast<uint8_t>(RHYTHM_CHIP_BRIDGE_SUB_FAIL_RESOURCE_BUSY);
+    }
+    if (error == CHIP_ERROR_CONNECTION_ABORTED || error == CHIP_ERROR_CONNECTION_CLOSED_UNEXPECTEDLY ||
+        error == CHIP_ERROR_NOT_CONNECTED)
+    {
+        return static_cast<uint8_t>(RHYTHM_CHIP_BRIDGE_SUB_FAIL_PEER_CLOSED);
+    }
+    return static_cast<uint8_t>(RHYTHM_CHIP_BRIDGE_SUB_FAIL_OTHER);
+}
+
+class OnOffSubscriptionOperation final : public DeviceConnectionOperation, public app::ReadClient::Callback
 {
 public:
-    using ReportFn = std::function<void(NodeId, EndpointId, bool)>;
+    using ReportFn     = std::function<void(NodeId, EndpointId, bool)>;
+    using TerminatedFn = std::function<void(NodeId, EndpointId, CHIP_ERROR)>;
 
     OnOffSubscriptionOperation(NodeId nodeId, EndpointId endpoint, uint16_t minIntervalSecs, uint16_t maxIntervalSecs,
-                               ReportFn onReport) :
+                               ReportFn onReport, TerminatedFn onTerminated) :
         DeviceConnectionOperation(nodeId),
         mNodeId(nodeId), mEndpoint(endpoint), mMinIntervalSecs(minIntervalSecs), mMaxIntervalSecs(maxIntervalSecs),
-        mOnReport(std::move(onReport))
-    {}
+        mOnReport(std::move(onReport)), mOnTerminated(std::move(onTerminated)),
+        mAttributePath(endpoint, OnOff::Id, OnOff::Attributes::OnOff::Id)
+    {
+        SetOperationLabel("onoff-subscribe");
+    }
+
+    bool IsActive() const { return mActive.load(std::memory_order_acquire); }
 
 protected:
     CHIP_ERROR HandleConnected(Messaging::ExchangeManager & exchangeMgr, const SessionHandle & sessionHandle) override
     {
-        ClusterBase cluster(exchangeMgr, sessionHandle, mEndpoint);
-        return cluster.template SubscribeAttribute<OnOff::Attributes::OnOff::TypeInfo>(
-            this, OnReport, OnFailure, mMinIntervalSecs, mMaxIntervalSecs, OnSubscriptionEstablished,
-            OnResubscriptionAttempt, true, true);
+        app::ReadPrepareParams params(sessionHandle);
+        params.mpAttributePathParamsList    = &mAttributePath;
+        params.mAttributePathParamsListSize = 1;
+        params.mMinIntervalFloorSeconds     = mMinIntervalSecs;
+        params.mMaxIntervalCeilingSeconds   = mMaxIntervalSecs;
+        params.mKeepSubscriptions           = true;
+        params.mIsFabricFiltered            = true;
+
+        mReadClient = Platform::MakeUnique<app::ReadClient>(
+            app::InteractionModelEngine::GetInstance(), &exchangeMgr, *this,
+            app::ReadClient::InteractionType::Subscribe);
+        VerifyOrReturnError(mReadClient != nullptr, CHIP_ERROR_NO_MEMORY);
+
+        // SendRequest intentionally leaves automatic re-subscription disabled.
+        // Rust owns retry timing and re-enters through SubscribeOnOff after a
+        // terminal subscription failure.
+        CHIP_ERROR err = mReadClient->SendRequest(params);
+        if (err != CHIP_NO_ERROR)
+        {
+            mReadClient = nullptr;
+        }
+        return err;
     }
 
 private:
-    static void OnReport(void * context, bool value)
+    void NotifySubscriptionStillActive(const app::ReadClient & readClient) override
     {
-        auto * self = static_cast<OnOffSubscriptionOperation *>(context);
-        VerifyOrReturn(self != nullptr);
-        if (self->mOnReport)
+        (void) readClient;
+        mActive.store(true, std::memory_order_release);
+    }
+
+    void OnAttributeData(const app::ConcreteDataAttributePath & path, TLV::TLVReader * data,
+                         const app::StatusIB & status) override
+    {
+        if (!status.IsSuccess() || data == nullptr || path.mClusterId != OnOff::Id ||
+            path.mAttributeId != OnOff::Attributes::OnOff::Id)
         {
-            self->mOnReport(self->mNodeId, self->mEndpoint, value);
+            return;
+        }
+
+        OnOff::Attributes::OnOff::TypeInfo::DecodableType value;
+        if (app::DataModel::Decode(*data, value) != CHIP_NO_ERROR)
+        {
+            return;
+        }
+
+        mActive.store(true, std::memory_order_release);
+        if (mOnReport)
+        {
+            mOnReport(mNodeId, mEndpoint, value);
         }
     }
 
-    static void OnFailure(void * context, CHIP_ERROR error)
-    {
-        auto * self = static_cast<OnOffSubscriptionOperation *>(context);
-        VerifyOrReturn(self != nullptr);
-        self->Finish(error);
-    }
-
-    static void OnSubscriptionEstablished(void * context, SubscriptionId subscriptionId)
+    void OnSubscriptionEstablished(SubscriptionId subscriptionId) override
     {
         (void) subscriptionId;
-        auto * self = static_cast<OnOffSubscriptionOperation *>(context);
-        VerifyOrReturn(self != nullptr);
-        self->Finish(CHIP_NO_ERROR);
+        mEstablished = true;
+        mActive.store(true, std::memory_order_release);
+        Finish(CHIP_NO_ERROR);
     }
 
-    static void OnResubscriptionAttempt(void * context, CHIP_ERROR error, uint32_t nextResubscribeIntervalMsec)
+    // Record only. Finishing here would let the waiting RPC thread destroy this
+    // operation — and with it the ReadClient — while ReadClient::Close() is
+    // still running on the Matter thread. The terminal handoff belongs in
+    // OnDone(), which the SDK guarantees is the last thing Close() does.
+    // No log line: Rust owns termination logging, with backoff.
+    void OnError(CHIP_ERROR error) override
     {
-        (void) context;
-        ChipLogError(Controller, "Matter OnOff resubscription attempt after %" CHIP_ERROR_FORMAT " in %u ms", error.Format(),
-                     nextResubscribeIntervalMsec);
+        mLastError = error;
+        mActive.store(false, std::memory_order_release);
+    }
+
+    void OnDone(app::ReadClient * readClient) override
+    {
+        (void) readClient;
+        mActive.store(false, std::memory_order_release);
+        // Destroying the ReadClient inside OnDone on the Matter thread is the
+        // SDK-sanctioned pattern (ClusterBase/TypedReadCallback do the same):
+        // the ReadClient never touches itself after invoking this callback.
+        mReadClient = nullptr;
+
+        const CHIP_ERROR error = (mLastError == CHIP_NO_ERROR) ? CHIP_ERROR_CONNECTION_ABORTED : mLastError;
+        if (!mEstablished)
+        {
+            // Pre-establishment failure: the blocked SubscribeOnOff RPC reports
+            // it. Finish() can free `this` on the waiting thread, so nothing
+            // may touch members after this point.
+            Finish(error);
+            return;
+        }
+
+        if (mOnTerminated)
+        {
+            mOnTerminated(mNodeId, mEndpoint, error);
+        }
     }
 
     NodeId mNodeId;
@@ -817,6 +974,22 @@ private:
     uint16_t mMinIntervalSecs;
     uint16_t mMaxIntervalSecs;
     ReportFn mOnReport;
+    TerminatedFn mOnTerminated;
+    app::AttributePathParams mAttributePath;
+    Platform::UniquePtr<app::ReadClient> mReadClient;
+    std::atomic<bool> mActive{ false };
+    bool mEstablished      = false;
+    CHIP_ERROR mLastError = CHIP_NO_ERROR;
+};
+
+// One live On/Off subscription plus the key it was requested for. Key and
+// operation are kept in a single record so they can never desync, and the whole
+// table is owned by the Matter thread.
+struct OnOffSubscriptionEntry
+{
+    NodeId nodeId;
+    EndpointId endpoint;
+    std::unique_ptr<OnOffSubscriptionOperation> operation;
 };
 
 class BlockingPairingDelegate final : public DevicePairingDelegate
@@ -939,7 +1112,10 @@ public:
         }
 
         CHIP_ERROR err = CHIP_NO_ERROR;
-        ReturnErrorOnFailure(ExecuteOnMatterThread([this, &err]() { err = InitializeCommissioner(); }));
+        ReturnErrorOnFailure(ExecuteOnMatterThread([this, &err]() {
+            mUnpairedNodes.clear();
+            err = InitializeCommissioner();
+        }));
         return err;
     }
 
@@ -997,6 +1173,14 @@ public:
         }
 
         ReturnErrorOnFailure(mPairingDelegate.WaitForCompletion(kCommissioningTimeout));
+        // The node is paired again: lift any unpair tombstone so subscriptions
+        // can be installed for it.
+        const NodeId commissionedNodeId = request.node_id;
+        CHIP_ERROR tombstone = ExecuteOnMatterThread([this, commissionedNodeId]() { mUnpairedNodes.erase(commissionedNodeId); });
+        if (tombstone != CHIP_NO_ERROR)
+        {
+            return tombstone;
+        }
         return ProbeLight(request.node_id, device);
     }
 
@@ -1179,7 +1363,13 @@ public:
         VerifyOrReturnError(mCommissioner != nullptr, CHIP_ERROR_INCORRECT_STATE);
 
         CHIP_ERROR err = CHIP_NO_ERROR;
-        ReturnErrorOnFailure(ExecuteOnMatterThread([this, &err, nodeId]() { err = mCommissioner->UnpairDevice(nodeId); }));
+        ReturnErrorOnFailure(ExecuteOnMatterThread([this, &err, nodeId]() {
+            err = mCommissioner->UnpairDevice(nodeId);
+            if (err == CHIP_NO_ERROR)
+            {
+                RemoveOnOffSubscriptionsForNode(nodeId);
+            }
+        }));
         return err;
     }
 
@@ -1689,24 +1879,94 @@ public:
         VerifyOrReturnError(mCommissioner != nullptr, CHIP_ERROR_INCORRECT_STATE);
         VerifyOrReturnError(targets != nullptr || targetCount == 0, CHIP_ERROR_INVALID_ARGUMENT);
         VerifyOrReturnError(maxIntervalSecs >= minIntervalSecs, CHIP_ERROR_INVALID_ARGUMENT);
+        // One target per call. Every target costs Matter-thread hops plus a
+        // blocking subscribe, and rhythm-matter deliberately drives one
+        // endpoint at a time under its shared work budget; a batch would sit
+        // unbounded inside a single RPC. An empty request stays a no-op.
+        VerifyOrReturnError(targetCount <= 1, CHIP_ERROR_INVALID_ARGUMENT);
+
+        // The subscription table is owned by the Matter thread: every read and
+        // every mutation (including ReadClient destruction) is hopped there, so
+        // a concurrent Decommission cannot race this RPC thread now that the
+        // service no longer serializes SubscribeOnOff behind the lifecycle lock.
+        // Prune terminal non-resubscribing clients before deciding whether a
+        // target already has a live Rust-owned subscription.
+        ReturnErrorOnFailure(ExecuteOnMatterThread([this]() { PruneInactiveOnOffSubscriptions(); }));
 
         for (size_t i = 0; i < targetCount; ++i)
         {
-            NodeId nodeId       = targets[i].node_id;
-            EndpointId endpoint = targets[i].endpoint;
-            if (HasOnOffSubscription(nodeId, endpoint))
+            const NodeId nodeId       = targets[i].node_id;
+            const EndpointId endpoint = targets[i].endpoint;
+            const auto key            = std::make_pair(nodeId, endpoint);
+
+            // Check-and-reserve in one Matter-thread hop. Without the
+            // reservation two concurrent callers (SubscribeOnOff racing the
+            // post-commission subscribe) could both observe "not subscribed"
+            // and install a second ReadClient for the same endpoint, which
+            // mKeepSubscriptions=true would keep alive on the peer.
+            bool skip = false;
+            ReturnErrorOnFailure(ExecuteOnMatterThread([this, nodeId, endpoint, key, &skip]() {
+                skip = HasOnOffSubscription(nodeId, endpoint) || mPendingOnOffSubscriptions.count(key) != 0;
+                if (!skip)
+                {
+                    mPendingOnOffSubscriptions.insert(key);
+                }
+            }));
+            if (skip)
             {
                 continue;
             }
+
+            // Releases the reservation on every early return below. Disarmed
+            // once the bookkeeping hop has taken ownership of the operation.
+            ScopeGuard releaseReservation([this, key]() {
+                CHIP_ERROR ignored = ExecuteOnMatterThread([this, key]() { mPendingOnOffSubscriptions.erase(key); });
+                (void) ignored;
+            });
 
             auto subscription = std::make_unique<OnOffSubscriptionOperation>(
                 nodeId, endpoint, minIntervalSecs, maxIntervalSecs,
                 [this](NodeId reportNodeId, EndpointId reportEndpoint, bool on) {
                     this->QueueOnOffReport(reportNodeId, reportEndpoint, on);
+                },
+                [this](NodeId terminatedNodeId, EndpointId terminatedEndpoint, CHIP_ERROR error) {
+                    this->QueueSubscriptionTermination(terminatedNodeId, terminatedEndpoint, error);
                 });
+            // On failure the operation is destroyed here, on the RPC thread.
+            // That is safe because every failing path releases the ReadClient
+            // first: SendRequest failures clear it inline, and OnDone() clears
+            // it on the Matter thread before finishing the wait.
             ReturnErrorOnFailure(RunConnectionOperation(*subscription));
-            mOnOffSubscriptionKeys.emplace_back(nodeId, endpoint);
-            mOnOffSubscriptions.push_back(std::move(subscription));
+
+            const CHIP_ERROR bookkeeping = ExecuteOnMatterThread([this, nodeId, endpoint, key, &subscription]() {
+                mPendingOnOffSubscriptions.erase(key);
+                if (subscription == nullptr)
+                {
+                    return;
+                }
+                // Established, then died before we got here (its termination is
+                // already queued), or the node was unpaired while we were
+                // subscribing: drop the operation here, on the Matter thread.
+                if (!subscription->IsActive() || mUnpairedNodes.count(nodeId) != 0)
+                {
+                    subscription.reset();
+                    return;
+                }
+                mOnOffSubscriptions.push_back(OnOffSubscriptionEntry{ nodeId, endpoint, std::move(subscription) });
+            });
+            if (bookkeeping != CHIP_NO_ERROR)
+            {
+                // The subscription is established and still owns a live
+                // ReadClient that only the Matter thread may destroy — and the
+                // Matter thread is unreachable. Leak it deliberately rather
+                // than destroying it here; the process is on its way down.
+                (void) subscription.release();
+                ChipLogError(Controller,
+                             "Matter thread unreachable while recording an established subscription; leaking one "
+                             "ReadClient instead of destroying it off-thread");
+                return bookkeeping;
+            }
+            releaseReservation.Disarm();
         }
 
         return CHIP_NO_ERROR;
@@ -1729,6 +1989,24 @@ public:
         return count;
     }
 
+    size_t DrainSubscriptionTerminations(rhythm_chip_bridge_subscription_termination * terminations,
+                                         size_t terminationsCapacity)
+    {
+        if (terminations == nullptr || terminationsCapacity == 0)
+        {
+            return 0;
+        }
+
+        std::lock_guard<std::mutex> lock(mReportMutex);
+        const size_t count = std::min(terminationsCapacity, mSubscriptionTerminations.size());
+        for (size_t i = 0; i < count; ++i)
+        {
+            terminations[i] = mSubscriptionTerminations[i];
+        }
+        mSubscriptionTerminations.erase(mSubscriptionTerminations.begin(), mSubscriptionTerminations.begin() + count);
+        return count;
+    }
+
     void Shutdown()
     {
         std::lock_guard<std::mutex> lock(mMutex);
@@ -1738,16 +2016,27 @@ public:
             return;
         }
 
-        CHIP_ERROR ignored = ExecuteOnMatterThread([this]() {
+        CHIP_ERROR teardown = ExecuteOnMatterThread([this]() {
             mOnOffSubscriptions.clear();
-            mOnOffSubscriptionKeys.clear();
+            mPendingOnOffSubscriptions.clear();
+            mUnpairedNodes.clear();
             if (mCommissioner != nullptr)
             {
                 mCommissioner->Shutdown();
                 mCommissioner.reset();
             }
         });
-        (void) ignored;
+        if (teardown != CHIP_NO_ERROR)
+        {
+            ChipLogError(Controller, "Matter controller teardown could not reach the Matter thread: %" CHIP_ERROR_FORMAT,
+                         teardown.Format());
+        }
+
+        {
+            std::lock_guard<std::mutex> reportLock(mReportMutex);
+            mAttributeReports.clear();
+            mSubscriptionTerminations.clear();
+        }
 
         if (mEventLoopStarted)
         {
@@ -2325,10 +2614,37 @@ private:
         return err == CHIP_NO_ERROR ? iterErr : err;
     }
 
+    // The three helpers below must run on the Matter thread: they read and
+    // destroy ReadClient-owning operations.
     bool HasOnOffSubscription(NodeId nodeId, EndpointId endpoint) const
     {
-        return std::any_of(mOnOffSubscriptionKeys.begin(), mOnOffSubscriptionKeys.end(),
-                           [nodeId, endpoint](const auto & key) { return key.first == nodeId && key.second == endpoint; });
+        return std::any_of(mOnOffSubscriptions.begin(), mOnOffSubscriptions.end(),
+                           [nodeId, endpoint](const OnOffSubscriptionEntry & entry) {
+                               return entry.nodeId == nodeId && entry.endpoint == endpoint && entry.operation != nullptr &&
+                                   entry.operation->IsActive();
+                           });
+    }
+
+    void PruneInactiveOnOffSubscriptions()
+    {
+        mOnOffSubscriptions.erase(std::remove_if(mOnOffSubscriptions.begin(), mOnOffSubscriptions.end(),
+                                                 [](const OnOffSubscriptionEntry & entry) {
+                                                     return entry.operation == nullptr || !entry.operation->IsActive();
+                                                 }),
+                                  mOnOffSubscriptions.end());
+    }
+
+    void RemoveOnOffSubscriptionsForNode(NodeId nodeId)
+    {
+        mOnOffSubscriptions.erase(std::remove_if(mOnOffSubscriptions.begin(), mOnOffSubscriptions.end(),
+                                                 [nodeId](const OnOffSubscriptionEntry & entry) {
+                                                     return entry.nodeId == nodeId;
+                                                 }),
+                                  mOnOffSubscriptions.end());
+        // Tombstone the unpaired node so a SubscribeOnOff that is still in
+        // flight for it cannot re-install a subscription afterwards. Cleared
+        // when the node is commissioned again, and on controller init.
+        mUnpairedNodes.insert(nodeId);
     }
 
     void QueueOnOffReport(NodeId nodeId, EndpointId endpoint, bool on)
@@ -2350,6 +2666,27 @@ private:
         mAttributeReports.push_back(report);
     }
 
+    // Called on the Matter thread from OnOffSubscriptionOperation::OnDone once
+    // an established subscription has ended. Only established subscriptions
+    // reach here; pre-establishment failures surface as the SubscribeOnOff RPC
+    // error instead.
+    void QueueSubscriptionTermination(NodeId nodeId, EndpointId endpoint, CHIP_ERROR error)
+    {
+        rhythm_chip_bridge_subscription_termination termination;
+        termination.node_id       = nodeId;
+        termination.endpoint      = endpoint;
+        termination.chip_error    = static_cast<uint32_t>(error.AsInteger());
+        termination.failure_class = ClassifySubscriptionFailure(error);
+
+        std::lock_guard<std::mutex> lock(mReportMutex);
+        constexpr size_t kMaxQueuedSubscriptionTerminations = 256;
+        if (mSubscriptionTerminations.size() >= kMaxQueuedSubscriptionTerminations)
+        {
+            mSubscriptionTerminations.erase(mSubscriptionTerminations.begin());
+        }
+        mSubscriptionTerminations.push_back(termination);
+    }
+
     std::mutex mMutex;
     std::unique_ptr<PersistentStorage> mStorage;
     std::unique_ptr<chip::Credentials::FileAttestationTrustStore> mPaaTrustStore;
@@ -2360,10 +2697,14 @@ private:
     chip::Crypto::P256Keypair mOperationalKeypair;
     BlockingPairingDelegate mPairingDelegate;
     std::unique_ptr<DeviceCommissioner> mCommissioner;
-    std::vector<std::unique_ptr<OnOffSubscriptionOperation>> mOnOffSubscriptions;
-    std::vector<std::pair<NodeId, EndpointId>> mOnOffSubscriptionKeys;
+    // Matter-thread-owned subscription table plus the reservations and unpair
+    // tombstones that keep concurrent RPCs from racing it.
+    std::vector<OnOffSubscriptionEntry> mOnOffSubscriptions;
+    std::set<std::pair<NodeId, EndpointId>> mPendingOnOffSubscriptions;
+    std::set<NodeId> mUnpairedNodes;
     std::mutex mReportMutex;
     std::vector<rhythm_chip_bridge_attribute_report> mAttributeReports;
+    std::vector<rhythm_chip_bridge_subscription_termination> mSubscriptionTerminations;
     std::string mStoragePath;
     std::string mFabricId;
     uint64_t mOperationalFabricId = 0;
@@ -2661,6 +3002,20 @@ bool rhythm_chip_bridge_drain_attribute_reports(struct rhythm_chip_bridge_attrib
     }
 
     *out_report_count = gContext.DrainAttributeReports(reports, reports_capacity);
+    return true;
+}
+
+bool rhythm_chip_bridge_drain_subscription_terminations(struct rhythm_chip_bridge_subscription_termination * terminations,
+                                                        size_t terminations_capacity, size_t * out_termination_count,
+                                                        char * error_message, size_t error_message_size)
+{
+    if (out_termination_count == nullptr)
+    {
+        WriteErrorMessage(error_message, error_message_size, "drain_subscription_terminations requires output count");
+        return false;
+    }
+
+    *out_termination_count = gContext.DrainSubscriptionTerminations(terminations, terminations_capacity);
     return true;
 }
 

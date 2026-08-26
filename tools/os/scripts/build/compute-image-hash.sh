@@ -16,6 +16,15 @@
 #   - rust/** source code
 #   - Cargo.{toml,lock}
 #   - tools/os/scripts/build-rpiz-image.sh, tools/os/scripts/build-server.sh (run at invoke time)
+#
+# Modes:
+#   (default)     print the 12-char input hash
+#   --inputs      print the hashed input lines (debugging: which input moved?)
+#   --chip-info   print human-readable connectedhomeip pin metadata as
+#                 key=value lines (chip_rev / chip_ref / chip_diff). Not part
+#                 of the hash — the refresh script records it in
+#                 install/rpiz/builder-image.lock so the SDK a release was
+#                 built against is readable from the repo.
 
 set -euo pipefail
 
@@ -65,7 +74,18 @@ git_local_diff_sha() {
     fi
 }
 
-{
+git_describe() {
+    # Nearest release tag + distance, e.g. v1.5.1.0 or v1.4.2.0-2520-gb468bbbea0.
+    # Prefer bumping connectedhomeip to an exact release tag so this reads as
+    # a plain version (see build/README.md "Bumping connectedhomeip").
+    if [ -d "$1/.git" ] || [ -f "$1/.git" ]; then
+        git -C "$1" describe --tags --always 2>/dev/null || echo "no-describe"
+    else
+        echo "no-git"
+    fi
+}
+
+hashed_inputs() {
     echo "dockerfile $(sha_file "$SCRIPT_DIR/Dockerfile.rpiz-builder")"
     echo "packager   $(sha_file "$SCRIPT_DIR/build-rpiz-builder-image.sh")"
     echo "br-external $(sha_dir_tree "$PROJECT_ROOT/install/rpiz/buildroot")"
@@ -75,4 +95,37 @@ git_local_diff_sha() {
     echo "libchip    $(sha_file "$CHIP_SRC/out/rpiz-arm-musl/lib/libCHIP.a")"
     echo "args.gn    $(sha_file "$CHIP_SRC/out/rpiz-arm-musl/args.gn")"
     echo "toolchain  $(sha_file "$TOOLCHAIN_SRC/bin/arm-unknown-linux-musleabihf-gcc")"
-} | sha256sum | cut -c1-12
+}
+
+chip_info() {
+    # Informational only. Deliberately NOT hashed so adding/changing these
+    # lines never forces a builder-image rebuild.
+    local diff_sha empty_sha
+    diff_sha="$(git_local_diff_sha "$CHIP_SRC")"
+    empty_sha="$(printf '' | sha256sum | awk '{print $1}')"
+    if [ "$diff_sha" = "$empty_sha" ]; then
+        diff_sha="clean"
+    fi
+    echo "chip_rev=$(git_rev "$CHIP_SRC")"
+    echo "chip_ref=$(git_describe "$CHIP_SRC")"
+    echo "chip_diff=$diff_sha"
+}
+
+case "${1:-}" in
+    "")
+        hashed_inputs | sha256sum | cut -c1-12
+        ;;
+    --inputs)
+        hashed_inputs
+        ;;
+    --chip-info)
+        chip_info
+        ;;
+    -h|--help)
+        sed -n '2,32p' "$0"
+        ;;
+    *)
+        echo "Unknown option: $1" >&2
+        exit 1
+        ;;
+esac

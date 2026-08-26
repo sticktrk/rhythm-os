@@ -64,7 +64,11 @@ push; CHIP/Buildroot/defconfig bumps do.
   sha prefix on stdout. Used as the image tag.
 - `refresh-builder-image.sh` — computes the hash, queries Docker Hub to see if
   that tag already exists, pushes only if it doesn't, and updates
-  `install/rpiz/builder-image.lock`. Invoked automatically by `release.sh`.
+  `install/rpiz/builder-image.lock` (image ref, hash, and the `chip_*` pin
+  lines). Invoked automatically by `release.sh`.
+- `chip-bridge-syntax-check.sh` — `clang++ -fsyntax-only` of the native
+  Matter bridge against a connectedhomeip checkout; runs on macOS. Not the
+  real build, but resolves every SDK identifier and instantiates templates.
 
 ## What triggers an image refresh
 
@@ -109,6 +113,62 @@ docker login                                      # dtconcepts account
 The lock file at `install/rpiz/builder-image.lock` is updated to the exact
 image ref (e.g. `dtconcepts/rhythm-rpiz-builder:v1-aa91843f7d73`). Commit it
 alongside whatever input change caused the hash to flip.
+
+The lock also records which `connectedhomeip` checkout the image bakes, so
+the SDK a release was built against is readable from the repo without the
+release host:
+
+```text
+chip_rev=<full commit SHA>
+chip_ref=<git describe --tags --always, e.g. v1.5.1.0 or v1.4.2.0-2520-gb468bbbea0>
+chip_diff=<sha256 of the uncommitted local diff, or "clean">
+```
+
+These lines are informational — the SHA and local diff are already part of
+`hash=`, so editing or adding them never forces a rebuild. Print them on any
+host with `compute-image-hash.sh --chip-info` (set `RHYTHM_CHIP_SRC_DIR` if
+the checkout is not at `os/connectedhomeip`). Cite `chip_ref` in any PR that
+changes `os/rust/bins/rhythm-chipd/native/chip_bridge.cc`.
+
+## Bumping connectedhomeip
+
+Only bump for a reason: an SDK security fix, an mDNS / AddressResolve / CASE
+bug actually observed in the field, a spec-version requirement, or an API the
+bridge needs. Every bump costs a prebuilt rebuild, a builder-image push, and a
+Matter soak (commissioning incl. BLE, subscriptions, room fan-out).
+
+Pin to a **release tag** (`v1.5.x`), not a `master` snapshot: same effort,
+reproducible, and there is a changelog to read before soaking. `chip_ref`
+should then read as a plain version.
+
+On the release host:
+
+```bash
+cd os/connectedhomeip
+git fetch --tags origin
+git checkout v1.5.1.0                             # release tag, not master
+# re-apply the local BLE patch if this host carries one (chip_diff != clean)
+git submodule update --init --recursive
+# rebuild the prebuilts the bridge links against (host + rpiz musl)
+gn gen out/host && ninja -C out/host
+gn gen out/rpiz-arm-musl --args="$(cat out/rpiz-arm-musl/args.gn)" && ninja -C out/rpiz-arm-musl
+cd ../..
+
+# fast header/semantic check of the bridge before a full build (works on macOS too)
+RHYTHM_CHIP_ROOT=os/connectedhomeip RHYTHM_CHIP_OUT_DIR=os/connectedhomeip/out/host \
+  tools/os/scripts/build/chip-bridge-syntax-check.sh
+
+# full native build + tests, then the image
+RHYTHM_CHIP_ROOT=os/connectedhomeip RHYTHM_CHIP_OUT_DIR=os/connectedhomeip/out/host \
+  cargo test -p rhythm-chipd --features chip-ffi
+./tools/os/scripts/build/refresh-builder-image.sh --push     # new hash, new tag, lock updated
+```
+
+The bridge uses semi-internal SDK APIs (`data-model-providers/codegen`,
+`ExamplePersistentStorage`, `ExampleOperationalCredentialsIssuer`,
+`FileAttestationTrustStore`) that move between releases; expect small bridge
+fixes. Land the bump as its own PR with the new `chip_ref` in the title and
+soak it on beta before anything else stacks on it.
 
 ## Pruning knobs
 

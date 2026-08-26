@@ -3,6 +3,7 @@ use anyhow::Result;
 use rhythm_matter::transport::{
     CommissionedDevice, MatterAttributeReport, MatterCommissionRequest, MatterGroup,
     MatterGroupMember, MatterLevelCommandVariant, MatterLevelStepMode, MatterSubscriptionTarget,
+    MatterSubscriptionTermination,
 };
 
 use crate::service::CommissioningState;
@@ -423,6 +424,18 @@ impl ChipFfiController {
         }
     }
 
+    pub fn drain_subscription_terminations(&self) -> Result<Vec<MatterSubscriptionTermination>> {
+        #[cfg(rhythm_chipd_chip_ffi)]
+        {
+            ffi_probe::drain_subscription_terminations()
+        }
+
+        #[cfg(not(rhythm_chipd_chip_ffi))]
+        {
+            Err(self.unsupported("drain_subscription_terminations"))
+        }
+    }
+
     #[cfg(not(rhythm_chipd_chip_ffi))]
     fn unsupported(&self, operation: &str) -> anyhow::Error {
         match &self.mode {
@@ -581,6 +594,10 @@ mod tests {
             controller.drain_attribute_reports(),
             "drain_attribute_reports",
         );
+        unsupported(
+            controller.drain_subscription_terminations(),
+            "drain_subscription_terminations",
+        );
     }
 }
 
@@ -602,7 +619,8 @@ mod ffi_probe {
     use rhythm_matter::transport::{
         CommissionedDevice, MatterAttributeReport, MatterAttributeValue, MatterColorMode,
         MatterCommissionRequest, MatterCommissioningRendezvous, MatterGroup, MatterGroupMember,
-        MatterLevelCommandVariant, MatterLevelStepMode, MatterSubscriptionTarget,
+        MatterLevelCommandVariant, MatterLevelStepMode, MatterSubscriptionFailureClass,
+        MatterSubscriptionTarget, MatterSubscriptionTermination,
     };
 
     const ERROR_BUFFER_SIZE: usize = 512;
@@ -618,6 +636,14 @@ mod ffi_probe {
     const COLOR_MODE_COLOR_TEMPERATURE: u32 = 1 << 2;
     const ATTRIBUTE_VALUE_BOOL: u8 = 1;
     const MAX_DRAINED_REPORTS: usize = 128;
+    const MAX_DRAINED_TERMINATIONS: usize = 128;
+    // Mirrors `enum rhythm_chip_bridge_subscription_failure_class`; 0 and any
+    // unknown value decode to `Other`.
+    const SUB_FAIL_ADDRESS_RESOLUTION: u8 = 1;
+    const SUB_FAIL_CASE_SESSION: u8 = 2;
+    const SUB_FAIL_RESOURCE_BUSY: u8 = 3;
+    const SUB_FAIL_TIMEOUT: u8 = 4;
+    const SUB_FAIL_PEER_CLOSED: u8 = 5;
     const JSON_BUFFER_SIZE: usize = 64 * 1024;
     const LEVEL_COMMAND_MOVE_TO_LEVEL: u8 = 0;
     const LEVEL_COMMAND_MOVE_TO_LEVEL_WITH_ON_OFF: u8 = 1;
@@ -684,6 +710,15 @@ mod ffi_probe {
         attribute_id: u32,
         value_type: c_uchar,
         bool_value: bool,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct ChipBridgeSubscriptionTermination {
+        node_id: u64,
+        endpoint: c_ushort,
+        chip_error: u32,
+        failure_class: c_uchar,
     }
 
     unsafe extern "C" {
@@ -875,6 +910,13 @@ mod ffi_probe {
             reports: *mut ChipBridgeAttributeReport,
             reports_capacity: usize,
             out_report_count: *mut usize,
+            error_message: *mut c_char,
+            error_message_size: usize,
+        ) -> bool;
+        fn rhythm_chip_bridge_drain_subscription_terminations(
+            terminations: *mut ChipBridgeSubscriptionTermination,
+            terminations_capacity: usize,
+            out_termination_count: *mut usize,
             error_message: *mut c_char,
             error_message_size: usize,
         ) -> bool;
@@ -1483,6 +1525,40 @@ mod ffi_probe {
             .collect()
     }
 
+    /// Drain terminal subscription failures the native bridge observed.
+    ///
+    /// The bridge never re-subscribes on its own: it reports each established
+    /// subscription's termination once and rhythm-matter owns the backoff.
+    pub fn drain_subscription_terminations() -> Result<Vec<MatterSubscriptionTermination>> {
+        let empty_termination = ChipBridgeSubscriptionTermination {
+            node_id: 0,
+            endpoint: 0,
+            chip_error: 0,
+            failure_class: 0,
+        };
+        let mut terminations = vec![empty_termination; MAX_DRAINED_TERMINATIONS];
+        let mut termination_count = 0usize;
+        let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
+        let success = unsafe {
+            rhythm_chip_bridge_drain_subscription_terminations(
+                terminations.as_mut_ptr(),
+                terminations.len(),
+                &mut termination_count,
+                error_buffer.as_mut_ptr(),
+                error_buffer.len(),
+            )
+        };
+        if !success {
+            return Err(read_error_buffer(&error_buffer));
+        }
+
+        Ok(terminations
+            .into_iter()
+            .take(termination_count)
+            .map(decode_subscription_termination)
+            .collect())
+    }
+
     fn zeroed_device() -> ChipBridgeDevice {
         ChipBridgeDevice {
             node_id: 0,
@@ -1613,6 +1689,28 @@ mod ffi_probe {
             attr_id: report.attribute_id,
             value,
         })
+    }
+
+    fn decode_subscription_termination(
+        termination: ChipBridgeSubscriptionTermination,
+    ) -> MatterSubscriptionTermination {
+        let failure_class = match termination.failure_class {
+            SUB_FAIL_ADDRESS_RESOLUTION => MatterSubscriptionFailureClass::AddressResolution,
+            SUB_FAIL_CASE_SESSION => MatterSubscriptionFailureClass::CaseSession,
+            SUB_FAIL_RESOURCE_BUSY => MatterSubscriptionFailureClass::ResourceBusy,
+            SUB_FAIL_TIMEOUT => MatterSubscriptionFailureClass::Timeout,
+            SUB_FAIL_PEER_CLOSED => MatterSubscriptionFailureClass::PeerClosed,
+            _ => MatterSubscriptionFailureClass::Other,
+        };
+
+        MatterSubscriptionTermination {
+            node_id: termination.node_id,
+            endpoint: termination.endpoint,
+            failure_class,
+            chip_error: termination.chip_error,
+            // Diagnostics only: the raw CHIP code, never an identifier.
+            detail: Some(format!("chip_error=0x{:08x}", termination.chip_error)),
+        }
     }
 
     fn decode_fixed_string(buffer: &[c_char; STRING_CAPACITY]) -> Result<String> {

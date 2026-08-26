@@ -1,5 +1,6 @@
 //! Desktop Matter transport backed by a local native CHIP controller daemon.
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::ErrorKind;
@@ -25,7 +26,7 @@ use crate::transport::{
     CommissionedDevice, MatterAttributeReport, MatterCommandSubmission, MatterCommissionRequest,
     MatterControllerEventBatch, MatterControllerEventCursor, MatterDeviceInfo,
     MatterEndpointCommandPlan, MatterGroup, MatterGroupMember, MatterLevelCommandVariant,
-    MatterLevelStepMode, MatterSubscriptionTarget, MatterTransport,
+    MatterLevelStepMode, MatterSubscriptionFailureClass, MatterSubscriptionTarget, MatterTransport,
     DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS, DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
 };
 
@@ -58,6 +59,10 @@ const OPERATIONAL_RECOVERY_MDNS_SCAN_TIMEOUT: Duration = Duration::from_secs(15)
 /// chipd's 180s kCommissioningTimeout, so the first attempt must have failed
 /// inside this budget for the retry to still fit the request window.
 const BLE_AUTO_RETRY_FIRST_ATTEMPT_BUDGET: Duration = Duration::from_secs(45);
+/// Quiet period after which a repeated sidecar failure class starts a new
+/// burst. Without it the power-of-two summary threshold keeps climbing for the
+/// life of the process and a later outage never reaches the next power.
+const SIDECAR_FAILURE_BURST_WINDOW_SECS: i64 = 5 * 60;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MatterPairingStopReason {
@@ -104,6 +109,13 @@ fn rpc_timeout_for_request(request: &ChipRpcRequest) -> Duration {
         | ChipRpcRequest::SetHueSaturation { .. }
         | ChipRpcRequest::ReadOnOff { .. }
         | ChipRpcRequest::ReadLightState { .. } => RPC_CONTROL_TIMEOUT,
+        // Subscribing is not a control step: the server no longer holds the
+        // lifecycle lock for it and the native operation is bounded by the SDK
+        // (address resolve ~45s plus CASE). An 8s client deadline turned an
+        // ordinary slow endpoint into a false failure cascade, so keep the
+        // default deadline — reaching it means the sidecar itself is wedged and
+        // the transport recovery path should restart it.
+        ChipRpcRequest::SubscribeOnOff { .. } => RPC_TIMEOUT,
         ChipRpcRequest::CommissionLight(_) => RPC_COMMISSION_TIMEOUT,
         _ => RPC_TIMEOUT,
     }
@@ -378,7 +390,7 @@ impl ChipTransport {
                 }
                 Err(rpc_error) => Err(rpc_error),
             },
-            Err(first_error) if is_control_rpc_response_timeout(&request, &first_error) => {
+            Err(first_error) if is_plain_rpc_response_timeout(&request, &first_error) => {
                 Err(first_error)
             }
             Err(first_error) => {
@@ -1143,6 +1155,17 @@ fn open_sidecar_log_file(path: &Path) -> Result<std::fs::File> {
 struct SidecarLogSinks {
     main: Mutex<std::fs::File>,
     verbose: Mutex<std::fs::File>,
+    repeated_failures: Mutex<HashMap<MatterSubscriptionFailureClass, SidecarFailureSummary>>,
+}
+
+struct SidecarFailureSummary {
+    count: u64,
+    first_at: chrono::DateTime<chrono::Utc>,
+    last_at: chrono::DateTime<chrono::Utc>,
+}
+
+fn format_log_timestamp(at: chrono::DateTime<chrono::Utc>) -> String {
+    at.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string()
 }
 
 impl SidecarLogSinks {
@@ -1150,20 +1173,79 @@ impl SidecarLogSinks {
         Ok(Self {
             main: Mutex::new(open_sidecar_log_file(log_path)?),
             verbose: Mutex::new(open_sidecar_log_file(&verbose_sidecar_log_path(log_path))?),
+            repeated_failures: Mutex::new(HashMap::new()),
         })
     }
 
+    /// Route one already ANSI-stripped sidecar line.
+    ///
+    /// A classified repeat-failure line is never written to the main log: the
+    /// raw, stamped line always goes to the verbose sink so the detail (node,
+    /// CHIP error, source file) is retained, and the main log receives only a
+    /// privacy-bounded summary at counts 1, 2, 4, 8, … within one burst. A
+    /// burst ends after `SIDECAR_FAILURE_BURST_WINDOW` of silence for that
+    /// class, so a fresh outage a day later starts counting from one again
+    /// instead of hiding behind a stale power-of-two threshold.
+    ///
+    /// Unclassified lines keep the ordinary split: `[EM]`/`[DMG]` chatter to
+    /// verbose, everything else to main.
     fn write_line(&self, line: &str) {
-        let stamped = format!(
-            "{} {}\n",
-            chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ"),
-            line
-        );
+        let now = chrono::Utc::now();
+        let stamped = format!("{} {}\n", format_log_timestamp(now), line);
+        if let Some(class) = classify_sidecar_failure(line) {
+            self.append(&self.verbose, &stamped);
+            if let Some(summary) = self.summarize_failure(class, now) {
+                self.append(
+                    &self.main,
+                    &format!("{} {}\n", format_log_timestamp(now), summary),
+                );
+            }
+            return;
+        }
         let sink = if is_verbose_chip_line(line) {
             &self.verbose
         } else {
             &self.main
         };
+        self.append(sink, &stamped);
+    }
+
+    /// Count one occurrence of `class` and return the summary line to emit,
+    /// or `None` while the burst count is not a power of two.
+    fn summarize_failure(
+        &self,
+        class: MatterSubscriptionFailureClass,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<String> {
+        let mut failures = self.repeated_failures.lock().ok()?;
+        let entry = failures
+            .entry(class)
+            .or_insert_with(|| SidecarFailureSummary {
+                count: 0,
+                first_at: now,
+                last_at: now,
+            });
+        if now.signed_duration_since(entry.last_at).num_seconds()
+            > SIDECAR_FAILURE_BURST_WINDOW_SECS
+        {
+            entry.count = 0;
+            entry.first_at = now;
+        }
+        entry.last_at = now;
+        entry.count = entry.count.saturating_add(1);
+        if !entry.count.is_power_of_two() {
+            return None;
+        }
+        Some(format!(
+            "[RHYTHM] Matter controller retry summary class={} count={} first_at={} last_at={}",
+            class.as_str(),
+            entry.count,
+            format_log_timestamp(entry.first_at),
+            format_log_timestamp(now)
+        ))
+    }
+
+    fn append(&self, sink: &Mutex<std::fs::File>, stamped: &str) {
         if let Ok(mut file) = sink.lock() {
             use std::io::Write as _;
             let _ = file.write_all(stamped.as_bytes());
@@ -1189,6 +1271,64 @@ fn verbose_sidecar_log_path(log_path: &Path) -> PathBuf {
 /// chipd's output and drown the commissioning story in the rotation budget.
 fn is_verbose_chip_line(line: &str) -> bool {
     line.starts_with("[EM]") || line.starts_with("[DMG]")
+}
+
+/// Classify a controller failure from a sidecar log line or from the rendered
+/// text of a failed controller RPC.
+///
+/// `MatterSubscriptionFailureClass` is the single failure vocabulary in this
+/// crate: the same names appear in the sidecar log summaries, in the
+/// subscription worker's backoff warnings, and in the structured terminations
+/// chipd reports. `Other` is never returned — an unrecognised line is `None`
+/// so the summarizer leaves it alone instead of collapsing it.
+pub(crate) fn classify_sidecar_failure(text: &str) -> Option<MatterSubscriptionFailureClass> {
+    // `[EM]`/`[DMG]` chatter is by far the highest-volume input and is never a
+    // terminal controller failure; skip it before allocating a lowered copy.
+    if is_verbose_chip_line(text) {
+        return None;
+    }
+    let lower = text.to_ascii_lowercase();
+
+    // Most specific cause first: a timeout inside address resolution is an
+    // address-resolution failure, not a bare timeout.
+    if lower.contains("addressresolve")
+        || lower.contains("address resolution")
+        || (lower.contains("operational discovery")
+            && (lower.contains("fail")
+                || lower.contains("timeout")
+                || lower.contains("timed out")
+                || lower.contains("error")))
+    {
+        return Some(MatterSubscriptionFailureClass::AddressResolution);
+    }
+    // "case" alone matches "because", "lowercase", "in case of" — require a
+    // phrase the SDK actually uses for CASE session establishment. Sigma
+    // steps are logged on successful handshakes too, so only a Sigma line
+    // that also names a failure counts.
+    let case_failure_words = ["fail", "error", "timeout", "timed out"];
+    if lower.contains("case session")
+        || lower.contains("casesession")
+        || lower.contains("case establishment")
+        || (lower.contains("sigma") && case_failure_words.iter().any(|w| lower.contains(w)))
+    {
+        return Some(MatterSubscriptionFailureClass::CaseSession);
+    }
+    if lower.contains("resource busy")
+        || lower.contains("resource is busy")
+        || (lower.contains("chip error") && lower.contains("busy"))
+    {
+        return Some(MatterSubscriptionFailureClass::ResourceBusy);
+    }
+    if lower.contains("broken pipe")
+        || lower.contains("connection closed")
+        || lower.contains("peer")
+    {
+        return Some(MatterSubscriptionFailureClass::PeerClosed);
+    }
+    if lower.contains("timeout") || lower.contains("timed out") {
+        return Some(MatterSubscriptionFailureClass::Timeout);
+    }
+    None
 }
 
 /// Strip ANSI CSI escape sequences from a chipd output line.
@@ -1276,8 +1416,22 @@ fn is_rpc_response_timeout(error: &anyhow::Error) -> bool {
     })
 }
 
-fn is_control_rpc_response_timeout(request: &ChipRpcRequest, error: &anyhow::Error) -> bool {
-    rpc_timeout_for_request(request) == RPC_CONTROL_TIMEOUT && is_rpc_response_timeout(error)
+/// Requests whose read timeout is a plain failure for the caller to own rather
+/// than evidence that the sidecar needs restarting.
+///
+/// Control RPCs qualify because their 8s deadline is far below anything the
+/// sidecar legitimately needs. `SubscribeOnOff` qualifies for the opposite
+/// reason: the subscription worker owns retry and backoff for it
+/// (`MATTER RETRY OWNER: RUST`), so bouncing chipd — and with it every healthy
+/// subscription and in-flight command — because one endpoint was slow is
+/// exactly the cascade this contract exists to prevent.
+fn is_plain_failure_on_timeout(request: &ChipRpcRequest) -> bool {
+    matches!(request, ChipRpcRequest::SubscribeOnOff { .. })
+        || rpc_timeout_for_request(request) == RPC_CONTROL_TIMEOUT
+}
+
+fn is_plain_rpc_response_timeout(request: &ChipRpcRequest, error: &anyhow::Error) -> bool {
+    is_plain_failure_on_timeout(request) && is_rpc_response_timeout(error)
 }
 
 fn is_recoverable_ble_commissioning_error(error: &anyhow::Error) -> bool {
@@ -1937,12 +2091,18 @@ mod tests {
         let log_path = dir.join("rhythm-matter.log");
         let sinks = SidecarLogSinks::open(&log_path).unwrap();
 
-        let input = concat!(
+        let mut input = concat!(
             "\x1b[0;32m[CTL] Commission called for node ID 0x69\x1b[0m\n",
             "\x1b[0;34m[EM] Rxd Ack; Removing MessageCounter:1 from Retrans Table\x1b[0m\n",
             "\x1b[0;34m[DMG] AttributeReportIBs =\x1b[0m\n",
             "\n",
-        );
+        )
+        .to_string();
+        let repeated = "[CTL] OperationalSessionSetup[1:0000000000000066]: operational discovery failed: src/lib/address_resolve/AddressResolve_DefaultImpl.cpp:124: CHIP Error 0x00000032: Timeout";
+        for _ in 0..10 {
+            input.push_str(repeated);
+            input.push('\n');
+        }
         pump_sidecar_log(std::io::Cursor::new(input.as_bytes()), &sinks);
         drop(sinks);
 
@@ -1951,6 +2111,27 @@ mod tests {
 
         assert!(main.contains("[CTL] Commission called"));
         assert!(!main.contains("[EM]"), "chatter must not hit the main log");
+        assert!(main.contains("Matter controller retry summary class=address_resolution count=8"));
+        assert!(main.contains("first_at="));
+        assert!(main.contains("last_at="));
+        assert!(
+            !main.contains("0000000000000066"),
+            "summaries must not retain endpoint identifiers"
+        );
+        assert!(
+            !main.contains("operational discovery failed"),
+            "classified raw lines belong in the verbose sink only: {main:?}"
+        );
+        assert_eq!(
+            main.matches("class=address_resolution").count(),
+            4,
+            "ten repeats should retain only counts 1, 2, 4, and 8"
+        );
+        assert_eq!(
+            verbose.matches("operational discovery failed").count(),
+            10,
+            "every raw failure line must be retained in the verbose sink"
+        );
         assert!(!main.contains('\u{1b}'), "ANSI must be stripped: {main:?}");
         assert!(
             main.starts_with("20"),
@@ -1965,6 +2146,92 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn repeated_failure_summary_restarts_counting_after_a_quiet_window() {
+        let dir = test_temp_root().join(format!(
+            "chipd-log-burst-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let sinks = SidecarLogSinks::open(&dir.join("rhythm-matter.log")).unwrap();
+        let class = MatterSubscriptionFailureClass::AddressResolution;
+        let start = chrono::Utc::now();
+
+        let emitted: Vec<u64> = (0..6)
+            .filter_map(|step| {
+                sinks
+                    .summarize_failure(class, start + chrono::Duration::seconds(step))
+                    .map(|_| step as u64)
+            })
+            .collect();
+        assert_eq!(emitted, vec![0, 1, 3], "counts 1, 2 and 4 within one burst");
+
+        let later = start + chrono::Duration::seconds(SIDECAR_FAILURE_BURST_WINDOW_SECS + 60);
+        let summary = sinks
+            .summarize_failure(class, later)
+            .expect("a new burst starts at count 1");
+        assert!(
+            summary.contains("count=1"),
+            "a quiet window must reset the burst: {summary}"
+        );
+        assert!(
+            summary.contains(&format!("first_at={}", format_log_timestamp(later))),
+            "the new burst must re-anchor first_at: {summary}"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sidecar_failure_classifier_matches_only_real_failure_phrases() {
+        assert_eq!(
+            classify_sidecar_failure(
+                "[CTL] OperationalSessionSetup: operational discovery failed: CHIP Error 0x00000032"
+            ),
+            Some(MatterSubscriptionFailureClass::AddressResolution)
+        );
+        assert_eq!(
+            classify_sidecar_failure(
+                "src/lib/address_resolve/AddressResolve_DefaultImpl.cpp:124: CHIP Error 0x00000032: Timeout"
+            ),
+            Some(MatterSubscriptionFailureClass::AddressResolution),
+            "a timeout inside address resolution is not a bare timeout"
+        );
+        assert_eq!(
+            classify_sidecar_failure("[SC] CASESession timed out while waiting for peer response"),
+            Some(MatterSubscriptionFailureClass::CaseSession)
+        );
+        assert_eq!(
+            classify_sidecar_failure("[SC] Sigma1 processing error"),
+            Some(MatterSubscriptionFailureClass::CaseSession)
+        );
+        assert_eq!(
+            classify_sidecar_failure("resource is busy for fabric 7"),
+            Some(MatterSubscriptionFailureClass::ResourceBusy)
+        );
+        assert_eq!(
+            classify_sidecar_failure("writing CHIP RPC newline: Broken pipe (os error 32)"),
+            Some(MatterSubscriptionFailureClass::PeerClosed)
+        );
+        assert_eq!(
+            classify_sidecar_failure("subscribe timed out"),
+            Some(MatterSubscriptionFailureClass::Timeout),
+            "a bare timeout is the last-resort class"
+        );
+        assert_eq!(
+            classify_sidecar_failure("[EM] Rxd Ack; broken pipe"),
+            None,
+            "exchange chatter must never be summarized"
+        );
+        assert_eq!(classify_sidecar_failure("[CTL] Commission called"), None);
+        assert_eq!(
+            classify_sidecar_failure("[CTL] skipped because the fabric is lowercase"),
+            None,
+            "\"because\"/\"lowercase\" must not read as a CASE session failure"
+        );
     }
 
     fn temp_socket_path(name: &str) -> PathBuf {
@@ -2018,6 +2285,55 @@ mod tests {
             }),
             RPC_CONTROL_TIMEOUT
         );
+    }
+
+    #[test]
+    fn subscribe_requests_keep_the_default_rpc_timeout() {
+        // The native subscribe is bounded by the SDK (address resolve ~45s plus
+        // CASE) and the server no longer serializes it behind the lifecycle
+        // lock, so an 8s control deadline would fail endpoints that were only
+        // slow. Reaching the 120s default instead means the sidecar is wedged.
+        assert_eq!(
+            rpc_timeout_for_request(&ChipRpcRequest::SubscribeOnOff {
+                targets: vec![MatterSubscriptionTarget {
+                    node_id: 42,
+                    endpoint: 1,
+                }],
+                min_interval_secs: 1,
+                max_interval_secs: 30,
+            }),
+            RPC_TIMEOUT
+        );
+        assert!(RPC_TIMEOUT > Duration::from_secs(45));
+    }
+
+    #[test]
+    fn a_subscribe_timeout_is_a_plain_failure_and_never_restarts_the_sidecar() {
+        // The subscription worker owns retry for SubscribeOnOff, so a slow
+        // endpoint must not bounce chipd and take every healthy subscription
+        // and in-flight command down with it.
+        assert!(is_plain_failure_on_timeout(
+            &ChipRpcRequest::SubscribeOnOff {
+                targets: vec![MatterSubscriptionTarget {
+                    node_id: 42,
+                    endpoint: 1,
+                }],
+                min_interval_secs: 1,
+                max_interval_secs: 30,
+            }
+        ));
+        assert!(is_plain_failure_on_timeout(&ChipRpcRequest::SetOnOff {
+            node_id: 42,
+            endpoint: 1,
+            on: true,
+        }));
+        // Commissioning still recovers the sidecar on a stuck socket.
+        assert!(!is_plain_failure_on_timeout(
+            &ChipRpcRequest::CommissionLight(ble_commission_request())
+        ));
+        assert!(!is_plain_failure_on_timeout(&ChipRpcRequest::ProbeLight {
+            node_id: 42
+        }));
     }
 
     #[test]
