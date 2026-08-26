@@ -61,6 +61,13 @@ to the child process environment. It does not invoke a shell or print values or
 resolved paths. The child process remains responsible for keeping its own
 output privacy-safe.
 
+Flutter build helpers materialize the exact validated `app-build` values,
+including non-empty process overrides, as a private temporary JSON file beside
+the external source profile. They remove that file when the build exits and
+never place it in the repository or an isolated worktree. A selected external
+profile that is missing or invalid fails closed; the repository app `.env` is
+used only by the compatibility fallback described below.
+
 `RHYTHM_CONFIG_DIR` changes the shared configuration directory. Each profile
 also has one explicit absolute-path override documented in `profiles.toml`.
 Validation reports only profile state and key names; it never prints credential

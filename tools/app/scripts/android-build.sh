@@ -9,6 +9,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../app" && pwd)"
 FLUTTER_APP="$PROJECT_ROOT/flutter/rhythm_app"
 
+# shellcheck source=lib/app-build-profile.sh
+source "$SCRIPT_DIR/lib/app-build-profile.sh"
+
 MODE="debug"
 ARTIFACT="apk"
 CLEAN=false
@@ -139,22 +142,9 @@ fi
 BUILD_ARGS=()
 BUILD_ARGS+=(--"$MODE")
 
-APP_BUILD_ENV_FILE="${RHYTHM_APP_BUILD_ENV_FILE:-${RHYTHM_CONFIG_DIR:-$HOME/.config/rhythm}/app-build.env}"
-APP_BUILD_ENV_IS_EXTERNAL=true
-if [ ! -f "$APP_BUILD_ENV_FILE" ] && [ -z "${RHYTHM_APP_BUILD_ENV_FILE:-}" ] && \
-    [ -z "${RHYTHM_CONFIG_DIR:-}" ] && [ -f "$FLUTTER_APP/.env" ]; then
-    APP_BUILD_ENV_FILE="$FLUTTER_APP/.env"
-    APP_BUILD_ENV_IS_EXTERNAL=false
-fi
-if [ -f "$APP_BUILD_ENV_FILE" ]; then
-    if [ "$APP_BUILD_ENV_IS_EXTERNAL" = true ] && \
-        ! RHYTHM_APP_BUILD_ENV_FILE="$APP_BUILD_ENV_FILE" \
-            python3 "$PROJECT_ROOT/../tools/config/validate.py" --profile app-build; then
-        echo "Error: the external app-build profile is not ready." >&2
-        exit 1
-    fi
-    BUILD_ARGS+=(--dart-define-from-file="$APP_BUILD_ENV_FILE")
-fi
+prepare_app_build_define_file "$PROJECT_ROOT/.." "$FLUTTER_APP"
+trap cleanup_app_build_define_file EXIT
+BUILD_ARGS+=(--dart-define-from-file="$RHYTHM_APP_BUILD_DEFINE_FILE")
 
 if [ -n "$BUILD_NAME" ]; then
     BUILD_ARGS+=(--build-name="$BUILD_NAME")

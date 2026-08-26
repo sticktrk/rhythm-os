@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import subprocess
@@ -46,6 +47,16 @@ class RhythmEnvironmentTest(unittest.TestCase):
                 "SUPABASE_ANON_KEY=anon-value",
                 "RHYTHM_ADMIN_EMAIL=staff@example.invalid",
                 f"RHYTHM_ADMIN_PASSWORD={marker}",
+                "",
+            )
+        )
+
+    def app_build_content(self) -> str:
+        return "\n".join(
+            (
+                "SUPABASE_URL=https://file.example.invalid",
+                "SUPABASE_ANON_KEY=file-anon",
+                "LOGIN_ENABLED=true",
                 "",
             )
         )
@@ -309,6 +320,61 @@ class RhythmEnvironmentTest(unittest.TestCase):
         output = result.stdout + result.stderr
         self.assertNotIn(marker, output)
         self.assertNotIn(str(self.config_dir), output)
+
+    def test_app_build_materializer_applies_overrides_and_is_private(self) -> None:
+        source = self.write_profile("app-build.env", self.app_build_content())
+        environment = os.environ.copy()
+        for name in self.registry.profiles["app-build"].allowed_keys:
+            environment.pop(name, None)
+        environment.update(
+            {
+                "RHYTHM_CONFIG_DIR": str(self.config_dir),
+                "SUPABASE_URL": "https://override.example.invalid",
+            }
+        )
+
+        result = subprocess.run(
+            [sys.executable, str(CONFIG_DIR / "materialize_app_build.py")],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        materialized = Path(result.stdout.strip())
+        try:
+            self.assertEqual(materialized.parent, self.config_dir)
+            self.assertNotEqual(materialized, source)
+            self.assertEqual(stat.S_IMODE(materialized.stat().st_mode), 0o600)
+            values = json.loads(materialized.read_text(encoding="utf-8"))
+            self.assertEqual(
+                values["SUPABASE_URL"], "https://override.example.invalid"
+            )
+            self.assertEqual(values["SUPABASE_ANON_KEY"], "file-anon")
+            self.assertEqual(
+                source.read_text(encoding="utf-8"), self.app_build_content()
+            )
+        finally:
+            materialized.unlink(missing_ok=True)
+
+    def test_app_build_materializer_fails_closed_when_profile_is_missing(self) -> None:
+        environment = os.environ.copy()
+        for name in self.registry.profiles["app-build"].allowed_keys:
+            environment.pop(name, None)
+        environment["RHYTHM_CONFIG_DIR"] = str(self.config_dir)
+
+        result = subprocess.run(
+            [sys.executable, str(CONFIG_DIR / "materialize_app_build.py")],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.stdout, "")
+        self.assertNotIn(str(self.config_dir), result.stderr)
 
     def test_provisioner_splits_legacy_files_and_hardens_targets(self) -> None:
         legacy_root = self.config_dir / "legacy"
