@@ -5,6 +5,8 @@ import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDevice;
 import 'package:uuid/uuid.dart';
 
 import '../../providers/server_sync_provider.dart';
+import '../../services/analytics_service.dart';
+import '../../services/matter_bulb_test_plan.dart';
 import '../../services/matter_bulb_tester_service.dart';
 import '../../widgets/solar_orbit.dart';
 
@@ -25,226 +27,9 @@ class MatterBulbTesterScreen extends StatefulWidget {
 class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
   static const _uuid = Uuid();
   static const _lowDimMinBrightnessHint = 10;
-  static const _rapidGapsMs = [50, 100, 200, 500, 1000];
 
   final _notesController = TextEditingController();
-  final _throttleController = TextEditingController(text: '250');
-  final _steps = const [
-    _MatterBulbTestStep(
-      id: 'identify',
-      title: 'Identify',
-      prompt: 'Did this bulb blink?',
-      runLabel: 'Blink bulb',
-    ),
-    _MatterBulbTestStep(
-      id: 'turn_off',
-      title: 'Baseline Off',
-      prompt: 'Did the bulb turn fully off?',
-      runLabel: 'Turn off bulb',
-    ),
-    _MatterBulbTestStep(
-      id: 'brightness_without_on',
-      title: 'Brightness Without On',
-      prompt:
-          'Starting from off, did the bulb turn on after only a brightness command?',
-      runLabel: 'Test brightness',
-    ),
-    _MatterBulbTestStep(
-      id: 'brightness_with_on',
-      title: 'Explicit On',
-      prompt: 'Did explicit on followed by brightness work?',
-      runLabel: 'Test explicit on',
-    ),
-    _MatterBulbTestStep(
-      id: 'level_move_to_level',
-      title: 'MoveToLevel',
-      prompt:
-          'Starting from off, did plain MoveToLevel turn the bulb on or visibly set brightness?',
-      runLabel: 'Test MoveToLevel',
-    ),
-    _MatterBulbTestStep(
-      id: 'level_move_to_level_with_onoff',
-      title: 'MoveToLevelWithOnOff',
-      prompt:
-          'Starting from off, did MoveToLevelWithOnOff turn the bulb on and set brightness?',
-      runLabel: 'Test MTL OnOff',
-    ),
-    _MatterBulbTestStep(
-      id: 'level_step',
-      title: 'Step',
-      prompt:
-          'It should first reset to neutral white, then run a plain Step down command. Did brightness step down?',
-      runLabel: 'Test Step',
-    ),
-    _MatterBulbTestStep(
-      id: 'level_step_with_onoff',
-      title: 'StepWithOnOff',
-      prompt:
-          'Starting from off, did StepWithOnOff turn the bulb on or visibly step brightness?',
-      runLabel: 'Test Step OnOff',
-    ),
-    _MatterBulbTestStep(
-      id: 'dim_low',
-      title: 'Low Dim',
-      prompt:
-          'It should first reset to neutral white, then drop low. Did it stay on at a stable low dim level?',
-      runLabel: 'Test low dim',
-    ),
-    _MatterBulbTestStep(
-      id: 'dim_ramp',
-      title: 'Dimming Ramp',
-      prompt:
-          'It should first reset to neutral white, then fade down. Did it fade smoothly instead of jumping or failing?',
-      runLabel: 'Test fade',
-    ),
-    _MatterBulbTestStep(
-      id: 'brightness_steps',
-      title: 'Brightness Range',
-      prompt:
-          'It should first reset to neutral white, then step low, medium, and full. Were the steps visible?',
-      runLabel: 'Test range',
-    ),
-    _MatterBulbTestStep(
-      id: 'color_temperature_warm',
-      title: 'Warm White',
-      prompt:
-          'It should first reset to neutral white, then move warm. Did it become warm white?',
-      runLabel: 'Test warm white',
-    ),
-    _MatterBulbTestStep(
-      id: 'color_temperature_cool',
-      title: 'Cool White',
-      prompt:
-          'It should first reset to neutral white, then move cool. Did it become cool white?',
-      runLabel: 'Test cool white',
-    ),
-    _MatterBulbTestStep(
-      id: 'xy_red',
-      title: 'Red',
-      prompt:
-          'It should first reset to neutral white, then turn red. Did it turn red?',
-      runLabel: 'Test red',
-    ),
-    _MatterBulbTestStep(
-      id: 'xy_green',
-      title: 'Green',
-      prompt:
-          'It should first reset to neutral white, then turn green. Did it turn green?',
-      runLabel: 'Test green',
-    ),
-    _MatterBulbTestStep(
-      id: 'xy_blue',
-      title: 'Blue',
-      prompt:
-          'It should first reset to neutral white, then turn blue. Did it turn blue?',
-      runLabel: 'Test blue',
-    ),
-    _MatterBulbTestStep(
-      id: 'hue_sat_red',
-      title: 'Hue/Sat Red',
-      prompt:
-          'It should first reset to neutral white, then use Hue/Sat red. Did it turn red?',
-      runLabel: 'Test HS red',
-    ),
-    _MatterBulbTestStep(
-      id: 'hue_sat_green',
-      title: 'Hue/Sat Green',
-      prompt:
-          'It should first reset to neutral white, then use Hue/Sat green. Did it turn green?',
-      runLabel: 'Test HS green',
-    ),
-    _MatterBulbTestStep(
-      id: 'hue_sat_blue',
-      title: 'Hue/Sat Blue',
-      prompt:
-          'It should first reset to neutral white, then use Hue/Sat blue. Did it turn blue?',
-      runLabel: 'Test HS blue',
-    ),
-    _MatterBulbTestStep(
-      id: 'ct_to_xy',
-      title: 'CT to XY',
-      prompt:
-          'It should first reset to neutral white, move warm, then switch to XY red. Did it end red?',
-      runLabel: 'Test CT to XY',
-    ),
-    _MatterBulbTestStep(
-      id: 'xy_to_ct',
-      title: 'XY to CT',
-      prompt:
-          'It should first reset to neutral white, move XY blue, then switch to warm white. Did it end warm white?',
-      runLabel: 'Test XY to CT',
-    ),
-    _MatterBulbTestStep(
-      id: 'ct_to_hue_sat',
-      title: 'CT to Hue/Sat',
-      prompt:
-          'It should first reset to neutral white, move warm, then switch to Hue/Sat blue. Did it end blue?',
-      runLabel: 'Test CT to HS',
-    ),
-    _MatterBulbTestStep(
-      id: 'hue_sat_to_ct',
-      title: 'Hue/Sat to CT',
-      prompt:
-          'It should first reset to neutral white, move Hue/Sat blue, then switch to warm white. Did it end warm white?',
-      runLabel: 'Test HS to CT',
-    ),
-    _MatterBulbTestStep(
-      id: 'on_level_restore',
-      title: 'On Level Restore',
-      prompt:
-          'It should first reset to neutral white, dim to 10%, turn off, then turn on. Did it come back at the low level?',
-      runLabel: 'Test restore',
-    ),
-    _MatterBulbTestStep(
-      id: 'power_on_behavior',
-      title: 'Power-On Restore',
-      prompt:
-          'After it sets warm white at 50%, physically power-cycle the bulb. Did it come back warm at about 50%?',
-      runLabel: 'Set power test',
-    ),
-    _MatterBulbTestStep(
-      id: 'rapid_commands',
-      title: 'Rapid Commands',
-      prompt:
-          'It should first reset to neutral white, then rapidly cycle high-contrast colors, warm/cool white, or brightness. Did it visibly change more than once and land on the final state?',
-      runLabel: 'Test burst',
-    ),
-    _MatterBulbTestStep(
-      id: 'rapid_50ms',
-      title: 'Rapid 50 ms',
-      prompt:
-          'It should first reset to neutral white, then rapidly cycle high-contrast changes with 50 ms gaps. Did it visibly change more than once and land on the final state?',
-      runLabel: 'Test 50 ms',
-    ),
-    _MatterBulbTestStep(
-      id: 'rapid_100ms',
-      title: 'Rapid 100 ms',
-      prompt:
-          'It should first reset to neutral white, then rapidly cycle high-contrast changes with 100 ms gaps. Did it visibly change more than once and land on the final state?',
-      runLabel: 'Test 100 ms',
-    ),
-    _MatterBulbTestStep(
-      id: 'rapid_200ms',
-      title: 'Rapid 200 ms',
-      prompt:
-          'It should first reset to neutral white, then rapidly cycle high-contrast changes with 200 ms gaps. Did it visibly change more than once and land on the final state?',
-      runLabel: 'Test 200 ms',
-    ),
-    _MatterBulbTestStep(
-      id: 'rapid_500ms',
-      title: 'Rapid 500 ms',
-      prompt:
-          'It should first reset to neutral white, then rapidly cycle high-contrast changes with 500 ms gaps. Did it visibly change more than once and land on the final state?',
-      runLabel: 'Test 500 ms',
-    ),
-    _MatterBulbTestStep(
-      id: 'rapid_1000ms',
-      title: 'Rapid 1000 ms',
-      prompt:
-          'It should first reset to neutral white, then rapidly cycle high-contrast changes with 1000 ms gaps. Did it visibly change more than once and land on the final state?',
-      runLabel: 'Test 1000 ms',
-    ),
-  ];
+  final String _journeyId = 'matter-bulb-test-${_uuid.v4()}';
 
   final Map<String, _StepObservation> _observations = {};
   int _currentStep = 0;
@@ -253,16 +38,37 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
   String? _status;
 
   @override
-  void dispose() {
-    _notesController.dispose();
-    _throttleController.dispose();
-    super.dispose();
+  void initState() {
+    super.initState();
+    AnalyticsService().logMatterBulbTesterStarted(
+      journeyId: _journeyId,
+      source: 'device_detail',
+      plannedTestCount: matterBulbTestSteps.length,
+    );
   }
 
   @override
+  void dispose() {
+    _notesController.dispose();
+    super.dispose();
+  }
+
+  bool get _xyFailed => _observations['xy_red']?.worked == false;
+
+  List<MatterBulbTestStep> _activeSteps() =>
+      activeMatterBulbTestSteps(xyFailed: _xyFailed);
+
+  List<String> get _skippedXyTestIds => skippedMatterBulbTestIds(
+        xyFailed: _xyFailed,
+      )
+          .where((testId) => _observations[testId] == null)
+          .toList(growable: false);
+
+  @override
   Widget build(BuildContext context) {
-    final currentIndex = _currentStep.clamp(0, _steps.length - 1).toInt();
-    final current = _steps[currentIndex];
+    final activeSteps = _activeSteps();
+    final currentIndex = _currentStep.clamp(0, activeSteps.length - 1).toInt();
+    final current = activeSteps[currentIndex];
     final answeredCount = _observations.values
         .where((observation) => observation.answered)
         .length;
@@ -281,9 +87,13 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
                 children: [
                   _buildDeviceBlock(),
                   const SizedBox(height: 16),
-                  _buildCurrentStep(current),
+                  _buildCurrentStep(
+                    current,
+                    currentIndex: currentIndex,
+                    stepCount: activeSteps.length,
+                  ),
                   const SizedBox(height: 16),
-                  _buildStepList(),
+                  _buildStepList(activeSteps),
                   const SizedBox(height: 16),
                   _buildInferredQuirks(inferredQuirks, capabilityHints),
                   const SizedBox(height: 16),
@@ -409,7 +219,11 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
     );
   }
 
-  Widget _buildCurrentStep(_MatterBulbTestStep step) {
+  Widget _buildCurrentStep(
+    MatterBulbTestStep step, {
+    required int currentIndex,
+    required int stepCount,
+  }) {
     final observation = _observations[step.id];
     return Container(
       padding: const EdgeInsets.all(16),
@@ -430,7 +244,7 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
                 ),
               ),
               Text(
-                '${_currentStep + 1}/${_steps.length}',
+                '${currentIndex + 1}/$stepCount',
                 style: const TextStyle(
                   color: CelestialColors.textSecondary,
                   fontSize: 13,
@@ -439,6 +253,33 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
             ],
           ),
           const SizedBox(height: 8),
+          if (step.preparation != null) ...[
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Padding(
+                  padding: EdgeInsets.only(top: 1),
+                  child: Icon(
+                    Icons.tune_rounded,
+                    color: CelestialColors.sunWarm,
+                    size: 16,
+                  ),
+                ),
+                const SizedBox(width: 7),
+                Expanded(
+                  child: Text(
+                    step.preparation!,
+                    style: const TextStyle(
+                      color: CelestialColors.sunWarm,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+          ],
           Text(
             step.prompt,
             style: const TextStyle(
@@ -487,15 +328,6 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
                   onTap: () => _recordObservation(step, false),
                 ),
               ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _AnswerButton(
-                  label: 'Unsure',
-                  selected: observation?.answered == true &&
-                      observation?.worked == null,
-                  onTap: () => _recordObservation(step, null),
-                ),
-              ),
             ],
           ),
         ],
@@ -503,17 +335,17 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
     );
   }
 
-  Widget _buildStepList() {
+  Widget _buildStepList(List<MatterBulbTestStep> activeSteps) {
     return Column(
       children: [
-        for (int i = 0; i < _steps.length; i++) ...[
+        for (int i = 0; i < activeSteps.length; i++) ...[
           _StepSummaryRow(
-            step: _steps[i],
+            step: activeSteps[i],
             selected: i == _currentStep,
-            observation: _observations[_steps[i].id],
+            observation: _observations[activeSteps[i].id],
             onTap: () => setState(() => _currentStep = i),
           ),
-          if (i < _steps.length - 1) const SizedBox(height: 8),
+          if (i < activeSteps.length - 1) const SizedBox(height: 8),
         ],
       ],
     );
@@ -578,25 +410,6 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
                   ),
               ],
             ),
-          if (_needsThrottleInput()) ...[
-            const SizedBox(height: 12),
-            TextField(
-              controller: _throttleController,
-              keyboardType: TextInputType.number,
-              style: const TextStyle(color: CelestialColors.textPrimary),
-              decoration: const InputDecoration(
-                labelText: 'Command gap ms',
-                labelStyle: TextStyle(color: CelestialColors.textSecondary),
-                enabledBorder: UnderlineInputBorder(
-                  borderSide: BorderSide(color: CelestialColors.orbitRing),
-                ),
-                focusedBorder: UnderlineInputBorder(
-                  borderSide: BorderSide(color: CelestialColors.sunWarm),
-                ),
-              ),
-              onChanged: (_) => setState(() {}),
-            ),
-          ],
         ],
       ),
     );
@@ -655,7 +468,7 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
     );
   }
 
-  Future<void> _runStep(_MatterBulbTestStep step) async {
+  Future<void> _runStep(MatterBulbTestStep step) async {
     setState(() {
       _running = true;
       _status = null;
@@ -684,7 +497,7 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
     });
   }
 
-  void _recordObservation(_MatterBulbTestStep step, bool? worked) {
+  void _recordObservation(MatterBulbTestStep step, bool worked) {
     HapticFeedback.selectionClick();
     final existing = _observations[step.id];
     setState(() {
@@ -694,10 +507,13 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
         serverResult: existing?.serverResult,
         recordedAt: DateTime.now(),
       );
+      final activeSteps = _activeSteps();
       final currentIndex =
-          _steps.indexWhere((candidate) => candidate.id == step.id);
-      if (currentIndex >= 0 && currentIndex < _steps.length - 1) {
+          activeSteps.indexWhere((candidate) => candidate.id == step.id);
+      if (currentIndex >= 0 && currentIndex < activeSteps.length - 1) {
         _currentStep = currentIndex + 1;
+      } else if (currentIndex >= 0) {
+        _currentStep = currentIndex;
       }
       _status = null;
     });
@@ -754,6 +570,21 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
         (false, _, false) => 'Saved locally. Server save failed.',
       };
     });
+    AnalyticsService().logMatterBulbTesterSaveCompleted(
+      journeyId: _journeyId,
+      outcome: serverSaved && cloudResult.uploaded ? 'succeeded' : 'partial',
+      answeredTestCount: _observations.values
+          .where((observation) => observation.answered)
+          .length,
+      skippedXyTestCount: _skippedXyTestIds.length,
+      xyOutcome: switch (_observations['xy_red']?.worked) {
+        true => 'succeeded',
+        false => 'failed',
+        null => 'not_tested',
+      },
+      serverOutcome: serverSaved ? 'saved' : 'failed',
+      cloudOutcome: cloudResult.uploaded ? 'uploaded' : 'not_uploaded',
+    );
   }
 
   Map<String, dynamic> _buildReport() {
@@ -769,6 +600,21 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
       'device_id': widget.nativeDeviceId,
       'canonical_device_id': widget.device.id,
       'created_at': DateTime.now().toUtc().toIso8601String(),
+      'test_plan': {
+        'planned_test_count': matterBulbTestSteps.length,
+        'active_test_count': _activeSteps().length,
+        'single_color_sample': 'red',
+        'assume_green_blue_if_red_succeeds': true,
+        'rapid_cycling_assumed_unsupported': true,
+        'assumed_command_spacing_ms': defaultMatterBulbCommandSpacingMs,
+        'skipped_tests': [
+          for (final testId in _skippedXyTestIds)
+            {
+              'test': testId,
+              'reason': 'xy_red_failed',
+            },
+        ],
+      },
       'device': {
         'name': widget.device.displayName,
         'manufacturer': widget.device.manufacturer,
@@ -785,7 +631,7 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
       'readback_consistency': _readbackConsistency(),
       'visual_observations': _visualObservations(),
       'observations': [
-        for (final step in _steps)
+        for (final step in matterBulbTestSteps)
           if (_observations[step.id] != null)
             {
               'test': step.id,
@@ -813,12 +659,12 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
       'color_coverage': {
         'warm_white_worked': _observations['color_temperature_warm']?.worked,
         'cool_white_worked': _observations['color_temperature_cool']?.worked,
-        'red_worked': _observations['xy_red']?.worked,
-        'green_worked': _observations['xy_green']?.worked,
-        'blue_worked': _observations['xy_blue']?.worked,
+        'xy_red_worked': _observations['xy_red']?.worked,
+        'xy_green_blue_assumed_from_red':
+            _observations['xy_red']?.worked == true,
         'hue_sat_red_worked': _observations['hue_sat_red']?.worked,
-        'hue_sat_green_worked': _observations['hue_sat_green']?.worked,
-        'hue_sat_blue_worked': _observations['hue_sat_blue']?.worked,
+        'hue_sat_green_blue_assumed_from_red':
+            _observations['hue_sat_red']?.worked == true,
         'ct_to_xy_worked': _observations['ct_to_xy']?.worked,
         'xy_to_ct_worked': _observations['xy_to_ct']?.worked,
         'ct_to_hue_sat_worked': _observations['ct_to_hue_sat']?.worked,
@@ -830,7 +676,7 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
   }
 
   Map<String, dynamic>? _firstServerMap(String key) {
-    for (final step in _steps) {
+    for (final step in matterBulbTestSteps) {
       final value = _observations[step.id]?.serverResult?[key];
       if (value is Map) {
         return Map<String, dynamic>.from(value);
@@ -841,7 +687,7 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
 
   Map<String, dynamic> _commandResults() {
     return {
-      for (final step in _steps)
+      for (final step in matterBulbTestSteps)
         if (_observations[step.id]?.serverResult != null)
           step.id: {
             'status': _observations[step.id]!.serverResult?['status'],
@@ -856,7 +702,7 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
 
   Map<String, dynamic> _visualObservations() {
     return {
-      for (final step in _steps)
+      for (final step in matterBulbTestSteps)
         if (_observations[step.id] != null)
           step.id: {
             'title': step.title,
@@ -918,13 +764,14 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
       },
       'xy_color': {
         'red': _observations['xy_red']?.worked,
-        'green': _observations['xy_green']?.worked,
-        'blue': _observations['xy_blue']?.worked,
+        'sampled_colors': const ['red'],
+        'green_blue_assumed_from_red': _observations['xy_red']?.worked == true,
       },
       'hue_saturation': {
         'red': _observations['hue_sat_red']?.worked,
-        'green': _observations['hue_sat_green']?.worked,
-        'blue': _observations['hue_sat_blue']?.worked,
+        'sampled_colors': const ['red'],
+        'green_blue_assumed_from_red':
+            _observations['hue_sat_red']?.worked == true,
       },
       'color_mode_switching': {
         'ct_to_xy': _observations['ct_to_xy']?.worked,
@@ -937,9 +784,8 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
         'transition_behavior': _transitionBehavior(),
       },
       'rapid_commands': {
-        'zero_gap': _observations['rapid_commands']?.worked,
-        for (final gapMs in _rapidGapsMs)
-          '${gapMs}ms': _observations['rapid_${gapMs}ms']?.worked,
+        'tested': false,
+        'assumed_unsupported': true,
       },
       'power_on_behavior': {
         'restored_warm_50_percent': _observations['power_on_behavior']?.worked,
@@ -953,7 +799,7 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
       'level': 'tracked_when_native_bridge_available',
       'color': 'tracked_when_native_bridge_available',
       'by_test': {
-        for (final step in _steps)
+        for (final step in matterBulbTestSteps)
           if (_observations[step.id] != null)
             step.id: {
               'command_ack': _commandAckStatus(
@@ -970,7 +816,6 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
 
   Map<String, dynamic> _recommendedControlStrategy() {
     final minBrightness = _capabilityHints()['min_brightness'];
-    final spacingMs = _recommendedCommandSpacingMs();
     return {
       'turn_on_sequence': _turnOnSequence(),
       'brightness_command': _preferredLevelCommand(),
@@ -978,7 +823,7 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
       'color_command': _preferredColorCommand(),
       'min_brightness': minBrightness,
       'transition_behavior': _transitionBehavior(),
-      'recommended_command_spacing_ms': spacingMs,
+      'recommended_command_spacing_ms': defaultMatterBulbCommandSpacingMs,
       'on_restores_previous_level': _observations['on_level_restore']?.worked,
       'power_on_behavior': _powerOnBehavior(),
     };
@@ -986,24 +831,11 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
 
   List<dynamic> _inferredBehavioralQuirks() {
     final quirks = <dynamic>[];
-    final xyResults = [
-      _observations['xy_red']?.worked,
-      _observations['xy_green']?.worked,
-      _observations['xy_blue']?.worked,
-    ];
-    final hueSatResults = [
-      _observations['hue_sat_red']?.worked,
-      _observations['hue_sat_green']?.worked,
-      _observations['hue_sat_blue']?.worked,
-    ];
     final ctResults = [
       _observations['color_temperature_warm']?.worked,
       _observations['color_temperature_cool']?.worked,
     ];
-    final xyWasTested = xyResults.any((worked) => worked != null);
-    final xyAllFailed =
-        xyWasTested && xyResults.every((worked) => worked == false);
-    final hueSatWorks = hueSatResults.any((worked) => worked == true);
+    final hueSatWorks = _observations['hue_sat_red']?.worked == true;
     final ctWorks = ctResults.any((worked) => worked == true);
 
     if (_observations['on_level_restore']?.worked == false) {
@@ -1014,13 +846,13 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
     } else if (_observations['power_on_behavior']?.worked == false) {
       quirks.add({'power_on_behavior': 'not_restore_previous'});
     }
-    if (xyAllFailed) {
+    if (_xyFailed) {
       quirks.add('xy_color_commands_ack_but_no_visible_change');
     }
 
     final modeSwitchResults = <String, bool?>{
-      if (!xyAllFailed) 'ct_to_xy_fails': _observations['ct_to_xy']?.worked,
-      if (!xyAllFailed && ctWorks)
+      if (!_xyFailed) 'ct_to_xy_fails': _observations['ct_to_xy']?.worked,
+      if (!_xyFailed && ctWorks)
         'xy_to_ct_fails': _observations['xy_to_ct']?.worked,
       if (hueSatWorks)
         'ct_to_hue_sat_fails': _observations['ct_to_hue_sat']?.worked,
@@ -1042,8 +874,7 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
   String _answerLabel(_StepObservation observation) {
     if (!observation.answered) return 'unanswered';
     if (observation.worked == true) return 'yes';
-    if (observation.worked == false) return 'no';
-    return 'unsure';
+    return 'no';
   }
 
   String _commandAckStatus(Map<String, dynamic>? serverResult) {
@@ -1126,19 +957,11 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
   }
 
   String _preferredColorCommand() {
-    final hueSatWorked = [
-      _observations['hue_sat_red']?.worked,
-      _observations['hue_sat_green']?.worked,
-      _observations['hue_sat_blue']?.worked,
-    ].any((worked) => worked == true);
-    if (hueSatWorked) return 'hue_saturation';
+    if (_observations['hue_sat_red']?.worked == true) {
+      return 'hue_saturation';
+    }
 
-    final xyWorked = [
-      _observations['xy_red']?.worked,
-      _observations['xy_green']?.worked,
-      _observations['xy_blue']?.worked,
-    ].any((worked) => worked == true);
-    if (xyWorked) return 'xy';
+    if (_observations['xy_red']?.worked == true) return 'xy';
 
     final colorTemperatureWorked = [
       _observations['color_temperature_warm']?.worked,
@@ -1154,31 +977,6 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
     if (worked == true) return 'smooth';
     if (worked == false) return 'instant_jump_or_ignored';
     return 'unknown';
-  }
-
-  int? _recommendedCommandSpacingMs() {
-    for (final gapMs in _rapidGapsMs) {
-      if (_observations['rapid_${gapMs}ms']?.worked == true) return gapMs;
-    }
-    final anyRapidFailure = _observations['rapid_commands']?.worked == false ||
-        _rapidGapsMs.any(
-          (gapMs) => _observations['rapid_${gapMs}ms']?.worked == false,
-        );
-    if (_observations['rapid_commands']?.worked == true && !anyRapidFailure) {
-      return 50;
-    }
-    if (anyRapidFailure) {
-      final throttleMs = int.tryParse(_throttleController.text.trim()) ?? 250;
-      return throttleMs.clamp(50, 2000);
-    }
-    return null;
-  }
-
-  bool _needsThrottleInput() {
-    if (_observations['rapid_commands']?.worked == false) return true;
-    return _rapidGapsMs.any(
-      (gapMs) => _observations['rapid_${gapMs}ms']?.worked == false,
-    );
   }
 
   String _powerOnBehavior() {
@@ -1200,22 +998,12 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
       _observations['color_temperature_warm']?.worked,
       _observations['color_temperature_cool']?.worked,
     ];
-    final xyResults = [
-      _observations['xy_red']?.worked,
-      _observations['xy_green']?.worked,
-      _observations['xy_blue']?.worked,
-    ];
     final colorTemperatureFailed =
         colorTemperatureResults.any((worked) => worked == false);
-    final xyWorked = xyResults.any((worked) => worked == true);
-    if (colorTemperatureFailed && xyWorked) {
+    if (colorTemperatureFailed && _observations['xy_red']?.worked == true) {
       quirks.add('needs_xy_not_ct');
     }
-
-    final spacingMs = _recommendedCommandSpacingMs();
-    if (spacingMs != null && spacingMs > 50) {
-      quirks.add({'command_throttle_ms': spacingMs});
-    }
+    quirks.add({'command_throttle_ms': defaultMatterBulbCommandSpacingMs});
     return quirks;
   }
 
@@ -1234,7 +1022,7 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
     if (quirk == 'needs_explicit_on') return 'Explicit On';
     if (quirk == 'needs_xy_not_ct') return 'Prefer XY';
     if (quirk is Map && quirk['command_throttle_ms'] != null) {
-      return '${quirk['command_throttle_ms']} ms gap';
+      return '${quirk['command_throttle_ms']} ms safe gap';
     }
     return quirk.toString();
   }
@@ -1261,20 +1049,6 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
       ),
     );
   }
-}
-
-class _MatterBulbTestStep {
-  const _MatterBulbTestStep({
-    required this.id,
-    required this.title,
-    required this.prompt,
-    required this.runLabel,
-  });
-
-  final String id;
-  final String title;
-  final String prompt;
-  final String runLabel;
 }
 
 class _StepObservation {
@@ -1341,7 +1115,7 @@ class _StepSummaryRow extends StatelessWidget {
     required this.onTap,
   });
 
-  final _MatterBulbTestStep step;
+  final MatterBulbTestStep step;
   final bool selected;
   final _StepObservation? observation;
   final VoidCallback onTap;
@@ -1351,20 +1125,19 @@ class _StepSummaryRow extends StatelessWidget {
     final icon = switch ((observation?.answered, observation?.worked)) {
       (true, true) => Icons.check_circle,
       (true, false) => Icons.cancel,
-      (true, null) => Icons.help,
       (false, _) when observation?.serverResult != null => Icons.terminal,
       _ => Icons.radio_button_unchecked,
     };
     final color = switch ((observation?.answered, observation?.worked)) {
       (true, true) => const Color(0xFF81C784),
       (true, false) => const Color(0xFFE57373),
-      (true, null) => const Color(0xFFFFD54F),
       (false, _) when observation?.serverResult != null =>
         CelestialColors.accentBlue,
       _ => CelestialColors.textSecondary,
     };
 
     return GestureDetector(
+      key: ValueKey('matter-bulb-test-step-${step.id}'),
       onTap: onTap,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),

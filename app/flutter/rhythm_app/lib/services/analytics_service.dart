@@ -924,6 +924,40 @@ class AnalyticsService {
     });
   }
 
+  /// Track entry into the privacy-bounded manual Matter bulb test journey.
+  Future<void> logMatterBulbTesterStarted({
+    required String journeyId,
+    required String source,
+    required int plannedTestCount,
+  }) async {
+    await logEvent('matter_bulb_tester_started', {
+      'journey_id': journeyId,
+      'source': source,
+      'planned_test_count': plannedTestCount,
+    });
+  }
+
+  /// Track the terminal app-observed outcome of saving a Matter bulb report.
+  Future<void> logMatterBulbTesterSaveCompleted({
+    required String journeyId,
+    required String outcome,
+    required int answeredTestCount,
+    required int skippedXyTestCount,
+    required String xyOutcome,
+    required String serverOutcome,
+    required String cloudOutcome,
+  }) async {
+    await logEvent('matter_bulb_tester_save_completed', {
+      'journey_id': journeyId,
+      'outcome': outcome,
+      'answered_test_count': answeredTestCount,
+      'skipped_xy_test_count': skippedXyTestCount,
+      'xy_outcome': xyOutcome,
+      'server_outcome': serverOutcome,
+      'cloud_outcome': cloudOutcome,
+    });
+  }
+
   /// Track the terminal app-observed result of assigning a device parent.
   Future<void> logDeviceRoomMoveCompleted({
     required String journeyId,

@@ -651,6 +651,56 @@ void main() {
     );
   });
 
+  test('Matter bulb tester analytics stays bounded and privacy-safe', () async {
+    await analytics.logMatterBulbTesterStarted(
+      journeyId: 'matter-bulb-test-123',
+      source: 'device_detail',
+      plannedTestCount: 21,
+    );
+    await analytics.logMatterBulbTesterSaveCompleted(
+      journeyId: 'matter-bulb-test-123',
+      outcome: 'partial',
+      answeredTestCount: 19,
+      skippedXyTestCount: 2,
+      xyOutcome: 'failed',
+      serverOutcome: 'saved',
+      cloudOutcome: 'not_uploaded',
+    );
+
+    expect(
+      backend.events.map((event) => event.name),
+      [
+        'matter_bulb_tester_started',
+        'matter_bulb_tester_save_completed',
+      ],
+    );
+    expect(backend.events.first.properties, {
+      'journey_id': 'matter-bulb-test-123',
+      'source': 'device_detail',
+      'planned_test_count': 21,
+    });
+    expect(backend.events.last.properties, {
+      'journey_id': 'matter-bulb-test-123',
+      'outcome': 'partial',
+      'answered_test_count': 19,
+      'skipped_xy_test_count': 2,
+      'xy_outcome': 'failed',
+      'server_outcome': 'saved',
+      'cloud_outcome': 'not_uploaded',
+    });
+    final keys = backend.events.expand((event) => event.properties.keys);
+    for (final forbiddenKey in [
+      'device_id',
+      'node_id',
+      'home_id',
+      'device_name',
+      'operator_notes',
+      'error',
+    ]) {
+      expect(keys, isNot(contains(forbiddenKey)));
+    }
+  });
+
   test('analytics remains a no-op when the backend is unavailable', () async {
     BackendProvider.resetForTesting();
 
