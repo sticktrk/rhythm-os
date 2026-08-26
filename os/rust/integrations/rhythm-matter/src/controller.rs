@@ -1542,6 +1542,62 @@ mod tests {
     }
 
     #[test]
+    fn h7056_uses_hue_saturation_for_direct_and_adaptive_color() {
+        let (controller, spy, _) = make_controller();
+        let mut h7056 = profiled_color_bulb(42, "Shenzhen Qianyan Technology", "H7056");
+        h7056.vendor_id = 4999;
+        h7056.product_id = 28758;
+        h7056.color_modes = vec![
+            crate::transport::MatterColorMode::HueSaturation,
+            crate::transport::MatterColorMode::Xy,
+            crate::transport::MatterColorMode::ColorTemperature,
+        ];
+        h7056.min_kelvin = None;
+        h7056.max_kelvin = None;
+        let caps = crate::commissioning::build_device_capabilities(&h7056);
+        let quirks = crate::commissioning::build_device_quirks(&h7056);
+        controller
+            .hub_data
+            .device_caps
+            .lock()
+            .unwrap()
+            .insert("matter-42".to_string(), caps);
+        controller
+            .hub_data
+            .device_quirks
+            .lock()
+            .unwrap()
+            .insert("matter-42".to_string(), quirks);
+
+        block_on(controller.turn_on(
+            "kitchen",
+            LightingCommand::from_color(
+                31,
+                rhythm_core::Rgb::new(129, 56, 255),
+                rhythm_core::XyColor { x: 0.205, y: 0.106 },
+                None,
+            ),
+        ))
+        .unwrap();
+        block_on(controller.turn_on("kitchen", LightingCommand::new(100, 4000))).unwrap();
+
+        let operations = operations_for_node(&spy.operations(), 42);
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|operation| matches!(operation, RecordedOperation::SetHueSaturation { .. }))
+                .count(),
+            2
+        );
+        assert!(!operations
+            .iter()
+            .any(|operation| matches!(operation, RecordedOperation::SetXy { .. })));
+        assert!(!operations
+            .iter()
+            .any(|operation| matches!(operation, RecordedOperation::SetColorTemperature { .. })));
+    }
+
+    #[test]
     fn lifx_everyday_lightstrip_uses_hue_saturation_for_color_temperature() {
         let (controller, spy, registry) = make_controller();
         registry.lock().unwrap().upsert_room(

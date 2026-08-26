@@ -221,6 +221,39 @@ mod tests {
 
     #[cfg(feature = "serde")]
     #[test]
+    fn test_lookup_h7056_by_matter_id() {
+        let db = DeviceDatabase::builtin();
+        let entry = db
+            .lookup_matter(4999, 28758)
+            .expect("Govee H7056 Matter IDs should match");
+
+        assert_eq!(entry.manufacturer, "Shenzhen Qianyan Technology");
+        assert_eq!(entry.model, "H7056");
+        assert_eq!(entry.name, "Govee Outdoor Pathway Lights 2");
+        assert_eq!(
+            entry.light_type,
+            crate::capabilities::LightType::ExtendedColor
+        );
+        let capabilities = entry.capabilities();
+        assert!(capabilities.supports_hue_saturation());
+        assert!(!capabilities.supports_xy_color());
+        assert!(capabilities.supports_color_temp());
+        assert!(capabilities.supports_transition);
+        assert_eq!(
+            entry
+                .matter
+                .as_ref()
+                .map(|matter| matter.quirks.clone())
+                .unwrap_or_default(),
+            vec![
+                crate::quirks::DeviceQuirk::NeedsHueSaturationNotCt,
+                crate::quirks::DeviceQuirk::CommandThrottleMs(250),
+            ]
+        );
+    }
+
+    #[cfg(feature = "serde")]
+    #[test]
     fn test_lookup_lifx_everyday_lightstrip_by_matter_id() {
         let db = DeviceDatabase::builtin();
         let entry = db

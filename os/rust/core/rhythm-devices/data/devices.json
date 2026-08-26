@@ -624,5 +624,20 @@
         { "command_throttle_ms": 250 }
       ]
     }
+  },
+  {
+    "manufacturer": "Shenzhen Qianyan Technology",
+    "model": "H7056",
+    "name": "Govee Outdoor Pathway Lights 2",
+    "light_type": "extended_color",
+    "color_modes": ["hue_saturation", "color_temperature"],
+    "matter": {
+      "vendor_id": 4999,
+      "product_id": 28758,
+      "quirks": [
+        "needs_hue_saturation_not_ct",
+        { "command_throttle_ms": 250 }
+      ]
+    }
   }
 ]
