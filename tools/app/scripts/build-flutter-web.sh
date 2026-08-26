@@ -10,6 +10,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../app" && pwd)"
 FLUTTER_APP="$PROJECT_ROOT/flutter/rhythm_app"
 
+# shellcheck source=lib/app-build-profile.sh
+source "$SCRIPT_DIR/lib/app-build-profile.sh"
+
 # Defaults
 SKIP_WASM=false
 PLATFORM_CONTEXT="standalone_web"
@@ -62,15 +65,14 @@ else
     exit 1
 fi
 
-# Check for .env file with Supabase credentials
-DART_DEFINES=""
-if [ -f "$FLUTTER_APP/.env" ]; then
-    DART_DEFINES="--dart-define-from-file=$FLUTTER_APP/.env"
-    echo "Using Supabase config from .env"
-fi
+# Resolve the exact validated app-build values, including process overrides.
+prepare_app_build_define_file "$PROJECT_ROOT/.." "$FLUTTER_APP"
+trap cleanup_app_build_define_file EXIT
+DART_DEFINE_ARGS=("--dart-define-from-file=$RHYTHM_APP_BUILD_DEFINE_FILE")
+echo "Using the configured app-build profile"
 
 echo "Building Flutter web (PLATFORM_CONTEXT=$PLATFORM_CONTEXT)..."
-(cd "$FLUTTER_APP" && "$FLUTTER_CMD" build web --release --dart-define=PLATFORM_CONTEXT=$PLATFORM_CONTEXT $DART_DEFINES)
+(cd "$FLUTTER_APP" && "$FLUTTER_CMD" build web --release --dart-define=PLATFORM_CONTEXT="$PLATFORM_CONTEXT" "${DART_DEFINE_ARGS[@]}")
 
 # Patch base href for HA ingress (must be relative, not absolute root)
 INDEX="$FLUTTER_APP/build/web/index.html"

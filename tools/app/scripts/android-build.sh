@@ -9,6 +9,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../app" && pwd)"
 FLUTTER_APP="$PROJECT_ROOT/flutter/rhythm_app"
 
+# shellcheck source=lib/app-build-profile.sh
+source "$SCRIPT_DIR/lib/app-build-profile.sh"
+
 MODE="debug"
 ARTIFACT="apk"
 CLEAN=false
@@ -139,9 +142,9 @@ fi
 BUILD_ARGS=()
 BUILD_ARGS+=(--"$MODE")
 
-if [ -f "$FLUTTER_APP/.env" ]; then
-    BUILD_ARGS+=(--dart-define-from-file="$FLUTTER_APP/.env")
-fi
+prepare_app_build_define_file "$PROJECT_ROOT/.." "$FLUTTER_APP"
+trap cleanup_app_build_define_file EXIT
+BUILD_ARGS+=(--dart-define-from-file="$RHYTHM_APP_BUILD_DEFINE_FILE")
 
 if [ -n "$BUILD_NAME" ]; then
     BUILD_ARGS+=(--build-name="$BUILD_NAME")

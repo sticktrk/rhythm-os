@@ -185,9 +185,10 @@ GitHub Actions requires these repository secrets:
 | `CLOUDFLARE_R2_BUCKET` | Update bucket name |
 
 The standalone `rpiz-sd-image.yml` publisher uses the same secrets. Local
-`release.sh --upload` reads them from the first existing file among `os/.env`,
-the repository `.env`, and `admin-api/.env`; none of those files may be
-committed.
+`release.sh --upload` validates and loads the external `release` profile at
+`~/.config/rhythm/release.env` by default. Set an absolute
+`RHYTHM_RELEASE_ENV_FILE` override when needed; never commit or copy that file
+into a worktree.
 
 ### One-time cutover
 
@@ -244,7 +245,8 @@ Then:
 ./tools/os/scripts/release.sh --promote-stable --no-image
 
 # Escape hatch: build + publish the feed locally when GitHub Actions is down.
-./tools/os/scripts/release.sh --upload            # uses local CLOUDFLARE_* R2 credentials
+python3 tools/config/validate.py --consumer ota-upload
+./tools/os/scripts/release.sh --upload            # uses the external release profile
 
 # Factory/manual image build without the tag pipeline:
 gh workflow run rpiz-sd-image.yml -f tag=vX.Y.Z-beta -f image_mode=auto \

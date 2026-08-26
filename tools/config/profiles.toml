@@ -1,0 +1,88 @@
+schema_version = 1
+config_dir_env = "RHYTHM_CONFIG_DIR"
+default_config_dir = "~/.config/rhythm"
+
+[profiles.staff]
+description = "Read-only Rhythm staff authentication for support and fleet tooling."
+file = "staff.env"
+file_env = "RHYTHM_STAFF_ENV_FILE"
+example = "staff.env.example"
+required = ["SUPABASE_URL", "SUPABASE_ANON_KEY"]
+one_of = [
+  ["RHYTHM_ADMIN_ACCESS_TOKEN"],
+  ["RHYTHM_ADMIN_EMAIL", "RHYTHM_ADMIN_PASSWORD"],
+]
+optional = []
+
+[profiles.analytics]
+description = "Read-only aggregate PostHog access for fleet analytics."
+file = "analytics.env"
+file_env = "RHYTHM_ANALYTICS_ENV_FILE"
+example = "analytics.env.example"
+required = ["POSTHOG_PERSONAL_API_KEY", "POSTHOG_PROJECT_ID"]
+one_of = []
+optional = ["POSTHOG_API_HOST"]
+
+[profiles.admin-api]
+description = "Local Rhythm Admin API service configuration."
+file = "admin-api.env"
+file_env = "RHYTHM_ADMIN_API_ENV_FILE"
+example = "admin-api.env.example"
+required = ["SUPABASE_URL", "SUPABASE_ANON_KEY"]
+one_of = []
+optional = [
+  "SUPABASE_SERVICE_ROLE_KEY",
+  "SUPABASE_SERVICE_KEY",
+  "SUPPORT_ACCESS_ENCRYPTION_KEY",
+  "SUPPORT_ACCESS_KEY_ID",
+  "ADMIN_API_HOST",
+  "ADMIN_API_PORT",
+  "ADMIN_API_ALLOWED_ORIGINS",
+  "PORT",
+]
+
+[profiles.app-build]
+description = "Flutter compile-time application configuration."
+file = "app-build.env"
+file_env = "RHYTHM_APP_BUILD_ENV_FILE"
+example = "app-build.env.example"
+required = ["SUPABASE_URL", "SUPABASE_ANON_KEY"]
+one_of = []
+optional = [
+  "GOOGLE_SIGN_IN_SERVER_CLIENT_ID",
+  "GOOGLE_WEB_OAUTH_CLIENT_ID",
+  "GOOGLE_DESKTOP_OAUTH_CLIENT_ID",
+  "GOOGLE_DESKTOP_OAUTH_SECRET",
+  "GOOGLE_WEB_OAUTH_SECRET",
+  "LOGIN_ENABLED",
+  "AUX_SIGN_IN",
+  "ENTITLEMENTS_ENABLED",
+  "SHOW_ADVANCED_LIGHT_SECTION",
+  "REMOTE_ACCESS_TUNNEL_ENABLED",
+  "PLATFORM_CONTEXT",
+  "POSTHOG_API_KEY",
+  "POSTHOG_HOST",
+]
+
+[profiles.release]
+description = "Cloudflare R2 credentials for explicit local OTA upload."
+file = "release.env"
+file_env = "RHYTHM_RELEASE_ENV_FILE"
+example = "release.env.example"
+required = [
+  "CLOUDFLARE_ACCESS_KEY",
+  "CLOUDFLARE_SECRET_ACCESS_KEY",
+  "CLOUDFLARE_S3_API_ENDPOINT",
+  "CLOUDFLARE_R2_BUCKET",
+]
+one_of = []
+optional = []
+
+[consumers]
+bug-fixer = ["staff"]
+fleet-scout = ["staff", "analytics"]
+customer-lighting-tuning = ["staff"]
+admin-api = ["admin-api"]
+admin-ui = ["app-build"]
+testflight = ["app-build"]
+ota-upload = ["release"]
