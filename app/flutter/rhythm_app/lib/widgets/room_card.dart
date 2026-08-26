@@ -1493,12 +1493,17 @@ class _RoomTransitionSpinner extends StatelessWidget {
     return Semantics(
       label: 'Room updating',
       liveRegion: true,
-      child: Padding(
-        padding: const EdgeInsets.all(1),
-        child: CircularProgressIndicator(
-          strokeWidth: 1.8,
-          valueColor: AlwaysStoppedAnimation<Color>(
-            color.withValues(alpha: 0.78),
+      child: Center(
+        child: SizedBox.square(
+          dimension: 18,
+          child: Padding(
+            padding: const EdgeInsets.all(1),
+            child: CircularProgressIndicator(
+              strokeWidth: 1.8,
+              valueColor: AlwaysStoppedAnimation<Color>(
+                color.withValues(alpha: 0.78),
+              ),
+            ),
           ),
         ),
       ),
@@ -1507,8 +1512,8 @@ class _RoomTransitionSpinner extends StatelessWidget {
 }
 
 /// Warning signal shown in the spinner slot after one or more light commands
-/// failed to physically reach their bulbs. Tapping reveals an anchored,
-/// identity-aware explanation.
+/// failed to physically reach their bulbs. Tapping reveals a centered,
+/// identity-aware explanation that stays inside the safe viewport.
 class _DispatchFailureBadge extends StatefulWidget {
   const _DispatchFailureBadge({
     super.key,
@@ -1526,7 +1531,6 @@ class _DispatchFailureBadge extends StatefulWidget {
 }
 
 class _DispatchFailureBadgeState extends State<_DispatchFailureBadge> {
-  final LayerLink _link = LayerLink();
   OverlayEntry? _popover;
 
   @override
@@ -1575,14 +1579,15 @@ class _DispatchFailureBadgeState extends State<_DispatchFailureBadge> {
               onTap: _removePopover,
             ),
           ),
-          CompositedTransformFollower(
-            link: _link,
-            targetAnchor: Alignment.bottomRight,
-            followerAnchor: Alignment.topRight,
-            offset: const Offset(9, 8),
-            child: _DispatchFailurePopover(
-              warnings: widget.warnings,
-              nodeName: widget.nodeName,
+          Positioned.fill(
+            child: SafeArea(
+              minimum: const EdgeInsets.all(12),
+              child: Center(
+                child: _DispatchFailurePopover(
+                  warnings: widget.warnings,
+                  nodeName: widget.nodeName,
+                ),
+              ),
             ),
           ),
         ],
@@ -1603,27 +1608,24 @@ class _DispatchFailureBadgeState extends State<_DispatchFailureBadge> {
         : exactNames.length == 1
             ? 'Light delivery warning for ${exactNames.single}'
             : 'Light delivery warnings for ${exactNames.join(', ')}';
-    return CompositedTransformTarget(
-      link: _link,
-      child: Semantics(
-        button: true,
-        liveRegion: true,
-        label: '$warningLabel. Tap for details.',
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: _showPopover,
-          // Settle-in: the badge lands where the spinner just was, so it
-          // arrives with a small overshoot instead of just appearing.
-          child: TweenAnimationBuilder<double>(
-            tween: Tween(begin: 0.6, end: 1),
-            duration: const Duration(milliseconds: 340),
-            curve: Curves.easeOutBack,
-            builder: (context, scale, child) =>
-                Transform.scale(scale: scale, child: child),
-            child: LightDeliveryWarningSignal(
-              count: widget.warnings.length,
-              glow: true,
-            ),
+    return Semantics(
+      button: true,
+      liveRegion: true,
+      label: '$warningLabel. Tap for details.',
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: _showPopover,
+        // Settle-in: the badge lands where the spinner just was, so it
+        // arrives with a small overshoot instead of just appearing.
+        child: TweenAnimationBuilder<double>(
+          tween: Tween(begin: 0.6, end: 1),
+          duration: const Duration(milliseconds: 340),
+          curve: Curves.easeOutBack,
+          builder: (context, scale, child) =>
+              Transform.scale(scale: scale, child: child),
+          child: LightDeliveryWarningSignal(
+            count: widget.warnings.length,
+            glow: true,
           ),
         ),
       ),
@@ -1637,7 +1639,7 @@ class _DispatchFailureBadgeState extends State<_DispatchFailureBadge> {
       };
 }
 
-/// Compact anchored panel that names every exactly resolved bulb without
+/// Compact centered panel that names every exactly resolved bulb without
 /// exposing transport-native endpoint labels or raw failure detail.
 class _DispatchFailurePopover extends StatelessWidget {
   const _DispatchFailurePopover({
@@ -1685,81 +1687,69 @@ class _DispatchFailurePopover extends StatelessWidget {
         opacity: t,
         child: Transform.scale(
           scale: 0.94 + 0.06 * t,
-          alignment: Alignment.topRight,
+          alignment: Alignment.center,
           child: child,
         ),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Padding(
-            padding: const EdgeInsets.only(right: 12),
-            child: CustomPaint(
-              size: const Size(14, 7),
-              painter: _PopoverCaretPainter(),
+      child: Material(
+        color: Colors.transparent,
+        child: Container(
+          key: const ValueKey('light-delivery-warning-popover'),
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+          constraints: const BoxConstraints(maxWidth: 280),
+          decoration: BoxDecoration(
+            color: const Color(0xF20E141B),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: lightDeliveryWarningColor.withValues(alpha: 0.3),
             ),
+            boxShadow: [
+              const BoxShadow(
+                color: Color(0xB3000000),
+                blurRadius: 24,
+                offset: Offset(0, 10),
+              ),
+              BoxShadow(
+                color: lightDeliveryWarningColor.withValues(alpha: 0.08),
+                blurRadius: 32,
+              ),
+            ],
           ),
-          Material(
-            color: Colors.transparent,
-            child: Container(
-              padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-              constraints: const BoxConstraints(maxWidth: 280),
-              decoration: BoxDecoration(
-                color: const Color(0xF20E141B),
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(
-                  color: lightDeliveryWarningColor.withValues(alpha: 0.3),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                _title,
+                key: const ValueKey('light-delivery-warning-title'),
+                style: const TextStyle(
+                  color: CelestialColors.textPrimary,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  height: 1.3,
                 ),
-                boxShadow: [
-                  const BoxShadow(
-                    color: Color(0xB3000000),
-                    blurRadius: 24,
-                    offset: Offset(0, 10),
-                  ),
-                  BoxShadow(
-                    color: lightDeliveryWarningColor.withValues(alpha: 0.08),
-                    blurRadius: 32,
-                  ),
-                ],
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    _title,
-                    key: const ValueKey('light-delivery-warning-title'),
-                    style: const TextStyle(
-                      color: CelestialColors.textPrimary,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                      height: 1.3,
-                    ),
-                  ),
-                  const SizedBox(height: 9),
-                  for (var index = 0; index < warnings.length; index++) ...[
-                    _DispatchFailureRow(
-                      targetLabel: _targetLabel(warnings[index]),
-                      detail:
-                          '${_actionLabel(warnings[index])} \u00b7 ${_relativeTime(warnings[index])}',
-                    ),
-                    if (index < warnings.length - 1)
-                      Padding(
-                        padding: const EdgeInsets.only(left: 25),
-                        child: Divider(
-                          height: 13,
-                          color: CelestialColors.orbitRing.withValues(
-                            alpha: 0.16,
-                          ),
-                        ),
+              const SizedBox(height: 9),
+              for (var index = 0; index < warnings.length; index++) ...[
+                _DispatchFailureRow(
+                  targetLabel: _targetLabel(warnings[index]),
+                  detail:
+                      '${_actionLabel(warnings[index])} \u00b7 ${_relativeTime(warnings[index])}',
+                ),
+                if (index < warnings.length - 1)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 25),
+                    child: Divider(
+                      height: 13,
+                      color: CelestialColors.orbitRing.withValues(
+                        alpha: 0.16,
                       ),
-                  ],
-                ],
-              ),
-            ),
+                    ),
+                  ),
+              ],
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -1810,35 +1800,6 @@ class _DispatchFailureRow extends StatelessWidget {
       ],
     );
   }
-}
-
-class _PopoverCaretPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final path = Path()
-      ..moveTo(size.width / 2, 0)
-      ..lineTo(size.width, size.height)
-      ..lineTo(0, size.height)
-      ..close();
-    canvas.drawPath(path, Paint()..color = const Color(0xF20E141B));
-    final edge = Paint()
-      ..color = lightDeliveryWarningColor.withValues(alpha: 0.28)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1;
-    canvas.drawLine(
-      Offset(size.width / 2, 0),
-      Offset(0, size.height),
-      edge,
-    );
-    canvas.drawLine(
-      Offset(size.width / 2, 0),
-      Offset(size.width, size.height),
-      edge,
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 class _SunSliderThumbShape extends SliderComponentShape {

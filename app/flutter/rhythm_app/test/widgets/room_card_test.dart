@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' show SemanticsAction, Tristate;
 
@@ -1193,6 +1194,8 @@ void main() {
 
   testWidgets('shows and clears a spinner while the room is transitioning',
       (tester) async {
+    final screenshotPath =
+        Platform.environment['RHYTHM_ROOM_CARD_SPINNER_SCREENSHOT'];
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
       const RoomDto(
@@ -1252,7 +1255,16 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    final spinner = find.byType(CircularProgressIndicator);
+    expect(spinner, findsOneWidget);
+    final spinnerRect = tester.getRect(spinner);
+    expect(spinnerRect.width, spinnerRect.height);
+    if (screenshotPath != null && screenshotPath.isNotEmpty) {
+      await expectLater(
+        find.byType(Overlay),
+        matchesGoldenFile(screenshotPath),
+      );
+    }
     expect(tester.widget<Slider>(_brightnessSlider()).onChanged, isNull);
     expect(
       tester.widget<GestureDetector>(_roomSegment('Brightness')).onTap,
@@ -1694,6 +1706,14 @@ void main() {
     final warningTitle = find.text('Couldn\u2019t reach 2 bulbs');
     expect(warningTitle, findsOneWidget);
     expect(tester.getRect(warningTitle).top, greaterThan(activityRect.bottom));
+    final popover = find.byKey(
+      const ValueKey('light-delivery-warning-popover'),
+    );
+    final popoverRect = tester.getRect(popover);
+    final viewportRect = tester.getRect(find.byType(Scaffold).first);
+    expect(popoverRect.center.dx, closeTo(viewportRect.center.dx, 0.5));
+    expect(popoverRect.left, greaterThanOrEqualTo(viewportRect.left + 12));
+    expect(popoverRect.right, lessThanOrEqualTo(viewportRect.right - 12));
     expect(find.text('Aqara Porch Bulb'), findsOneWidget);
     expect(find.text('Door Sconce'), findsOneWidget);
     expect(find.textContaining('matter-113'), findsNothing);
