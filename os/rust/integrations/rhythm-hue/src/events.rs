@@ -84,8 +84,8 @@ fn translate_sse_event_with_hooks(
             let room_id = match lookup_motion_room(registry, &motion_id) {
                 MotionLookup::Room(id) => id,
                 MotionLookup::KnownRoomless => {
-                    info!(target: "evt", "SSE: Motion sensor {} is known but has no room assignment, ignoring", motion_id);
-                    return Vec::new();
+                    info!(target: "evt", "SSE: Motion sensor {} is known without a registry room; forwarding for topology routing", motion_id);
+                    String::new()
                 }
                 MotionLookup::LockFailed => return Vec::new(),
                 MotionLookup::Unknown => {
@@ -95,8 +95,8 @@ fn translate_sse_event_with_hooks(
                     match lookup_motion_room(registry, &motion_id) {
                         MotionLookup::Room(id) => id,
                         MotionLookup::KnownRoomless => {
-                            info!(target: "evt", "SSE: Motion sensor {} is known but has no room assignment, ignoring", motion_id);
-                            return Vec::new();
+                            info!(target: "evt", "SSE: Motion sensor {} was discovered without a registry room; forwarding for topology routing", motion_id);
+                            String::new()
                         }
                         MotionLookup::LockFailed => return Vec::new(),
                         MotionLookup::Unknown => {
@@ -114,6 +114,20 @@ fn translate_sse_event_with_hooks(
                 room_id,
                 sensor_id: motion_id.clone(),
                 detected: motion_detected,
+            }]
+        }
+
+        HueSseEvent::TopologyChanged {
+            resource_id,
+            resource_type,
+        } => {
+            if let Some(cb) = on_activity {
+                cb();
+            }
+            vec![HubEvent::TopologyChanged {
+                hub_key: None,
+                resource_id,
+                resource_type,
             }]
         }
 
@@ -208,7 +222,7 @@ mod tests {
     use rhythm_core::runtime::hub_registry::DeviceType;
 
     #[test]
-    fn known_roomless_motion_does_not_trigger_unknown_discovery() {
+    fn known_roomless_motion_forwards_to_topology_without_unknown_discovery() {
         let registry = Arc::new(Mutex::new(HubDeviceRegistry::new()));
         registry
             .lock()
@@ -231,7 +245,20 @@ mod tests {
             Some(&on_unknown),
         );
 
-        assert!(events.is_empty());
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            HubEvent::Motion {
+                room_id,
+                sensor_id,
+                detected,
+                ..
+            } => {
+                assert!(room_id.is_empty());
+                assert_eq!(sensor_id, "motion-svc-1");
+                assert!(*detected);
+            }
+            other => panic!("expected motion event, got {:?}", other),
+        }
         assert_eq!(unknown_calls.load(Ordering::SeqCst), 0);
     }
 
@@ -276,5 +303,29 @@ mod tests {
             }
             other => panic!("expected motion event, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn topology_change_is_forwarded_for_resync() {
+        let registry = Arc::new(Mutex::new(HubDeviceRegistry::new()));
+        let events = translate_sse_event(
+            &registry,
+            crate::sse::HueSseEvent::TopologyChanged {
+                resource_id: "light-1".to_string(),
+                resource_type: "light".to_string(),
+            },
+            None,
+            None,
+            None,
+        );
+
+        assert!(matches!(
+            events.as_slice(),
+            [HubEvent::TopologyChanged {
+                hub_key: None,
+                resource_id,
+                resource_type,
+            }] if resource_id == "light-1" && resource_type == "light"
+        ));
     }
 }

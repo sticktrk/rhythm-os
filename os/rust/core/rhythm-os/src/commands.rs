@@ -47,9 +47,9 @@ use crate::device_naming::LightNameReconciliationScope;
 use crate::discovery::{HubDiscovery, ManagedSceneProjection, ManagedSceneProjectionTarget};
 use crate::factory_default_config::{
     factory_default_active_mode, factory_default_active_profile_config_for_mode,
-    factory_default_idle_profile_config_for_mode, factory_default_light_profile_config_map,
-    factory_default_mode_config_map, factory_default_mode_transition_configs,
-    factory_default_power_save, factory_default_profile_bundle, factory_default_scene_map,
+    factory_default_light_profile_config_map, factory_default_mode_config_map,
+    factory_default_mode_transition_configs, factory_default_power_save,
+    factory_default_profile_bundle, factory_default_scene_map,
 };
 use crate::hub::HubType;
 use crate::light_runtime::LightRuntimeKind;
@@ -206,6 +206,17 @@ struct RoomLightingContext<'a> {
     longitude: Option<f32>,
     timezone_name: Option<&'a str>,
     utc_offset: f32,
+}
+
+fn effective_room_lighting_context<'a>(
+    lighting: RoomLightingContext<'a>,
+    settings: &RoomProfileSettings,
+    local_hour: f32,
+) -> RoomLightingContext<'a> {
+    RoomLightingContext {
+        mode: settings.schedule_mode(lighting.mode, local_hour),
+        ..lighting
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -538,25 +549,6 @@ fn resolved_active_profile_id_for_mode_from_parts(
     }
 }
 
-fn resolved_active_profile_id_for_settings_from_parts(
-    lighting: RoomLightingContext<'_>,
-    settings: &RoomProfileSettings,
-) -> String {
-    let active_profile_id = resolved_active_profile_id_for_mode_from_parts(
-        lighting.light_profile_configs,
-        lighting.mode_configs,
-        lighting.mode,
-    );
-    let requested_id = settings.resolved_profile_id(active_profile_id.as_str());
-    if !rhythm_core::is_builtin_state_profile_id(requested_id)
-        && lighting.light_profile_configs.contains_key(requested_id)
-    {
-        requested_id.to_string()
-    } else {
-        active_profile_id
-    }
-}
-
 fn compute_room_display_values_for_settings_from_parts(
     lighting: RoomLightingContext<'_>,
     room: RoomLightingInput<'_>,
@@ -566,6 +558,9 @@ fn compute_room_display_values_for_settings_from_parts(
     }
 
     let local = current_local_datetime(lighting.utc_offset);
+    let local_hour =
+        local.hour() as f32 + local.minute() as f32 / 60.0 + local.second() as f32 / 3600.0;
+    let lighting = effective_room_lighting_context(lighting, room.settings, local_hour);
     let ctx = rhythm_core::curve_context_for_local_datetime(
         lighting.solar_noon,
         lighting.latitude,
@@ -893,6 +888,7 @@ fn clear_removed_node_ephemeral_state(s: &mut AppState, node_id: &str) {
     s.light_usage.close_subject(node_id);
     s.motion_snapshots.remove(node_id);
     s.room_mode_transitions.remove(node_id);
+    s.room_schedule_evaluations.remove(node_id);
     s.pending_periodic_ticks.remove(node_id);
     s.node_preference_write_locks.remove(node_id);
     s.pending_motion_clear.retain(|pending| pending != node_id);
@@ -902,7 +898,7 @@ fn clear_removed_node_ephemeral_state(s: &mut AppState, node_id: &str) {
         .retain(|seed| seed.source_node_id != node_id && seed.target_node_id != node_id);
 }
 
-fn clear_removed_node_mode_defaults(s: &mut AppState, node_id: &str) -> bool {
+fn clear_node_mode_defaults(s: &mut AppState, node_id: &str) -> bool {
     let mut changed = false;
 
     for config in s.mode_configs.values_mut() {
@@ -926,11 +922,31 @@ pub(crate) fn reconcile_hub_endpoint_visibility(
         let report = s
             .canonical_registry
             .deactivate_missing_endpoints_for_hub(hub_key, discovered_native_ids);
-        if report.affected_device_ids.is_empty() {
+        let mut orphan_topology_ids = s
+            .topology
+            .device_nodes()
+            .filter(|node| {
+                s.canonical_registry
+                    .get(&node.canonical_device_id)
+                    .is_none()
+            })
+            .map(|node| node.id.clone())
+            .collect::<Vec<_>>();
+        orphan_topology_ids.sort();
+        if report.affected_device_ids.is_empty() && orphan_topology_ids.is_empty() {
             return Ok((0, 0));
         }
 
         let hidden_ids = report.hidden_device_ids.clone();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        for device_id in &hidden_ids {
+            s.canonical_registry
+                .triage_mut()
+                .resolve_unassigned_for_device(device_id, now);
+        }
         let mut topology_changed = false;
         for device_id in &hidden_ids {
             // `remove_device_everywhere` reports affected parent rooms, so a
@@ -941,6 +957,19 @@ pub(crate) fn reconcile_hub_endpoint_visibility(
             let affected_rooms = s.topology.remove_device_everywhere(device_id);
             topology_changed |= existed || !affected_rooms.is_empty();
             clear_removed_node_ephemeral_state(&mut s, device_id);
+        }
+        for device_id in &orphan_topology_ids {
+            let existed = s.topology.get_device_node(device_id).is_some();
+            let affected_rooms = s.topology.remove_device_everywhere(device_id);
+            topology_changed |= existed || !affected_rooms.is_empty();
+            clear_removed_node_ephemeral_state(&mut s, device_id);
+        }
+        if !orphan_topology_ids.is_empty() {
+            warn!(
+                target: "cmd",
+                "Removed {} topology device node(s) without canonical identity during authoritative hub reconciliation",
+                orphan_topology_ids.len()
+            );
         }
         for device_id in &report.affected_device_ids {
             if hidden_ids.iter().any(|hidden_id| hidden_id == device_id) {
@@ -969,7 +998,9 @@ pub(crate) fn reconcile_hub_endpoint_visibility(
             }
         }
 
-        persist_canonical(&s);
+        if !report.affected_device_ids.is_empty() {
+            persist_canonical(&s);
+        }
         if topology_changed {
             persist_topology(&s);
         }
@@ -997,6 +1028,7 @@ fn resolved_room_motion_timeout_secs_from_parts(
     settings: &RoomProfileSettings,
     current_hour: f32,
 ) -> u64 {
+    let lighting = effective_room_lighting_context(lighting, settings, current_hour);
     let local = current_local_datetime(lighting.utc_offset);
     let registry = light_profile_registry_from_parts(
         lighting.light_profile_configs,
@@ -1032,6 +1064,7 @@ pub struct RoomProfileSettingsPatch {
     pub fade_ms: Option<Option<TimerSetting>>,
     pub motion_timeout_secs: Option<Option<TimerSetting>>,
     pub motion_activation_enabled: Option<Option<bool>>,
+    pub room_schedule: Option<Option<rhythm_core::RoomScheduleConfig>>,
     pub profile_overrides: Option<Option<BTreeMap<String, Option<LightProfileNodeOverride>>>>,
     /// Effective override map reviewed by the caller. The dispatch worker
     /// rejects the queued mutation if this node changed before worker
@@ -1069,6 +1102,9 @@ impl RoomProfileSettingsPatch {
         }
         if let Some(motion_activation_enabled) = self.motion_activation_enabled {
             settings.motion_activation_enabled = motion_activation_enabled;
+        }
+        if let Some(room_schedule) = self.room_schedule {
+            settings.room_schedule = room_schedule;
         }
         if let Some(profile_overrides) = &self.profile_overrides {
             match profile_overrides {
@@ -1125,17 +1161,32 @@ impl RoomProfileSettingsPatch {
             || self.fade_ms.is_some()
             || self.motion_timeout_secs.is_some()
             || self.motion_activation_enabled.is_some()
+            || self.room_schedule.is_some()
             || self.profile_overrides.is_some()
     }
 
-    fn touches_lighting_output_settings(&self) -> bool {
-        self.clear_all
+    fn touches_lighting_output_settings_for_profile(
+        &self,
+        current_profile_id: Option<&str>,
+    ) -> bool {
+        if self.clear_all
             || self.profile_id.is_some()
             || self.mood_enabled.is_some()
             || self.mood_profile_id.is_some()
             || self.mood_scene_id.is_some()
             || self.fade_ms.is_some()
-            || self.profile_overrides.is_some()
+            || self.room_schedule.is_some()
+        {
+            return true;
+        }
+
+        match &self.profile_overrides {
+            None => false,
+            Some(None) => current_profile_id.is_some(),
+            Some(Some(overrides)) => {
+                current_profile_id.is_some_and(|profile_id| overrides.contains_key(profile_id))
+            }
+        }
     }
 
     fn requests_nonempty_lighting_output_settings(&self) -> bool {
@@ -1147,6 +1198,7 @@ impl RoomProfileSettingsPatch {
             || self.mood_profile_id.as_ref().is_some_and(Option::is_some)
             || self.mood_scene_id.as_ref().is_some_and(Option::is_some)
             || self.fade_ms.as_ref().is_some_and(Option::is_some)
+            || self.room_schedule.as_ref().is_some_and(Option::is_some)
             || self.profile_overrides.as_ref().is_some_and(|overrides| {
                 overrides.as_ref().is_some_and(|overrides| {
                     overrides.values().any(|profile_override| {
@@ -2658,6 +2710,30 @@ pub(crate) fn resolve_input_source_node_id(
     s.canonical_registry
         .find_by_native_id(hub_key, source_native_id)
         .map(|device| device.id.clone())
+}
+
+/// Resolve one hub-native dispatch target to its durable canonical node ID.
+///
+/// The dispatch queue carries a formatted hub-key label rather than a
+/// [`HubKey`]. Match that complete scoped label against canonical endpoints so
+/// repeated native IDs on different hubs cannot be confused. Grouped-light
+/// and stream labels intentionally return `None`.
+pub(crate) fn resolve_dispatch_target_node_id(
+    state: &SharedState,
+    hub_key_label: &str,
+    native_id: &str,
+) -> Option<String> {
+    let s = state.lock().ok()?;
+    let target_node_id = s
+        .canonical_registry
+        .devices()
+        .find(|device| {
+            device.endpoints.iter().any(|endpoint| {
+                endpoint.hub_key.to_string() == hub_key_label && endpoint.native_id == native_id
+            })
+        })
+        .map(|device| device.id.clone());
+    target_node_id
 }
 
 /// Promote a hub-recognized button that has no canonical device yet so its
@@ -7402,6 +7478,13 @@ fn apply_room_mode_defaults(
             }
         }
         for snap in snapshots {
+            if snap
+                .profile_settings
+                .room_schedule
+                .is_some_and(|schedule| schedule.follows_time())
+            {
+                continue;
+            }
             let target_state = defaults_by_room
                 .get(snap.id.as_str())
                 .copied()
@@ -7420,6 +7503,13 @@ fn apply_room_mode_defaults(
             }
         }
         for snap in snapshots {
+            if snap
+                .profile_settings
+                .room_schedule
+                .is_some_and(|schedule| schedule.follows_time())
+            {
+                continue;
+            }
             let target_state = defaults_by_room.get(snap.id.as_str()).copied().or_else(|| {
                 snap.parent_id
                     .as_deref()
@@ -7836,7 +7926,10 @@ fn base_mood_profile_config_locked(
     }
 
     let mode_configs = s.mode_configs();
-    resolved_profile_config_for_room_state_from_parts(
+    let local = current_local_datetime(s.utc_offset_hours);
+    let local_hour =
+        local.hour() as f32 + local.minute() as f32 / 60.0 + local.second() as f32 / 3600.0;
+    let lighting = effective_room_lighting_context(
         RoomLightingContext {
             light_profile_configs: &s.light_profile_configs,
             mode_configs: &mode_configs,
@@ -7847,6 +7940,11 @@ fn base_mood_profile_config_locked(
             timezone_name: s.timezone_name.as_deref(),
             utc_offset: s.utc_offset_hours,
         },
+        &snapshot.profile_settings,
+        local_hour,
+    );
+    resolved_profile_config_for_room_state_from_parts(
+        lighting,
         &snapshot.profile_settings,
         RoomModeState::Mood,
     )
@@ -8479,6 +8577,10 @@ fn resolve_room_output_for_state_at_from_parts(
         return None;
     }
 
+    let local_hour = sample_at.hour() as f32
+        + sample_at.minute() as f32 / 60.0
+        + sample_at.second() as f32 / 3600.0;
+    let lighting = effective_room_lighting_context(lighting, room.settings, local_hour);
     let ctx = rhythm_core::curve_context_for_local_datetime(
         lighting.solar_noon,
         lighting.latitude,
@@ -8521,59 +8623,12 @@ fn resolved_profile_config_for_room_state_from_parts(
     settings: &RoomProfileSettings,
     room_state: RoomModeState,
 ) -> LightProfileConfig {
-    let active_profile_id = resolved_active_profile_id_for_mode_from_parts(
+    light_profile_registry_from_parts(
         lighting.light_profile_configs,
         lighting.mode_configs,
         lighting.mode,
-    );
-    let base_id = resolved_active_profile_id_for_settings_from_parts(lighting, settings);
-
-    let mut active_config = lighting
-        .light_profile_configs
-        .get(base_id.as_str())
-        .cloned()
-        .or_else(|| {
-            lighting
-                .light_profile_configs
-                .get(active_profile_id.as_str())
-                .cloned()
-        })
-        .unwrap_or_else(|| factory_default_active_profile_config_for_mode(lighting.mode));
-    settings.apply_to_config_for_profile(base_id.as_str(), &mut active_config);
-
-    if room_state == RoomModeState::Active {
-        return active_config;
-    }
-
-    let mode_config = mode_config_for_mode(lighting.mode_configs, lighting.mode)
-        .cloned()
-        .unwrap_or_else(|| ModeConfig::default_for_mode(lighting.mode));
-
-    let room_mood_config = if room_state == RoomModeState::Mood {
-        settings
-            .mood_profile_id
-            .as_deref()
-            .and_then(|target_id| lighting.light_profile_configs.get(target_id).cloned())
-    } else {
-        None
-    };
-
-    room_mood_config
-        .or_else(|| {
-            mode_config
-                .resolve_state_profile_id(room_state, active_profile_id.as_str())
-                .and_then(|target_id| lighting.light_profile_configs.get(target_id).cloned())
-        })
-        .unwrap_or_else(|| {
-            if matches!(
-                room_state,
-                RoomModeState::Mood | RoomModeState::Standby | RoomModeState::HardOff
-            ) {
-                factory_default_idle_profile_config_for_mode(lighting.mode)
-            } else {
-                active_config.clone()
-            }
-        })
+    )
+    .profile_config_for_room_state(lighting.mode, room_state, Some(settings))
 }
 
 fn resolve_mode_transition_duration_ms_for_room_from_parts(
@@ -8591,6 +8646,7 @@ fn resolve_mode_transition_duration_ms_for_room_from_parts(
         return Some(duration_ms);
     }
 
+    let lighting = effective_room_lighting_context(lighting, room.settings, started_at_hour);
     resolved_profile_config_for_room_state_from_parts(lighting, room.settings, room.room_state)
         .fade_ms
         .resolve(started_at_hour)
@@ -8611,6 +8667,314 @@ fn resolve_room_command_for_state_at_from_parts(
         brightness,
         transition_ms,
     ))
+}
+
+fn room_schedule_local_datetime(utc_offset: f32, current_hour: f32) -> chrono::NaiveDateTime {
+    let date = current_local_datetime(utc_offset).date();
+    let total_seconds = ((current_hour.rem_euclid(24.0)) * 3600.0).round() as u32 % 86_400;
+    date.and_hms_opt(
+        total_seconds / 3600,
+        (total_seconds % 3600) / 60,
+        total_seconds % 60,
+    )
+    .expect("normalized room schedule time is valid")
+}
+
+fn room_schedule_interval_id(
+    room_id: &str,
+    schedule: rhythm_core::RoomScheduleConfig,
+    local: chrono::NaiveDateTime,
+) -> (RhythmMode, String) {
+    let minute = (local.hour() as u16) * 60 + local.minute() as u16;
+    let wake = schedule.wake_time.minutes_since_midnight();
+    let sleep = schedule.sleep_time.minutes_since_midnight();
+    let mode = schedule.effective_mode(minute as f32 / 60.0);
+    let started_today = match mode {
+        RhythmMode::Day if wake < sleep => true,
+        RhythmMode::Day => minute >= wake,
+        RhythmMode::Sleep if wake < sleep => minute >= sleep,
+        RhythmMode::Sleep => true,
+    };
+    let start_date = if started_today {
+        local.date()
+    } else {
+        local.date().pred_opt().unwrap_or_else(|| local.date())
+    };
+    let boundary = if mode == RhythmMode::Day { wake } else { sleep };
+    let mut hasher = Sha256::new();
+    hasher.update(b"room-schedule-evaluation-v1\0");
+    hasher.update(room_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(start_date.to_string().as_bytes());
+    hasher.update(b"\0");
+    hasher.update(boundary.to_be_bytes());
+    hasher.update(wake.to_be_bytes());
+    hasher.update(sleep.to_be_bytes());
+    hasher.update([match mode {
+        RhythmMode::Day => 0,
+        RhythmMode::Sleep => 1,
+    }]);
+    (mode, format!("{:x}", hasher.finalize()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RoomScheduleReconcile {
+    pub evaluation_id: String,
+    pub mode: RhythmMode,
+}
+
+fn apply_room_schedule_target(
+    state: &SharedState,
+    room_id: &str,
+    mode: RhythmMode,
+    target_state: RoomModeState,
+    respect_room_schedule: bool,
+    persist: bool,
+) -> Result<()> {
+    let (
+        runtime,
+        light_profile_configs,
+        mode_configs,
+        solar_noon,
+        latitude,
+        longitude,
+        timezone_name,
+        utc_offset,
+    ) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        (
+            s.hub_runtime(),
+            s.light_profile_configs.clone(),
+            s.mode_configs(),
+            s.solar_noon_hour(),
+            s.latitude,
+            s.longitude,
+            s.timezone_name.clone(),
+            s.utc_offset_hours,
+        )
+    };
+    let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+    let snapshot = runtime
+        .engine_node_snapshot(room_id)
+        .ok_or_else(|| anyhow::anyhow!("Schedule target not found in engine"))?;
+    if !snapshot.kind.is_light_addressable() || snapshot.parent_id.is_some() {
+        return Err(anyhow::anyhow!(
+            "Schedule target must be a room or unassigned light node"
+        ));
+    }
+    let (soft_off, mood_active, hard_off) = room_flags_for_target_state(target_state)?;
+
+    runtime.restore_node_state(
+        room_id,
+        RestoredNodeState {
+            rhythm_enabled: true,
+            disabled: snapshot.disabled,
+            time_offset_minutes: snapshot.time_offset_minutes,
+            brightness_offset: snapshot.brightness_offset,
+            soft_off,
+            mood_active,
+            standby_enabled: snapshot.standby_enabled,
+            hard_off,
+            profile_settings: snapshot.profile_settings.clone(),
+        },
+    );
+    clear_room_mode_transition(state, room_id);
+    queue_motion_timer_clear(state, room_id);
+
+    if hard_off {
+        runtime.lights_off_room(room_id, None)?;
+        update_lights_on_cache_for_runtime_node(state, &runtime, room_id, false);
+    } else {
+        let mut render_settings = snapshot.profile_settings.clone();
+        if !respect_room_schedule {
+            render_settings.room_schedule = None;
+        }
+        let lighting = RoomLightingContext {
+            light_profile_configs: &light_profile_configs,
+            mode_configs: &mode_configs,
+            mode,
+            solar_noon,
+            latitude,
+            longitude,
+            timezone_name: timezone_name.as_deref(),
+            utc_offset,
+        };
+        let command = resolve_room_command_for_state_at_from_parts(
+            lighting,
+            RoomLightingInput {
+                settings: &render_settings,
+                room_state: target_state,
+                time_offset_minutes: snapshot.time_offset_minutes,
+                brightness_offset: snapshot.brightness_offset,
+            },
+            current_local_datetime(utc_offset),
+            Some(0),
+        )
+        .ok_or_else(|| anyhow::anyhow!("Room schedule output unavailable"))?;
+        runtime.apply_room_command(room_id, command)?;
+        update_lights_on_cache_for_runtime_node(state, &runtime, room_id, true);
+    }
+    if persist {
+        persist_rooms(state);
+    }
+    emit_node_state_event_after_apply(state, &runtime, room_id);
+    Ok(())
+}
+
+pub(crate) fn reconcile_room_schedule_before_tick(
+    state: &SharedState,
+    room_id: &str,
+    current_hour: f32,
+) -> Result<Option<RoomScheduleReconcile>> {
+    let (schedule, utc_offset) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let runtime = s
+            .hub_runtime()
+            .ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+        let Some(snapshot) = runtime.engine_node_snapshot(room_id) else {
+            return Ok(None);
+        };
+        if !snapshot.kind.is_light_addressable() || snapshot.parent_id.is_some() {
+            return Ok(None);
+        }
+        (snapshot.profile_settings.room_schedule, s.utc_offset_hours)
+    };
+    let Some(schedule) = schedule.filter(|schedule| schedule.follows_time()) else {
+        if let Ok(mut s) = state.lock() {
+            s.room_schedule_evaluations.remove(room_id);
+        }
+        return Ok(None);
+    };
+    let local = room_schedule_local_datetime(utc_offset, current_hour);
+    let (mode, evaluation_id) = room_schedule_interval_id(room_id, schedule, local);
+    let previous = state
+        .lock()
+        .ok()
+        .and_then(|s| s.room_schedule_evaluations.get(room_id).cloned());
+    if previous.as_deref() == Some(evaluation_id.as_str()) {
+        return Ok(None);
+    }
+
+    let reason = if previous.is_some() {
+        "boundary_or_config"
+    } else {
+        "restart_reconcile"
+    };
+    let target_state = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let mode_configs = s.mode_configs();
+        mode_config_for_mode(&mode_configs, mode)
+            .and_then(|config| {
+                config
+                    .room_defaults
+                    .iter()
+                    .find(|default| default.room_id == room_id)
+                    .map(|default| default.state)
+            })
+            .unwrap_or(RoomModeState::Active)
+    };
+    let apply_result = apply_room_schedule_target(state, room_id, mode, target_state, true, true);
+    let mut activity = crate::activity::LightActivityRecord::app(room_id, "room_schedule_boundary");
+    activity.correlation_id = Some(evaluation_id.clone());
+    activity.payload = Some(serde_json::json!({
+        "source": "follow_time",
+        "target_mode": if mode == RhythmMode::Day { "day" } else { "sleep" },
+        "target_state": target_state,
+        "status": if apply_result.is_ok() { "applied" } else { "failed" },
+        "failure_stage": apply_result.as_ref().err().map(|_| "output_apply"),
+        "reconciliation": reason,
+    }));
+    crate::activity::record_light_activity(state, activity);
+    apply_result?;
+    if let Ok(mut s) = state.lock() {
+        s.room_schedule_evaluations
+            .insert(room_id.to_string(), evaluation_id.clone());
+    }
+    Ok(Some(RoomScheduleReconcile {
+        evaluation_id,
+        mode,
+    }))
+}
+
+pub(crate) fn apply_room_schedule_configuration(
+    state: &SharedState,
+    room_id: &str,
+    previous: Option<rhythm_core::RoomScheduleConfig>,
+    schedule: rhythm_core::RoomScheduleConfig,
+) -> Result<bool> {
+    if schedule.follows_time() {
+        if let Ok(mut s) = state.lock() {
+            s.room_schedule_evaluations.remove(room_id);
+        }
+        let current_hour = state
+            .lock()
+            .ok()
+            .and_then(|s| s.hub_runtime())
+            .map(|runtime| runtime.current_hour())
+            .unwrap_or(12.0);
+        return reconcile_room_schedule_before_tick(state, room_id, current_hour)
+            .map(|result| result.is_some());
+    }
+
+    if let Ok(mut s) = state.lock() {
+        s.room_schedule_evaluations.remove(room_id);
+    }
+    if previous.map(|old| old.source) == Some(schedule.source) {
+        return Ok(false);
+    }
+    let (mode, target_state) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let mode = s.active_mode;
+        let target_state = s
+            .mode_configs()
+            .iter()
+            .find(|config| config.mode == mode)
+            .and_then(|config| {
+                config
+                    .room_defaults
+                    .iter()
+                    .find(|default| default.room_id == room_id)
+            })
+            .map(|default| default.state)
+            .unwrap_or(RoomModeState::Active);
+        (mode, target_state)
+    };
+    apply_room_schedule_target(state, room_id, mode, target_state, false, true)?;
+    Ok(true)
+}
+
+/// Preview one room's configured behavior for [mode] without changing global mode.
+pub fn do_room_schedule_test(
+    state: &SharedState,
+    room_id: &str,
+    mode: RhythmMode,
+) -> Result<String> {
+    let (runtime, mode_configs) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        (s.hub_runtime(), s.mode_configs())
+    };
+    let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+    let snapshot = runtime
+        .engine_node_snapshot(room_id)
+        .ok_or_else(|| anyhow::anyhow!("Schedule target not found in engine"))?;
+    if !snapshot.kind.is_light_addressable() || snapshot.parent_id.is_some() {
+        return Err(anyhow::anyhow!(
+            "Schedule target must be a room or unassigned light node"
+        ));
+    }
+    let target_state = mode_config_for_mode(&mode_configs, mode)
+        .and_then(|config| {
+            config
+                .room_defaults
+                .iter()
+                .find(|default| default.room_id == room_id)
+                .map(|default| default.state)
+        })
+        .unwrap_or(RoomModeState::Active);
+    apply_room_schedule_target(state, room_id, mode, target_state, false, false)?;
+    build_node_state(state, room_id).and_then(|node_state| {
+        serde_json::to_string(&node_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+    })
 }
 
 /// Snapshots every addressable settings node: rooms plus standalone light
@@ -8778,6 +9142,12 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
     }
     let snapshots = addressable_root_snapshots(&runtime)
         .into_iter()
+        .filter(|snapshot| {
+            !snapshot
+                .profile_settings
+                .room_schedule
+                .is_some_and(|schedule| schedule.follows_time())
+        })
         .filter(|snapshot| rhythm_automation_allowed_for_node(state, &snapshot.id))
         .collect::<Vec<_>>();
     let mut room_commands = Vec::new();
@@ -9743,7 +10113,9 @@ fn validate_room_profile_settings(
         }
     }
     for profile_id in room_profile.profile_overrides.keys() {
-        if rhythm_core::is_builtin_state_profile_id(profile_id) {
+        if rhythm_core::is_builtin_state_profile_id(profile_id)
+            && profile_id != rhythm_core::DAY_IDLE_PROFILE_ID
+        {
             return Err(anyhow::anyhow!(
                 "Room '{}' cannot override built-in state profile '{}'",
                 room_id,
@@ -9789,6 +10161,7 @@ fn imported_room_profile_patch(room: &BackupConfigurationRoom) -> RoomProfileSet
         fade_ms: Some(room.room_profile.fade_ms.clone()),
         motion_timeout_secs: Some(room.room_profile.motion_timeout_secs.clone()),
         motion_activation_enabled: Some(room.room_profile.motion_activation_enabled),
+        room_schedule: Some(room.room_profile.room_schedule),
         profile_overrides: Some(Some(
             room.room_profile
                 .profile_overrides
@@ -11544,7 +11917,7 @@ pub fn do_device_hard_remove(
     let mut mode_config_propagation = None;
     if let Some(canonical_id) = canonical_id.as_deref() {
         clear_removed_node_ephemeral_state(&mut s, canonical_id);
-        if clear_removed_node_mode_defaults(&mut s, canonical_id) {
+        if clear_node_mode_defaults(&mut s, canonical_id) {
             let configs = s.mode_configs();
             let runtimes = s
                 .hubs
@@ -13389,8 +13762,6 @@ pub fn do_node_preferences_set(
     );
     let profile_settings_touched =
         room_profile.is_some_and(|patch| patch.touches_profile_settings());
-    let lighting_output_settings_touched =
-        room_profile.is_some_and(|patch| patch.touches_lighting_output_settings());
     let requests_nonempty_lighting_output_settings =
         room_profile.is_some_and(|patch| patch.requests_nonempty_lighting_output_settings());
     if snap.kind == LightNodeKind::LightDevice
@@ -13466,7 +13837,7 @@ pub fn do_node_preferences_set(
         }
     }
     for profile_id in profile_settings.profile_overrides.keys() {
-        if rhythm_core::is_builtin_state_profile_id(profile_id) {
+        if !node_profile_override_id_allowed(snap.kind, profile_id) {
             return Err(anyhow::anyhow!(
                 "State profiles cannot be overridden per-node"
             ));
@@ -13478,6 +13849,27 @@ pub fn do_node_preferences_set(
             ));
         }
     }
+
+    let current_output_profile_id = if persistent_state == RoomModeState::Mood
+        && profile_settings.mood_scene_id.is_some()
+    {
+        None
+    } else {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let mode_configs = s.mode_configs();
+        Some(
+            light_profile_registry_from_parts(
+                &s.light_profile_configs,
+                &mode_configs,
+                s.active_mode,
+            )
+            .profile_config_for_room_state(s.active_mode, persistent_state, Some(&profile_settings))
+            .id,
+        )
+    };
+    let lighting_output_settings_touched = room_profile.is_some_and(|patch| {
+        patch.touches_lighting_output_settings_for_profile(current_output_profile_id.as_deref())
+    });
 
     let motion_timeout_after = if motion_timeout_before.is_some() {
         Some(resolved_motion_timeout_for_node_settings(
@@ -13669,8 +14061,14 @@ pub struct QueuedNodePreferencesPatch {
     pub room_profile: Option<RoomProfileSettingsPatch>,
 }
 
+fn node_profile_override_id_allowed(kind: LightNodeKind, profile_id: &str) -> bool {
+    !rhythm_core::is_builtin_state_profile_id(profile_id)
+        || (kind.is_room() && profile_id == rhythm_core::DAY_IDLE_PROFILE_ID)
+}
+
 fn validate_room_profile_settings_patch(
     room_profile: Option<&RoomProfileSettingsPatch>,
+    kind: LightNodeKind,
     valid_profile_ids: &HashSet<String>,
     valid_scene_ids: &HashSet<String>,
 ) -> Result<()> {
@@ -13711,7 +14109,7 @@ fn validate_room_profile_settings_patch(
         .and_then(|profile_overrides| profile_overrides.as_ref())
     {
         for profile_id in profile_overrides.keys() {
-            if rhythm_core::is_builtin_state_profile_id(profile_id) {
+            if !node_profile_override_id_allowed(kind, profile_id) {
                 return Err(anyhow::anyhow!(
                     "State profiles cannot be overridden per-node"
                 ));
@@ -13791,11 +14189,12 @@ pub fn queue_node_preferences_batch(
 
     let mut work_items = Vec::with_capacity(updates.len() + usize::from(persist_after));
     for update in updates {
-        runtime
+        let snapshot = runtime
             .engine_node_snapshot(&update.node_id)
             .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", update.node_id))?;
         validate_room_profile_settings_patch(
             update.room_profile.as_ref(),
+            snapshot.kind,
             &valid_profile_ids,
             &valid_scene_ids,
         )?;
@@ -14171,7 +14570,7 @@ fn schedule_topology_group_sync_for_integrations(state: &SharedState) {
     }
 }
 
-fn clear_runtime_node_off_flags(state: &SharedState, node_id: &str) -> Result<()> {
+fn clear_runtime_node_standalone_state(state: &SharedState, node_id: &str) -> Result<()> {
     let runtime = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.hub_runtime()
@@ -14182,9 +14581,13 @@ fn clear_runtime_node_off_flags(state: &SharedState, node_id: &str) -> Result<()
     let Some(snap) = runtime.engine_node_snapshot(node_id) else {
         return Ok(());
     };
-    if !snap.soft_off && !snap.hard_off {
+    let clear_off_state = snap.soft_off || snap.hard_off;
+    if !clear_off_state && snap.profile_settings.room_schedule.is_none() {
         return Ok(());
     }
+
+    let mut profile_settings = snap.profile_settings;
+    profile_settings.room_schedule = None;
 
     runtime.restore_node_state(
         node_id,
@@ -14194,10 +14597,14 @@ fn clear_runtime_node_off_flags(state: &SharedState, node_id: &str) -> Result<()
             time_offset_minutes: snap.time_offset_minutes,
             brightness_offset: snap.brightness_offset,
             soft_off: false,
-            mood_active: false,
+            mood_active: if clear_off_state {
+                false
+            } else {
+                snap.mood_active
+            },
             standby_enabled: snap.standby_enabled,
             hard_off: false,
-            profile_settings: snap.profile_settings,
+            profile_settings,
         },
     );
     Ok(())
@@ -15018,7 +15425,17 @@ pub fn do_canonical_assign_room(
     device_id: &str,
     room_id: Option<&str>,
 ) -> Result<()> {
-    do_canonical_assign_room_with_precondition(state, device_id, room_id, None)
+    do_canonical_assign_room_with_outcome(state, device_id, room_id).map(|_| ())
+}
+
+/// Assign a canonical device and report the best-known external projection
+/// state without waiting for the asynchronous integration worker.
+pub fn do_canonical_assign_room_with_outcome(
+    state: &SharedState,
+    device_id: &str,
+    room_id: Option<&str>,
+) -> Result<crate::api_types::DeviceRoomAssignmentResponse> {
+    do_canonical_assign_room_with_precondition_outcome(state, device_id, room_id, None)
 }
 
 #[derive(Clone, Debug)]
@@ -15065,6 +15482,16 @@ pub fn do_canonical_assign_room_with_precondition(
     room_id: Option<&str>,
     precondition: Option<TopologyAssignmentPrecondition>,
 ) -> Result<()> {
+    do_canonical_assign_room_with_precondition_outcome(state, device_id, room_id, precondition)
+        .map(|_| ())
+}
+
+fn do_canonical_assign_room_with_precondition_outcome(
+    state: &SharedState,
+    device_id: &str,
+    room_id: Option<&str>,
+    precondition: Option<TopologyAssignmentPrecondition>,
+) -> Result<crate::api_types::DeviceRoomAssignmentResponse> {
     let transaction_lock = state
         .lock()
         .map_err(|_| anyhow::anyhow!("lock"))?
@@ -15287,6 +15714,32 @@ pub fn do_canonical_assign_room_with_precondition(
         sync_endpoint_device_rooms(&mut s, &active_endpoints, room_id);
     }
 
+    let mut projection_hub_keys = if matches!(device_type, DeviceType::Light) {
+        assignments
+            .iter()
+            .filter(|assignment| {
+                s.topology
+                    .external_room_topology_sync_is_enabled(&assignment.hub_key)
+            })
+            .map(|assignment| assignment.hub_key.clone())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    projection_hub_keys.sort_by(|left, right| left.to_string().cmp(&right.to_string()));
+    projection_hub_keys.dedup();
+    for hub_key in &projection_hub_keys {
+        if s.topology.external_hub_has_full_rhythm_consent(hub_key) {
+            // Publish a durable pending state in the same commit as the
+            // canonical move. The asynchronous Hue worker will replace it
+            // with either exact read-back success or durable attention.
+            s.topology
+                .set_external_grouped_dispatch_suspended(hub_key, true);
+            s.topology
+                .set_external_room_topology_sync_attention(hub_key, false);
+        }
+    }
+
     let new_motion_target = old_motion_target.as_ref().map(|_| {
         s.topology
             .effective_control_target(device_id, &NodeControlKind::Motion)
@@ -15311,7 +15764,24 @@ pub fn do_canonical_assign_room_with_precondition(
             error,
         ));
     }
+    let mode_config_propagation =
+        if assigning_standalone_light_child && clear_node_mode_defaults(&mut s, device_id) {
+            let configs = s.mode_configs();
+            let runtimes = s
+                .hubs
+                .values()
+                .filter_map(|hub| hub.runtime.clone())
+                .collect::<Vec<_>>();
+            persist_settings_locked(&s);
+            Some((configs, runtimes))
+        } else {
+            None
+        };
     drop(s);
+
+    if let Some((configs, runtimes)) = mode_config_propagation {
+        propagate_mode_configs_to_runtimes(runtimes, configs);
+    }
 
     if let (Some(old), Some(new)) = (old_motion_target, new_motion_target) {
         if old != new {
@@ -15338,7 +15808,7 @@ pub fn do_canonical_assign_room_with_precondition(
     }
     reconcile_runtime_from_state(state)?;
     if assigning_standalone_light_child {
-        clear_runtime_node_off_flags(state, device_id)?;
+        clear_runtime_node_standalone_state(state, device_id)?;
         persist_rooms(state);
     }
     if matches!(device_type, DeviceType::Light)
@@ -15362,7 +15832,63 @@ pub fn do_canonical_assign_room_with_precondition(
         emit_triage_changed(state);
         crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
     }
-    Ok(())
+    let projection_status = state
+        .lock()
+        .map(|state| device_room_projection_status(&state, &projection_hub_keys))
+        .unwrap_or_else(|_| {
+            if projection_hub_keys.is_empty() {
+                crate::api_types::DeviceRoomProjectionStatus::NotApplicable
+            } else {
+                crate::api_types::DeviceRoomProjectionStatus::Pending
+            }
+        });
+    Ok(crate::api_types::DeviceRoomAssignmentResponse {
+        schema_version: 1,
+        canonical_committed: true,
+        projection_status,
+    })
+}
+
+fn device_room_projection_status(
+    state: &AppState,
+    hub_keys: &[crate::canonical::identity::HubKey],
+) -> crate::api_types::DeviceRoomProjectionStatus {
+    use crate::api_types::DeviceRoomProjectionStatus;
+
+    let mut status = DeviceRoomProjectionStatus::NotApplicable;
+    for hub_key in hub_keys {
+        let candidate = if !state
+            .topology
+            .external_room_topology_sync_is_enabled(hub_key)
+        {
+            DeviceRoomProjectionStatus::NotApplicable
+        } else if !state.topology.external_hub_has_full_rhythm_consent(hub_key) {
+            DeviceRoomProjectionStatus::Blocked
+        } else if state
+            .topology
+            .external_room_topology_sync_needs_attention(hub_key)
+        {
+            DeviceRoomProjectionStatus::Attention
+        } else if state
+            .topology
+            .external_grouped_dispatch_is_suspended(hub_key)
+        {
+            DeviceRoomProjectionStatus::Pending
+        } else {
+            DeviceRoomProjectionStatus::Synced
+        };
+        let rank = |status| match status {
+            DeviceRoomProjectionStatus::NotApplicable => 0,
+            DeviceRoomProjectionStatus::Synced => 1,
+            DeviceRoomProjectionStatus::Pending => 2,
+            DeviceRoomProjectionStatus::Blocked => 3,
+            DeviceRoomProjectionStatus::Attention => 4,
+        };
+        if rank(candidate) > rank(status) {
+            status = candidate;
+        }
+    }
+    status
 }
 
 /// Set the preferred endpoint for a canonical device.
@@ -16890,6 +17416,8 @@ mod tests {
         events: Mutex<Vec<(String, ButtonAction)>>,
         applied_commands: Mutex<Vec<(String, rhythm_core::LightingCommand)>>,
         turn_on_calls: Mutex<Vec<String>>,
+        soft_off_tick_calls: Mutex<Vec<String>>,
+        mood_tick_calls: Mutex<Vec<String>>,
         lights_off_calls: Mutex<Vec<(String, Option<u32>)>>,
         applied_states: Mutex<Vec<(String, RoomModeState)>>,
         config_updates: Mutex<Vec<LightProfileConfig>>,
@@ -16915,6 +17443,8 @@ mod tests {
                 events: Mutex::new(Vec::new()),
                 applied_commands: Mutex::new(Vec::new()),
                 turn_on_calls: Mutex::new(Vec::new()),
+                soft_off_tick_calls: Mutex::new(Vec::new()),
+                mood_tick_calls: Mutex::new(Vec::new()),
                 lights_off_calls: Mutex::new(Vec::new()),
                 applied_states: Mutex::new(Vec::new()),
                 config_updates: Mutex::new(Vec::new()),
@@ -17035,6 +17565,14 @@ mod tests {
 
         fn clear_turn_on_calls(&self) {
             self.turn_on_calls.lock().unwrap().clear();
+        }
+
+        fn soft_off_tick_calls(&self) -> Vec<String> {
+            self.soft_off_tick_calls.lock().unwrap().clone()
+        }
+
+        fn mood_tick_calls(&self) -> Vec<String> {
+            self.mood_tick_calls.lock().unwrap().clone()
         }
 
         fn lights_off_calls(&self) -> Vec<(String, Option<u32>)> {
@@ -17319,6 +17857,18 @@ mod tests {
             1
         }
         fn soft_off_tick_room(&self, room_id: &str) -> anyhow::Result<()> {
+            self.soft_off_tick_calls
+                .lock()
+                .unwrap()
+                .push(room_id.to_string());
+            self.set_target_lights(room_id, true);
+            Ok(())
+        }
+        fn mood_tick_room(&self, room_id: &str) -> anyhow::Result<()> {
+            self.mood_tick_calls
+                .lock()
+                .unwrap()
+                .push(room_id.to_string());
             self.set_target_lights(room_id, true);
             Ok(())
         }
@@ -18559,7 +19109,9 @@ mod tests {
     #[test]
     fn pure_profile_output_helpers_cover_wrap_fallback_and_direct_color_paths() {
         let rhythm = factory_default_light_profile_config(rhythm_core::RHYTHM_PROFILE_ID).unwrap();
-        let day_idle = factory_default_idle_profile_config_for_mode(RhythmMode::Day);
+        let day_idle = crate::factory_default_config::factory_default_idle_profile_config_for_mode(
+            RhythmMode::Day,
+        );
 
         assert!(absorb_light_profile_time_offset(&day_idle, 12.0, 30.0, 6.0, 18.0).is_none());
         assert!(absorb_light_profile_time_offset(&rhythm, 12.0, 30.0, 6.0, 18.0).is_none());
@@ -18736,6 +19288,7 @@ mod tests {
             fade_ms: Some(TimerSetting::Fixed { value: 100 }),
             motion_timeout_secs: Some(TimerSetting::Fixed { value: 20 }),
             motion_activation_enabled: Some(false),
+            room_schedule: None,
             profile_overrides: BTreeMap::from([(
                 "custom".to_string(),
                 LightProfileNodeOverride {
@@ -21775,6 +22328,14 @@ mod tests {
                 ..Default::default()
             },
         );
+        source_room.profile_settings.profile_overrides.insert(
+            rhythm_core::DAY_IDLE_PROFILE_ID.to_string(),
+            LightProfileNodeOverride {
+                min_brightness: Some(5),
+                max_brightness: Some(5),
+                ..Default::default()
+            },
+        );
         let (source_state, _source_runtime) = setup_state(vec![source_room]);
 
         let bundle = build_backup_bundle_dto(&source_state, false).unwrap();
@@ -21786,6 +22347,14 @@ mod tests {
         assert_eq!(exported_override.min_brightness, Some(7));
         assert_eq!(exported_override.max_brightness, Some(63));
         assert_eq!(exported_override.max_color_temp, Some(4_100));
+        assert_eq!(
+            bundle.configuration.rooms[0]
+                .room_profile
+                .profile_overrides
+                .get(rhythm_core::DAY_IDLE_PROFILE_ID)
+                .and_then(|profile_override| profile_override.max_brightness),
+            Some(5)
+        );
 
         let (target_state, _target_runtime) =
             setup_state(vec![make_snapshot("room1", false, false)]);
@@ -21803,6 +22372,14 @@ mod tests {
         assert_eq!(restored_override.min_brightness, Some(7));
         assert_eq!(restored_override.max_brightness, Some(63));
         assert_eq!(restored_override.max_color_temp, Some(4_100));
+        assert_eq!(
+            restored
+                .profile_settings
+                .profile_overrides
+                .get(rhythm_core::DAY_IDLE_PROFILE_ID)
+                .and_then(|profile_override| profile_override.max_brightness),
+            Some(5)
+        );
 
         let reexported = build_backup_bundle_dto(&target_state, false).unwrap();
         let reexported_override = reexported.configuration.rooms[0]
@@ -23265,6 +23842,7 @@ mod tests {
 
         {
             let mut s = state.lock().unwrap();
+            s.canonical_registry.assign_room(&hidden_id, Some("room1"));
             assert!(s.topology.attach_device_user_override("room1", &hidden_id));
             s.canonical_registry
                 .get_mut(&surviving_room_id)
@@ -23313,6 +23891,9 @@ mod tests {
 
         let s = state.lock().unwrap();
         assert!(s.topology.get_device_node(&hidden_id).is_none());
+        let hidden = s.canonical_registry.get(&hidden_id).unwrap();
+        assert_eq!(hidden.room_id.as_deref(), Some("room1"));
+        assert_eq!(hidden.active_endpoints().count(), 0);
         assert_eq!(
             s.topology
                 .device_parent_room_id(&surviving_room_id)
@@ -23355,6 +23936,8 @@ mod tests {
             let mut s = state.lock().unwrap();
             s.storage = Some(storage.clone());
             s.topology.ensure_standalone_device(&device_id);
+            s.canonical_registry.queue_unassigned(&device_id, 1000);
+            assert_eq!(s.canonical_registry.triage().pending_unassigned_count(), 1);
             persist_topology(&s);
         }
 
@@ -23367,6 +23950,12 @@ mod tests {
             .topology
             .get_device_node(&device_id)
             .is_none());
+        {
+            let mut s = state.lock().unwrap();
+            assert_eq!(s.canonical_registry.triage().pending_unassigned_count(), 0);
+            s.canonical_registry.queue_unassigned(&device_id, 2000);
+            assert_eq!(s.canonical_registry.triage().pending_unassigned_count(), 0);
+        }
 
         let persisted = storage
             .load_topology()
@@ -23375,6 +23964,35 @@ mod tests {
         let restored: crate::topology::RoomTopologyStore =
             serde_json::from_value(persisted).unwrap();
         assert!(restored.get_device_node(&device_id).is_none());
+    }
+
+    #[test]
+    fn endpoint_visibility_reconcile_removes_persisted_topology_orphans() {
+        let (state, _runtime) = setup_state(vec![]);
+        let storage = Arc::new(TestStorage::default());
+        let hue_key = HubKey::new(HubType::new("hue"), "bridge");
+        {
+            let mut s = state.lock().unwrap();
+            s.storage = Some(storage.clone());
+            s.topology
+                .ensure_standalone_device("orphan-topology-device");
+            persist_topology(&s);
+        }
+
+        let (affected, hidden) =
+            reconcile_hub_endpoint_visibility(&state, &hue_key, &HashSet::new()).unwrap();
+
+        assert_eq!((affected, hidden), (0, 0));
+        assert!(state
+            .lock()
+            .unwrap()
+            .topology
+            .get_device_node("orphan-topology-device")
+            .is_none());
+        let persisted = storage.load_topology().unwrap().unwrap();
+        let restored: crate::topology::RoomTopologyStore =
+            serde_json::from_value(persisted).unwrap();
+        assert!(restored.get_device_node("orphan-topology-device").is_none());
     }
 
     #[test]
@@ -29078,6 +29696,177 @@ mod tests {
         assert!(s.pending_motion_timeout_refresh.is_empty());
     }
 
+    #[test]
+    fn room_day_idle_override_reapplies_only_standby_and_scene_less_mood_output() {
+        let mut standby = make_snapshot("standby", false, true);
+        standby.standby_enabled = true;
+        let mut mood = make_snapshot("mood", false, false);
+        mood.mood_active = true;
+        let active = make_snapshot("active", false, false);
+        let (state, runtime) = setup_state(vec![standby, mood, active]);
+        let low_glow_rgb = Rgb::new(38, 82, 255);
+        let patch = profile_overrides_patch(vec![(
+            rhythm_core::DAY_IDLE_PROFILE_ID,
+            Some(LightProfileNodeOverride {
+                min_brightness: Some(8),
+                max_brightness: Some(8),
+                curve: Some(rhythm_core::LightCurveShape::Constant {
+                    brightness: 1.0,
+                    color_temp: 0.0,
+                    direct_color: Some(rhythm_core::LightDirectColor {
+                        xy: rhythm_core::rgb_to_xy(low_glow_rgb),
+                        rgb: low_glow_rgb,
+                    }),
+                }),
+                ..Default::default()
+            }),
+        )]);
+
+        for node_id in ["standby", "mood", "active"] {
+            if node_id == "active" {
+                set_observed_lights_on(&state, node_id, true);
+                runtime.set_light_on(node_id, true);
+            }
+            do_node_preferences_set(&state, node_id, None, None, None, None, Some(&patch), false)
+                .unwrap();
+        }
+
+        assert_eq!(
+            runtime
+                .engine_room_snapshot("standby")
+                .unwrap()
+                .profile_settings
+                .profile_overrides
+                .get(rhythm_core::DAY_IDLE_PROFILE_ID)
+                .and_then(|profile_override| profile_override.max_brightness),
+            Some(8)
+        );
+        assert_eq!(runtime.soft_off_tick_calls(), vec!["standby"]);
+        assert_eq!(runtime.mood_tick_calls(), vec!["mood"]);
+        assert!(runtime.turn_on_calls().is_empty());
+
+        let sample_at = chrono::NaiveDate::from_ymd_opt(2026, 8, 19)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+        let commands = {
+            let s = state.lock().unwrap();
+            let mode_configs = s.mode_configs();
+            let lighting = RoomLightingContext {
+                light_profile_configs: &s.light_profile_configs,
+                mode_configs: &mode_configs,
+                mode: s.active_mode,
+                solar_noon: s.solar_noon_hour(),
+                latitude: s.latitude,
+                longitude: s.longitude,
+                timezone_name: s.timezone_name.as_deref(),
+                utc_offset: s.utc_offset_hours,
+            };
+            [
+                ("standby", RoomModeState::Standby),
+                ("mood", RoomModeState::Mood),
+            ]
+            .map(|(node_id, room_state)| {
+                let snapshot = runtime.engine_room_snapshot(node_id).unwrap();
+                resolve_room_command_for_state_at_from_parts(
+                    lighting,
+                    RoomLightingInput::from_snapshot(&snapshot, room_state),
+                    sample_at,
+                    None,
+                )
+                .unwrap()
+            })
+        };
+        for command in commands {
+            assert_eq!(command.brightness, 8);
+            assert!(command.is_direct_color);
+            assert_eq!(command.rgb, low_glow_rgb);
+        }
+
+        let mut auto = profile_overrides_patch(vec![(rhythm_core::DAY_IDLE_PROFILE_ID, None)]);
+        auto.replace_profile_overrides = true;
+        do_node_preferences_set(
+            &state,
+            "standby",
+            None,
+            None,
+            None,
+            None,
+            Some(&auto),
+            false,
+        )
+        .unwrap();
+        assert!(!runtime
+            .engine_room_snapshot("standby")
+            .unwrap()
+            .profile_settings
+            .profile_overrides
+            .contains_key(rhythm_core::DAY_IDLE_PROFILE_ID));
+        assert_eq!(runtime.soft_off_tick_calls(), vec!["standby", "standby"]);
+    }
+
+    #[test]
+    fn day_idle_override_is_room_only_and_other_state_profiles_stay_reserved() {
+        let (state, runtime) = setup_state(vec![
+            make_snapshot("room", false, false),
+            make_standalone_light_snapshot("light"),
+        ]);
+        let day_idle = profile_overrides_patch(vec![(
+            rhythm_core::DAY_IDLE_PROFILE_ID,
+            Some(LightProfileNodeOverride {
+                max_brightness: Some(8),
+                ..Default::default()
+            }),
+        )]);
+        let sleep_idle = profile_overrides_patch(vec![(
+            rhythm_core::SLEEP_IDLE_PROFILE_ID,
+            Some(LightProfileNodeOverride {
+                max_brightness: Some(8),
+                ..Default::default()
+            }),
+        )]);
+
+        assert!(do_node_preferences_set(
+            &state,
+            "room",
+            None,
+            None,
+            None,
+            None,
+            Some(&day_idle),
+            false,
+        )
+        .is_ok());
+        assert!(do_node_preferences_set(
+            &state,
+            "light",
+            None,
+            None,
+            None,
+            None,
+            Some(&day_idle),
+            false,
+        )
+        .is_err());
+        assert!(do_node_preferences_set(
+            &state,
+            "room",
+            None,
+            None,
+            None,
+            None,
+            Some(&sleep_idle),
+            false,
+        )
+        .is_err());
+        assert!(runtime
+            .engine_node_snapshot("light")
+            .unwrap()
+            .profile_settings
+            .profile_overrides
+            .is_empty());
+    }
+
     // ========================================================================
     // Settings edge case tests
     // ========================================================================
@@ -29332,6 +30121,173 @@ mod tests {
             applied[0].1.brightness
         );
         assert_eq!(observed_lights_on(&state.lock().unwrap(), "r1"), Some(true));
+    }
+
+    #[test]
+    fn room_schedule_test_dispatches_only_target_without_global_mode_change() {
+        let (state, runtime) = setup_state(vec![
+            make_snapshot("r1", false, false),
+            make_snapshot("r2", false, false),
+        ]);
+        assert_eq!(state.lock().unwrap().active_mode, RhythmMode::Day);
+
+        do_room_schedule_test(&state, "r1", RhythmMode::Sleep).unwrap();
+
+        assert_eq!(state.lock().unwrap().active_mode, RhythmMode::Day);
+        let applied = runtime.applied_commands();
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].0, "r1");
+        assert!(runtime.engine_room_snapshot("r2").is_some());
+    }
+
+    #[test]
+    fn room_schedule_interval_identity_is_boundary_stable_across_midnight_and_dst() {
+        let schedule = rhythm_core::RoomScheduleConfig {
+            source: rhythm_core::RoomScheduleSource::FollowTime,
+            wake_time: rhythm_core::ModeTransitionTime::parse("06:30").unwrap(),
+            sleep_time: rhythm_core::ModeTransitionTime::parse("22:30").unwrap(),
+        };
+        let before_midnight = chrono::NaiveDate::from_ymd_opt(2026, 11, 1)
+            .unwrap()
+            .and_hms_opt(23, 59, 0)
+            .unwrap();
+        let after_midnight = chrono::NaiveDate::from_ymd_opt(2026, 11, 2)
+            .unwrap()
+            .and_hms_opt(0, 1, 0)
+            .unwrap();
+        let repeated_fall_back_hour = chrono::NaiveDate::from_ymd_opt(2026, 11, 1)
+            .unwrap()
+            .and_hms_opt(1, 30, 0)
+            .unwrap();
+
+        let (_, before_id) = room_schedule_interval_id("stable-room", schedule, before_midnight);
+        let (_, after_id) = room_schedule_interval_id("stable-room", schedule, after_midnight);
+        let (_, first_fall_back_id) =
+            room_schedule_interval_id("stable-room", schedule, repeated_fall_back_hour);
+        let (_, second_fall_back_id) =
+            room_schedule_interval_id("stable-room", schedule, repeated_fall_back_hour);
+
+        assert_eq!(before_id, after_id, "midnight remains one Sleep interval");
+        assert_eq!(first_fall_back_id, second_fall_back_id);
+        assert_ne!(before_id, first_fall_back_id);
+    }
+
+    #[test]
+    fn room_schedule_authority_applies_each_mode_preset_only_to_target() {
+        let schedule = rhythm_core::RoomScheduleConfig {
+            source: rhythm_core::RoomScheduleSource::FollowTime,
+            wake_time: rhythm_core::ModeTransitionTime::parse("06:30").unwrap(),
+            sleep_time: rhythm_core::ModeTransitionTime::parse("22:30").unwrap(),
+        };
+        let mut target = make_snapshot("r1", false, false);
+        target.profile_settings.room_schedule = Some(schedule);
+        let mut other = make_snapshot("r2", false, false);
+        other.hard_off = true;
+        let (state, runtime) = setup_state(vec![target, other]);
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = RhythmMode::Day;
+            s.set_mode_configs(vec![
+                ModeConfig {
+                    mode: RhythmMode::Day,
+                    active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+                    idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+                    wake_profile_id: None,
+                    warning_profile_id: None,
+                    room_defaults: vec![rhythm_core::RoomModeDefault {
+                        room_id: "r1".into(),
+                        state: RoomModeState::HardOff,
+                    }],
+                },
+                ModeConfig {
+                    mode: RhythmMode::Sleep,
+                    active_profile_id: Some(rhythm_core::SLEEP_PROFILE_ID.into()),
+                    idle_profile_id: Some(rhythm_core::SLEEP_IDLE_PROFILE_ID.into()),
+                    wake_profile_id: None,
+                    warning_profile_id: None,
+                    room_defaults: vec![rhythm_core::RoomModeDefault {
+                        room_id: "r1".into(),
+                        state: RoomModeState::Active,
+                    }],
+                },
+            ]);
+        }
+
+        let wake = reconcile_room_schedule_before_tick(&state, "r1", 12.0)
+            .unwrap()
+            .expect("initial custom-time interval should reconcile");
+        assert_eq!(wake.mode, RhythmMode::Day);
+        assert!(runtime.engine_room_snapshot("r1").unwrap().hard_off);
+        assert!(runtime.engine_room_snapshot("r2").unwrap().hard_off);
+        assert_eq!(state.lock().unwrap().active_mode, RhythmMode::Day);
+        assert_eq!(runtime.lights_off_calls().len(), 1);
+        assert!(reconcile_room_schedule_before_tick(&state, "r1", 12.0)
+            .unwrap()
+            .is_none());
+
+        let sleep = reconcile_room_schedule_before_tick(&state, "r1", 23.0)
+            .unwrap()
+            .expect("sleep boundary should reconcile");
+        assert_eq!(sleep.mode, RhythmMode::Sleep);
+        assert!(!runtime.engine_room_snapshot("r1").unwrap().hard_off);
+        assert!(runtime.engine_room_snapshot("r2").unwrap().hard_off);
+        assert_eq!(runtime.applied_commands().len(), 1);
+    }
+
+    #[test]
+    fn room_schedule_supports_unassigned_lights_and_rejects_assigned_children() {
+        let schedule = rhythm_core::RoomScheduleConfig {
+            source: rhythm_core::RoomScheduleSource::FollowTime,
+            wake_time: rhythm_core::ModeTransitionTime::parse("06:30").unwrap(),
+            sleep_time: rhythm_core::ModeTransitionTime::parse("22:30").unwrap(),
+        };
+        let mut standalone = make_standalone_light_snapshot("standalone-light");
+        standalone.profile_settings.room_schedule = Some(schedule);
+        let (standalone_state, standalone_runtime) = setup_state(vec![standalone]);
+        {
+            let mut state = standalone_state.lock().unwrap();
+            state.set_mode_configs(vec![ModeConfig {
+                mode: RhythmMode::Day,
+                active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+                idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![rhythm_core::RoomModeDefault {
+                    room_id: "standalone-light".into(),
+                    state: RoomModeState::HardOff,
+                }],
+            }]);
+        }
+
+        let reconciled =
+            reconcile_room_schedule_before_tick(&standalone_state, "standalone-light", 12.0)
+                .unwrap()
+                .expect("an unassigned light should reconcile like a room");
+        assert_eq!(reconciled.mode, RhythmMode::Day);
+        assert!(
+            standalone_runtime
+                .engine_node_snapshot("standalone-light")
+                .unwrap()
+                .hard_off
+        );
+
+        let (state, _runtime) = setup_state(vec![make_light_child_snapshot("light-1", "r1")]);
+        assert!(do_room_schedule_test(&state, "light-1", RhythmMode::Day).is_err());
+        assert!(reconcile_room_schedule_before_tick(&state, "light-1", 12.0)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn room_schedule_forgets_deleted_nodes() {
+        let (state, _runtime) = setup_state(vec![]);
+        {
+            let mut s = state.lock().unwrap();
+            s.room_schedule_evaluations
+                .insert("deleted-room".into(), "evaluation".into());
+            clear_removed_node_ephemeral_state(&mut s, "deleted-room");
+            assert!(!s.room_schedule_evaluations.contains_key("deleted-room"));
+        }
     }
 
     #[test]
@@ -29992,6 +30948,48 @@ mod tests {
         let snap = runtime.engine_room_snapshot("r1").unwrap();
         assert!(!snap.soft_off);
         assert!(snap.hard_off);
+    }
+
+    #[test]
+    fn global_mode_change_skips_follow_time_room_defaults_and_outputs() {
+        let mut follow_time = make_snapshot("follow", false, false);
+        follow_time.profile_settings.room_schedule = Some(rhythm_core::RoomScheduleConfig {
+            source: rhythm_core::RoomScheduleSource::FollowTime,
+            wake_time: rhythm_core::ModeTransitionTime::parse("06:30").unwrap(),
+            sleep_time: rhythm_core::ModeTransitionTime::parse("22:30").unwrap(),
+        });
+        let (state, runtime) =
+            setup_state(vec![follow_time, make_snapshot("ordinary", false, false)]);
+        {
+            let mut s = state.lock().unwrap();
+            s.active_mode = RhythmMode::Day;
+            set_observed_lights_on_in_app(&mut s, "follow", true);
+            set_observed_lights_on_in_app(&mut s, "ordinary", true);
+            s.set_mode_configs(vec![ModeConfig {
+                mode: RhythmMode::Sleep,
+                active_profile_id: Some(rhythm_core::SLEEP_PROFILE_ID.into()),
+                idle_profile_id: Some(rhythm_core::SLEEP_IDLE_PROFILE_ID.into()),
+                wake_profile_id: None,
+                warning_profile_id: None,
+                room_defaults: vec![rhythm_core::RoomModeDefault {
+                    room_id: "follow".into(),
+                    state: RoomModeState::HardOff,
+                }],
+            }]);
+        }
+
+        do_set_active_mode(&state, RhythmMode::Sleep).unwrap();
+
+        assert_eq!(state.lock().unwrap().active_mode, RhythmMode::Sleep);
+        assert!(!runtime.engine_room_snapshot("follow").unwrap().hard_off);
+        assert!(runtime
+            .restore_calls()
+            .iter()
+            .all(|(room_id, _, _)| room_id != "follow"));
+        assert!(runtime
+            .applied_commands()
+            .iter()
+            .all(|(room_id, _)| room_id != "follow"));
     }
 
     #[test]
@@ -32512,18 +33510,62 @@ mod tests {
     }
 
     #[test]
-    fn canonical_assign_room_clears_standalone_light_off_flags() {
+    fn canonical_assign_room_clears_standalone_light_schedule_authority() {
         let (state, runtime, hub_key) = setup_state_with_deferred_runtime();
         let storage = TestStorage::default();
         state.lock().unwrap().storage = Some(std::sync::Arc::new(storage.clone()));
         let room_id = state.lock().unwrap().topology.create_room("Office");
         let device_id = insert_canonical_device(&state, hub_key, "matter-100", "Desk Lamp", "", "");
+        let schedule = rhythm_core::RoomScheduleConfig {
+            source: rhythm_core::RoomScheduleSource::FollowTime,
+            wake_time: rhythm_core::ModeTransitionTime::parse("07:15").unwrap(),
+            sleep_time: rhythm_core::ModeTransitionTime::parse("23:45").unwrap(),
+        };
 
         {
             let mut s = state.lock().unwrap();
             s.topology.ensure_standalone_device(&device_id);
+            s.set_mode_configs(vec![
+                ModeConfig {
+                    mode: RhythmMode::Day,
+                    active_profile_id: Some(rhythm_core::RHYTHM_PROFILE_ID.into()),
+                    idle_profile_id: Some(rhythm_core::DAY_IDLE_PROFILE_ID.into()),
+                    wake_profile_id: None,
+                    warning_profile_id: None,
+                    room_defaults: vec![
+                        rhythm_core::RoomModeDefault {
+                            room_id: device_id.clone(),
+                            state: RoomModeState::HardOff,
+                        },
+                        rhythm_core::RoomModeDefault {
+                            room_id: room_id.clone(),
+                            state: RoomModeState::Active,
+                        },
+                    ],
+                },
+                ModeConfig {
+                    mode: RhythmMode::Sleep,
+                    active_profile_id: Some(rhythm_core::SLEEP_PROFILE_ID.into()),
+                    idle_profile_id: Some(rhythm_core::SLEEP_IDLE_PROFILE_ID.into()),
+                    wake_profile_id: None,
+                    warning_profile_id: None,
+                    room_defaults: vec![
+                        rhythm_core::RoomModeDefault {
+                            room_id: device_id.clone(),
+                            state: RoomModeState::Active,
+                        },
+                        rhythm_core::RoomModeDefault {
+                            room_id: room_id.clone(),
+                            state: RoomModeState::HardOff,
+                        },
+                    ],
+                },
+            ]);
         }
         reconcile_runtime_from_state(&state).unwrap();
+        let mut standalone_settings = RoomProfileSettings::default();
+        standalone_settings.room_schedule = Some(schedule);
+        standalone_settings.motion_activation_enabled = Some(true);
         runtime.restore_node_state(
             &device_id,
             RestoredNodeState {
@@ -32535,7 +33577,7 @@ mod tests {
                 mood_active: false,
                 standby_enabled: false,
                 hard_off: true,
-                profile_settings: RoomProfileSettings::default(),
+                profile_settings: standalone_settings,
             },
         );
         let before = runtime
@@ -32553,6 +33595,18 @@ mod tests {
         assert_eq!(after.parent_id.as_deref(), Some(room_id.as_str()));
         assert!(!after.soft_off);
         assert!(!after.hard_off);
+        assert_eq!(after.profile_settings.room_schedule, None);
+        assert_eq!(after.profile_settings.motion_activation_enabled, Some(true));
+
+        let mode_configs = state.lock().unwrap().mode_configs();
+        assert!(mode_configs.iter().all(|config| config
+            .room_defaults
+            .iter()
+            .all(|default| default.room_id != device_id)));
+        assert!(mode_configs.iter().all(|config| config
+            .room_defaults
+            .iter()
+            .any(|default| default.room_id == room_id)));
 
         let saved = storage.inner.lock().unwrap();
         let saved_child = saved
@@ -32561,6 +33615,21 @@ mod tests {
             .expect("assigned light child should be persisted");
         assert!(!saved_child.soft_off);
         assert!(!saved_child.hard_off);
+        assert_eq!(saved_child.profile_settings.room_schedule, None);
+        assert_eq!(
+            saved_child.profile_settings.motion_activation_enabled,
+            Some(true)
+        );
+        assert!(saved
+            .settings
+            .as_ref()
+            .expect("mode defaults should be persisted")
+            .modes
+            .iter()
+            .all(|config| config
+                .room_defaults
+                .iter()
+                .all(|default| default.room_id != device_id)));
     }
 
     #[test]
@@ -33364,6 +34433,69 @@ mod tests {
     }
 
     #[test]
+    fn canonical_assign_room_reports_external_projection_pending() {
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+
+        let created: serde_json::Value =
+            serde_json::from_str(&do_topology_create_room(&state, "Office").unwrap()).unwrap();
+        let room_id = created["id"].as_str().unwrap().to_string();
+        let device_id = insert_canonical_device(
+            &state,
+            hub_key.clone(),
+            "hue-device-100",
+            "Desk Lamp",
+            "",
+            "",
+        );
+        let sync_started = Arc::new(AtomicUsize::new(0));
+        {
+            let sync_started = sync_started.clone();
+            let mut app = state.lock().unwrap();
+            assert!(app.topology.upsert_room_binding(
+                &room_id,
+                crate::topology::HubRoomBinding {
+                    hub_key: hub_key.clone(),
+                    hub_room_id: "hue-office".to_string(),
+                    control_id: "hue-office-group".to_string(),
+                    light_device_ids: Vec::new(),
+                },
+            ));
+            app.topology
+                .replace_external_room_automation_decisions(
+                    &hub_key,
+                    &[(
+                        room_id.clone(),
+                        crate::topology::ExternalRoomAutomationOwner::Rhythm,
+                    )],
+                )
+                .unwrap();
+            app.topology
+                .set_external_room_topology_sync_enabled(&hub_key, true);
+            app.sync_topology_groups_fn = Some(Arc::new(move |_| {
+                sync_started.fetch_add(1, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(500));
+                Ok(())
+            }));
+        }
+
+        let outcome =
+            do_canonical_assign_room_with_outcome(&state, &device_id, Some(&room_id)).unwrap();
+
+        assert!(outcome.canonical_committed);
+        assert_eq!(
+            outcome.projection_status,
+            crate::api_types::DeviceRoomProjectionStatus::Pending
+        );
+        assert!(state
+            .lock()
+            .unwrap()
+            .topology
+            .external_grouped_dispatch_is_suspended(&hub_key));
+        wait_for_sync_count(&sync_started, 1);
+        wait_for_topology_group_sync_idle(&state);
+    }
+
+    #[test]
     fn topology_group_sync_rebuilds_composite_routing_for_new_group_binding() {
         let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
 
@@ -33917,6 +35049,32 @@ mod tests {
             target_node, "room-a",
             "motion event should route to the room the user assigned, \
              not the room bound to the Hue-native source room"
+        );
+    }
+
+    #[test]
+    fn dispatch_target_resolution_requires_exact_hub_scoped_endpoint() {
+        let (state, _runtime, hub_key) = setup_state_with_deferred_runtime();
+        let canonical_id = insert_canonical_device(
+            &state,
+            hub_key.clone(),
+            "matter-113",
+            "Porch Bulb",
+            "room-1",
+            "Porch",
+        );
+
+        assert_eq!(
+            resolve_dispatch_target_node_id(&state, &hub_key.to_string(), "matter-113"),
+            Some(canonical_id),
+        );
+        assert_eq!(
+            resolve_dispatch_target_node_id(&state, "matter@another-hub", "matter-113"),
+            None,
+        );
+        assert_eq!(
+            resolve_dispatch_target_node_id(&state, &hub_key.to_string(), "matter-controller"),
+            None,
         );
     }
 

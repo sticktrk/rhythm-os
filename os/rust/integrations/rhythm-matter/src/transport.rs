@@ -366,6 +366,17 @@ pub trait MatterTransport: Send + Sync {
     /// Commission a light and return the fully probed device description.
     fn commission_light(&self, request: &MatterCommissionRequest) -> Result<CommissionedDevice>;
 
+    /// Commission with the initiating API request's deadline/cancellation
+    /// fence. Compatibility transports keep their existing synchronous
+    /// behavior; the native CHIP transport terminates abandoned sidecar work.
+    fn commission_light_with_context(
+        &self,
+        request: &MatterCommissionRequest,
+        _context: &rhythm_os::pairing::PairingRequestContext,
+    ) -> Result<CommissionedDevice> {
+        self.commission_light(request)
+    }
+
     /// Remove a device from the local fabric.
     fn decommission_device(&self, node_id: u64, force: bool) -> Result<()>;
 
@@ -399,6 +410,26 @@ pub trait MatterTransport: Send + Sync {
                 device.light_endpoint,
                 expected_endpoint
             );
+        }
+        Ok(device)
+    }
+
+    /// Recover an existing node while retaining ownership of the initiating
+    /// pairing request. Native transports override this to interrupt in-flight
+    /// controller RPCs; compatibility transports still fail closed before and
+    /// after their synchronous probe so cancellation cannot finalize state.
+    fn recover_light_connection_with_context(
+        &self,
+        node_id: u64,
+        expected_endpoint: u16,
+        context: &rhythm_os::pairing::PairingRequestContext,
+    ) -> Result<CommissionedDevice> {
+        if context.is_cancelled() {
+            anyhow::bail!("Matter pairing request was cancelled");
+        }
+        let device = self.recover_light_connection(node_id, expected_endpoint)?;
+        if context.is_cancelled() {
+            anyhow::bail!("Matter pairing request was cancelled");
         }
         Ok(device)
     }

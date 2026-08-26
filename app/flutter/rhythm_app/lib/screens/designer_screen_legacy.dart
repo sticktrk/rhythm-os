@@ -1,7 +1,5 @@
 import 'dart:async';
-import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import '../api/hybrid_client.dart';
@@ -28,7 +26,6 @@ class _DesignerScreenLegacyState extends State<DesignerScreenLegacy> {
   @override
   void initState() {
     super.initState();
-    _setLandscapeMode();
     _updateCurrentHour();
     _startNowTimer();
     _loadData();
@@ -36,31 +33,8 @@ class _DesignerScreenLegacyState extends State<DesignerScreenLegacy> {
 
   @override
   void dispose() {
-    _restoreOrientation();
     _nowTimer?.cancel();
     super.dispose();
-  }
-
-  /// Force landscape orientation on mobile devices.
-  void _setLandscapeMode() {
-    if (!kIsWeb) {
-      SystemChrome.setPreferredOrientations([
-        DeviceOrientation.landscapeLeft,
-        DeviceOrientation.landscapeRight,
-      ]).catchError((_) {});
-    }
-  }
-
-  /// Restore all orientations when leaving the screen.
-  void _restoreOrientation() {
-    if (!kIsWeb) {
-      SystemChrome.setPreferredOrientations([
-        DeviceOrientation.portraitUp,
-        DeviceOrientation.portraitDown,
-        DeviceOrientation.landscapeLeft,
-        DeviceOrientation.landscapeRight,
-      ]).catchError((_) {});
-    }
   }
 
   void _updateCurrentHour() {

@@ -410,6 +410,32 @@ void main() {
         });
       });
 
+      test('round-trips room schedule while retaining unknown fields', () {
+        final settings = RhythmNodeProfileSettings.fromJson({
+          'room_schedule': {
+            'source': 'follow_time',
+            'wake_time': '07:15',
+            'sleep_time': '23:45',
+          },
+          'future_setting': true,
+        });
+
+        expect(
+          settings.roomSchedule?.source,
+          RhythmRoomScheduleSource.followTime,
+        );
+        expect(settings.roomSchedule?.wakeTime, '07:15');
+        expect(settings.roomSchedule?.sleepTime, '23:45');
+        expect(settings.toJson(), {
+          'future_setting': true,
+          'room_schedule': {
+            'source': 'follow_time',
+            'wake_time': '07:15',
+            'sleep_time': '23:45',
+          },
+        });
+      });
+
       test('parses legacy active_light_scene_id as mood_scene_id', () {
         final room = RhythmRoom.fromJson({
           'profile_settings': {

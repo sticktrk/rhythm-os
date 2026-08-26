@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 import '../../providers/server_sync_provider.dart';
-import '../../utils/app_color_temperature.dart';
+import '../../widgets/automation_section_header.dart';
+import '../../widgets/celestial_segmented_control.dart';
+import '../../widgets/rhythm_clock/rhythm_clock_visuals.dart';
 import '../../widgets/header_close_button.dart';
 import '../../widgets/mode_room_behavior_section.dart';
 import '../../widgets/settings_row.dart';
@@ -38,7 +39,7 @@ class AutomationsScreen extends StatelessWidget {
                     return Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
-                        const _AutomationSectionHeader(
+                        const AutomationSectionHeader(
                           step: 1,
                           title: 'Schedule',
                           subtitle:
@@ -52,7 +53,7 @@ class AutomationsScreen extends StatelessWidget {
                             _buttonRow(context, sync, profileColors),
                           ],
                         ),
-                        const _AutomationSectionHeader(
+                        const AutomationSectionHeader(
                           step: 2,
                           title: 'Wake / Sleep Presets',
                           subtitle: 'Set what your rooms do once Wake or Sleep '
@@ -65,7 +66,7 @@ class AutomationsScreen extends StatelessWidget {
                             _modeRow(context, sync, RhythmMode.sleep),
                           ],
                         ),
-                        const _AutomationSectionHeader(
+                        const AutomationSectionHeader(
                           step: 3,
                           title: 'Test your presets',
                           subtitle: 'Manually trigger a Wake or Sleep preset.',
@@ -189,85 +190,6 @@ class AutomationsScreen extends StatelessWidget {
   }
 }
 
-/// A numbered, two-line section header for the Automations flow. The tinted
-/// step badge plus subtitle turns two loose lists into a clear sequence:
-/// ① decide how the home switches → ② define what each mode does.
-class _AutomationSectionHeader extends StatelessWidget {
-  final int step;
-  final String title;
-  final String subtitle;
-  final Color accent;
-
-  const _AutomationSectionHeader({
-    required this.step,
-    required this.title,
-    required this.subtitle,
-    required this.accent,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(left: 2, right: 8, top: 30, bottom: 14),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Tinted numeral badge — conveys "first, then" ordering.
-          Container(
-            width: 26,
-            height: 26,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: accent.withValues(alpha: 0.16),
-              border: Border.all(
-                color: accent.withValues(alpha: 0.4),
-                width: 1,
-              ),
-            ),
-            child: Text(
-              '$step',
-              style: TextStyle(
-                color: accent,
-                fontSize: 13,
-                fontWeight: FontWeight.w700,
-                height: 1,
-              ),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title.toUpperCase(),
-                  style: TextStyle(
-                    color: accent,
-                    fontSize: 12.5,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.9,
-                  ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  subtitle,
-                  style: TextStyle(
-                    color:
-                        CelestialColors.textSecondary.withValues(alpha: 0.85),
-                    fontSize: 13,
-                    height: 1.35,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 /// A colorful On/Off status pill (green when enabled, muted grey when off),
 /// paired with a chevron to keep the row reading as tappable.
 class _StatusPill extends StatelessWidget {
@@ -326,7 +248,6 @@ class _ManualModeToggleState extends State<_ManualModeToggle> {
     final sync = context.read<ServerSyncProvider>();
     if (_busy || sync.activeMode == target || !sync.canDispatchActions) return;
 
-    HapticFeedback.mediumImpact();
     setState(() => _busy = true);
     try {
       final current = sync.activeMode;
@@ -350,72 +271,26 @@ class _ManualModeToggleState extends State<_ManualModeToggle> {
     final active = context.select<ServerSyncProvider, RhythmMode?>(
       (s) => s.activeMode,
     );
-    return Opacity(
-      opacity: _busy ? 0.6 : 1.0,
-      child: Container(
-        padding: const EdgeInsets.all(6),
-        decoration: BoxDecoration(
-          color: CelestialColors.backgroundCard,
-          borderRadius: BorderRadius.circular(14),
+    return CelestialSegmentedControl<RhythmMode>(
+      segments: const [
+        CelestialSegment(
+          value: RhythmMode.day,
+          label: 'Wake',
+          icon: Icons.wb_sunny_rounded,
+          accent: Color(0xFFF9A825),
         ),
-        child: Row(
-          children: [
-            _segment(RhythmMode.day, active),
-            _segment(RhythmMode.sleep, active),
-          ],
+        CelestialSegment(
+          value: RhythmMode.sleep,
+          label: 'Sleep',
+          icon: Icons.bedtime_rounded,
+          accent: Color(0xFF7C83FF),
         ),
-      ),
-    );
-  }
-
-  Widget _segment(RhythmMode mode, RhythmMode? active) {
-    final isActive = mode == active;
-    final isDay = mode == RhythmMode.day;
-    final color = isDay ? const Color(0xFFF9A825) : const Color(0xFF7C83FF);
-    return Expanded(
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: _busy ? null : () => _select(mode),
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 250),
-          curve: Curves.easeOut,
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(10),
-            color:
-                isActive ? color.withValues(alpha: 0.16) : Colors.transparent,
-            border: Border.all(
-              color:
-                  isActive ? color.withValues(alpha: 0.5) : Colors.transparent,
-              width: 1,
-            ),
-          ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(
-                isDay ? Icons.wb_sunny_rounded : Icons.bedtime_rounded,
-                size: 18,
-                color: isActive
-                    ? color
-                    : CelestialColors.textSecondary.withValues(alpha: 0.5),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                isDay ? 'Wake' : 'Sleep',
-                style: TextStyle(
-                  color: isActive
-                      ? color
-                      : CelestialColors.textSecondary.withValues(alpha: 0.65),
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.2,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
+      ],
+      selected: active,
+      onTap: _select,
+      enabled: !_busy,
+      trackColor: CelestialColors.backgroundCard,
+      mediumHaptic: true,
     );
   }
 }
@@ -512,38 +387,4 @@ class AutomationDetailHeader extends StatelessWidget {
       ),
     );
   }
-}
-
-// ── Profile color resolution (shared with the orbital-clock detail) ─────────
-
-/// Maps each [RhythmMode] to the dominant color of its active profile, used to
-/// tint the orbital clock in the Automatic detail.
-Map<RhythmMode, Color> resolveProfileColors(
-  List<RhythmModeConfig> modeConfigs,
-  List<RhythmCurveConfig> profiles,
-) {
-  final colors = <RhythmMode, Color>{};
-  for (final mc in modeConfigs) {
-    final profile = profiles.cast<RhythmCurveConfig?>().firstWhere(
-          (p) => p!.id == mc.activeProfileId,
-          orElse: () => null,
-        );
-    if (profile == null) continue;
-    colors[mc.mode] = _colorFromProfile(profile);
-  }
-  return colors;
-}
-
-Color _colorFromProfile(RhythmCurveConfig profile) {
-  final curve = profile.curve;
-  if (curve is RhythmConstantCurve && curve.directColor != null) {
-    final rgb = curve.directColor!.rgb;
-    return Color.fromARGB(255, rgb.r, rgb.g, rgb.b);
-  }
-  if (curve is RhythmSuperGaussianCurve && curve.directColor != null) {
-    final rgb = curve.directColor!.rgb;
-    return Color.fromARGB(255, rgb.r, rgb.g, rgb.b);
-  }
-  final midCct = (profile.minColorTemp + profile.maxColorTemp) ~/ 2;
-  return AppColorTemperature.toColor(midCct);
 }

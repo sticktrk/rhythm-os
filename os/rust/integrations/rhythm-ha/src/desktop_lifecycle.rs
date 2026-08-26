@@ -4,7 +4,6 @@
 //! `connect_and_start`, `ensure_runtime`, `get_hub_provider`.
 //! No platform-specific code needed in the consuming crate.
 
-use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
@@ -158,6 +157,23 @@ pub static INTEGRATION: HaIntegration = HaIntegration;
 /// HA integration using reqwest transport (desktop/server targets).
 pub struct HaIntegration;
 
+fn target_area_id_for_assignment(assignment: &HubDeviceRoomAssignment) -> Result<Option<&str>> {
+    match assignment.target_rhythm_room_id.as_deref() {
+        Some(_) => match assignment.target_hub_room_ids.as_slice() {
+            [target_area_id] => Ok(Some(target_area_id.as_str())),
+            // A Rhythm-only room has no HA area binding. Removing the
+            // entity-level HA area lets the canonical user override remain
+            // authoritative without inventing a native area.
+            [] => Ok(None),
+            _ => Err(anyhow::anyhow!(
+                "Cannot move Home Assistant light to Rhythm room '{}': it maps to multiple areas in this Home Assistant instance",
+                assignment.target_rhythm_room_id.as_deref().unwrap_or_default()
+            )),
+        },
+        None => Ok(None),
+    }
+}
+
 impl ExternalLightHubIntegration for HaIntegration {
     fn hub_type(&self) -> &'static str {
         crate::ha_lifecycle::HA_HUB_TYPE
@@ -188,24 +204,7 @@ impl ExternalLightHubIntegration for HaIntegration {
             return Ok(HubDeviceRoomAssignmentOutcome::Unchanged);
         }
 
-        let target_area_id = match assignment.target_rhythm_room_id.as_deref() {
-            Some(target_room_id) => match assignment.target_hub_room_ids.as_slice() {
-                [target_area_id] => Some(target_area_id.as_str()),
-                [] => {
-                    return Err(anyhow::anyhow!(
-                        "Cannot move Home Assistant light to Rhythm room '{}': that room is not backed by this Home Assistant instance",
-                        target_room_id
-                    ));
-                }
-                _ => {
-                    return Err(anyhow::anyhow!(
-                        "Cannot move Home Assistant light to Rhythm room '{}': it maps to multiple areas in this Home Assistant instance",
-                        target_room_id
-                    ));
-                }
-            },
-            None => None,
-        };
+        let target_area_id = target_area_id_for_assignment(assignment)?;
 
         let config = {
             let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -422,18 +421,18 @@ fn start_event_stream(
     config: HaConnectionConfig,
     registry: Arc<Mutex<HaDeviceRegistry>>,
     shutdown: Arc<AtomicBool>,
-    device_area_cache: Arc<Mutex<HashMap<String, String>>>,
+    event_routing_cache: Arc<Mutex<crate::hub_state::HaEventRoutingCache>>,
 ) -> Receiver<HubEvent> {
     let ws_rx = start_ha_ws(config, shutdown.clone());
     let button_registry = registry.clone();
-    let button_cache = device_area_cache.clone();
+    let button_cache = event_routing_cache.clone();
     let on_unknown_button: Arc<dyn Fn(&RawButtonEvent) + Send + Sync> =
         Arc::new(move |evt: &RawButtonEvent| {
             crate::events::register_unknown_button_from_cache(evt, &button_registry, &button_cache);
         });
 
     let motion_registry = registry.clone();
-    let motion_cache = device_area_cache.clone();
+    let motion_cache = event_routing_cache.clone();
     let on_unknown_motion: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |sensor_id: &str| {
         crate::events::register_unknown_motion_from_cache(
             sensor_id,
@@ -443,7 +442,7 @@ fn start_event_stream(
     });
 
     let contact_registry = registry.clone();
-    let contact_cache = device_area_cache;
+    let contact_cache = event_routing_cache.clone();
     let on_unknown_contact: Arc<dyn Fn(&str) + Send + Sync> = Arc::new(move |sensor_id: &str| {
         crate::events::register_unknown_contact_from_cache(
             sensor_id,
@@ -456,6 +455,7 @@ fn start_event_stream(
         ws_rx,
         registry,
         shutdown,
+        event_routing_cache,
         None,
         Some(on_unknown_button),
         Some(on_unknown_motion),
@@ -632,7 +632,9 @@ mod tests {
         HaHubData {
             config: ha_config(),
             registry: Arc::new(Mutex::new(HaDeviceRegistry::new())),
-            device_area_cache: Arc::new(Mutex::new(HashMap::new())),
+            event_routing_cache: Arc::new(Mutex::new(
+                crate::hub_state::HaEventRoutingCache::default(),
+            )),
         }
     }
 
@@ -689,8 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn ha_light_move_requires_exactly_one_native_target_area() {
-        let state = state();
+    fn ha_light_move_accepts_rhythm_only_target_and_rejects_ambiguous_area() {
         let assignment = |target_hub_room_ids: Vec<String>| HubDeviceRoomAssignment {
             hub_key: ha_key("ha.local:8123"),
             native_device_id: "light.desk".to_string(),
@@ -700,15 +701,15 @@ mod tests {
             target_hub_room_ids,
         };
 
-        let missing = string_error(
-            INTEGRATION.prepare_device_room_assignment(&state, &assignment(Vec::new())),
+        assert_eq!(
+            target_area_id_for_assignment(&assignment(Vec::new())).unwrap(),
+            None
         );
-        assert!(missing.contains("not backed by this Home Assistant instance"));
 
-        let ambiguous = string_error(INTEGRATION.prepare_device_room_assignment(
-            &state,
-            &assignment(vec!["office-a".to_string(), "office-b".to_string()]),
-        ));
+        let ambiguous = string_error(target_area_id_for_assignment(&assignment(vec![
+            "office-a".to_string(),
+            "office-b".to_string(),
+        ])));
         assert!(ambiguous.contains("maps to multiple areas"));
     }
 

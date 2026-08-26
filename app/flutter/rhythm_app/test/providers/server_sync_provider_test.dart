@@ -1,18 +1,22 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' as ui;
 import 'dart:ui' show Tristate;
 
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:dio/dio.dart';
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
+import 'package:rhythm_app/backend/backend.dart' show AuthUser;
+import 'package:rhythm_app/models/plan_tier.dart';
 import 'package:rhythm_app/providers/home_provider.dart';
 import 'package:rhythm_app/providers/room_provider.dart';
 import 'package:rhythm_app/providers/server_sync_provider.dart';
 import 'package:rhythm_app/providers/subscription_provider.dart';
-import 'package:rhythm_app/models/plan_tier.dart';
 import 'package:rhythm_app/services/account_cloud_sync_service.dart';
 import 'package:rhythm_app/services/demo_server_api.dart';
 import 'package:rhythm_app/services/hue/hue_service_locator.dart';
@@ -23,6 +27,8 @@ import 'package:rhythm_app/screens/hubs/room_device_add_flow.dart';
 import 'package:rhythm_app/widgets/device_detail_sheet.dart';
 import 'package:rhythm_app/widgets/hub_picker_screen.dart';
 import 'package:rhythm_app/widgets/room_settings_sheet.dart';
+import 'package:rhythm_app/widgets/room_schedule_tab.dart';
+import 'package:rhythm_app/widgets/solar_clock/solar_clock_exports.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
@@ -132,8 +138,10 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   int assignDeviceParentCalls = 0;
   String? lastAssignedDeviceId;
   String? lastAssignedParentId;
-  bool assignDeviceParentResult = true;
+  bool assignDeviceParentSucceeds = true;
   Completer<bool>? assignDeviceParentCompleter;
+  RhythmRoomProjectionStatus assignDeviceProjectionStatus =
+      RhythmRoomProjectionStatus.notApplicable;
   int flashCanonicalDeviceCalls = 0;
   bool flashCanonicalDeviceResult = true;
   Completer<bool>? flashCanonicalDeviceCompleter;
@@ -148,6 +156,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   String? lastControlKind;
   List<String>? lastControlTargetIds;
   bool setTopologyNodeControlTargetsResult = true;
+  FutureOr<void> Function()? beforeSetTopologyNodeControlTargets;
   int createTopologyRoomCalls = 0;
   String? lastCreatedRoomName;
   int topologyDeleteRoomCalls = 0;
@@ -157,6 +166,10 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   String? lastRenamedRoomId;
   String? lastRenamedRoomName;
   bool topologyRenameRoomResult = true;
+  int renameCanonicalDeviceCalls = 0;
+  String? lastRenamedDeviceId;
+  String? lastRenamedDeviceName;
+  bool renameCanonicalDeviceResult = true;
   int triggerSyncCalls = 0;
   final Map<String, Map<String, dynamic>?> canonicalDevices = {};
   int getCanonicalDevicesCalls = 0;
@@ -244,6 +257,15 @@ class _FakeRhythmServerApi extends RhythmServerApi {
       motionActivationCalls = [];
   Completer<RhythmRoomState?>? motionActivationCompleter;
   bool motionActivationSucceeds = true;
+  Completer<bool>? roomScheduleTestCompleter;
+  bool roomScheduleTestSucceeds = true;
+  bool roomScheduleSetSucceeds = true;
+  bool roomScheduleSetThrows = false;
+  RhythmRoomState? roomScheduleSetResponse;
+  final List<Completer<RhythmRoomState?>> roomScheduleSetCompleters = [];
+  final List<RhythmRoomSchedule> roomScheduleSetCalls = [];
+  final List<String> roomScheduleSetRequestIds = [];
+  final List<String> roomScheduleTestRequestIds = [];
   final List<
       ({
         String nodeId,
@@ -379,6 +401,39 @@ class _FakeRhythmServerApi extends RhythmServerApi {
       'state': 'active',
       'profile_settings': {'motion_activation_enabled': enabled},
     });
+  }
+
+  @override
+  Future<RhythmRoomState?> roomScheduleSet({
+    required String roomId,
+    required RhythmRoomSchedule schedule,
+    required String requestId,
+  }) async {
+    final callIndex = roomScheduleSetCalls.length;
+    roomScheduleSetCalls.add(schedule);
+    roomScheduleSetRequestIds.add(requestId);
+    if (roomScheduleSetThrows) throw StateError('schedule write failed');
+    if (callIndex < roomScheduleSetCompleters.length) {
+      return roomScheduleSetCompleters[callIndex].future;
+    }
+    if (!roomScheduleSetSucceeds) return null;
+    return roomScheduleSetResponse ??
+        RhythmRoomState.fromJson({
+          'node_id': roomId,
+          'state': 'active',
+          'profile_settings': {'room_schedule': schedule.toJson()},
+        });
+  }
+
+  @override
+  Future<bool> roomScheduleTest({
+    required String roomId,
+    required RhythmMode mode,
+    required String requestId,
+  }) async {
+    roomScheduleTestRequestIds.add(requestId);
+    final pending = roomScheduleTestCompleter;
+    return pending == null ? roomScheduleTestSucceeds : pending.future;
   }
 
   @override
@@ -603,7 +658,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     lastAssignedParentId = parentId;
     final pending = assignDeviceParentCompleter;
     final result =
-        pending == null ? assignDeviceParentResult : await pending.future;
+        pending == null ? assignDeviceParentSucceeds : await pending.future;
     if (result) {
       topologyNodes = [
         for (final node in topologyNodes)
@@ -629,6 +684,19 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   }
 
   @override
+  Future<RhythmDeviceRoomAssignmentResult?> assignDeviceParentResult(
+    String deviceId,
+    String? parentId,
+  ) async {
+    final committed = await assignDeviceParent(deviceId, parentId);
+    if (!committed) return null;
+    return RhythmDeviceRoomAssignmentResult(
+      canonicalCommitted: true,
+      projectionStatus: assignDeviceProjectionStatus,
+    );
+  }
+
+  @override
   Future<bool> flashCanonicalDevice(String id) async {
     flashCanonicalDeviceCalls++;
     final pending = flashCanonicalDeviceCompleter;
@@ -646,6 +714,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     lastControlSourceNodeId = nodeId;
     lastControlKind = controlKind;
     lastControlTargetIds = List<String>.of(targetIds);
+    await beforeSetTopologyNodeControlTargets?.call();
     if (!setTopologyNodeControlTargetsResult) return false;
 
     topologyNodes = [
@@ -703,6 +772,14 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     lastRenamedRoomId = roomId;
     lastRenamedRoomName = name;
     return topologyRenameRoomResult;
+  }
+
+  @override
+  Future<bool> renameCanonicalDevice(String id, String name) async {
+    renameCanonicalDeviceCalls++;
+    lastRenamedDeviceId = id;
+    lastRenamedDeviceName = name;
+    return renameCanonicalDeviceResult;
   }
 
   @override
@@ -788,6 +865,7 @@ class _FakeRhythmConnection extends RhythmConnection {
   bool isConnected = true;
   int reconnectCalls = 0;
   bool? lastReconnectAuthoritative;
+  FutureOr<void> Function(bool authoritative)? reconnectHandler;
   final List<
       ({
         String host,
@@ -823,6 +901,7 @@ class _FakeRhythmConnection extends RhythmConnection {
   Future<void> reconnect({bool authoritative = false}) async {
     reconnectCalls++;
     lastReconnectAuthoritative = authoritative;
+    await reconnectHandler?.call(authoritative);
   }
 }
 
@@ -860,6 +939,8 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
 
   final _helloController = StreamController<RhythmHello>.broadcast();
   final _rhythmStateController = StreamController<RhythmRoomState>.broadcast();
+  final _dispatchFailureController =
+      StreamController<RhythmDispatchFailure>.broadcast();
   final _hubEventController = StreamController<
       ({String event, String? hubType, String? address})>.broadcast();
   final _motionTimerController =
@@ -870,6 +951,7 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
       StreamController<RhythmSettings>.broadcast();
   final _lightBreakerChangedController =
       StreamController<RhythmLightBreaker>.broadcast();
+  final _newNodesController = StreamController<void>.broadcast();
   final _connectionStateController =
       StreamController<RhythmConnectionState>.broadcast();
   RhythmHello? helloOnReconnect;
@@ -892,6 +974,10 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
       _rhythmStateController.stream;
 
   @override
+  Stream<RhythmDispatchFailure> get dispatchFailureEvents =>
+      _dispatchFailureController.stream;
+
+  @override
   Stream<({String event, String? hubType, String? address})> get hubEvents =>
       _hubEventController.stream;
 
@@ -912,7 +998,7 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
       _lightBreakerChangedController.stream;
 
   @override
-  Stream<void> get newNodesDetected => const Stream<void>.empty();
+  Stream<void> get newNodesDetected => _newNodesController.stream;
 
   @override
   Stream<Map<String, dynamic>> get triageChangedEvents =>
@@ -932,6 +1018,10 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
 
   void emitRhythmState(RhythmRoomState state) {
     _rhythmStateController.add(state);
+  }
+
+  void emitDispatchFailure(RhythmDispatchFailure failure) {
+    _dispatchFailureController.add(failure);
   }
 
   void emitHubEvent({
@@ -962,15 +1052,21 @@ class _HelloRhythmConnection extends _FakeRhythmConnection {
     _lightBreakerChangedController.add(lightBreaker);
   }
 
+  void emitNewNodesDetected() {
+    _newNodesController.add(null);
+  }
+
   @override
   void dispose() {
     _helloController.close();
     _rhythmStateController.close();
+    _dispatchFailureController.close();
     _hubEventController.close();
     _motionTimerController.close();
     _modeChangedController.close();
     _settingsChangedController.close();
     _lightBreakerChangedController.close();
+    _newNodesController.close();
     _connectionStateController.close();
     super.dispose();
   }
@@ -980,6 +1076,7 @@ Widget _buildTestApp({
   required RoomProvider roomProvider,
   required ServerSyncProvider provider,
   required Widget child,
+  String? fontFamily,
 }) {
   return MultiProvider(
     providers: [
@@ -988,8 +1085,13 @@ Widget _buildTestApp({
       ChangeNotifierProvider<SubscriptionProvider>(
         create: (_) => _TestSubscriptionProvider(),
       ),
+      // The room Schedule tab reads the home location for its orbital clock.
+      ChangeNotifierProvider<HomeProvider>(
+        create: (_) => _TestHomeProvider(const []),
+      ),
     ],
     child: MaterialApp(
+      theme: ThemeData(fontFamily: fontFamily),
       home: Scaffold(body: child),
     ),
   );
@@ -1038,6 +1140,49 @@ void _registerWidgetCleanup(WidgetTester tester) {
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();
   });
+}
+
+Future<void> _captureRoomScheduleEvidence(
+  WidgetTester tester,
+  GlobalKey boundaryKey,
+  String fileName,
+) async {
+  final outputDir = Platform.environment['CODEX_UI_SCREENSHOT_DIR'];
+  if (outputDir == null || outputDir.isEmpty) return;
+  final boundary = tester.renderObject<RenderRepaintBoundary>(
+    find.byKey(boundaryKey),
+  );
+  boundary.markNeedsPaint();
+  await tester.pump();
+  await tester.runAsync(() async {
+    final image = await boundary.toImage(pixelRatio: 2);
+    final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+    await Directory(outputDir).create(recursive: true);
+    await File('$outputDir/$fileName').writeAsBytes(
+      bytes!.buffer.asUint8List(),
+      flush: true,
+    );
+  });
+}
+
+Future<void> _loadRoomScheduleEvidenceFont() async {
+  final executable = File(Platform.resolvedExecutable);
+  final font = File(
+    '${executable.parent.parent.parent.path}/material_fonts/Roboto-Regular.ttf',
+  );
+  final loader = FontLoader('CodexReadableRoboto')
+    ..addFont(
+      font.readAsBytes().then((bytes) => bytes.buffer.asByteData()),
+    );
+  await loader.load();
+  final icons = File(
+    '${executable.parent.parent.parent.path}/material_fonts/MaterialIcons-Regular.otf',
+  );
+  final iconLoader = FontLoader('MaterialIcons')
+    ..addFont(
+      icons.readAsBytes().then((bytes) => bytes.buffer.asByteData()),
+    );
+  await iconLoader.load();
 }
 
 RhythmSceneDefinition _testScene(String id) => RhythmSceneDefinition(
@@ -1127,6 +1272,46 @@ void main() {
       ),
       {'room-explicit', 'room-new'},
     );
+  });
+
+  test('account sign-in arms periodic activity cloud recovery', () async {
+    final roomProvider = RoomProvider();
+    final connection = _FakeRhythmConnection(_FakeRhythmServerApi());
+    final authStates = StreamController<AuthUser?>.broadcast();
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+      activityCloudCanProvision: () => true,
+      authStateChanges: authStates.stream,
+    );
+
+    expect(provider.activityCloudProvisioningTimerActive, isFalse);
+
+    authStates.add(const AuthUser(
+      id: 'signed-in-owner',
+      isAnonymous: false,
+    ));
+    await Future<void>.delayed(Duration.zero);
+
+    expect(
+      provider.activityCloudProvisioningTimerActive,
+      isTrue,
+      reason: 'transient bootstrap failures must receive later retries',
+    );
+
+    authStates.add(null);
+    await Future<void>.delayed(Duration.zero);
+    expect(
+      provider.activityCloudProvisioningTimerActive,
+      isFalse,
+      reason: 'sign-out must release the periodic recovery timer',
+    );
+
+    provider.dispose();
+    roomProvider.dispose();
+    connection.dispose();
+    await authStates.close();
   });
 
   group('ServerSyncProvider.applyProfileConfig', () {
@@ -1546,9 +1731,273 @@ void main() {
     });
   });
 
+  group('ServerSyncProvider room schedule authority', () {
+    RhythmHello scheduleHello({
+      String wakeTime = '06:30',
+      String name = 'Kitchen',
+      String kind = 'room',
+      String? parentId,
+    }) {
+      return RhythmHello.fromJson({
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': [RhythmFeature.roomScheduleV1],
+          'hubs': const <dynamic>[],
+        },
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': name,
+            'kind': kind,
+            if (parentId != null) 'parent_id': parentId,
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'profile_settings': {
+              'room_schedule': {
+                'source': 'follow_time',
+                'wake_time': wakeTime,
+                'sleep_time': '22:30',
+              },
+            },
+          },
+        ],
+      });
+    }
+
+    RhythmRoomSchedule schedule(String wakeTime) => RhythmRoomSchedule(
+          source: RhythmRoomScheduleSource.followTime,
+          wakeTime: wakeTime,
+          sleepTime: '22:30',
+        );
+
+    testWidgets('supports rooms and unassigned bulbs but not assigned bulbs',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final connection = _HelloRhythmConnection(_FakeRhythmServerApi());
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(scheduleHello());
+      await tester.pump();
+      expect(provider.roomScheduleSupportedForNode('room-1'), isTrue);
+
+      connection.emitHello(scheduleHello(
+        kind: 'light_device',
+        name: 'Porch Bulb',
+      ));
+      await tester.pump();
+      expect(provider.roomScheduleSupportedForNode('room-1'), isTrue);
+
+      connection.emitHello(scheduleHello(
+        kind: 'light_device',
+        name: 'Porch Bulb',
+        parentId: 'porch-room',
+      ));
+      await tester.pump();
+      expect(provider.roomScheduleSupportedForNode('room-1'), isFalse);
+    });
+
+    testWidgets('explains that an assigned bulb inherits room settings',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final connection = _HelloRhythmConnection(_FakeRhythmServerApi());
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(scheduleHello(
+        kind: 'light_device',
+        name: 'Porch Bulb',
+        parentId: 'porch-room',
+      ));
+      await tester.pump();
+      await tester.pumpWidget(_buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const RoomScheduleTab(
+          roomId: 'room-1',
+          roomName: 'Porch Bulb',
+          showRoomLightingOverride: false,
+        ),
+      ));
+      await tester.pump();
+
+      expect(find.byKey(const ValueKey('light-schedule-inherited')),
+          findsOneWidget);
+      expect(
+        find.text(
+            'This bulb uses the custom light settings from its assigned room.'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('installs the full authoritative write response',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()
+        ..roomScheduleSetResponse = RhythmRoomState.fromJson({
+          'node_id': 'room-1',
+          'name': 'Authoritative Kitchen',
+          'state': 'active',
+          'rhythm_enabled': true,
+          'time_offset': 0.0,
+          'brightness_offset': 4.0,
+          'profile_settings': {
+            'room_schedule': schedule('07:15').toJson(),
+          },
+        });
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(scheduleHello());
+      await tester.pump();
+
+      expect(
+        await provider.setRoomSchedule(
+          'room-1',
+          schedule('07:15'),
+          requestId: 'room-schedule-save-journey-1',
+        ),
+        isTrue,
+      );
+      expect(
+        api.roomScheduleSetRequestIds.single,
+        'room-schedule-save-journey-1',
+      );
+      expect(provider.nodeById('room-1')?.name, 'Authoritative Kitchen');
+      expect(provider.nodeById('room-1')?.brightnessOffset, 4.0);
+      expect(provider.scheduleForRoom('room-1').wakeTime, '07:15');
+      expect(provider.roomSchedulePendingForRoom('room-1'), isFalse);
+    });
+
+    testWidgets('a reconnect snapshot wins over an older rejection',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final pending = Completer<RhythmRoomState?>();
+      final api = _FakeRhythmServerApi()
+        ..roomScheduleSetCompleters.add(pending);
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(scheduleHello());
+      await tester.pump();
+      final write = provider.setRoomSchedule('room-1', schedule('07:15'));
+      await tester.pump();
+      connection.emitHello(
+        scheduleHello(wakeTime: '09:00', name: 'Reconnected Kitchen'),
+      );
+      await tester.pump();
+      pending.complete(null);
+
+      expect(await write, isFalse);
+      expect(provider.nodeById('room-1')?.name, 'Reconnected Kitchen');
+      expect(provider.scheduleForRoom('room-1').wakeTime, '09:00');
+      expect(provider.roomSchedulePendingForRoom('room-1'), isFalse);
+    });
+
+    testWidgets('rapid edits ignore the stale first completion',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final first = Completer<RhythmRoomState?>();
+      final second = Completer<RhythmRoomState?>();
+      final api = _FakeRhythmServerApi()
+        ..roomScheduleSetCompleters.addAll([first, second]);
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(scheduleHello());
+      await tester.pump();
+      final firstWrite = provider.setRoomSchedule('room-1', schedule('07:15'));
+      await tester.pump();
+      final secondWrite = provider.setRoomSchedule('room-1', schedule('08:00'));
+      await tester.pump();
+
+      first.complete(RhythmRoomState.fromJson({
+        'node_id': 'room-1',
+        'state': 'active',
+        'profile_settings': {
+          'room_schedule': schedule('07:15').toJson(),
+        },
+      }));
+      expect(await firstWrite, isTrue);
+      expect(provider.scheduleForRoom('room-1').wakeTime, '08:00');
+      expect(provider.roomSchedulePendingForRoom('room-1'), isTrue);
+
+      second.complete(RhythmRoomState.fromJson({
+        'node_id': 'room-1',
+        'state': 'active',
+        'profile_settings': {
+          'room_schedule': schedule('08:00').toJson(),
+        },
+      }));
+      expect(await secondWrite, isTrue);
+      expect(provider.scheduleForRoom('room-1').wakeTime, '08:00');
+      expect(provider.roomSchedulePendingForRoom('room-1'), isFalse);
+    });
+
+    testWidgets('a thrown write rolls back and always clears pending',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()..roomScheduleSetThrows = true;
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(scheduleHello());
+      await tester.pump();
+
+      expect(
+          await provider.setRoomSchedule('room-1', schedule('07:15')), isFalse);
+      expect(provider.scheduleForRoom('room-1').wakeTime, '06:30');
+      expect(provider.roomSchedulePendingForRoom('room-1'), isFalse);
+    });
+  });
+
   group('ServerSyncProvider room light profile overrides', () {
     RhythmHello roomLightHello({
       bool supported = true,
+      bool dayIdleSupported = false,
       bool motionActivationEnabled = false,
     }) {
       return RhythmHello.fromJson({
@@ -1556,7 +2005,11 @@ void main() {
         'capabilities': {
           'api_schema_version': 2,
           'features': supported
-              ? [RhythmFeature.roomLightProfileOverrides]
+              ? [
+                  RhythmFeature.roomLightProfileOverrides,
+                  if (dayIdleSupported)
+                    RhythmFeature.roomDayIdleProfileOverrides,
+                ]
               : <String>[],
           'hubs': const <dynamic>[],
         },
@@ -1652,6 +2105,58 @@ void main() {
           'max_brightness': 72,
         },
       });
+    });
+
+    testWidgets('day idle writes require the additive room capability', (
+      tester,
+    ) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi();
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(roomLightHello());
+      await tester.pump();
+      expect(
+        provider.roomDayIdleProfileOverridesSupportedForNode('room-1'),
+        isFalse,
+      );
+      expect(
+        await provider.setNodeLightProfileOverride(
+          'room-1',
+          profileId: 'day_idle',
+          profileOverride:
+              const RhythmLightProfileNodeOverride(maxBrightness: 8),
+          correlationId: 'room-low-glow-unsupported',
+        ),
+        isFalse,
+      );
+      expect(api.nodeProfileOverrideCalls, isEmpty);
+
+      connection.emitHello(roomLightHello(dayIdleSupported: true));
+      await tester.pump();
+      expect(
+        provider.roomDayIdleProfileOverridesSupportedForNode('room-1'),
+        isTrue,
+      );
+      expect(
+        await provider.setNodeLightProfileOverride(
+          'room-1',
+          profileId: 'day_idle',
+          profileOverride:
+              const RhythmLightProfileNodeOverride(maxBrightness: 8),
+          correlationId: 'room-low-glow-supported',
+        ),
+        isTrue,
+      );
+      expect(api.nodeProfileOverrideCalls, hasLength(1));
     });
 
     testWidgets('existing override contract accepts light-device nodes',
@@ -1752,6 +2257,11 @@ void main() {
               'light_capabilities': {
                 'individual_profile_overrides': false,
               },
+              'profile_settings': {
+                'profile_overrides': {
+                  'rhythm': {'max_brightness': 31},
+                },
+              },
             },
           ],
         }),
@@ -1761,6 +2271,11 @@ void main() {
       expect(
         provider.lightProfileOverridesSupportedForNode('hue-light-1'),
         isFalse,
+      );
+      expect(
+        provider.hasNodeLightProfileOverrides('hue-light-1'),
+        isFalse,
+        reason: 'stored overrides are not effective on a grouped light route',
       );
       expect(
         await provider.setNodeLightProfileOverride(
@@ -2589,6 +3104,98 @@ void main() {
       expect(api.lastControlSourceNodeId, 'sensor-1');
       expect(api.lastControlKind, 'motion');
       expect(api.lastControlTargetIds, ['room-1', 'room-2']);
+    });
+
+    test('control target save fails when authoritative refresh fails',
+        () async {
+      api.topologyNodes = [
+        RhythmTopologyNode.fromJson({
+          'id': 'button-1',
+          'name': 'Kitchen Button',
+          'kind': 'button',
+          'parent_id': 'room-1',
+        }),
+      ];
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'nodes': const <Map<String, dynamic>>[],
+          'location': const <String, dynamic>{},
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(provider.topologyNodes, hasLength(1));
+
+      api.topologyNodes = const [];
+      final success = await provider.setNodeControlTargets(
+        sourceNodeId: 'button-1',
+        controlKind: 'button',
+        targetNodeIds: const ['room-1', 'room-2'],
+      );
+
+      expect(success, isFalse);
+      expect(provider.topologyNodes.single.id, 'button-1');
+    });
+
+    test('control target save survives the nodes-changed reconnect race',
+        () async {
+      api.topologyNodes = [
+        RhythmTopologyNode.fromJson({
+          'id': 'room-1',
+          'name': 'Kitchen',
+          'kind': 'room',
+        }),
+        RhythmTopologyNode.fromJson({
+          'id': 'button-1',
+          'name': 'Kitchen Button',
+          'kind': 'button',
+          'parent_id': 'room-1',
+        }),
+      ];
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'nodes': const <Map<String, dynamic>>[],
+          'location': const <String, dynamic>{},
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      connection.reconnectHandler = (authoritative) {
+        connection.isConnected = authoritative;
+      };
+      api.beforeSetTopologyNodeControlTargets = () async {
+        connection.emitNewNodesDetected();
+        await Future<void>.delayed(Duration.zero);
+        expect(connection.isConnected, isFalse);
+      };
+
+      final success = await provider.setNodeControlTargets(
+        sourceNodeId: 'button-1',
+        controlKind: 'button',
+        targetNodeIds: const ['room-1'],
+      );
+
+      expect(success, isTrue);
+      expect(connection.reconnectCalls, 2);
+      expect(connection.lastReconnectAuthoritative, isTrue);
+      expect(
+        provider.controlTargetNodeIds(
+          sourceNodeId: 'button-1',
+          controlKind: 'button',
+        ),
+        ['room-1'],
+      );
     });
 
     test('keeps roomless light-device nodes in the room provider', () async {
@@ -5323,7 +5930,10 @@ void main() {
       RhythmHello.fromJson({
         'capabilities': {
           'api_schema_version': 2,
-          'features': [RhythmFeature.roomLightProfileOverrides],
+          'features': [
+            RhythmFeature.roomLightProfileOverrides,
+            RhythmFeature.roomScheduleV1,
+          ],
           'hubs': const <dynamic>[],
         },
         'nodes': [
@@ -5370,10 +5980,34 @@ void main() {
       ),
     );
 
-    expect(find.text('Light'), findsNWidgets(2));
+    expect(find.text('Bulbs'), findsOneWidget);
     expect(find.text('Motion'), findsOneWidget);
     expect(find.text('Buttons'), findsOneWidget);
+    expect(find.text('Lighting'), findsNWidgets(2));
     expect(find.text('Info'), findsNothing);
+    final lightingTab = find.descendant(
+      of: find.byKey(const ValueKey('room-settings-tabs')),
+      matching: find.text('Lighting'),
+    );
+    final bulbsTab = find.descendant(
+      of: find.byKey(const ValueKey('room-settings-tabs')),
+      matching: find.text('Bulbs'),
+    );
+    final motionTab = find.descendant(
+      of: find.byKey(const ValueKey('room-settings-tabs')),
+      matching: find.text('Motion'),
+    );
+    final buttonsTab = find.descendant(
+      of: find.byKey(const ValueKey('room-settings-tabs')),
+      matching: find.text('Buttons'),
+    );
+    expect(tester.getTopLeft(lightingTab).dx,
+        lessThan(tester.getTopLeft(bulbsTab).dx));
+    expect(tester.getTopLeft(bulbsTab).dx,
+        lessThan(tester.getTopLeft(motionTab).dx));
+    expect(tester.getTopLeft(motionTab).dx,
+        lessThan(tester.getTopLeft(buttonsTab).dx));
+    expect(find.byKey(const ValueKey('lighting')), findsOneWidget);
     expect(
       find.byKey(const ValueKey('room-settings-rename')),
       findsOneWidget,
@@ -5385,10 +6019,15 @@ void main() {
     expect(find.text('Matter'), findsOneWidget);
     expect(find.text('Hide this room'), findsNothing);
     expect(find.text('Hide this light'), findsNothing);
-    expect(find.text('Lighting'), findsOneWidget);
-    expect(find.text('Low glow'), findsOneWidget);
+    await _selectRoomSettingsTab(tester, 'Bulbs');
+    await tester.pumpAndSettle();
+    final bulbsContent = find.byKey(const ValueKey('bulbs'));
+    expect(
+      find.descendant(of: bulbsContent, matching: find.text('Low glow')),
+      findsNothing,
+    );
     expect(find.text('Add Bulb'), findsOneWidget);
-    expect(find.text('LIGHTS'), findsOneWidget);
+    expect(find.text('BULBS'), findsOneWidget);
     expect(find.text('Ceiling Light'), findsOneWidget);
     expect(
       find.byKey(const ValueKey('light-profile-override-badge-room-1')),
@@ -5398,35 +6037,31 @@ void main() {
       find.byKey(const ValueKey('light-profile-override-badge-light-1')),
       findsNothing,
     );
-    final lightContent = find.byKey(const ValueKey('light'));
     expect(
       find.descendant(
-        of: lightContent,
+        of: bulbsContent,
         matching: find.byKey(const ValueKey('room-settings-add-bulb')),
       ),
       findsOneWidget,
     );
-    final addBulbSemantics = tester.getSemantics(
-      find.byKey(const ValueKey('room-settings-add-bulb')),
-    );
+    final addBulbSemantics = tester
+        .widget<Semantics>(
+          find.byKey(const ValueKey('room-settings-add-bulb')),
+        )
+        .properties;
     expect(addBulbSemantics.label, 'Add Bulb');
     expect(addBulbSemantics.hint, 'Choose Scan or Select from existing');
     expect(find.text('Delete Room'), findsNothing);
     expect(find.text('Entry Motion'), findsNothing);
     expect(find.text('Wall Button'), findsNothing);
     expect(
-      tester
-          .widget<Text>(
-            find.byKey(
-              const ValueKey('room-settings-light-status-room-1'),
-            ),
-          )
-          .data,
-      'Auto',
-    );
-    expect(
-      tester.getTopLeft(find.text('Lighting')).dy,
-      lessThan(tester.getTopLeft(find.text('LIGHTS')).dy),
+      find.descendant(
+        of: bulbsContent,
+        matching: find.byKey(
+          const ValueKey('room-settings-light-settings-room-1'),
+        ),
+      ),
+      findsNothing,
     );
     final roomNameRect = tester.getRect(
       find.byKey(const ValueKey('room-settings-room-name')),
@@ -5440,14 +6075,6 @@ void main() {
     expect(renameRect.left, greaterThanOrEqualTo(roomNameRect.right));
     expect(renameRect.left - roomNameRect.right, lessThanOrEqualTo(8));
     expect(sourceRect.top, lessThan(roomNameRect.top));
-
-    final lightingSemantics = tester.getSemantics(
-      find.byKey(
-        const ValueKey('room-settings-light-settings-room-1'),
-      ),
-    );
-    expect(lightingSemantics.label, 'Lighting');
-    expect(lightingSemantics.value, 'Using automatic settings');
 
     await _selectRoomSettingsTab(tester, 'Motion');
 
@@ -5535,6 +6162,83 @@ void main() {
       findsNothing,
     );
 
+    await _selectRoomSettingsTab(tester, 'Lighting');
+    final lightingContent = find.byKey(const ValueKey('lighting'));
+    expect(lightingContent, findsOneWidget);
+    expect(
+      find.descendant(
+        of: lightingContent,
+        matching: find.byKey(
+          const ValueKey('room-settings-light-settings-room-1'),
+        ),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: lightingContent,
+        matching: find.byKey(const ValueKey('room-settings-add-bulb')),
+      ),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey('room-settings-low-glow-room-1')),
+      findsOneWidget,
+    );
+    expect(
+      tester
+          .widget<Text>(
+            find.byKey(
+              const ValueKey('room-settings-light-status-room-1'),
+            ),
+          )
+          .data,
+      'Auto',
+    );
+    final lightingSemantics = tester.widget<Semantics>(
+      find.byKey(
+        const ValueKey('room-settings-light-settings-room-1'),
+      ),
+    );
+    expect(lightingSemantics.properties.label, 'Lighting');
+    expect(
+      lightingSemantics.properties.value,
+      'Using automatic settings',
+    );
+
+    expect(find.text('SCHEDULE'), findsOneWidget);
+    expect(find.text('WAKE / SLEEP PRESETS'), findsOneWidget);
+    expect(find.text('TEST YOUR PRESETS'), findsOneWidget);
+    expect(
+      tester
+          .getSemantics(
+            find.byKey(const ValueKey('segmented-tab-lighting')),
+          )
+          .getSemanticsData()
+          .flagsCollection
+          .isSelected,
+      Tristate.isTrue,
+    );
+    expect(
+      find.byKey(const ValueKey('room-schedule-source-presets')),
+      findsOneWidget,
+    );
+    // Custom-times editor stays collapsed while the room follows the home
+    // schedule — the dial and steppers only mount for Custom times.
+    expect(
+      find.byKey(const ValueKey('room-schedule-time-dial')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey('room-schedule-wake-later')),
+      findsNothing,
+    );
+    expect(
+        find.byKey(const ValueKey('room-schedule-test-wake')), findsOneWidget);
+    expect(
+        find.byKey(const ValueKey('room-schedule-test-sleep')), findsOneWidget);
+    expect(find.text('SCHEDULE BEHAVIOR'), findsNothing);
+
     connection.helloOnReconnect = RhythmHello.fromJson({
       'nodes': [
         {
@@ -5596,6 +6300,616 @@ void main() {
       'Dining Room',
     );
     semantics.dispose();
+  });
+
+  testWidgets('unsupported room schedule stays visible as an update state',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 1200));
+
+    connection.emitHello(RhythmHello.fromJson({
+      'nodes': [
+        {
+          'id': 'room-1',
+          'name': 'Kitchen',
+          'kind': 'room',
+          'state': 'active',
+          'rhythm_enabled': true,
+          'disabled': false,
+          'time_offset': 0.0,
+          'brightness_offset': 0.0,
+        },
+      ],
+    }));
+    await tester.pump();
+    await _pumpRoomSettingsSheet(
+      tester,
+      roomProvider: roomProvider,
+      provider: provider,
+      room: const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.matter,
+        deviceIds: [],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: false,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+
+    await _selectRoomSettingsTab(tester, 'Lighting');
+    expect(
+      find.byKey(const ValueKey('room-schedule-update-required')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('room-schedule-source-follow-time')),
+      findsNothing,
+    );
+    expect(api.roomScheduleSetCalls, isEmpty);
+  });
+
+  testWidgets('room schedule retries reuse one journey request id',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi()..roomScheduleSetSucceeds = false;
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 1200));
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': [RhythmFeature.roomScheduleV1],
+          'hubs': const <dynamic>[],
+        },
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'profile_settings': {
+              'room_schedule': {
+                'source': 'follow_time',
+                'wake_time': '06:30',
+                'sleep_time': '22:30',
+              },
+            },
+          },
+        ],
+      }),
+    );
+    await tester.pump();
+    await _pumpRoomSettingsSheet(
+      tester,
+      roomProvider: roomProvider,
+      provider: provider,
+      room: const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.matter,
+        deviceIds: [],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    await _selectRoomSettingsTab(tester, 'Lighting');
+
+    final presets = find.byKey(const ValueKey('room-schedule-source-presets'));
+    await tester.tap(presets);
+    await tester.pump();
+    expect(find.byKey(const ValueKey('room-schedule-failure')), findsOneWidget);
+
+    api.roomScheduleSetSucceeds = true;
+    await tester.tap(presets);
+    await tester.pump();
+    expect(api.roomScheduleSetRequestIds, hasLength(2));
+    expect(api.roomScheduleSetRequestIds[1], api.roomScheduleSetRequestIds[0]);
+    expect(
+      api.roomScheduleSetRequestIds.first,
+      startsWith('room-schedule-save-'),
+    );
+
+    api.roomScheduleTestSucceeds = false;
+    final wakeTest = find.byKey(const ValueKey('room-schedule-test-wake'));
+    // The test toggle sits at the bottom of the (lazy) tab list — scroll it
+    // into build range, then pin the list to its end so the toggle is fully
+    // inside the viewport (not clipped at its bottom edge).
+    await tester.dragUntilVisible(
+      wakeTest,
+      find.byKey(const ValueKey('lighting')),
+      const Offset(0, -120),
+    );
+    await tester.drag(
+      find.byKey(const ValueKey('lighting')),
+      const Offset(0, -200),
+    );
+    await tester.pump();
+    await tester.tap(wakeTest);
+    await tester.pump();
+    api.roomScheduleTestSucceeds = true;
+    await tester.tap(wakeTest);
+    await tester.pump();
+    expect(api.roomScheduleTestRequestIds, hasLength(2));
+    expect(
+      api.roomScheduleTestRequestIds[1],
+      api.roomScheduleTestRequestIds[0],
+    );
+    expect(
+      api.roomScheduleTestRequestIds.first,
+      startsWith('room-schedule-test-'),
+    );
+  });
+
+  testWidgets(
+      'room schedule presets stay live and apply the active mode to lights',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 1400));
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': [RhythmFeature.roomScheduleV1],
+          'hubs': const <dynamic>[],
+        },
+        'mode': {
+          'active': 'day',
+          'configs': [
+            {
+              'mode': 'day',
+              'active_profile_id': 'rhythm',
+              'room_defaults': const <Map<String, dynamic>>[],
+            },
+            {
+              'mode': 'sleep',
+              'active_profile_id': 'sleep',
+              'room_defaults': const <Map<String, dynamic>>[],
+            },
+          ],
+        },
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+            'profile_settings': {
+              'room_schedule': {
+                // Custom times must NOT freeze the presets — the schedule
+                // source is only the WHEN; presets are the WHAT.
+                'source': 'follow_time',
+                'wake_time': '06:30',
+                'sleep_time': '22:30',
+              },
+            },
+          },
+        ],
+      }),
+    );
+    await tester.pump();
+    await _pumpRoomSettingsSheet(
+      tester,
+      roomProvider: roomProvider,
+      provider: provider,
+      room: const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.matter,
+        deviceIds: [],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    await _selectRoomSettingsTab(tester, 'Lighting');
+    await tester.pumpAndSettle();
+
+    // Tapping On in the Wake row (the active mode) records the room default
+    // AND moves the room's lights immediately.
+    final wakeRow =
+        find.byKey(const ValueKey('room-schedule-presets-day-room-1'));
+    await tester.dragUntilVisible(
+      wakeRow,
+      find.byKey(const ValueKey('lighting')),
+      const Offset(0, -120),
+    );
+    await tester.tap(
+      find.descendant(of: wakeRow, matching: find.text('On')),
+    );
+    await tester.pump();
+    expect(
+        provider.roomDefaultStateForMode('room-1', RhythmMode.day), 'active');
+    expect(api.nodePreferenceCalls, hasLength(1));
+    expect(api.nodePreferenceCalls.single.nodeId, 'room-1');
+    expect(api.nodePreferenceCalls.single.state, RoomModeState.active);
+    expect(api.nodePreferenceCalls.single.rhythmEnabled, isTrue);
+
+    // Tapping Off in the Sleep row updates the default but leaves the lights
+    // alone — Sleep is not the current mode.
+    final sleepRow =
+        find.byKey(const ValueKey('room-schedule-presets-night-room-1'));
+    await tester.dragUntilVisible(
+      sleepRow,
+      find.byKey(const ValueKey('lighting')),
+      const Offset(0, -120),
+    );
+    await tester.tap(
+      find.descendant(of: sleepRow, matching: find.text('Off')),
+    );
+    await tester.pump();
+    expect(
+      provider.roomDefaultStateForMode('room-1', RhythmMode.sleep),
+      'hard_off',
+    );
+    expect(api.nodePreferenceCalls, hasLength(1));
+
+    // Let the debounced room-default persist fire before teardown.
+    await tester.pump(const Duration(milliseconds: 801));
+    await tester.pump();
+  });
+
+  testWidgets(
+      'custom-time chips name exact solar anchors and fall back after a step',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 1200));
+    final captureEvidence =
+        (Platform.environment['CODEX_UI_SCREENSHOT_DIR'] ?? '').isNotEmpty;
+    if (captureEvidence) {
+      await tester.runAsync(_loadRoomScheduleEvidenceFont);
+    }
+    final boundaryKey = GlobalKey();
+
+    const solarData = SolarClockData(
+      sunTimes: SunTimesDto(
+        sunrise: 6.5,
+        sunset: 18.5,
+        solarNoon: 12.5,
+        solarMidnight: 0.5,
+        dayLength: 12,
+      ),
+      twilightTimes: TwilightTimesDto(
+        dawn: TwilightPhaseDto(
+          civil: 6,
+          nautical: 5.5,
+          astronomical: 5,
+        ),
+        dusk: TwilightPhaseDto(
+          civil: 19,
+          nautical: 19.5,
+          astronomical: 20,
+        ),
+      ),
+    );
+
+    String fixedTime(double hour) {
+      final minute = (hour * 60).round() % 1440;
+      return '${(minute ~/ 60).toString().padLeft(2, '0')}:'
+          '${(minute % 60).toString().padLeft(2, '0')}';
+    }
+
+    final wakeTime = fixedTime(solarData.sunrise);
+    final sleepTime = fixedTime(solarData.sunset);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+
+    connection.emitHello(RhythmHello.fromJson({
+      'capabilities': {
+        'api_schema_version': 2,
+        'features': [RhythmFeature.roomScheduleV1],
+        'hubs': const <dynamic>[],
+      },
+      'nodes': [
+        {
+          'id': 'room-1',
+          'name': 'Kitchen',
+          'kind': 'room',
+          'state': 'active',
+          'rhythm_enabled': true,
+          'disabled': false,
+          'time_offset': 0.0,
+          'brightness_offset': 0.0,
+          'profile_settings': {
+            'room_schedule': {
+              'source': 'follow_time',
+              'wake_time': wakeTime,
+              'sleep_time': sleepTime,
+            },
+          },
+        },
+      ],
+      'location': const <String, dynamic>{},
+    }));
+    await tester.pump();
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        fontFamily: captureEvidence ? 'CodexReadableRoboto' : null,
+        child: RepaintBoundary(
+          key: boundaryKey,
+          child: const RoomScheduleTab(
+            roomId: 'room-1',
+            roomName: 'Kitchen',
+            showRoomLightingOverride: false,
+            solarClockDataOverride: solarData,
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      tester
+          .widget<Text>(
+            find.byKey(const ValueKey('room-schedule-wake-value')),
+          )
+          .data,
+      'Sunrise',
+    );
+    expect(
+      tester
+          .widget<Text>(
+            find.byKey(const ValueKey('room-schedule-sleep-value')),
+          )
+          .data,
+      'Sunset',
+    );
+    await _captureRoomScheduleEvidence(
+      tester,
+      boundaryKey,
+      '05-solar-preset-labels.png',
+    );
+
+    await tester.tap(
+      find.byKey(const ValueKey('room-schedule-wake-later')),
+    );
+    await tester.pumpAndSettle();
+
+    final steppedWakeMinutes = ((solarData.sunrise * 60).round() + 15) % 1440;
+    final steppedWake =
+        '${(steppedWakeMinutes ~/ 60).toString().padLeft(2, '0')}:'
+        '${(steppedWakeMinutes % 60).toString().padLeft(2, '0')}';
+    expect(api.roomScheduleSetCalls.single.wakeTime, steppedWake);
+    expect(
+      tester
+          .widget<Text>(
+            find.byKey(const ValueKey('room-schedule-wake-value')),
+          )
+          .data,
+      steppedWake,
+    );
+  });
+
+  testWidgets('room schedule renders deterministic visual evidence states',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 1200));
+    await tester.runAsync(_loadRoomScheduleEvidenceFont);
+
+    Map<String, dynamic> hello({
+      bool followTime = false,
+      String wakeTime = '06:30',
+    }) =>
+        {
+          'capabilities': {
+            'api_schema_version': 2,
+            'features': [RhythmFeature.roomScheduleV1],
+            'hubs': const <dynamic>[],
+          },
+          'nodes': [
+            {
+              'id': 'mock-room',
+              'name': 'Sample Bulb',
+              'kind': 'light_device',
+              'state': 'active',
+              'rhythm_enabled': true,
+              'disabled': false,
+              'standby_enabled': true,
+              'time_offset': 0.0,
+              'brightness_offset': 0.0,
+              'lights_on': true,
+              'profile_settings': {
+                'room_schedule': {
+                  'source': followTime ? 'follow_time' : 'wake_sleep_presets',
+                  'wake_time': wakeTime,
+                  'sleep_time': '22:30',
+                },
+              },
+            },
+          ],
+          'location': const <String, dynamic>{},
+        };
+
+    connection.emitHello(RhythmHello.fromJson(hello()));
+    await tester.pump(const Duration(milliseconds: 10));
+    const room = RoomDto(
+      id: 'mock-room',
+      name: 'Sample Bulb',
+      source: RoomSourceDto.matter,
+      deviceIds: [],
+      rhythmEnabled: true,
+      disabled: false,
+      lightsOn: true,
+      timeOffsetMinutes: 0,
+      brightnessOffset: 0,
+    );
+    await roomProvider.addRoom(room);
+    final boundaryKey = GlobalKey();
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        fontFamily: 'CodexReadableRoboto',
+        child: RepaintBoundary(
+          key: boundaryKey,
+          child: const RoomSettingsSheet(
+            room: room,
+            enableLivePreview: false,
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+    await _selectRoomSettingsTab(tester, 'Lighting');
+    await tester.pump(const Duration(milliseconds: 250));
+    await _captureRoomScheduleEvidence(
+      tester,
+      boundaryKey,
+      '01-wake-sleep-presets.png',
+    );
+
+    connection.emitHello(
+      RhythmHello.fromJson(hello(followTime: true, wakeTime: '07:45')),
+    );
+    await tester.pump(const Duration(milliseconds: 20));
+    expect(find.text('07:45'), findsOneWidget);
+    // Let the custom-times editor finish expanding before tapping into it.
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey('room-schedule-wake-later')),
+    );
+    await tester.pumpAndSettle();
+    expect(api.roomScheduleSetCalls.last.wakeTime, '08:00');
+    expect(find.text('08:00'), findsOneWidget);
+    // Presets stay live under Custom times — the schedule source only picks
+    // WHEN triggers fire; presets are always the WHAT.
+    expect(
+      find.byKey(const ValueKey('room-schedule-presets-disabled')),
+      findsNothing,
+    );
+    await _captureRoomScheduleEvidence(
+      tester,
+      boundaryKey,
+      '02-follow-time.png',
+    );
+
+    await tester.drag(
+      find.byKey(const ValueKey('lighting')),
+      const Offset(0, -180),
+    );
+    await tester.pump();
+    await _captureRoomScheduleEvidence(
+      tester,
+      boundaryKey,
+      '03-disabled-inline-presets.png',
+    );
+
+    api.roomScheduleTestCompleter = Completer<bool>();
+    await tester.dragUntilVisible(
+      find.byKey(const ValueKey('room-schedule-test-wake')),
+      find.byKey(const ValueKey('lighting')),
+      const Offset(0, -120),
+    );
+    await tester.tap(find.byKey(const ValueKey('room-schedule-test-wake')));
+    await tester.pump();
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('room-schedule-test-wake')),
+        matching: find.byType(CircularProgressIndicator),
+      ),
+      findsOneWidget,
+    );
+    await _captureRoomScheduleEvidence(
+      tester,
+      boundaryKey,
+      '04-test-pending.png',
+    );
+
+    api.roomScheduleTestCompleter!.complete(true);
+    await tester.pump();
+    api.roomScheduleTestCompleter = null;
+    api.roomScheduleSetSucceeds = false;
+    await tester.dragUntilVisible(
+      find.byKey(const ValueKey('room-schedule-source-presets')),
+      find.byKey(const ValueKey('lighting')),
+      const Offset(0, 120),
+    );
+    await tester.tap(
+      find.byKey(const ValueKey('room-schedule-source-presets')),
+    );
+    await tester.pump();
+    await _captureRoomScheduleEvidence(
+      tester,
+      boundaryKey,
+      '05-save-failure-retry.png',
+    );
+    expect(find.byKey(const ValueKey('room-schedule-failure')), findsOneWidget);
   });
 
   testWidgets('room tabs show Scan above the inline existing-device list',
@@ -5666,6 +6980,14 @@ void main() {
       'name': 'Hall Lamp',
       'device_type': 'light',
       'room_id': 'room-2',
+      'manufacturer': 'Signify',
+      'model': 'LCA001',
+      'endpoints': const <Map<String, dynamic>>[],
+    };
+    api.canonicalDevices['light-unassigned'] = {
+      'id': 'light-unassigned',
+      'name': 'Zulu Lamp',
+      'device_type': 'light',
       'endpoints': const <Map<String, dynamic>>[],
     };
     api.topologyNodes = [
@@ -5704,6 +7026,7 @@ void main() {
       ),
     );
 
+    await _selectRoomSettingsTab(tester, 'Bulbs');
     final addBulb = find.byKey(const ValueKey('room-settings-add-bulb'));
     expect(addBulb, findsOneWidget);
     expect(find.text('Add Bulb'), findsOneWidget);
@@ -5719,7 +7042,33 @@ void main() {
       find.byKey(const ValueKey('existing-room-device-light-hall')),
       findsOneWidget,
     );
+    expect(
+      tester
+          .getTopLeft(
+            find.byKey(const ValueKey('existing-room-device-light-unassigned')),
+          )
+          .dy,
+      lessThan(
+        tester
+            .getTopLeft(
+              find.byKey(const ValueKey('existing-room-device-light-hall')),
+            )
+            .dy,
+      ),
+    );
+    expect(find.text('Unassigned'), findsOneWidget);
+    expect(find.textContaining('Signify · LCA001'), findsOneWidget);
     expect(find.text('Wall Button'), findsNothing);
+    if (const bool.fromEnvironment(
+      'RHYTHM_CAPTURE_ROOM_DEVICE_ADD_EVIDENCE',
+    )) {
+      await expectLater(
+        find.byKey(const ValueKey('room-device-add-sheet')),
+        matchesGoldenFile(
+          'goldens/room-device-add-unassigned-first.png',
+        ),
+      );
+    }
 
     await tester.tap(find.byKey(const ValueKey('room-device-add-scan')));
     await tester.pumpAndSettle();
@@ -5734,16 +7083,51 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
 
+    api.assignDeviceProjectionStatus = RhythmRoomProjectionStatus.attention;
     await tester.tap(addBulb);
     await tester.pumpAndSettle();
     await tester.tap(
+      find.byKey(
+        const ValueKey('existing-room-device-identify-light-hall'),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(api.flashCanonicalDeviceCalls, 1);
+    expect(find.text('Identified Hall Lamp'), findsOneWidget);
+
+    await tester.tap(
       find.byKey(const ValueKey('existing-room-device-light-hall')),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('confirm-existing-room-device-move')),
+      findsOneWidget,
+    );
+    final confirmationMessage = tester.widget<Text>(
+      find.byKey(const ValueKey('confirm-device-move-message')),
+    );
+    expect(
+      confirmationMessage.data,
+      contains(
+          'This removes the bulb from Another room and adds it to Kitchen.'),
+    );
+    expect(api.assignDeviceParentCalls, 0);
+
+    await tester.tap(
+      find.byKey(const ValueKey('confirm-device-move-action')),
     );
     await tester.pumpAndSettle();
     expect(api.assignDeviceParentCalls, 1);
     expect(api.lastAssignedDeviceId, 'light-hall');
     expect(api.lastAssignedParentId, 'room-1');
-    expect(find.text('Moved Hall Lamp to Kitchen'), findsOneWidget);
+    expect(
+      find.text(
+        'Moved Hall Lamp to Kitchen. Hue room sync needs attention; '
+        'individual bulb control remains available.',
+      ),
+      findsOneWidget,
+    );
+    expect(find.text('Moved Hall Lamp to Kitchen'), findsNothing);
     await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
     api.getCanonicalDevicesCalls = 0;
@@ -5908,7 +7292,7 @@ void main() {
       find.byKey(const ValueKey('room-settings-add-button')),
       findsNothing,
     );
-    await _selectRoomSettingsTab(tester, 'Light');
+    await _selectRoomSettingsTab(tester, 'Bulbs');
     expect(
       find.byKey(const ValueKey('room-settings-add-bulb')),
       findsNothing,
@@ -6081,6 +7465,120 @@ void main() {
       find.text('Added Hall Motion as additional motion for Kitchen'),
       findsOneWidget,
     );
+  });
+
+  testWidgets('room sheet materializes canonical-only motion before adding it',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 1200));
+    final screenshotPath =
+        Platform.environment['RHYTHM_MOTION_SOURCE_SCREENSHOT'];
+
+    api.topologyNodes = [
+      RhythmTopologyNode.fromJson({
+        'id': 'room-1',
+        'name': 'Kitchen',
+        'kind': 'room',
+      }),
+    ];
+    api.canonicalDevices['motion-unassigned'] = {
+      'id': 'motion-unassigned',
+      'name': 'Camera Motion',
+      'device_type': 'motion',
+      'endpoints': const <Map<String, dynamic>>[],
+    };
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'capabilities': {'hubs': const <dynamic>[]},
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': false,
+          },
+        ],
+        'location': const <String, dynamic>{},
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await _pumpRoomSettingsSheet(
+      tester,
+      roomProvider: roomProvider,
+      provider: provider,
+      room: const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.unknown,
+        deviceIds: [],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: false,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    await _selectRoomSettingsTab(tester, 'Motion');
+    await tester.tap(
+      find.byKey(const ValueKey('room-settings-add-motion')),
+    );
+    await tester.pumpAndSettle();
+
+    final assignment = Completer<bool>();
+    api.assignDeviceParentCompleter = assignment;
+    await tester.tap(
+      find.byKey(const ValueKey('existing-room-device-motion-unassigned')),
+    );
+    await tester.pump();
+
+    expect(api.assignDeviceParentCalls, 1);
+    expect(api.lastAssignedDeviceId, 'motion-unassigned');
+    expect(api.lastAssignedParentId, 'room-1');
+
+    // The real server creates this source node as part of the canonical room
+    // assignment. Publish that authoritative result before completing the
+    // fake request so the app's mandatory refresh observes it.
+    api.topologyNodes = [
+      ...api.topologyNodes,
+      RhythmTopologyNode.fromJson({
+        'id': 'motion-unassigned',
+        'name': 'Camera Motion',
+        'kind': 'motion_sensor',
+        'parent_id': 'room-1',
+      }),
+    ];
+    assignment.complete(true);
+    await tester.pumpAndSettle();
+
+    expect(api.setTopologyNodeControlTargetsCalls, 0);
+    expect(
+      find.text('Added Camera Motion as additional motion for Kitchen'),
+      findsOneWidget,
+    );
+    if (screenshotPath != null && screenshotPath.isNotEmpty) {
+      await expectLater(
+        find.byType(RoomSettingsSheet),
+        matchesGoldenFile(screenshotPath),
+      );
+    }
   });
 
   testWidgets(
@@ -6482,6 +7980,9 @@ void main() {
             'time_offset': 0.0,
             'brightness_offset': 0.0,
             'lights_on': true,
+            'light_capabilities': {
+              'individual_profile_overrides': true,
+            },
             'profile_settings': {
               'profile_overrides': {
                 'rhythm': {
@@ -6514,6 +8015,8 @@ void main() {
       ),
     );
 
+    await _selectRoomSettingsTab(tester, 'Bulbs');
+    await tester.pumpAndSettle();
     final row = find.byKey(const ValueKey('room-device-row-light-1'));
     expect(row, findsOneWidget);
     expect(
@@ -6522,7 +8025,7 @@ void main() {
     );
     expect(find.text('BRI · CCT'), findsOneWidget);
     expect(
-      tester.getSemantics(row).hint,
+      tester.widget<Semantics>(row).properties.hint,
       'Tap for settings. Touch and hold to identify.',
     );
 
@@ -6664,6 +8167,17 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(api.flashCanonicalDeviceCalls, 1);
+    expect(find.text('Move to Room'), findsOneWidget);
+    await tester.binding.handlePopRoute();
+    await tester.pumpAndSettle();
+
+    expect(find.byType(DeviceDetailSheet), findsOneWidget);
+    expect(find.text('Move to Room...'), findsOneWidget);
+    expect(api.assignDeviceParentCalls, 0);
+
+    await tester.tap(find.text('Move to Room...'));
+    await tester.pumpAndSettle();
+    expect(api.flashCanonicalDeviceCalls, 2);
     expect(find.text('Move to Room'), findsOneWidget);
     await tester.tap(find.text('Dining'));
     await tester.pump(const Duration(milliseconds: 300));
@@ -7004,6 +8518,62 @@ void main() {
 
     final headerText = tester.widget<Text>(find.text(deviceName));
     expect(headerText.textAlign, TextAlign.center);
+  });
+
+  testWidgets('motion sensors expose canonical rename in Device Info',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+
+    api.canonicalDevices['motion-1'] = {
+      'id': 'motion-1',
+      'name': 'Motion Sensor',
+      'device_type': 'motion',
+      'endpoints': const <Map<String, dynamic>>[],
+    };
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const DeviceDetailSheet(
+          device: RhythmDevice(
+            id: 'motion-1',
+            type: RhythmDeviceType.motion,
+            name: 'Motion Sensor',
+          ),
+          roomId: 'room-1',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Info'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Name'), findsOneWidget);
+    await tester.tap(find.text('Name'));
+    await tester.pumpAndSettle();
+    expect(find.text('Rename Motion Sensor'), findsOneWidget);
+
+    await tester.enterText(find.byType(TextField), 'Mud Room Motion');
+    await tester.tap(find.widgetWithText(TextButton, 'Rename'));
+    await tester.pumpAndSettle();
+
+    expect(api.renameCanonicalDeviceCalls, 1);
+    expect(api.lastRenamedDeviceId, 'motion-1');
+    expect(api.lastRenamedDeviceName, 'Mud Room Motion');
+    expect(find.text('Mud Room Motion'), findsNWidgets(2));
+    expect(api.triggerSyncCalls, 1);
   });
 
   testWidgets('Hue Bluetooth lights expose their removable connection',
@@ -8386,10 +9956,154 @@ void main() {
     expect(api.lastControlSourceNodeId, 'sensor-1');
     expect(api.lastControlKind, 'motion');
     expect(api.lastControlTargetIds, ['room-1', 'room-2']);
-    expect(connection.reconnectCalls, 0);
+    expect(connection.reconnectCalls, 1);
+    expect(connection.lastReconnectAuthoritative, isTrue);
     expect(find.text('2 rooms'), findsOneWidget);
     expect(
       find.text('Updated Kitchen Motion motion controls'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets(
+      'button controls require capability and save multiple room targets',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.binding.setSurfaceSize(const Size(390, 900));
+    api.topologyNodes = [
+      RhythmTopologyNode.fromJson({
+        'id': 'room-1',
+        'name': 'Kitchen',
+        'kind': 'room',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'room-2',
+        'name': 'Hall',
+        'kind': 'room',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'button-1',
+        'name': 'Kitchen Button',
+        'kind': 'button',
+        'parent_id': 'room-1',
+        'controls': [
+          {
+            'kind': 'button',
+            'target_id': 'room-1',
+            'inherited': true,
+          },
+        ],
+      }),
+    ];
+    api.canonicalDevices['button-1'] = {
+      'id': 'button-1',
+      'name': 'Kitchen Button',
+      'endpoints': const <Map<String, dynamic>>[],
+    };
+    final helloJson = {
+      'nodes': [
+        {
+          'id': 'room-1',
+          'name': 'Kitchen',
+          'kind': 'room',
+          'state': 'active',
+          'rhythm_enabled': true,
+          'disabled': false,
+          'time_offset': 0.0,
+          'brightness_offset': 0.0,
+          'lights_on': true,
+        },
+        {
+          'id': 'room-2',
+          'name': 'Hall',
+          'kind': 'room',
+          'state': 'active',
+          'rhythm_enabled': true,
+          'disabled': false,
+          'time_offset': 0.0,
+          'brightness_offset': 0.0,
+          'lights_on': true,
+        },
+      ],
+      'location': const <String, dynamic>{},
+    };
+    connection.emitHello(RhythmHello.fromJson(helloJson));
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const DeviceDetailSheet(
+          device: RhythmDevice(
+            id: 'button-1',
+            type: RhythmDeviceType.button,
+            name: 'Kitchen Button',
+          ),
+          roomId: 'room-1',
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(provider.buttonMultiRoomControlsSupported, isFalse);
+    expect(find.text('Button controls'), findsNothing);
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        ...helloJson,
+        'capabilities': {
+          'features': [RhythmFeature.buttonMultiRoomControls],
+        },
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    expect(provider.buttonMultiRoomControlsSupported, isTrue);
+    expect(find.text('Button controls'), findsOneWidget);
+    expect(find.text('1 room'), findsOneWidget);
+
+    await tester.tap(find.text('Button controls'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.text('Button Controls'), findsOneWidget);
+    expect(
+      tester
+          .widget<CheckboxListTile>(
+            find.widgetWithText(CheckboxListTile, 'Kitchen'),
+          )
+          .value,
+      isTrue,
+    );
+
+    await tester.tap(find.text('Hall'));
+    await tester.pump();
+    await tester.tap(find.widgetWithText(ElevatedButton, 'SAVE'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(api.setTopologyNodeControlTargetsCalls, 1);
+    expect(api.lastControlSourceNodeId, 'button-1');
+    expect(api.lastControlKind, 'button');
+    expect(api.lastControlTargetIds, ['room-1', 'room-2']);
+    expect(find.text('2 rooms'), findsOneWidget);
+    expect(
+      find.text('Updated Kitchen Button button controls'),
       findsOneWidget,
     );
   });
@@ -8519,11 +10233,362 @@ void main() {
       find.byWidgetPredicate(
         (widget) =>
             widget.runtimeType.toString() == '_DeviceRow' &&
-            (widget as dynamic).roomId == 'room-2',
+            (widget as dynamic).currentRoomId == 'room-1' &&
+            (widget as dynamic).parentRoomId == 'room-2',
         skipOffstage: false,
       ),
       findsOneWidget,
     );
+    expect(find.text('PARENT', skipOffstage: false), findsNothing);
+  });
+
+  testWidgets('room motion tab shows a parentless controlling sensor',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.binding.setSurfaceSize(const Size(390, 900));
+    api.topologyNodes = [
+      RhythmTopologyNode.fromJson({
+        'id': 'room-1',
+        'name': 'Porch',
+        'kind': 'room',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'sensor-1',
+        'name': 'Front Door Motion',
+        'kind': 'motion_sensor',
+        'controls': [
+          {'kind': 'motion', 'target_id': 'room-1', 'inherited': false},
+        ],
+      }),
+    ];
+    api.canonicalDevices['sensor-1'] = {
+      'id': 'sensor-1',
+      'name': 'Front Door Motion',
+      'device_type': 'motion',
+      'endpoints': const <Map<String, dynamic>>[],
+    };
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Porch',
+            'kind': 'room',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+          },
+          {
+            'id': 'sensor-1',
+            'name': 'Front Door Motion',
+            'kind': 'motion_sensor',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': false,
+          },
+        ],
+        'location': const <String, dynamic>{},
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const RoomSettingsSheet(
+          enableLivePreview: false,
+          room: RoomDto(
+            id: 'room-1',
+            name: 'Porch',
+            source: RoomSourceDto.matter,
+            deviceIds: [],
+            rhythmEnabled: true,
+            disabled: false,
+            lightsOn: true,
+            timeOffsetMinutes: 0,
+            brightnessOffset: 0,
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+    await _selectRoomSettingsTab(tester, 'Motion');
+    await tester.pumpAndSettle();
+
+    expect(
+      find.text('Front Door Motion', skipOffstage: false),
+      findsOneWidget,
+    );
+    expect(find.text('PARENT', skipOffstage: false), findsNothing);
+    expect(
+      find.byWidgetPredicate(
+        (widget) =>
+            widget.runtimeType.toString() == '_DeviceRow' &&
+            (widget as dynamic).currentRoomId == 'room-1' &&
+            (widget as dynamic).parentRoomId == '',
+        skipOffstage: false,
+      ),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.text('Front Door Motion').last);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Move or Remove...'), findsOneWidget);
+    await tester.tap(find.text('Move or Remove...'));
+    await tester.pumpAndSettle();
+    expect(find.text('Remove from Room'), findsOneWidget);
+
+    await tester.tap(find.text('Remove from Room'));
+    await tester.pumpAndSettle();
+
+    expect(api.assignDeviceParentCalls, 0);
+    expect(api.setTopologyNodeControlTargetsCalls, 1);
+    expect(api.lastControlSourceNodeId, 'sensor-1');
+    expect(api.lastControlKind, 'motion');
+    expect(api.lastControlTargetIds, isEmpty);
+    expect(find.text('Removed Front Door Motion from Porch'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('room-device-row-sensor-1')),
+      findsNothing,
+    );
+  });
+
+  testWidgets(
+      'delivery failures aggregate by bulb, mark bulb rows, and expire independently',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _FakeRhythmServerApi();
+    api.topologyNodes = [
+      RhythmTopologyNode.fromJson({
+        'id': 'room-1',
+        'name': 'Porch',
+        'kind': 'room',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'bulb-1',
+        'name': 'Aqara Porch Bulb',
+        'kind': 'light_device',
+        'parent_id': 'room-1',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'bulb-2',
+        'name': 'Door Sconce',
+        'kind': 'light_device',
+        'parent_id': 'room-1',
+      }),
+    ];
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Porch',
+            'kind': 'room',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+          },
+          {
+            'id': 'bulb-1',
+            'name': 'Aqara Porch Bulb',
+            'kind': 'light_device',
+            'parent_id': 'room-1',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+          },
+          {
+            'id': 'bulb-2',
+            'name': 'Door Sconce',
+            'kind': 'light_device',
+            'parent_id': 'room-1',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+          },
+        ],
+        'location': const <String, dynamic>{},
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    connection.emitDispatchFailure(const RhythmDispatchFailure(
+      hubType: 'matter',
+      hubKey: 'matter@local',
+      nodeId: 'room-1',
+      targetNodeId: 'bulb-1',
+      target: 'matter-113',
+      kind: 'matter_controller_command',
+      status: 'timed_out',
+    ));
+    connection.emitDispatchFailure(const RhythmDispatchFailure(
+      hubType: 'matter',
+      hubKey: 'matter@local',
+      nodeId: 'bulb-1',
+      targetNodeId: 'bulb-1',
+      target: 'matter-113',
+      kind: 'matter_controller_command',
+      status: 'timed_out',
+    ));
+    await tester.pump();
+    expect(
+      provider.recentLightDeliveryWarningsForNode('room-1'),
+      hasLength(1),
+      reason: 'the same canonical bulb is one warning across command scopes',
+    );
+    await tester.pump(const Duration(seconds: 5));
+    connection.emitDispatchFailure(const RhythmDispatchFailure(
+      hubType: 'matter',
+      hubKey: 'matter@local',
+      nodeId: 'room-1',
+      targetNodeId: 'bulb-2',
+      target: 'matter-114',
+      kind: 'matter_controller_command',
+      status: 'timed_out',
+    ));
+    await tester.pump();
+
+    expect(
+      provider
+          .recentLightDeliveryWarningsForNode('room-1')
+          .map((warning) => warning.bulbName),
+      ['Aqara Porch Bulb', 'Door Sconce'],
+    );
+    expect(
+      provider.recentLightDeliveryWarningsForNode('bulb-1'),
+      hasLength(1),
+    );
+    expect(
+      provider.recentLightDeliveryWarningsForNode('bulb-2'),
+      hasLength(1),
+    );
+
+    await _pumpRoomSettingsSheet(
+      tester,
+      roomProvider: roomProvider,
+      provider: provider,
+      room: const RoomDto(
+        id: 'room-1',
+        name: 'Porch',
+        source: RoomSourceDto.matter,
+        deviceIds: ['bulb-1', 'bulb-2'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    await _selectRoomSettingsTab(tester, 'Bulbs');
+    expect(
+      find.byKey(const ValueKey('room-device-delivery-warning-bulb-1')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('room-device-delivery-warning-bulb-2')),
+      findsOneWidget,
+    );
+    expect(find.text('Couldn\u2019t reach this bulb'), findsNWidgets(2));
+    expect(
+      tester
+          .widget<Semantics>(
+            find.byKey(const ValueKey('room-device-row-bulb-1')),
+          )
+          .properties
+          .label,
+      contains('delivery warning, could not reach this bulb'),
+    );
+
+    // The first bulb's timer started five seconds earlier, so it disappears
+    // without clearing the still-relevant second bulb warning.
+    await tester.pump(const Duration(seconds: 26));
+    expect(
+      provider.recentLightDeliveryWarningsForNode('bulb-1'),
+      isEmpty,
+    );
+    expect(
+      provider.recentLightDeliveryWarningsForNode('bulb-2'),
+      hasLength(1),
+    );
+    expect(
+      find.byKey(const ValueKey('room-device-delivery-warning-bulb-1')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey('room-device-delivery-warning-bulb-2')),
+      findsOneWidget,
+    );
+
+    await tester.pump(const Duration(seconds: 5));
+    expect(provider.recentLightDeliveryWarningsForNode('room-1'), isEmpty);
+
+    // Previous appliances omit target_node_id. When they directly address a
+    // canonical bulb, multiple endpoint outcomes must still collapse to that
+    // one physical bulb instead of inflating the affected-bulb count.
+    connection.emitDispatchFailure(const RhythmDispatchFailure(
+      hubType: 'matter',
+      hubKey: 'matter@local',
+      nodeId: 'bulb-1',
+      target: 'matter-113',
+      kind: 'matter_controller_command',
+      status: 'timed_out',
+    ));
+    connection.emitDispatchFailure(const RhythmDispatchFailure(
+      hubType: 'hue',
+      hubKey: 'hue@bridge.local',
+      nodeId: 'bulb-1',
+      target: 'hue-light-22',
+      kind: 'turn_on',
+      status: 'failed',
+    ));
+    await tester.pump();
+    expect(
+      provider.recentLightDeliveryWarningsForNode('bulb-1'),
+      hasLength(1),
+      reason: 'previous-appliance endpoint failures name one canonical bulb',
+    );
+    await tester.pump(const Duration(seconds: 31));
   });
 
   testWidgets('Room card device flow offers Remove from Room for Matter bulbs',
@@ -8612,7 +10677,7 @@ void main() {
       ),
     );
 
-    await _selectRoomSettingsTab(tester, 'Light');
+    await _selectRoomSettingsTab(tester, 'Bulbs');
     await tester.tap(find.text('Desk Lamp').last);
     await tester.pumpAndSettle();
 
@@ -8709,6 +10774,7 @@ void main() {
     );
 
     await _selectRoomSettingsTab(tester, 'Motion');
+    expect(find.text('PARENT', skipOffstage: false), findsOneWidget);
     await tester.tap(find.text('Kitchen Motion').last);
     await tester.pumpAndSettle();
 
@@ -8807,7 +10873,7 @@ void main() {
     expect(api.lastDeletedRoomId, 'room-1');
   });
 
-  testWidgets('room page explains unavailable Light settings capability',
+  testWidgets('room page explains unavailable Lighting settings capability',
       (tester) async {
     _registerWidgetCleanup(tester);
     final semantics = tester.ensureSemantics();
@@ -8865,6 +10931,7 @@ void main() {
       ),
     );
 
+    await _selectRoomSettingsTab(tester, 'Lighting');
     final lightSettings = find.byKey(
       const ValueKey('room-settings-light-settings-room-1'),
     );
@@ -8879,9 +10946,12 @@ void main() {
           .data,
       'Update required',
     );
-    final lightSettingsSemantics = tester.getSemantics(lightSettings);
-    expect(lightSettingsSemantics.label, 'Lighting');
-    expect(lightSettingsSemantics.value, 'Appliance update required');
+    final lightSettingsSemantics = tester.widget<Semantics>(lightSettings);
+    expect(lightSettingsSemantics.properties.label, 'Lighting');
+    expect(
+      lightSettingsSemantics.properties.value,
+      'Appliance update required',
+    );
 
     await tester.tap(lightSettings);
     await tester.pump();
@@ -8951,8 +11021,15 @@ void main() {
       ),
     );
 
-    await _selectRoomSettingsTab(tester, 'Light');
-    await tester.tap(find.text('Low glow'));
+    await _selectRoomSettingsTab(tester, 'Lighting');
+    await tester.tap(
+      find.descendant(
+        of: find.byKey(
+          const ValueKey('room-settings-low-glow-room-1'),
+        ),
+        matching: find.text('Low glow'),
+      ),
+    );
     await tester.pump();
 
     expect(api.nodePreferenceCalls, hasLength(1));
@@ -9072,9 +11149,12 @@ void main() {
       ),
     );
 
-    await _selectRoomSettingsTab(tester, 'Light');
+    await _selectRoomSettingsTab(tester, 'Lighting');
 
-    expect(find.text('Low glow'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('room-settings-low-glow-room-1')),
+      findsOneWidget,
+    );
     expect(find.text('DAY PROFILE'), findsNothing);
     expect(find.text('SLEEP PROFILE'), findsNothing);
     expect(find.text('Motion Timeout'), findsNothing);
@@ -9461,7 +11541,284 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    expect(find.text('Low Glow'), findsOneWidget);
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const LightScreen(
+          showBackButton: true,
+          roomId: 'bulb-1',
+          roomName: 'Desk Lamp',
+          overrideScope: LightOverrideScope.bulb,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
     expect(find.text('Low Glow'), findsNothing);
+  });
+
+  testWidgets(
+      'room Low Glow saves an isolated day_idle override and returns to Auto',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    const profiles = [
+      RhythmCurveConfig(id: 'rhythm', name: 'Day Profile'),
+      RhythmCurveConfig(id: 'sleep', name: 'Sleep Profile'),
+      RhythmCurveConfig(
+        id: 'day_idle',
+        name: 'Low Glow',
+        minColorTemp: 0,
+        maxColorTemp: 0,
+        minBrightness: 1,
+        maxBrightness: 1,
+        curve: RhythmInheritActiveCurve(),
+      ),
+    ];
+    final api = _FakeRhythmServerApi()
+      ..profileConfigs = profiles
+      ..profileMode = RhythmModeResource.fromJson({
+        'active': 'day',
+        'configs': [
+          {'mode': 'day', 'active_profile_id': 'rhythm'},
+          {'mode': 'sleep', 'active_profile_id': 'sleep'},
+        ],
+      });
+    final screenshotDir =
+        Platform.environment['RHYTHM_ROOM_LOW_GLOW_SCREENSHOT_DIR'];
+    Future<void> captureState(String name) async {
+      if (screenshotDir == null || screenshotDir.isEmpty) return;
+      await expectLater(
+        find.byType(LightScreen),
+        matchesGoldenFile('$screenshotDir/$name.png'),
+      );
+    }
+
+    final connection = _HelloRhythmConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 1400));
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'version': '0.6.590-beta',
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': [
+            RhythmFeature.roomLightProfileOverrides,
+            RhythmFeature.roomDayIdleProfileOverrides,
+          ],
+          'hubs': const <dynamic>[],
+        },
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'profile_settings': {
+              'profile_overrides': {
+                'sleep': {
+                  'min_brightness': 7,
+                },
+              },
+            },
+          },
+        ],
+        'profiles': [for (final profile in profiles) profile.toJson()],
+        'mode': {
+          'active': 'day',
+          'configs': [
+            {'mode': 'day', 'active_profile_id': 'rhythm'},
+            {'mode': 'sleep', 'active_profile_id': 'sleep'},
+          ],
+        },
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const LightScreen(
+          showBackButton: true,
+          roomId: 'room-1',
+          roomName: 'Kitchen',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('Low Glow'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('room-light-layer-custom-day_idle')),
+      findsNothing,
+    );
+    await tester.tap(find.text('Low Glow'));
+    await tester.pumpAndSettle();
+    expect(find.text('Auto · 1%'), findsOneWidget);
+    expect(
+      tester
+          .getSemantics(
+            find.byKey(const ValueKey('light-layer-preview-day_idle')),
+          )
+          .label,
+      contains('Auto, 1 percent, Day color'),
+    );
+    await captureState('room-low-glow-inherited');
+    await tester.tap(
+      find.byKey(const ValueKey('day-low-glow-custom-brightness')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Custom · 1%'), findsOneWidget);
+    await tester.tap(
+      find.byKey(const ValueKey('day-low-glow-custom-brightness')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Auto · 1%'), findsOneWidget);
+    expect(
+      tester
+          .getSemantics(
+            find.byKey(const ValueKey('light-layer-preview-day_idle')),
+          )
+          .label,
+      contains('Auto, 1 percent, Day color'),
+    );
+    await tester.tap(
+      find.byKey(const ValueKey('day-low-glow-custom-brightness')),
+    );
+    await tester.pumpAndSettle();
+    await captureState('room-low-glow-custom');
+    tester
+        .widget<Slider>(
+          find.byKey(const ValueKey('day-low-glow-brightness')),
+        )
+        .onChanged!(80);
+    await tester.pumpAndSettle();
+    await tester.tap(
+      find.byKey(const ValueKey('day-low-glow-custom-color')),
+    );
+    await tester.pumpAndSettle();
+    final spectrum = find.byKey(
+      const ValueKey('day-low-glow-color-spectrum'),
+    );
+    final spectrumWidth = tester.getSize(spectrum).width;
+    final spectrumGesture = tester.widget<GestureDetector>(spectrum);
+    spectrumGesture.onTapDown!(
+      TapDownDetails(localPosition: Offset(spectrumWidth * 0.08, 12)),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Custom · 80%'), findsOneWidget);
+    await captureState('room-low-glow-warm-bright');
+    spectrumGesture.onTapDown!(
+      TapDownDetails(localPosition: Offset(spectrumWidth * 0.62, 12)),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .getSemantics(
+            find.byKey(const ValueKey('light-layer-preview-day_idle')),
+          )
+          .label,
+      contains('Custom, 80 percent, custom color'),
+    );
+    await captureState('room-low-glow-cool-bright');
+    final pendingSave = Completer<bool>();
+    api.nodeProfileOverridesCompleter = pendingSave;
+    await tester.tap(find.text('Save'));
+    await tester.pump();
+    await captureState('room-low-glow-pending');
+    pendingSave.complete(true);
+    await tester.pumpAndSettle();
+    api.nodeProfileOverridesCompleter = null;
+
+    expect(api.profileConfigSetCalls, isEmpty);
+    expect(api.profileModeSetCalls, isEmpty);
+    expect(api.nodeProfileOverrideCalls, hasLength(1));
+    expect(api.nodeProfileOverrideCalls.single.nodeId, 'room-1');
+    expect(
+      api.nodeProfileOverrideCalls.single.profileOverrides?.keys,
+      contains('day_idle'),
+    );
+    expect(
+      provider
+          .nodeById('room-1')
+          ?.profileSettings
+          ?.profileOverrides
+          .containsKey('sleep'),
+      isTrue,
+      reason: 'saving Low Glow must retain unrelated room overrides',
+    );
+
+    expect(
+      await provider.setNodeLightProfileOverride(
+        'room-1',
+        profileId: 'day_idle',
+        profileOverride: null,
+        correlationId: 'room-low-glow-auto',
+      ),
+      isTrue,
+    );
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 5));
+
+    expect(api.nodeProfileOverrideCalls, hasLength(2));
+    expect(api.nodeProfileOverrideCalls.last.profileOverrides, {
+      'day_idle': null,
+    });
+    expect(
+      provider
+          .nodeById('room-1')
+          ?.profileSettings
+          ?.profileOverrides
+          .containsKey('day_idle'),
+      isFalse,
+    );
+    expect(
+      provider
+          .nodeById('room-1')
+          ?.profileSettings
+          ?.profileOverrides
+          .containsKey('sleep'),
+      isTrue,
+    );
+
+    await tester.tap(
+      find.byKey(const ValueKey('day-low-glow-custom-brightness')),
+    );
+    await tester.pumpAndSettle();
+    api.nodeProfileOverridesSucceeds = false;
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    await captureState('room-low-glow-failed-retry');
+    expect(api.nodeProfileOverrideCalls, hasLength(3));
+    expect(
+      provider
+          .nodeById('room-1')
+          ?.profileSettings
+          ?.profileOverrides
+          .containsKey('day_idle'),
+      isFalse,
+      reason: 'a rejected retry must restore the authoritative Auto state',
+    );
+
+    api.nodeProfileOverridesSucceeds = true;
+    await tester.tap(find.text('Save'));
+    await tester.pumpAndSettle();
+    expect(api.nodeProfileOverrideCalls, hasLength(4));
   });
 
   testWidgets('returning Low Glow to Auto only clears the Day idle mapping',
@@ -9588,6 +11945,201 @@ void main() {
     expect(savedDay.idleProfileId, isNull);
     expect(savedSleep.activeProfileId, 'sleep');
     expect(savedSleep.idleProfileId, 'sleep_idle');
+    expect(api.profileConfigs, initialProfiles);
+
+    Map<String, dynamic> roomHello({required bool explicitDayIdle}) => {
+          'version': '0.6.590-beta',
+          'capabilities': {
+            'api_schema_version': 2,
+            'features': [
+              RhythmFeature.roomLightProfileOverrides,
+              RhythmFeature.roomDayIdleProfileOverrides,
+            ],
+            'hubs': const <dynamic>[],
+          },
+          'nodes': [
+            {
+              'id': 'inheriting-room',
+              'name': 'Kitchen',
+              'kind': 'room',
+              'state': 'standby',
+              'rhythm_enabled': true,
+              'disabled': false,
+              'time_offset': 0.0,
+              'brightness_offset': 0.0,
+            },
+            {
+              'id': 'custom-room',
+              'name': 'Nursery',
+              'kind': 'room',
+              'state': 'standby',
+              'rhythm_enabled': true,
+              'disabled': false,
+              'time_offset': 0.0,
+              'brightness_offset': 0.0,
+              'profile_settings': {
+                'profile_overrides': {
+                  'day_idle': {
+                    'min_brightness': 7,
+                    'max_brightness': 7,
+                  },
+                },
+              },
+            },
+          ],
+          'profiles': [for (final profile in initialProfiles) profile.toJson()],
+          'mode': {
+            'active': 'day',
+            'configs': [
+              {
+                'mode': 'day',
+                'active_profile_id': 'rhythm',
+                if (explicitDayIdle) 'idle_profile_id': 'day_idle',
+              },
+              {
+                'mode': 'sleep',
+                'active_profile_id': 'sleep',
+                'idle_profile_id': 'sleep_idle',
+              },
+            ],
+          },
+        };
+
+    connection.emitHello(
+      RhythmHello.fromJson(roomHello(explicitDayIdle: false)),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const LightScreen(
+          key: ValueKey('inheriting-auto-room'),
+          roomId: 'inheriting-room',
+          roomName: 'Kitchen',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Auto · 1%'), findsOneWidget);
+    expect(
+      tester
+          .getSemantics(
+            find.byKey(const ValueKey('light-layer-preview-day_idle')),
+          )
+          .label,
+      contains('Auto, 1 percent, Day color'),
+    );
+    await tester.tap(find.text('Low Glow'));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<Switch>(
+            find.byKey(
+              const ValueKey('day-low-glow-custom-brightness'),
+            ),
+          )
+          .value,
+      isFalse,
+      reason: 'the room editor must ignore the stale stored custom profile',
+    );
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const LightScreen(
+          key: ValueKey('custom-auto-room'),
+          roomId: 'custom-room',
+          roomName: 'Nursery',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Custom · 7%'), findsOneWidget);
+    expect(
+      tester
+          .getSemantics(
+            find.byKey(const ValueKey('light-layer-preview-day_idle')),
+          )
+          .label,
+      contains('Custom, 7 percent, Day color'),
+    );
+
+    api.profileMode = RhythmModeResource.fromJson(
+      roomHello(explicitDayIdle: true)['mode'] as Map<String, dynamic>,
+    );
+    connection.emitHello(
+      RhythmHello.fromJson(roomHello(explicitDayIdle: true)),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const LightScreen(
+          key: ValueKey('inheriting-explicit-room'),
+          roomId: 'inheriting-room',
+          roomName: 'Kitchen',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Auto · 20%'), findsOneWidget);
+    expect(
+      tester
+          .getSemantics(
+            find.byKey(const ValueKey('light-layer-preview-day_idle')),
+          )
+          .label,
+      contains('Auto, 20 percent, custom color'),
+    );
+    await tester.tap(find.text('Low Glow'));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<Switch>(
+            find.byKey(
+              const ValueKey('day-low-glow-custom-brightness'),
+            ),
+          )
+          .value,
+      isTrue,
+      reason: 'an explicit mapping must load the stored custom profile',
+    );
+
+    await tester.pumpWidget(
+      _buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const LightScreen(
+          key: ValueKey('custom-explicit-room'),
+          roomId: 'custom-room',
+          roomName: 'Nursery',
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('Custom · 7%'), findsOneWidget);
+    expect(
+      tester
+          .getSemantics(
+            find.byKey(const ValueKey('light-layer-preview-day_idle')),
+          )
+          .label,
+      contains('Custom, 7 percent, custom color'),
+    );
+    await tester.tap(find.text('Low Glow'));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<Slider>(
+            find.byKey(const ValueKey('day-low-glow-brightness')),
+          )
+          .value,
+      7,
+      reason: 'the room delta must remain isolated atop explicit inheritance',
+    );
     expect(api.profileConfigs, initialProfiles);
   });
 }

@@ -228,8 +228,8 @@ version:
   fingerprint against the published feed. `--with-image` forces the image
   build (it embeds a `[with-image]` marker in the tag message).
 - `--upload` is the escape hatch when GitHub Actions is down: builds,
-  packages, and uploads the feed locally to Cloudflare R2 using the first
-  available ignored environment file: `os/.env`, `.env`, or `admin-api/.env`.
+  packages, and uploads the feed locally to Cloudflare R2 using the validated
+  external `release` profile (default `~/.config/rhythm/release.env`).
 
 ```bash
 ./tools/os/scripts/release.sh                    # Next patch beta release
@@ -240,6 +240,10 @@ version:
 ./tools/os/scripts/release.sh --upload           # Local build + feed upload (no CI)
 ./tools/os/scripts/release.sh --dry-run          # Preview without changing git state
 ```
+
+Before the local upload escape hatch, run
+`python3 tools/config/validate.py --consumer ota-upload`. Use an absolute
+`RHYTHM_RELEASE_ENV_FILE` to override the default profile path.
 
 Run `release.sh --help` for the full flag list.
 

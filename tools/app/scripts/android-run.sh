@@ -9,6 +9,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../../../app" && pwd)"
 FLUTTER_APP="$PROJECT_ROOT/flutter/rhythm_app"
 
+# shellcheck source=lib/app-build-profile.sh
+source "$SCRIPT_DIR/lib/app-build-profile.sh"
+
 MODE="debug"
 DEVICE="${RHYTHM_ANDROID_DEVICE:-}"
 RUN_SETUP=true
@@ -137,9 +140,9 @@ RUN_ARGS+=(--"$MODE")
 
 RUN_ARGS+=(-d "$DEVICE")
 
-if [ -f "$FLUTTER_APP/.env" ]; then
-    RUN_ARGS+=(--dart-define-from-file="$FLUTTER_APP/.env")
-fi
+prepare_app_build_define_file "$PROJECT_ROOT/.." "$FLUTTER_APP"
+trap cleanup_app_build_define_file EXIT
+RUN_ARGS+=(--dart-define-from-file="$RHYTHM_APP_BUILD_DEFINE_FILE")
 
 if [ ${#EXTRA_ARGS[@]} -gt 0 ]; then
     RUN_ARGS+=("${EXTRA_ARGS[@]}")

@@ -5,6 +5,7 @@ import '../../services/analytics_service.dart';
 import '../../services/device_pairing_code.dart';
 import '../../widgets/solar_orbit.dart';
 import 'device_pairing_scanner_screen.dart';
+import 'matter_add_method.dart';
 
 class DevicePairingCodeEntryScreen extends StatefulWidget {
   const DevicePairingCodeEntryScreen({
@@ -12,12 +13,16 @@ class DevicePairingCodeEntryScreen extends StatefulWidget {
     this.hueBridgeSerialSearchAvailable = false,
     this.supportedLocalBleProfileIds = const {},
     this.hueBridgeOnly = false,
+    this.matterOnNetworkAvailable = false,
+    this.matterAddMethod,
     this.journeyId,
   });
 
   final bool hueBridgeSerialSearchAvailable;
   final Set<String> supportedLocalBleProfileIds;
   final bool hueBridgeOnly;
+  final bool matterOnNetworkAvailable;
+  final MatterAddMethod? matterAddMethod;
   final String? journeyId;
 
   static Future<DevicePairingScannerResult?> show(
@@ -25,6 +30,8 @@ class DevicePairingCodeEntryScreen extends StatefulWidget {
     bool hueBridgeSerialSearchAvailable = false,
     Set<String> supportedLocalBleProfileIds = const {},
     bool hueBridgeOnly = false,
+    bool matterOnNetworkAvailable = false,
+    MatterAddMethod? matterAddMethod,
     String? journeyId,
   }) {
     AnalyticsService().logScreenView('device_pairing_code_entry');
@@ -34,6 +41,8 @@ class DevicePairingCodeEntryScreen extends StatefulWidget {
           hueBridgeSerialSearchAvailable: hueBridgeSerialSearchAvailable,
           supportedLocalBleProfileIds: supportedLocalBleProfileIds,
           hueBridgeOnly: hueBridgeOnly,
+          matterOnNetworkAvailable: matterOnNetworkAvailable,
+          matterAddMethod: matterAddMethod,
           journeyId: journeyId,
         ),
       ),
@@ -53,12 +62,17 @@ class _DevicePairingCodeEntryScreenState
   final _controller = TextEditingController();
   DevicePairingGuidance? _guidance;
   DevicePairingCodeDecision? _pendingDecision;
+  MatterAddMethod? _matterAddMethod;
 
   bool get _hasInput => _controller.text.trim().isNotEmpty;
+
+  bool get _isExistingMatter =>
+      _matterAddMethod == MatterAddMethod.onNetworkSetupCode;
 
   @override
   void initState() {
     super.initState();
+    _matterAddMethod = widget.matterAddMethod;
     _controller.addListener(_handleChanged);
   }
 
@@ -88,6 +102,30 @@ class _DevicePairingCodeEntryScreenState
   }
 
   void _identifyCode() {
+    if (_isExistingMatter) {
+      final code = classifyDevicePairingCode(_controller.text);
+      if (code.kind == DevicePairingCodeKind.matter) {
+        _continueWithCode(code);
+        return;
+      }
+      AnalyticsService().logDevicePairingCodeDetected(
+        codeKind: _pairingCodeAnalyticsKind(code.kind),
+        outcome: 'guidance_shown',
+        journeyId: widget.journeyId,
+        inputMethod: 'manual_code',
+      );
+      HapticFeedback.lightImpact();
+      setState(() {
+        _pendingDecision = null;
+        _guidance = const DevicePairingGuidance(
+          title: 'New Matter code required',
+          message: 'Open pairing mode in the Matter app that already controls '
+              'this device, then paste the new Matter setup code it provides.',
+        );
+      });
+      return;
+    }
+
     final decision = processDevicePairingCodes(
       [_controller.text],
       hueBridgeSerialSearchAvailable: widget.hueBridgeSerialSearchAvailable,
@@ -148,6 +186,7 @@ class _DevicePairingCodeEntryScreenState
             code.payload,
             inputMethod: 'manual_code',
             journeyId: widget.journeyId,
+            addMethod: _matterAddMethod,
           ),
         DevicePairingCodeKind.hue => DevicePairingScannerResult.hueBridge(
             normalizeHueBridgeSerial(code.payload)!,
@@ -172,7 +211,11 @@ class _DevicePairingCodeEntryScreenState
         backgroundColor: CelestialColors.backgroundDark,
         foregroundColor: CelestialColors.textPrimary,
         title: Text(
-          widget.hueBridgeOnly ? 'Enter Bulb Serial' : 'Enter a Code',
+          widget.hueBridgeOnly
+              ? 'Enter Bulb Serial'
+              : (_isExistingMatter
+                  ? 'Add Existing Matter Device'
+                  : 'Enter a Code'),
         ),
         elevation: 0,
       ),
@@ -208,7 +251,9 @@ class _DevicePairingCodeEntryScreenState
               Text(
                 widget.hueBridgeOnly
                     ? 'Enter Hue bulb serial'
-                    : 'Enter any setup code',
+                    : (_isExistingMatter
+                        ? 'Add from another Matter app'
+                        : 'Enter any setup code'),
                 style: TextStyle(
                   color: CelestialColors.textPrimary,
                   fontSize: 26,
@@ -222,14 +267,44 @@ class _DevicePairingCodeEntryScreenState
                 widget.hueBridgeOnly
                     ? 'Type or paste the six-character serial printed on the '
                         'Hue bulb. Your connected Hue Bridge will search for it.'
-                    : 'Type or paste the code printed on your device. Rhythm '
-                        'will identify what it is and continue when it can.',
+                    : (_isExistingMatter
+                        ? 'In Apple Home or the app that already controls this '
+                            'device, choose “Turn On Pairing Mode” or “Add '
+                            'another controller.” Paste the new Matter setup '
+                            'code it provides. Your existing connection and '
+                            'Thread network stay in place.'
+                        : 'Type or paste the code printed on your device. '
+                            'Rhythm will identify what it is and continue when '
+                            'it can.'),
                 style: TextStyle(
                   color: CelestialColors.textSecondary.withValues(alpha: 0.82),
                   fontSize: 15,
                   height: 1.45,
                 ),
               ),
+              if (!_isExistingMatter &&
+                  !widget.hueBridgeOnly &&
+                  widget.matterOnNetworkAvailable) ...[
+                const SizedBox(height: 16),
+                OutlinedButton.icon(
+                  key: const ValueKey('enter-existing-matter-code'),
+                  onPressed: () {
+                    AnalyticsService().logDevicePairingCodeDetected(
+                      codeKind: 'matter',
+                      outcome: 'existing_matter_entry_selected',
+                      journeyId: widget.journeyId,
+                      inputMethod: 'manual_code',
+                    );
+                    setState(() {
+                      _matterAddMethod = MatterAddMethod.onNetworkSetupCode;
+                      _guidance = null;
+                      _pendingDecision = null;
+                    });
+                  },
+                  icon: const Icon(Icons.hub_outlined),
+                  label: const Text('Already in another Matter app?'),
+                ),
+              ],
               const SizedBox(height: 28),
               Container(
                 decoration: BoxDecoration(
@@ -252,7 +327,9 @@ class _DevicePairingCodeEntryScreenState
                             child: Text(
                               widget.hueBridgeOnly
                                   ? 'HUE BULB SERIAL'
-                                  : 'DEVICE SETUP CODE',
+                                  : (_isExistingMatter
+                                      ? 'NEW MATTER PAIRING CODE'
+                                      : 'DEVICE SETUP CODE'),
                               style: TextStyle(
                                 color: _accentBright,
                                 fontSize: 11,
@@ -295,7 +372,9 @@ class _DevicePairingCodeEntryScreenState
                         decoration: InputDecoration(
                           hintText: widget.hueBridgeOnly
                               ? 'E277DA'
-                              : 'Enter the code exactly as shown',
+                              : (_isExistingMatter
+                                  ? 'Paste the new Matter setup code'
+                                  : 'Enter the code exactly as shown'),
                           hintStyle: TextStyle(
                             color: CelestialColors.textSecondary
                                 .withValues(alpha: 0.42),
@@ -350,7 +429,9 @@ class _DevicePairingCodeEntryScreenState
                   label: Text(
                     widget.hueBridgeOnly
                         ? 'Search with Hue Bridge'
-                        : 'Identify & Continue',
+                        : (_isExistingMatter
+                            ? 'Add to Rhythm'
+                            : 'Identify & Continue'),
                     style: TextStyle(
                       fontSize: 16,
                       fontWeight: FontWeight.w700,

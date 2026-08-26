@@ -1,9 +1,19 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmMode;
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmMode, RoomModeState;
+import 'package:uuid/uuid.dart';
 
+import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
 import '../services/analytics_service.dart';
+import 'celestial_segmented_control.dart';
+import 'solar_orbit.dart' show CelestialColors;
+
+// Menu chrome shared with the Alarm Schedule editor's elevated surfaces.
+const Color _menuSurface = Color(0xFF1F2630);
+const Color _menuHairline = Color(0xFF2C3441);
 
 /// The four per-room behaviors available when Day or Night begins.
 enum RoomScheduleBehavior { automatic, standby, off, on }
@@ -27,7 +37,7 @@ String? stateForRoomScheduleBehavior(RoomScheduleBehavior behavior) =>
 String roomScheduleBehaviorLabel(RoomScheduleBehavior behavior) =>
     switch (behavior) {
       RoomScheduleBehavior.automatic => 'Auto',
-      RoomScheduleBehavior.standby => 'Standby',
+      RoomScheduleBehavior.standby => 'Low glow',
       RoomScheduleBehavior.off => 'Off',
       RoomScheduleBehavior.on => 'On',
     };
@@ -39,6 +49,94 @@ RoomScheduleBehavior nextRoomScheduleBehavior(RoomScheduleBehavior behavior) =>
       RoomScheduleBehavior.standby => RoomScheduleBehavior.off,
       RoomScheduleBehavior.off => RoomScheduleBehavior.automatic,
     };
+
+/// Shared commit path for both behavior pickers: optimistic provider write
+/// plus the analytics event matching the surface that triggered it.
+///
+/// With [applyToLightsIfActive], a selection for the mode the home is
+/// currently in also moves the room's lights right away — the preset is the
+/// WHAT of the schedule, so editing the current mode's WHAT should be felt
+/// immediately, exactly like the room card's direct state controls.
+void _applyBehaviorSelection(
+  BuildContext context, {
+  required String roomId,
+  required RhythmMode mode,
+  required RoomScheduleBehavior selected,
+  required String analyticsSource,
+  required String inputMethod,
+  bool applyToLightsIfActive = false,
+}) {
+  final sync = context.read<ServerSyncProvider>();
+  sync.updateRoomDefaultForMode(
+    roomId: roomId,
+    mode: mode,
+    state: stateForRoomScheduleBehavior(selected),
+  );
+  if (applyToLightsIfActive && sync.activeMode == mode) {
+    _applyBehaviorToLightsNow(context, roomId: roomId, behavior: selected);
+  }
+  if (analyticsSource == 'room_schedule_tab') {
+    AnalyticsService().logRoomScheduleInlinePresetChanged(
+      journeyId: 'room-schedule-preset-${const Uuid().v4()}',
+      attemptNumber: 1,
+      inputMethod: inputMethod,
+      mode: mode == RhythmMode.sleep ? 'sleep' : 'wake',
+      behavior: selected.name,
+    );
+  } else {
+    AnalyticsService().logLightProfileRoomDefaultChanged(
+      profile: mode == RhythmMode.sleep ? 'sleep' : 'rhythm',
+      cleared: selected == RoomScheduleBehavior.automatic,
+      source: analyticsSource,
+    );
+  }
+}
+
+/// Move the room's lights to [behavior] immediately, mirroring the room
+/// card's optimistic local update + server push for each state. Auto resets
+/// the room onto the live adaptive curve.
+void _applyBehaviorToLightsNow(
+  BuildContext context, {
+  required String roomId,
+  required RoomScheduleBehavior behavior,
+}) {
+  final roomProvider = context.read<RoomProvider>();
+  final sync = context.read<ServerSyncProvider>();
+  switch (behavior) {
+    case RoomScheduleBehavior.on:
+      roomProvider.setRoomLightsOnLocal(roomId, true);
+      roomProvider.setRoomRhythmEnabled(roomId, true);
+      roomProvider.setRoomStateLocal(roomId, RoomModeState.active);
+      unawaited(sync.pushNodePreferences(
+        roomId,
+        rhythmEnabled: true,
+        state: RoomModeState.active,
+      ));
+    case RoomScheduleBehavior.standby:
+      roomProvider.setRoomLightsOnLocal(roomId, true);
+      roomProvider.setRoomRhythmEnabled(roomId, true);
+      roomProvider.setRoomStateLocal(roomId, RoomModeState.standby);
+      unawaited(sync.pushNodePreferences(
+        roomId,
+        rhythmEnabled: true,
+        state: RoomModeState.standby,
+      ));
+    case RoomScheduleBehavior.off:
+      roomProvider.setRoomLightsOnLocal(roomId, false);
+      roomProvider.setRoomStateLocal(roomId, RoomModeState.hardOff);
+      unawaited(sync.pushNodePreferences(
+        roomId,
+        state: RoomModeState.hardOff,
+      ));
+    case RoomScheduleBehavior.automatic:
+      // Reset is the complete server action: it enables Rhythm, clears
+      // offsets, and dispatches the live curve.
+      roomProvider.setRoomLightsOnLocal(roomId, true);
+      roomProvider.setRoomRhythmEnabled(roomId, true);
+      roomProvider.setRoomStateLocal(roomId, RoomModeState.active);
+      sync.dispatchResetNode(roomId);
+  }
+}
 
 /// Compact access to a room's Day and Night automation behavior.
 ///
@@ -158,7 +256,7 @@ class _ScheduleModeMenu extends StatelessWidget {
       enabled: enabled,
       label: '$title schedule behavior',
       value: label,
-      hint: 'Choose Auto, Standby, Off, or On',
+      hint: 'Choose Auto, Low glow, Off, or On',
       excludeSemantics: true,
       child: PopupMenuButton<RoomScheduleBehavior>(
         key: ValueKey('$keyPrefix-$modeKey-$roomId'),
@@ -168,32 +266,32 @@ class _ScheduleModeMenu extends StatelessWidget {
         position: PopupMenuPosition.under,
         onSelected: (selected) {
           if (selected == behavior) return;
-          context.read<ServerSyncProvider>().updateRoomDefaultForMode(
-                roomId: roomId,
-                mode: mode,
-                state: stateForRoomScheduleBehavior(selected),
-              );
-          AnalyticsService().logLightProfileRoomDefaultChanged(
-            profile: mode == RhythmMode.sleep ? 'sleep' : 'rhythm',
-            cleared: selected == RoomScheduleBehavior.automatic,
-            source: analyticsSource,
+          _applyBehaviorSelection(
+            context,
+            roomId: roomId,
+            mode: mode,
+            selected: selected,
+            analyticsSource: analyticsSource,
+            inputMethod: 'popup_menu',
           );
         },
+        color: _menuSurface,
+        elevation: 12,
+        shadowColor: Colors.black.withValues(alpha: 0.5),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+          side: const BorderSide(color: _menuHairline),
+        ),
+        constraints: const BoxConstraints(minWidth: 216, maxWidth: 248),
         itemBuilder: (_) => [
           for (final option in RoomScheduleBehavior.values)
             PopupMenuItem<RoomScheduleBehavior>(
               value: option,
-              child: Row(
-                children: [
-                  SizedBox(
-                    width: 22,
-                    child: option == behavior
-                        ? Icon(Icons.check_rounded, size: 18, color: accent)
-                        : null,
-                  ),
-                  const SizedBox(width: 8),
-                  Text(roomScheduleBehaviorLabel(option)),
-                ],
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              child: _BehaviorMenuRow(
+                option: option,
+                selected: option == behavior,
+                accent: accent,
               ),
             ),
         ],
@@ -242,6 +340,268 @@ class _ScheduleModeMenu extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// Full-width behavior picker for the room Schedule tab: a Wake row and a
+/// Sleep row, each with all four behaviors visible as one 4-way segmented
+/// control — one tap, nothing hidden behind a menu. Shares state ownership
+/// and analytics with the compact popup variant used on room cards.
+///
+/// Presets are always live — they define WHAT a trigger does regardless of
+/// which schedule source supplies the WHEN. A tap on the row for the home's
+/// current mode also moves the room's lights immediately.
+class RoomScheduleBehaviorSegments extends StatelessWidget {
+  const RoomScheduleBehaviorSegments({
+    super.key,
+    required this.roomId,
+    this.enabled = true,
+    this.keyPrefix = 'room-schedule-presets',
+    this.analyticsSource = 'room_schedule_tab',
+  });
+
+  final String roomId;
+  final bool enabled;
+  final String keyPrefix;
+  final String analyticsSource;
+
+  @override
+  Widget build(BuildContext context) {
+    return Selector<ServerSyncProvider, (String?, String?)>(
+      selector: (_, sync) => (
+        sync.roomDefaultStateForMode(roomId, RhythmMode.day),
+        sync.roomDefaultStateForMode(roomId, RhythmMode.sleep),
+      ),
+      builder: (context, defaults, _) {
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _BehaviorSegmentRow(
+              key: ValueKey('$keyPrefix-day-$roomId'),
+              roomId: roomId,
+              mode: RhythmMode.day,
+              title: 'Wake',
+              icon: Icons.wb_sunny_rounded,
+              accent: const Color(0xFFF9A825),
+              state: defaults.$1,
+              enabled: enabled,
+              keyPrefix: keyPrefix,
+              analyticsSource: analyticsSource,
+            ),
+            const SizedBox(height: 12),
+            _BehaviorSegmentRow(
+              key: ValueKey('$keyPrefix-night-$roomId'),
+              roomId: roomId,
+              mode: RhythmMode.sleep,
+              title: 'Sleep',
+              icon: Icons.bedtime_rounded,
+              accent: const Color(0xFF7C83FF),
+              state: defaults.$2,
+              enabled: enabled,
+              keyPrefix: keyPrefix,
+              analyticsSource: analyticsSource,
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _BehaviorSegmentRow extends StatelessWidget {
+  const _BehaviorSegmentRow({
+    super.key,
+    required this.roomId,
+    required this.mode,
+    required this.title,
+    required this.icon,
+    required this.accent,
+    required this.state,
+    required this.enabled,
+    required this.keyPrefix,
+    required this.analyticsSource,
+  });
+
+  final String roomId;
+  final RhythmMode mode;
+  final String title;
+  final IconData icon;
+  final Color accent;
+  final String? state;
+  final bool enabled;
+  final String keyPrefix;
+  final String analyticsSource;
+
+  @override
+  Widget build(BuildContext context) {
+    final behavior = roomScheduleBehaviorForState(state);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Opacity(
+          opacity: enabled ? 1.0 : 0.5,
+          child: Padding(
+            padding: const EdgeInsets.only(left: 4),
+            child: Row(
+              children: [
+                Icon(icon, size: 13, color: accent),
+                const SizedBox(width: 6),
+                Text(
+                  title.toUpperCase(),
+                  style: TextStyle(
+                    color: accent,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.6,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 6),
+        CelestialSegmentedControl<RoomScheduleBehavior>(
+          segments: [
+            // Ordered as a brightness scale rather than enum order.
+            for (final option in const [
+              RoomScheduleBehavior.automatic,
+              RoomScheduleBehavior.on,
+              RoomScheduleBehavior.standby,
+              RoomScheduleBehavior.off,
+            ])
+              CelestialSegment(
+                value: option,
+                label: roomScheduleBehaviorLabel(option),
+                accent: accent,
+                key: ValueKey(
+                  '$keyPrefix-${mode == RhythmMode.day ? 'day' : 'night'}-'
+                  '${option.name}-$roomId',
+                ),
+                semanticLabel: '$title ${roomScheduleBehaviorLabel(option)}',
+              ),
+          ],
+          selected: behavior,
+          onTap: (option) => _applyBehaviorSelection(
+            context,
+            roomId: roomId,
+            mode: mode,
+            selected: option,
+            analyticsSource: analyticsSource,
+            inputMethod: 'segment',
+            applyToLightsIfActive: true,
+          ),
+          enabled: enabled,
+          // Re-tapping the selected behavior re-applies it to the lights
+          // when this row is the current mode — like tapping On again on a
+          // room card.
+          allowReselect: true,
+          density: CelestialSegmentedDensity.compact,
+        ),
+      ],
+    );
+  }
+}
+
+/// One row of the behavior menu: tinted icon disc, label + one-line meaning,
+/// accent check on the current choice. Styled to the celestial palette rather
+/// than the stock Material menu row.
+class _BehaviorMenuRow extends StatelessWidget {
+  const _BehaviorMenuRow({
+    required this.option,
+    required this.selected,
+    required this.accent,
+  });
+
+  final RoomScheduleBehavior option;
+  final bool selected;
+  final Color accent;
+
+  (IconData, Color, String) get _visual => switch (option) {
+        RoomScheduleBehavior.automatic => (
+            Icons.auto_awesome_rounded,
+            CelestialColors.accentBlue,
+            'Follows the lighting curve',
+          ),
+        RoomScheduleBehavior.on => (
+            Icons.lightbulb_rounded,
+            const Color(0xFF3FB950),
+            'Lights turn on',
+          ),
+        RoomScheduleBehavior.standby => (
+            Icons.nightlight_round,
+            const Color(0xFFFFB74D),
+            'Faint night-light glow',
+          ),
+        RoomScheduleBehavior.off => (
+            Icons.power_settings_new_rounded,
+            CelestialColors.textSecondary,
+            'Lights turn off',
+          ),
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    final (icon, iconColor, meaning) = _visual;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+      decoration: selected
+          ? BoxDecoration(
+              color: accent.withValues(alpha: 0.10),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: accent.withValues(alpha: 0.28)),
+            )
+          : null,
+      child: Row(
+        children: [
+          Container(
+            width: 28,
+            height: 28,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: iconColor.withValues(alpha: 0.14),
+              border: Border.all(color: iconColor.withValues(alpha: 0.32)),
+            ),
+            child: Icon(icon, size: 14, color: iconColor),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  roomScheduleBehaviorLabel(option),
+                  style: TextStyle(
+                    color: CelestialColors.textPrimary
+                        .withValues(alpha: selected ? 1.0 : 0.92),
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.1,
+                  ),
+                ),
+                const SizedBox(height: 1),
+                Text(
+                  meaning,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: CelestialColors.textSecondary
+                        .withValues(alpha: selected ? 0.85 : 0.65),
+                    fontSize: 10.5,
+                    height: 1.2,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (selected) ...[
+            const SizedBox(width: 6),
+            Icon(Icons.check_rounded, size: 16, color: accent),
+          ],
+        ],
       ),
     );
   }

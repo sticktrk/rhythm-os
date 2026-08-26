@@ -15,14 +15,14 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RhythmNodeProfileSettings,
         RhythmTimerSetting;
 import '../screens/hubs/room_device_add_flow.dart';
-import '../screens/settings/light_screen.dart';
 import '../utils/app_color_temperature.dart';
 import 'device_detail_sheet.dart';
-import 'low_glow_switch.dart';
+import 'light_delivery_warning_signal.dart';
+import 'low_glow_switch.dart' show LightProfileOverrideBadge;
 import 'segmented_tab_bar.dart';
 import 'light_output_display.dart';
 import 'auto_slider_setting_row.dart';
-import 'room_schedule_behavior_control.dart';
+import 'room_schedule_tab.dart';
 import 'solar_orbit.dart'; // For CelestialColors
 
 /// Bottom sheet with per-room settings.
@@ -53,10 +53,10 @@ class RoomSettingsSheet extends StatefulWidget {
   State<RoomSettingsSheet> createState() => _RoomSettingsSheetState();
 }
 
-enum _SheetTab { light, motion, buttons }
+enum _SheetTab { lighting, bulbs, motion, buttons }
 
 class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
-  _SheetTab _selectedTab = _SheetTab.light;
+  _SheetTab _selectedTab = _SheetTab.lighting;
   late String _roomName;
   final Map<String, RhythmTimerSetting> _motionTimeoutDrafts = {};
 
@@ -92,28 +92,6 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
         context.read<ServerSyncProvider>().ensureRoomPreviewStateFresh(room.id),
       );
     });
-  }
-
-  void _openRoomLightSettings() {
-    HapticFeedback.lightImpact();
-    LightScreen.showForRoom(
-      context,
-      roomId: room.id,
-      roomName: _roomName,
-    );
-  }
-
-  void _showRoomLightSettingsUnavailable() {
-    HapticFeedback.lightImpact();
-    final version = context.read<ServerSyncProvider>().firmwareVersion;
-    final versionSuffix = version == '0.0.0' ? '' : ' ($version)';
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          'Update the Rhythm appliance$versionSuffix to customize light settings for $_roomName.',
-        ),
-      ),
-    );
   }
 
   @override
@@ -188,7 +166,8 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
                     selected: _selectedTab,
                     onChanged: (tab) => setState(() => _selectedTab = tab),
                     tabs: const [
-                      SegmentedTab('Light', _SheetTab.light),
+                      SegmentedTab('Lighting', _SheetTab.lighting),
+                      SegmentedTab('Bulbs', _SheetTab.bulbs),
                       SegmentedTab('Motion', _SheetTab.motion),
                       SegmentedTab('Buttons', _SheetTab.buttons),
                     ],
@@ -200,9 +179,14 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
                   child: AnimatedSwitcher(
                     duration: const Duration(milliseconds: 200),
                     child: switch (_selectedTab) {
-                      _SheetTab.light => _buildLightContent(context),
+                      _SheetTab.bulbs => _buildBulbsContent(context),
                       _SheetTab.motion => _buildMotionContent(context),
                       _SheetTab.buttons => _buildButtonsContent(context),
+                      _SheetTab.lighting => RoomScheduleTab(
+                          roomId: room.id,
+                          roomName: _roomName,
+                          showRoomLightingOverride: room.kind.isRoom,
+                        ),
                     },
                   ),
                 ),
@@ -377,20 +361,15 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
     );
   }
 
-  Widget _buildLightContent(BuildContext context) {
+  Widget _buildBulbsContent(BuildContext context) {
     final syncProvider = context.watch<ServerSyncProvider>();
-    final standbyEnabled = syncProvider.standbyEnabledForNode(room.id);
-    final lightSettingsSupported =
-        syncProvider.lightProfileOverridesSupportedForNode(room.id);
-    final hasLightOverrides =
-        syncProvider.hasNodeLightProfileOverrides(room.id);
     final lights = syncProvider
         .devicesForRoom(room.id)
         .where((device) => device.type == RhythmDeviceType.light)
         .toList(growable: false);
 
     return ListView(
-      key: const ValueKey('light'),
+      key: const ValueKey('bulbs'),
       padding: const EdgeInsets.symmetric(horizontal: 20),
       children: [
         if (room.kind.isRoom) ...[
@@ -405,41 +384,9 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
             ),
           ]),
           const SizedBox(height: 16),
-          _buildSettingsGroup('Schedule behavior', [
-            Padding(
-              padding: const EdgeInsets.all(10),
-              child: RoomScheduleBehaviorControl(
-                roomId: room.id,
-                foregroundColor: CelestialColors.textPrimary,
-                showTopDivider: false,
-                keyPrefix: 'room-settings-schedule',
-                analyticsSource: 'room_settings',
-              ),
-            ),
-          ]),
-          const SizedBox(height: 16),
         ],
-        // Low glow is the user-facing name for the room's existing Standby
-        // preference, independent of the Day/Sleep profile selection.
-        _buildSettingsGroup('', [
-          if (room.kind.isRoom)
-            LightingOverrideRow(
-              nodeId: room.id,
-              supported: lightSettingsSupported,
-              customized: hasLightOverrides,
-              settingsKeyPrefix: 'room-settings-light',
-              onPressed: lightSettingsSupported
-                  ? _openRoomLightSettings
-                  : _showRoomLightSettingsUnavailable,
-            ),
-          LowGlowSettingRow(
-            value: standbyEnabled,
-            onChanged: (val) => _setStandbyEnabled(context, val),
-          ),
-        ]),
         if (lights.isNotEmpty) ...[
-          const SizedBox(height: 16),
-          _buildDeviceGroup('Lights', lights),
+          _buildDeviceGroup('Bulbs', lights),
         ],
       ],
     );
@@ -464,10 +411,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
       final device = syncProvider.deviceForNode(sourceNode.id);
       if (device == null || device.type != RhythmDeviceType.motion) continue;
       motionSensorsById[device.id] = device;
-      final parentId = sourceNode.parentId;
-      if (parentId != null && parentId.isNotEmpty) {
-        motionParentIds[device.id] = parentId;
-      }
+      motionParentIds[device.id] = sourceNode.parentId?.trim() ?? '';
     }
     final motionSensors = motionSensorsById.values.toList(growable: false)
       ..sort(
@@ -770,13 +714,6 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
     return '${secs}s';
   }
 
-  void _setStandbyEnabled(BuildContext context, bool enabled) {
-    final syncProvider = context.read<ServerSyncProvider>();
-    syncProvider.setNodeStandbyEnabledLocal(room.id, enabled);
-    syncProvider.pushNodePreferences(room.id, standbyEnabled: enabled);
-    HapticFeedback.selectionClick();
-  }
-
   Future<void> _showRenameDialog(BuildContext context) async {
     final controller = TextEditingController(text: _roomName);
     final isRoom = room.kind.isRoom;
@@ -972,7 +909,8 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
       for (final device in devices)
         _DeviceRow(
           device: device,
-          roomId: parentNodeIdsByDevice[device.id] ?? room.id,
+          currentRoomId: room.id,
+          parentRoomId: parentNodeIdsByDevice[device.id] ?? room.id,
         ),
     ]);
   }
@@ -996,9 +934,14 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
 /// A device row in the matching room settings device section.
 class _DeviceRow extends StatefulWidget {
   final RhythmDevice device;
-  final String roomId;
+  final String currentRoomId;
+  final String parentRoomId;
 
-  const _DeviceRow({required this.device, required this.roomId});
+  const _DeviceRow({
+    required this.device,
+    required this.currentRoomId,
+    required this.parentRoomId,
+  });
 
   @override
   State<_DeviceRow> createState() => _DeviceRowState();
@@ -1036,6 +979,9 @@ class _DeviceRowState extends State<_DeviceRow> {
       RhythmDeviceType.motion => 'Motion',
       RhythmDeviceType.contact => 'Contact',
     };
+    final isParentRoom = device.type == RhythmDeviceType.motion &&
+        widget.parentRoomId.isNotEmpty &&
+        widget.parentRoomId == widget.currentRoomId;
     final profileOverride = context.select<
             ServerSyncProvider,
             ({
@@ -1045,6 +991,11 @@ class _DeviceRowState extends State<_DeviceRow> {
             })>(
         (provider) => provider.lightProfileOverrideSummaryForNode(device.id));
     final isLight = device.type == RhythmDeviceType.light;
+    final hasDeliveryWarning =
+        context.select<ServerSyncProvider, bool>((provider) {
+      if (!isLight) return false;
+      return provider.recentLightDeliveryWarningsForNode(device.id).isNotEmpty;
+    });
     final customProfileParts = <String>[
       if (profileOverride.brightnessRange) 'brightness range',
       if (profileOverride.colorTemperatureRange) 'color temperature range',
@@ -1057,16 +1008,27 @@ class _DeviceRowState extends State<_DeviceRow> {
     return Semantics(
       key: ValueKey('room-device-row-${device.id}'),
       button: true,
-      label: '${device.displayName}, $typeLabel$customProfileLabel',
+      label:
+          '${device.displayName}, $typeLabel${isParentRoom ? ', parent room' : ''}$customProfileLabel${hasDeliveryWarning ? ', delivery warning, could not reach this bulb' : ''}',
       hint: isLight
           ? 'Tap for settings. Touch and hold to identify.'
           : 'Tap for settings.',
-      onTap: () => DeviceDetailSheet.show(context, device, widget.roomId),
+      onTap: () => DeviceDetailSheet.show(
+        context,
+        device,
+        widget.currentRoomId,
+        parentRoomId: widget.parentRoomId,
+      ),
       onLongPress: isLight && !_identifying ? _identify : null,
       excludeSemantics: true,
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onTap: () => DeviceDetailSheet.show(context, device, widget.roomId),
+        onTap: () => DeviceDetailSheet.show(
+          context,
+          device,
+          widget.currentRoomId,
+          parentRoomId: widget.parentRoomId,
+        ),
         onLongPress: isLight && !_identifying ? _identify : null,
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
@@ -1105,6 +1067,20 @@ class _DeviceRowState extends State<_DeviceRow> {
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
+                    if (hasDeliveryWarning)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 3),
+                        child: Text(
+                          'Couldn\u2019t reach this bulb',
+                          style: TextStyle(
+                            color: lightDeliveryWarningColor,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -1120,6 +1096,13 @@ class _DeviceRowState extends State<_DeviceRow> {
                 ),
               ],
               const SizedBox(width: 8),
+              if (hasDeliveryWarning) ...[
+                LightDeliveryWarningSignal(
+                  key: ValueKey('room-device-delivery-warning-${device.id}'),
+                  size: 18,
+                ),
+                const SizedBox(width: 8),
+              ],
               if (_identifying)
                 const SizedBox(
                   key: ValueKey('room-device-identify-progress'),
@@ -1130,7 +1113,7 @@ class _DeviceRowState extends State<_DeviceRow> {
                     color: Color(0xFFFFB74D),
                   ),
                 )
-              else
+              else ...[
                 Text(
                   typeLabel,
                   style: const TextStyle(
@@ -1138,6 +1121,31 @@ class _DeviceRowState extends State<_DeviceRow> {
                     fontSize: 12,
                   ),
                 ),
+                if (isParentRoom) ...[
+                  const SizedBox(width: 6),
+                  Container(
+                    key: ValueKey('room-device-parent-badge-${device.id}'),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: CelestialColors.sunWarm.withValues(alpha: 0.14),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(
+                        color: CelestialColors.sunWarm.withValues(alpha: 0.35),
+                      ),
+                    ),
+                    child: const Text(
+                      'PARENT',
+                      style: TextStyle(
+                        color: CelestialColors.sunWarm,
+                        fontSize: 9,
+                        fontWeight: FontWeight.w700,
+                        letterSpacing: 0.5,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
             ],
           ),
         ),

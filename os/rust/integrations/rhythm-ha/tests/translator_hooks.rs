@@ -5,6 +5,7 @@ use std::time::Duration;
 use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_core::ButtonAction;
 use rhythm_ha::ha_lifecycle::{start_event_translator, HaWsEvent};
+use rhythm_ha::hub_state::HaEventRoutingCache;
 use rhythm_ha::registry::HaDeviceRegistry;
 use rhythm_os::button_resolve::RawButtonEvent;
 use rhythm_os::hub::HubEvent;
@@ -48,6 +49,7 @@ fn translator_uses_raw_button_hook_for_unknown_hue_event() {
         ws_rx,
         registry,
         Arc::new(AtomicBool::new(false)),
+        Arc::new(Mutex::new(HaEventRoutingCache::default())),
         None,
         Some(on_unknown_button),
         None,
@@ -106,6 +108,7 @@ fn translator_uses_motion_hook_for_unknown_state_changed_motion() {
         ws_rx,
         registry,
         Arc::new(AtomicBool::new(false)),
+        Arc::new(Mutex::new(HaEventRoutingCache::default())),
         None,
         None,
         Some(on_unknown_motion),
@@ -161,6 +164,7 @@ fn translator_uses_contact_hook_for_unknown_state_changed_contact() {
         ws_rx,
         registry,
         Arc::new(AtomicBool::new(false)),
+        Arc::new(Mutex::new(HaEventRoutingCache::default())),
         None,
         None,
         None,

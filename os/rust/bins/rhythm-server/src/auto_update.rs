@@ -23,7 +23,7 @@ use rhythm_os::state::SharedState;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::self_update::{self, UpdateChannel};
+use crate::self_update::{self, OtaStatusHandle, UpdateChannel};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const MIN_BETWEEN_CHECKS: Duration = Duration::from_secs(20 * 60 * 60);
@@ -34,7 +34,7 @@ const MIN_SANE_YEAR: i32 = 2024;
 const AUTO_UPDATE_STATE_SCHEMA_VERSION: u32 = 1;
 pub const AUTO_UPDATE_STATE_RELATIVE_PATH: &str = "ota/auto-update-state.json";
 
-pub fn spawn(state: SharedState) {
+pub fn spawn(state: SharedState, ota_status: OtaStatusHandle) {
     if !should_spawn_for_state(&state) {
         info!(target: "sys", "auto-update: skipping loop (not appliance)");
         return;
@@ -42,11 +42,11 @@ pub fn spawn(state: SharedState) {
 
     thread::Builder::new()
         .name("auto-update".to_string())
-        .spawn(move || run(state))
+        .spawn(move || run(state, ota_status))
         .expect("Failed to spawn auto-update thread");
 }
 
-fn run(state: SharedState) {
+fn run(state: SharedState, ota_status: OtaStatusHandle) {
     info!(
         target: "sys",
         "auto-update: loop started (poll={}s, window={}-{} local, min_between_checks={}h)",
@@ -59,7 +59,7 @@ fn run(state: SharedState) {
     let mut last_attempt: Option<RecentAttempt> = None;
 
     loop {
-        maybe_attempt_update(&state, &mut last_attempt);
+        maybe_attempt_update(&state, &ota_status, &mut last_attempt);
         thread::sleep(POLL_INTERVAL);
     }
 }
@@ -70,7 +70,11 @@ struct RecentAttempt {
     decision: AutoUpdateDecision,
 }
 
-fn maybe_attempt_update(state: &SharedState, last_attempt: &mut Option<RecentAttempt>) {
+fn maybe_attempt_update(
+    state: &SharedState,
+    ota_status: &OtaStatusHandle,
+    last_attempt: &mut Option<RecentAttempt>,
+) {
     let snapshot = match snapshot_settings(state) {
         Some(s) => s,
         None => return,
@@ -101,7 +105,7 @@ fn maybe_attempt_update(state: &SharedState, last_attempt: &mut Option<RecentAtt
         return;
     }
 
-    let decision = attempt_update(state, &snapshot);
+    let decision = attempt_update(state, &snapshot, ota_status);
     *last_attempt = Some(RecentAttempt {
         at: Instant::now(),
         decision,
@@ -244,6 +248,7 @@ pub fn load_status_json(state: &SharedState) -> Option<Value> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum AutoUpdateDecision {
+    SkippedBusy,
     CheckFailed,
     UpToDate,
     SkippedRecentRollback,
@@ -256,6 +261,7 @@ enum AutoUpdateDecision {
 impl AutoUpdateDecision {
     fn as_str(self) -> &'static str {
         match self {
+            Self::SkippedBusy => "skipped_busy",
             Self::CheckFailed => "check_failed",
             Self::UpToDate => "up_to_date",
             Self::SkippedRecentRollback => "skipped_recent_rollback",
@@ -271,13 +277,14 @@ impl AutoUpdateDecision {
             // A transient Wi-Fi/feed blip should not burn the whole daily
             // update window. Retry on the next poll while preserving the
             // durable "last check failed" state for postmortems.
-            Self::CheckFailed => CHECK_FAILURE_RETRY_INTERVAL,
+            Self::SkippedBusy | Self::CheckFailed => CHECK_FAILURE_RETRY_INTERVAL,
             _ => MIN_BETWEEN_CHECKS,
         }
     }
 
     fn from_str(value: &str) -> Self {
         match value {
+            "skipped_busy" => Self::SkippedBusy,
             "check_failed" => Self::CheckFailed,
             "up_to_date" => Self::UpToDate,
             "skipped_recent_rollback" => Self::SkippedRecentRollback,
@@ -290,11 +297,22 @@ impl AutoUpdateDecision {
     }
 }
 
-fn attempt_update(state: &SharedState, settings: &LoopSettings) -> AutoUpdateDecision {
+fn attempt_update(
+    state: &SharedState,
+    settings: &LoopSettings,
+    ota_status: &OtaStatusHandle,
+) -> AutoUpdateDecision {
     let version = crate::BUILD_VERSION;
     let channel = settings.channel;
     let state_path = auto_update_state_path(settings);
     let checked_at = Utc::now();
+    let operation = match ota_status.begin_operation() {
+        Ok(operation) => operation,
+        Err(error) => {
+            info!(target: "sys", "auto-update: skipping check: {}", error);
+            return AutoUpdateDecision::SkippedBusy;
+        }
+    };
     info!(
         target: "sys",
         "auto-update: checking {} feed (v{} -> ?)",
@@ -320,12 +338,18 @@ fn attempt_update(state: &SharedState, settings: &LoopSettings) -> AutoUpdateDec
                     channel,
                     version,
                     AutoUpdateDecision::CheckFailed,
-                    e,
+                    e.clone(),
                 ),
             );
+            let _ = ota_status.mark_error(&operation, e);
             return AutoUpdateDecision::CheckFailed;
         }
     };
+
+    if let Err(error) = ota_status.record_check_result(&operation, &info) {
+        warn!(target: "sys", "auto-update: failed to record check status: {}", error);
+        return AutoUpdateDecision::CheckFailed;
+    }
 
     if !info.update_available {
         info!(target: "sys", "auto-update: already current (v{})", info.current_version);
@@ -367,7 +391,20 @@ fn attempt_update(state: &SharedState, settings: &LoopSettings) -> AutoUpdateDec
                 None,
             ),
         );
+        let _ = ota_status.mark_skipped(
+            &operation,
+            format!(
+                "Skipped v{} because this appliance just rolled it back",
+                info.latest_version
+            ),
+        );
         return AutoUpdateDecision::SkippedRecentRollback;
+    }
+
+    if let Err(error) = ota_status.begin_update(&operation, &info.latest_version) {
+        warn!(target: "sys", "auto-update: failed to retain operation lease: {}", error);
+        let _ = ota_status.mark_error(&operation, error);
+        return AutoUpdateDecision::ApplyFailed;
     }
 
     info!(
@@ -420,6 +457,14 @@ fn attempt_update(state: &SharedState, settings: &LoopSettings) -> AutoUpdateDec
                     ),
                 );
             }
+            if let Err(error) = ota_status.mark_restarting(
+                &operation,
+                &info.current_version,
+                &info.latest_version,
+                result.checksum_verified,
+            ) {
+                warn!(target: "sys", "auto-update: failed to record restart status: {}", error);
+            }
             let restart_persist_error = if let Err(error) =
                 self_update::schedule_post_update_restart_with_best_effort_persist(state.clone())
             {
@@ -464,6 +509,7 @@ fn attempt_update(state: &SharedState, settings: &LoopSettings) -> AutoUpdateDec
                     restart_persist_error,
                 ),
             );
+            operation.retain_for_restart();
             outcome
         }
         Err(e) => {
@@ -490,11 +536,12 @@ fn attempt_update(state: &SharedState, settings: &LoopSettings) -> AutoUpdateDec
                     &info,
                     AutoUpdateDecision::ApplyFailed,
                     "Update failed".to_string(),
-                    Some(e),
+                    Some(e.clone()),
                     None,
                     None,
                 ),
             );
+            let _ = ota_status.mark_error(&operation, e);
             AutoUpdateDecision::ApplyFailed
         }
     }
@@ -767,6 +814,25 @@ fn update_reason_name(reason: Option<self_update::UpdateReason>) -> Option<Strin
 }
 
 #[cfg(test)]
+pub(crate) fn hold_failed_apply_for_test(
+    ota_status: OtaStatusHandle,
+    apply_entered: std::sync::Arc<std::sync::Barrier>,
+    release_apply: std::sync::Arc<std::sync::Barrier>,
+) {
+    let operation = ota_status
+        .begin_operation()
+        .expect("auto-update test operation should acquire the shared gate");
+    ota_status
+        .begin_update(&operation, "test-auto-update")
+        .expect("auto-update test operation should enter apply");
+    apply_entered.wait();
+    release_apply.wait();
+    ota_status
+        .mark_error(&operation, "simulated auto-update apply failure")
+        .expect("auto-update test operation should record terminal failure");
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use chrono::TimeZone;
@@ -891,7 +957,8 @@ mod tests {
         assert!(settings.auto_update);
         assert_eq!(settings.channel, UpdateChannel::Beta);
 
-        let decision = attempt_update(&state, &settings);
+        let ota_status = OtaStatusHandle::new(crate::BUILD_VERSION);
+        let decision = attempt_update(&state, &settings, &ota_status);
 
         std::env::remove_var("RHYTHM_UPDATE_BASE_URL");
 

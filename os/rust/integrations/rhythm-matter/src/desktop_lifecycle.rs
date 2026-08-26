@@ -394,6 +394,19 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
         state: &SharedState,
         params: &serde_json::Value,
     ) -> Result<PairingSession> {
+        self.start_pairing_with_context(
+            state,
+            params,
+            rhythm_os::pairing::PairingRequestContext::accepted_now(),
+        )
+    }
+
+    fn start_pairing_with_context(
+        &self,
+        state: &SharedState,
+        params: &serde_json::Value,
+        context: rhythm_os::pairing::PairingRequestContext,
+    ) -> Result<PairingSession> {
         let request = crate::commissioning::MatterPairingParams::from_value(params)?;
         rhythm_os::pairing::emit_pairing_progress(
             state,
@@ -420,7 +433,9 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
             None,
             None,
         );
-        crate::commissioning::pair_device(state, transport, hub_data, &request)
+        crate::commissioning::pair_device_with_context(
+            state, transport, hub_data, &request, &context,
+        )
     }
 
     fn start_unpairing(

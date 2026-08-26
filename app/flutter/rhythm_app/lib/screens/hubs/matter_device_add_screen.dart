@@ -126,7 +126,8 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
   late final AnimationController _pulseController;
   late final AnimationController _sweepController;
   late final RhythmMatterApi _pairingApi;
-  late final String _sessionId;
+  late final String _journeyId;
+  late String _pairingSessionId;
 
   _PairingPhase _phase = _PairingPhase.input;
   String? _errorText;
@@ -145,8 +146,9 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
           baseUrl: widget.endpoint.baseUrl,
           authToken: widget.authToken,
         );
-    _sessionId = widget.journeyId ??
+    _journeyId = widget.journeyId ??
         'matter-pair-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}';
+    _pairingSessionId = _newPairingSessionId();
     _pulseController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 2000),
@@ -186,7 +188,9 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     if (connection == null) return;
     _progressSub = connection.pairingProgressEvents.listen((event) {
       if (!mounted) return;
-      if (event.sessionId != null && event.sessionId != _sessionId) return;
+      if (event.sessionId != null && event.sessionId != _pairingSessionId) {
+        return;
+      }
       if (event.hubType != 'matter') return;
       setState(() {
         _latestProgress = event;
@@ -216,9 +220,12 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       widget.addMethod.requiresWifiCommissioningPreflight;
 
   String get _sessionShortId {
-    final tail = _sessionId.split('-').last;
+    final tail = _pairingSessionId.split('-').last;
     return tail.length > 8 ? tail.substring(tail.length - 8) : tail;
   }
+
+  String _newPairingSessionId() =>
+      'matter-pair-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}-$_attemptNumber';
 
   String get _phaseTag => switch (_phase) {
         _PairingPhase.input => '01 / CAPTURE',
@@ -242,7 +249,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     final result = await DevicePairingScannerScreen.show(
       context,
       showEnterCodeAction: false,
-      journeyId: _sessionId,
+      journeyId: _journeyId,
     );
     final payload = result?.payload;
     if (!mounted ||
@@ -268,8 +275,9 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
 
     _pairingRequestInFlight = true;
     _attemptNumber += 1;
+    _pairingSessionId = _newPairingSessionId();
     AnalyticsService().logMatterPairingAttempted(
-      journeyId: _sessionId,
+      journeyId: _journeyId,
       source: widget.analyticsSource,
       inputMethod: _inputMethod,
       addMethod: _analyticsAddMethod,
@@ -314,10 +322,10 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
 
       final result = await _pairingApi.pairDevice(
         setupPayload: setupPayload,
-        rendezvous: 'auto',
+        rendezvous: widget.addMethod.rendezvous,
         network: 'wifi',
         receiveTimeout: _pairingRequestTimeout,
-        sessionId: _sessionId,
+        sessionId: _pairingSessionId,
       );
 
       if (!mounted) return;
@@ -334,7 +342,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       if (result.status == 'failed') {
         _showPairingError(
           'Pairing failed.',
-          detail: result.error,
+          detail: _userFacingMatterPairingDetail(result.error),
           failureStage: 'commissioning',
           recoveryAction: result.recoveryAction,
         );
@@ -387,6 +395,34 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     }
   }
 
+  String? _userFacingMatterPairingDetail(String? detail) {
+    final trimmed = detail?.trim();
+    if (trimmed == null || trimmed.isEmpty) return null;
+
+    final lower = trimmed.toLowerCase();
+    const technicalMarkers = <String>[
+      'bluez',
+      'chip error',
+      'blemanagerimpl.cpp',
+      'pasesession.cpp',
+      'native/chip_bridge',
+      'chip sidecar',
+      'chip rpc',
+    ];
+    if (technicalMarkers.any(lower.contains)) {
+      if (widget.addMethod == MatterAddMethod.onNetworkSetupCode) {
+        return 'Rhythm could not reach the device over your local Matter '
+            'network. Keep its sharing window open and check that the Rhythm '
+            'Box can use your Thread border router\'s IPv6 route, then try '
+            'again.';
+      }
+      return 'The device stopped responding before setup finished. Put it '
+          'back in pairing mode, keep it near the Rhythm Box, and try again.';
+    }
+
+    return trimmed;
+  }
+
   Future<void> _simulateDemoPairing() async {
     await Future.delayed(const Duration(milliseconds: 1500));
     if (!mounted) return;
@@ -423,7 +459,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     String? recoveryAction,
   }) {
     AnalyticsService().logMatterPairingCompleted(
-      journeyId: _sessionId,
+      journeyId: _journeyId,
       source: widget.analyticsSource,
       inputMethod: _inputMethod,
       addMethod: _analyticsAddMethod,
@@ -584,7 +620,11 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
           accent: _teal,
           warning: _amber,
           helperText: _setupPayloadController.text.isEmpty
-              ? 'Paste the setup payload or the code printed on the device.'
+              ? (widget.addMethod == MatterAddMethod.onNetworkSetupCode
+                  ? 'Paste the new setup code from the Matter app that '
+                      'already controls this device.'
+                  : 'Paste the setup payload or the code printed on the '
+                      'device.')
               : (_looksLikeMatterPayload
                   ? 'Ready to send to the server.'
                   : 'Enter a Matter QR payload or the numeric Matter setup '
@@ -605,6 +645,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
   }
 
   Widget _buildDeviceReadinessCard() {
+    final isOnNetwork = widget.addMethod == MatterAddMethod.onNetworkSetupCode;
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
@@ -633,8 +674,8 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  'Ready the device',
+                Text(
+                  isOnNetwork ? 'Open Matter pairing mode' : 'Ready the device',
                   style: TextStyle(
                     color: CelestialColors.textPrimary,
                     fontSize: 16,
@@ -643,12 +684,23 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
                 ),
                 const SizedBox(height: 5),
                 Text(
-                  _hasFailedOnce
-                      ? 'Put the device back in pairing mode, then try its '
-                          'setup code again. Follow the device maker’s reset '
-                          'instructions if needed.'
-                      : 'Keep the device powered on and in pairing mode while '
-                          'Rhythm connects to it.',
+                  isOnNetwork
+                      ? (_hasFailedOnce
+                          ? 'Reopen pairing mode in the app that already '
+                              'controls this device and use the new code it '
+                              'provides. Keep the existing connection in place; '
+                              'do not factory-reset the device.'
+                          : 'In the app that already controls this device, '
+                              'choose “Turn On Pairing Mode” or “Add another '
+                              'controller,” then use the new Matter code it '
+                              'provides. Keep the device powered and on the '
+                              'same home network.')
+                      : (_hasFailedOnce
+                          ? 'Put the device back in pairing mode, then try its '
+                              'setup code again. Follow the device maker’s '
+                              'reset instructions if needed.'
+                          : 'Keep the device powered on and in pairing mode '
+                              'while Rhythm connects to it.'),
                   style: TextStyle(
                     color:
                         CelestialColors.textSecondary.withValues(alpha: 0.78),

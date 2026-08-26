@@ -8,6 +8,7 @@ import '../../providers/server_sync_provider.dart';
 import '../../services/hue/hue_service_locator.dart';
 import '../../services/server_endpoint_resolver.dart';
 import '../../widgets/device_detail_sheet.dart';
+import '../../widgets/blocking_operation_overlay.dart';
 import 'device_pairing_code_entry_screen.dart';
 import 'device_pairing_scanner_screen.dart';
 import 'matter_add_method.dart';
@@ -55,12 +56,19 @@ Future<void> startMatterPairingFlow(
       final scanResult = await DevicePairingScannerScreen.show(
         context,
         journeyId: activeJourneyId,
+        matterOnNetworkAvailable: syncProvider.canAddMatterOnNetworkDevice,
       );
       if (!context.mounted || scanResult == null) return;
       intakeResult = scanResult.action == DevicePairingScannerAction.enterCode
           ? await DevicePairingCodeEntryScreen.show(
               context,
               journeyId: activeJourneyId,
+              matterOnNetworkAvailable:
+                  syncProvider.canAddMatterOnNetworkDevice,
+              matterAddMethod: scanResult.matterAddMethod ??
+                  (addMethod == MatterAddMethod.onNetworkSetupCode
+                      ? addMethod
+                      : null),
             )
           : scanResult;
       if (!context.mounted) return;
@@ -69,6 +77,9 @@ Future<void> startMatterPairingFlow(
       intakeResult = await DevicePairingCodeEntryScreen.show(
         context,
         journeyId: activeJourneyId,
+        matterOnNetworkAvailable: syncProvider.canAddMatterOnNetworkDevice,
+        matterAddMethod:
+            addMethod == MatterAddMethod.onNetworkSetupCode ? addMethod : null,
       );
       if (!context.mounted || intakeResult == null) return;
     }
@@ -81,7 +92,7 @@ Future<void> startMatterPairingFlow(
       context,
       endpoint: serverEndpoint.endpoint,
       authToken: serverEndpoint.hub.token,
-      addMethod: addMethod,
+      addMethod: intakeResult.matterAddMethod ?? addMethod,
       analyticsSource: analyticsSource,
       journeyId: activeJourneyId,
       initialSetupPayload: intakeResult.payload,
@@ -100,14 +111,22 @@ Future<void> startMatterPairingFlow(
     );
   }
 
-  if (HueServiceLocator.isDemoMode) {
-    await syncProvider.fullRefresh();
-  } else {
-    await syncProvider.connection.reconnect();
+  final finalizingOverlay = showBlockingOperationOverlay(
+    context,
+    message: 'Finishing setup…',
+  );
+  ({RhythmDevice device, String parentNodeId})? pairedDevice;
+  try {
+    if (HueServiceLocator.isDemoMode) {
+      await syncProvider.fullRefresh();
+    } else {
+      await syncProvider.connection.reconnect();
+    }
+    if (!context.mounted) return;
+    pairedDevice = await _resolvePairedMatterDevice(context, pairingResult);
+  } finally {
+    finalizingOverlay.remove();
   }
-  if (!context.mounted) return;
-
-  final pairedDevice = await _resolvePairedMatterDevice(context, pairingResult);
   if (!context.mounted) return;
 
   if (pairedDevice == null) {

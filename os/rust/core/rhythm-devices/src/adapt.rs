@@ -122,12 +122,15 @@ fn select_color(
 
     match color {
         ColorRequest::DirectColor { xy, hue_saturation } => {
-            if supports_hs {
-                (None, None, Some(hue_saturation))
-            } else if supports_xy {
-                (None, Some(clamp_xy(caps, xy)), None)
-            } else {
-                (None, None, None)
+            let clamped_xy = clamp_xy(caps, xy);
+            match preference {
+                ColorPreference::PreferXy if supports_xy => (None, Some(clamped_xy), None),
+                ColorPreference::PreferHueSaturation if supports_hs => {
+                    (None, None, Some(hue_saturation))
+                }
+                _ if supports_hs => (None, None, Some(hue_saturation)),
+                _ if supports_xy => (None, Some(clamped_xy), None),
+                _ => (None, None, None),
             }
         }
         ColorRequest::Xy(xy) => {
@@ -519,6 +522,28 @@ mod tests {
         assert_eq!(adapted.kelvin, None);
         assert_eq!(adapted.xy, None);
         assert_eq!(adapted.hue_saturation, Some((32, 254)));
+    }
+
+    #[test]
+    fn extended_color_direct_color_honors_explicit_xy_preference() {
+        let caps = LightCapabilities {
+            color_modes: vec![ColorMode::HueSaturation, ColorMode::Xy],
+            ..LightCapabilities::defaults_for(LightType::ExtendedColor)
+        };
+        let adapted = adapt_command(
+            &caps,
+            80,
+            ColorRequest::DirectColor {
+                xy: (0.45, 0.25),
+                hue_saturation: (32, 254),
+            },
+            None,
+            ColorPreference::PreferXy,
+        );
+
+        assert_eq!(adapted.kelvin, None);
+        assert_eq!(adapted.xy, Some((0.45, 0.25)));
+        assert_eq!(adapted.hue_saturation, None);
     }
 
     #[test]

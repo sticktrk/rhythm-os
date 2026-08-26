@@ -9,7 +9,6 @@
 //! `rhythm_os::lifecycle`. This module keeps only HA-specific logic:
 //! `HaWsEvent` enum, `connect_ha` wrapper, and `ensure_ha_runtime`.
 
-use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
@@ -17,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use log::info;
 
-use crate::hub_state::HaHubData;
+use crate::hub_state::{HaEventRoutingCache, HaHubData};
 use crate::registry::HaDeviceRegistry;
 use crate::transport::HaConnectionConfig;
 
@@ -32,13 +31,13 @@ pub const HA_HUB_TYPE: &str = "homeassistant";
 
 /// Connect to HA and set up the hub (generic over transport).
 ///
-/// Creates a `device_area_cache` (initially empty) and shares it with
+/// Creates an event routing cache (initially empty) and shares it with
 /// both `HaHubData` (for later population) and the event translator
 /// (for on-demand button discovery).
 ///
 /// The `start_event_stream` closure is provided by the platform crate to
-/// handle the actual WS transport. It now receives the device_area_cache
-/// so the event translator can use it for button resolution.
+/// handle the actual WS transport. It receives the routing cache so the event
+/// translator can resolve buttons and camera motion sub-events.
 ///
 /// Returns `(ActiveHub, Receiver<HubEvent>)`. The runtime inside ActiveHub
 /// is `None` — call the platform's `ensure_runtime()` when the first room arrives.
@@ -54,14 +53,14 @@ where
         &HaConnectionConfig,
         Arc<Mutex<HaDeviceRegistry>>,
         Arc<AtomicBool>,
-        Arc<Mutex<HashMap<String, String>>>,
+        Arc<Mutex<HaEventRoutingCache>>,
     ) -> Receiver<HubEvent>,
 {
     info!(target: "sys", "Connecting to HA at {}:{}...", config.host, config.port);
 
     let config_clone = config.clone();
-    let device_area_cache = Arc::new(Mutex::new(HashMap::new()));
-    let cache_for_hub = device_area_cache.clone();
+    let event_routing_cache = Arc::new(Mutex::new(HaEventRoutingCache::default()));
+    let cache_for_hub = event_routing_cache.clone();
 
     rhythm_os::lifecycle::connect_hub(
         state,
@@ -74,12 +73,12 @@ where
             Box::new(HaHubData {
                 config: config_clone,
                 registry,
-                device_area_cache: cache_for_hub,
+                event_routing_cache: cache_for_hub,
             })
         },
         // start_event_stream: wrap the platform closure with HA config + cache
         move |registry, shutdown| {
-            start_event_stream(&config, registry, shutdown, device_area_cache)
+            start_event_stream(&config, registry, shutdown, event_routing_cache)
         },
     )
 }
@@ -127,6 +126,7 @@ pub fn start_event_translator(
     ws_rx: Receiver<HaWsEvent>,
     registry: Arc<Mutex<HaDeviceRegistry>>,
     shutdown: Arc<AtomicBool>,
+    event_routing_cache: Arc<Mutex<HaEventRoutingCache>>,
     on_activity: Option<Arc<dyn Fn() + Send + Sync>>,
     on_unknown_button: Option<Arc<dyn Fn(&RawButtonEvent) + Send + Sync>>,
     on_unknown_motion: Option<Arc<dyn Fn(&str) + Send + Sync>>,
@@ -154,6 +154,7 @@ pub fn start_event_translator(
                         event_type,
                         data,
                         &registry,
+                        &event_routing_cache,
                         activity_ref,
                         unknown_button_ref,
                         unknown_motion_ref,
@@ -277,7 +278,7 @@ mod tests {
             Some("Kitchen")
         );
         assert_eq!(
-            data.device_area_cache
+            data.event_routing_cache
                 .lock()
                 .unwrap()
                 .get("device-1")
@@ -312,6 +313,7 @@ mod tests {
             rx,
             registry,
             Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(HaEventRoutingCache::default())),
             None,
             None,
             None,

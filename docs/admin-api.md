@@ -3,17 +3,21 @@
 Launch the local staff admin API from the repo root with:
 
 ```sh
-cd admin-api && dart pub get && dart run bin/server.dart
+cd admin-api
+dart pub get
+python3 ../tools/config/run.py --consumer admin-api -- dart run bin/server.dart
 ```
 
 The API listens on `http://127.0.0.1:8787` by default.
 
 ## Environment
 
-Create `admin-api/.env` before launching if it does not already exist:
+Provision and validate the external `admin-api` profile from the repository
+root. The default live path is `~/.config/rhythm/admin-api.env`:
 
 ```sh
-test -f admin-api/.env || cp admin-api/.env.example admin-api/.env
+python3 tools/config/provision.py --profile admin-api
+python3 tools/config/validate.py --consumer admin-api
 ```
 
 Required values:
@@ -30,8 +34,9 @@ Useful optional values:
 - `ADMIN_API_PORT`
 - `ADMIN_API_ALLOWED_ORIGINS`
 
-The server loads env values from the process, `admin-api/.env`, and the Flutter
-app env file when present.
+The wrapper validates the external profile and exposes only its declared keys
+to the server process. Process environment values remain explicit overrides;
+the profile is never copied into the checkout.
 
 ## Check It
 

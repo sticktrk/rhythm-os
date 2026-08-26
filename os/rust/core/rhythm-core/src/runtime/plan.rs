@@ -64,8 +64,15 @@ pub fn runtime_node_kind_from_light_node_kind(
 pub fn runtime_lighting_command_from_core(
     command: &LightingCommand,
 ) -> rhythm_runtime_api::LightingCommand {
-    let mut runtime_command =
-        rhythm_runtime_api::LightingCommand::new(command.brightness, command.kelvin);
+    let mut runtime_command = if command.is_direct_color {
+        rhythm_runtime_api::LightingCommand::from_direct_color(
+            command.brightness,
+            [command.rgb.r, command.rgb.g, command.rgb.b],
+            [command.xy.x, command.xy.y],
+        )
+    } else {
+        rhythm_runtime_api::LightingCommand::new(command.brightness, command.kelvin)
+    };
     runtime_command.transition_ms = command.transition_ms;
     runtime_command
 }
@@ -73,7 +80,18 @@ pub fn runtime_lighting_command_from_core(
 pub fn core_lighting_command_from_runtime(
     command: &rhythm_runtime_api::LightingCommand,
 ) -> LightingCommand {
-    let mut core = LightingCommand::new(command.brightness, command.kelvin);
+    let mut core = match command.direct_color {
+        Some(direct) => LightingCommand::from_color(
+            command.brightness,
+            crate::Rgb::new(direct.rgb[0], direct.rgb[1], direct.rgb[2]),
+            crate::XyColor {
+                x: direct.xy[0],
+                y: direct.xy[1],
+            },
+            None,
+        ),
+        None => LightingCommand::new(command.brightness, command.kelvin),
+    };
     core.transition_ms = command.transition_ms;
     core
 }
@@ -423,6 +441,26 @@ mod tests {
         assert_eq!(runtime.kelvin, 2700);
         assert_eq!(runtime.transition_ms, Some(1500));
         assert_eq!(core_lighting_command_from_runtime(&runtime), core);
+
+        let direct = LightingCommand::from_color(
+            1,
+            crate::Rgb::new(38, 62, 255),
+            crate::XyColor {
+                x: 0.1616,
+                y: 0.087,
+            },
+            Some(500),
+        );
+        let runtime_direct = runtime_lighting_command_from_core(&direct);
+        assert_eq!(runtime_direct.kelvin, 0);
+        assert_eq!(
+            runtime_direct.direct_color,
+            Some(rhythm_runtime_api::DirectColor {
+                rgb: [38, 62, 255],
+                xy: [0.1616, 0.087],
+            })
+        );
+        assert_eq!(core_lighting_command_from_runtime(&runtime_direct), direct);
     }
 
     #[test]
@@ -585,6 +623,79 @@ mod tests {
                 ..
             }) if node_id == "room-a"
         ));
+    }
+
+    #[test]
+    fn periodic_standby_plan_preserves_room_direct_color() {
+        let runtime = test_runtime();
+        runtime.add_room("room-a", "Room A");
+        let direct = crate::LightDirectColor {
+            xy: crate::XyColor {
+                x: 0.1616,
+                y: 0.087,
+            },
+            rgb: crate::Rgb::new(38, 62, 255),
+        };
+        let mut profile_settings = crate::RoomProfileSettings::default();
+        profile_settings.profile_overrides.insert(
+            crate::DAY_IDLE_PROFILE_ID.to_string(),
+            crate::LightProfileNodeOverride {
+                curve: Some(crate::LightCurveShape::Constant {
+                    brightness: 1.0,
+                    color_temp: 0.0,
+                    direct_color: Some(direct.clone()),
+                }),
+                ..Default::default()
+            },
+        );
+        runtime.restore_room_state(
+            "room-a",
+            RestoredRoomState {
+                rhythm_enabled: true,
+                disabled: false,
+                time_offset_minutes: 0.0,
+                brightness_offset: 0.0,
+                soft_off: true,
+                mood_active: false,
+                standby_enabled: true,
+                hard_off: false,
+                profile_settings,
+            },
+        );
+        let tick = TickContext {
+            node_id: "hue-group-room-a".to_string(),
+            hour: 19.0,
+            epoch_ms: None,
+            metadata: Default::default(),
+        };
+
+        let outcome = runtime
+            .plan_periodic_node_tick(&tick, "room-a", None)
+            .unwrap();
+        let RhythmPeriodicPlanOutcome::Plan {
+            plan,
+            dispatch_records,
+        } = outcome
+        else {
+            panic!("expected standby dispatch plan");
+        };
+
+        let Some(DispatchCommand::TurnOn { command, .. }) = plan.dispatch.first() else {
+            panic!("expected grouped turn-on command");
+        };
+        assert_eq!(command.brightness, 1);
+        assert_eq!(
+            command.direct_color,
+            Some(rhythm_runtime_api::DirectColor {
+                rgb: [38, 62, 255],
+                xy: [0.162, 0.087],
+            })
+        );
+        assert!(dispatch_records[0].command.is_direct_color);
+        assert_eq!(
+            dispatch_records[0].command.xy,
+            crate::XyColor { x: 0.162, y: 0.087 }
+        );
     }
 
     #[test]

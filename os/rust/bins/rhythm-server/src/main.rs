@@ -266,16 +266,17 @@ fn main() -> Result<()> {
             .expect("Failed to spawn periodic thread");
     }
 
+    let ota_status = rhythm_server::self_update::OtaStatusHandle::new(VERSION);
     if appliance_runtime {
         rhythm_server::liveness::spawn_periodic_watchdog(state.clone());
-        rhythm_server::auto_update::spawn(state.clone());
+        rhythm_server::auto_update::spawn(state.clone(), ota_status.clone());
     }
 
     // Start tokio runtime for the async HTTP server + mDNS
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
-        .block_on(run_server(state, args.port))
+        .block_on(run_server(state, args.port, ota_status))
 }
 
 fn install_factory_reset_hook(state: &SharedState) -> Result<()> {
@@ -291,7 +292,11 @@ fn install_factory_reset_hook(state: &SharedState) -> Result<()> {
     Ok(())
 }
 
-async fn run_server(state: SharedState, port: u16) -> Result<()> {
+async fn run_server(
+    state: SharedState,
+    port: u16,
+    ota_status: rhythm_server::self_update::OtaStatusHandle,
+) -> Result<()> {
     rhythm_os::state::capture_tokio_runtime_handle(&state);
     rhythm_server::support_bundle_jobs::resume_pending(state.clone());
 
@@ -299,7 +304,7 @@ async fn run_server(state: SharedState, port: u16) -> Result<()> {
     let addr = format!("0.0.0.0:{}", port);
     info!(target: "sys", "Starting HTTP server on {}", addr);
 
-    let server = http_server::create_router(state.clone());
+    let server = http_server::create_router(state.clone(), ota_status);
     let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| {
         anyhow::anyhow!(
             "Failed to bind to {} — is another process using this port? {}",

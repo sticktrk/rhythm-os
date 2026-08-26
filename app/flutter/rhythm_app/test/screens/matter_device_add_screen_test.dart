@@ -214,6 +214,111 @@ void main() {
     ]);
   });
 
+  testWidgets('hides technical appliance details after Matter pairing fails',
+      (tester) async {
+    final api = _FakeRhythmMatterApi(
+      onPair: (_) async => const RhythmMatterPairingResponse(
+        httpStatus: 200,
+        status: 'failed',
+        error: 'BlueZ/CHIP lost the BLE connection: '
+            'src/platform/Linux/bluez/BluezConnection.cpp:109: '
+            'CHIP Error 0x0000040F',
+      ),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: MatterDeviceAddScreen(
+          endpoint: const HubEndpoint(host: '127.0.0.1', port: 0),
+          addMethod: MatterAddMethod.automatic,
+          initialSetupPayload: '3497-011-2332',
+          pairingApi: api,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+
+    expect(
+      find.textContaining(
+          'The device stopped responding before setup finished'),
+      findsOneWidget,
+    );
+    expect(find.textContaining('BlueZ'), findsNothing);
+    expect(find.textContaining('CHIP Error'), findsNothing);
+    expect(find.textContaining('.cpp'), findsNothing);
+  });
+
+  testWidgets('explains on-network transport failures without BLE advice',
+      (tester) async {
+    final api = _FakeRhythmMatterApi(
+      onPair: (_) async => const RhythmMatterPairingResponse(
+        httpStatus: 200,
+        status: 'failed',
+        error: 'CHIP sidecar closed the socket without a response '
+            '(chipd status: running)',
+      ),
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: MatterDeviceAddScreen(
+          endpoint: const HubEndpoint(host: '127.0.0.1', port: 0),
+          addMethod: MatterAddMethod.onNetworkSetupCode,
+          initialSetupPayload: '3497-011-2332',
+          pairingApi: api,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+
+    expect(find.textContaining('local Matter network'), findsOneWidget);
+    expect(find.textContaining('Thread border router'), findsOneWidget);
+    expect(find.textContaining('keep it near'), findsNothing);
+    expect(find.textContaining('CHIP sidecar'), findsNothing);
+    expect(find.textContaining('chipd'), findsNothing);
+  });
+
+  testWidgets('retry starts a new durable Matter pairing session',
+      (tester) async {
+    var pairRequestCount = 0;
+    final api = _FakeRhythmMatterApi(
+      onPair: (_) async {
+        pairRequestCount += 1;
+        return const RhythmMatterPairingResponse(
+          httpStatus: 200,
+          status: 'failed',
+          error: 'The device stopped responding.',
+        );
+      },
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: MatterDeviceAddScreen(
+          endpoint: const HubEndpoint(host: '127.0.0.1', port: 0),
+          addMethod: MatterAddMethod.onNetworkSetupCode,
+          initialSetupPayload: '3497-011-2332',
+          pairingApi: api,
+        ),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+
+    expect(pairRequestCount, 1);
+    await tester.tap(find.text('Try Again'));
+    await tester.pump();
+    await tester.ensureVisible(find.text('Add Device'));
+    await tester.tap(find.text('Add Device'));
+    await tester.pump(const Duration(milliseconds: 10));
+
+    expect(pairRequestCount, 2);
+    expect(api.sessionIds, hasLength(2));
+    expect(api.sessionIds.first, isNot(api.sessionIds.last));
+  });
+
   testWidgets(
       'manual codes enter the same pairing path with manual attribution',
       (tester) async {
@@ -248,6 +353,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 10));
 
       expect(pairRequestCount, 1);
+      expect(api.lastRendezvous, 'auto');
       final attempted = analyticsBackend.events.singleWhere(
         (event) => event.name == 'matter_pairing_attempted',
       );
@@ -260,6 +366,59 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     }
   });
+
+  testWidgets(
+      'existing Matter devices use network discovery and bounded analytics',
+      (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    try {
+      final api = _FakeRhythmMatterApi(
+        onPair: (_) async => const RhythmMatterPairingResponse(
+          httpStatus: 200,
+          status: 'failed',
+          error: 'network discovery timed out',
+        ),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: MatterDeviceAddScreen(
+            endpoint: const HubEndpoint(host: '127.0.0.1', port: 0),
+            addMethod: MatterAddMethod.onNetworkSetupCode,
+            analyticsSource: 'test_existing_matter',
+            journeyId: 'matter-existing-test',
+            pairingApi: api,
+          ),
+        ),
+      );
+
+      expect(find.text('Open Matter pairing mode'), findsOneWidget);
+      expect(find.textContaining('Turn On Pairing Mode'), findsOneWidget);
+      expect(find.textContaining('same home network'), findsOneWidget);
+
+      await tester.enterText(find.byType(TextField), '3497-011-2332');
+      tester.testTextInput.hide();
+      await tester.ensureVisible(find.text('Add Device'));
+      await tester.pump();
+      await tester.tap(find.text('Add Device'));
+      await tester.pump(const Duration(milliseconds: 10));
+
+      expect(api.lastRendezvous, 'on_network');
+      final attempted = analyticsBackend.events.singleWhere(
+        (event) => event.name == 'matter_pairing_attempted',
+      );
+      expect(attempted.properties, {
+        'journey_id': 'matter-existing-test',
+        'source': 'test_existing_matter',
+        'input_method': 'manual_code',
+        'add_method': 'on_network_setup_code',
+        'attempt_number': 1,
+      });
+      expect(attempted.properties.values, isNot(contains('3497-011-2332')));
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
 }
 
 class _FakeRhythmMatterApi extends RhythmMatterApi {
@@ -268,6 +427,8 @@ class _FakeRhythmMatterApi extends RhythmMatterApi {
 
   final Future<RhythmMatterPairingResponse> Function(Duration receiveTimeout)
       onPair;
+  String? lastRendezvous;
+  final sessionIds = <String?>[];
 
   @override
   Future<RhythmMatterPairingResponse> pairDevice({
@@ -277,6 +438,8 @@ class _FakeRhythmMatterApi extends RhythmMatterApi {
     Duration receiveTimeout = const Duration(seconds: 45),
     String? sessionId,
   }) {
+    lastRendezvous = rendezvous;
+    sessionIds.add(sessionId);
     return onPair(receiveTimeout);
   }
 }

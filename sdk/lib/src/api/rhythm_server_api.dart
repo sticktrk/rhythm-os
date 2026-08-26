@@ -24,6 +24,49 @@ String? _plainTextResponseError(Object? value) {
       : '${message.substring(0, maxLength)}…';
 }
 
+enum RhythmRoomProjectionStatus {
+  notApplicable,
+  notReported,
+  blocked,
+  pending,
+  attention,
+  synced;
+
+  static RhythmRoomProjectionStatus fromWire(Object? value) => switch (value) {
+        'not_applicable' => RhythmRoomProjectionStatus.notApplicable,
+        'blocked' => RhythmRoomProjectionStatus.blocked,
+        'pending' => RhythmRoomProjectionStatus.pending,
+        'attention' => RhythmRoomProjectionStatus.attention,
+        'synced' => RhythmRoomProjectionStatus.synced,
+        _ => RhythmRoomProjectionStatus.notReported,
+      };
+}
+
+class RhythmDeviceRoomAssignmentResult {
+  final bool canonicalCommitted;
+  final RhythmRoomProjectionStatus projectionStatus;
+
+  const RhythmDeviceRoomAssignmentResult({
+    required this.canonicalCommitted,
+    required this.projectionStatus,
+  });
+
+  const RhythmDeviceRoomAssignmentResult.legacyCommitted()
+      : canonicalCommitted = true,
+        projectionStatus = RhythmRoomProjectionStatus.notReported;
+
+  factory RhythmDeviceRoomAssignmentResult.fromJson(
+    Map<String, dynamic> json,
+  ) {
+    return RhythmDeviceRoomAssignmentResult(
+      canonicalCommitted: json['canonical_committed'] == true,
+      projectionStatus: RhythmRoomProjectionStatus.fromWire(
+        json['projection_status'],
+      ),
+    );
+  }
+}
+
 enum RhythmNodeColorScope {
   preview,
   mood,
@@ -689,6 +732,50 @@ class RhythmServerApi {
       );
     }
     return null;
+  }
+
+  /// Persist a room-local schedule and return authoritative post-apply state.
+  Future<RhythmRoomState?> roomScheduleSet({
+    required String roomId,
+    required RhythmRoomSchedule schedule,
+    required String requestId,
+  }) async {
+    try {
+      final response = await _dio.put(
+        'api/nodes/preferences',
+        data: {
+          'node_id': roomId,
+          'profile_settings': {'room_schedule': schedule.toJson()},
+          'request_id': requestId,
+        },
+      );
+      return _parseAndCacheSingleState(response.data);
+    } catch (e) {
+      _log.warning('roomScheduleSet failed requestId=$requestId', e);
+      return null;
+    }
+  }
+
+  /// Preview one room's configured Day/Sleep behavior without changing home mode.
+  Future<bool> roomScheduleTest({
+    required String roomId,
+    required RhythmMode mode,
+    required String requestId,
+  }) async {
+    try {
+      await _dio.put(
+        'api/nodes/preferences',
+        data: {
+          'node_id': roomId,
+          'schedule_test': mode.wireValue,
+          'request_id': requestId,
+        },
+      );
+      return true;
+    } catch (e) {
+      _log.warning('roomScheduleTest failed requestId=$requestId', e);
+      return false;
+    }
   }
 
   /// Patch per-profile node overrides.
@@ -2271,18 +2358,36 @@ class RhythmServerApi {
     return null;
   }
 
-  /// Assign a canonical device to a parent node (or unassign with `null`).
-  Future<bool> assignDeviceParent(String deviceId, String? parentId) async {
+  /// Assign a canonical device and preserve the server's qualified external
+  /// projection outcome. A previous appliance may return 204 without the
+  /// additive result body; that remains a committed legacy outcome.
+  Future<RhythmDeviceRoomAssignmentResult?> assignDeviceParentResult(
+    String deviceId,
+    String? parentId,
+  ) async {
     try {
-      await _dio.put(
+      final response = await _dio.put(
         'api/devices/canonical/$deviceId/parent',
         data: {'parent_id': parentId},
+        options: Options(receiveTimeout: const Duration(seconds: 30)),
       );
-      return true;
+      final data = response.data;
+      if (data is Map) {
+        return RhythmDeviceRoomAssignmentResult.fromJson(
+          Map<String, dynamic>.from(data),
+        );
+      }
+      return const RhythmDeviceRoomAssignmentResult.legacyCommitted();
     } catch (e) {
-      _log.warning('assignDeviceParent failed', e);
+      _log.warning('assignDeviceParentResult failed', e);
     }
-    return false;
+    return null;
+  }
+
+  /// Assign a canonical device to a parent node (or unassign with `null`).
+  Future<bool> assignDeviceParent(String deviceId, String? parentId) async {
+    final result = await assignDeviceParentResult(deviceId, parentId);
+    return result?.canonicalCommitted == true;
   }
 
   /// Assign a canonical device to a room (or unassign with `null`).

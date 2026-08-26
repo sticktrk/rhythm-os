@@ -166,6 +166,20 @@ void main() {
   });
 
   group('RoomPageProvider', () {
+    test('requests restoration when an initialized layout scope changes', () {
+      final restoredScopes = <String?>[];
+      final provider = RoomPageProvider(
+        layoutStore: _FakeRoomPageLayoutStore(),
+      );
+      provider.configureLayoutScopeChanged(restoredScopes.add);
+
+      provider.setLayoutScope('scope-a');
+      provider.setLayoutScope('scope-a');
+      provider.setLayoutScope('scope-b');
+
+      expect(restoredScopes, ['scope-b']);
+    });
+
     test('loads a different layout for each scope', () {
       final store = _FakeRoomPageLayoutStore(
         scopedLayouts: {
@@ -309,6 +323,42 @@ void main() {
       expect(store.scopedLayouts['scope-b'], [
         ['room-b']
       ]);
+    });
+
+    test('normal presentation alphabetizes every persisted page', () {
+      final provider = RoomPageProvider(
+        layoutStore: _FakeRoomPageLayoutStore(
+          scopedLayouts: {
+            'scope-a': [
+              ['kitchen', 'bedroom'],
+              ['office', 'attic'],
+            ],
+          },
+        ),
+      );
+      final rooms = [
+        _room('kitchen', name: 'Kitchen'),
+        _room('bedroom', name: 'bedroom'),
+        _room('office', name: 'Office'),
+        _room('attic', name: 'Attic'),
+      ];
+
+      provider.setLayoutScope('scope-a');
+
+      expect(
+        provider.getRoomsForPage(0, rooms).map((room) => room.id),
+        ['bedroom', 'kitchen'],
+      );
+      expect(
+        provider.getRoomsForPage(1, rooms).map((room) => room.id),
+        ['attic', 'office'],
+      );
+
+      provider.enterEditMode();
+      expect(
+        provider.getRoomsForPage(0, rooms).map((room) => room.id),
+        ['kitchen', 'bedroom'],
+      );
     });
 
     test('only user-authored layout moves request account sync', () {

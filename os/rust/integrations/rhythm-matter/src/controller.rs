@@ -17,6 +17,7 @@ use rhythm_core::controller::{
 };
 use rhythm_core::lighting::LightingCommand;
 use rhythm_core::room::Room;
+use rhythm_devices::quirks::PREFER_COLOR_TEMPERATURE_QUIRK;
 #[cfg(test)]
 use rhythm_devices::LightType;
 use rhythm_devices::{ColorPreference, DeviceQuirk, LightCapabilities};
@@ -505,8 +506,19 @@ impl MatterLightController {
         }
     }
 
+    /// Exact built-in, cloud, and saved tester profiles are authoritative.
+    /// Unprofiled Matter bulbs default to Hue/Saturation because it is the
+    /// safest cross-vendor color path; capability adaptation still falls back
+    /// when the device does not advertise it.
     fn color_preference(quirks: &[DeviceQuirk]) -> ColorPreference {
-        if quirks
+        if quirks.iter().any(|quirk| {
+            matches!(
+                quirk,
+                DeviceQuirk::Other(value) if value == PREFER_COLOR_TEMPERATURE_QUIRK
+            )
+        }) {
+            ColorPreference::PreferColorTemperature
+        } else if quirks
             .iter()
             .any(|quirk| matches!(quirk, DeviceQuirk::NeedsHueSaturationNotCt))
         {
@@ -517,7 +529,7 @@ impl MatterLightController {
         {
             ColorPreference::PreferXy
         } else {
-            ColorPreference::PreferColorTemperature
+            ColorPreference::PreferHueSaturation
         }
     }
 
@@ -1079,6 +1091,27 @@ mod tests {
         );
     }
 
+    fn set_device_capabilities(
+        controller: &MatterLightController,
+        node_id: u64,
+        capabilities: LightCapabilities,
+    ) {
+        let device_id = format!("matter-{node_id}");
+        controller
+            .hub_data
+            .device_caps
+            .lock()
+            .unwrap()
+            .insert(device_id.clone(), capabilities);
+        controller
+            .hub_data
+            .device_quirks
+            .lock()
+            .unwrap()
+            .entry(device_id)
+            .or_default();
+    }
+
     fn profiled_color_bulb(
         node_id: u64,
         vendor_name: &str,
@@ -1192,7 +1225,7 @@ mod tests {
 
         assert!(spy.operations().iter().any(|operation| matches!(
             operation,
-            RecordedOperation::SetColorTemperature { node_id: 42, .. }
+            RecordedOperation::SetHueSaturation { node_id: 42, .. }
         )));
         assert!(spy.operations().iter().any(|operation| matches!(
             operation,
@@ -1233,7 +1266,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_on_sends_brightness_and_color_temperature_commands_by_default() {
+    fn turn_on_sends_brightness_and_hue_saturation_commands_by_default() {
         let (controller, spy, _) = make_controller();
         let command = LightingCommand::new(80, 4000);
 
@@ -1246,7 +1279,7 @@ mod tests {
             let node_operations = operations_for_node(&operations, node_id);
             assert!(matches!(
                 node_operations[0],
-                RecordedOperation::SetColorTemperature { endpoint: 1, .. }
+                RecordedOperation::SetHueSaturation { endpoint: 1, .. }
             ));
             assert_eq!(
                 node_operations[1],
@@ -1263,6 +1296,13 @@ mod tests {
     #[test]
     fn turn_on_fans_out_to_devices_concurrently() {
         let (controller, spy, _) = make_controller();
+        for node_id in [42, 43] {
+            set_device_capabilities(
+                &controller,
+                node_id,
+                LightCapabilities::defaults_for(LightType::ColorTemperature),
+            );
+        }
         spy.delay_color_temperature(Duration::from_millis(40));
 
         block_on(controller.turn_on("kitchen", LightingCommand::new(80, 4000))).unwrap();
@@ -1283,6 +1323,13 @@ mod tests {
     #[test]
     fn turn_on_sends_brightness_after_color_temperature_so_color_cannot_clobber_level() {
         let (controller, spy, _) = make_controller();
+        for node_id in [42, 43] {
+            set_device_capabilities(
+                &controller,
+                node_id,
+                LightCapabilities::defaults_for(LightType::ColorTemperature),
+            );
+        }
         let command = LightingCommand::new(7, 2700);
 
         block_on(controller.turn_on("kitchen", command)).unwrap();
@@ -1351,10 +1398,11 @@ mod tests {
             assert_eq!(
                 operations_for_node(&operations, node_id),
                 vec![
-                    RecordedOperation::SetColorTemperature {
+                    RecordedOperation::SetHueSaturation {
                         node_id,
                         endpoint: 1,
-                        kelvin: 4000,
+                        hue: 22,
+                        saturation: 90,
                         transition_ms: None,
                     },
                     RecordedOperation::SetBrightness {
@@ -1438,6 +1486,108 @@ mod tests {
     }
 
     #[test]
+    fn h6004_uses_hue_saturation_for_direct_and_adaptive_color() {
+        let (controller, spy, _) = make_controller();
+        let mut h6004 = profiled_color_bulb(42, "Shenzhen Qianyan Technology", "H6004");
+        h6004.vendor_id = 4999;
+        h6004.product_id = 24580;
+        h6004.color_modes = vec![
+            crate::transport::MatterColorMode::HueSaturation,
+            crate::transport::MatterColorMode::Xy,
+            crate::transport::MatterColorMode::ColorTemperature,
+        ];
+        h6004.min_kelvin = None;
+        h6004.max_kelvin = None;
+        let caps = crate::commissioning::build_device_capabilities(&h6004);
+        let quirks = crate::commissioning::build_device_quirks(&h6004);
+        controller
+            .hub_data
+            .device_caps
+            .lock()
+            .unwrap()
+            .insert("matter-42".to_string(), caps);
+        controller
+            .hub_data
+            .device_quirks
+            .lock()
+            .unwrap()
+            .insert("matter-42".to_string(), quirks);
+
+        block_on(controller.turn_on(
+            "kitchen",
+            LightingCommand::from_color(
+                31,
+                rhythm_core::Rgb::new(129, 56, 255),
+                rhythm_core::XyColor { x: 0.205, y: 0.106 },
+                None,
+            ),
+        ))
+        .unwrap();
+        block_on(controller.turn_on("kitchen", LightingCommand::new(100, 1800))).unwrap();
+
+        let operations = operations_for_node(&spy.operations(), 42);
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|operation| matches!(operation, RecordedOperation::SetHueSaturation { .. }))
+                .count(),
+            2
+        );
+        assert!(!operations
+            .iter()
+            .any(|operation| matches!(operation, RecordedOperation::SetXy { .. })));
+        assert!(!operations
+            .iter()
+            .any(|operation| matches!(operation, RecordedOperation::SetColorTemperature { .. })));
+    }
+
+    #[test]
+    fn lifx_everyday_lightstrip_uses_hue_saturation_for_color_temperature() {
+        let (controller, spy, registry) = make_controller();
+        registry.lock().unwrap().upsert_room(
+            "lifx-room",
+            "LIFX room",
+            "matter-group-62000",
+            &["matter-100".to_string()],
+        );
+        let mut lifx = profiled_color_bulb(100, "LIFX", "LIFX Everyday Lightstrip");
+        lifx.vendor_id = 5155;
+        lifx.product_id = 207;
+        lifx.color_modes = vec![
+            crate::transport::MatterColorMode::HueSaturation,
+            crate::transport::MatterColorMode::Xy,
+            crate::transport::MatterColorMode::ColorTemperature,
+        ];
+        let expected = rhythm_os::controller_helpers::adapt_lighting_command(
+            &crate::commissioning::build_device_capabilities(&lifx),
+            &LightingCommand::new(100, 5500),
+            ColorPreference::PreferHueSaturation,
+        );
+        spy.set_probe_device(lifx);
+
+        block_on(controller.turn_on("lifx-room", LightingCommand::new(100, 5500))).unwrap();
+
+        assert_eq!(
+            operations_for_node(&spy.operations(), 100),
+            vec![
+                RecordedOperation::SetHueSaturation {
+                    node_id: 100,
+                    endpoint: 1,
+                    hue: expected.hue_saturation.unwrap().0,
+                    saturation: expected.hue_saturation.unwrap().1,
+                    transition_ms: None,
+                },
+                RecordedOperation::SetBrightness {
+                    node_id: 100,
+                    endpoint: 1,
+                    level: clusters::brightness_to_level(100),
+                    transition_ms: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn turn_on_group_target_uses_authoritative_endpoint_plans() {
         let (mut controller, spy, _) = make_controller();
         controller.group_fanout_only = false;
@@ -1462,10 +1612,11 @@ mod tests {
             assert_eq!(
                 operations_for_node(&operations, node_id),
                 vec![
-                    RecordedOperation::SetColorTemperature {
+                    RecordedOperation::SetHueSaturation {
                         node_id,
                         endpoint: 1,
-                        kelvin: 4000,
+                        hue: 22,
+                        saturation: 90,
                         transition_ms: None,
                     },
                     RecordedOperation::SetBrightness {
@@ -1607,7 +1758,7 @@ mod tests {
         let operations = spy.operations();
         assert!(operations.iter().any(|operation| matches!(
             operation,
-            RecordedOperation::SetColorTemperature { node_id: 42, .. }
+            RecordedOperation::SetHueSaturation { node_id: 42, .. }
         )));
         assert!(operations.iter().any(|operation| matches!(
             operation,
@@ -2139,7 +2290,7 @@ mod tests {
         )));
         assert!(operations.iter().any(|operation| matches!(
             operation,
-            RecordedOperation::SetColorTemperature { node_id: 42, .. }
+            RecordedOperation::SetHueSaturation { node_id: 42, .. }
         )));
         assert!(operations.iter().any(|operation| matches!(
             operation,
@@ -2147,7 +2298,7 @@ mod tests {
         )));
         assert!(operations.iter().any(|operation| matches!(
             operation,
-            RecordedOperation::SetColorTemperature { node_id: 43, .. }
+            RecordedOperation::SetHueSaturation { node_id: 43, .. }
         )));
         assert!(operations.iter().any(|operation| matches!(
             operation,
@@ -2332,7 +2483,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_on_quirked_device_prefers_xy() {
+    fn turn_on_profiled_device_xy_preference_overrides_hue_saturation_default() {
         let spy = Arc::new(SpyTransport::new());
         let registry = Arc::new(Mutex::new(MatterDeviceRegistry::with_options(true)));
         registry
@@ -2354,7 +2505,14 @@ mod tests {
             next_node_id: std::sync::atomic::AtomicU64::new(100),
             device_caps: std::sync::Mutex::new(std::collections::HashMap::from([(
                 "matter-42".to_string(),
-                LightCapabilities::defaults_for(LightType::ExtendedColor),
+                LightCapabilities {
+                    color_modes: vec![
+                        rhythm_devices::ColorMode::HueSaturation,
+                        rhythm_devices::ColorMode::Xy,
+                        rhythm_devices::ColorMode::ColorTemperature,
+                    ],
+                    ..LightCapabilities::defaults_for(LightType::ExtendedColor)
+                },
             )])),
             device_quirks: std::sync::Mutex::new(std::collections::HashMap::from([(
                 "matter-42".to_string(),
@@ -2371,20 +2529,78 @@ mod tests {
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
 
+        block_on(controller.turn_on(
+            "r1",
+            LightingCommand::from_color(
+                50,
+                rhythm_core::Rgb::new(255, 0, 0),
+                rhythm_core::XyColor { x: 0.64, y: 0.33 },
+                Some(400),
+            ),
+        ))
+        .unwrap();
         block_on(controller.turn_on("r1", LightingCommand::new(50, 3000))).unwrap();
 
-        assert!(spy
-            .operations()
+        let operations = operations_for_node(&spy.operations(), 42);
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|operation| matches!(operation, RecordedOperation::SetXy { .. }))
+                .count(),
+            2
+        );
+        assert!(!operations
             .iter()
-            .any(|operation| matches!(operation, RecordedOperation::SetXy { node_id: 42, .. })));
-        assert!(!spy.operations().iter().any(|operation| matches!(
-            operation,
-            RecordedOperation::SetColorTemperature { node_id: 42, .. }
-        )));
+            .any(|operation| matches!(operation, RecordedOperation::SetHueSaturation { .. })));
+        assert!(!operations
+            .iter()
+            .any(|operation| matches!(operation, RecordedOperation::SetColorTemperature { .. })));
     }
 
     #[test]
-    fn turn_on_direct_color_prefers_hue_saturation_when_supported() {
+    fn turn_on_profiled_device_color_temperature_preference_overrides_hs_default() {
+        let (controller, spy, _) = make_controller();
+        set_device_capabilities(
+            &controller,
+            42,
+            LightCapabilities {
+                color_modes: vec![
+                    rhythm_devices::ColorMode::HueSaturation,
+                    rhythm_devices::ColorMode::Xy,
+                    rhythm_devices::ColorMode::ColorTemperature,
+                ],
+                ..LightCapabilities::defaults_for(LightType::ExtendedColor)
+            },
+        );
+        controller.hub_data.device_quirks.lock().unwrap().insert(
+            "matter-42".to_string(),
+            vec![DeviceQuirk::Other(
+                PREFER_COLOR_TEMPERATURE_QUIRK.to_string(),
+            )],
+        );
+
+        block_on(controller.turn_on_target(
+            &HubDispatchTarget::Devices {
+                native_ids: vec!["matter-42".to_string()],
+            },
+            LightingCommand::new(50, 3000),
+        ))
+        .unwrap();
+
+        let operations = operations_for_node(&spy.operations(), 42);
+        assert!(operations
+            .iter()
+            .any(|operation| matches!(operation, RecordedOperation::SetColorTemperature { .. })));
+        assert!(!operations
+            .iter()
+            .any(|operation| matches!(operation, RecordedOperation::SetHueSaturation { .. })));
+        assert!(!operations
+            .iter()
+            .any(|operation| matches!(operation, RecordedOperation::SetXy { .. })));
+    }
+
+    #[test]
+    fn turn_on_unprofiled_device_prefers_hue_saturation_when_supported() {
         let spy = Arc::new(SpyTransport::new());
         let registry = Arc::new(Mutex::new(MatterDeviceRegistry::with_options(true)));
         registry
@@ -2437,15 +2653,56 @@ mod tests {
             Some(400),
         );
         block_on(controller.turn_on("r1", command)).unwrap();
+        block_on(controller.turn_on("r1", LightingCommand::new(50, 3000))).unwrap();
 
-        assert!(spy.operations().iter().any(|operation| matches!(
-            operation,
-            RecordedOperation::SetHueSaturation { node_id: 42, .. }
-        )));
-        assert!(!spy
-            .operations()
+        let operations = operations_for_node(&spy.operations(), 42);
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|operation| matches!(operation, RecordedOperation::SetHueSaturation { .. }))
+                .count(),
+            2
+        );
+        assert!(!operations
             .iter()
             .any(|operation| matches!(operation, RecordedOperation::SetXy { node_id: 42, .. })));
+        assert!(!operations
+            .iter()
+            .any(|operation| matches!(operation, RecordedOperation::SetColorTemperature { .. })));
+    }
+
+    #[test]
+    fn turn_on_unprofiled_xy_only_device_falls_back_to_xy() {
+        let (controller, spy, _) = make_controller();
+        set_device_capabilities(
+            &controller,
+            42,
+            LightCapabilities {
+                color_modes: vec![rhythm_devices::ColorMode::Xy],
+                min_kelvin: None,
+                max_kelvin: None,
+                ..LightCapabilities::defaults_for(LightType::ExtendedColor)
+            },
+        );
+
+        block_on(controller.turn_on_target(
+            &HubDispatchTarget::Devices {
+                native_ids: vec!["matter-42".to_string()],
+            },
+            LightingCommand::new(50, 3000),
+        ))
+        .unwrap();
+
+        let operations = operations_for_node(&spy.operations(), 42);
+        assert!(operations
+            .iter()
+            .any(|operation| matches!(operation, RecordedOperation::SetXy { .. })));
+        assert!(!operations
+            .iter()
+            .any(|operation| matches!(operation, RecordedOperation::SetHueSaturation { .. })));
+        assert!(!operations
+            .iter()
+            .any(|operation| matches!(operation, RecordedOperation::SetColorTemperature { .. })));
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! recent logs, persisted topology/canonical state, and runtime-derived
 //! diagnostics without needing filesystem access to the appliance.
 
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fs;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -245,6 +245,14 @@ struct ProcessResourceSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     route: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    ipv6_route: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    if_inet6: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ipv6_route_classification: Option<Ipv6RouteClassification>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ipv6_ra: Option<Ipv6RaSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     net_dev: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     wireless: Option<String>,
@@ -256,6 +264,32 @@ struct ProcessResourceSnapshot {
     partitions: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     data_dir_filesystem: Option<DataDirFilesystem>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+struct Ipv6RouteClassification {
+    route_count: usize,
+    default_route_count: usize,
+    ula_prefix_64_route_count: usize,
+    wifi_ula_prefix_64_route_count: usize,
+    thread_omr_candidate_present: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+struct Ipv6RaSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    global_forwarding: Option<String>,
+    interfaces: BTreeMap<String, Ipv6InterfaceRaSnapshot>,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+struct Ipv6InterfaceRaSnapshot {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    forwarding: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    accept_ra: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    accept_ra_rt_info_max_plen: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -2568,6 +2602,10 @@ fn build_process_resources_json(
             udp: None,
             udp6: None,
             route: None,
+            ipv6_route: None,
+            if_inet6: None,
+            ipv6_route_classification: None,
+            ipv6_ra: None,
             net_dev: None,
             wireless: None,
             arp: None,
@@ -2593,6 +2631,11 @@ fn build_process_resources_json(
         snapshot.udp = linux_read_optional_proc_file("/proc/net/udp", diagnostics);
         snapshot.udp6 = linux_read_optional_proc_file("/proc/net/udp6", diagnostics);
         snapshot.route = linux_read_optional_proc_file("/proc/net/route", diagnostics);
+        snapshot.ipv6_route = linux_read_optional_proc_file("/proc/net/ipv6_route", diagnostics);
+        snapshot.if_inet6 = linux_read_optional_proc_file("/proc/net/if_inet6", diagnostics);
+        snapshot.ipv6_route_classification =
+            snapshot.ipv6_route.as_deref().map(classify_ipv6_routes);
+        snapshot.ipv6_ra = Some(linux_ipv6_ra_snapshot(diagnostics));
         snapshot.net_dev = linux_read_optional_proc_file("/proc/net/dev", diagnostics);
         snapshot.wireless = linux_read_optional_proc_file("/proc/net/wireless", diagnostics);
         snapshot.arp = linux_read_optional_proc_file("/proc/net/arp", diagnostics);
@@ -2622,6 +2665,10 @@ fn build_process_resources_json(
         udp: None,
         udp6: None,
         route: None,
+        ipv6_route: None,
+        if_inet6: None,
+        ipv6_route_classification: None,
+        ipv6_ra: None,
         net_dev: None,
         wireless: None,
         arp: None,
@@ -2633,6 +2680,79 @@ fn build_process_resources_json(
     snapshot.data_dir_filesystem = unix_data_dir_filesystem(data_dir, diagnostics);
 
     serde_json::to_string_pretty(&snapshot).context("serializing process resource snapshot")
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn classify_ipv6_routes(raw: &str) -> Ipv6RouteClassification {
+    let mut classification = Ipv6RouteClassification::default();
+    for line in raw.lines() {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() < 10 || fields[0].len() != 32 {
+            continue;
+        }
+        let Ok(prefix_len) = u8::from_str_radix(fields[1], 16) else {
+            continue;
+        };
+        let Ok(first_byte) = u8::from_str_radix(&fields[0][..2], 16) else {
+            continue;
+        };
+        classification.route_count += 1;
+        if prefix_len == 0 {
+            classification.default_route_count += 1;
+        }
+        // Thread OMR prefixes are commonly ULAs. Report only bounded counts,
+        // never the private prefix itself, in the quick classification.
+        if prefix_len == 64 && first_byte & 0xfe == 0xfc {
+            classification.ula_prefix_64_route_count += 1;
+            if fields[9].starts_with("wl") {
+                classification.wifi_ula_prefix_64_route_count += 1;
+            }
+        }
+    }
+    classification.thread_omr_candidate_present = classification.wifi_ula_prefix_64_route_count > 0;
+    classification
+}
+
+#[cfg(target_os = "linux")]
+fn linux_ipv6_ra_snapshot(diagnostics: &mut BundleDiagnostics) -> Ipv6RaSnapshot {
+    let root = Path::new("/proc/sys/net/ipv6/conf");
+    let mut snapshot = Ipv6RaSnapshot {
+        global_forwarding: linux_read_optional_proc_file(
+            "/proc/sys/net/ipv6/conf/all/forwarding",
+            diagnostics,
+        )
+        .map(|value| value.trim().to_string()),
+        interfaces: BTreeMap::new(),
+    };
+    let Ok(entries) = fs::read_dir("/sys/class/net") else {
+        return snapshot;
+    };
+    for entry in entries.flatten() {
+        let interface = entry.file_name().to_string_lossy().into_owned();
+        if !interface.starts_with("wl")
+            && !entry.path().join("wireless").is_dir()
+            && !entry.path().join("phy80211").exists()
+        {
+            continue;
+        }
+        let interface_root = root.join(&interface);
+        let read = |name: &str, diagnostics: &mut BundleDiagnostics| {
+            linux_read_optional_proc_file(
+                interface_root.join(name).to_string_lossy().as_ref(),
+                diagnostics,
+            )
+            .map(|value| value.trim().to_string())
+        };
+        snapshot.interfaces.insert(
+            interface,
+            Ipv6InterfaceRaSnapshot {
+                forwarding: read("forwarding", diagnostics),
+                accept_ra: read("accept_ra", diagnostics),
+                accept_ra_rt_info_max_plen: read("accept_ra_rt_info_max_plen", diagnostics),
+            },
+        );
+    }
+    snapshot
 }
 
 #[cfg(unix)]
@@ -4690,6 +4810,25 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn ipv6_route_classification_reports_thread_candidate_without_prefix_value() {
+        let routes = concat!(
+            "00000000000000000000000000000000 00 00000000000000000000000000000000 00 00000000000000000000000000000000 00000064 00000000 00000000 00000001 wlan0\n",
+            "fdb3b32f16e600000000000000000000 40 00000000000000000000000000000000 00 fe800000000000000000000000000001 00000064 00000000 00000000 00000001 wlan0\n",
+            "fe800000000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000000 00000000 00000001 wlan0\n",
+        );
+
+        let classification = classify_ipv6_routes(routes);
+
+        assert_eq!(classification.route_count, 3);
+        assert_eq!(classification.default_route_count, 1);
+        assert_eq!(classification.ula_prefix_64_route_count, 1);
+        assert_eq!(classification.wifi_ula_prefix_64_route_count, 1);
+        assert!(classification.thread_omr_candidate_present);
+        let serialized = serde_json::to_string(&classification).unwrap();
+        assert!(!serialized.contains("fdb3b32f"));
     }
 
     #[cfg(target_os = "linux")]

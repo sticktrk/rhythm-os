@@ -792,10 +792,14 @@ pub fn save_bulb_test_report(state: &SharedState, report: &Value) -> Result<Valu
     let mut applied_capabilities = Value::Object(Map::new());
 
     if apply_local {
-        let quirks = match inferred_quirks {
+        let mut quirks = match inferred_quirks {
             Some(value) => crate::local_quirks::quirks_from_value(value)?,
             None => Vec::new(),
         };
+        if let Some(preference) = recommended_color_preference_quirk(report) {
+            quirks.retain(|quirk| !is_color_preference_quirk(quirk));
+            quirks.push(preference);
+        }
         let capability_override = match capability_hints {
             Some(value) => crate::local_quirks::capability_override_from_value(value)?,
             None => crate::local_quirks::LocalCapabilityOverride::default(),
@@ -839,6 +843,31 @@ pub fn save_bulb_test_report(state: &SharedState, report: &Value) -> Result<Valu
         "applied_quirks": applied_quirks,
         "applied_capabilities": applied_capabilities,
     }))
+}
+
+fn recommended_color_preference_quirk(report: &Value) -> Option<rhythm_devices::DeviceQuirk> {
+    match report
+        .pointer("/recommended_control_strategy/color_command")
+        .and_then(Value::as_str)
+    {
+        Some("hue_saturation") => Some(rhythm_devices::DeviceQuirk::NeedsHueSaturationNotCt),
+        Some("xy") => Some(rhythm_devices::DeviceQuirk::NeedsXyNotCt),
+        Some("color_temperature") => Some(rhythm_devices::DeviceQuirk::Other(
+            rhythm_devices::quirks::PREFER_COLOR_TEMPERATURE_QUIRK.to_string(),
+        )),
+        _ => None,
+    }
+}
+
+fn is_color_preference_quirk(quirk: &rhythm_devices::DeviceQuirk) -> bool {
+    match quirk {
+        rhythm_devices::DeviceQuirk::NeedsHueSaturationNotCt
+        | rhythm_devices::DeviceQuirk::NeedsXyNotCt => true,
+        rhythm_devices::DeviceQuirk::Other(value) => {
+            value == rhythm_devices::quirks::PREFER_COLOR_TEMPERATURE_QUIRK
+        }
+        _ => false,
+    }
 }
 
 fn get_hub_data(state: &SharedState) -> Result<Arc<MatterHubData>> {
@@ -1819,9 +1848,16 @@ mod tests {
     }
 
     fn unique_data_dir() -> PathBuf {
+        static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
+
         std::env::temp_dir()
             .join("rhythm-matter-bulb-test")
-            .join(format!("{}-{}", std::process::id(), now_unix_ms()))
+            .join(format!(
+                "{}-{}-{}",
+                std::process::id(),
+                now_unix_ms(),
+                NEXT_TEST_DIR.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ))
     }
 
     fn test_state_with_transport(
@@ -2144,6 +2180,40 @@ mod tests {
                 .get("matter-42")
                 .and_then(|caps| caps.min_brightness),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn save_bulb_test_report_applies_recommended_color_strategy() {
+        let (state, hub_data, _data_dir) = bulb_test_state();
+
+        let result = save_bulb_test_report(
+            &state,
+            &json!({
+                "device_id": "matter-42",
+                "report_id": "Prefer CT",
+                "schema_version": 2,
+                "inferred_quirks": ["needs_xy_not_ct"],
+                "recommended_control_strategy": {
+                    "color_command": "color_temperature"
+                }
+            }),
+        )
+        .unwrap();
+
+        let expected = vec![DeviceQuirk::Other(
+            rhythm_devices::quirks::PREFER_COLOR_TEMPERATURE_QUIRK.to_string(),
+        )];
+        assert_eq!(result["applied_local"], true);
+        assert_eq!(
+            hub_data.device_quirks.lock().unwrap().get("matter-42"),
+            Some(&expected)
+        );
+        assert_eq!(
+            crate::local_quirks::load_overrides_for_state(&state)
+                .quirks
+                .get("matter-42"),
+            Some(&expected)
         );
     }
 }

@@ -5,17 +5,14 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show
-        RhythmDispatchFailure,
-        RhythmSceneDefinition,
-        RhythmSceneSourceKind,
-        RoomModeState;
+    show RhythmSceneDefinition, RhythmSceneSourceKind, RoomModeState;
 import '../providers/server_sync_provider.dart';
 import '../providers/room_provider.dart';
 import '../services/analytics_service.dart';
 import '../utils/app_color_temperature.dart';
 import 'device_detail_sheet.dart';
 import 'first_run_explainer.dart';
+import 'light_delivery_warning_signal.dart';
 import 'low_glow_switch.dart';
 import 'mood_sheet.dart';
 import 'room_settings_sheet.dart';
@@ -759,11 +756,17 @@ class _RoomCardState extends State<RoomCard> {
             context.select<ServerSyncProvider, bool>(
           (p) => p.motionActivationPendingForNode(widget.roomId),
         );
+        final motionSuppressedByActiveScene =
+            context.select<ServerSyncProvider, bool>(
+          (p) => p.motionSuppressedByActiveSceneForNode(widget.roomId),
+        );
         // A recent light command that failed to physically reach its target.
         // Shown in the spinner slot once the in-flight state clears.
-        final dispatchFailure =
-            context.select<ServerSyncProvider, RhythmDispatchFailure?>(
-                (p) => p.recentDispatchFailureForNode(widget.roomId));
+        final deliveryWarnings =
+            context.select<ServerSyncProvider, List<LightDeliveryWarning>>(
+          (provider) =>
+              provider.recentLightDeliveryWarningsForNode(widget.roomId),
+        );
         // Scene currently bound as this room's mood (null = custom color mood).
         final moodSceneId = context.select<ServerSyncProvider, String?>(
             (p) => p.moodSceneIdForRoom(widget.roomId));
@@ -888,11 +891,15 @@ class _RoomCardState extends State<RoomCard> {
 
         final showActivitySpinner =
             _localActionPending || isTransitioning || isDispatchPending;
-        final VoidCallback? motionIndicatorTap = !motionActivationSupported
-            ? () => _showMotionActivationUnavailable(room.name)
-            : motionActivationEnabled
-                ? () => _setMotionActivationEnabled(false)
-                : null;
+        final motionEffectivelyEnabled =
+            motionActivationEnabled && !motionSuppressedByActiveScene;
+        final VoidCallback? motionIndicatorTap = motionSuppressedByActiveScene
+            ? null
+            : !motionActivationSupported
+                ? () => _showMotionActivationUnavailable(room.name)
+                : motionActivationEnabled
+                    ? () => _setMotionActivationEnabled(false)
+                    : null;
 
         // Blend directly from a neutral dark base toward the CCT color —
         // brightness scales the mix so hue stays clear at every level.
@@ -1154,8 +1161,8 @@ class _RoomCardState extends State<RoomCard> {
                                       key: ValueKey(
                                         'room-card-activity-${widget.roomId}',
                                       ),
-                                      width: 18,
-                                      height: 18,
+                                      width: 28,
+                                      height: 20,
                                       child: AnimatedSwitcher(
                                         duration:
                                             const Duration(milliseconds: 160),
@@ -1166,13 +1173,16 @@ class _RoomCardState extends State<RoomCard> {
                                                 ),
                                                 color: iconColor,
                                               )
-                                            : dispatchFailure != null
+                                            : deliveryWarnings.isNotEmpty
                                                 ? _DispatchFailureBadge(
-                                                    key: const ValueKey(
-                                                      'room_dispatch_failure_badge',
+                                                    key: ValueKey(
+                                                      'room_dispatch_failure_badge-${widget.roomId}',
                                                     ),
-                                                    failure: dispatchFailure,
-                                                    roomName: room.name,
+                                                    warnings: deliveryWarnings,
+                                                    nodeName: room.name,
+                                                    surface: room.kind.isRoom
+                                                        ? 'room_card'
+                                                        : 'bulb_card',
                                                   )
                                                 : const SizedBox.shrink(
                                                     key: ValueKey(
@@ -1217,7 +1227,8 @@ class _RoomCardState extends State<RoomCard> {
                                     ),
                                   ),
                                 )
-                              else if (motionTimer != null)
+                              else if (motionTimer != null &&
+                                  !motionSuppressedByActiveScene)
                                 Padding(
                                   padding: const EdgeInsets.only(left: 8),
                                   child: _MotionIndicator(
@@ -1237,26 +1248,31 @@ class _RoomCardState extends State<RoomCard> {
                                 Padding(
                                   padding: const EdgeInsets.only(left: 8),
                                   child: Semantics(
-                                    button: true,
-                                    label: motionActivationSupported
-                                        ? motionActivationEnabled
-                                            ? 'Turn off motion activation for ${room.name}'
-                                            : 'Turn on motion activation for ${room.name}'
-                                        : 'Motion control for ${room.name} '
-                                            'requires an appliance update',
+                                    button: !motionSuppressedByActiveScene,
+                                    label: motionSuppressedByActiveScene
+                                        ? 'Motion paused while a Scene is active in ${room.name}'
+                                        : motionActivationSupported
+                                            ? motionActivationEnabled
+                                                ? 'Turn off motion activation for ${room.name}'
+                                                : 'Turn on motion activation for ${room.name}'
+                                            : 'Motion control for ${room.name} '
+                                                'requires an appliance update',
                                     child: GestureDetector(
                                       key: ValueKey(
                                         'room-card-motion-${widget.roomId}',
                                       ),
                                       behavior: HitTestBehavior.opaque,
-                                      onTap: motionActivationSupported
-                                          ? () => _setMotionActivationEnabled(
-                                                !motionActivationEnabled,
-                                              )
-                                          : () =>
-                                              _showMotionActivationUnavailable(
-                                                room.name,
-                                              ),
+                                      onTap: motionSuppressedByActiveScene
+                                          ? null
+                                          : motionActivationSupported
+                                              ? () =>
+                                                  _setMotionActivationEnabled(
+                                                    !motionActivationEnabled,
+                                                  )
+                                              : () =>
+                                                  _showMotionActivationUnavailable(
+                                                    room.name,
+                                                  ),
                                       child: SizedBox(
                                         width: _roomHeaderActionHitSize,
                                         height: _roomHeaderActionHitSize,
@@ -1266,12 +1282,12 @@ class _RoomCardState extends State<RoomCard> {
                                             width: 28,
                                             height: 28,
                                             child: Icon(
-                                              motionActivationEnabled
+                                              motionEffectivelyEnabled
                                                   ? Icons.sensors_rounded
                                                   : Icons.sensors_off_rounded,
                                               size: 18,
                                               color: iconColor.withValues(
-                                                alpha: motionActivationEnabled
+                                                alpha: motionEffectivelyEnabled
                                                     ? motionActivationSupported
                                                         ? 0.45
                                                         : 0.18
@@ -1477,12 +1493,17 @@ class _RoomTransitionSpinner extends StatelessWidget {
     return Semantics(
       label: 'Room updating',
       liveRegion: true,
-      child: Padding(
-        padding: const EdgeInsets.all(1),
-        child: CircularProgressIndicator(
-          strokeWidth: 1.8,
-          valueColor: AlwaysStoppedAnimation<Color>(
-            color.withValues(alpha: 0.78),
+      child: Center(
+        child: SizedBox.square(
+          dimension: 18,
+          child: Padding(
+            padding: const EdgeInsets.all(1),
+            child: CircularProgressIndicator(
+              strokeWidth: 1.8,
+              valueColor: AlwaysStoppedAnimation<Color>(
+                color.withValues(alpha: 0.78),
+              ),
+            ),
           ),
         ),
       ),
@@ -1490,35 +1511,38 @@ class _RoomTransitionSpinner extends StatelessWidget {
   }
 }
 
-/// The failure signal color — a warm coral-red that sits naturally on the
-/// card's deep celestial surfaces instead of a raw material red.
-const _kDispatchFailureRed = Color(0xFFFF6159);
-
-/// Red (i) badge shown in the spinner slot after a light command failed to
-/// physically reach its target. Tapping reveals an anchored popover with the
-/// failure narrative.
+/// Warning signal shown in the spinner slot after one or more light commands
+/// failed to physically reach their bulbs. Tapping reveals a centered,
+/// identity-aware explanation that stays inside the safe viewport.
 class _DispatchFailureBadge extends StatefulWidget {
   const _DispatchFailureBadge({
     super.key,
-    required this.failure,
-    required this.roomName,
+    required this.warnings,
+    required this.nodeName,
+    required this.surface,
   });
 
-  final RhythmDispatchFailure failure;
-  final String roomName;
+  final List<LightDeliveryWarning> warnings;
+  final String nodeName;
+  final String surface;
 
   @override
   State<_DispatchFailureBadge> createState() => _DispatchFailureBadgeState();
 }
 
 class _DispatchFailureBadgeState extends State<_DispatchFailureBadge> {
-  final LayerLink _link = LayerLink();
   OverlayEntry? _popover;
 
   @override
   void dispose() {
     _removePopover();
     super.dispose();
+  }
+
+  @override
+  void didUpdateWidget(covariant _DispatchFailureBadge oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _popover?.markNeedsBuild();
   }
 
   void _removePopover() {
@@ -1532,6 +1556,19 @@ class _DispatchFailureBadgeState extends State<_DispatchFailureBadge> {
       return;
     }
     HapticFeedback.lightImpact();
+    final failureKinds = widget.warnings
+        .map((warning) => _failureKindCategory(warning.failure.kind))
+        .toSet();
+    unawaited(
+      AnalyticsService().logLightDeliveryWarningOpened(
+        surface: widget.surface,
+        affectedBulbCount:
+            widget.warnings.where((warning) => warning.hasExactBulb).length,
+        hasUnresolvedTarget:
+            widget.warnings.any((warning) => !warning.hasExactBulb),
+        failureKind: failureKinds.length == 1 ? failureKinds.single : 'mixed',
+      ),
+    );
     final entry = OverlayEntry(
       builder: (context) => Stack(
         children: [
@@ -1542,14 +1579,15 @@ class _DispatchFailureBadgeState extends State<_DispatchFailureBadge> {
               onTap: _removePopover,
             ),
           ),
-          CompositedTransformFollower(
-            link: _link,
-            targetAnchor: Alignment.bottomRight,
-            followerAnchor: Alignment.topRight,
-            offset: const Offset(9, 8),
-            child: _DispatchFailurePopover(
-              failure: widget.failure,
-              roomName: widget.roomName,
+          Positioned.fill(
+            child: SafeArea(
+              minimum: const EdgeInsets.all(12),
+              child: Center(
+                child: _DispatchFailurePopover(
+                  warnings: widget.warnings,
+                  nodeName: widget.nodeName,
+                ),
+              ),
             ),
           ),
         ],
@@ -1561,70 +1599,79 @@ class _DispatchFailureBadgeState extends State<_DispatchFailureBadge> {
 
   @override
   Widget build(BuildContext context) {
-    return CompositedTransformTarget(
-      link: _link,
-      child: Semantics(
-        button: true,
-        label: 'Light command failed — details',
-        child: GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTap: _showPopover,
-          // Settle-in: the badge lands where the spinner just was, so it
-          // arrives with a small overshoot instead of just appearing.
-          child: TweenAnimationBuilder<double>(
-            tween: Tween(begin: 0.6, end: 1),
-            duration: const Duration(milliseconds: 340),
-            curve: Curves.easeOutBack,
-            builder: (context, scale, child) =>
-                Transform.scale(scale: scale, child: child),
-            child: Container(
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                boxShadow: [
-                  BoxShadow(
-                    color: _kDispatchFailureRed.withValues(alpha: 0.45),
-                    blurRadius: 9,
-                    spreadRadius: 0.5,
-                  ),
-                ],
-              ),
-              child: const Icon(
-                Icons.info,
-                size: 18,
-                color: _kDispatchFailureRed,
-              ),
-            ),
+    final exactNames = widget.warnings
+        .map((warning) => warning.bulbName)
+        .whereType<String>()
+        .toList(growable: false);
+    final warningLabel = exactNames.isEmpty
+        ? 'Light delivery warning for ${widget.nodeName}'
+        : exactNames.length == 1
+            ? 'Light delivery warning for ${exactNames.single}'
+            : 'Light delivery warnings for ${exactNames.join(', ')}';
+    return Semantics(
+      button: true,
+      liveRegion: true,
+      label: '$warningLabel. Tap for details.',
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: _showPopover,
+        // Settle-in: the badge lands where the spinner just was, so it
+        // arrives with a small overshoot instead of just appearing.
+        child: TweenAnimationBuilder<double>(
+          tween: Tween(begin: 0.6, end: 1),
+          duration: const Duration(milliseconds: 340),
+          curve: Curves.easeOutBack,
+          builder: (context, scale, child) =>
+              Transform.scale(scale: scale, child: child),
+          child: LightDeliveryWarningSignal(
+            count: widget.warnings.length,
+            glow: true,
           ),
         ),
       ),
     );
   }
+
+  String _failureKindCategory(String kind) => switch (kind) {
+        'turn_on' => 'turn_on',
+        'turn_off' => 'turn_off',
+        _ => 'light_update',
+      };
 }
 
-/// Compact anchored panel: "Failed to [action] [device]", nothing more.
+/// Compact centered panel that names every exactly resolved bulb without
+/// exposing transport-native endpoint labels or raw failure detail.
 class _DispatchFailurePopover extends StatelessWidget {
   const _DispatchFailurePopover({
-    required this.failure,
-    required this.roomName,
+    required this.warnings,
+    required this.nodeName,
   });
 
-  final RhythmDispatchFailure failure;
-  final String roomName;
+  final List<LightDeliveryWarning> warnings;
+  final String nodeName;
 
-  String get _message {
-    final action = switch (failure.kind) {
-      'turn_on' => 'turn on',
-      'turn_off' => 'turn off',
-      _ => 'reach',
-    };
-    return 'Failed to $action $roomName';
+  String get _title {
+    if (warnings.length > 1) {
+      return 'Couldn\u2019t reach ${warnings.length} bulbs';
+    }
+    final bulbName = warnings.single.bulbName;
+    return bulbName == null
+        ? 'Couldn\u2019t reach $nodeName lights'
+        : 'Couldn\u2019t reach $bulbName';
   }
 
-  String get _relativeTime {
-    if (failure.epochMs <= 0) return 'just now';
-    final elapsed = DateTime.now().difference(
-      DateTime.fromMillisecondsSinceEpoch(failure.epochMs),
-    );
+  String _targetLabel(LightDeliveryWarning warning) =>
+      warning.bulbName ?? '$nodeName lights';
+
+  String _actionLabel(LightDeliveryWarning warning) =>
+      switch (warning.failure.kind) {
+        'turn_on' => 'Turn on didn\u2019t apply',
+        'turn_off' => 'Turn off didn\u2019t apply',
+        _ => 'Light update didn\u2019t apply',
+      };
+
+  String _relativeTime(LightDeliveryWarning warning) {
+    final elapsed = DateTime.now().difference(warning.occurredAt);
     if (elapsed.inSeconds < 5) return 'just now';
     if (elapsed.inSeconds < 60) return '${elapsed.inSeconds}s ago';
     return '${elapsed.inMinutes}m ago';
@@ -1640,132 +1687,119 @@ class _DispatchFailurePopover extends StatelessWidget {
         opacity: t,
         child: Transform.scale(
           scale: 0.94 + 0.06 * t,
-          alignment: Alignment.topRight,
+          alignment: Alignment.center,
           child: child,
         ),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // Caret pointing up at the badge.
-          Padding(
-            padding: const EdgeInsets.only(right: 12),
-            child: CustomPaint(
-              size: const Size(14, 7),
-              painter: _PopoverCaretPainter(),
+      child: Material(
+        color: Colors.transparent,
+        child: Container(
+          key: const ValueKey('light-delivery-warning-popover'),
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+          constraints: const BoxConstraints(maxWidth: 280),
+          decoration: BoxDecoration(
+            color: const Color(0xF20E141B),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: lightDeliveryWarningColor.withValues(alpha: 0.3),
             ),
-          ),
-          Material(
-            color: Colors.transparent,
-            child: Container(
-              padding: const EdgeInsets.fromLTRB(13, 10, 13, 10),
-              constraints: const BoxConstraints(maxWidth: 240),
-              decoration: BoxDecoration(
-                color: const Color(0xF20E141B),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(
-                  color: _kDispatchFailureRed.withValues(alpha: 0.28),
-                ),
-                boxShadow: [
-                  const BoxShadow(
-                    color: Color(0xB3000000),
-                    blurRadius: 24,
-                    offset: Offset(0, 10),
-                  ),
-                  BoxShadow(
-                    color: _kDispatchFailureRed.withValues(alpha: 0.08),
-                    blurRadius: 32,
-                  ),
-                ],
+            boxShadow: [
+              const BoxShadow(
+                color: Color(0xB3000000),
+                blurRadius: 24,
+                offset: Offset(0, 10),
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Container(
-                        width: 7,
-                        height: 7,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: _kDispatchFailureRed,
-                          boxShadow: [
-                            BoxShadow(
-                              color: _kDispatchFailureRed.withValues(
-                                alpha: 0.6,
-                              ),
-                              blurRadius: 6,
-                            ),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Flexible(
-                        child: Text(
-                          _message,
-                          style: const TextStyle(
-                            color: CelestialColors.textPrimary,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                            height: 1.35,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 3),
+              BoxShadow(
+                color: lightDeliveryWarningColor.withValues(alpha: 0.08),
+                blurRadius: 32,
+              ),
+            ],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                _title,
+                key: const ValueKey('light-delivery-warning-title'),
+                style: const TextStyle(
+                  color: CelestialColors.textPrimary,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  height: 1.3,
+                ),
+              ),
+              const SizedBox(height: 9),
+              for (var index = 0; index < warnings.length; index++) ...[
+                _DispatchFailureRow(
+                  targetLabel: _targetLabel(warnings[index]),
+                  detail:
+                      '${_actionLabel(warnings[index])} \u00b7 ${_relativeTime(warnings[index])}',
+                ),
+                if (index < warnings.length - 1)
                   Padding(
-                    padding: const EdgeInsets.only(left: 15),
-                    child: Text(
-                      _relativeTime,
-                      style: TextStyle(
-                        color: CelestialColors.textSecondary.withValues(
-                          alpha: 0.8,
-                        ),
-                        fontSize: 11,
+                    padding: const EdgeInsets.only(left: 25),
+                    child: Divider(
+                      height: 13,
+                      color: CelestialColors.orbitRing.withValues(
+                        alpha: 0.16,
                       ),
                     ),
                   ),
-                ],
-              ),
-            ),
+              ],
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
 }
 
-class _PopoverCaretPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final path = Path()
-      ..moveTo(size.width / 2, 0)
-      ..lineTo(size.width, size.height)
-      ..lineTo(0, size.height)
-      ..close();
-    canvas.drawPath(path, Paint()..color = const Color(0xF20E141B));
-    final edge = Paint()
-      ..color = _kDispatchFailureRed.withValues(alpha: 0.28)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1;
-    canvas.drawLine(
-      Offset(size.width / 2, 0),
-      Offset(0, size.height),
-      edge,
-    );
-    canvas.drawLine(
-      Offset(size.width / 2, 0),
-      Offset(size.width, size.height),
-      edge,
-    );
-  }
+class _DispatchFailureRow extends StatelessWidget {
+  const _DispatchFailureRow({
+    required this.targetLabel,
+    required this.detail,
+  });
+
+  final String targetLabel;
+  final String detail;
 
   @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Padding(
+          padding: EdgeInsets.only(top: 1),
+          child: LightDeliveryWarningSignal(size: 17),
+        ),
+        const SizedBox(width: 8),
+        Flexible(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                targetLabel,
+                style: const TextStyle(
+                  color: CelestialColors.textPrimary,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                detail,
+                style: TextStyle(
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.78),
+                  fontSize: 10.5,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
 }
 
 class _SunSliderThumbShape extends SliderComponentShape {

@@ -1602,10 +1602,15 @@ mod tests {
             metadata.device_quirks.get("matter-107"),
             Some(&vec![
                 DeviceQuirk::NeedsExplicitOn,
+                DeviceQuirk::NeedsHueSaturationNotCt,
                 DeviceQuirk::CommandThrottleMs(250),
             ])
         );
         assert!(metadata
+            .device_caps
+            .get("matter-107")
+            .is_some_and(LightCapabilities::supports_hue_saturation));
+        assert!(!metadata
             .device_caps
             .get("matter-107")
             .is_some_and(LightCapabilities::supports_xy_color));
@@ -1729,6 +1734,7 @@ mod tests {
             data.device_quirks.lock().unwrap().get("matter-107"),
             Some(&vec![
                 DeviceQuirk::NeedsExplicitOn,
+                DeviceQuirk::NeedsHueSaturationNotCt,
                 DeviceQuirk::CommandThrottleMs(250),
             ])
         );
@@ -2563,6 +2569,7 @@ mod tests {
             data.device_quirks.lock().unwrap().get("matter-107"),
             Some(&vec![
                 DeviceQuirk::NeedsExplicitOn,
+                DeviceQuirk::NeedsHueSaturationNotCt,
                 DeviceQuirk::CommandThrottleMs(250),
             ])
         );

@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use log::{info, warn};
+use rhythm_devices::quirks::PREFER_COLOR_TEMPERATURE_QUIRK;
 use rhythm_devices::{ColorMode, DeviceQuirk, LightCapabilities, LightType};
 use rhythm_os::state::SharedState;
 use serde::{Deserialize, Serialize};
@@ -189,6 +190,12 @@ impl CloudMatterDeviceProfile {
         {
             push_unique_quirk(quirks, DeviceQuirk::NeedsHueSaturationNotCt);
         }
+        if self.capabilities.preferred_color_command.as_deref() == Some("color_temperature") {
+            push_unique_quirk(
+                quirks,
+                DeviceQuirk::Other(PREFER_COLOR_TEMPERATURE_QUIRK.to_string()),
+            );
+        }
         if let Some(ms) = self
             .quirks
             .recommended_command_spacing_ms
@@ -328,6 +335,9 @@ fn device_quirk_from_value(value: &serde_json::Value) -> Option<DeviceQuirk> {
         serde_json::Value::String(value) if value == "needs_hue_saturation_not_ct" => {
             Some(DeviceQuirk::NeedsHueSaturationNotCt)
         }
+        serde_json::Value::String(value) if value == PREFER_COLOR_TEMPERATURE_QUIRK => Some(
+            DeviceQuirk::Other(PREFER_COLOR_TEMPERATURE_QUIRK.to_string()),
+        ),
         serde_json::Value::Object(map) => map
             .get("command_throttle_ms")
             .and_then(serde_json::Value::as_u64)
@@ -401,6 +411,7 @@ mod tests {
                 capabilities: CloudMatterProfileCapabilities {
                     supports_transition: Some(false),
                     min_brightness: Some(8),
+                    preferred_color_command: Some("color_temperature".to_string()),
                     ..Default::default()
                 },
                 quirks: CloudMatterProfileQuirks {
@@ -421,6 +432,9 @@ mod tests {
         assert_eq!(caps.min_brightness, Some(8));
         assert!(!caps.color_modes.contains(&ColorMode::Xy));
         assert!(quirks.contains(&DeviceQuirk::CommandThrottleMs(250)));
+        assert!(quirks.contains(&DeviceQuirk::Other(
+            PREFER_COLOR_TEMPERATURE_QUIRK.to_string()
+        )));
     }
 
     #[test]

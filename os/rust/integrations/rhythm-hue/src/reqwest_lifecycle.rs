@@ -3758,6 +3758,77 @@ mod tests {
     }
 
     #[test]
+    fn persisted_topology_attention_clears_after_later_exact_projection() {
+        static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "rhythm-hue-topology-retry-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let storage = Arc::new(FileStorage::new(path.to_str().unwrap()).unwrap());
+        let key = hue_key("192.0.2.11");
+        let room_id = "rhythm-office";
+        let source = shared_state();
+        {
+            let mut app = source.lock().unwrap();
+            app.storage = Some(storage.clone());
+            app.topology
+                .insert_room(rhythm_os::topology::TopologyRoom::new(room_id, "Office"));
+            app.topology
+                .set_external_room_topology_sync_enabled(&key, true);
+            app.topology
+                .set_external_grouped_dispatch_suspended(&key, true);
+            app.topology
+                .set_external_room_topology_sync_attention(&key, true);
+            rhythm_os::commands::save_authority_state(&app).unwrap();
+        }
+
+        let durable = storage.load_authority_state().unwrap().unwrap();
+        let mut restored_topology: rhythm_os::topology::RoomTopologyStore =
+            serde_json::from_value(durable.topology).unwrap();
+        restored_topology.rebuild_indices();
+        assert!(restored_topology.external_room_topology_sync_needs_attention(&key));
+
+        let restarted = shared_state();
+        {
+            let mut app = restarted.lock().unwrap();
+            app.storage = Some(storage.clone());
+            app.topology = restored_topology;
+        }
+        publish_managed_room_bindings(
+            &restarted,
+            &key,
+            &[(
+                room_id.to_string(),
+                "Office".to_string(),
+                HubRoomBinding {
+                    hub_key: key.clone(),
+                    hub_room_id: "managed-office".to_string(),
+                    control_id: "managed-office-group".to_string(),
+                    light_device_ids: Vec::new(),
+                },
+            )],
+        )
+        .unwrap();
+
+        let app = restarted.lock().unwrap();
+        assert!(!app.topology.external_grouped_dispatch_is_suspended(&key));
+        assert!(!app
+            .topology
+            .external_room_topology_sync_needs_attention(&key));
+        drop(app);
+        let durable = storage.load_authority_state().unwrap().unwrap();
+        let mut durable_topology: rhythm_os::topology::RoomTopologyStore =
+            serde_json::from_value(durable.topology).unwrap();
+        durable_topology.rebuild_indices();
+        assert!(!durable_topology.external_room_topology_sync_needs_attention(&key));
+        drop(restarted);
+        drop(source);
+        drop(storage);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
     fn unreviewed_hue_room_reconciliation_is_observe_only() {
         let state = shared_state();
         let key = hue_key("192.0.2.10");
@@ -3994,12 +4065,12 @@ mod tests {
             .get(&paired_id)
             .unwrap()
             .name
-            .starts_with("Hue Zig "));
+            .starts_with("Hue Hub "));
         assert_eq!(
             state.canonical_registry.get(&unrelated_id).unwrap().name,
             "Test Hue lamp"
         );
-        assert!(paired_devices[0].name.starts_with("Hue Zig "));
+        assert!(paired_devices[0].name.starts_with("Hue Hub "));
         assert_eq!(
             renamed_native_ids.lock().unwrap().as_slice(),
             ["hue-paired"]

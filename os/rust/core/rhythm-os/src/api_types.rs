@@ -7,7 +7,7 @@
 use rhythm_core::{
     runtime::hub_registry::DeviceType, LightNodeKind, LightProfileConfig, LightProfileNodeOverride,
     ModeChangeCause, ModeConfig, ModeTransitionConfig, RhythmMode, RoomModeState,
-    RoomProfileSettings, TimerSetting,
+    RoomProfileSettings, RoomScheduleConfig, TimerSetting,
 };
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
@@ -49,6 +49,8 @@ pub struct RoomProfileSettingsDto {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub motion_timeout_secs: Option<TimerSetting>,
     pub motion_activation_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub room_schedule: Option<RoomScheduleConfig>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub profile_overrides: BTreeMap<String, LightProfileNodeOverride>,
 }
@@ -63,6 +65,7 @@ impl RoomProfileSettingsDto {
             fade_ms: settings.fade_ms.clone(),
             motion_timeout_secs: settings.motion_timeout_secs.clone(),
             motion_activation_enabled: settings.motion_activation_enabled(),
+            room_schedule: settings.room_schedule,
             profile_overrides: settings.profile_overrides.clone(),
         }
     }
@@ -272,7 +275,9 @@ pub struct HubStartupRetryDto {
 pub const API_SCHEMA_VERSION: u32 = 2;
 pub const FEATURE_ASYNC_DEBUG_BUNDLE_UPLOAD: &str = "async_debug_bundle_upload";
 pub const FEATURE_MOTION_ACTIVATION_TOGGLE: &str = "motion_activation_toggle";
+pub const FEATURE_ROOM_SCHEDULE_V1: &str = "room_schedule_v1";
 pub const FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES: &str = "room_light_profile_overrides";
+pub const FEATURE_ROOM_DAY_IDLE_PROFILE_OVERRIDES: &str = "room_day_idle_profile_overrides_v1";
 pub const FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES: &str =
     "guarded_room_light_profile_overrides";
 pub const FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES: &str =
@@ -280,6 +285,8 @@ pub const FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES: &str =
 pub const FEATURE_HUE_ROOM_AUTHORITY_CONSENT: &str = "hue_room_authority_consent_v1";
 pub const FEATURE_MATTER_SETUP_CODE_RECOVERY: &str = "matter_setup_code_recovery_v1";
 pub const FEATURE_HUE_ROOM_TOPOLOGY_SYNC: &str = "hue_room_topology_sync_v1";
+pub const FEATURE_SCENE_MOTION_SUPPRESSION: &str = "scene_motion_suppression_v1";
+pub const FEATURE_BUTTON_MULTI_ROOM_CONTROLS: &str = "button_multi_room_controls_v1";
 
 #[derive(Clone, Debug)]
 pub struct ApiCapabilitiesDto {
@@ -298,12 +305,16 @@ impl Serialize for ApiCapabilitiesDto {
             &[
                 FEATURE_ASYNC_DEBUG_BUNDLE_UPLOAD,
                 FEATURE_MOTION_ACTIVATION_TOGGLE,
+                FEATURE_ROOM_SCHEDULE_V1,
                 FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES,
+                FEATURE_ROOM_DAY_IDLE_PROFILE_OVERRIDES,
                 FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
                 FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
                 FEATURE_HUE_ROOM_AUTHORITY_CONSENT,
                 FEATURE_MATTER_SETUP_CODE_RECOVERY,
                 FEATURE_HUE_ROOM_TOPOLOGY_SYNC,
+                FEATURE_SCENE_MOTION_SUPPRESSION,
+                FEATURE_BUTTON_MULTI_ROOM_CONTROLS,
             ],
         )?;
         state.serialize_field("hubs", &self.hubs)?;
@@ -714,6 +725,28 @@ pub struct HueBridgeAuthorityDto {
 pub struct HueAuthorityResponse {
     pub schema_version: u32,
     pub bridges: Vec<HueBridgeAuthorityDto>,
+}
+
+/// Best-known external room projection state after a canonical device move.
+///
+/// The canonical mutation is committed before optional external projections
+/// run. Keeping this state explicit prevents clients from treating request
+/// acceptance as proof that every external controller already converged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceRoomProjectionStatus {
+    NotApplicable,
+    Blocked,
+    Pending,
+    Attention,
+    Synced,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct DeviceRoomAssignmentResponse {
+    pub schema_version: u32,
+    pub canonical_committed: bool,
+    pub projection_status: DeviceRoomProjectionStatus,
 }
 
 // ---------------------------------------------------------------------------
@@ -1574,27 +1607,43 @@ mod tests {
         );
         assert_eq!(
             json["capabilities"]["features"][2],
-            FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES
+            FEATURE_ROOM_SCHEDULE_V1
         );
         assert_eq!(
             json["capabilities"]["features"][3],
-            FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES
+            FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES
         );
         assert_eq!(
             json["capabilities"]["features"][4],
-            FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES
+            FEATURE_ROOM_DAY_IDLE_PROFILE_OVERRIDES
         );
         assert_eq!(
             json["capabilities"]["features"][5],
-            FEATURE_HUE_ROOM_AUTHORITY_CONSENT
+            FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES
         );
         assert_eq!(
             json["capabilities"]["features"][6],
-            FEATURE_MATTER_SETUP_CODE_RECOVERY
+            FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES
         );
         assert_eq!(
             json["capabilities"]["features"][7],
+            FEATURE_HUE_ROOM_AUTHORITY_CONSENT
+        );
+        assert_eq!(
+            json["capabilities"]["features"][8],
+            FEATURE_MATTER_SETUP_CODE_RECOVERY
+        );
+        assert_eq!(
+            json["capabilities"]["features"][9],
             FEATURE_HUE_ROOM_TOPOLOGY_SYNC
+        );
+        assert_eq!(
+            json["capabilities"]["features"][10],
+            FEATURE_SCENE_MOTION_SUPPRESSION
+        );
+        assert_eq!(
+            json["capabilities"]["features"][11],
+            FEATURE_BUTTON_MULTI_ROOM_CONTROLS
         );
         assert_eq!(
             json["capabilities"]["hubs"][0]["device_onboarding_methods"][0],

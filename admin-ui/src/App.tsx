@@ -106,8 +106,8 @@ function SetupScreen() {
         </div>
         <h1>Admin UI is not configured</h1>
         <p>
-          Set <code>VITE_SUPABASE_URL</code>, <code>VITE_SUPABASE_ANON_KEY</code>,
-          and <code>VITE_ADMIN_API_URL</code> in <code>admin-ui/.env</code>.
+          Load the external <code>app-build</code> profile and set{' '}
+          <code>VITE_ADMIN_API_URL</code> in <code>admin-ui/.env</code>.
         </p>
       </section>
     </main>

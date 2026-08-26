@@ -632,8 +632,8 @@ pub fn handle_post_factory_reset(state: &SharedState) -> ApiResponse {
             )
         })
         .unwrap_or((false, None));
-    let mut bluetooth_reservation = if appliance_reset {
-        match try_acquire_pairing_guard(state, crate::hub::HubType::HUE_BLE) {
+    let mut reset_reservation = if appliance_reset {
+        match try_acquire_factory_reset_guard(state) {
             Ok(guard) => Some(guard),
             Err(response) => return response,
         }
@@ -653,7 +653,7 @@ pub fn handle_post_factory_reset(state: &SharedState) -> ApiResponse {
                     // the reboot grace period, even when platform cleanup
                     // fails: a new bond or association could recreate state
                     // that this reset just removed.
-                    if let Some(guard) = bluetooth_reservation.as_mut() {
+                    if let Some(guard) = reset_reservation.as_mut() {
                         guard.keep_reserved();
                     }
                     if let Some(recover) = post_barrier_recovery.as_ref() {
@@ -665,19 +665,19 @@ pub fn handle_post_factory_reset(state: &SharedState) -> ApiResponse {
                 }
             }
             // Once both shared reset and synchronous platform cleanup succeed,
-            // retain the adapter reservation until the scheduled reboot.
-            // Releasing it after the HTTP response would allow a new
-            // Matter/Hue BLE bond to appear in the reboot grace period.
-            if let Some(guard) = bluetooth_reservation.as_mut() {
+            // retain both pairing reservations until the scheduled reboot.
+            // Releasing either after the HTTP response would allow a new
+            // Matter association or Bluetooth bond in the reboot grace period.
+            if let Some(guard) = reset_reservation.as_mut() {
                 guard.keep_reserved();
             }
             ApiResponse::json_ok(json)
         }
         Err(e) if commands::factory_reset_error_is_post_barrier(&e) => {
             // Reset began and may already have removed credentials/state. Keep
-            // the shared adapter slot poisoned until the recovery reboot so a
-            // concurrent pairing request cannot repopulate it.
-            if let Some(guard) = bluetooth_reservation.as_mut() {
+            // both shared pairing slots poisoned until the recovery reboot so
+            // a concurrent pairing request cannot repopulate either one.
+            if let Some(guard) = reset_reservation.as_mut() {
                 guard.keep_reserved();
             }
             if let Some(recover) = post_barrier_recovery.as_ref() {
@@ -1122,6 +1122,21 @@ fn parse_profile_settings_patch(
         })?)),
     };
 
+    let room_schedule = match body.get("room_schedule") {
+        None => None,
+        Some(v) if v.is_null() => Some(None),
+        Some(v) => {
+            let schedule: rhythm_core::RoomScheduleConfig = serde_json::from_value(v.clone())
+                .map_err(|e| format!("Invalid {field_name}.room_schedule: {e}"))?;
+            if schedule.wake_time == schedule.sleep_time {
+                return Err(format!(
+                    "{field_name}.room_schedule wake_time and sleep_time must differ"
+                ));
+            }
+            Some(Some(schedule))
+        }
+    };
+
     Ok(Some(commands::RoomProfileSettingsPatch {
         clear_all: false,
         profile_id,
@@ -1131,6 +1146,7 @@ fn parse_profile_settings_patch(
         fade_ms: parse_timer_patch_value(body, "fade_ms")?,
         motion_timeout_secs: parse_timer_patch_value(body, "motion_timeout_secs")?,
         motion_activation_enabled,
+        room_schedule,
         profile_overrides: parse_profile_overrides_patch_value(body, field_name)?,
         expected_effective_profile_overrides: None,
         replace_profile_overrides: body
@@ -2847,6 +2863,165 @@ pub fn handle_put_node_preferences(
         Err(e) => return ApiResponse::bad_request(&e),
     };
 
+    if items.len() == 1 {
+        if let Some(mode_value) = items[0].get("schedule_test") {
+            let mode = match serde_json::from_value::<rhythm_core::RhythmMode>(mode_value.clone()) {
+                Ok(mode) => mode,
+                Err(_) => return ApiResponse::bad_request("schedule_test must be day or sleep"),
+            };
+            let Some(raw_node_id) = items[0].get("node_id").and_then(Value::as_str) else {
+                return ApiResponse::bad_request("Missing node_id");
+            };
+            let node_id = commands::resolve_node_id(state, raw_node_id);
+            let request_id = items[0]
+                .get("request_id")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty() && value.len() <= 128)
+                .map(str::to_string)
+                .unwrap_or_else(|| crate::logging::next_command_id("room-schedule-test"));
+            let result = commands::do_room_schedule_test(state, &node_id, mode);
+            let mut record = crate::activity::LightActivityRecord::app(
+                &node_id,
+                if mode == rhythm_core::RhythmMode::Day {
+                    "room_schedule_test_wake"
+                } else {
+                    "room_schedule_test_sleep"
+                },
+            );
+            record.correlation_id = Some(request_id);
+            record.payload = Some(json!({
+                "status": if result.is_ok() { "applied" } else { "failed" },
+                "failure_stage": result.as_ref().err().map(|_| "output_apply"),
+            }));
+            crate::activity::record_light_activity(state, record);
+            return match result {
+                Ok(node) => ApiResponse::json_ok(format!(r#"{{"nodes":[{}]}}"#, node)),
+                Err(error) => ApiResponse::server_error(error),
+            };
+        }
+    }
+
+    // Room schedules require an authoritative acknowledgement. Keep this
+    // additive shape on the SDK-owned preferences route, but apply it
+    // synchronously so a 2xx response means the canonical room state was
+    // persisted rather than merely admitted to the dispatch queue.
+    if items.len() == 1
+        && items[0]
+            .get("profile_settings")
+            .and_then(Value::as_object)
+            .is_some_and(|settings| settings.contains_key("room_schedule"))
+    {
+        let Some(raw_node_id) = items[0].get("node_id").and_then(Value::as_str) else {
+            return ApiResponse::bad_request("Missing node_id");
+        };
+        let node_id = commands::resolve_node_id(state, raw_node_id);
+        let previous_schedule = match state
+            .lock()
+            .ok()
+            .and_then(|locked| locked.hub_runtime())
+            .and_then(|runtime| runtime.engine_node_snapshot(&node_id))
+        {
+            Some(snapshot)
+                if snapshot.kind.is_light_addressable() && snapshot.parent_id.is_none() =>
+            {
+                snapshot.profile_settings.room_schedule
+            }
+            Some(_) => {
+                return ApiResponse::bad_request(
+                    "Schedules require a room or unassigned light node",
+                )
+            }
+            None => return ApiResponse::bad_request("Schedule target was not found"),
+        };
+        let patch = match parse_profile_settings_patch(
+            items[0].get("profile_settings"),
+            "profile_settings",
+        ) {
+            Ok(Some(patch)) => patch,
+            Ok(None) => return ApiResponse::bad_request("Missing room schedule"),
+            Err(error) => return ApiResponse::bad_request(&error),
+        };
+        let Some(schedule) = patch
+            .room_schedule
+            .as_ref()
+            .and_then(Option::as_ref)
+            .copied()
+        else {
+            return ApiResponse::bad_request("Room schedule cannot be cleared");
+        };
+        let source = if schedule.follows_time() {
+            "follow_time"
+        } else {
+            "wake_sleep_presets"
+        };
+        let request_id = items[0]
+            .get("request_id")
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty() && value.len() <= 128)
+            .map(str::to_string)
+            .or_else(|| Some(crate::logging::next_command_id("room-schedule-save")));
+        let accepted_node = match commands::do_node_preferences_set(
+            state,
+            &node_id,
+            None,
+            None,
+            None,
+            None,
+            Some(&patch),
+            persist,
+        ) {
+            Ok(node) => node,
+            Err(error) => {
+                let mut record = crate::activity::LightActivityRecord::app(
+                    &node_id,
+                    "room_schedule_config_updated",
+                );
+                record.correlation_id = request_id;
+                record.payload = Some(json!({
+                    "source": source,
+                    "status": "failed",
+                    "failure_stage": "persistence",
+                }));
+                crate::activity::record_light_activity(state, record);
+                return ApiResponse::server_error(error);
+            }
+        };
+        let output_result = commands::apply_room_schedule_configuration(
+            state,
+            &node_id,
+            previous_schedule,
+            schedule,
+        );
+        if let Err(error) = &output_result {
+            tracing::warn!(
+                target: "cmd",
+                event = "room_schedule_config_updated",
+                node_id = %node_id,
+                status = "failed",
+                failure_stage = "output_apply",
+                error = %error,
+                "Room schedule was accepted but immediate output application failed"
+            );
+        }
+        let mut record =
+            crate::activity::LightActivityRecord::app(&node_id, "room_schedule_config_updated");
+        record.correlation_id = request_id;
+        record.payload = Some(json!({
+            "source": source,
+            "status": match &output_result {
+                Ok(true) => "applied",
+                Ok(false) => "accepted",
+                Err(_) => "failed",
+            },
+            "failure_stage": output_result.as_ref().err().map(|_| "output_apply"),
+        }));
+        crate::activity::record_light_activity(state, record);
+        let authoritative_node = commands::build_node_state(state, &node_id)
+            .and_then(|node| serde_json::to_string(&node).map_err(Into::into))
+            .unwrap_or(accepted_node);
+        return ApiResponse::json_ok(format!(r#"{{"nodes":[{}]}}"#, authoritative_node));
+    }
+
     let mut updates = Vec::with_capacity(items.len());
 
     for item in &items {
@@ -2870,6 +3045,14 @@ pub fn handle_put_node_preferences(
                 Ok(patch) => patch,
                 Err(e) => return ApiResponse::bad_request(&e),
             };
+        if room_profile
+            .as_ref()
+            .is_some_and(|patch| patch.room_schedule.is_some())
+        {
+            return ApiResponse::bad_request(
+                "Schedule updates must target one room or unassigned light node per request",
+            );
+        }
         updates.push(commands::QueuedNodePreferencesPatch {
             node_id,
             rhythm_enabled,
@@ -2911,16 +3094,23 @@ pub fn handle_put_node_preferences(
             || update.room_profile.is_some()
         {
             let action_id = update
-                .target_state
-                .map(|_| "set_room_state".to_string())
+                .room_profile
+                .as_ref()
+                .filter(|patch| patch.room_schedule.is_some())
+                .map(|_| "room_schedule_config_updated".to_string())
                 .or_else(|| {
-                    update.rhythm_enabled.map(|enabled| {
-                        if enabled {
-                            "circadian_on".to_string()
-                        } else {
-                            "circadian_off".to_string()
-                        }
-                    })
+                    update
+                        .target_state
+                        .map(|_| "set_room_state".to_string())
+                        .or_else(|| {
+                            update.rhythm_enabled.map(|enabled| {
+                                if enabled {
+                                    "circadian_on".to_string()
+                                } else {
+                                    "circadian_off".to_string()
+                                }
+                            })
+                        })
                 })
                 .unwrap_or_else(|| "set_light_preferences".to_string());
             let mut record = crate::activity::LightActivityRecord::app(&update.node_id, action_id);
@@ -2929,6 +3119,11 @@ pub fn handle_put_node_preferences(
                 "standby_enabled": update.standby_enabled,
                 "state": update.target_state.map(|state| state.as_api_str()),
                 "profile_settings_touched": update.room_profile.is_some(),
+                "room_schedule_source": update.room_profile.as_ref()
+                    .and_then(|patch| patch.room_schedule.as_ref())
+                    .and_then(|schedule| schedule.as_ref())
+                    .map(|schedule| if schedule.follows_time() { "follow_time" } else { "wake_sleep_presets" }),
+                "status": "accepted",
             }));
             crate::activity::record_light_activity(state, record);
         }
@@ -3176,9 +3371,14 @@ pub fn handle_get_version(version: &str) -> ApiResponse {
 struct PairingAttemptGuard {
     state: SharedState,
     hub_type: String,
-    pairing_slot: String,
+    reservations: Vec<PairingReservation>,
     resource_activity_fn: Option<crate::state::PairingResourceActivityFn>,
     release_on_drop: bool,
+}
+
+struct PairingReservation {
+    pairing_slot: String,
+    resource_activity: bool,
 }
 
 impl Drop for PairingAttemptGuard {
@@ -3186,19 +3386,23 @@ impl Drop for PairingAttemptGuard {
         if !self.release_on_drop {
             return;
         }
-        if let Some(callback) = &self.resource_activity_fn {
-            if let Err(error) = callback(&self.hub_type, &self.pairing_slot, false) {
-                log::error!(
-                    target: "sys",
-                    "Could not release pairing resource {} for {}; keeping the slot reserved: {error:#}",
-                    self.pairing_slot,
-                    self.hub_type
-                );
-                return;
+        for reservation in self.reservations.iter().rev() {
+            if reservation.resource_activity {
+                if let Some(callback) = &self.resource_activity_fn {
+                    if let Err(error) = callback(&self.hub_type, &reservation.pairing_slot, false) {
+                        log::error!(
+                            target: "sys",
+                            "Could not release pairing resource {} for {}; keeping the slot reserved: {error:#}",
+                            reservation.pairing_slot,
+                            self.hub_type
+                        );
+                        continue;
+                    }
+                }
             }
-        }
-        if let Ok(mut s) = self.state.lock() {
-            s.finish_pairing(&self.pairing_slot);
+            if let Ok(mut state) = self.state.lock() {
+                state.finish_pairing(&reservation.pairing_slot);
+            }
         }
     }
 }
@@ -3209,57 +3413,161 @@ impl PairingAttemptGuard {
     }
 }
 
-fn pairing_slot(platform_type: &str, hub_type: &str) -> (String, bool) {
-    if platform_type == "appliance" && matches!(hub_type, "matter" | "hue_ble" | "local_ble") {
-        ("appliance_bluetooth_adapter".to_string(), true)
+fn matter_pairing_uses_bluetooth(params: &serde_json::Value) -> bool {
+    match params.get("rendezvous").and_then(serde_json::Value::as_str) {
+        Some("on_network") => false,
+        Some(_) => true,
+        None => params
+            .get("setup_payload")
+            .and_then(serde_json::Value::as_str)
+            .map(|payload| {
+                payload
+                    .trim()
+                    .get(..3)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("MT:"))
+            })
+            // Invalid or legacy requests without enough information stay on
+            // the conservative shared-adapter path until integration parsing.
+            .unwrap_or(true),
+    }
+}
+
+fn pairing_slots(
+    platform_type: &str,
+    hub_type: &str,
+    params: &serde_json::Value,
+) -> Vec<PairingReservation> {
+    if platform_type != "appliance" {
+        return vec![PairingReservation {
+            pairing_slot: hub_type.to_string(),
+            resource_activity: false,
+        }];
+    }
+
+    match hub_type {
+        crate::hub::HubType::MATTER => {
+            let mut reservations = vec![PairingReservation {
+                // Commissioner serialization is independent from whether the
+                // selected rendezvous consumes the Bluetooth adapter.
+                pairing_slot: crate::hub::HubType::MATTER.to_string(),
+                resource_activity: false,
+            }];
+            if matter_pairing_uses_bluetooth(params) {
+                reservations.push(PairingReservation {
+                    pairing_slot: "appliance_bluetooth_adapter".to_string(),
+                    resource_activity: true,
+                });
+            }
+            reservations
+        }
+        crate::hub::HubType::HUE_BLE | crate::hub::HubType::LOCAL_BLE => {
+            vec![PairingReservation {
+                pairing_slot: "appliance_bluetooth_adapter".to_string(),
+                resource_activity: false,
+            }]
+        }
+        _ => vec![PairingReservation {
+            pairing_slot: hub_type.to_string(),
+            resource_activity: false,
+        }],
+    }
+}
+
+fn pairing_conflict_message(reservation: &PairingReservation, hub_type: &str) -> String {
+    if reservation.pairing_slot == "appliance_bluetooth_adapter" {
+        "Bluetooth pairing is already in progress on this appliance".to_string()
     } else {
-        (hub_type.to_string(), false)
+        format!("Pairing already in progress for {hub_type}")
     }
 }
 
 fn try_acquire_pairing_guard(
     state: &SharedState,
     hub_type: &str,
+    params: &serde_json::Value,
 ) -> Result<PairingAttemptGuard, ApiResponse> {
-    let mut s = match state.lock() {
-        Ok(s) => s,
+    try_acquire_pairing_guard_with(state, hub_type, |platform_type| {
+        pairing_slots(platform_type, hub_type, params)
+    })
+}
+
+fn try_acquire_factory_reset_guard(
+    state: &SharedState,
+) -> Result<PairingAttemptGuard, ApiResponse> {
+    try_acquire_pairing_guard_with(state, crate::hub::HubType::MATTER, |platform_type| {
+        if platform_type == "appliance" {
+            vec![
+                PairingReservation {
+                    pairing_slot: crate::hub::HubType::MATTER.to_string(),
+                    resource_activity: false,
+                },
+                PairingReservation {
+                    pairing_slot: "appliance_bluetooth_adapter".to_string(),
+                    resource_activity: false,
+                },
+            ]
+        } else {
+            Vec::new()
+        }
+    })
+}
+
+fn try_acquire_pairing_guard_with(
+    state: &SharedState,
+    hub_type: &str,
+    reservation_plan: impl FnOnce(&str) -> Vec<PairingReservation>,
+) -> Result<PairingAttemptGuard, ApiResponse> {
+    let mut state_guard = match state.lock() {
+        Ok(state) => state,
         Err(_) => return Err(ApiResponse::server_error("lock")),
     };
-    let (pairing_slot, shared_bluetooth_slot) = pairing_slot(s.platform_type, hub_type);
-    if !s.begin_pairing(&pairing_slot) {
-        let message = if shared_bluetooth_slot {
-            "Bluetooth pairing is already in progress on this appliance".to_string()
-        } else {
-            format!("Pairing already in progress for {hub_type}")
-        };
-        return Err(ApiResponse::conflict(&message));
+    let reservations = reservation_plan(state_guard.platform_type);
+    if let Some(conflict) = reservations.iter().find(|reservation| {
+        state_guard
+            .pairing_in_progress
+            .contains(&reservation.pairing_slot)
+    }) {
+        return Err(ApiResponse::conflict(&pairing_conflict_message(
+            conflict, hub_type,
+        )));
     }
-    let resource_activity_fn = s.pairing_resource_activity_fn.clone();
-    drop(s);
+    for reservation in &reservations {
+        let acquired = state_guard.begin_pairing(&reservation.pairing_slot);
+        debug_assert!(acquired);
+    }
+    let resource_activity_fn = state_guard.pairing_resource_activity_fn.clone();
+    drop(state_guard);
+
     let mut guard = PairingAttemptGuard {
         state: state.clone(),
         hub_type: hub_type.to_string(),
-        pairing_slot,
+        reservations,
         resource_activity_fn,
         release_on_drop: true,
     };
-    if let Some(callback) = &guard.resource_activity_fn {
-        if let Err(error) = callback(hub_type, &guard.pairing_slot, true) {
-            // The resource never acknowledged acquisition, so this request
-            // does not own a lease that can justify poisoning the logical
-            // pairing slot. A partially applied platform reservation still
-            // gets a best-effort rollback, but a rollback error must not turn
-            // an initialization failure into a permanent HTTP 409.
-            if let Err(rollback_error) = callback(hub_type, &guard.pairing_slot, false) {
+    for reservation in &guard.reservations {
+        if !reservation.resource_activity {
+            continue;
+        }
+        let Some(callback) = &guard.resource_activity_fn else {
+            continue;
+        };
+        if let Err(error) = callback(hub_type, &reservation.pairing_slot, true) {
+            // The platform did not acknowledge the external reservation.
+            // Release every logical slot acquired atomically above so an
+            // adapter admission failure cannot poison Matter serialization.
+            if let Err(rollback_error) = callback(hub_type, &reservation.pairing_slot, false) {
                 log::error!(
                     target: "sys",
                     "Could not roll back unacknowledged pairing resource {} for {}: {rollback_error:#}",
-                    guard.pairing_slot,
+                    reservation.pairing_slot,
                     hub_type
                 );
             }
-            if let Ok(mut state) = guard.state.lock() {
-                state.finish_pairing(&guard.pairing_slot);
+            if let Ok(mut state_guard) = guard.state.lock() {
+                for acquired in &guard.reservations {
+                    state_guard.finish_pairing(&acquired.pairing_slot);
+                }
             }
             guard.release_on_drop = false;
             return Err(ApiResponse::server_error(format!(
@@ -3280,14 +3588,25 @@ fn try_acquire_unpairing_guard(
     ) {
         return Ok(None);
     }
-    try_acquire_pairing_guard(state, hub_type).map(Some)
+    try_acquire_pairing_guard(state, hub_type, &serde_json::Value::Null).map(Some)
 }
 
 pub fn handle_pair_device(
     state: &SharedState,
     request: &crate::pairing::PairingRequest,
 ) -> ApiResponse {
-    let request_context = crate::pairing::PairingRequestContext::accepted_now();
+    handle_pair_device_with_context(
+        state,
+        request,
+        crate::pairing::PairingRequestContext::accepted_now(),
+    )
+}
+
+pub fn handle_pair_device_with_context(
+    state: &SharedState,
+    request: &crate::pairing::PairingRequest,
+    request_context: crate::pairing::PairingRequestContext,
+) -> ApiResponse {
     if request.hub_type == crate::hub::HubType::LOCAL_BLE && request.session_id.is_none() {
         return ApiResponse::bad_request("Local Bluetooth pairing requires a session ID");
     }
@@ -3297,7 +3616,13 @@ pub fn handle_pair_device(
         }
     }
 
-    let durable_reconciliation = request.hub_type == crate::hub::HubType::LOCAL_BLE;
+    let durable_reconciliation = request.hub_type == crate::hub::HubType::LOCAL_BLE
+        || (request.hub_type == crate::hub::HubType::MATTER
+            && request.session_id.is_some()
+            && state
+                .lock()
+                .map(|state| state.storage.is_some())
+                .unwrap_or(false));
     if durable_reconciliation {
         let reconcile = match state.lock() {
             Ok(state) => state.reconcile_pairing_results_fn.clone(),
@@ -3340,7 +3665,7 @@ pub fn handle_pair_device(
         let session_id = request
             .session_id
             .as_deref()
-            .expect("durable local Bluetooth pairing requires a session ID");
+            .expect("durable pairing requires a session ID");
         let fingerprint = request_fingerprint
             .as_deref()
             .expect("session-bound pairing request has a fingerprint");
@@ -3384,7 +3709,8 @@ pub fn handle_pair_device(
         }
     }
 
-    let _pairing_guard = match try_acquire_pairing_guard(state, &request.hub_type) {
+    let _pairing_guard = match try_acquire_pairing_guard(state, &request.hub_type, &request.params)
+    {
         Ok(guard) => guard,
         Err(response) => {
             if let (Some(session_id), Some(fingerprint), Some(_)) = (
@@ -3814,8 +4140,11 @@ pub fn handle_put_device_room(state: &SharedState, device_id: &str, body: &Value
         .get("room_id")
         .and_then(|v| v.as_str())
         .map(|raw_room_id| commands::resolve_node_id(state, raw_room_id));
-    match commands::do_canonical_assign_room(state, device_id, room_id.as_deref()) {
-        Ok(()) => ApiResponse::no_content(),
+    match commands::do_canonical_assign_room_with_outcome(state, device_id, room_id.as_deref()) {
+        Ok(outcome) => match serde_json::to_string(&outcome) {
+            Ok(json) => ApiResponse::json_ok(json),
+            Err(error) => ApiResponse::server_error(error),
+        },
         Err(e) => ApiResponse::server_error(e),
     }
 }
@@ -3825,8 +4154,11 @@ pub fn handle_put_device_parent(state: &SharedState, device_id: &str, body: &Val
         .get("parent_id")
         .and_then(|v| v.as_str())
         .map(|raw_parent_id| commands::resolve_node_id(state, raw_parent_id));
-    match commands::do_canonical_assign_room(state, device_id, parent_id.as_deref()) {
-        Ok(()) => ApiResponse::no_content(),
+    match commands::do_canonical_assign_room_with_outcome(state, device_id, parent_id.as_deref()) {
+        Ok(outcome) => match serde_json::to_string(&outcome) {
+            Ok(json) => ApiResponse::json_ok(json),
+            Err(error) => ApiResponse::server_error(error),
+        },
         Err(e) => ApiResponse::server_error(e),
     }
 }
@@ -4510,6 +4842,51 @@ mod tests {
     }
 
     #[test]
+    fn matter_terminal_pairing_result_is_idempotent_and_queryable() {
+        let (state, path) = pairing_test_state("matter-idempotent");
+        let calls = Arc::new(AtomicUsize::new(0));
+        {
+            let calls = calls.clone();
+            state.lock().unwrap().start_pairing_fn = Some(Arc::new(move |_, _, _, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(PairingSession {
+                    hub_type: "matter".to_string(),
+                    status: PairingStatus::Failed,
+                    device: None,
+                    devices: Vec::new(),
+                    error: Some("On-network Matter pairing could not reach local IPv6".to_string()),
+                    failure_stage: None,
+                    warnings: Vec::new(),
+                    details: None,
+                })
+            }));
+        }
+        let request = PairingRequest {
+            hub_type: "matter".to_string(),
+            session_id: Some("matter-pair-idempotent".to_string()),
+            params: json!({
+                "setup_payload": "34970112332",
+                "rendezvous": "on_network",
+            }),
+        };
+
+        let first = handle_pair_device(&state, &request);
+        let duplicate = handle_pair_device(&state, &request);
+
+        assert_eq!(first.status, 200);
+        assert_eq!(duplicate.status, 200);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let status = handle_get_pair_device(&state, "matter-pair-idempotent");
+        assert_eq!(status.status, 200);
+        let status: crate::pairing::PairingResultStatus =
+            serde_json::from_str(&status.body).unwrap();
+        assert_eq!(status.state, crate::pairing::PairingResultState::Terminal);
+        assert_eq!(status.result.unwrap().status, PairingStatus::Failed);
+
+        fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
     fn an_overtaking_get_prevents_the_later_post_from_starting_work() {
         let (state, path) = pairing_test_state("overtaken-get");
         let calls = Arc::new(AtomicUsize::new(0));
@@ -4833,6 +5210,68 @@ mod tests {
     }
 
     #[test]
+    fn appliance_on_network_matter_pairing_does_not_reserve_bluetooth() {
+        let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+        let activity = Arc::new(Mutex::new(Vec::<(String, String, bool)>::new()));
+        {
+            let activity_for_hook = activity.clone();
+            let state_during_pair = state.clone();
+            let mut state = state.lock().unwrap();
+            state.platform_type = "appliance";
+            state
+                .pairing_in_progress
+                .insert("appliance_bluetooth_adapter".to_string());
+            state.pairing_resource_activity_fn =
+                Some(Arc::new(move |hub_type, pairing_slot, active| {
+                    activity_for_hook.lock().unwrap().push((
+                        hub_type.to_string(),
+                        pairing_slot.to_string(),
+                        active,
+                    ));
+                    Ok(())
+                }));
+            state.start_pairing_fn = Some(Arc::new(move |_, _, _, _| {
+                let state = state_during_pair.lock().unwrap();
+                assert!(state.pairing_in_progress.contains("matter"));
+                assert!(state
+                    .pairing_in_progress
+                    .contains("appliance_bluetooth_adapter"));
+                drop(state);
+                Ok(PairingSession {
+                    hub_type: "matter".to_string(),
+                    status: PairingStatus::Failed,
+                    device: None,
+                    devices: Vec::new(),
+                    error: Some("test failure".to_string()),
+                    failure_stage: None,
+                    warnings: Vec::new(),
+                    details: None,
+                })
+            }));
+        }
+
+        let response = handle_pair_device(
+            &state,
+            &PairingRequest {
+                hub_type: "matter".to_string(),
+                session_id: None,
+                params: json!({
+                    "setup_payload": "34970112332",
+                    "rendezvous": "on_network",
+                }),
+            },
+        );
+
+        assert_eq!(response.status, 200);
+        assert!(activity.lock().unwrap().is_empty());
+        let state = state.lock().unwrap();
+        assert!(!state.pairing_in_progress.contains("matter"));
+        assert!(state
+            .pairing_in_progress
+            .contains("appliance_bluetooth_adapter"));
+    }
+
+    #[test]
     fn appliance_pairing_guard_bridges_resource_activity_for_external_owner() {
         let state: SharedState = Arc::new(Mutex::new(AppState::default()));
         let activity = Arc::new(Mutex::new(Vec::<(String, String, bool)>::new()));
@@ -4877,7 +5316,10 @@ mod tests {
             &PairingRequest {
                 hub_type: "matter".to_string(),
                 session_id: Some("resource-test".to_string()),
-                params: json!({"setup_payload": "redacted"}),
+                params: json!({
+                    "setup_payload": "redacted",
+                    "rendezvous": "ble",
+                }),
             },
         );
         assert_eq!(response.status, 200);
@@ -5309,6 +5751,11 @@ mod tests {
                 "fade_ms": {"mode": "fixed", "value": 250},
                 "motion_timeout_secs": null,
                 "motion_activation_enabled": false,
+                "room_schedule": {
+                    "source": "follow_time",
+                    "wake_time": "07:15",
+                    "sleep_time": "23:45"
+                },
                 "profile_overrides": {
                     "rhythm": {
                         "motion_timeout_secs": {"mode": "fixed", "value": 300}
@@ -5330,6 +5777,14 @@ mod tests {
         );
         assert_eq!(patch.motion_timeout_secs, Some(None));
         assert_eq!(patch.motion_activation_enabled, Some(Some(false)));
+        assert_eq!(
+            patch.room_schedule.unwrap().unwrap(),
+            rhythm_core::RoomScheduleConfig {
+                source: rhythm_core::RoomScheduleSource::FollowTime,
+                wake_time: rhythm_core::ModeTransitionTime::parse("07:15").unwrap(),
+                sleep_time: rhythm_core::ModeTransitionTime::parse("23:45").unwrap(),
+            }
+        );
         let profile_overrides = patch.profile_overrides.unwrap().unwrap();
         assert_eq!(
             profile_overrides
@@ -5338,6 +5793,18 @@ mod tests {
                 .and_then(|override_patch| override_patch.motion_timeout_secs.as_ref()),
             Some(&rhythm_core::TimerSetting::Fixed { value: 300 })
         );
+        assert!(parse_profile_settings_patch(
+            Some(&json!({
+                "room_schedule": {
+                    "source": "follow_time",
+                    "wake_time": "07:15",
+                    "sleep_time": "07:15"
+                }
+            })),
+            "room_profile"
+        )
+        .unwrap_err()
+        .contains("must differ"));
         assert!(matches!(profile_overrides.get("sleep"), Some(None)));
 
         assert_eq!(
@@ -6142,6 +6609,126 @@ mod tests {
     }
 
     #[test]
+    fn room_schedule_preference_returns_authoritative_state_without_queue() {
+        let state = handler_state_with_runtime();
+        let rx = attach_work_queue(&state);
+        let response = handle_put_node_preferences(
+            &state,
+            &json!({
+                "node_id": "room1",
+                "profile_settings": {
+                    "room_schedule": {
+                        "source": "follow_time",
+                        "wake_time": "07:15",
+                        "sleep_time": "23:45"
+                    }
+                },
+                "request_id": "schedule-request-1"
+            }),
+            false,
+        );
+
+        assert_eq!(response.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(
+            parsed["nodes"][0]["profile_settings"]["room_schedule"]["source"],
+            "follow_time"
+        );
+        assert!(rx.recv_timeout(Duration::from_millis(25)).is_err());
+    }
+
+    #[test]
+    fn unassigned_light_schedule_returns_authoritative_state_without_queue() {
+        let state = handler_state_with_runtime();
+        let rx = attach_work_queue(&state);
+        let response = handle_put_node_preferences(
+            &state,
+            &json!({
+                "node_id": "standalone-light",
+                "profile_settings": {
+                    "room_schedule": {
+                        "source": "follow_time",
+                        "wake_time": "07:15",
+                        "sleep_time": "23:45"
+                    }
+                }
+            }),
+            false,
+        );
+
+        assert_eq!(response.status, 200, "{}", response.body);
+        let parsed: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(
+            parsed["nodes"][0]["profile_settings"]["room_schedule"]["wake_time"],
+            "07:15"
+        );
+        assert!(rx.recv_timeout(Duration::from_millis(25)).is_err());
+    }
+
+    #[test]
+    fn room_schedule_output_failure_keeps_accepted_state_authoritative() {
+        let state = handler_state_with_runtime_options(true);
+        let temp_dir = TestDir::new("room-schedule-output-failure");
+        let storage: Arc<dyn crate::storage::Storage> =
+            Arc::new(crate::storage::FileStorage::new(temp_dir.path().to_str().unwrap()).unwrap());
+        state.lock().unwrap().storage = Some(storage.clone());
+
+        let response = handle_put_node_preferences(
+            &state,
+            &json!({
+                "node_id": "room1",
+                "profile_settings": {
+                    "room_schedule": {
+                        "source": "follow_time",
+                        "wake_time": "07:15",
+                        "sleep_time": "23:45"
+                    }
+                },
+                "request_id": "room-schedule-save-journey-1"
+            }),
+            true,
+        );
+
+        assert_eq!(response.status, 200, "{}", response.body);
+        let immediate: Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(
+            immediate["nodes"][0]["profile_settings"]["room_schedule"]["wake_time"],
+            "07:15"
+        );
+
+        let persisted = storage.load_rooms().unwrap();
+        let persisted_schedule = persisted
+            .get("room1")
+            .and_then(|room| room.profile_settings.room_schedule)
+            .unwrap();
+        assert_eq!(
+            persisted_schedule.wake_time,
+            rhythm_core::ModeTransitionTime::parse("07:15").unwrap()
+        );
+
+        let reconnect = commands::build_node_state(&state, "room1").unwrap();
+        assert_eq!(
+            reconnect.profile_settings.room_schedule.unwrap().wake_time,
+            persisted_schedule.wake_time
+        );
+        let state = state.lock().unwrap();
+        let activity = state
+            .light_activity
+            .iter()
+            .find(|event| event.action_id == "room_schedule_config_updated")
+            .unwrap();
+        assert_eq!(
+            activity.correlation_id.as_deref(),
+            Some("room-schedule-save-journey-1")
+        );
+        assert_eq!(activity.payload.as_ref().unwrap()["status"], "failed");
+        assert_eq!(
+            activity.payload.as_ref().unwrap()["failure_stage"],
+            "output_apply"
+        );
+    }
+
+    #[test]
     fn parse_profile_settings_patch_accepts_legacy_scene_alias() {
         let patch = parse_profile_settings_patch(
             Some(&json!({"active_light_scene_id": "icy-glow"})),
@@ -6674,6 +7261,10 @@ mod tests {
 
     // Helper: set up state with a mock runtime for handler tests
     fn handler_state_with_runtime() -> SharedState {
+        handler_state_with_runtime_options(false)
+    }
+
+    fn handler_state_with_runtime_options(fail_schedule_output_apply: bool) -> SharedState {
         use crate::hub::{ActiveHub, HubType};
         use rhythm_core::{
             ButtonAction, InputEvent, LightProfileConfig, RoomSnapshot, RuntimeHandle,
@@ -6681,6 +7272,7 @@ mod tests {
 
         struct HandlerMockRuntime {
             snapshots: std::sync::Mutex<Vec<RoomSnapshot>>,
+            fail_schedule_output_apply: bool,
         }
         impl RuntimeHandle for HandlerMockRuntime {
             fn handle_event(&self, event: &InputEvent) -> anyhow::Result<bool> {
@@ -6747,6 +7339,9 @@ mod tests {
                 _: &str,
                 _: rhythm_core::LightingCommand,
             ) -> anyhow::Result<()> {
+                if self.fail_schedule_output_apply {
+                    anyhow::bail!("simulated schedule output failure");
+                }
                 Ok(())
             }
             fn lights_off_room(&self, _: &str, _: Option<u32>) -> anyhow::Result<()> {
@@ -6791,6 +7386,7 @@ mod tests {
         }
 
         let runtime = std::sync::Arc::new(HandlerMockRuntime {
+            fail_schedule_output_apply,
             snapshots: std::sync::Mutex::new(vec![
                 RoomSnapshot {
                     id: "room1".into(),
@@ -7216,6 +7812,7 @@ mod tests {
             .unwrap()
             .pairing_in_progress
             .contains("appliance_bluetooth_adapter"));
+        assert!(state.lock().unwrap().pairing_in_progress.contains("matter"));
     }
 
     #[test]
@@ -7247,7 +7844,30 @@ mod tests {
     }
 
     #[test]
-    fn appliance_factory_reset_retains_adapter_reservation_until_reboot() {
+    fn appliance_factory_reset_rejects_an_in_flight_on_network_matter_pairing() {
+        let state = handler_state_with_runtime();
+        let invoked = Arc::new(AtomicBool::new(false));
+        {
+            let invoked = invoked.clone();
+            let mut state = state.lock().unwrap();
+            state.platform_type = "appliance";
+            state.pairing_in_progress.insert("matter".to_string());
+            state.before_factory_reset_fn = Some(Arc::new(move |_| {
+                invoked.store(true, Ordering::SeqCst);
+                Ok(())
+            }));
+        }
+
+        let response = handle_post_factory_reset(&state);
+
+        assert_eq!(response.status, 409);
+        assert_eq!(response.body, "Pairing already in progress for matter");
+        assert!(!invoked.load(Ordering::SeqCst));
+        assert!(state.lock().unwrap().pairing_in_progress.contains("matter"));
+    }
+
+    #[test]
+    fn appliance_factory_reset_retains_pairing_reservations_until_reboot() {
         let state = handler_state_with_runtime();
         let before_invoked = Arc::new(AtomicBool::new(false));
         let after_invoked = Arc::new(AtomicBool::new(false));
@@ -7276,10 +7896,23 @@ mod tests {
             .unwrap()
             .pairing_in_progress
             .contains("appliance_bluetooth_adapter"));
+        assert!(state.lock().unwrap().pairing_in_progress.contains("matter"));
+        let on_network = match try_acquire_pairing_guard(
+            &state,
+            crate::hub::HubType::MATTER,
+            &json!({
+                "setup_payload": "34970112332",
+                "rendezvous": "on_network",
+            }),
+        ) {
+            Ok(_) => panic!("reboot grace must exclude new on-network Matter pairing"),
+            Err(response) => response,
+        };
+        assert_eq!(on_network.status, 409);
     }
 
     #[test]
-    fn appliance_factory_reset_cleanup_failure_retains_adapter_for_reboot() {
+    fn appliance_factory_reset_cleanup_failure_retains_pairing_reservations() {
         let state = handler_state_with_runtime();
         let recovery_invoked = Arc::new(AtomicBool::new(false));
         {
@@ -7305,6 +7938,7 @@ mod tests {
             .unwrap()
             .pairing_in_progress
             .contains("appliance_bluetooth_adapter"));
+        assert!(state.lock().unwrap().pairing_in_progress.contains("matter"));
     }
 
     #[test]
@@ -7738,7 +8372,7 @@ mod tests {
     }
 
     #[test]
-    fn put_device_parent_returns_204() {
+    fn put_device_parent_reports_canonical_and_projection_outcomes() {
         let state = handler_state_with_runtime();
         let (canonical_id, target_room_id) = {
             let mut state = state.lock().unwrap();
@@ -7775,8 +8409,11 @@ mod tests {
             &canonical_id,
             &json!({"parent_id": target_room_id.clone()}),
         );
-        assert_eq!(r.status, 204);
-        assert!(r.body.is_empty());
+        assert_eq!(r.status, 200);
+        let outcome: serde_json::Value = serde_json::from_str(&r.body).unwrap();
+        assert_eq!(outcome["schema_version"], 1);
+        assert_eq!(outcome["canonical_committed"], true);
+        assert_eq!(outcome["projection_status"], "not_applicable");
 
         let state = state.lock().unwrap();
         assert_eq!(

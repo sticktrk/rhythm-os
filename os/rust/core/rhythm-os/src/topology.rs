@@ -393,6 +393,7 @@ struct TopologyLightNodeRoute {
 struct DispatchPlan {
     room_targets: Vec<(HubKey, HubDispatchTarget)>,
     node_routes: Vec<TopologyLightNodeRoute>,
+    transition_aliases: Vec<(String, HubKey, HubDispatchTarget)>,
 }
 
 const INTERNAL_LIGHT_NODE_PREFIX: &str = "__rhythm_light_node__";
@@ -645,15 +646,14 @@ impl TopologyRoom {
             }
 
             let assigned_native_ids = remaining_ids.keys().cloned().collect::<HashSet<_>>();
-            let exact_grouped_target = (!grouped_dispatch_suspended_hubs.contains(&hub_key))
-                .then(|| {
-                    self.exact_native_grouped_dispatch_target_for_hub(
-                        &hub_key,
-                        &assigned_native_ids,
-                    )
-                })
-                .flatten();
-            if let Some(target) = exact_grouped_target {
+            let exact_grouped_target =
+                self.exact_native_grouped_dispatch_target_for_hub(&hub_key, &assigned_native_ids);
+            let grouped_dispatch_suspended = grouped_dispatch_suspended_hubs.contains(&hub_key);
+            if let Some(target) = exact_grouped_target
+                .as_ref()
+                .filter(|_| !grouped_dispatch_suspended)
+                .cloned()
+            {
                 let HubDispatchTarget::Group {
                     room_id: hub_room_id,
                     ..
@@ -684,6 +684,30 @@ impl TopologyRoom {
                     .map(|(native_id, _)| native_id.clone())
                     .collect();
                 native_ids.sort();
+                if grouped_dispatch_suspended {
+                    if let Some(HubDispatchTarget::Group {
+                        room_id: hub_room_id,
+                        ..
+                    }) = exact_grouped_target
+                    {
+                        // A periodic tick may already be queued under the
+                        // synthetic group-node identity when Hue room sync
+                        // raises the individual-device fallback fence. Keep
+                        // that old identity routable to the safe direct target
+                        // until the scheduler naturally replaces it with the
+                        // per-device nodes below. This alias is deliberately
+                        // omitted from periodic_light_nodes so it cannot
+                        // schedule duplicate work or dispatch to the fenced
+                        // grouped-light target.
+                        plan.transition_aliases.push((
+                            group_light_node_id(&self.id, &hub_key, &hub_room_id),
+                            hub_key.clone(),
+                            HubDispatchTarget::Devices {
+                                native_ids: native_ids.clone(),
+                            },
+                        ));
+                    }
+                }
                 plan.room_targets.push((
                     hub_key.clone(),
                     HubDispatchTarget::Devices {
@@ -3240,6 +3264,9 @@ impl RoomTopologyStore {
                     vec![(node_route.hub_key.to_string(), node_route.target)],
                 );
             }
+            for (node_id, hub_key, target) in plan.transition_aliases {
+                table.insert(node_id, vec![(hub_key.to_string(), target)]);
+            }
         }
         let mut attached_light_node_ids: Vec<_> = self
             .device_nodes
@@ -4182,17 +4209,34 @@ mod tests {
             &store.composite_routing(&registry)[&room_id][0].1,
             HubDispatchTarget::Group { .. }
         ));
+        let scheduled_group_node_id = store
+            .periodic_light_nodes(&registry)
+            .into_iter()
+            .find(|node| node.source_node_id == room_id)
+            .expect("grouped Hue room should schedule one synthetic node")
+            .id;
 
         assert!(store.set_external_room_topology_sync_enabled(&key, true));
         assert!(store.set_external_room_topology_sync_attention(&key, true));
+        let direct_target = HubDispatchTarget::Devices {
+            native_ids: vec!["hue-light-1".to_string()],
+        };
+        let suspended_routing = store.composite_routing(&registry);
         assert_eq!(
-            store.composite_routing(&registry).get(&room_id),
-            Some(&vec![(
-                key.to_string(),
-                HubDispatchTarget::Devices {
-                    native_ids: vec!["hue-light-1".to_string()],
-                },
-            )])
+            suspended_routing.get(&room_id),
+            Some(&vec![(key.to_string(), direct_target.clone())])
+        );
+        assert_eq!(
+            suspended_routing.get(&scheduled_group_node_id),
+            Some(&vec![(key.to_string(), direct_target)]),
+            "a queued group-node tick must remain routable through the direct fallback"
+        );
+        assert!(
+            store
+                .periodic_light_nodes(&registry)
+                .iter()
+                .all(|node| node.id != scheduled_group_node_id),
+            "the compatibility alias must not schedule duplicate periodic work"
         );
 
         let mut restored: RoomTopologyStore =
@@ -4751,6 +4795,50 @@ mod tests {
                 .into_iter()
                 .collect::<std::collections::BTreeSet<_>>(),
             [hall_id, stairs_id].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn button_multi_room_controls_survive_roundtrip_and_clear_to_parent() {
+        let mut store = RoomTopologyStore::new();
+        let source_room_id = store.create_room("Office");
+        let hall_id = store.create_room("Hall");
+        let stairs_id = store.create_room("Stairs");
+        let mut registry = CanonicalRegistry::new();
+
+        let button_id = register_identity(
+            &mut registry,
+            &hue_key(),
+            make_identity(
+                "button-1",
+                "office-native",
+                "Office",
+                "Office Button",
+                DeviceType::Button,
+            ),
+        );
+
+        assert!(store.attach_device_user_override(&source_room_id, &button_id));
+        assert!(store.set_control_targets(
+            &button_id,
+            NodeControlKind::Button,
+            &[hall_id.as_str(), stairs_id.as_str()],
+        ));
+
+        let serialized = serde_json::to_value(&store).expect("serialize topology");
+        let mut restored: RoomTopologyStore =
+            serde_json::from_value(serialized).expect("restore topology");
+        let mut expected_targets = vec![hall_id, stairs_id];
+        expected_targets.sort();
+        assert_eq!(
+            restored.effective_control_targets(&button_id, &NodeControlKind::Button),
+            expected_targets
+        );
+
+        assert!(restored.set_control_targets(&button_id, NodeControlKind::Button, &[],));
+        assert_eq!(
+            restored.effective_control_targets(&button_id, &NodeControlKind::Button),
+            vec![source_room_id]
         );
     }
 

@@ -4,6 +4,7 @@ WPA_CONF=/etc/wpa_supplicant.conf
 DEV_DEFAULTS=/etc/default/rhythm-dev
 LOG_DIR_DEFAULT=/data/log
 LOG_DIR_FALLBACK=/var/log
+IPV6_CONF_ROOT="${RHYTHM_IPV6_CONF_ROOT:-/proc/sys/net/ipv6/conf}"
 
 resolve_log_dir() {
     if [ -n "${RHYTHM_LOG_DIR:-}" ]; then
@@ -69,6 +70,10 @@ has_wifi_config() {
 
 pid_is_running() {
     [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null
+}
+
+start_wpa_supplicant() {
+    /usr/sbin/wpa_supplicant "$@"
 }
 
 status_field() {
@@ -164,6 +169,54 @@ disable_wifi_power_save() {
     fi
 
     log "power_save: no supported tool available"
+}
+
+write_ipv6_setting() {
+    local path="$1"
+    local value="$2"
+
+    if [ ! -e "$path" ]; then
+        log "ipv6: missing ${path#${IPV6_CONF_ROOT}/}"
+        return 1
+    fi
+    if [ ! -w "$path" ]; then
+        log "ipv6: cannot write ${path#${IPV6_CONF_ROOT}/}"
+        return 1
+    fi
+    if ! printf '%s\n' "$value" >"$path"; then
+        log "ipv6: failed to set ${path#${IPV6_CONF_ROOT}/}=$value"
+        return 1
+    fi
+    return 0
+}
+
+# Thread border routers advertise their off-mesh-routable /64 through an IPv6
+# Router Advertisement Route Information Option. Linux ignores every RIO by
+# default when accept_ra_rt_info_max_plen is 0, leaving Matter discovery able
+# to see the device while every PASE packet fails with ENETUNREACH.
+configure_ipv6_ra_rio() {
+    local iface="$1"
+    local iface_root="$IPV6_CONF_ROOT/$iface"
+    local accept_ra=1
+    local failed=0
+    local global_forwarding iface_forwarding
+
+    global_forwarding="$(cat "$IPV6_CONF_ROOT/all/forwarding" 2>/dev/null || true)"
+    iface_forwarding="$(cat "$iface_root/forwarding" 2>/dev/null || true)"
+    if [ "$global_forwarding" = "1" ] || [ "$iface_forwarding" = "1" ]; then
+        # Linux disables ordinary RA processing while forwarding. Value 2 is
+        # the explicit host/router mode that still accepts upstream RAs.
+        accept_ra=2
+    fi
+
+    write_ipv6_setting "$iface_root/accept_ra" "$accept_ra" || failed=1
+    write_ipv6_setting "$iface_root/accept_ra_rt_info_max_plen" 64 || failed=1
+
+    if [ "$failed" -eq 0 ]; then
+        log "ipv6: $iface accepts router advertisements and RIO prefixes through /64 (accept_ra=$accept_ra)"
+        return 0
+    fi
+    return 1
 }
 
 KEEPALIVE_PIDFILE_PATTERN="/var/run/wifi-keepalive.%s.pid"
@@ -328,7 +381,7 @@ start() {
     disable_wifi_power_save "$iface"
 
     if ! pid_is_running "$WPA_PIDFILE"; then
-        if /usr/sbin/wpa_supplicant -B -i "$iface" -c "$WPA_CONF" -P "$WPA_PIDFILE"; then
+        if start_wpa_supplicant -B -i "$iface" -c "$WPA_CONF" -P "$WPA_PIDFILE"; then
             log "wpa_supplicant started"
         else
             log "wpa_supplicant failed to start"
@@ -336,6 +389,13 @@ start() {
             return 0
         fi
     fi
+
+    # Some brcmfmac boots do not expose the per-interface IPv6 sysctls until
+    # wpa_supplicant has initialized the raised interface. Configure RA/RIO
+    # acceptance after that point so Thread routes are not left at the Linux
+    # default of accept_ra_rt_info_max_plen=0.
+    configure_ipv6_ra_rio "$iface" ||
+        log "ipv6: Thread route acceptance is incomplete on $iface"
 
     if [ "$configured" -eq 0 ]; then
         log "wpa_supplicant ready for local Wi-Fi scanning"

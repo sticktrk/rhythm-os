@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../backend/backend.dart';
+import '../config/app_orientation_policy.dart';
 
 /// Singleton service for analytics tracking.
 ///
@@ -141,6 +142,7 @@ class AnalyticsService {
       'from_cache': fromCache ? 1 : 0,
       'room_count_bucket': roomCountBucket,
       'presentation_state': fromCache ? 'cached_read_only' : 'authoritative',
+      'orientation_policy': appOrientationPolicyAnalyticsValue,
     });
   }
 
@@ -155,6 +157,7 @@ class AnalyticsService {
       'showed_cached_rooms': showedCachedRooms ? 1 : 0,
       'room_count_bucket': roomCountBucket,
       'presentation_state': 'authoritative_interactive',
+      'orientation_policy': appOrientationPolicyAnalyticsValue,
     });
   }
 
@@ -385,6 +388,23 @@ class AnalyticsService {
   Future<void> logRoomCardSettingsOpened({required String nodeKind}) async {
     await logEvent('room_card_settings_opened', {
       'node_kind': nodeKind,
+    });
+  }
+
+  /// Track an explicit request to understand a physical delivery warning.
+  ///
+  /// This intentionally excludes room, bulb, hub, and endpoint identity.
+  Future<void> logLightDeliveryWarningOpened({
+    required String surface,
+    required int affectedBulbCount,
+    required bool hasUnresolvedTarget,
+    required String failureKind,
+  }) async {
+    await logEvent('light_delivery_warning_opened', {
+      'surface': surface,
+      'affected_bulb_count': affectedBulbCount,
+      'has_unresolved_target': hasUnresolvedTarget ? 1 : 0,
+      'failure_kind': failureKind,
     });
   }
 
@@ -766,6 +786,83 @@ class AnalyticsService {
     });
   }
 
+  /// Track room Schedule-tab entry without room identity or saved times.
+  Future<void> logRoomScheduleOpened({required String source}) async {
+    await logEvent('room_schedule_opened', {'source': source});
+  }
+
+  Future<void> logRoomScheduleSaveAttempted({
+    required String journeyId,
+    required int attemptNumber,
+    required String inputMethod,
+    required String changeKind,
+    required String source,
+  }) async {
+    await logEvent('room_schedule_save_attempted', {
+      'journey_id': journeyId,
+      'attempt_number': attemptNumber,
+      'input_method': inputMethod,
+      'change_kind': changeKind,
+      'source': source,
+    });
+  }
+
+  Future<void> logRoomScheduleSaveCompleted({
+    required String journeyId,
+    required int attemptNumber,
+    required String inputMethod,
+    required String changeKind,
+    required String source,
+    required String outcome,
+    String? failureStage,
+  }) async {
+    await logEvent('room_schedule_save_completed', {
+      'journey_id': journeyId,
+      'attempt_number': attemptNumber,
+      'input_method': inputMethod,
+      'change_kind': changeKind,
+      'source': source,
+      'outcome': outcome,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
+  Future<void> logRoomScheduleTestCompleted({
+    required String journeyId,
+    required int attemptNumber,
+    required String inputMethod,
+    required String source,
+    required String action,
+    required String outcome,
+    String? failureStage,
+  }) async {
+    await logEvent('room_schedule_test_completed', {
+      'journey_id': journeyId,
+      'attempt_number': attemptNumber,
+      'input_method': inputMethod,
+      'source': source,
+      'action': action,
+      'outcome': outcome,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
+  Future<void> logRoomScheduleInlinePresetChanged({
+    required String journeyId,
+    required int attemptNumber,
+    required String inputMethod,
+    required String mode,
+    required String behavior,
+  }) async {
+    await logEvent('room_schedule_inline_preset_changed', {
+      'journey_id': journeyId,
+      'attempt_number': attemptNumber,
+      'input_method': inputMethod,
+      'mode': mode,
+      'behavior': behavior,
+    });
+  }
+
   /// Track discovery of room-scoped Light settings without room identifiers.
   Future<void> logRoomLightSettingsOpened({
     required bool hasOverrides,
@@ -795,8 +892,7 @@ class AnalyticsService {
       'outcome': outcome,
       'changed_field_count': changedFieldCount,
       if (dayColorMode != null) 'day_color_mode': dayColorMode,
-      if (dayBrightnessMode != null)
-        'day_brightness_mode': dayBrightnessMode,
+      if (dayBrightnessMode != null) 'day_brightness_mode': dayBrightnessMode,
       if (failureStage != null) 'failure_stage': failureStage,
     });
   }
@@ -840,6 +936,23 @@ class AnalyticsService {
       'journey_id': journeyId,
       'source': source,
       'destination': destination,
+      'outcome': outcome,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
+  /// Track the terminal app-observed result of saving button room targets.
+  Future<void> logButtonControlTargetsSaveCompleted({
+    required String journeyId,
+    required String source,
+    required String targetCountBucket,
+    required String outcome,
+    String? failureStage,
+  }) async {
+    await logEvent('button_control_targets_save_completed', {
+      'journey_id': journeyId,
+      'source': source,
+      'target_count_bucket': targetCountBucket,
       'outcome': outcome,
       if (failureStage != null) 'failure_stage': failureStage,
     });

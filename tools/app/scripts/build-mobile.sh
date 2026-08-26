@@ -66,6 +66,9 @@ FLUTTER_APP="$PROJECT_ROOT/flutter/rhythm_app"
 RUST_FFI="$FLUTTER_APP/rust"
 BUILD_RECEIPT_WRITER="$SCRIPT_DIR/write-app-build-receipt.sh"
 
+# shellcheck source=lib/app-build-profile.sh
+source "$SCRIPT_DIR/lib/app-build-profile.sh"
+
 # Find flutter command (same as build-wasm.sh)
 find_flutter() {
     if command -v flutter &> /dev/null; then
@@ -869,10 +872,10 @@ FLUTTER_BUILD_ARGS=()
 if [ -n "$RELEASE" ]; then
     FLUTTER_BUILD_ARGS+=("$RELEASE")
 fi
-if [ -f "$FLUTTER_APP/.env" ]; then
-    FLUTTER_BUILD_ARGS+=("--dart-define-from-file=$FLUTTER_APP/.env")
-    echo "Using Supabase config from .env"
-fi
+prepare_app_build_define_file "$REPO_ROOT" "$FLUTTER_APP"
+trap cleanup_app_build_define_file EXIT
+FLUTTER_BUILD_ARGS+=("--dart-define-from-file=$RHYTHM_APP_BUILD_DEFINE_FILE")
+echo "Using the configured app-build profile"
 if [ -n "$BUILD_METADATA_ARGS" ]; then
     FLUTTER_BUILD_ARGS+=("$BUILD_METADATA_ARGS")
 fi

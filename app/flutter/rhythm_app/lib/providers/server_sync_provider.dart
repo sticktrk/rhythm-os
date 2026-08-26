@@ -89,6 +89,8 @@ typedef RemoteAccessAutoEnableScheduler = void Function({
   RemoteAccessEnabledCallback? onEnabled,
 });
 
+typedef ActivityCloudCanProvision = bool Function();
+
 List<RhythmSceneDefinition> _userVisibleScenes(
   Iterable<RhythmSceneDefinition> scenes,
 ) =>
@@ -118,6 +120,32 @@ int? _sceneRepresentativeBrightness(RhythmSceneDefinition scene) {
   return brightness?.clamp(1, 100).toInt();
 }
 
+/// One recent physical light-delivery problem prepared for app presentation.
+///
+/// [targetNodeId] and [bulbName] are present only when the appliance supplied
+/// exact canonical identity (or the command directly addressed a bulb node).
+/// The app deliberately never displays the hub-native dispatch target.
+@immutable
+class LightDeliveryWarning {
+  const LightDeliveryWarning({
+    required this.failure,
+    required this.receivedAt,
+    this.targetNodeId,
+    this.bulbName,
+  });
+
+  final RhythmDispatchFailure failure;
+  final DateTime receivedAt;
+  final String? targetNodeId;
+  final String? bulbName;
+
+  bool get hasExactBulb => targetNodeId != null;
+
+  DateTime get occurredAt => failure.epochMs > 0
+      ? DateTime.fromMillisecondsSinceEpoch(failure.epochMs)
+      : receivedAt;
+}
+
 /// Syncs app state with a server (bridge, rhythm-server, addon) via
 /// [RhythmConnection] from the SDK.
 ///
@@ -139,6 +167,7 @@ class ServerSyncProvider extends ChangeNotifier {
   final Future<List<ConnectivityResult>> Function()? _connectivityCheck;
   final ServerAuthApiFactory _authApiFactory;
   final RemoteAccessAutoEnableScheduler _remoteAccessAutoEnableScheduler;
+  final ActivityCloudCanProvision _activityCloudCanProvision;
 
   StreamSubscription<RhythmHello>? _helloSub;
   StreamSubscription<RhythmRoomState>? _rhythmStateSub;
@@ -213,6 +242,9 @@ class ServerSyncProvider extends ChangeNotifier {
   /// one request in flight per node so rapid taps cannot reorder the final
   /// persisted value.
   final Set<String> _motionActivationPending = {};
+  final Set<String> _roomSchedulePending = {};
+  final Map<String, int> _roomScheduleWriteGenerations = {};
+  final Set<String> _roomScheduleTestPending = {};
   final Set<String> _lightProfileOverridePending = {};
   static const Uuid _uuid = Uuid();
 
@@ -285,6 +317,11 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Bumps whenever the server confirms a global mode event.
   int _modeChangeGeneration = 0;
+
+  /// Bumps whenever a full server hello replaces the node snapshot.
+  /// Optimistic room-schedule failures may only roll back when this value is
+  /// unchanged, so a reconnect can never be overwritten by an older request.
+  int _authoritativeNodeSnapshotGeneration = 0;
 
   /// Saved mode transitions from the server.
   List<RhythmModeTransitionConfig> _modeTransitions = const [];
@@ -895,6 +932,15 @@ class ServerSyncProvider extends ChangeNotifier {
       HueServiceLocator.isDemoMode ||
       _capabilities?.supportsFeature(RhythmFeature.hueRoomTopologySync) == true;
 
+  /// Button fan-out must fail closed because older appliances persist the
+  /// additive target list but execute only its first entry.
+  bool get buttonMultiRoomControlsSupported =>
+      HueServiceLocator.isDemoMode ||
+      _capabilities?.supportsFeature(
+            RhythmFeature.buttonMultiRoomControls,
+          ) ==
+          true;
+
   /// Whether the host explicitly advertised supported hub types.
   bool get hasExplicitHubCapabilities => _capabilities != null;
 
@@ -1167,6 +1213,23 @@ class ServerSyncProvider extends ChangeNotifier {
   bool motionActivationEnabledForNode(String nodeId) =>
       nodeById(nodeId)?.profileSettings?.isMotionActivationEnabled ?? true;
 
+  /// Whether committed Scene-backed Mood temporarily suppresses motion.
+  ///
+  /// This is derived from the optimistic/current Scene plus room mode. It must
+  /// never overwrite [motionActivationEnabledForNode], which remains the
+  /// user's durable preference and becomes effective again after the Scene.
+  bool motionSuppressedByActiveSceneForNode(String nodeId) {
+    final supported = HueServiceLocator.isDemoMode ||
+        _capabilities?.supportsFeature(
+              RhythmFeature.sceneMotionSuppression,
+            ) ==
+            true;
+    if (!supported) return false;
+    if (moodSceneIdForRoom(nodeId) == null) return false;
+    return _roomProvider.getDisplayRoomState(nodeId) == RoomModeState.mood ||
+        nodeById(nodeId)?.moodActive == true;
+  }
+
   bool motionActivationSupportedForNode(String nodeId) {
     if (HueServiceLocator.isDemoMode) return true;
     final node = nodeById(nodeId);
@@ -1176,6 +1239,144 @@ class ServerSyncProvider extends ChangeNotifier {
             true ||
         node?.profileSettings?.motionActivationEnabled != null;
   }
+
+  bool roomScheduleSupportedForNode(String nodeId) {
+    final node = nodeById(nodeId);
+    final parentId = node?.parentId;
+    final independentLightTarget = node?.kind == RhythmNodeKind.room ||
+        (node?.kind == RhythmNodeKind.lightDevice &&
+            (parentId == null || parentId.isEmpty));
+    if (HueServiceLocator.isDemoMode) {
+      return node == null || independentLightTarget;
+    }
+    return independentLightTarget &&
+        _capabilities?.supportsFeature(RhythmFeature.roomScheduleV1) == true;
+  }
+
+  RhythmRoomSchedule scheduleForRoom(String roomId) =>
+      nodeById(roomId)?.profileSettings?.roomSchedule ??
+      const RhythmRoomSchedule();
+
+  bool roomSchedulePendingForRoom(String roomId) =>
+      _roomSchedulePending.contains(roomId);
+
+  bool roomScheduleTestPendingForRoom(String roomId) =>
+      _roomScheduleTestPending.contains(roomId);
+
+  Future<bool> setRoomSchedule(
+    String roomId,
+    RhythmRoomSchedule schedule, {
+    String? requestId,
+  }) async {
+    final index = _helloNodes.indexWhere((node) => node.id == roomId);
+    if (index == -1 ||
+        !roomScheduleSupportedForNode(roomId) ||
+        (!HueServiceLocator.isDemoMode && !_connection.connected)) {
+      return false;
+    }
+    final writeGeneration = (_roomScheduleWriteGenerations[roomId] ?? 0) + 1;
+    _roomScheduleWriteGenerations[roomId] = writeGeneration;
+    final snapshotGeneration = _authoritativeNodeSnapshotGeneration;
+    final previous = _helloNodes[index];
+    final previousSettings =
+        previous.profileSettings ?? const RhythmNodeProfileSettings();
+    final nextSettings = _settingsWithSchedule(previousSettings, schedule);
+    _helloNodes[index] = _copyNodeWithProfileSettings(previous, nextSettings);
+    _helloRooms = _buildRoomSummaries();
+    _roomSchedulePending.add(roomId);
+    notifyListeners();
+
+    var accepted = HueServiceLocator.isDemoMode;
+    RhythmRoomState? authoritative;
+    try {
+      if (!accepted) {
+        authoritative = await api.roomScheduleSet(
+          roomId: roomId,
+          schedule: schedule,
+          requestId: requestId ?? 'room-schedule-save-${_uuid.v4()}',
+        );
+        final applied = authoritative?.profileSettings?.roomSchedule;
+        accepted = applied?.source == schedule.source &&
+            applied?.wakeTime == schedule.wakeTime &&
+            applied?.sleepTime == schedule.sleepTime;
+      }
+    } catch (error) {
+      debugPrint('ServerSync: room schedule save failed: $error');
+      accepted = false;
+    } finally {
+      if (_roomScheduleWriteGenerations[roomId] == writeGeneration) {
+        _roomSchedulePending.remove(roomId);
+      }
+    }
+
+    final currentWrite =
+        _roomScheduleWriteGenerations[roomId] == writeGeneration;
+    if (!currentWrite) {
+      return true;
+    }
+    final snapshotUnchanged =
+        _authoritativeNodeSnapshotGeneration == snapshotGeneration;
+    if (accepted && authoritative != null && snapshotUnchanged) {
+      _updateHelloNodeFromRhythmState(authoritative);
+    } else if (!accepted && snapshotUnchanged) {
+      final current = _helloNodes.indexWhere((node) => node.id == roomId);
+      if (current != -1 &&
+          identical(_helloNodes[current].profileSettings, nextSettings)) {
+        _helloNodes[current] = _copyNodeWithProfileSettings(
+          _helloNodes[current],
+          previousSettings,
+        );
+        _helloRooms = _buildRoomSummaries();
+      }
+    }
+    notifyListeners();
+    return accepted;
+  }
+
+  Future<bool> testRoomSchedule(
+    String roomId,
+    RhythmMode mode, {
+    String? requestId,
+  }) async {
+    if (!roomScheduleSupportedForNode(roomId) ||
+        _roomScheduleTestPending.contains(roomId) ||
+        (!HueServiceLocator.isDemoMode && !_connection.connected)) {
+      return false;
+    }
+    _roomScheduleTestPending.add(roomId);
+    notifyListeners();
+    try {
+      return HueServiceLocator.isDemoMode ||
+          await api.roomScheduleTest(
+            roomId: roomId,
+            mode: mode,
+            requestId: requestId ?? 'room-schedule-test-${_uuid.v4()}',
+          );
+    } catch (error) {
+      debugPrint('ServerSync: room schedule test failed: $error');
+      return false;
+    } finally {
+      _roomScheduleTestPending.remove(roomId);
+      notifyListeners();
+    }
+  }
+
+  RhythmNodeProfileSettings _settingsWithSchedule(
+    RhythmNodeProfileSettings previous,
+    RhythmRoomSchedule schedule,
+  ) =>
+      RhythmNodeProfileSettings(
+        profileId: previous.profileId,
+        moodEnabled: previous.moodEnabled,
+        moodProfileId: previous.moodProfileId,
+        moodSceneId: previous.moodSceneId,
+        fadeSetting: previous.fadeSetting,
+        motionTimeoutSetting: previous.motionTimeoutSetting,
+        motionActivationEnabled: previous.motionActivationEnabled,
+        roomSchedule: schedule,
+        profileOverrides: previous.profileOverrides,
+        raw: previous.raw,
+      );
 
   bool lightProfileOverridesSupportedForNode(String nodeId) {
     if (HueServiceLocator.isDemoMode) return true;
@@ -1190,6 +1391,15 @@ class ServerSyncProvider extends ChangeNotifier {
       return node?.lightCapabilities?.individualProfileOverrides == true;
     }
     return true;
+  }
+
+  bool roomDayIdleProfileOverridesSupportedForNode(String nodeId) {
+    if (HueServiceLocator.isDemoMode) return true;
+    return nodeById(nodeId)?.kind == RhythmNodeKind.room &&
+        _capabilities?.supportsFeature(
+              RhythmFeature.roomDayIdleProfileOverrides,
+            ) ==
+            true;
   }
 
   bool hasNodeLightProfileOverrides(String nodeId) {
@@ -1209,7 +1419,16 @@ class ServerSyncProvider extends ChangeNotifier {
     bool colorTemperatureRange,
     bool otherVisual,
   }) lightProfileOverrideSummaryForNode(String nodeId) {
-    final overrides = nodeById(nodeId)?.profileSettings?.profileOverrides;
+    final node = nodeById(nodeId);
+    if (node?.kind == RhythmNodeKind.lightDevice &&
+        node?.lightCapabilities?.individualProfileOverrides != true) {
+      return (
+        brightnessRange: false,
+        colorTemperatureRange: false,
+        otherVisual: false,
+      );
+    }
+    final overrides = node?.profileSettings?.profileOverrides;
     if (overrides == null || overrides.isEmpty) {
       return (
         brightnessRange: false,
@@ -1326,6 +1545,7 @@ class ServerSyncProvider extends ChangeNotifier {
         fadeSetting: previousSettings.fadeSetting,
         motionTimeoutSetting: previousSettings.motionTimeoutSetting,
         motionActivationEnabled: enabled,
+        roomSchedule: previousSettings.roomSchedule,
         profileOverrides: previousSettings.profileOverrides,
         raw: previousSettings.raw,
       ),
@@ -1393,6 +1613,7 @@ class ServerSyncProvider extends ChangeNotifier {
       fadeSetting: previousSettings.fadeSetting,
       motionTimeoutSetting: previousSettings.motionTimeoutSetting,
       motionActivationEnabled: previousSettings.motionActivationEnabled,
+      roomSchedule: previousSettings.roomSchedule,
       profileOverrides: _withMotionTimeoutProfileOverride(
         previousSettings.profileOverrides,
         profileId: profileId,
@@ -1934,6 +2155,8 @@ class ServerSyncProvider extends ChangeNotifier {
     @visibleForTesting ServerAuthApiFactory? authApiFactory,
     @visibleForTesting
     RemoteAccessAutoEnableScheduler? remoteAccessAutoEnableScheduler,
+    @visibleForTesting ActivityCloudCanProvision? activityCloudCanProvision,
+    @visibleForTesting Stream<AuthUser?>? authStateChanges,
   })  : _connection = connection,
         _roomProvider = roomProvider,
         _homeProvider = homeProvider,
@@ -1941,7 +2164,10 @@ class ServerSyncProvider extends ChangeNotifier {
         _connectivityCheck = connectivityCheck,
         _authApiFactory = authApiFactory ?? _defaultAuthApiFactory,
         _remoteAccessAutoEnableScheduler = remoteAccessAutoEnableScheduler ??
-            RemoteAccessService.instance.scheduleAutoEnableForHub {
+            RemoteAccessService.instance.scheduleAutoEnableForHub,
+        _activityCloudCanProvision = activityCloudCanProvision ??
+            (() =>
+                ServerActivityCloudProvisioningService.instance.canProvision) {
     // Listen for connection events
     _helloSub = _connection.helloEvents.listen(_onHello);
     _rhythmStateSub = _connection.rhythmStateEvents.listen(_onRhythmState);
@@ -1971,7 +2197,8 @@ class ServerSyncProvider extends ChangeNotifier {
       unawaited(_refreshDemoState());
     });
 
-    _authStateSub = AuthService().authStateChanges.listen(_onAuthStateChanged);
+    _authStateSub = (authStateChanges ?? AuthService().authStateChanges)
+        .listen(_onAuthStateChanged);
   }
 
   void _beginRoomReadinessRefresh() {
@@ -2724,6 +2951,7 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Handle hello from server — accept rooms and reconcile config.
   void _onHello(RhythmHello hello) {
+    _authoritativeNodeSnapshotGeneration++;
     final helloNodes = _mergeOptimisticStandbyEnabled(hello.nodes);
     debugPrint(
         'ServerSync: Hello received with ${helloNodes.length} nodes, version=${hello.version}');
@@ -2847,16 +3075,20 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   void _onAuthStateChanged(AuthUser? user) {
-    if (user == null || user.isAnonymous) return;
+    if (user == null || user.isAnonymous) {
+      _stopActivityCloudProvisioningTimer();
+      return;
+    }
     _ensureServerActivityCloudConfigured(
       serverInstanceId: _lastServerInstanceId,
     );
+    _startActivityCloudProvisioningTimer();
   }
 
   void _startActivityCloudProvisioningTimer() {
     if (!_connection.connected ||
         HueServiceLocator.isDemoMode ||
-        !ServerActivityCloudProvisioningService.instance.canProvision) {
+        !_activityCloudCanProvision()) {
       return;
     }
     _activityCloudProvisioningTimer ??= Timer.periodic(
@@ -2872,12 +3104,16 @@ class ServerSyncProvider extends ChangeNotifier {
     _activityCloudProvisioningTimer = null;
   }
 
+  @visibleForTesting
+  bool get activityCloudProvisioningTimerActive =>
+      _activityCloudProvisioningTimer != null;
+
   void _ensureServerActivityCloudConfigured({String? serverInstanceId}) {
     if (!_connection.connected) return;
     final serverHub = _serverHub ?? _homeProvider.activeServerHub;
     if (serverHub == null ||
         HueServiceLocator.isDemoMode ||
-        !ServerActivityCloudProvisioningService.instance.canProvision) {
+        !_activityCloudCanProvision()) {
       return;
     }
     unawaited(
@@ -3074,16 +3310,18 @@ class ServerSyncProvider extends ChangeNotifier {
   /// pending flag still clears and the UI would otherwise read as success.
   void _onDispatchFailure(RhythmDispatchFailure failure) {
     debugPrint('ServerSync: dispatch failure node=${failure.nodeId} $failure');
-    _recentDispatchFailures[failure.nodeId] = (
+    final entryKey = _dispatchFailureEntryKey(failure);
+    _recentDispatchFailures[entryKey] = (
       failure: failure,
       receivedAt: DateTime.now(),
     );
-    // Re-notify at window expiry so the failure badge disappears on its own.
-    _dispatchFailureExpiryTimers[failure.nodeId]?.cancel();
-    _dispatchFailureExpiryTimers[failure.nodeId] =
-        Timer(_dispatchFailureWindow, () {
-      _dispatchFailureExpiryTimers.remove(failure.nodeId);
-      if (_recentDispatchFailures.remove(failure.nodeId) != null) {
+    // Each physical target owns its own expiry. A second failing bulb must not
+    // overwrite the first one's explanation, while a repeat for one bulb
+    // simply refreshes that bulb's warning window.
+    _dispatchFailureExpiryTimers[entryKey]?.cancel();
+    _dispatchFailureExpiryTimers[entryKey] = Timer(_dispatchFailureWindow, () {
+      _dispatchFailureExpiryTimers.remove(entryKey);
+      if (_recentDispatchFailures.remove(entryKey) != null) {
         notifyListeners();
       }
     });
@@ -3095,25 +3333,106 @@ class ServerSyncProvider extends ChangeNotifier {
       _recentDispatchFailures = {};
   final Map<String, Timer> _dispatchFailureExpiryTimers = {};
 
-  /// The most recent dispatch failure for [nodeId], if it happened within
-  /// the last [_dispatchFailureWindow]. Cards use this to show delivery
-  /// problems in place of the in-flight spinner.
-  RhythmDispatchFailure? recentDispatchFailureForNode(String nodeId) {
-    final entry = _recentDispatchFailures[nodeId];
-    if (entry == null) return null;
-    if (DateTime.now().difference(entry.receivedAt) > _dispatchFailureWindow) {
-      return null;
+  String _dispatchFailureEntryKey(RhythmDispatchFailure failure) {
+    // Use the same exact canonical identity as presentation, including the
+    // previous-appliance fallback where a command directly addressed a known
+    // light-device node. Endpoint labels are only a fallback for unresolved
+    // room fan-out failures.
+    final targetNodeId = _warningTargetNodeId(failure);
+    if (targetNodeId != null && targetNodeId.isNotEmpty) {
+      return 'node:$targetNodeId';
     }
-    return entry.failure;
+    return '${failure.nodeId}\u0000native:${failure.hubKey}:${failure.target}';
   }
 
-  /// Drop the stored failure for [nodeId] — a new command attempt supersedes
-  /// it (the spinner takes over; a repeat failure arrives as a fresh event).
-  void _clearRecentDispatchFailure(String nodeId) {
-    _dispatchFailureExpiryTimers.remove(nodeId)?.cancel();
-    if (_recentDispatchFailures.remove(nodeId) != null) {
-      notifyListeners();
+  String? _warningTargetNodeId(RhythmDispatchFailure failure) {
+    final targetNodeId = failure.targetNodeId?.trim();
+    if (targetNodeId != null && targetNodeId.isNotEmpty) return targetNodeId;
+    // Previous appliances cannot identify a room fan-out target, but a command
+    // addressed directly to a canonical bulb node is still exact.
+    return isNodeLightDevice(failure.nodeId) ? failure.nodeId : null;
+  }
+
+  String? _warningBulbName(String? targetNodeId) {
+    if (targetNodeId == null) return null;
+    final helloName = nodeById(targetNodeId)?.name.trim();
+    if (helloName != null && helloName.isNotEmpty) return helloName;
+    final topologyName = topologyNodeById(targetNodeId)?.name.trim();
+    if (topologyName != null && topologyName.isNotEmpty) return topologyName;
+    for (final room in _helloRooms) {
+      for (final device in room.devices) {
+        if (device.id == targetNodeId) return device.displayName;
+      }
     }
+    return null;
+  }
+
+  String? _warningTargetParentId(String? targetNodeId) {
+    if (targetNodeId == null) return null;
+    return topologyNodeById(targetNodeId)?.parentId ??
+        nodeById(targetNodeId)?.parentId;
+  }
+
+  /// Recent delivery problems relevant to a room or canonical bulb node.
+  ///
+  /// Room callers receive every target in that room; bulb callers receive only
+  /// their own exact target. Returned records are stable-sorted by bulb name so
+  /// multi-bulb warning copy does not jump as events arrive.
+  List<LightDeliveryWarning> recentLightDeliveryWarningsForNode(String nodeId) {
+    final now = DateTime.now();
+    final warnings = <LightDeliveryWarning>[];
+    for (final entry in _recentDispatchFailures.values) {
+      if (now.difference(entry.receivedAt) > _dispatchFailureWindow) continue;
+      final targetNodeId = _warningTargetNodeId(entry.failure);
+      final targetParentId = _warningTargetParentId(targetNodeId);
+      if (entry.failure.nodeId != nodeId &&
+          targetNodeId != nodeId &&
+          targetParentId != nodeId) {
+        continue;
+      }
+      warnings.add(
+        LightDeliveryWarning(
+          failure: entry.failure,
+          receivedAt: entry.receivedAt,
+          targetNodeId: targetNodeId,
+          bulbName: _warningBulbName(targetNodeId),
+        ),
+      );
+    }
+    warnings.sort((left, right) {
+      final leftName = left.bulbName?.toLowerCase() ?? '\uffff';
+      final rightName = right.bulbName?.toLowerCase() ?? '\uffff';
+      final byName = leftName.compareTo(rightName);
+      if (byName != 0) return byName;
+      return left.occurredAt.compareTo(right.occurredAt);
+    });
+    return List.unmodifiable(warnings);
+  }
+
+  /// Compatibility accessor for callers that only need one failure.
+  RhythmDispatchFailure? recentDispatchFailureForNode(String nodeId) {
+    final warnings = recentLightDeliveryWarningsForNode(nodeId);
+    return warnings.isEmpty ? null : warnings.last.failure;
+  }
+
+  /// Drop warnings superseded by a new command for [nodeId]. Room commands
+  /// clear all children; bulb commands clear only that exact bulb.
+  void _clearRecentDispatchFailure(String nodeId) {
+    final keysToRemove = <String>[];
+    for (final entry in _recentDispatchFailures.entries) {
+      final targetNodeId = _warningTargetNodeId(entry.value.failure);
+      if (entry.value.failure.nodeId == nodeId ||
+          targetNodeId == nodeId ||
+          _warningTargetParentId(targetNodeId) == nodeId) {
+        keysToRemove.add(entry.key);
+      }
+    }
+    if (keysToRemove.isEmpty) return;
+    for (final key in keysToRemove) {
+      _dispatchFailureExpiryTimers.remove(key)?.cancel();
+      _recentDispatchFailures.remove(key);
+    }
+    notifyListeners();
   }
 
   /// Handle motion timer updates from server.
@@ -3813,6 +4132,8 @@ class ServerSyncProvider extends ChangeNotifier {
     final index = _helloNodes.indexWhere((node) => node.id == nodeId);
     if (index == -1 ||
         !lightProfileOverridesSupportedForNode(nodeId) ||
+        (profileId == 'day_idle' &&
+            !roomDayIdleProfileOverridesSupportedForNode(nodeId)) ||
         _lightProfileOverridePending.contains(nodeId) ||
         (!HueServiceLocator.isDemoMode &&
             (!_connection.connected || _receivingFromServer))) {
@@ -3838,6 +4159,7 @@ class ServerSyncProvider extends ChangeNotifier {
       fadeSetting: previousSettings.fadeSetting,
       motionTimeoutSetting: previousSettings.motionTimeoutSetting,
       motionActivationEnabled: previousSettings.motionActivationEnabled,
+      roomSchedule: previousSettings.roomSchedule,
       profileOverrides: Map.unmodifiable(nextOverrides),
       raw: previousSettings.raw,
     );
@@ -3910,6 +4232,7 @@ class ServerSyncProvider extends ChangeNotifier {
       fadeSetting: previousSettings.fadeSetting,
       motionTimeoutSetting: previousSettings.motionTimeoutSetting,
       motionActivationEnabled: previousSettings.motionActivationEnabled,
+      roomSchedule: previousSettings.roomSchedule,
       raw: previousSettings.raw,
     );
     _helloNodes[index] = _copyNodeWithProfileSettings(previous, nextSettings);
@@ -4791,10 +5114,8 @@ class ServerSyncProvider extends ChangeNotifier {
       controlKind: controlKind,
       targetId: targetNodeId,
     );
-    if (success) {
-      await _refreshTopologyNodes();
-    }
-    return success;
+    if (!success) return false;
+    return refreshAfterTopologyMutation();
   }
 
   Future<bool> setNodeControlTargets({
@@ -4814,10 +5135,8 @@ class ServerSyncProvider extends ChangeNotifier {
       controlKind: controlKind,
       targetIds: normalizedTargetNodeIds,
     );
-    if (success) {
-      await _refreshTopologyNodes();
-    }
-    return success;
+    if (!success) return false;
+    return refreshAfterTopologyMutation();
   }
 
   Future<void> _refreshDemoState() async {

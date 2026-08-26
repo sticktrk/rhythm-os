@@ -5,17 +5,18 @@ React web dashboard for Rhythm staff.
 ## Run
 
 ```sh
-cd admin-ui
-cp .env.example .env
-npm install
-npm run dev
+cp admin-ui/.env.example admin-ui/.env
+npm --prefix admin-ui install
+python3 tools/config/run.py --consumer admin-ui -- npm --prefix admin-ui run dev
 ```
 
 The UI signs staff in with Supabase Auth and sends the access token to
 `admin-api`. The browser never receives hub tokens or service-role credentials.
-When `VITE_SUPABASE_URL` or `VITE_SUPABASE_ANON_KEY` are not set in
-`admin-ui/.env`, Vite falls back to the existing Flutter app `.env` values for
-those two browser-safe settings.
+The external `app-build` profile supplies the browser-safe Supabase URL and
+anonymous key. Keep only UI-specific values such as `VITE_ADMIN_API_URL` in
+`admin-ui/.env`; explicit `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY`
+values there remain supported for deployment-specific builds. The UI never
+reads the Flutter app's repository-local `.env`.
 
 ## Structure
 

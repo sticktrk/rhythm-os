@@ -285,7 +285,7 @@ fn brand_label(device: &CanonicalDevice, endpoint: &IntegrationEndpoint) -> Stri
 
 fn protocol_label(endpoint: &IntegrationEndpoint) -> &'static str {
     match endpoint.hub_key.hub_type.as_str() {
-        HubType::HUE => "Zig",
+        HubType::HUE => "Hub",
         HubType::HUE_BLE | HubType::LOCAL_BLE => "BLE",
         HubType::HA => "HA",
         HubType::MATTER => {
@@ -508,7 +508,7 @@ mod tests {
             .into_iter()
             .map(|plan| (plan.canonical_id, plan.desired_name))
             .collect::<HashMap<_, _>>();
-        assert_eq!(names[&hue_id], "Hue Zig Color Lamp 1 GuestBath");
+        assert_eq!(names[&hue_id], "Hue Hub Color Lamp 1 GuestBath");
         assert_eq!(
             names[&matter_id],
             "LEED MatWifi Color Downlight 2 GuestBath"
@@ -609,7 +609,7 @@ mod tests {
         let scope = LightNameReconciliationScope::for_room(Some(room_id));
         let plans = planned_light_names(&state, &scope);
         assert_eq!(plans.len(), 1);
-        assert!(plans[0].desired_name.starts_with("Hue Zig Color Lamp 2 "));
+        assert!(plans[0].desired_name.starts_with("Hue Hub Color Lamp 2 "));
         assert!(plans[0].desired_name.len() <= 32);
         assert!(plans[0].desired_name.ends_with('…'));
     }
@@ -662,7 +662,7 @@ mod tests {
                 .get(&canonical_id)
                 .unwrap()
                 .name,
-            "Hue Zig Color Lamp 1 GuestBath"
+            "Hue Hub Color Lamp 1 GuestBath"
         );
         {
             let mut state = shared.lock().unwrap();
@@ -676,8 +676,8 @@ mod tests {
         assert_eq!(
             calls.lock().unwrap().as_slice(),
             [
-                "Hue Zig Color Lamp 1 GuestBath",
-                "Hue Zig Color Lamp 1 MasterBe…"
+                "Hue Hub Color Lamp 1 GuestBath",
+                "Hue Hub Color Lamp 1 MasterBe…"
             ]
         );
     }
@@ -755,7 +755,7 @@ mod tests {
         let state = shared.lock().unwrap();
         assert_eq!(
             state.canonical_registry.get(&target_id).unwrap().name,
-            "Hue Zig Color Lamp 1"
+            "Hue Hub Color Lamp 1"
         );
         assert_eq!(
             state.canonical_registry.get(&unrelated_id).unwrap().name,

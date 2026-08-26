@@ -8,6 +8,7 @@ import '../../services/device_pairing_code.dart';
 import '../../services/hue_ble_auto_discovery_service.dart';
 import '../../widgets/nearby_hue_ble_prompt.dart';
 import '../../widgets/solar_orbit.dart';
+import 'matter_add_method.dart';
 
 enum DevicePairingScannerAction {
   matter,
@@ -24,17 +25,20 @@ class DevicePairingScannerResult {
     this.localBleSetup,
     this.inputMethod = 'camera',
     this.journeyId,
+    this.matterAddMethod,
   });
 
   const DevicePairingScannerResult.matter(
     String payload, {
     String inputMethod = 'camera',
     String? journeyId,
+    MatterAddMethod? addMethod,
   }) : this._(
           action: DevicePairingScannerAction.matter,
           payload: payload,
           inputMethod: inputMethod,
           journeyId: journeyId,
+          matterAddMethod: addMethod,
         );
 
   const DevicePairingScannerResult.hueBridge(
@@ -68,14 +72,19 @@ class DevicePairingScannerResult {
           journeyId: journeyId,
         );
 
-  const DevicePairingScannerResult.enterCode()
-      : this._(action: DevicePairingScannerAction.enterCode);
+  const DevicePairingScannerResult.enterCode({
+    MatterAddMethod? addMethod,
+  }) : this._(
+          action: DevicePairingScannerAction.enterCode,
+          matterAddMethod: addMethod,
+        );
 
   final DevicePairingScannerAction action;
   final String? payload;
   final LocalBleSetup? localBleSetup;
   final String inputMethod;
   final String? journeyId;
+  final MatterAddMethod? matterAddMethod;
 }
 
 typedef DevicePairingCameraBuilder = Widget Function(
@@ -102,6 +111,7 @@ class DevicePairingScannerScreen extends StatefulWidget {
   const DevicePairingScannerScreen({
     super.key,
     this.showEnterCodeAction = true,
+    this.matterOnNetworkAvailable = false,
     this.hueBridgeSerialSearchAvailable = false,
     this.supportedLocalBleProfileIds = const {},
     this.hueBridgeOnly = false,
@@ -113,6 +123,7 @@ class DevicePairingScannerScreen extends StatefulWidget {
   });
 
   final bool showEnterCodeAction;
+  final bool matterOnNetworkAvailable;
   final bool hueBridgeSerialSearchAvailable;
   final Set<String> supportedLocalBleProfileIds;
   final bool hueBridgeOnly;
@@ -125,6 +136,7 @@ class DevicePairingScannerScreen extends StatefulWidget {
   static Future<DevicePairingScannerResult?> show(
     BuildContext context, {
     bool showEnterCodeAction = true,
+    bool matterOnNetworkAvailable = false,
     bool hueBridgeSerialSearchAvailable = false,
     Set<String> supportedLocalBleProfileIds = const {},
     bool hueBridgeOnly = false,
@@ -139,6 +151,7 @@ class DevicePairingScannerScreen extends StatefulWidget {
         pageBuilder: (context, animation, secondaryAnimation) {
           return DevicePairingScannerScreen(
             showEnterCodeAction: showEnterCodeAction,
+            matterOnNetworkAvailable: matterOnNetworkAvailable,
             hueBridgeSerialSearchAvailable: hueBridgeSerialSearchAvailable,
             supportedLocalBleProfileIds: supportedLocalBleProfileIds,
             hueBridgeOnly: hueBridgeOnly,
@@ -374,6 +387,11 @@ class _DevicePairingScannerScreenState
                 final compact = constraints.maxHeight < 700;
                 final compactGuidance =
                     compact && (_guidance != null || _pendingDecision != null);
+                final compactActions = compact &&
+                    !compactGuidance &&
+                    widget.showEnterCodeAction &&
+                    widget.matterOnNetworkAvailable &&
+                    !widget.hueBridgeOnly;
                 return Padding(
                   padding: EdgeInsets.fromLTRB(
                     20,
@@ -386,9 +404,15 @@ class _DevicePairingScannerScreenState
                       _buildHeader(context),
                       const Spacer(),
                       _buildViewfinder(
-                        compactGuidance ? 130 : (compact ? 210 : 264),
+                        compactGuidance
+                            ? 130
+                            : (compactActions ? 170 : (compact ? 210 : 264)),
                       ),
-                      SizedBox(height: compact ? 14 : 24),
+                      SizedBox(
+                        height: compactGuidance || compactActions
+                            ? 8
+                            : (compact ? 14 : 24),
+                      ),
                       Text(
                         widget.hueBridgeOnly
                             ? 'Scan Hue bulb QR'
@@ -400,7 +424,7 @@ class _DevicePairingScannerScreenState
                           fontWeight: FontWeight.w600,
                         ),
                       ),
-                      if (!compactGuidance) ...[
+                      if (!compactGuidance && !compactActions) ...[
                         SizedBox(height: compact ? 4 : 8),
                         Text(
                           widget.hueBridgeOnly
@@ -417,7 +441,9 @@ class _DevicePairingScannerScreenState
                         ),
                       ],
                       SizedBox(
-                        height: compactGuidance ? 8 : (compact ? 14 : 24),
+                        height: compactGuidance || compactActions
+                            ? 8
+                            : (compact ? 14 : 24),
                       ),
                       AnimatedSwitcher(
                         duration: const Duration(milliseconds: 220),
@@ -572,6 +598,30 @@ class _DevicePairingScannerScreenState
                 ),
               ),
             ),
+            if (!widget.hueBridgeOnly && widget.matterOnNetworkAvailable) ...[
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: TextButton.icon(
+                  key: const ValueKey('add-existing-matter-device'),
+                  onPressed: () {
+                    AnalyticsService().logDevicePairingCodeDetected(
+                      codeKind: 'matter',
+                      outcome: 'existing_matter_entry_selected',
+                      journeyId: widget.journeyId,
+                      inputMethod: 'manual_code',
+                    );
+                    Navigator.of(context).pop(
+                      const DevicePairingScannerResult.enterCode(
+                        addMethod: MatterAddMethod.onNetworkSetupCode,
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.hub_outlined),
+                  label: const Text('Already in another Matter app?'),
+                ),
+              ),
+            ],
           ],
         ],
       ),

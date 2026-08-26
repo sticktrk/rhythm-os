@@ -1126,6 +1126,30 @@ where
     }
 }
 
+struct PairingRequestCancellationGuard {
+    context: Option<crate::pairing::PairingRequestContext>,
+}
+
+impl PairingRequestCancellationGuard {
+    fn new(context: crate::pairing::PairingRequestContext) -> Self {
+        Self {
+            context: Some(context),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.context = None;
+    }
+}
+
+impl Drop for PairingRequestCancellationGuard {
+    fn drop(&mut self) {
+        if let Some(context) = self.context.take() {
+            context.cancel();
+        }
+    }
+}
+
 pub async fn put_hub_credentials(
     State(state): State<SharedState>,
     Json(body): Json<Value>,
@@ -1189,7 +1213,15 @@ pub async fn post_pair_device(
     State(state): State<SharedState>,
     Json(body): Json<crate::pairing::PairingRequest>,
 ) -> ApiResponse {
-    run_blocking(move || handlers::handle_pair_device(&state, &body)).await
+    let context = crate::pairing::PairingRequestContext::accepted_now();
+    let worker_context = context.clone();
+    let mut cancel_on_drop = PairingRequestCancellationGuard::new(context);
+    let response = run_blocking(move || {
+        handlers::handle_pair_device_with_context(&state, &body, worker_context)
+    })
+    .await;
+    cancel_on_drop.disarm();
+    response
 }
 
 pub async fn get_pair_device(
@@ -1654,6 +1686,84 @@ mod tests {
             .expect("second read did not acquire the released permit")
             .unwrap();
         assert_eq!(second.await.unwrap().status, 204);
+    }
+
+    #[tokio::test]
+    async fn cancelled_pairing_request_stops_worker_and_releases_matter_slot() {
+        let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+        let started_tx = Arc::new(Mutex::new(Some(started_tx)));
+        let finished_tx = Arc::new(Mutex::new(Some(finished_tx)));
+
+        {
+            let started_tx = started_tx.clone();
+            let finished_tx = finished_tx.clone();
+            let mut state = state.lock().unwrap();
+            state.platform_type = "appliance";
+            state.start_pairing_fn = Some(Arc::new(move |_, _, _, context| {
+                if let Some(sender) = started_tx.lock().unwrap().take() {
+                    let _ = sender.send(());
+                }
+                while !context.is_cancelled() {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                if let Some(sender) = finished_tx.lock().unwrap().take() {
+                    let _ = sender.send(());
+                }
+                Ok(crate::pairing::PairingSession {
+                    hub_type: "matter".to_string(),
+                    status: crate::pairing::PairingStatus::Failed,
+                    device: None,
+                    devices: Vec::new(),
+                    error: Some("cancelled".to_string()),
+                    failure_stage: None,
+                    warnings: Vec::new(),
+                    details: None,
+                })
+            }));
+        }
+
+        let request = Request::builder()
+            .method(HttpMethod::POST)
+            .uri("/api/devices/pair")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({
+                    "hub_type": "matter",
+                    "params": {
+                        "setup_payload": "34970112332",
+                        "rendezvous": "on_network",
+                    },
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let request_task = tokio::spawn(api_routes().with_state(state.clone()).oneshot(request));
+
+        tokio::time::timeout(Duration::from_secs(2), started_rx)
+            .await
+            .expect("pairing worker did not start")
+            .expect("pairing worker dropped start notification");
+        assert!(state.lock().unwrap().pairing_in_progress.contains("matter"));
+
+        request_task.abort();
+        let _ = request_task.await;
+        tokio::time::timeout(Duration::from_secs(2), finished_rx)
+            .await
+            .expect("cancelled pairing worker did not stop")
+            .expect("pairing worker dropped finish notification");
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if state.lock().unwrap().pairing_in_progress.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("cancelled pairing worker did not release its Matter slot");
     }
 
     fn light_profile_config_hash_cases() -> serde_json::Value {

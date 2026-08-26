@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' show SemanticsAction, Tristate;
 
@@ -15,6 +16,7 @@ import 'package:rhythm_app/models/plan_tier.dart';
 import 'package:rhythm_app/services/analytics_service.dart';
 import 'package:rhythm_app/widgets/compact_room_orb.dart';
 import 'package:rhythm_app/widgets/first_run_explainer.dart';
+import 'package:rhythm_app/widgets/light_delivery_warning_signal.dart';
 import 'package:rhythm_app/widgets/mood_sheet.dart';
 import 'package:rhythm_app/widgets/room_card.dart';
 import 'package:rhythm_app/widgets/room_settings_sheet.dart';
@@ -67,6 +69,8 @@ class _FakeSubscriptionProvider extends ChangeNotifier
 
 class _FakeRhythmServerApi extends RhythmServerApi {
   _FakeRhythmServerApi() : super(Dio());
+
+  List<RhythmTopologyNode> topologyNodes = const [];
 
   final List<
       ({
@@ -127,7 +131,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
       ];
 
   @override
-  Future<List<RhythmTopologyNode>> getTopologyNodes() async => const [];
+  Future<List<RhythmTopologyNode>> getTopologyNodes() async => topologyNodes;
 
   @override
   Future<void> nodeBrightness({
@@ -522,7 +526,7 @@ void main() {
             value: subscription,
           ),
         ],
-        child: const MaterialApp(
+        child: MaterialApp(
           home: Scaffold(
             body: RoomSettingsSheet(
               room: room,
@@ -537,20 +541,21 @@ void main() {
     final button = find.byKey(
       const ValueKey('room-settings-light-settings-room-1'),
     );
+    expect(find.byKey(const ValueKey('lighting')), findsOneWidget);
     expect(button, findsOneWidget);
     expect(
       find.byKey(const ValueKey('room-settings-schedule-room-1')),
-      findsOneWidget,
+      findsNothing,
     );
     expect(
       find.byKey(const ValueKey('room-settings-schedule-day-room-1')),
-      findsOneWidget,
+      findsNothing,
     );
     expect(
       find.byKey(const ValueKey('room-settings-schedule-night-room-1')),
-      findsOneWidget,
+      findsNothing,
     );
-    expect(find.text('Lighting'), findsOneWidget);
+    expect(find.text('Lighting'), findsNWidgets(2));
     expect(
       tester
           .widget<Text>(
@@ -561,9 +566,9 @@ void main() {
           .data,
       'Custom',
     );
-    final semantics = tester.getSemantics(button);
-    expect(semantics.label, 'Lighting');
-    expect(semantics.value, 'Custom light settings');
+    final semantics = tester.widget<Semantics>(button);
+    expect(semantics.properties.label, 'Lighting');
+    expect(semantics.properties.value, 'Custom light settings');
 
     await tester.tap(button);
     await tester.pumpAndSettle();
@@ -973,8 +978,224 @@ void main() {
     expect(find.text('Settings'), findsNothing);
   });
 
+  testWidgets(
+      'room Scene temporarily pauses motion without changing its preference',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await roomProvider.addRoom(
+      const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.hue,
+        kind: RoomNodeKind.room,
+        deviceIds: ['light-1', 'motion-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    roomProvider.markRoomHasSensor('room-1');
+    roomProvider.updateMotionTimer(
+      'room-1',
+      MotionTimerInfo(
+        motionActive: true,
+        motionOwned: true,
+        remainingSecs: 30,
+        timeoutSecs: 60,
+        receivedAt: DateTime.now(),
+      ),
+    );
+    final connection = _TestRhythmConnection();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _FakeHomeProvider(),
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    Map<String, dynamic> helloNode({
+      required bool sceneActive,
+      String sceneId = 'evening-glow',
+    }) =>
+        {
+          'id': 'room-1',
+          'name': 'Kitchen',
+          'kind': 'room',
+          'hub_types': ['hue'],
+          'device_ids': ['light-1', 'motion-1'],
+          'devices': [
+            {'id': 'motion-1', 'type': 'motion'},
+          ],
+          'rhythm_enabled': true,
+          'disabled': false,
+          'lights_on': true,
+          'time_offset': 0,
+          'brightness_offset': 0,
+          'state': sceneActive ? 'mood' : 'active',
+          'mood_active': sceneActive,
+          'profile_settings': {
+            'motion_activation_enabled': true,
+            'mood_scene_id': sceneId,
+          },
+        };
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': [helloNode(sceneActive: true)],
+      }),
+    );
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'room-1',
+              globalConfig: defaultCurveConfig,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    final motion = find.byKey(
+      const ValueKey('room-card-motion-room-1'),
+    );
+    expect(serverSync.motionActivationEnabledForNode('room-1'), isTrue);
+    expect(
+      serverSync.motionSuppressedByActiveSceneForNode('room-1'),
+      isFalse,
+      reason: 'a previous-stable capability payload cannot prove suppression',
+    );
+    expect(find.byIcon(Icons.sensors_rounded), findsOneWidget);
+    expect(
+      tester.getSemantics(motion).label,
+      'Turn off motion activation for Kitchen',
+    );
+    expect(
+      tester
+          .getSemantics(motion)
+          .getSemanticsData()
+          .hasAction(SemanticsAction.tap),
+      isTrue,
+    );
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': [RhythmFeature.sceneMotionSuppression],
+          'hubs': <dynamic>[],
+        },
+        'nodes': [helloNode(sceneActive: true)],
+      }),
+    );
+    await tester.pump();
+
+    expect(serverSync.motionActivationEnabledForNode('room-1'), isTrue);
+    expect(
+      serverSync.motionSuppressedByActiveSceneForNode('room-1'),
+      isTrue,
+    );
+    expect(find.byIcon(Icons.sensors_off_rounded), findsOneWidget);
+    expect(
+      tester.getSemantics(motion).label,
+      'Motion paused while a Scene is active in Kitchen',
+    );
+    expect(
+      tester
+          .getSemantics(motion)
+          .getSemanticsData()
+          .hasAction(SemanticsAction.tap),
+      isFalse,
+    );
+    await tester.tap(motion);
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(connection.api.motionActivationCalls, isEmpty);
+
+    if (const bool.fromEnvironment(
+      'RHYTHM_CAPTURE_SCENE_MOTION_EVIDENCE',
+    )) {
+      await expectLater(
+        find.byType(RoomCard),
+        matchesGoldenFile('goldens/room-scene-motion-paused.png'),
+      );
+    }
+
+    for (final generatedSceneId in [
+      'node-mood-scene-room-1',
+      'node_mood_scene_room_1',
+    ]) {
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'capabilities': {
+            'api_schema_version': 2,
+            'features': [RhythmFeature.sceneMotionSuppression],
+            'hubs': <dynamic>[],
+          },
+          'nodes': [
+            helloNode(sceneActive: true, sceneId: generatedSceneId),
+          ],
+        }),
+      );
+      await tester.pump();
+
+      expect(
+        serverSync.motionSuppressedByActiveSceneForNode('room-1'),
+        isFalse,
+        reason: '$generatedSceneId is a custom Mood, not a saved Scene',
+      );
+      expect(find.byIcon(Icons.sensors_rounded), findsOneWidget);
+      expect(
+        tester.getSemantics(motion).label,
+        'Turn off motion activation for Kitchen',
+      );
+      expect(
+        tester
+            .getSemantics(motion)
+            .getSemanticsData()
+            .hasAction(SemanticsAction.tap),
+        isTrue,
+      );
+    }
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': [RhythmFeature.sceneMotionSuppression],
+          'hubs': <dynamic>[],
+        },
+        'nodes': [helloNode(sceneActive: false)],
+      }),
+    );
+    await tester.pump();
+
+    expect(serverSync.motionActivationEnabledForNode('room-1'), isTrue);
+    expect(
+      serverSync.motionSuppressedByActiveSceneForNode('room-1'),
+      isFalse,
+    );
+    expect(find.byIcon(Icons.sensors_rounded), findsOneWidget);
+    expect(
+      tester.getSemantics(motion).label,
+      'Turn off motion activation for Kitchen',
+    );
+  });
+
   testWidgets('shows and clears a spinner while the room is transitioning',
       (tester) async {
+    final screenshotPath =
+        Platform.environment['RHYTHM_ROOM_CARD_SPINNER_SCREENSHOT'];
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
       const RoomDto(
@@ -1034,7 +1255,16 @@ void main() {
     );
     await tester.pump();
 
-    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    final spinner = find.byType(CircularProgressIndicator);
+    expect(spinner, findsOneWidget);
+    final spinnerRect = tester.getRect(spinner);
+    expect(spinnerRect.width, spinnerRect.height);
+    if (screenshotPath != null && screenshotPath.isNotEmpty) {
+      await expectLater(
+        find.byType(Overlay),
+        matchesGoldenFile(screenshotPath),
+      );
+    }
     expect(tester.widget<Slider>(_brightnessSlider()).onChanged, isNull);
     expect(
       tester.widget<GestureDetector>(_roomSegment('Brightness')).onTap,
@@ -1213,7 +1443,7 @@ void main() {
     expect(find.byType(CircularProgressIndicator), findsNothing);
   });
 
-  testWidgets('dispatch failure shows red badge with tappable popover',
+  testWidgets('legacy dispatch failure keeps a descriptive room fallback',
       (tester) async {
     final roomProvider = RoomProvider();
     // On-curve room (no offsets): the off-curve reset clasp overlays the
@@ -1274,25 +1504,260 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.byType(CircularProgressIndicator), findsNothing);
-    final badge = find.byKey(const ValueKey('room_dispatch_failure_badge'));
+    final badge = find.byKey(
+      const ValueKey('room_dispatch_failure_badge-room-1'),
+    );
     expect(badge, findsOneWidget);
 
     // Tapping reveals the failure popover.
     await tester.tap(badge);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 200));
-    expect(find.text('Failed to turn on Kitchen'), findsOneWidget);
+    expect(find.text('Couldn\u2019t reach Kitchen lights'), findsOneWidget);
+    expect(find.text('Kitchen lights'), findsOneWidget);
 
     // Tapping outside dismisses it.
     await tester.tapAt(const Offset(5, 500));
     await tester.pump();
-    expect(find.text('Failed to turn on Kitchen'), findsNothing);
+    expect(find.text('Couldn\u2019t reach Kitchen lights'), findsNothing);
 
     // The badge expires with the failure window.
     await tester.pump(const Duration(seconds: 31));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 200));
     expect(badge, findsNothing);
+  });
+
+  testWidgets(
+      'room warning lists every failed bulb and propagates to bulb cards',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(390, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    final analyticsBackend = CapturingAnalyticsBackend();
+    await analyticsBackend.initialize();
+    BackendProvider.setInstanceForTesting(
+      auth: OfflineAuthBackend(),
+      analytics: analyticsBackend,
+    );
+    final analytics = AnalyticsService();
+    analytics.resetForTesting();
+    await analytics.initialize();
+    addTearDown(() {
+      analytics.resetForTesting();
+      BackendProvider.resetForTesting();
+    });
+
+    final roomProvider = RoomProvider();
+    final connection = _TestRhythmConnection();
+    connection.api.topologyNodes = [
+      RhythmTopologyNode.fromJson({
+        'id': 'room-1',
+        'name': 'Porch',
+        'kind': 'room',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'bulb-1',
+        'name': 'Aqara Porch Bulb',
+        'kind': 'light_device',
+        'parent_id': 'room-1',
+      }),
+      RhythmTopologyNode.fromJson({
+        'id': 'bulb-2',
+        'name': 'Door Sconce',
+        'kind': 'light_device',
+        'parent_id': 'room-1',
+      }),
+    ];
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _FakeHomeProvider(),
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Porch',
+            'kind': 'room',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+          },
+          {
+            'id': 'bulb-1',
+            'name': 'Aqara Porch Bulb',
+            'kind': 'light_device',
+            'parent_id': 'room-1',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+          },
+          {
+            'id': 'bulb-2',
+            'name': 'Door Sconce',
+            'kind': 'light_device',
+            'parent_id': 'room-1',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'lights_on': true,
+          },
+        ],
+        'location': const <String, dynamic>{},
+      }),
+    );
+    await tester.pump(const Duration(milliseconds: 10));
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'room-1',
+              globalConfig: defaultCurveConfig,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    connection.emitDispatchFailure(const RhythmDispatchFailure(
+      hubType: 'matter',
+      hubKey: 'matter@local',
+      nodeId: 'room-1',
+      targetNodeId: 'bulb-1',
+      target: 'matter-113',
+      kind: 'matter_controller_command',
+      status: 'timed_out',
+    ));
+    connection.emitDispatchFailure(const RhythmDispatchFailure(
+      hubType: 'matter',
+      hubKey: 'matter@local',
+      nodeId: 'room-1',
+      targetNodeId: 'bulb-2',
+      target: 'matter-114',
+      kind: 'matter_controller_command',
+      status: 'timed_out',
+    ));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    final roomBadge = find.byKey(
+      const ValueKey('room_dispatch_failure_badge-room-1'),
+    );
+    expect(roomBadge, findsOneWidget);
+    expect(
+      tester
+          .widget<LightDeliveryWarningSignal>(
+            find.descendant(
+              of: roomBadge,
+              matching: find.byType(LightDeliveryWarningSignal),
+            ),
+          )
+          .count,
+      2,
+    );
+    final badgeSemanticsFinder = find.descendant(
+      of: roomBadge,
+      matching: find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            (widget.properties.label ?? '')
+                .startsWith('Light delivery warnings for'),
+      ),
+    );
+    final badgeSemantics = tester.widget<Semantics>(
+      badgeSemanticsFinder,
+    );
+    expect(badgeSemantics.properties.label, contains('Aqara Porch Bulb'));
+    expect(badgeSemantics.properties.label, contains('Door Sconce'));
+    expect(
+      tester
+          .getSemantics(badgeSemanticsFinder)
+          .getSemanticsData()
+          .hasAction(SemanticsAction.tap),
+      isTrue,
+    );
+    final activityRect = tester.getRect(
+      find.byKey(const ValueKey('room-card-activity-room-1')),
+    );
+    expect(activityRect.contains(tester.getCenter(roomBadge)), isTrue);
+    await tester.tap(roomBadge);
+    await tester.pump(const Duration(milliseconds: 200));
+
+    final warningTitle = find.text('Couldn\u2019t reach 2 bulbs');
+    expect(warningTitle, findsOneWidget);
+    expect(tester.getRect(warningTitle).top, greaterThan(activityRect.bottom));
+    final popover = find.byKey(
+      const ValueKey('light-delivery-warning-popover'),
+    );
+    final popoverRect = tester.getRect(popover);
+    final viewportRect = tester.getRect(find.byType(Scaffold).first);
+    expect(popoverRect.center.dx, closeTo(viewportRect.center.dx, 0.5));
+    expect(popoverRect.left, greaterThanOrEqualTo(viewportRect.left + 12));
+    expect(popoverRect.right, lessThanOrEqualTo(viewportRect.right - 12));
+    expect(find.text('Aqara Porch Bulb'), findsOneWidget);
+    expect(find.text('Door Sconce'), findsOneWidget);
+    expect(find.textContaining('matter-113'), findsNothing);
+
+    final warningEvent = analyticsBackend.events.singleWhere(
+      (event) => event.name == 'light_delivery_warning_opened',
+    );
+    expect(warningEvent.properties, {
+      'surface': 'room_card',
+      'affected_bulb_count': 2,
+      'has_unresolved_target': 0,
+      'failure_kind': 'light_update',
+    });
+
+    await tester.tapAt(const Offset(5, 880));
+    await tester.pump();
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'bulb-1',
+              globalConfig: defaultCurveConfig,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 200));
+
+    expect(
+      find.byKey(const ValueKey('room_dispatch_failure_badge-bulb-1')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('room_dispatch_failure_badge-bulb-2')),
+      findsNothing,
+    );
+
+    await tester.pump(const Duration(seconds: 31));
   });
 
   testWidgets('on from off sends one reset action without active preference',

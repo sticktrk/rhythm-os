@@ -436,6 +436,90 @@ void main() {
           )).called(1);
     });
 
+    test('roomScheduleSet sends additive room profile patch', () async {
+      when(() => dio.put(any(), data: any(named: 'data'))).thenAnswer(
+        (_) async => Response(
+          requestOptions: RequestOptions(path: 'api/nodes/preferences'),
+          statusCode: 200,
+          data: {
+            'nodes': [
+              {
+                'node_id': 'room-1',
+                'rhythm_enabled': true,
+                'state': 'active',
+                'profile_settings': {
+                  'room_schedule': {
+                    'source': 'follow_time',
+                    'wake_time': '07:15',
+                    'sleep_time': '23:45',
+                  },
+                },
+              },
+            ],
+          },
+        ),
+      );
+
+      final authoritative = await api.roomScheduleSet(
+        roomId: 'room-1',
+        schedule: const RhythmRoomSchedule(
+          source: RhythmRoomScheduleSource.followTime,
+          wakeTime: '07:15',
+          sleepTime: '23:45',
+        ),
+        requestId: 'schedule-request-1',
+      );
+
+      expect(
+        authoritative?.profileSettings?.roomSchedule?.source,
+        RhythmRoomScheduleSource.followTime,
+      );
+      verify(
+        () => dio.put(
+          'api/nodes/preferences',
+          data: {
+            'node_id': 'room-1',
+            'profile_settings': {
+              'room_schedule': {
+                'source': 'follow_time',
+                'wake_time': '07:15',
+                'sleep_time': '23:45',
+              },
+            },
+            'request_id': 'schedule-request-1',
+          },
+        ),
+      ).called(1);
+    });
+
+    test('roomScheduleTest sends room-only preview request', () async {
+      when(() => dio.put(any(), data: any(named: 'data'))).thenAnswer(
+        (_) async => Response(
+          requestOptions: RequestOptions(path: 'api/nodes/preferences'),
+          statusCode: 200,
+        ),
+      );
+
+      expect(
+        await api.roomScheduleTest(
+          roomId: 'room-1',
+          mode: RhythmMode.sleep,
+          requestId: 'schedule-test-1',
+        ),
+        isTrue,
+      );
+      verify(
+        () => dio.put(
+          'api/nodes/preferences',
+          data: {
+            'node_id': 'room-1',
+            'schedule_test': 'sleep',
+            'request_id': 'schedule-test-1',
+          },
+        ),
+      ).called(1);
+    });
+
     test('nodeMotionActivationSet returns null on rejected write', () async {
       when(() => dio.put(any(), data: any(named: 'data'))).thenThrow(
         DioException(
@@ -1193,22 +1277,56 @@ void main() {
           )).called(1);
     });
 
-    test('assignDeviceParent sends parent_id including null', () async {
-      when(() => dio.put(any(), data: any(named: 'data')))
-          .thenAnswer((_) async => Response(
-                requestOptions: RequestOptions(
-                  path: 'api/devices/canonical/device-1/parent',
-                ),
-                statusCode: 204,
-              ));
+    test('assignDeviceParent sends parent_id with the mutation timeout',
+        () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(
+              path: 'api/devices/canonical/device-1/parent',
+            ),
+            statusCode: 204,
+          ));
 
       final saved = await api.assignDeviceParent('device-1', null);
 
       expect(saved, isTrue);
-      verify(() => dio.put(
+      final options = verify(() => dio.put(
             'api/devices/canonical/device-1/parent',
             data: {'parent_id': null},
-          )).called(1);
+            options: captureAny(named: 'options'),
+          )).captured.single as Options;
+      expect(options.receiveTimeout, const Duration(seconds: 30));
+    });
+
+    test('assignDeviceParentResult parses qualified projection attention',
+        () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(
+              path: 'api/devices/canonical/device-1/parent',
+            ),
+            statusCode: 200,
+            data: {
+              'schema_version': 1,
+              'canonical_committed': true,
+              'projection_status': 'attention',
+            },
+          ));
+
+      final result = await api.assignDeviceParentResult('device-1', 'room-2');
+
+      expect(result, isNotNull);
+      expect(result!.canonicalCommitted, isTrue);
+      expect(
+        result.projectionStatus,
+        RhythmRoomProjectionStatus.attention,
+      );
     });
   });
 
