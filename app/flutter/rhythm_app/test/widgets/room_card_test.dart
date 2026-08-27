@@ -25,6 +25,7 @@ import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 import '../helpers/capturing_analytics_backend.dart';
+import '../helpers/ui_evidence_fonts.dart';
 
 class _FakeHomeProvider extends HomeProvider {
   @override
@@ -1196,6 +1197,9 @@ void main() {
       (tester) async {
     final screenshotPath =
         Platform.environment['RHYTHM_ROOM_CARD_SPINNER_SCREENSHOT'];
+    if (screenshotPath != null && screenshotPath.isNotEmpty) {
+      await tester.runAsync(loadUiEvidenceFonts);
+    }
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
       const RoomDto(

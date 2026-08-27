@@ -53,6 +53,7 @@ MANIFEST="$TMP_DIR/evidence/manifest.json"
 jq -n '{
     schema_version: 1,
     uses_mock_data: true,
+    renderer: "rhythm_flutter_test_fonts_v1",
     source_test: "test/visual/room_settings_test.dart",
     screenshots: [{path: "screenshots/room-settings.png", caption: "Room settings — Auto color"}]
 }' > "$MANIFEST"
@@ -110,6 +111,14 @@ if "$POSTER" --pr 7 --head "$FAKE_HEAD_SHA" --manifest "$INVALID_MANIFEST" >/dev
     fail "live-data manifests must be rejected"
 fi
 [ ! -s "$FAKE_GH_LOG" ] || fail "invalid manifests should fail before contacting GitHub"
+
+INVALID_RENDERER_MANIFEST="$TMP_DIR/evidence/invalid-renderer-manifest.json"
+jq 'del(.renderer)' "$MANIFEST" > "$INVALID_RENDERER_MANIFEST"
+: > "$FAKE_GH_LOG"
+if "$POSTER" --pr 7 --head "$FAKE_HEAD_SHA" --manifest "$INVALID_RENDERER_MANIFEST" >/dev/null 2>&1; then
+    fail "manifests without the canonical font renderer must be rejected"
+fi
+[ ! -s "$FAKE_GH_LOG" ] || fail "invalid renderer manifests should fail before contacting GitHub"
 
 STALE_HEAD="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 : > "$FAKE_GH_LOG"
