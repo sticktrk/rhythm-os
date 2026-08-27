@@ -815,18 +815,21 @@ fn perform_unpair_device(
         result.warning,
         result.error
     );
-    crate::pairing::record_pairing_history(
-        state,
-        crate::pairing::pairing_history_entry_for_unpair(
-            &request.hub_type,
-            &request.params,
-            &result.status,
-            result.device_id.as_deref(),
-            result.error.as_deref(),
-        ),
-    );
-
     if result.status == crate::pairing::PairingStatus::Complete {
+        if archive && result.device_id.is_none() {
+            let error = anyhow::anyhow!("Completed archive did not identify the removed device");
+            crate::pairing::record_pairing_history(
+                state,
+                crate::pairing::pairing_history_entry_for_unpair(
+                    &request.hub_type,
+                    &request.params,
+                    &crate::pairing::PairingStatus::Failed,
+                    None,
+                    Some(&error.to_string()),
+                ),
+            );
+            return Err(error);
+        }
         if let Some(device_id) = &result.device_id {
             let hub_address = result
                 .hub_address
@@ -848,13 +851,38 @@ fn perform_unpair_device(
                 crate::hub::HubType::new(&result.hub_type),
                 hub_address,
             );
-            if archive {
-                commands::do_device_archive(state, device_id, &hub_key)?;
+            let cleanup = if archive {
+                commands::do_device_archive(state, device_id, &hub_key)
             } else {
-                commands::do_device_endpoint_remove(state, device_id, &hub_key)?;
+                commands::do_device_endpoint_remove(state, device_id, &hub_key)
+            };
+            if let Err(error) = cleanup {
+                let error_text = format!("{error:#}");
+                crate::pairing::record_pairing_history(
+                    state,
+                    crate::pairing::pairing_history_entry_for_unpair(
+                        &request.hub_type,
+                        &request.params,
+                        &crate::pairing::PairingStatus::Failed,
+                        Some(device_id),
+                        Some(&error_text),
+                    ),
+                );
+                return Err(error);
             }
         }
     }
+
+    crate::pairing::record_pairing_history(
+        state,
+        crate::pairing::pairing_history_entry_for_unpair(
+            &request.hub_type,
+            &request.params,
+            &result.status,
+            result.device_id.as_deref(),
+            result.error.as_deref(),
+        ),
+    );
 
     Ok(result)
 }
@@ -4644,6 +4672,34 @@ mod tests {
         };
         assert!(app.canonical_registry.soft_remove(&id, 2));
         id
+    }
+
+    #[test]
+    fn removed_devices_report_recovery_availability_without_exposing_secret() {
+        let state = test_state();
+        let id = archived_matter_device(&state);
+        state.lock().unwrap().load_pairing_recovery_fn =
+            Some(Arc::new(|_, hub_type, native_device_id| {
+                assert_eq!(hub_type, "matter");
+                assert_eq!(native_device_id, "matter-42-2");
+                Ok(Some(PairingRecoverySecret {
+                    payload_kind: "qr_code".to_string(),
+                    setup_payload: "MT:PRIVATE-ARCHIVE-SECRET".to_string(),
+                    captured_at: "2026-08-27T00:00:00Z".to_string(),
+                }))
+            }));
+
+        let available = handle_get_removed_devices(&state);
+        assert_eq!(available.status, 200);
+        let available: Value = serde_json::from_str(&available.body).unwrap();
+        assert_eq!(available[0]["id"], id);
+        assert_eq!(available[0]["recovery_available"], true);
+        assert!(!available.to_string().contains("PRIVATE-ARCHIVE-SECRET"));
+
+        state.lock().unwrap().load_pairing_recovery_fn = Some(Arc::new(|_, _, _| Ok(None)));
+        let unavailable: Value =
+            serde_json::from_str(&handle_get_removed_devices(&state).body).unwrap();
+        assert_eq!(unavailable[0]["recovery_available"], false);
     }
 
     #[test]
@@ -9124,6 +9180,66 @@ mod tests {
         let reg = registry.lock().unwrap();
         assert!(reg.get_light_entities("device-1").is_empty());
         assert!(!reg.rooms().iter().any(|room| room.id == "device-1"));
+    }
+
+    #[test]
+    fn archive_commit_failure_records_failed_instead_of_archived() {
+        let (state, _registry, canonical_id, _room_id, _hub_key) =
+            handler_state_with_canonical_light();
+        let path = std::env::temp_dir().join(format!(
+            "rhythm-handler-archive-failure-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let storage = Arc::new(crate::storage::FileStorage::new(path.to_str().unwrap()).unwrap());
+        std::fs::create_dir(path.join("authority_state.json")).unwrap();
+        {
+            let mut app = state.lock().unwrap();
+            app.storage = Some(storage.clone());
+            app.start_unpairing_fn = Some(Arc::new(|_, _, _| {
+                Ok(UnpairingResult {
+                    hub_type: "mock".to_string(),
+                    hub_address: Some("local".to_string()),
+                    status: PairingStatus::Complete,
+                    device_id: Some("device-1".to_string()),
+                    error: None,
+                    completion_scope: None,
+                    warning: None,
+                })
+            }));
+        }
+
+        let response = handle_unpair_device(
+            &state,
+            &UnpairingRequest {
+                hub_type: "mock".to_string(),
+                params: json!({
+                    "device_id": "device-1",
+                    "force": true,
+                    "archive": true
+                }),
+            },
+        );
+
+        assert_eq!(response.status, 500);
+        assert!(!state
+            .lock()
+            .unwrap()
+            .canonical_registry
+            .get(&canonical_id)
+            .unwrap()
+            .is_removed());
+        let history = crate::storage::Storage::load_pairing_history(storage.as_ref())
+            .unwrap()
+            .unwrap();
+        assert_eq!(history.entries.len(), 1);
+        assert_eq!(history.entries[0].status, "failed");
+        assert_ne!(history.entries[0].status, "archived");
+
+        let _ = std::fs::remove_dir_all(path);
     }
 
     // -- Single room action returns {"rooms":[...]} --

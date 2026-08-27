@@ -14988,20 +14988,41 @@ pub fn build_canonical_devices(state: &SharedState) -> Result<String> {
 
 /// Build JSON for soft-removed light devices without exposing recovery secrets.
 pub fn build_removed_devices(state: &SharedState) -> Result<String> {
-    let mut devices: Vec<_> = {
+    let (mut devices, load_pairing_recovery) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.canonical_registry
-            .all_devices_including_removed()
-            .filter(|device| device.is_removed() && device.device_type == DeviceType::Light)
-            .cloned()
-            .collect()
+        (
+            s.canonical_registry
+                .all_devices_including_removed()
+                .filter(|device| device.is_removed() && device.device_type == DeviceType::Light)
+                .cloned()
+                .collect::<Vec<_>>(),
+            s.load_pairing_recovery_fn.clone(),
+        )
     };
     devices.sort_by(|left, right| {
         left.removed_at
             .cmp(&right.removed_at)
             .then_with(|| left.id.cmp(&right.id))
     });
-    serde_json::to_string(&devices).map_err(|e| anyhow::anyhow!(e))
+    let mut payload = Vec::with_capacity(devices.len());
+    for device in devices {
+        let recovery_available = load_pairing_recovery.as_ref().is_some_and(|load| {
+            device.endpoints.iter().any(|endpoint| {
+                endpoint.hub_key.hub_type.as_str() == "matter"
+                    && matches!(load(state, "matter", &endpoint.native_id), Ok(Some(_)))
+            })
+        });
+        let mut value = serde_json::to_value(device).map_err(|e| anyhow::anyhow!(e))?;
+        let Some(object) = value.as_object_mut() else {
+            anyhow::bail!("Removed device did not serialize as an object");
+        };
+        object.insert(
+            "recovery_available".to_string(),
+            serde_json::Value::Bool(recovery_available),
+        );
+        payload.push(value);
+    }
+    serde_json::to_string(&payload).map_err(|e| anyhow::anyhow!(e))
 }
 
 /// Build JSON for a single canonical device.
@@ -32141,6 +32162,7 @@ mod tests {
             serde_json::from_str(&build_removed_devices(&state).unwrap()).unwrap();
         assert_eq!(payload.as_array().unwrap().len(), 1);
         assert_eq!(payload[0]["id"], device_id);
+        assert_eq!(payload[0]["recovery_available"], false);
         assert!(payload[0].get("setup_payload").is_none());
     }
 

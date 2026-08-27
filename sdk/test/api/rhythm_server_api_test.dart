@@ -2914,6 +2914,7 @@ void main() {
                 'id': 'canonical-42',
                 'name': 'Desk bulb',
                 'removed_at': 1234,
+                'recovery_available': true,
               },
             ],
           ));
@@ -2922,6 +2923,7 @@ void main() {
 
       expect(result, hasLength(1));
       expect(result!.single['id'], 'canonical-42');
+      expect(result.single['recovery_available'], isTrue);
       verify(() => dio.get('api/devices/removed')).called(1);
     });
 

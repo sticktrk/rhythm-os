@@ -58,6 +58,24 @@ String factoryResetFailureMessage({
   };
 }
 
+@visibleForTesting
+bool removedMatterRecoveryAvailable(
+  String hubType,
+  Map<String, dynamic> device,
+) =>
+    hubType == 'matter' && device['recovery_available'] == true;
+
+@visibleForTesting
+String removedDeviceRecoveryStatus(
+  String hubType,
+  Map<String, dynamic> device,
+) {
+  if (hubType != 'matter') return 'Archived from active rooms';
+  return removedMatterRecoveryAvailable(hubType, device)
+      ? 'Saved for Matter retry'
+      : 'Saved setup code unavailable — add again with its code';
+}
+
 /// Settings screen for a connected server hub (bridge, standalone, HA addon).
 ///
 /// Adapts visible sections based on the server's platform context.
@@ -4803,7 +4821,8 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
     final name = device['name']?.toString().trim();
     final busy = _removedDeviceBusy.contains(id);
     final endpoint = _removedEndpoint(device);
-    final canRetry = _type == 'matter' && endpoint != null;
+    final canRetry =
+        endpoint != null && removedMatterRecoveryAvailable(_type, device);
     return Padding(
       key: ValueKey('removed-bulb-$id'),
       padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
@@ -4824,9 +4843,7 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                   ),
                 ),
                 Text(
-                  canRetry
-                      ? 'Saved for Matter retry'
-                      : 'Archived from active rooms',
+                  removedDeviceRecoveryStatus(_type, device),
                   style: TextStyle(
                     color: CelestialColors.textSecondary.withValues(alpha: 0.6),
                     fontSize: 11,
