@@ -11756,12 +11756,54 @@ pub fn do_device_hard_remove(
     device_id: &str,
     hub_key: Option<&HubKey>,
 ) -> Result<()> {
-    do_device_remove_with_retention(state, device_id, hub_key, false, false)
+    do_device_remove_with_retention(
+        state,
+        device_id,
+        hub_key,
+        false,
+        DeviceRemovalStateRequirement::Active,
+    )
 }
 
 /// Permanently remove a device only while it is still an archived tombstone.
 pub fn do_archived_device_hard_remove(state: &SharedState, device_id: &str) -> Result<()> {
-    do_device_remove_with_retention(state, device_id, None, false, true)
+    do_device_remove_with_retention(
+        state,
+        device_id,
+        None,
+        false,
+        DeviceRemovalStateRequirement::Archived,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum DeviceRemovalStateRequirement {
+    Active,
+    Archived,
+}
+
+/// Reject active removal APIs when their canonical/native target is archived.
+///
+/// Missing canonical state remains valid for the legacy idempotent cleanup
+/// paths, but a retained tombstone may only be deleted by the owner-only
+/// removed-device endpoint.
+pub fn validate_active_device_removal_target(
+    state: &SharedState,
+    device_id: &str,
+    hub_key: &HubKey,
+) -> Result<()> {
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let device = s
+        .canonical_registry
+        .get(device_id)
+        .or_else(|| s.canonical_registry.find_by_native_id(hub_key, device_id));
+    if device.is_some_and(|device| device.is_removed()) {
+        anyhow::bail!(
+            "Device is archived; use the owner-only removed-device deletion route: {}",
+            device_id
+        );
+    }
+    Ok(())
 }
 
 /// Validate that one whole light can enter the removed-device archive.
@@ -11796,7 +11838,13 @@ pub fn validate_device_archive(
 /// Remove active topology/runtime state while retaining a canonical tombstone.
 pub fn do_device_archive(state: &SharedState, device_id: &str, hub_key: &HubKey) -> Result<()> {
     validate_device_archive(state, device_id, hub_key)?;
-    do_device_remove_with_retention(state, device_id, Some(hub_key), true, false)
+    do_device_remove_with_retention(
+        state,
+        device_id,
+        Some(hub_key),
+        true,
+        DeviceRemovalStateRequirement::Active,
+    )
 }
 
 fn do_device_remove_with_retention(
@@ -11804,7 +11852,7 @@ fn do_device_remove_with_retention(
     device_id: &str,
     hub_key: Option<&HubKey>,
     retain_tombstone: bool,
-    require_archived: bool,
+    state_requirement: DeviceRemovalStateRequirement,
 ) -> Result<()> {
     info!(
         target: "cmd",
@@ -11863,12 +11911,25 @@ fn do_device_remove_with_retention(
             automatic_name_scope,
         )
     };
-    if require_archived
-        && !canonical_device
-            .as_ref()
-            .is_some_and(|device| device.is_removed())
-    {
-        anyhow::bail!("Device is no longer archived: {}", device_id);
+    match state_requirement {
+        DeviceRemovalStateRequirement::Active
+            if canonical_device
+                .as_ref()
+                .is_some_and(|device| device.is_removed()) =>
+        {
+            anyhow::bail!(
+                "Device is archived; use the owner-only removed-device deletion route: {}",
+                device_id
+            );
+        }
+        DeviceRemovalStateRequirement::Archived
+            if !canonical_device
+                .as_ref()
+                .is_some_and(|device| device.is_removed()) =>
+        {
+            anyhow::bail!("Device is no longer archived: {}", device_id);
+        }
+        _ => {}
     }
     let prepared_assignments =
         prepare_hub_device_room_assignments(state, &assignments, prepare_assignment.as_deref())?;
@@ -11888,18 +11949,21 @@ fn do_device_remove_with_retention(
             .canonical_registry
             .get(canonical_id)
             .is_some_and(|device| {
-                (!require_archived || device.is_removed())
-                    && build_hub_device_room_assignments(&s, device, None) == assignments
+                (match state_requirement {
+                    DeviceRemovalStateRequirement::Active => !device.is_removed(),
+                    DeviceRemovalStateRequirement::Archived => device.is_removed(),
+                }) && build_hub_device_room_assignments(&s, device, None) == assignments
             });
         if !unchanged {
             drop(s);
             return Err(rollback_prepared_hub_device_room_assignments(
                 state,
                 prepared_assignments,
-                anyhow::anyhow!(if require_archived {
-                    "Archived device changed or was reactivated before permanent deletion"
-                } else {
-                    "Device topology changed while native removal was in progress"
+                anyhow::anyhow!(match state_requirement {
+                    DeviceRemovalStateRequirement::Archived =>
+                        "Archived device changed or was reactivated before permanent deletion",
+                    DeviceRemovalStateRequirement::Active =>
+                        "Active device changed or was archived while native removal was in progress",
                 }),
             ));
         }
@@ -12069,6 +12133,12 @@ pub fn do_device_endpoint_remove(
             // canonical projection remains. Treat the request as idempotent.
             return Ok(());
         };
+        if device.is_removed() {
+            anyhow::bail!(
+                "Device is archived; use the owner-only removed-device deletion route: {}",
+                device_id
+            );
+        }
         let native_id = device
             .endpoints
             .iter()
@@ -12124,7 +12194,8 @@ pub fn do_device_endpoint_remove(
         s.canonical_registry
             .get(&canonical_id)
             .is_some_and(|device| {
-                device.endpoints.len() == endpoint_count
+                !device.is_removed()
+                    && device.endpoints.len() == endpoint_count
                     && device.endpoints.iter().any(|endpoint| {
                         endpoint.hub_key == *hub_key && endpoint.native_id == native_id
                     })
@@ -32223,6 +32294,8 @@ mod tests {
             "hub-device-1",
         )
         .is_err());
+        assert!(do_device_hard_remove(&state, &device_id, None).is_err());
+        assert!(do_device_endpoint_remove(&state, &device_id, &hub_key).is_err());
 
         let state = state.lock().unwrap();
         let archived = state.canonical_registry.get(&device_id).unwrap();

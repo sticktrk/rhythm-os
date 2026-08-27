@@ -774,6 +774,8 @@ fn perform_unpair_device(
         let device_id = requested_device_id
             .ok_or_else(|| anyhow::anyhow!("Archive request is missing device_id"))?;
         commands::validate_device_archive(state, device_id, &requested_hub_key)?;
+    } else if let Some(device_id) = requested_device_id {
+        commands::validate_active_device_removal_target(state, device_id, &requested_hub_key)?;
     }
     let start_unpairing = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -4819,6 +4821,67 @@ mod tests {
         let device = state.canonical_registry.get(&id).unwrap();
         assert!(!device.is_removed());
         assert!(response.body.contains("no longer archived"));
+    }
+
+    #[test]
+    fn ordinary_unpair_refuses_archived_tombstone_before_integration_io() {
+        let state = test_state();
+        let id = archived_matter_device(&state);
+        let integration_called = Arc::new(AtomicBool::new(false));
+        let integration_called_for_callback = integration_called.clone();
+        state.lock().unwrap().start_unpairing_fn = Some(Arc::new(move |_, _, _| {
+            integration_called_for_callback.store(true, Ordering::SeqCst);
+            anyhow::bail!("archived target reached integration I/O")
+        }));
+
+        let response = handle_unpair_device(
+            &state,
+            &UnpairingRequest {
+                hub_type: "matter".to_string(),
+                params: serde_json::json!({
+                    "device_id": "matter-42-2",
+                    "force": false,
+                }),
+            },
+        );
+
+        assert_eq!(response.status, 500);
+        assert!(response.body.contains("owner-only removed-device deletion"));
+        assert!(!integration_called.load(Ordering::SeqCst));
+        assert!(state
+            .lock()
+            .unwrap()
+            .canonical_registry
+            .get(&id)
+            .is_some_and(|device| device.is_removed()));
+    }
+
+    #[test]
+    fn legacy_delete_refuses_archived_tombstone_before_integration_io() {
+        let state = test_state();
+        let id = archived_matter_device(&state);
+        let integration_called = Arc::new(AtomicBool::new(false));
+        let integration_called_for_callback = integration_called.clone();
+        {
+            let mut app = state.lock().unwrap();
+            app.platform_type = "appliance";
+            app.start_unpairing_fn = Some(Arc::new(move |_, _, _| {
+                integration_called_for_callback.store(true, Ordering::SeqCst);
+                anyhow::bail!("archived target reached integration I/O")
+            }));
+        }
+
+        let response = handle_delete_device(&state, &id);
+
+        assert_eq!(response.status, 500);
+        assert!(response.body.contains("owner-only removed-device deletion"));
+        assert!(!integration_called.load(Ordering::SeqCst));
+        assert!(state
+            .lock()
+            .unwrap()
+            .canonical_registry
+            .get(&id)
+            .is_some_and(|device| device.is_removed()));
     }
 
     #[test]
