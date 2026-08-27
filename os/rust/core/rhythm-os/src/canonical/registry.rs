@@ -468,6 +468,13 @@ impl CanonicalRegistry {
             Some(e) => e.clone(),
             None => return false,
         };
+        if self
+            .devices
+            .get(canonical_id)
+            .is_none_or(CanonicalDevice::is_removed)
+        {
+            return false;
+        }
 
         let source_user_name = self
             .native_index
@@ -1368,6 +1375,56 @@ mod tests {
         let triage = reg.triage().get("triage-1").unwrap();
         assert_eq!(triage.status, TriageStatus::Confirmed);
         assert_eq!(triage.resolved_by.as_deref(), Some("api"));
+    }
+
+    #[test]
+    fn complete_merge_rejects_soft_removed_target() {
+        let mut reg = CanonicalRegistry::new();
+        let identity = make_identity(
+            "hue-light-1",
+            "Kitchen Spot 1",
+            vec![HardwareId::mac("00:17:88:01:09:ab:cd:ef")],
+        );
+        let canonical_id = match reg.resolve(&identity, &hue_key(), 1000) {
+            ResolveResult::Created { canonical_id } => canonical_id,
+            _ => panic!("expected Created"),
+        };
+        assert!(reg.soft_remove(&canonical_id, 2000));
+
+        reg.triage_mut().add(TriageEntry {
+            id: "triage-archived-target".to_string(),
+            kind: TriageKind::DeviceMerge,
+            discovered: TriageDiscoveredDevice {
+                native_id: "light.kitchen_spot_1".to_string(),
+                name: "Kitchen Spot 1".to_string(),
+                device_type: DeviceType::Light,
+                room_id: "area-1".to_string(),
+                room_name: "Kitchen".to_string(),
+                manufacturer: None,
+                model: None,
+            },
+            hub_key: ha_key(),
+            candidate_matches: vec![],
+            room_binding: None,
+            confidence: 8,
+            status: TriageStatus::Pending,
+            resolved_by: None,
+            created_at: 2000,
+            resolved_at: None,
+            canonical_id: None,
+        });
+
+        assert!(!reg.complete_merge("triage-archived-target", &canonical_id, &ha_key(), 3000,));
+
+        let device = reg.get(&canonical_id).unwrap();
+        assert!(device.is_removed());
+        assert_eq!(device.endpoints.len(), 1);
+        assert!(reg
+            .find_by_native_id(&ha_key(), "light.kitchen_spot_1")
+            .is_none());
+        let triage = reg.triage().get("triage-archived-target").unwrap();
+        assert_eq!(triage.status, TriageStatus::Pending);
+        assert!(triage.resolved_by.is_none());
     }
 
     #[test]
