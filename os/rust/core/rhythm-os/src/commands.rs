@@ -11756,7 +11756,12 @@ pub fn do_device_hard_remove(
     device_id: &str,
     hub_key: Option<&HubKey>,
 ) -> Result<()> {
-    do_device_remove_with_retention(state, device_id, hub_key, false)
+    do_device_remove_with_retention(state, device_id, hub_key, false, false)
+}
+
+/// Permanently remove a device only while it is still an archived tombstone.
+pub fn do_archived_device_hard_remove(state: &SharedState, device_id: &str) -> Result<()> {
+    do_device_remove_with_retention(state, device_id, None, false, true)
 }
 
 /// Validate that one whole light can enter the removed-device archive.
@@ -11791,7 +11796,7 @@ pub fn validate_device_archive(
 /// Remove active topology/runtime state while retaining a canonical tombstone.
 pub fn do_device_archive(state: &SharedState, device_id: &str, hub_key: &HubKey) -> Result<()> {
     validate_device_archive(state, device_id, hub_key)?;
-    do_device_remove_with_retention(state, device_id, Some(hub_key), true)
+    do_device_remove_with_retention(state, device_id, Some(hub_key), true, false)
 }
 
 fn do_device_remove_with_retention(
@@ -11799,6 +11804,7 @@ fn do_device_remove_with_retention(
     device_id: &str,
     hub_key: Option<&HubKey>,
     retain_tombstone: bool,
+    require_archived: bool,
 ) -> Result<()> {
     info!(
         target: "cmd",
@@ -11857,6 +11863,13 @@ fn do_device_remove_with_retention(
             automatic_name_scope,
         )
     };
+    if require_archived
+        && !canonical_device
+            .as_ref()
+            .is_some_and(|device| device.is_removed())
+    {
+        anyhow::bail!("Device is no longer archived: {}", device_id);
+    }
     let prepared_assignments =
         prepare_hub_device_room_assignments(state, &assignments, prepare_assignment.as_deref())?;
 
@@ -11875,14 +11888,19 @@ fn do_device_remove_with_retention(
             .canonical_registry
             .get(canonical_id)
             .is_some_and(|device| {
-                build_hub_device_room_assignments(&s, device, None) == assignments
+                (!require_archived || device.is_removed())
+                    && build_hub_device_room_assignments(&s, device, None) == assignments
             });
         if !unchanged {
             drop(s);
             return Err(rollback_prepared_hub_device_room_assignments(
                 state,
                 prepared_assignments,
-                anyhow::anyhow!("Device topology changed while native removal was in progress"),
+                anyhow::anyhow!(if require_archived {
+                    "Archived device changed or was reactivated before permanent deletion"
+                } else {
+                    "Device topology changed while native removal was in progress"
+                }),
             ));
         }
     }

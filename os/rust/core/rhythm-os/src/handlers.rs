@@ -4183,6 +4183,40 @@ pub fn handle_delete_removed_device(
     id: &str,
     correlation_id: Option<&str>,
 ) -> ApiResponse {
+    let has_matter_endpoint = {
+        let Ok(s) = state.lock() else {
+            return ApiResponse::server_error("lock");
+        };
+        let Some(device) = s.canonical_registry.get(id) else {
+            return ApiResponse::not_found("Removed device not found");
+        };
+        if !device.is_removed()
+            || device.device_type != rhythm_core::runtime::hub_registry::DeviceType::Light
+        {
+            return ApiResponse::bad_request("Only archived lights can be permanently deleted");
+        }
+        device
+            .endpoints
+            .iter()
+            .any(|endpoint| endpoint.hub_key.hub_type.as_str() == "matter")
+    };
+
+    // A Matter retry can reactivate the same canonical tombstone. Hold the
+    // commissioner slot across the secret purge and archived-only deletion so
+    // a successful retry cannot be hard-deleted by an older request.
+    let _matter_pairing_guard = if has_matter_endpoint {
+        match try_acquire_pairing_guard(
+            state,
+            crate::hub::HubType::MATTER,
+            &serde_json::Value::Null,
+        ) {
+            Ok(guard) => Some(guard),
+            Err(response) => return response,
+        }
+    } else {
+        None
+    };
+
     let (device, purge_recovery) = {
         let Ok(s) = state.lock() else {
             return ApiResponse::server_error("lock");
@@ -4210,7 +4244,7 @@ pub fn handle_delete_removed_device(
         }
     }
 
-    if let Err(error) = commands::do_device_hard_remove(state, id, None) {
+    if let Err(error) = commands::do_archived_device_hard_remove(state, id) {
         return ApiResponse::server_error(error);
     }
 
@@ -4735,6 +4769,53 @@ mod tests {
 
         assert_eq!(response.status, 500);
         assert!(state.lock().unwrap().canonical_registry.get(&id).is_some());
+    }
+
+    #[test]
+    fn permanent_delete_refuses_concurrent_matter_retry() {
+        let state = test_state();
+        let id = archived_matter_device(&state);
+        let purge_called = Arc::new(AtomicBool::new(false));
+        let purge_called_for_callback = purge_called.clone();
+        {
+            let mut app = state.lock().unwrap();
+            assert!(app.begin_pairing("matter"));
+            app.purge_pairing_recovery_fn = Some(Arc::new(move |_, _, _| {
+                purge_called_for_callback.store(true, Ordering::SeqCst);
+                Ok(())
+            }));
+        }
+
+        let response = handle_delete_removed_device(&state, &id, None);
+
+        assert_eq!(response.status, 409);
+        assert!(!purge_called.load(Ordering::SeqCst));
+        assert!(state.lock().unwrap().canonical_registry.get(&id).is_some());
+    }
+
+    #[test]
+    fn permanent_delete_does_not_remove_reactivated_identity() {
+        let state = test_state();
+        let id = archived_matter_device(&state);
+        let id_for_callback = id.clone();
+        state.lock().unwrap().purge_pairing_recovery_fn = Some(Arc::new(move |state, _, _| {
+            state
+                .lock()
+                .unwrap()
+                .canonical_registry
+                .get_mut(&id_for_callback)
+                .unwrap()
+                .removed_at = None;
+            Ok(())
+        }));
+
+        let response = handle_delete_removed_device(&state, &id, None);
+
+        assert_eq!(response.status, 500);
+        let state = state.lock().unwrap();
+        let device = state.canonical_registry.get(&id).unwrap();
+        assert!(!device.is_removed());
+        assert!(response.body.contains("no longer archived"));
     }
 
     #[test]
