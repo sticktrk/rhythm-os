@@ -284,6 +284,7 @@ pub const FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES: &str =
     "target_guarded_room_light_profile_overrides";
 pub const FEATURE_HUE_ROOM_AUTHORITY_CONSENT: &str = "hue_room_authority_consent_v1";
 pub const FEATURE_MATTER_SETUP_CODE_RECOVERY: &str = "matter_setup_code_recovery_v1";
+pub const FEATURE_REMOVED_DEVICE_ARCHIVE: &str = "removed_device_archive_v1";
 pub const FEATURE_HUE_ROOM_TOPOLOGY_SYNC: &str = "hue_room_topology_sync_v1";
 pub const FEATURE_SCENE_MOTION_SUPPRESSION: &str = "scene_motion_suppression_v1";
 pub const FEATURE_BUTTON_MULTI_ROOM_CONTROLS: &str = "button_multi_room_controls_v1";
@@ -312,6 +313,7 @@ impl Serialize for ApiCapabilitiesDto {
                 FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
                 FEATURE_HUE_ROOM_AUTHORITY_CONSENT,
                 FEATURE_MATTER_SETUP_CODE_RECOVERY,
+                FEATURE_REMOVED_DEVICE_ARCHIVE,
                 FEATURE_HUE_ROOM_TOPOLOGY_SYNC,
                 FEATURE_SCENE_MOTION_SUPPRESSION,
                 FEATURE_BUTTON_MULTI_ROOM_CONTROLS,
@@ -1635,14 +1637,18 @@ mod tests {
         );
         assert_eq!(
             json["capabilities"]["features"][9],
-            FEATURE_HUE_ROOM_TOPOLOGY_SYNC
+            FEATURE_REMOVED_DEVICE_ARCHIVE
         );
         assert_eq!(
             json["capabilities"]["features"][10],
-            FEATURE_SCENE_MOTION_SUPPRESSION
+            FEATURE_HUE_ROOM_TOPOLOGY_SYNC
         );
         assert_eq!(
             json["capabilities"]["features"][11],
+            FEATURE_SCENE_MOTION_SUPPRESSION
+        );
+        assert_eq!(
+            json["capabilities"]["features"][12],
             FEATURE_BUTTON_MULTI_ROOM_CONTROLS
         );
         assert_eq!(

@@ -19,6 +19,10 @@ const explicitExemptions = new Set([
   'GET api/ota/version',
   // Owner-only Matter setup secrets must never become staff/admin operations.
   'GET api/matter/setup-code/{}',
+  // Owner-only archived customer-device metadata is not a staff/admin surface.
+  'GET api/devices/removed',
+  // Owner-only permanent deletion must never become a staff/admin operation.
+  'DELETE api/devices/canonical/{}',
 ]);
 
 const catalog = readFileSync(catalogPath, 'utf8');

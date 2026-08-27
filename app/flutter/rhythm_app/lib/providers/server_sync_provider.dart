@@ -1001,6 +1001,12 @@ class ServerSyncProvider extends ChangeNotifier {
       ) ??
       false;
 
+  /// Whether whole-light removal can retain a recoverable tombstone.
+  bool get removedDeviceArchiveSupported =>
+      HueServiceLocator.isDemoMode ||
+      (_capabilities?.supportsFeature(RhythmFeature.removedDeviceArchive) ??
+          false);
+
   /// Whether a Matter device may exist before room assignment.
   bool get supportsMatterRoomlessDevices =>
       matterCapabilities?.supportsRoomlessDevices ??

@@ -107,6 +107,23 @@ void main() {
       outcome: 'failed',
       failureStage: 'request_or_refresh',
     );
+    await analytics.logRemovedBulbArchiveCompleted(
+      journeyId: 'removed-bulb-archive-123',
+      hubType: 'matter',
+      outcome: 'succeeded',
+    );
+    await analytics.logRemovedBulbsOpened(hubType: 'matter', count: 2);
+    await analytics.logRemovedBulbRetryCompleted(
+      journeyId: 'removed-bulb-retry-123',
+      hubType: 'matter',
+      outcome: 'failed',
+      failureStage: 'recovery_unavailable',
+    );
+    await analytics.logRemovedBulbPurgeCompleted(
+      journeyId: 'removed-bulb-purge-123',
+      hubType: 'matter',
+      outcome: 'succeeded',
+    );
 
     expect(
       backend.events.map((event) => event.name),
@@ -126,6 +143,10 @@ void main() {
         'matter_setup_code_recovery_attempted',
         'matter_setup_code_recovery_completed',
         'button_control_targets_save_completed',
+        'removed_bulb_archive_completed',
+        'removed_bulbs_opened',
+        'removed_bulb_retry_completed',
+        'removed_bulb_purge_completed',
       ],
     );
     expect(backend.events.first.properties, {
@@ -196,6 +217,24 @@ void main() {
       'target_count_bucket': 'two_to_three',
       'outcome': 'failed',
       'failure_stage': 'request_or_refresh',
+    });
+    expect(backend.events[15].properties, {
+      'journey_id': 'removed-bulb-archive-123',
+      'hub_type': 'matter',
+      'source': 'device_detail',
+      'outcome': 'succeeded',
+    });
+    expect(backend.events[16].properties, {
+      'hub_type': 'matter',
+      'source': 'hub_detail',
+      'count': 2,
+    });
+    expect(backend.events[17].properties, {
+      'journey_id': 'removed-bulb-retry-123',
+      'hub_type': 'matter',
+      'source': 'removed_bulbs',
+      'outcome': 'failed',
+      'failure_stage': 'recovery_unavailable',
     });
 
     final serialized = backend.events

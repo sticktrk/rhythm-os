@@ -770,6 +770,9 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     final canRecoverMatterSetupCode = context.select<ServerSyncProvider, bool>(
       (sync) => sync.canRecoverMatterSetupCode,
     );
+    final canArchiveRemovedDevices = context.select<ServerSyncProvider, bool>(
+      (sync) => sync.removedDeviceArchiveSupported,
+    );
     final canUnpairHueBle = context.select<ServerSyncProvider, bool>(
       (sync) => sync.canUnpairHueBleDevices,
     );
@@ -908,6 +911,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                         device,
                         canUnpairMatter,
                         canRecoverMatterSetupCode,
+                        canArchiveRemovedDevices,
                         canUnpairHueBle,
                         canUnpairLocalBle,
                         canUnpairHueBridge,
@@ -1086,6 +1090,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     RhythmDevice device,
     bool canUnpairMatter,
     bool canRecoverMatterSetupCode,
+    bool canArchiveRemovedDevices,
     bool canUnpairHueBle,
     bool canUnpairLocalBle,
     bool canUnpairHueBridge,
@@ -1134,6 +1139,9 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
               context,
               endpoint,
               removesConnectionOnly: hasMultipleConnections,
+              archive: canArchiveRemovedDevices &&
+                  isLight &&
+                  !hasMultipleConnections,
             ),
           ],
         ] else
@@ -1731,6 +1739,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   String _removeConfirmation(
     _DeviceEndpoint endpoint, {
     required bool removesConnectionOnly,
+    required bool archive,
   }) {
     final name = _deviceDisplayName;
     final connectionLabel = _endpointLabel(endpoint);
@@ -1754,6 +1763,13 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
           'The device will remain in Rhythm through its other '
           'connection.$handoffNote';
     }
+    if (archive) {
+      final retryCopy = endpoint.hubType == 'matter'
+          ? ' Its saved setup code stays private so you can retry pairing from Removed Bulbs.'
+          : ' You can find it in Removed Bulbs and add it again later.';
+      return 'This will remove "$name" from active rooms and move it to '
+          'Removed Bulbs after the $connectionLabel confirms removal.$retryCopy';
+    }
     if (endpoint.hubType == 'hue_ble') {
       return 'This will ask "$name" to perform an authenticated Bluetooth '
           'release, then remove it from Rhythm.\n\nKeep the bulb powered on '
@@ -1773,12 +1789,15 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     BuildContext context,
     _DeviceEndpoint endpoint, {
     required bool removesConnectionOnly,
+    required bool archive,
   }) {
     final isRemoving = _removingEndpoint == endpoint;
     final removalInProgress = _removingEndpoint != null;
     final idleLabel = removesConnectionOnly
         ? 'Remove ${_endpointLabel(endpoint)} Connection'
-        : 'Remove Device';
+        : archive
+            ? 'Move to Removed Bulbs'
+            : 'Remove Device';
     return GestureDetector(
       key: ValueKey(
         'remove-device-endpoint-${endpoint.hubType}-${endpoint.nativeId}',
@@ -1789,6 +1808,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                 context,
                 endpoint,
                 removesConnectionOnly: removesConnectionOnly,
+                archive: archive,
               ),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
@@ -1836,10 +1856,13 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     BuildContext context,
     _DeviceEndpoint endpoint, {
     required bool removesConnectionOnly,
+    required bool archive,
   }) async {
     final actionLabel = removesConnectionOnly
         ? 'Remove ${_endpointLabel(endpoint)} Connection'
-        : 'Remove Device';
+        : archive
+            ? 'Move to Removed Bulbs'
+            : 'Remove Device';
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -1852,6 +1875,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
           _removeConfirmation(
             endpoint,
             removesConnectionOnly: removesConnectionOnly,
+            archive: archive,
           ),
           style: const TextStyle(color: CelestialColors.textSecondary),
         ),
@@ -1862,7 +1886,10 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
           ),
           TextButton(
             onPressed: () => Navigator.of(ctx).pop(true),
-            child: Text('Remove', style: TextStyle(color: Colors.red.shade300)),
+            child: Text(
+              archive ? 'Move' : 'Remove',
+              style: TextStyle(color: Colors.red.shade300),
+            ),
           ),
         ],
       ),
@@ -1873,6 +1900,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       context,
       endpoint,
       removesConnectionOnly: removesConnectionOnly,
+      archive: archive,
     );
   }
 
@@ -1880,12 +1908,15 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     BuildContext context,
     _DeviceEndpoint endpoint, {
     required bool removesConnectionOnly,
+    required bool archive,
   }) async {
     final syncProvider = context.read<ServerSyncProvider>();
     final api = syncProvider.api;
-    final hueJourneyId = endpoint.hubType == 'hue'
-        ? 'hue-bridge-remove-${const Uuid().v4()}'
-        : null;
+    final removalJourneyId = archive
+        ? 'removed-bulb-archive-${const Uuid().v4()}'
+        : endpoint.hubType == 'hue'
+            ? 'hue-bridge-remove-${const Uuid().v4()}'
+            : null;
 
     var retryHueBleRelease = false;
     var forceAttempted = false;
@@ -1905,8 +1936,9 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                     ? endpoint.hubAddress
                     : null,
             deviceType: _deviceTypeAnalyticsLabel,
-            correlationId: hueJourneyId,
+            correlationId: removalJourneyId,
             force: force,
+            archive: archive,
           );
         },
         confirmForceRemove: (error) async {
@@ -2007,15 +2039,26 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       );
     } while (retryHueBleRelease && context.mounted);
 
-    if (hueJourneyId != null) {
+    if (!archive && removalJourneyId != null) {
       unawaited(
         AnalyticsService().logHueBridgeDeviceRemovalCompleted(
-          journeyId: hueJourneyId,
+          journeyId: removalJourneyId,
           deviceType: _deviceTypeAnalyticsLabel,
           outcome: outcome == MatterRemovalOutcome.removed
               ? 'succeeded'
               : 'cancelled',
           force: forceAttempted,
+        ),
+      );
+    }
+    if (archive && removalJourneyId != null) {
+      unawaited(
+        AnalyticsService().logRemovedBulbArchiveCompleted(
+          journeyId: removalJourneyId,
+          hubType: endpoint.hubType,
+          outcome: outcome == MatterRemovalOutcome.removed
+              ? 'succeeded'
+              : 'cancelled',
         ),
       );
     }
@@ -2072,7 +2115,11 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
         Navigator.of(context).pop();
         messenger.showSnackBar(
           SnackBar(
-            content: Text('Removed ${widget.device.displayName}'),
+            content: Text(
+              archive
+                  ? 'Moved ${widget.device.displayName} to Removed Bulbs'
+                  : 'Removed ${widget.device.displayName}',
+            ),
           ),
         );
       }

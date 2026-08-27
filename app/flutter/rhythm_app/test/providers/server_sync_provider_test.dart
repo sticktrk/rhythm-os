@@ -809,6 +809,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     String? deviceType,
     String? correlationId,
     bool force = false,
+    bool archive = false,
     Duration receiveTimeout = const Duration(seconds: 90),
   }) async {
     unpairDeviceTypes.add(deviceType);
@@ -2506,7 +2507,10 @@ void main() {
           'rooms': const <Map<String, dynamic>>[],
           'location': const <String, dynamic>{},
           'capabilities': {
-            'features': [RhythmFeature.matterSetupCodeRecovery],
+            'features': [
+              RhythmFeature.matterSetupCodeRecovery,
+              RhythmFeature.removedDeviceArchive,
+            ],
             'hubs': [
               {
                 'type': 'matter',
@@ -2529,6 +2533,7 @@ void main() {
       expect(provider.canCommissionMatterBleWifi, isFalse);
       expect(provider.canUnpairMatterDevices, isTrue);
       expect(provider.canRecoverMatterSetupCode, isTrue);
+      expect(provider.removedDeviceArchiveSupported, isTrue);
       expect(provider.supportsMatterRoomlessDevices, isTrue);
     });
 
@@ -2564,6 +2569,7 @@ void main() {
       await Future<void>.delayed(Duration.zero);
 
       expect(provider.canRecoverMatterSetupCode, isFalse);
+      expect(provider.removedDeviceArchiveSupported, isFalse);
 
       expect(provider.canConfigureHub('hue'), isTrue);
       expect(provider.canConfigureHub('homeassistant'), isFalse);

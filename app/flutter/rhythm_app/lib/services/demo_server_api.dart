@@ -839,8 +839,75 @@ class DemoServerApi extends RhythmServerApi {
   Future<List<Map<String, dynamic>>?> getCanonicalDevices() async {
     ensureSeeded();
     return _canonicalDevices.values
+        .where((device) => device['removed_at'] == null)
         .map((device) => Map<String, dynamic>.from(device))
         .toList(growable: false);
+  }
+
+  @override
+  Future<List<Map<String, dynamic>>?> getRemovedDevices() async {
+    ensureSeeded();
+    return _canonicalDevices.values
+        .where((device) => device['removed_at'] != null)
+        .map((device) => Map<String, dynamic>.from(device))
+        .toList(growable: false);
+  }
+
+  @override
+  Future<bool> permanentlyDeleteRemovedDevice(
+    String id, {
+    String? correlationId,
+  }) async {
+    ensureSeeded();
+    final device = _canonicalDevices[id];
+    if (device == null || device['removed_at'] == null) return false;
+    _canonicalDevices.remove(id);
+    _changes.add(null);
+    return true;
+  }
+
+  @override
+  Future<Map<String, dynamic>?> unpairDevice({
+    required String hubType,
+    required String deviceId,
+    String? hubAddress,
+    String? deviceType,
+    String? correlationId,
+    bool force = false,
+    bool archive = false,
+    Duration receiveTimeout = const Duration(seconds: 90),
+  }) async {
+    ensureSeeded();
+    MapEntry<String, Map<String, dynamic>>? match;
+    for (final entry in _canonicalDevices.entries) {
+      final endpoints = entry.value['endpoints'] as List<dynamic>? ?? const [];
+      final found = endpoints.cast<Map<String, dynamic>>().any((endpoint) {
+        final hubKey = endpoint['hub_key'] as Map<String, dynamic>? ?? const {};
+        return endpoint['native_id'] == deviceId &&
+            hubKey['hub_type'] == hubType &&
+            (hubAddress == null || hubKey['address'] == hubAddress);
+      });
+      if (found) {
+        match = entry;
+        break;
+      }
+    }
+    if (match == null) {
+      return {'status': 'failed', 'error': 'Demo device not found'};
+    }
+    if (archive && match.value['device_type'] == 'light') {
+      match.value['removed_at'] = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    } else {
+      _canonicalDevices.remove(match.key);
+    }
+    _topologyNodes.remove(match.key);
+    _nodeStates.remove(match.key);
+    _changes.add(null);
+    return {
+      'status': 'complete',
+      'hub_type': hubType,
+      'device_id': deviceId,
+    };
   }
 
   @override

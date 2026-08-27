@@ -41,4 +41,28 @@ void main() {
       );
     });
   });
+
+  group('removed Matter recovery state', () {
+    test('enables retry only when the secret-free projection says available',
+        () {
+      final available = <String, dynamic>{'recovery_available': true};
+      final missing = <String, dynamic>{'recovery_available': false};
+
+      expect(removedMatterRecoveryAvailable('matter', available), isTrue);
+      expect(removedMatterRecoveryAvailable('matter', missing), isFalse);
+      expect(removedMatterRecoveryAvailable('hue', available), isFalse);
+      expect(
+        removedDeviceRecoveryStatus('matter', available),
+        'Saved for Matter retry',
+      );
+      expect(
+        removedDeviceRecoveryStatus('matter', missing),
+        'Saved setup code unavailable — add again with its code',
+      );
+      expect(
+        removedDeviceRecoveryStatus('hue', missing),
+        'Archived from active rooms',
+      );
+    });
+  });
 }

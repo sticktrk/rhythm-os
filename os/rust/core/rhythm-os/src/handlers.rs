@@ -746,6 +746,37 @@ fn perform_unpair_device(
     state: &SharedState,
     request: &crate::pairing::UnpairingRequest,
 ) -> anyhow::Result<crate::pairing::UnpairingResult> {
+    let archive = request
+        .params
+        .get("archive")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let requested_device_id = request
+        .params
+        .get("device_id")
+        .and_then(serde_json::Value::as_str);
+    let requested_hub_address = request
+        .params
+        .get("hub_address")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| {
+            if request.hub_type == crate::hub::HubType::LOCAL_BLE {
+                "default"
+            } else {
+                "local"
+            }
+        });
+    let requested_hub_key = crate::canonical::identity::HubKey::new(
+        crate::hub::HubType::new(&request.hub_type),
+        requested_hub_address,
+    );
+    if archive {
+        let device_id = requested_device_id
+            .ok_or_else(|| anyhow::anyhow!("Archive request is missing device_id"))?;
+        commands::validate_device_archive(state, device_id, &requested_hub_key)?;
+    } else if let Some(device_id) = requested_device_id {
+        commands::validate_active_device_removal_target(state, device_id, &requested_hub_key)?;
+    }
     let start_unpairing = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.start_unpairing_fn.clone()
@@ -786,18 +817,21 @@ fn perform_unpair_device(
         result.warning,
         result.error
     );
-    crate::pairing::record_pairing_history(
-        state,
-        crate::pairing::pairing_history_entry_for_unpair(
-            &request.hub_type,
-            &request.params,
-            &result.status,
-            result.device_id.as_deref(),
-            result.error.as_deref(),
-        ),
-    );
-
     if result.status == crate::pairing::PairingStatus::Complete {
+        if archive && result.device_id.is_none() {
+            let error = anyhow::anyhow!("Completed archive did not identify the removed device");
+            crate::pairing::record_pairing_history(
+                state,
+                crate::pairing::pairing_history_entry_for_unpair(
+                    &request.hub_type,
+                    &request.params,
+                    &crate::pairing::PairingStatus::Failed,
+                    None,
+                    Some(&error.to_string()),
+                ),
+            );
+            return Err(error);
+        }
         if let Some(device_id) = &result.device_id {
             let hub_address = result
                 .hub_address
@@ -819,9 +853,38 @@ fn perform_unpair_device(
                 crate::hub::HubType::new(&result.hub_type),
                 hub_address,
             );
-            commands::do_device_endpoint_remove(state, device_id, &hub_key)?;
+            let cleanup = if archive {
+                commands::do_device_archive(state, device_id, &hub_key)
+            } else {
+                commands::do_device_endpoint_remove(state, device_id, &hub_key)
+            };
+            if let Err(error) = cleanup {
+                let error_text = format!("{error:#}");
+                crate::pairing::record_pairing_history(
+                    state,
+                    crate::pairing::pairing_history_entry_for_unpair(
+                        &request.hub_type,
+                        &request.params,
+                        &crate::pairing::PairingStatus::Failed,
+                        Some(device_id),
+                        Some(&error_text),
+                    ),
+                );
+                return Err(error);
+            }
         }
     }
+
+    crate::pairing::record_pairing_history(
+        state,
+        crate::pairing::pairing_history_entry_for_unpair(
+            &request.hub_type,
+            &request.params,
+            &result.status,
+            result.device_id.as_deref(),
+            result.error.as_deref(),
+        ),
+    );
 
     Ok(result)
 }
@@ -4110,9 +4173,108 @@ pub fn handle_get_canonical_devices(state: &SharedState) -> ApiResponse {
     }
 }
 
+pub fn handle_get_removed_devices(state: &SharedState) -> ApiResponse {
+    match commands::build_removed_devices(state) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_delete_removed_device(
+    state: &SharedState,
+    id: &str,
+    correlation_id: Option<&str>,
+) -> ApiResponse {
+    let has_matter_endpoint = {
+        let Ok(s) = state.lock() else {
+            return ApiResponse::server_error("lock");
+        };
+        let Some(device) = s.canonical_registry.get(id) else {
+            return ApiResponse::not_found("Removed device not found");
+        };
+        if !device.is_removed()
+            || device.device_type != rhythm_core::runtime::hub_registry::DeviceType::Light
+        {
+            return ApiResponse::bad_request("Only archived lights can be permanently deleted");
+        }
+        device
+            .endpoints
+            .iter()
+            .any(|endpoint| endpoint.hub_key.hub_type.as_str() == "matter")
+    };
+
+    // A Matter retry can reactivate the same canonical tombstone. Hold the
+    // commissioner slot across the secret purge and archived-only deletion so
+    // a successful retry cannot be hard-deleted by an older request.
+    let _matter_pairing_guard = if has_matter_endpoint {
+        match try_acquire_pairing_guard(
+            state,
+            crate::hub::HubType::MATTER,
+            &serde_json::Value::Null,
+        ) {
+            Ok(guard) => Some(guard),
+            Err(response) => return response,
+        }
+    } else {
+        None
+    };
+
+    let (device, purge_recovery) = {
+        let Ok(s) = state.lock() else {
+            return ApiResponse::server_error("lock");
+        };
+        let Some(device) = s.canonical_registry.get(id).cloned() else {
+            return ApiResponse::not_found("Removed device not found");
+        };
+        if !device.is_removed()
+            || device.device_type != rhythm_core::runtime::hub_registry::DeviceType::Light
+        {
+            return ApiResponse::bad_request("Only archived lights can be permanently deleted");
+        }
+        (device, s.purge_pairing_recovery_fn.clone())
+    };
+
+    for endpoint in &device.endpoints {
+        if endpoint.hub_key.hub_type.as_str() != "matter" {
+            continue;
+        }
+        let Some(purge) = purge_recovery.as_ref() else {
+            return ApiResponse::server_error("Matter recovery purge is unavailable");
+        };
+        if let Err(error) = purge(state, "matter", &endpoint.native_id) {
+            return ApiResponse::server_error(error);
+        }
+    }
+
+    if let Err(error) = commands::do_archived_device_hard_remove(state, id) {
+        return ApiResponse::server_error(error);
+    }
+
+    let hub_type = device
+        .endpoints
+        .first()
+        .map(|endpoint| endpoint.hub_key.hub_type.as_str())
+        .unwrap_or("unknown");
+    let mut params = serde_json::json!({
+        "device_id": id,
+        "device_type": "light",
+    });
+    if let Some(correlation_id) = correlation_id {
+        params["correlation_id"] = serde_json::Value::String(correlation_id.to_string());
+    }
+    crate::pairing::record_pairing_history(
+        state,
+        crate::pairing::pairing_history_entry_for_purge(hub_type, &params, id),
+    );
+    ApiResponse::no_content()
+}
+
 pub fn handle_get_canonical_device(state: &SharedState, id: &str) -> ApiResponse {
     match commands::build_canonical_device(state, id) {
         Ok(json) => ApiResponse::json_ok(json),
+        Err(e) if e.to_string().contains("Device not found") => {
+            ApiResponse::not_found("Device not found")
+        }
         Err(e) => ApiResponse::server_error(e),
     }
 }
@@ -4528,6 +4690,232 @@ mod tests {
         let response = handle_get_matter_setup_code(&test_state(), "matter-42");
         assert_eq!(response.status, 500);
         assert!(!response.body.contains("MT:"));
+    }
+
+    fn archived_matter_device(state: &SharedState) -> String {
+        let hub_key = HubKey::new(HubType::new("matter"), "local");
+        let identity = DiscoveredIdentity {
+            native_id: "matter-42-2".to_string(),
+            room_id: None,
+            room_name: None,
+            name: "Archived lamp".to_string(),
+            device_type: DeviceType::Light,
+            hardware_ids: vec![HardwareId::matter("vid-1-pid-2-node-42")],
+            manufacturer: Some("Acme".to_string()),
+            model: Some("Lamp".to_string()),
+        };
+        let mut app = state.lock().unwrap();
+        let id = match app.canonical_registry.resolve(&identity, &hub_key, 1) {
+            ResolveResult::Created { canonical_id } => canonical_id,
+            other => panic!("expected new canonical device, got {other:?}"),
+        };
+        assert!(app.canonical_registry.soft_remove(&id, 2));
+        id
+    }
+
+    #[test]
+    fn removed_devices_report_recovery_availability_without_exposing_secret() {
+        let state = test_state();
+        let id = archived_matter_device(&state);
+        state.lock().unwrap().load_pairing_recovery_fn =
+            Some(Arc::new(|_, hub_type, native_device_id| {
+                assert_eq!(hub_type, "matter");
+                assert_eq!(native_device_id, "matter-42-2");
+                Ok(Some(PairingRecoverySecret {
+                    payload_kind: "qr_code".to_string(),
+                    setup_payload: "MT:PRIVATE-ARCHIVE-SECRET".to_string(),
+                    captured_at: "2026-08-27T00:00:00Z".to_string(),
+                }))
+            }));
+
+        let available = handle_get_removed_devices(&state);
+        assert_eq!(available.status, 200);
+        let available: Value = serde_json::from_str(&available.body).unwrap();
+        assert_eq!(available[0]["id"], id);
+        assert_eq!(available[0]["recovery_available"], true);
+        assert!(!available.to_string().contains("PRIVATE-ARCHIVE-SECRET"));
+
+        state.lock().unwrap().load_pairing_recovery_fn = Some(Arc::new(|_, _, _| Ok(None)));
+        let unavailable: Value =
+            serde_json::from_str(&handle_get_removed_devices(&state).body).unwrap();
+        assert_eq!(unavailable[0]["recovery_available"], false);
+    }
+
+    #[test]
+    fn permanent_delete_purges_recovery_before_removing_tombstone() {
+        let state = test_state();
+        let id = archived_matter_device(&state);
+        let purged = Arc::new(AtomicBool::new(false));
+        let purged_for_callback = purged.clone();
+        state.lock().unwrap().purge_pairing_recovery_fn =
+            Some(Arc::new(move |_, hub_type, native_device_id| {
+                assert_eq!(hub_type, "matter");
+                assert_eq!(native_device_id, "matter-42-2");
+                purged_for_callback.store(true, Ordering::SeqCst);
+                Ok(())
+            }));
+
+        let response = handle_delete_removed_device(&state, &id, Some("purge-journey"));
+
+        assert_eq!(response.status, 204);
+        assert!(purged.load(Ordering::SeqCst));
+        assert!(state.lock().unwrap().canonical_registry.get(&id).is_none());
+    }
+
+    #[test]
+    fn permanent_delete_keeps_tombstone_when_recovery_purge_fails() {
+        let state = test_state();
+        let id = archived_matter_device(&state);
+        state.lock().unwrap().purge_pairing_recovery_fn = Some(Arc::new(|_, _, _| {
+            Err(anyhow::anyhow!("private store unavailable"))
+        }));
+
+        let response = handle_delete_removed_device(&state, &id, None);
+
+        assert_eq!(response.status, 500);
+        assert!(state.lock().unwrap().canonical_registry.get(&id).is_some());
+    }
+
+    #[test]
+    fn permanent_delete_refuses_concurrent_matter_retry() {
+        let state = test_state();
+        let id = archived_matter_device(&state);
+        let purge_called = Arc::new(AtomicBool::new(false));
+        let purge_called_for_callback = purge_called.clone();
+        {
+            let mut app = state.lock().unwrap();
+            assert!(app.begin_pairing("matter"));
+            app.purge_pairing_recovery_fn = Some(Arc::new(move |_, _, _| {
+                purge_called_for_callback.store(true, Ordering::SeqCst);
+                Ok(())
+            }));
+        }
+
+        let response = handle_delete_removed_device(&state, &id, None);
+
+        assert_eq!(response.status, 409);
+        assert!(!purge_called.load(Ordering::SeqCst));
+        assert!(state.lock().unwrap().canonical_registry.get(&id).is_some());
+    }
+
+    #[test]
+    fn permanent_delete_does_not_remove_reactivated_identity() {
+        let state = test_state();
+        let id = archived_matter_device(&state);
+        let id_for_callback = id.clone();
+        state.lock().unwrap().purge_pairing_recovery_fn = Some(Arc::new(move |state, _, _| {
+            state
+                .lock()
+                .unwrap()
+                .canonical_registry
+                .get_mut(&id_for_callback)
+                .unwrap()
+                .removed_at = None;
+            Ok(())
+        }));
+
+        let response = handle_delete_removed_device(&state, &id, None);
+
+        assert_eq!(response.status, 500);
+        let state = state.lock().unwrap();
+        let device = state.canonical_registry.get(&id).unwrap();
+        assert!(!device.is_removed());
+        assert!(response.body.contains("no longer archived"));
+    }
+
+    #[test]
+    fn ordinary_unpair_refuses_archived_tombstone_before_integration_io() {
+        let state = test_state();
+        let id = archived_matter_device(&state);
+        let integration_called = Arc::new(AtomicBool::new(false));
+        let integration_called_for_callback = integration_called.clone();
+        state.lock().unwrap().start_unpairing_fn = Some(Arc::new(move |_, _, _| {
+            integration_called_for_callback.store(true, Ordering::SeqCst);
+            anyhow::bail!("archived target reached integration I/O")
+        }));
+
+        let response = handle_unpair_device(
+            &state,
+            &UnpairingRequest {
+                hub_type: "matter".to_string(),
+                params: serde_json::json!({
+                    "device_id": "matter-42-2",
+                    "force": false,
+                }),
+            },
+        );
+
+        assert_eq!(response.status, 500);
+        assert!(response.body.contains("owner-only removed-device deletion"));
+        assert!(!integration_called.load(Ordering::SeqCst));
+        assert!(state
+            .lock()
+            .unwrap()
+            .canonical_registry
+            .get(&id)
+            .is_some_and(|device| device.is_removed()));
+    }
+
+    #[test]
+    fn ordinary_unpair_cannot_bypass_archive_guard_with_forged_hub_address() {
+        let state = test_state();
+        let id = archived_matter_device(&state);
+        let integration_called = Arc::new(AtomicBool::new(false));
+        let integration_called_for_callback = integration_called.clone();
+        state.lock().unwrap().start_unpairing_fn = Some(Arc::new(move |_, _, _| {
+            integration_called_for_callback.store(true, Ordering::SeqCst);
+            anyhow::bail!("archived target reached integration I/O")
+        }));
+
+        let response = handle_unpair_device(
+            &state,
+            &UnpairingRequest {
+                hub_type: "matter".to_string(),
+                params: serde_json::json!({
+                    "device_id": "matter-42-2",
+                    "hub_address": "forged-matter-address",
+                    "force": false,
+                }),
+            },
+        );
+
+        assert_eq!(response.status, 500);
+        assert!(response.body.contains("owner-only removed-device deletion"));
+        assert!(!integration_called.load(Ordering::SeqCst));
+        assert!(state
+            .lock()
+            .unwrap()
+            .canonical_registry
+            .get(&id)
+            .is_some_and(|device| device.is_removed()));
+    }
+
+    #[test]
+    fn legacy_delete_refuses_archived_tombstone_before_integration_io() {
+        let state = test_state();
+        let id = archived_matter_device(&state);
+        let integration_called = Arc::new(AtomicBool::new(false));
+        let integration_called_for_callback = integration_called.clone();
+        {
+            let mut app = state.lock().unwrap();
+            app.platform_type = "appliance";
+            app.start_unpairing_fn = Some(Arc::new(move |_, _, _| {
+                integration_called_for_callback.store(true, Ordering::SeqCst);
+                anyhow::bail!("archived target reached integration I/O")
+            }));
+        }
+
+        let response = handle_delete_device(&state, &id);
+
+        assert_eq!(response.status, 500);
+        assert!(response.body.contains("owner-only removed-device deletion"));
+        assert!(!integration_called.load(Ordering::SeqCst));
+        assert!(state
+            .lock()
+            .unwrap()
+            .canonical_registry
+            .get(&id)
+            .is_some_and(|device| device.is_removed()));
     }
 
     #[test]
@@ -8973,6 +9361,66 @@ mod tests {
         let reg = registry.lock().unwrap();
         assert!(reg.get_light_entities("device-1").is_empty());
         assert!(!reg.rooms().iter().any(|room| room.id == "device-1"));
+    }
+
+    #[test]
+    fn archive_commit_failure_records_failed_instead_of_archived() {
+        let (state, _registry, canonical_id, _room_id, _hub_key) =
+            handler_state_with_canonical_light();
+        let path = std::env::temp_dir().join(format!(
+            "rhythm-handler-archive-failure-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let storage = Arc::new(crate::storage::FileStorage::new(path.to_str().unwrap()).unwrap());
+        std::fs::create_dir(path.join("authority_state.json")).unwrap();
+        {
+            let mut app = state.lock().unwrap();
+            app.storage = Some(storage.clone());
+            app.start_unpairing_fn = Some(Arc::new(|_, _, _| {
+                Ok(UnpairingResult {
+                    hub_type: "mock".to_string(),
+                    hub_address: Some("local".to_string()),
+                    status: PairingStatus::Complete,
+                    device_id: Some("device-1".to_string()),
+                    error: None,
+                    completion_scope: None,
+                    warning: None,
+                })
+            }));
+        }
+
+        let response = handle_unpair_device(
+            &state,
+            &UnpairingRequest {
+                hub_type: "mock".to_string(),
+                params: json!({
+                    "device_id": "device-1",
+                    "force": true,
+                    "archive": true
+                }),
+            },
+        );
+
+        assert_eq!(response.status, 500);
+        assert!(!state
+            .lock()
+            .unwrap()
+            .canonical_registry
+            .get(&canonical_id)
+            .unwrap()
+            .is_removed());
+        let history = crate::storage::Storage::load_pairing_history(storage.as_ref())
+            .unwrap()
+            .unwrap();
+        assert_eq!(history.entries.len(), 1);
+        assert_eq!(history.entries[0].status, "failed");
+        assert_ne!(history.entries[0].status, "archived");
+
+        let _ = std::fs::remove_dir_all(path);
     }
 
     // -- Single room action returns {"rooms":[...]} --

@@ -2737,6 +2737,36 @@ void main() {
           (captured[1] as Options).receiveTimeout, const Duration(seconds: 5));
     });
 
+    test('adds archive only when the negotiated archive path is requested',
+        () async {
+      when(() => dio.post(
+            any(),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/devices/unpair'),
+            statusCode: 200,
+            data: {'status': 'complete'},
+          ));
+
+      await api.unpairDevice(
+        hubType: 'matter',
+        deviceId: 'matter-100',
+        archive: true,
+      );
+
+      final data = verify(() => dio.post(
+            'api/devices/unpair',
+            data: captureAny(named: 'data'),
+            options: any(named: 'options'),
+          )).captured.single as Map<String, dynamic>;
+      expect(data['params'], {
+        'device_id': 'matter-100',
+        'force': false,
+        'archive': true,
+      });
+    });
+
     test('passes a normalized hub address for bridge endpoint removal',
         () async {
       when(() => dio.post(
@@ -2871,6 +2901,55 @@ void main() {
 
       expect(result?['completion_scope'], 'local_bond_retained');
       expect(result?['warning'], 'The retained bond can be re-adopted.');
+    });
+  });
+
+  group('removed devices', () {
+    test('lists archived device metadata without transformation', () async {
+      when(() => dio.get(any())).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/devices/removed'),
+            statusCode: 200,
+            data: [
+              {
+                'id': 'canonical-42',
+                'name': 'Desk bulb',
+                'removed_at': 1234,
+                'recovery_available': true,
+              },
+            ],
+          ));
+
+      final result = await api.getRemovedDevices();
+
+      expect(result, hasLength(1));
+      expect(result!.single['id'], 'canonical-42');
+      expect(result.single['recovery_available'], isTrue);
+      verify(() => dio.get('api/devices/removed')).called(1);
+    });
+
+    test('permanent delete sends bounded correlation header', () async {
+      when(() => dio.delete(
+            any(),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            requestOptions:
+                RequestOptions(path: 'api/devices/canonical/canonical-42'),
+            statusCode: 204,
+          ));
+
+      expect(
+        await api.permanentlyDeleteRemovedDevice(
+          'canonical-42',
+          correlationId: ' removed-bulb-purge-42 ',
+        ),
+        isTrue,
+      );
+
+      final options = verify(() => dio.delete(
+            'api/devices/canonical/canonical-42',
+            options: captureAny(named: 'options'),
+          )).captured.single as Options;
+      expect(options.headers?['X-Request-Id'], 'removed-bulb-purge-42');
     });
   });
 

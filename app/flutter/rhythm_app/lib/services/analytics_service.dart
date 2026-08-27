@@ -252,6 +252,58 @@ class AnalyticsService {
     });
   }
 
+  Future<void> logRemovedBulbArchiveCompleted({
+    required String journeyId,
+    required String hubType,
+    required String outcome,
+  }) async {
+    await logEvent('removed_bulb_archive_completed', {
+      'journey_id': journeyId,
+      'hub_type': hubType,
+      'source': 'device_detail',
+      'outcome': outcome,
+    });
+  }
+
+  Future<void> logRemovedBulbsOpened({
+    required String hubType,
+    required int count,
+  }) async {
+    await logEvent('removed_bulbs_opened', {
+      'hub_type': hubType,
+      'source': 'hub_detail',
+      'count': count,
+    });
+  }
+
+  Future<void> logRemovedBulbRetryCompleted({
+    required String journeyId,
+    required String hubType,
+    required String outcome,
+    String? failureStage,
+  }) async {
+    await logEvent('removed_bulb_retry_completed', {
+      'journey_id': journeyId,
+      'hub_type': hubType,
+      'source': 'removed_bulbs',
+      'outcome': outcome,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
+  Future<void> logRemovedBulbPurgeCompleted({
+    required String journeyId,
+    required String hubType,
+    required String outcome,
+  }) async {
+    await logEvent('removed_bulb_purge_completed', {
+      'journey_id': journeyId,
+      'hub_type': hubType,
+      'source': 'removed_bulbs',
+      'outcome': outcome,
+    });
+  }
+
   /// Track room sync from a hub.
   Future<void> logRoomSync(int roomCount, String hubType) async {
     await logEvent('room_sync', {

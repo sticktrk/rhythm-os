@@ -834,6 +834,11 @@ pub trait ExternalLightHubIntegration: Send + Sync {
         Ok(None)
     }
 
+    /// Permanently delete integration-owned pairing recovery material.
+    fn purge_pairing_recovery(&self, _state: &SharedState, _native_device_id: &str) -> Result<()> {
+        Ok(())
+    }
+
     /// Run a hub-specific device diagnostic/test command.
     ///
     /// Direct-connection integrations can use this to exercise raw protocol
@@ -1758,6 +1763,9 @@ pub struct IntegrationCallbacks {
             + Send
             + Sync,
     >,
+    /// Purge secret pairing recovery material through the owning integration.
+    pub purge_pairing_recovery_fn:
+        Arc<dyn Fn(&SharedState, &str, &str) -> Result<()> + Send + Sync>,
     /// Run a device diagnostic/test command.
     pub run_device_test_fn: Arc<
         dyn Fn(&SharedState, &str, &serde_json::Value) -> Result<serde_json::Value> + Send + Sync,
@@ -2146,6 +2154,14 @@ pub fn integration_callbacks(
         },
     );
 
+    let purge_pairing_recovery_fn = Arc::new(
+        move |state: &SharedState, hub_type: &str, native_device_id: &str| -> Result<()> {
+            let integration = find_integration(integrations, hub_type)
+                .ok_or_else(|| anyhow::anyhow!("No integration for hub type '{}'", hub_type))?;
+            integration.purge_pairing_recovery(state, native_device_id)
+        },
+    );
+
     let run_device_test_fn = Arc::new(
         move |state: &SharedState,
               hub_type: &str,
@@ -2184,6 +2200,7 @@ pub fn integration_callbacks(
         reconcile_pairing_results_fn,
         start_unpairing_fn,
         load_pairing_recovery_fn,
+        purge_pairing_recovery_fn,
         run_device_test_fn,
         save_device_test_report_fn,
         hub_capabilities,

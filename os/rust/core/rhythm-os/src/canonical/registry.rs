@@ -133,7 +133,14 @@ impl CanonicalRegistry {
         if let Some(canonical_id) = self.native_index.get(&native_key).cloned() {
             let ownership_is_legacy = !self.name_ownership.contains_key(&canonical_id);
             if let Some(device) = self.devices.get_mut(&canonical_id) {
-                if !device.is_removed() {
+                if device.device_type == identity.device_type {
+                    if device.is_removed() {
+                        device.removed_at = None;
+                        info!(target: "canonical",
+                            "Restored explicitly rediscovered device '{}' ({})",
+                            device.name, canonical_id
+                        );
+                    }
                     let source_name_still_matches =
                         ownership_is_legacy && device.name.trim() == identity.name.trim();
                     device.upsert_endpoint(
@@ -461,6 +468,13 @@ impl CanonicalRegistry {
             Some(e) => e.clone(),
             None => return false,
         };
+        if self
+            .devices
+            .get(canonical_id)
+            .is_none_or(CanonicalDevice::is_removed)
+        {
+            return false;
+        }
 
         let source_user_name = self
             .native_index
@@ -1364,6 +1378,56 @@ mod tests {
     }
 
     #[test]
+    fn complete_merge_rejects_soft_removed_target() {
+        let mut reg = CanonicalRegistry::new();
+        let identity = make_identity(
+            "hue-light-1",
+            "Kitchen Spot 1",
+            vec![HardwareId::mac("00:17:88:01:09:ab:cd:ef")],
+        );
+        let canonical_id = match reg.resolve(&identity, &hue_key(), 1000) {
+            ResolveResult::Created { canonical_id } => canonical_id,
+            _ => panic!("expected Created"),
+        };
+        assert!(reg.soft_remove(&canonical_id, 2000));
+
+        reg.triage_mut().add(TriageEntry {
+            id: "triage-archived-target".to_string(),
+            kind: TriageKind::DeviceMerge,
+            discovered: TriageDiscoveredDevice {
+                native_id: "light.kitchen_spot_1".to_string(),
+                name: "Kitchen Spot 1".to_string(),
+                device_type: DeviceType::Light,
+                room_id: "area-1".to_string(),
+                room_name: "Kitchen".to_string(),
+                manufacturer: None,
+                model: None,
+            },
+            hub_key: ha_key(),
+            candidate_matches: vec![],
+            room_binding: None,
+            confidence: 8,
+            status: TriageStatus::Pending,
+            resolved_by: None,
+            created_at: 2000,
+            resolved_at: None,
+            canonical_id: None,
+        });
+
+        assert!(!reg.complete_merge("triage-archived-target", &canonical_id, &ha_key(), 3000,));
+
+        let device = reg.get(&canonical_id).unwrap();
+        assert!(device.is_removed());
+        assert_eq!(device.endpoints.len(), 1);
+        assert!(reg
+            .find_by_native_id(&ha_key(), "light.kitchen_spot_1")
+            .is_none());
+        let triage = reg.triage().get("triage-archived-target").unwrap();
+        assert_eq!(triage.status, TriageStatus::Pending);
+        assert!(triage.resolved_by.is_none());
+    }
+
+    #[test]
     fn complete_new_device_creates_separate() {
         let mut reg = CanonicalRegistry::new();
 
@@ -1416,6 +1480,30 @@ mod tests {
         assert_eq!(reg.all_devices_including_removed().count(), 1);
         // Device count includes removed (raw HashMap size)
         assert_eq!(reg.device_count(), 1);
+    }
+
+    #[test]
+    fn exact_native_rediscovery_restores_soft_removed_identity() {
+        let mut reg = CanonicalRegistry::new();
+        let identity = make_identity("hue-light-1", "Kitchen Spot", vec![]);
+        let canonical_id = match reg.resolve(&identity, &hue_key(), 1000) {
+            ResolveResult::Created { canonical_id } => canonical_id,
+            _ => panic!("expected Created"),
+        };
+        assert!(reg.soft_remove(&canonical_id, 2000));
+
+        let result = reg.resolve(&identity, &hue_key(), 3000);
+
+        assert!(matches!(
+            result,
+            ResolveResult::AlreadyKnown {
+                canonical_id: restored_id
+            } if restored_id == canonical_id
+        ));
+        let restored = reg.get(&canonical_id).unwrap();
+        assert_eq!(restored.removed_at, None);
+        assert_eq!(restored.endpoints[0].last_seen, 3000);
+        assert_eq!(reg.devices().count(), 1);
     }
 
     #[test]

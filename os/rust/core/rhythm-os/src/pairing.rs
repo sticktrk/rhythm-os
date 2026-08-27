@@ -1618,13 +1618,39 @@ pub fn pairing_history_entry_for_unpair(
         force: params.get("force").and_then(serde_json::Value::as_bool),
         rendezvous: None,
         network: None,
-        status: status_label(status),
+        status: if *status == PairingStatus::Complete
+            && params
+                .get("archive")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        {
+            "archived".to_string()
+        } else {
+            status_label(status)
+        },
         error: error.map(str::to_string),
         failure_stage: None,
         device: None,
         devices: Vec::new(),
         warnings: Vec::new(),
     }
+}
+
+/// Build the privacy-bounded lifecycle receipt for permanent tombstone purge.
+pub fn pairing_history_entry_for_purge(
+    hub_type: &str,
+    params: &serde_json::Value,
+    device_id: &str,
+) -> PairingHistoryEntry {
+    let mut entry = pairing_history_entry_for_unpair(
+        hub_type,
+        params,
+        &PairingStatus::Complete,
+        Some(device_id),
+        None,
+    );
+    entry.status = "purged".to_string();
+    entry
 }
 
 /// Append an entry to the persisted pairing history (load-modify-save).
@@ -1971,6 +1997,34 @@ mod tests {
         assert_eq!(entry.status, "complete");
         assert_eq!(entry.device_type.as_deref(), Some("button"));
         assert_eq!(entry.correlation_id.as_deref(), Some("hue-remove-journey"));
+    }
+
+    #[test]
+    fn archive_and_purge_entries_have_distinct_terminal_outcomes() {
+        let params = serde_json::json!({
+            "device_id": "matter-102",
+            "device_type": "light",
+            "correlation_id": "removed-bulb-journey",
+            "archive": true
+        });
+
+        let archived = pairing_history_entry_for_unpair(
+            "matter",
+            &params,
+            &PairingStatus::Complete,
+            None,
+            None,
+        );
+        let purged = pairing_history_entry_for_purge("matter", &params, "canonical-102");
+
+        assert_eq!(archived.status, "archived");
+        assert_eq!(archived.kind, "unpair");
+        assert_eq!(purged.status, "purged");
+        assert_eq!(purged.device_id.as_deref(), Some("canonical-102"));
+        assert_eq!(
+            purged.correlation_id.as_deref(),
+            Some("removed-bulb-journey")
+        );
     }
 
     #[test]
