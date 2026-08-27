@@ -8,7 +8,6 @@ import 'package:dio/dio.dart';
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_app/backend/backend.dart' show AuthUser;
@@ -31,6 +30,8 @@ import 'package:rhythm_app/widgets/room_schedule_tab.dart';
 import 'package:rhythm_app/widgets/solar_clock/solar_clock_exports.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
+
+import '../helpers/ui_evidence_fonts.dart';
 
 class _TestSubscriptionProvider extends ChangeNotifier
     implements SubscriptionProvider {
@@ -1164,26 +1165,6 @@ Future<void> _captureRoomScheduleEvidence(
       flush: true,
     );
   });
-}
-
-Future<void> _loadRoomScheduleEvidenceFont() async {
-  final executable = File(Platform.resolvedExecutable);
-  final font = File(
-    '${executable.parent.parent.parent.path}/material_fonts/Roboto-Regular.ttf',
-  );
-  final loader = FontLoader('CodexReadableRoboto')
-    ..addFont(
-      font.readAsBytes().then((bytes) => bytes.buffer.asByteData()),
-    );
-  await loader.load();
-  final icons = File(
-    '${executable.parent.parent.parent.path}/material_fonts/MaterialIcons-Regular.otf',
-  );
-  final iconLoader = FontLoader('MaterialIcons')
-    ..addFont(
-      icons.readAsBytes().then((bytes) => bytes.buffer.asByteData()),
-    );
-  await iconLoader.load();
 }
 
 RhythmSceneDefinition _testScene(String id) => RhythmSceneDefinition(
@@ -6616,7 +6597,7 @@ void main() {
     final captureEvidence =
         (Platform.environment['CODEX_UI_SCREENSHOT_DIR'] ?? '').isNotEmpty;
     if (captureEvidence) {
-      await tester.runAsync(_loadRoomScheduleEvidenceFont);
+      await tester.runAsync(loadUiEvidenceFonts);
     }
     final boundaryKey = GlobalKey();
 
@@ -6694,7 +6675,7 @@ void main() {
       _buildTestApp(
         roomProvider: roomProvider,
         provider: provider,
-        fontFamily: captureEvidence ? 'CodexReadableRoboto' : null,
+        fontFamily: captureEvidence ? uiEvidenceFontFamily : null,
         child: RepaintBoundary(
           key: boundaryKey,
           child: const RoomScheduleTab(
@@ -6766,7 +6747,7 @@ void main() {
     addTearDown(connection.dispose);
     addTearDown(() => tester.binding.setSurfaceSize(null));
     await tester.binding.setSurfaceSize(const Size(390, 1200));
-    await tester.runAsync(_loadRoomScheduleEvidenceFont);
+    await tester.runAsync(loadUiEvidenceFonts);
 
     Map<String, dynamic> hello({
       bool followTime = false,
@@ -6821,7 +6802,7 @@ void main() {
       _buildTestApp(
         roomProvider: roomProvider,
         provider: provider,
-        fontFamily: 'CodexReadableRoboto',
+        fontFamily: uiEvidenceFontFamily,
         child: RepaintBoundary(
           key: boundaryKey,
           child: const RoomSettingsSheet(

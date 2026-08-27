@@ -23,6 +23,7 @@ Manifest schema:
 {
   "schema_version": 1,
   "uses_mock_data": true,
+  "renderer": "rhythm_flutter_test_fonts_v1",
   "source_test": "test/visual/example_test.dart",
   "screenshots": [
     {"path": "screenshots/example.png", "caption": "Example state"}
@@ -94,6 +95,7 @@ trap cleanup EXIT
 jq -e '
     .schema_version == 1 and
     .uses_mock_data == true and
+    .renderer == "rhythm_flutter_test_fonts_v1" and
     (.source_test | type == "string" and length > 0 and length <= 240) and
     (.screenshots | type == "array" and length > 0 and length <= 6) and
     all(.screenshots[];
@@ -101,7 +103,7 @@ jq -e '
         (.path | type == "string" and length > 0 and length <= 240) and
         (.caption | type == "string" and length > 0 and length <= 120)
     )
-' "$MANIFEST" >/dev/null || fail "manifest must use schema version 1, declare mock data, name its source test, and contain 1-$MAX_SCREENSHOTS screenshots"
+' "$MANIFEST" >/dev/null || fail "manifest must use schema version 1, declare mock data and the canonical font renderer, name its source test, and contain 1-$MAX_SCREENSHOTS screenshots"
 
 SOURCE_TEST="$(jq -r '.source_test' "$MANIFEST")"
 printf '%s' "$SOURCE_TEST" | grep -Eq '^[A-Za-z0-9._/-]+$' || fail "source_test must be a repository-relative test path"
