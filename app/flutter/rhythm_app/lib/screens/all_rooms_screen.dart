@@ -929,7 +929,9 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
       final state = roomProvider.getDisplayRoomState(room.id);
       final isAdaptiveOn = state == RoomModeState.active ||
           state == RoomModeState.wake ||
-          state == RoomModeState.warning;
+          state == RoomModeState.warning ||
+          state == RoomModeState.standby ||
+          state == RoomModeState.idle;
       if (!isLightNode ||
           room.disabled ||
           !room.rhythmEnabled ||

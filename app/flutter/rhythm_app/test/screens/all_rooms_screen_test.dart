@@ -426,7 +426,7 @@ void main() {
   });
 
   testWidgets(
-      'global actions target only adaptive-on nodes and collapse child bulbs',
+      'global soften includes Low glow nodes and collapses child bulbs',
       (tester) async {
     final harness = await _pumpAllRooms(
       tester,
@@ -451,8 +451,9 @@ void main() {
     expect(harness.api.actionBatches, hasLength(1));
     expect(harness.api.actionBatches.single, [
       (nodeId: 'room-1', action: 'step_down'),
+      (nodeId: 'garage', action: 'step_down'),
     ]);
-    expect(find.text('Adjusted 1 of 1 rooms.'), findsOneWidget);
+    expect(find.text('Adjusted 2 of 2 rooms.'), findsOneWidget);
     expect(
       find.byKey(const ValueKey('global-room-action-undo')),
       findsOneWidget,
@@ -460,12 +461,17 @@ void main() {
   });
 
   testWidgets(
-      'global command locks duplicate taps and reports partial progress',
+      'global boost includes legacy Low glow and locks duplicate taps',
       (tester) async {
     final harness = await _pumpAllRooms(
       tester,
       rooms: const [_room1, _bedroom],
     );
+    harness.roomProvider.setRoomStateLocal(
+      _bedroom.id,
+      RoomModeState.idle,
+    );
+    await tester.pump();
     final pending = Completer<RhythmDispatchResult>();
     harness.api.actionBatchCompleter = pending;
 
