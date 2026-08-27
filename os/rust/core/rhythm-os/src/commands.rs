@@ -15047,7 +15047,10 @@ pub fn build_removed_devices(state: &SharedState) -> Result<String> {
 pub fn build_canonical_device(state: &SharedState, id: &str) -> Result<String> {
     let device = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.canonical_registry.get(id).cloned()
+        s.canonical_registry
+            .get(id)
+            .filter(|device| !device.is_removed())
+            .cloned()
     };
     match device {
         Some(device) => serde_json::to_string(&device).map_err(|e| anyhow::anyhow!(e)),
@@ -15072,6 +15075,13 @@ pub fn do_canonical_rename_device(state: &SharedState, device_id: &str, name: &s
 
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        if !s
+            .canonical_registry
+            .get(device_id)
+            .is_some_and(|device| !device.is_removed())
+        {
+            return Err(anyhow::anyhow!("Device not found: {}", device_id));
+        }
         if !s
             .canonical_registry
             .rename_device_by_user(device_id, trimmed)
@@ -15619,6 +15629,7 @@ fn do_canonical_assign_room_with_precondition_outcome(
         let device = s
             .canonical_registry
             .get(device_id)
+            .filter(|device| !device.is_removed())
             .ok_or_else(|| anyhow::anyhow!("Device not found: {}", device_id))?;
 
         if let Some(target_room_id) = room_id {
@@ -15668,15 +15679,19 @@ fn do_canonical_assign_room_with_precondition_outcome(
         }
     }
 
-    let state_is_unchanged = s.canonical_registry.get(device_id).is_some_and(|device| {
-        let current_room_id = s
-            .topology
-            .device_parent_room_id(device_id)
-            .map(str::to_string)
-            .or_else(|| device.room_id.clone());
-        current_room_id == source_room_id
-            && build_hub_device_room_assignments(&s, device, room_id) == assignments
-    });
+    let state_is_unchanged = s
+        .canonical_registry
+        .get(device_id)
+        .filter(|device| !device.is_removed())
+        .is_some_and(|device| {
+            let current_room_id = s
+                .topology
+                .device_parent_room_id(device_id)
+                .map(str::to_string)
+                .or_else(|| device.room_id.clone());
+            current_room_id == source_room_id
+                && build_hub_device_room_assignments(&s, device, room_id) == assignments
+        });
     if !state_is_unchanged {
         drop(s);
         return Err(rollback_prepared_hub_device_room_assignments(
@@ -15692,6 +15707,7 @@ fn do_canonical_assign_room_with_precondition_outcome(
     let device = s
         .canonical_registry
         .get(device_id)
+        .filter(|device| !device.is_removed())
         .ok_or_else(|| anyhow::anyhow!("Device not found: {}", device_id))?;
     let active_endpoints: Vec<_> = device.active_endpoints().cloned().collect();
     let device_name = device.name.clone();
@@ -16023,6 +16039,13 @@ pub fn do_canonical_set_preferred(
 
     let hub_key = HubKey::new(HubType::new(hub_type), hub_address);
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    if !s
+        .canonical_registry
+        .get(device_id)
+        .is_some_and(|device| !device.is_removed())
+    {
+        return Err(anyhow::anyhow!("Device not found: {}", device_id));
+    }
     if s.canonical_registry
         .set_preferred_endpoint(device_id, &hub_key, native_id)
     {
@@ -32182,6 +32205,30 @@ mod tests {
         assert_eq!(payload[0]["id"], device_id);
         assert_eq!(payload[0]["recovery_available"], false);
         assert!(payload[0].get("setup_payload").is_none());
+    }
+
+    #[test]
+    fn archived_tombstone_rejects_active_canonical_operations() {
+        let (state, device_id, _source_room_id, target_room_id, hub_key) = setup_native_room_move();
+        do_device_archive(&state, &device_id, &hub_key).unwrap();
+
+        assert!(build_canonical_device(&state, &device_id).is_err());
+        assert!(do_canonical_rename_device(&state, &device_id, "Renamed archive").is_err());
+        assert!(do_canonical_assign_room(&state, &device_id, Some(&target_room_id)).is_err());
+        assert!(do_canonical_set_preferred(
+            &state,
+            &device_id,
+            hub_key.hub_type.as_str(),
+            &hub_key.address,
+            "hub-device-1",
+        )
+        .is_err());
+
+        let state = state.lock().unwrap();
+        let archived = state.canonical_registry.get(&device_id).unwrap();
+        assert!(archived.is_removed());
+        assert_eq!(archived.name, "Hub Lamp");
+        assert!(state.topology.get_device_node(&device_id).is_none());
     }
 
     #[test]

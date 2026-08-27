@@ -4270,6 +4270,9 @@ pub fn handle_delete_removed_device(
 pub fn handle_get_canonical_device(state: &SharedState, id: &str) -> ApiResponse {
     match commands::build_canonical_device(state, id) {
         Ok(json) => ApiResponse::json_ok(json),
+        Err(e) if e.to_string().contains("Device not found") => {
+            ApiResponse::not_found("Device not found")
+        }
         Err(e) => ApiResponse::server_error(e),
     }
 }
