@@ -1449,6 +1449,25 @@ mod tests {
         }
     }
 
+    fn h7056_device(node_id: u64) -> CommissionedDevice {
+        CommissionedDevice {
+            node_id,
+            vendor_name: "Shenzhen Qianyan Technology".to_string(),
+            product_name: "H7056".to_string(),
+            vendor_id: 4999,
+            product_id: 28758,
+            serial_number: Some(format!("h7056-{node_id}")),
+            light_endpoint: 1,
+            color_modes: vec![
+                MatterColorMode::HueSaturation,
+                MatterColorMode::Xy,
+                MatterColorMode::ColorTemperature,
+            ],
+            min_kelvin: None,
+            max_kelvin: None,
+        }
+    }
+
     fn sengled_w41_device(node_id: u64) -> CommissionedDevice {
         CommissionedDevice {
             node_id,
@@ -1698,6 +1717,36 @@ mod tests {
                 DeviceQuirk::NeedsExplicitOn,
                 DeviceQuirk::NeedsHueSaturationNotCt,
             ])
+        );
+    }
+
+    #[test]
+    fn persisted_h7056_metadata_publishes_profiled_ct_range() {
+        let state = shared_state("persisted-h7056-profile");
+        let key = HubKey::new(HubType::new("matter"), "local");
+        let device = h7056_device(116);
+
+        let metadata = initial_device_metadata(
+            &state,
+            &[device_info_from_record(&device)],
+            &[device],
+            &crate::cloud_profiles::CloudMatterProfileCatalog::default(),
+            &key,
+        );
+
+        let caps = metadata.device_caps.get("matter-116").unwrap();
+        assert_eq!(caps.min_kelvin, Some(3080));
+        assert_eq!(caps.max_kelvin, Some(6120));
+        assert_eq!(
+            normalized_endpoint_capabilities(caps).and_then(|value| {
+                value
+                    .pointer("/light_capabilities/color_temperature")
+                    .cloned()
+            }),
+            Some(serde_json::json!({
+                "min_kelvin": 3080,
+                "max_kelvin": 6120,
+            }))
         );
     }
 
