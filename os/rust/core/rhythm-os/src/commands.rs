@@ -11756,7 +11756,56 @@ pub fn do_device_hard_remove(
     device_id: &str,
     hub_key: Option<&HubKey>,
 ) -> Result<()> {
-    info!(target: "cmd", "device_hard_remove: {}", device_id);
+    do_device_remove_with_retention(state, device_id, hub_key, false)
+}
+
+/// Validate that one whole light can enter the removed-device archive.
+pub fn validate_device_archive(
+    state: &SharedState,
+    device_id: &str,
+    hub_key: &HubKey,
+) -> Result<()> {
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let device = s
+        .canonical_registry
+        .get(device_id)
+        .or_else(|| s.canonical_registry.find_by_native_id(hub_key, device_id))
+        .ok_or_else(|| anyhow::anyhow!("Device not found: {}", device_id))?;
+    if device.is_removed() {
+        anyhow::bail!("Device is already archived");
+    }
+    if device.device_type != DeviceType::Light {
+        anyhow::bail!("Only whole light devices can be archived");
+    }
+    if device.endpoints.len() != 1
+        || !device.endpoints.iter().any(|endpoint| {
+            endpoint.hub_key == *hub_key
+                && (endpoint.native_id == device_id || device.id == device_id)
+        })
+    {
+        anyhow::bail!("Archive requires the device's single remaining connection");
+    }
+    Ok(())
+}
+
+/// Remove active topology/runtime state while retaining a canonical tombstone.
+pub fn do_device_archive(state: &SharedState, device_id: &str, hub_key: &HubKey) -> Result<()> {
+    validate_device_archive(state, device_id, hub_key)?;
+    do_device_remove_with_retention(state, device_id, Some(hub_key), true)
+}
+
+fn do_device_remove_with_retention(
+    state: &SharedState,
+    device_id: &str,
+    hub_key: Option<&HubKey>,
+    retain_tombstone: bool,
+) -> Result<()> {
+    info!(
+        target: "cmd",
+        "device_remove: id={} retain_tombstone={}",
+        device_id,
+        retain_tombstone
+    );
 
     let transaction_lock = state
         .lock()
@@ -11879,7 +11928,12 @@ pub fn do_device_hard_remove(
                 .remove_hub_room_binding_everywhere(&endpoint.hub_key, &endpoint.native_id);
             registry_removals.insert((endpoint.hub_key.clone(), endpoint.native_id.clone()));
         }
-        s.canonical_registry.remove_device(&device.id);
+        if retain_tombstone {
+            let now = current_epoch_ms() / 1000;
+            s.canonical_registry.soft_remove(&device.id, now);
+        } else {
+            s.canonical_registry.remove_device(&device.id);
+        }
         if let Err(error) = save_authority_state(&s) {
             s.topology = topology_before;
             s.canonical_registry = canonical_before;
@@ -14929,6 +14983,24 @@ pub fn build_canonical_devices(state: &SharedState) -> Result<String> {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.canonical_registry.devices().cloned().collect()
     };
+    serde_json::to_string(&devices).map_err(|e| anyhow::anyhow!(e))
+}
+
+/// Build JSON for soft-removed light devices without exposing recovery secrets.
+pub fn build_removed_devices(state: &SharedState) -> Result<String> {
+    let mut devices: Vec<_> = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.canonical_registry
+            .all_devices_including_removed()
+            .filter(|device| device.is_removed() && device.device_type == DeviceType::Light)
+            .cloned()
+            .collect()
+    };
+    devices.sort_by(|left, right| {
+        left.removed_at
+            .cmp(&right.removed_at)
+            .then_with(|| left.id.cmp(&right.id))
+    });
     serde_json::to_string(&devices).map_err(|e| anyhow::anyhow!(e))
 }
 
@@ -32040,6 +32112,36 @@ mod tests {
             .hub_room_bindings[0]
             .light_device_ids
             .is_empty());
+    }
+
+    #[test]
+    fn archive_removes_active_topology_but_retains_listable_tombstone() {
+        let (state, device_id, source_room_id, _target_room_id, hub_key) = setup_native_room_move();
+
+        do_device_archive(&state, &device_id, &hub_key).unwrap();
+
+        let state_guard = state.lock().unwrap();
+        let archived = state_guard
+            .canonical_registry
+            .get(&device_id)
+            .expect("archive retains canonical identity");
+        assert!(archived.is_removed());
+        assert_eq!(state_guard.canonical_registry.devices().count(), 0);
+        assert!(state_guard.topology.get_device_node(&device_id).is_none());
+        assert!(state_guard
+            .topology
+            .get(&source_room_id)
+            .unwrap()
+            .hub_room_bindings[0]
+            .light_device_ids
+            .is_empty());
+        drop(state_guard);
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&build_removed_devices(&state).unwrap()).unwrap();
+        assert_eq!(payload.as_array().unwrap().len(), 1);
+        assert_eq!(payload[0]["id"], device_id);
+        assert!(payload[0].get("setup_payload").is_none());
     }
 
     #[test]

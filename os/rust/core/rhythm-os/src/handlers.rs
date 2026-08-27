@@ -746,6 +746,35 @@ fn perform_unpair_device(
     state: &SharedState,
     request: &crate::pairing::UnpairingRequest,
 ) -> anyhow::Result<crate::pairing::UnpairingResult> {
+    let archive = request
+        .params
+        .get("archive")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let requested_device_id = request
+        .params
+        .get("device_id")
+        .and_then(serde_json::Value::as_str);
+    let requested_hub_address = request
+        .params
+        .get("hub_address")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| {
+            if request.hub_type == crate::hub::HubType::LOCAL_BLE {
+                "default"
+            } else {
+                "local"
+            }
+        });
+    let requested_hub_key = crate::canonical::identity::HubKey::new(
+        crate::hub::HubType::new(&request.hub_type),
+        requested_hub_address,
+    );
+    if archive {
+        let device_id = requested_device_id
+            .ok_or_else(|| anyhow::anyhow!("Archive request is missing device_id"))?;
+        commands::validate_device_archive(state, device_id, &requested_hub_key)?;
+    }
     let start_unpairing = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.start_unpairing_fn.clone()
@@ -819,7 +848,11 @@ fn perform_unpair_device(
                 crate::hub::HubType::new(&result.hub_type),
                 hub_address,
             );
-            commands::do_device_endpoint_remove(state, device_id, &hub_key)?;
+            if archive {
+                commands::do_device_archive(state, device_id, &hub_key)?;
+            } else {
+                commands::do_device_endpoint_remove(state, device_id, &hub_key)?;
+            }
         }
     }
 
@@ -4110,6 +4143,68 @@ pub fn handle_get_canonical_devices(state: &SharedState) -> ApiResponse {
     }
 }
 
+pub fn handle_get_removed_devices(state: &SharedState) -> ApiResponse {
+    match commands::build_removed_devices(state) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_delete_removed_device(
+    state: &SharedState,
+    id: &str,
+    correlation_id: Option<&str>,
+) -> ApiResponse {
+    let (device, purge_recovery) = {
+        let Ok(s) = state.lock() else {
+            return ApiResponse::server_error("lock");
+        };
+        let Some(device) = s.canonical_registry.get(id).cloned() else {
+            return ApiResponse::not_found("Removed device not found");
+        };
+        if !device.is_removed()
+            || device.device_type != rhythm_core::runtime::hub_registry::DeviceType::Light
+        {
+            return ApiResponse::bad_request("Only archived lights can be permanently deleted");
+        }
+        (device, s.purge_pairing_recovery_fn.clone())
+    };
+
+    for endpoint in &device.endpoints {
+        if endpoint.hub_key.hub_type.as_str() != "matter" {
+            continue;
+        }
+        let Some(purge) = purge_recovery.as_ref() else {
+            return ApiResponse::server_error("Matter recovery purge is unavailable");
+        };
+        if let Err(error) = purge(state, "matter", &endpoint.native_id) {
+            return ApiResponse::server_error(error);
+        }
+    }
+
+    if let Err(error) = commands::do_device_hard_remove(state, id, None) {
+        return ApiResponse::server_error(error);
+    }
+
+    let hub_type = device
+        .endpoints
+        .first()
+        .map(|endpoint| endpoint.hub_key.hub_type.as_str())
+        .unwrap_or("unknown");
+    let mut params = serde_json::json!({
+        "device_id": id,
+        "device_type": "light",
+    });
+    if let Some(correlation_id) = correlation_id {
+        params["correlation_id"] = serde_json::Value::String(correlation_id.to_string());
+    }
+    crate::pairing::record_pairing_history(
+        state,
+        crate::pairing::pairing_history_entry_for_purge(hub_type, &params, id),
+    );
+    ApiResponse::no_content()
+}
+
 pub fn handle_get_canonical_device(state: &SharedState, id: &str) -> ApiResponse {
     match commands::build_canonical_device(state, id) {
         Ok(json) => ApiResponse::json_ok(json),
@@ -4528,6 +4623,62 @@ mod tests {
         let response = handle_get_matter_setup_code(&test_state(), "matter-42");
         assert_eq!(response.status, 500);
         assert!(!response.body.contains("MT:"));
+    }
+
+    fn archived_matter_device(state: &SharedState) -> String {
+        let hub_key = HubKey::new(HubType::new("matter"), "local");
+        let identity = DiscoveredIdentity {
+            native_id: "matter-42-2".to_string(),
+            room_id: None,
+            room_name: None,
+            name: "Archived lamp".to_string(),
+            device_type: DeviceType::Light,
+            hardware_ids: vec![HardwareId::matter("vid-1-pid-2-node-42")],
+            manufacturer: Some("Acme".to_string()),
+            model: Some("Lamp".to_string()),
+        };
+        let mut app = state.lock().unwrap();
+        let id = match app.canonical_registry.resolve(&identity, &hub_key, 1) {
+            ResolveResult::Created { canonical_id } => canonical_id,
+            other => panic!("expected new canonical device, got {other:?}"),
+        };
+        assert!(app.canonical_registry.soft_remove(&id, 2));
+        id
+    }
+
+    #[test]
+    fn permanent_delete_purges_recovery_before_removing_tombstone() {
+        let state = test_state();
+        let id = archived_matter_device(&state);
+        let purged = Arc::new(AtomicBool::new(false));
+        let purged_for_callback = purged.clone();
+        state.lock().unwrap().purge_pairing_recovery_fn =
+            Some(Arc::new(move |_, hub_type, native_device_id| {
+                assert_eq!(hub_type, "matter");
+                assert_eq!(native_device_id, "matter-42-2");
+                purged_for_callback.store(true, Ordering::SeqCst);
+                Ok(())
+            }));
+
+        let response = handle_delete_removed_device(&state, &id, Some("purge-journey"));
+
+        assert_eq!(response.status, 204);
+        assert!(purged.load(Ordering::SeqCst));
+        assert!(state.lock().unwrap().canonical_registry.get(&id).is_none());
+    }
+
+    #[test]
+    fn permanent_delete_keeps_tombstone_when_recovery_purge_fails() {
+        let state = test_state();
+        let id = archived_matter_device(&state);
+        state.lock().unwrap().purge_pairing_recovery_fn = Some(Arc::new(|_, _, _| {
+            Err(anyhow::anyhow!("private store unavailable"))
+        }));
+
+        let response = handle_delete_removed_device(&state, &id, None);
+
+        assert_eq!(response.status, 500);
+        assert!(state.lock().unwrap().canonical_registry.get(&id).is_some());
     }
 
     #[test]

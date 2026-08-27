@@ -18,6 +18,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RhythmHubStartupRetryStatus,
         RhythmRoom,
         RoomModeState;
+import 'package:uuid/uuid.dart';
 import '../../widgets/solar_orbit.dart';
 import '../../providers/server_sync_provider.dart';
 import '../../providers/home_provider.dart';
@@ -31,6 +32,7 @@ import '../../widgets/device_detail_sheet.dart';
 import '../../widgets/info_tooltip.dart';
 import '../../widgets/report_bug_flow.dart';
 import 'device_pairing_flow.dart';
+import 'device_pairing_scanner_screen.dart';
 import 'hue_authority_screen.dart';
 import 'hue_bridge_button_add_screen.dart';
 import 'matter_pairing_flow.dart';
@@ -4188,6 +4190,9 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
   List<RhythmRoom>? _canonicalRooms;
   String? _canonicalSummary;
   bool _canonicalLoading = false;
+  List<Map<String, dynamic>> _removedDevices = const [];
+  final Set<String> _removedDeviceBusy = <String>{};
+  bool _removedOpenedLogged = false;
   bool _reviewingHueAutomation = false;
 
   @override
@@ -4199,13 +4204,20 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
   Future<void> _fetchCanonicalDevices() async {
     setState(() => _canonicalLoading = true);
     final http = context.read<RhythmConnection>();
+    final syncProvider = context.read<ServerSyncProvider>();
     final devices = await http.api.getCanonicalDevices();
+    final removedDevices = syncProvider.removedDeviceArchiveSupported
+        ? await http.api.getRemovedDevices()
+        : const <Map<String, dynamic>>[];
     if (!mounted) return;
 
     if (devices == null) {
       setState(() {
         _canonicalRooms = [];
         _canonicalSummary = 'No devices';
+        _removedDevices = (removedDevices ?? const [])
+            .where(_deviceBelongsToHub)
+            .toList(growable: false);
         _canonicalLoading = false;
       });
       return;
@@ -4213,23 +4225,12 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
 
     // Filter to the exact configured hub. A type-only filter would combine
     // devices from two Hue Bridges (or any future repeated integration).
-    final hubDevices = devices.where((d) {
-      final endpoints = d['endpoints'] as List<dynamic>? ?? [];
-      return endpoints.any((ep) {
-        final hubKey =
-            (ep as Map<String, dynamic>)['hub_key'] as Map<String, dynamic>? ??
-                {};
-        final endpointType = hubKey['hub_type']?.toString();
-        if (endpointType != _type) return false;
-        final address = _address?.trim();
-        if (address == null || address.isEmpty) return true;
-        return hubKey['address']?.toString().trim().toLowerCase() ==
-            address.toLowerCase();
-      });
-    }).toList();
+    final hubDevices = devices.where(_deviceBelongsToHub).toList();
+    final removedHubDevices = (removedDevices ?? const <Map<String, dynamic>>[])
+        .where(_deviceBelongsToHub)
+        .toList(growable: false);
 
     // Build room-node-id -> room-name lookup from topology-derived room summaries.
-    final syncProvider = context.read<ServerSyncProvider>();
     final roomNames = <String, String>{};
     for (final r in syncProvider.helloRooms) {
       if (r.id.isNotEmpty) roomNames[r.id] = r.name;
@@ -4300,8 +4301,46 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
     setState(() {
       _canonicalRooms = parsedRooms;
       _canonicalSummary = summary;
+      _removedDevices = removedHubDevices;
       _canonicalLoading = false;
     });
+    if (!_removedOpenedLogged && syncProvider.removedDeviceArchiveSupported) {
+      _removedOpenedLogged = true;
+      unawaited(
+        AnalyticsService().logRemovedBulbsOpened(
+          hubType: _type,
+          count: removedHubDevices.length,
+        ),
+      );
+    }
+  }
+
+  bool _deviceBelongsToHub(Map<String, dynamic> device) {
+    final endpoints = device['endpoints'] as List<dynamic>? ?? const [];
+    return endpoints.whereType<Map<String, dynamic>>().any((endpoint) {
+      final hubKey = endpoint['hub_key'] as Map<String, dynamic>? ?? const {};
+      if (hubKey['hub_type']?.toString() != _type) return false;
+      final address = _address?.trim();
+      if (address == null || address.isEmpty) return true;
+      return hubKey['address']?.toString().trim().toLowerCase() ==
+          address.toLowerCase();
+    });
+  }
+
+  Map<String, dynamic>? _removedEndpoint(Map<String, dynamic> device) {
+    final endpoints = device['endpoints'] as List<dynamic>? ?? const [];
+    for (final endpoint in endpoints.whereType<Map<String, dynamic>>()) {
+      final hubKey = endpoint['hub_key'] as Map<String, dynamic>? ?? const {};
+      if (hubKey['hub_type']?.toString() != _type) continue;
+      final address = _address?.trim();
+      if (address == null ||
+          address.isEmpty ||
+          hubKey['address']?.toString().trim().toLowerCase() ==
+              address.toLowerCase()) {
+        return endpoint;
+      }
+    }
+    return null;
   }
 
   @override
@@ -4509,6 +4548,12 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                     _buildSectionHeader('DEVICES'),
                     const SizedBox(height: 8),
                     _buildDevicesCard(rooms),
+                    if (syncProvider.removedDeviceArchiveSupported) ...[
+                      const SizedBox(height: 20),
+                      _buildSectionHeader('REMOVED BULBS'),
+                      const SizedBox(height: 8),
+                      _buildRemovedDevicesCard(),
+                    ],
                     if (canReviewHueAutomation) ...[
                       const SizedBox(height: 10),
                       _buildActionButton(
@@ -4714,6 +4759,220 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
               ],
             ),
     );
+  }
+
+  Widget _buildRemovedDevicesCard() {
+    return Container(
+      key: const ValueKey('removed-bulbs-card'),
+      decoration: BoxDecoration(
+        color: CelestialColors.backgroundCard,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: CelestialColors.orbitRing.withValues(alpha: 0.5),
+        ),
+      ),
+      child: _removedDevices.isEmpty
+          ? Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
+              child: Text(
+                'Removed bulbs will appear here so you can retry or permanently delete them.',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.6),
+                  fontSize: 12,
+                ),
+              ),
+            )
+          : Column(
+              children: [
+                for (final (index, device) in _removedDevices.indexed) ...[
+                  if (index > 0)
+                    Divider(
+                      height: 1,
+                      color: CelestialColors.orbitRing.withValues(alpha: 0.2),
+                    ),
+                  _buildRemovedDeviceRow(device),
+                ],
+              ],
+            ),
+    );
+  }
+
+  Widget _buildRemovedDeviceRow(Map<String, dynamic> device) {
+    final id = device['id']?.toString() ?? '';
+    final name = device['name']?.toString().trim();
+    final busy = _removedDeviceBusy.contains(id);
+    final endpoint = _removedEndpoint(device);
+    final canRetry = _type == 'matter' && endpoint != null;
+    return Padding(
+      key: ValueKey('removed-bulb-$id'),
+      padding: const EdgeInsets.fromLTRB(16, 12, 12, 12),
+      child: Row(
+        children: [
+          const Icon(Icons.inventory_2_outlined, color: _teal, size: 20),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  name?.isNotEmpty == true ? name! : 'Removed bulb',
+                  style: const TextStyle(
+                    color: CelestialColors.textPrimary,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                Text(
+                  canRetry
+                      ? 'Saved for Matter retry'
+                      : 'Archived from active rooms',
+                  style: TextStyle(
+                    color: CelestialColors.textSecondary.withValues(alpha: 0.6),
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (busy)
+            const SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          else ...[
+            if (canRetry)
+              TextButton(
+                key: ValueKey('retry-removed-bulb-$id'),
+                onPressed: () => _retryRemovedMatter(device),
+                child: const Text('Retry'),
+              ),
+            IconButton(
+              key: ValueKey('purge-removed-bulb-$id'),
+              tooltip: 'Delete permanently',
+              onPressed: () => _purgeRemovedDevice(device),
+              icon: Icon(Icons.delete_forever_outlined,
+                  color: Colors.red.shade300),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Future<void> _retryRemovedMatter(Map<String, dynamic> device) async {
+    final id = device['id']?.toString() ?? '';
+    final nativeId = _removedEndpoint(device)?['native_id']?.toString() ?? '';
+    if (id.isEmpty || nativeId.isEmpty || _removedDeviceBusy.contains(id)) {
+      return;
+    }
+    final journeyId = 'removed-bulb-retry-${const Uuid().v4()}';
+    setState(() => _removedDeviceBusy.add(id));
+    String outcome = 'failed';
+    String? failureStage;
+    try {
+      final secret = await context
+          .read<RhythmConnection>()
+          .api
+          .getMatterSetupCode(nativeId);
+      if (!mounted) return;
+      if (secret == null) {
+        failureStage = 'recovery_unavailable';
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+                'No saved Matter setup code is available. You can delete this entry and add the bulb with its code.'),
+          ),
+        );
+        return;
+      }
+      await startMatterPairingFlow(
+        context,
+        analyticsSource: 'removed_bulbs',
+        journeyId: journeyId,
+        initialIntakeResult: DevicePairingScannerResult.matter(
+          secret.setupPayload,
+          inputMethod: 'saved_recovery',
+          journeyId: journeyId,
+        ),
+      );
+      if (!mounted) return;
+      await _fetchCanonicalDevices();
+      outcome = _removedDevices.any((candidate) => candidate['id'] == id)
+          ? 'unresolved'
+          : 'succeeded';
+    } catch (_) {
+      failureStage = 'request_failed';
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('Could not start Matter recovery. Try again.')),
+        );
+      }
+    } finally {
+      unawaited(
+        AnalyticsService().logRemovedBulbRetryCompleted(
+          journeyId: journeyId,
+          hubType: _type,
+          outcome: outcome,
+          failureStage: failureStage,
+        ),
+      );
+      if (mounted) setState(() => _removedDeviceBusy.remove(id));
+    }
+  }
+
+  Future<void> _purgeRemovedDevice(Map<String, dynamic> device) async {
+    final id = device['id']?.toString() ?? '';
+    if (id.isEmpty || _removedDeviceBusy.contains(id)) return;
+    final name = device['name']?.toString().trim();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        backgroundColor: CelestialColors.backgroundCard,
+        title: const Text('Delete permanently?'),
+        content: Text(
+          'This permanently deletes ${name?.isNotEmpty == true ? name : 'this bulb'} and any saved Matter retry code. This cannot be undone.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: Text('Delete Forever',
+                style: TextStyle(color: Colors.red.shade300)),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    final journeyId = 'removed-bulb-purge-${const Uuid().v4()}';
+    setState(() => _removedDeviceBusy.add(id));
+    final success = await context
+        .read<RhythmConnection>()
+        .api
+        .permanentlyDeleteRemovedDevice(id, correlationId: journeyId);
+    if (!mounted) return;
+    unawaited(
+      AnalyticsService().logRemovedBulbPurgeCompleted(
+        journeyId: journeyId,
+        hubType: _type,
+        outcome: success ? 'succeeded' : 'failed',
+      ),
+    );
+    if (success) {
+      await _fetchCanonicalDevices();
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content:
+                Text('Could not permanently delete this bulb. Try again.')),
+      );
+    }
+    if (mounted) setState(() => _removedDeviceBusy.remove(id));
   }
 
   Widget _buildDeviceRow(RhythmDevice device, String roomId) {

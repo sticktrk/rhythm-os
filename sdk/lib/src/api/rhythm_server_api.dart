@@ -1645,6 +1645,43 @@ class RhythmServerApi {
     return null;
   }
 
+  /// Fetch soft-removed lights. Recovery secrets are never included.
+  Future<List<Map<String, dynamic>>?> getRemovedDevices() async {
+    try {
+      final response = await _dio.get('api/devices/removed');
+      return (response.data as List<dynamic>?)?.cast<Map<String, dynamic>>();
+    } catch (e) {
+      _log.warning('getRemovedDevices failed', e);
+    }
+    return null;
+  }
+
+  /// Permanently delete one archived light and its retained recovery material.
+  Future<bool> permanentlyDeleteRemovedDevice(
+    String id, {
+    String? correlationId,
+  }) async {
+    final normalizedCorrelationId = correlationId?.trim();
+    try {
+      final response = await _dio.delete(
+        'api/devices/canonical/${Uri.encodeComponent(id)}',
+        options: Options(
+          headers: {
+            if (normalizedCorrelationId != null &&
+                normalizedCorrelationId.isNotEmpty)
+              'X-Request-Id': normalizedCorrelationId,
+          },
+          validateStatus: (_) => true,
+        ),
+      );
+      final code = response.statusCode ?? 0;
+      return code >= 200 && code < 300;
+    } catch (e) {
+      _log.warning('permanentlyDeleteRemovedDevice failed', e);
+    }
+    return false;
+  }
+
   /// Rename a canonical device.
   Future<bool> renameCanonicalDevice(String id, String name) async {
     try {
@@ -2284,6 +2321,7 @@ class RhythmServerApi {
     String? deviceType,
     String? correlationId,
     bool force = false,
+    bool archive = false,
     Duration receiveTimeout = const Duration(seconds: 90),
   }) async {
     final normalizedHubAddress = hubAddress?.trim();
@@ -2304,6 +2342,7 @@ class RhythmServerApi {
                 normalizedCorrelationId.isNotEmpty)
               'correlation_id': normalizedCorrelationId,
             'force': force,
+            if (archive) 'archive': true,
           },
         },
         options: Options(

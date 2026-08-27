@@ -453,6 +453,10 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
             .get("force")
             .and_then(|value| value.as_bool())
             .unwrap_or(false);
+        let preserve_recovery = params
+            .get("archive")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
         let device_id = resolve_unpair_device_id(state, device_id)?;
 
         let (node_id, _endpoint) = crate::lifecycle::parse_device_id(&device_id)
@@ -513,7 +517,11 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
                 }
             }
 
-            let warning = delete_setup_recovery_for_node(state, node_id);
+            let warning = if preserve_recovery {
+                None
+            } else {
+                delete_setup_recovery_for_node(state, node_id)
+            };
             return Ok(UnpairingResult {
                 hub_type: "matter".to_string(),
                 hub_address: Some("local".to_string()),
@@ -534,7 +542,11 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
                 "Matter: node {} was already decommissioned recently",
                 node_id
             );
-            let warning = delete_setup_recovery_for_node(state, node_id);
+            let warning = if preserve_recovery {
+                None
+            } else {
+                delete_setup_recovery_for_node(state, node_id)
+            };
             return Ok(UnpairingResult {
                 hub_type: "matter".to_string(),
                 hub_address: Some("local".to_string()),
@@ -566,7 +578,11 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
                 info!(target: "sys", "Matter: decommissioned node {}", node_id);
                 hub_data.finish_decommission(node_id, true);
 
-                let warning = delete_setup_recovery_for_node(state, node_id);
+                let warning = if preserve_recovery {
+                    None
+                } else {
+                    delete_setup_recovery_for_node(state, node_id)
+                };
                 Ok(UnpairingResult {
                     hub_type: "matter".to_string(),
                     hub_address: Some("local".to_string()),
@@ -603,7 +619,7 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
             .lock()
             .map_err(|_| anyhow::anyhow!("lock"))?
             .canonical_registry
-            .devices()
+            .all_devices_including_removed()
             .any(|device| {
                 device.endpoints.iter().any(|endpoint| {
                     endpoint.hub_key == matter_hub_key && endpoint.native_id == native_device_id
@@ -616,6 +632,16 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
             state,
             &configured_fabric_id(state),
             native_device_id,
+        )
+    }
+
+    fn purge_pairing_recovery(&self, state: &SharedState, native_device_id: &str) -> Result<()> {
+        let (node_id, _endpoint) = crate::lifecycle::parse_device_id(native_device_id)
+            .ok_or_else(|| anyhow::anyhow!("Invalid Matter device ID: {}", native_device_id))?;
+        crate::setup_recovery::delete_setup_payloads_for_node(
+            state,
+            &configured_fabric_id(state),
+            node_id,
         )
     }
 
@@ -1410,6 +1436,56 @@ mod tests {
         assert_eq!(devices[0]["node_id"], 103);
         assert!(
             crate::setup_recovery::load_setup_payload(&state, "default", "matter-102",)
+                .unwrap()
+                .is_none()
+        );
+
+        let _ = std::fs::remove_dir_all(data_dir);
+    }
+
+    #[test]
+    fn archived_unpair_retains_recovery_until_explicit_purge() {
+        let state = state();
+        let data_dir = set_data_dir(&state, "archive-persistent-remove");
+        state.lock().unwrap().storage = Some(Arc::new(
+            rhythm_os::storage::FileStorage::new(data_dir.to_str().unwrap()).unwrap(),
+        ));
+        crate::setup_recovery::save_setup_payload(&state, "default", 104, 1, "MT:ARCHIVE-SECRET")
+            .unwrap();
+        let devices_path = data_dir.join("matter").join("chip").join("devices.json");
+        std::fs::create_dir_all(devices_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &devices_path,
+            serde_json::to_string_pretty(&vec![commissioned_device(104)]).unwrap(),
+        )
+        .unwrap();
+
+        let integration = MatterIntegration;
+        let result = integration
+            .start_unpairing(
+                &state,
+                &serde_json::json!({
+                    "device_id": "matter-104",
+                    "force": true,
+                    "archive": true
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(result.status, PairingStatus::Complete);
+        assert_eq!(
+            crate::setup_recovery::load_setup_payload(&state, "default", "matter-104")
+                .unwrap()
+                .unwrap()
+                .setup_payload,
+            "MT:ARCHIVE-SECRET"
+        );
+
+        integration
+            .purge_pairing_recovery(&state, "matter-104")
+            .unwrap();
+        assert!(
+            crate::setup_recovery::load_setup_payload(&state, "default", "matter-104")
                 .unwrap()
                 .is_none()
         );

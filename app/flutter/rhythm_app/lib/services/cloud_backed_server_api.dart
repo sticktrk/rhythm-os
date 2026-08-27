@@ -552,6 +552,20 @@ class CloudBackedServerApi {
     return _delegate.getCanonicalDevices();
   }
 
+  Future<List<Map<String, dynamic>>?> getRemovedDevices() {
+    return _delegate.getRemovedDevices();
+  }
+
+  Future<bool> permanentlyDeleteRemovedDevice(
+    String id, {
+    String? correlationId,
+  }) {
+    return _delegate.permanentlyDeleteRemovedDevice(
+      id,
+      correlationId: correlationId,
+    );
+  }
+
   Future<bool> renameCanonicalDevice(String id, String name) {
     return _delegate.renameCanonicalDevice(id, name);
   }
@@ -788,6 +802,7 @@ class CloudBackedServerApi {
     String? deviceType,
     String? correlationId,
     bool force = false,
+    bool archive = false,
     Duration receiveTimeout = const Duration(seconds: 90),
   }) {
     return _delegate.unpairDevice(
@@ -797,6 +812,7 @@ class CloudBackedServerApi {
       deviceType: deviceType,
       correlationId: correlationId,
       force: force,
+      archive: archive,
       receiveTimeout: receiveTimeout,
     );
   }

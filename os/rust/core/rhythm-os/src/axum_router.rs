@@ -206,10 +206,13 @@ fn shared_routes() -> Router<SharedState> {
             put(put_node_profile_overrides),
         )
         // Canonical device management
+        .route("/api/devices/removed", get(get_removed_devices))
         .route("/api/devices/canonical", get(get_canonical_devices))
         .route(
             "/api/devices/canonical/:id",
-            get(get_canonical_device).put(put_canonical_device),
+            get(get_canonical_device)
+                .put(put_canonical_device)
+                .delete(delete_removed_device),
         )
         .route("/api/devices/canonical/:id/room", put(put_device_room))
         .route("/api/devices/canonical/:id/parent", put(put_device_parent))
@@ -816,6 +819,25 @@ async fn put_node_profile_overrides(
 
 async fn get_canonical_devices(State(state): State<SharedState>) -> ApiResponse {
     run_canonical_read(move || handlers::handle_get_canonical_devices(&state)).await
+}
+
+async fn get_removed_devices(State(state): State<SharedState>) -> ApiResponse {
+    run_canonical_read(move || handlers::handle_get_removed_devices(&state)).await
+}
+
+async fn delete_removed_device(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> ApiResponse {
+    let correlation_id = headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    run_blocking(move || {
+        handlers::handle_delete_removed_device(&state, &id, correlation_id.as_deref())
+    })
+    .await
 }
 
 async fn get_canonical_device(
@@ -1811,13 +1833,15 @@ mod tests {
                     .unwrap();
 
                 let resp = app.clone().oneshot(req).await.unwrap();
-                assert_ne!(
-                    resp.status(),
-                    StatusCode::NOT_FOUND,
-                    "Route {} {} returned 404 - not registered in axum router",
-                    method_str,
-                    route.path,
-                );
+                if resp.status() == StatusCode::NOT_FOUND {
+                    let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+                    assert!(
+                        !body.is_empty(),
+                        "Route {} {} returned the empty router 404 - not registered in axum router",
+                        method_str,
+                        route.path,
+                    );
+                }
             }
         }
     }

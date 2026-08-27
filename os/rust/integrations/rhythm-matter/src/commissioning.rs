@@ -398,7 +398,7 @@ fn registered_recovery_targets(
             state
                 .canonical_registry
                 .find_by_native_id(&matter_hub_key, &native_id)
-                .is_some_and(|device| !device.is_removed())
+                .is_some()
         })
         .collect())
 }

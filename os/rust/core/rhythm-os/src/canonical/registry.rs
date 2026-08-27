@@ -133,7 +133,14 @@ impl CanonicalRegistry {
         if let Some(canonical_id) = self.native_index.get(&native_key).cloned() {
             let ownership_is_legacy = !self.name_ownership.contains_key(&canonical_id);
             if let Some(device) = self.devices.get_mut(&canonical_id) {
-                if !device.is_removed() {
+                if device.device_type == identity.device_type {
+                    if device.is_removed() {
+                        device.removed_at = None;
+                        info!(target: "canonical",
+                            "Restored explicitly rediscovered device '{}' ({})",
+                            device.name, canonical_id
+                        );
+                    }
                     let source_name_still_matches =
                         ownership_is_legacy && device.name.trim() == identity.name.trim();
                     device.upsert_endpoint(
@@ -1416,6 +1423,30 @@ mod tests {
         assert_eq!(reg.all_devices_including_removed().count(), 1);
         // Device count includes removed (raw HashMap size)
         assert_eq!(reg.device_count(), 1);
+    }
+
+    #[test]
+    fn exact_native_rediscovery_restores_soft_removed_identity() {
+        let mut reg = CanonicalRegistry::new();
+        let identity = make_identity("hue-light-1", "Kitchen Spot", vec![]);
+        let canonical_id = match reg.resolve(&identity, &hue_key(), 1000) {
+            ResolveResult::Created { canonical_id } => canonical_id,
+            _ => panic!("expected Created"),
+        };
+        assert!(reg.soft_remove(&canonical_id, 2000));
+
+        let result = reg.resolve(&identity, &hue_key(), 3000);
+
+        assert!(matches!(
+            result,
+            ResolveResult::AlreadyKnown {
+                canonical_id: restored_id
+            } if restored_id == canonical_id
+        ));
+        let restored = reg.get(&canonical_id).unwrap();
+        assert_eq!(restored.removed_at, None);
+        assert_eq!(restored.endpoints[0].last_seen, 3000);
+        assert_eq!(reg.devices().count(), 1);
     }
 
     #[test]

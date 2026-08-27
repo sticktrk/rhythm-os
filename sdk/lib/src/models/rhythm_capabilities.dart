@@ -52,9 +52,9 @@ abstract final class RhythmFeature {
       'target_guarded_room_light_profile_overrides';
   static const String hueRoomAuthorityConsent = 'hue_room_authority_consent_v1';
   static const String matterSetupCodeRecovery = 'matter_setup_code_recovery_v1';
+  static const String removedDeviceArchive = 'removed_device_archive_v1';
   static const String hueRoomTopologySync = 'hue_room_topology_sync_v1';
-  static const String sceneMotionSuppression =
-      'scene_motion_suppression_v1';
+  static const String sceneMotionSuppression = 'scene_motion_suppression_v1';
   static const String buttonMultiRoomControls = 'button_multi_room_controls_v1';
 }
 

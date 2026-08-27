@@ -260,6 +260,10 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["POST"],
     },
     SharedRoute {
+        path: "/api/devices/removed",
+        methods: &["GET"],
+    },
+    SharedRoute {
         path: "/api/matter/captures",
         methods: &["GET"],
     },
@@ -286,7 +290,7 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
     },
     SharedRoute {
         path: "/api/devices/canonical/:id",
-        methods: &["GET", "PUT"],
+        methods: &["GET", "PUT", "DELETE"],
     },
     SharedRoute {
         path: "/api/devices/canonical/:id/room",
