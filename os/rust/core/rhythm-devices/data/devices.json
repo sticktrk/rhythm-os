@@ -631,6 +631,8 @@
     "name": "Govee Outdoor Pathway Lights 2",
     "light_type": "extended_color",
     "color_modes": ["hue_saturation", "color_temperature"],
+    "min_kelvin": 3080,
+    "max_kelvin": 6120,
     "matter": {
       "vendor_id": 4999,
       "product_id": 28758,

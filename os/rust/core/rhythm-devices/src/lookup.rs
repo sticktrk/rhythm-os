@@ -238,6 +238,8 @@ mod tests {
         assert!(capabilities.supports_hue_saturation());
         assert!(!capabilities.supports_xy_color());
         assert!(capabilities.supports_color_temp());
+        assert_eq!(capabilities.min_kelvin, Some(3080));
+        assert_eq!(capabilities.max_kelvin, Some(6120));
         assert!(capabilities.supports_transition);
         assert_eq!(
             entry
