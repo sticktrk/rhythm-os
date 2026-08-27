@@ -224,6 +224,26 @@ void main() {
         expect(room.lightCapabilities?.colorTemperature?.maxKelvin, 20000);
       });
 
+      test('parses the verified H7056 color-temperature capability', () {
+        final light = RhythmRoom.fromJson({
+          'id': 'matter-h7056',
+          'manufacturer': 'Shenzhen Qianyan Technology',
+          'model': 'H7056',
+          'light_capabilities': {
+            'color_temperature': {
+              'min_kelvin': 3080,
+              'max_kelvin': 6120,
+            },
+            'individual_profile_overrides': true,
+          },
+        });
+
+        expect(light.lightCapabilities?.supportsColorTemperature, isTrue);
+        expect(light.lightCapabilities?.colorTemperature?.minKelvin, 3080);
+        expect(light.lightCapabilities?.colorTemperature?.maxKelvin, 6120);
+        expect(light.lightCapabilities?.individualProfileOverrides, isTrue);
+      });
+
       test('keeps semantic desired power distinct from physical proof', () {
         final room = RhythmRoom.fromJson({
           'id': 'matter-room',

@@ -27634,6 +27634,41 @@ mod tests {
     }
 
     #[test]
+    fn h7056_device_capabilities_publish_verified_color_temperature_range() {
+        let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        let hub_key = HubKey::new(HubType::new("matter"), "local");
+        let h7056_id = insert_known_canonical_light(
+            &state,
+            hub_key,
+            "matter-h7056",
+            "Shenzhen Qianyan Technology",
+            "H7056",
+        );
+        add_topology_room(&state, "room1", &[]);
+        assert!(state
+            .lock()
+            .unwrap()
+            .topology
+            .attach_device_user_override("room1", &h7056_id));
+        runtime
+            .snapshots
+            .lock()
+            .unwrap()
+            .push(make_light_child_snapshot(&h7056_id, "room1"));
+
+        let capabilities = build_node_state(&state, &h7056_id)
+            .unwrap()
+            .light_capabilities
+            .expect("H7056 should publish light capabilities");
+        assert_eq!(capabilities.individual_profile_overrides, Some(true));
+        let range = capabilities
+            .color_temperature
+            .expect("verified H7056 CT range should reach the app");
+        assert_eq!(range.min_kelvin, 3_080);
+        assert_eq!(range.max_kelvin, 6_120);
+    }
+
+    #[test]
     fn grouped_hue_light_capability_disables_individual_profile_overrides() {
         let (state, _runtime, grouped_light_id) = setup_attached_hue_light_with_group_dispatch();
         let grouped = build_node_state(&state, &grouped_light_id).unwrap();
