@@ -778,6 +778,9 @@ fn support_token_forbidden_reason(method: &Method, uri: &Uri) -> Option<&'static
     if *method == Method::GET && path.starts_with("/api/matter/setup-code/") {
         return Some("Support token cannot read Matter setup codes");
     }
+    if *method == Method::GET && path == "/api/devices/removed" {
+        return Some("Support token cannot read removed device archives");
+    }
     if *method == Method::DELETE && path.starts_with("/api/devices/canonical/") {
         return Some("Support token cannot permanently delete archived devices");
     }
@@ -814,6 +817,7 @@ fn support_token_forbidden_reason(method: &Method, uri: &Uri) -> Option<&'static
 
 fn owner_token_required(method: &Method, uri: &Uri) -> bool {
     (*method == Method::GET && uri.path().starts_with("/api/matter/setup-code/"))
+        || (*method == Method::GET && uri.path() == "/api/devices/removed")
         || (*method == Method::DELETE && uri.path().starts_with("/api/devices/canonical/"))
 }
 
@@ -1713,6 +1717,11 @@ mod tests {
                 Method::GET,
                 "/api/matter/setup-code/matter-42",
                 "Matter setup code recovery",
+            ),
+            (
+                Method::GET,
+                "/api/devices/removed",
+                "removed device archive listing",
             ),
             (
                 Method::DELETE,
