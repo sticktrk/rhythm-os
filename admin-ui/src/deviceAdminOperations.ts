@@ -587,6 +587,14 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     path: 'api/devices/canonical'
   },
   {
+    id: 'removed-devices-get',
+    category: 'Devices & Topology',
+    label: 'Read removed devices',
+    description: 'Fetch soft-removed light metadata without recovery secrets.',
+    method: 'GET',
+    path: 'api/devices/removed'
+  },
+  {
     id: 'canonical-device-get',
     category: 'Devices & Topology',
     label: 'Read canonical device',

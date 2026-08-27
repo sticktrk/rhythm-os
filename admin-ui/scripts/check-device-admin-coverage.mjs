@@ -19,6 +19,8 @@ const explicitExemptions = new Set([
   'GET api/ota/version',
   // Owner-only Matter setup secrets must never become staff/admin operations.
   'GET api/matter/setup-code/{}',
+  // Owner-only permanent deletion must never become a staff/admin operation.
+  'DELETE api/devices/canonical/{}',
 ]);
 
 const catalog = readFileSync(catalogPath, 'utf8');
