@@ -94,6 +94,29 @@ pub fn enrich_from_db(
             caps.max_kelvin = entry.max_kelvin.or(caps.max_kelvin);
         }
 
+        // A NeedsHueSaturationNotCt profile declares that the product renders
+        // logical white points through its hue/saturation path because its
+        // native CT path is unreliable. When that reviewed profile also has a
+        // measured Kelvin envelope, use it instead of an absent or invalid
+        // Matter cluster range so the logical CT surface survives restart.
+        let entry_capabilities = entry.capabilities();
+        let needs_profiled_hue_saturation_ct = entry.matter.as_ref().is_some_and(|matter| {
+            matter
+                .quirks
+                .contains(&DeviceQuirk::NeedsHueSaturationNotCt)
+        }) && caps.supports_hue_saturation()
+            && caps.supports_color_temp()
+            && entry_capabilities.supports_hue_saturation()
+            && entry_capabilities.supports_color_temp();
+        if needs_profiled_hue_saturation_ct {
+            if let (Some(min_kelvin), Some(max_kelvin)) = (entry.min_kelvin, entry.max_kelvin) {
+                if min_kelvin > 0 && min_kelvin <= max_kelvin {
+                    caps.min_kelvin = Some(min_kelvin);
+                    caps.max_kelvin = Some(max_kelvin);
+                }
+            }
+        }
+
         // Some Matter bulbs omit XY from their descriptor even though XY is
         // the only reliable color path they implement. A NeedsXyNotCt profile
         // is therefore also authoritative capability evidence; without this
@@ -104,7 +127,7 @@ pub fn enrich_from_db(
             .as_ref()
             .is_some_and(|matter| matter.quirks.contains(&DeviceQuirk::NeedsXyNotCt));
         if needs_xy
-            && entry.capabilities().supports_xy_color()
+            && entry_capabilities.supports_xy_color()
             && !caps.color_modes.contains(&ColorMode::Xy)
         {
             caps.color_modes.push(ColorMode::Xy);
@@ -307,6 +330,34 @@ mod tests {
         assert_eq!(caps.gamut, None);
         assert_eq!(caps.min_brightness, None);
         assert_eq!(caps.min_kelvin, Some(2700));
+    }
+
+    #[test]
+    fn profiled_hue_saturation_ct_uses_verified_logical_range() {
+        let device = CommissionedDevice {
+            node_id: 116,
+            vendor_name: "Shenzhen Qianyan Technology".to_string(),
+            product_name: "H7056".to_string(),
+            vendor_id: 4999,
+            product_id: 28758,
+            serial_number: None,
+            light_endpoint: 1,
+            color_modes: vec![
+                MatterColorMode::HueSaturation,
+                MatterColorMode::Xy,
+                MatterColorMode::ColorTemperature,
+            ],
+            min_kelvin: None,
+            max_kelvin: None,
+        };
+
+        let mut caps = capabilities_from_commissioned(&device);
+        enrich_from_db(&mut caps, &device, rhythm_devices::builtin_db());
+
+        assert!(caps.supports_hue_saturation());
+        assert!(caps.supports_color_temp());
+        assert_eq!(caps.min_kelvin, Some(3080));
+        assert_eq!(caps.max_kelvin, Some(6120));
     }
 
     #[test]
