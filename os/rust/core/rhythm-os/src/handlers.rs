@@ -4857,6 +4857,40 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_unpair_cannot_bypass_archive_guard_with_forged_hub_address() {
+        let state = test_state();
+        let id = archived_matter_device(&state);
+        let integration_called = Arc::new(AtomicBool::new(false));
+        let integration_called_for_callback = integration_called.clone();
+        state.lock().unwrap().start_unpairing_fn = Some(Arc::new(move |_, _, _| {
+            integration_called_for_callback.store(true, Ordering::SeqCst);
+            anyhow::bail!("archived target reached integration I/O")
+        }));
+
+        let response = handle_unpair_device(
+            &state,
+            &UnpairingRequest {
+                hub_type: "matter".to_string(),
+                params: serde_json::json!({
+                    "device_id": "matter-42-2",
+                    "hub_address": "forged-matter-address",
+                    "force": false,
+                }),
+            },
+        );
+
+        assert_eq!(response.status, 500);
+        assert!(response.body.contains("owner-only removed-device deletion"));
+        assert!(!integration_called.load(Ordering::SeqCst));
+        assert!(state
+            .lock()
+            .unwrap()
+            .canonical_registry
+            .get(&id)
+            .is_some_and(|device| device.is_removed()));
+    }
+
+    #[test]
     fn legacy_delete_refuses_archived_tombstone_before_integration_io() {
         let state = test_state();
         let id = archived_matter_device(&state);

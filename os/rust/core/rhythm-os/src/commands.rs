@@ -11793,11 +11793,23 @@ pub fn validate_active_device_removal_target(
     hub_key: &HubKey,
 ) -> Result<()> {
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    let device = s
-        .canonical_registry
-        .get(device_id)
-        .or_else(|| s.canonical_registry.find_by_native_id(hub_key, device_id));
-    if device.is_some_and(|device| device.is_removed()) {
+    let target_is_archived = match s.canonical_registry.get(device_id) {
+        Some(device) => device.is_removed(),
+        None => match s.canonical_registry.find_by_native_id(hub_key, device_id) {
+            Some(device) => device.is_removed(),
+            None => s
+                .canonical_registry
+                .all_devices_including_removed()
+                .filter(|device| device.is_removed())
+                .any(|device| {
+                    device.endpoints.iter().any(|endpoint| {
+                        endpoint.hub_key.hub_type == hub_key.hub_type
+                            && endpoint.native_id == device_id
+                    })
+                }),
+        },
+    };
+    if target_is_archived {
         anyhow::bail!(
             "Device is archived; use the owner-only removed-device deletion route: {}",
             device_id
