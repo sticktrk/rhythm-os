@@ -1088,7 +1088,7 @@ fn initial_device_metadata(
             crate::local_quirks::apply_capability_override(&mut caps, override_caps);
         }
         if let Some(local_quirks) = local_overrides.quirks.get(&device_id) {
-            quirks = local_quirks.clone();
+            quirks = crate::local_quirks::apply_quirk_override(&quirks, local_quirks);
         }
 
         metadata.device_caps.insert(device_id.clone(), caps.clone());
@@ -1468,6 +1468,25 @@ mod tests {
         }
     }
 
+    fn moes_matter_light(node_id: u64) -> CommissionedDevice {
+        CommissionedDevice {
+            node_id,
+            vendor_name: "MOES".to_string(),
+            product_name: "MOES Matter Light".to_string(),
+            vendor_id: 5245,
+            product_id: 1412,
+            serial_number: Some(format!("moes-{node_id}")),
+            light_endpoint: 1,
+            color_modes: vec![
+                MatterColorMode::HueSaturation,
+                MatterColorMode::Xy,
+                MatterColorMode::ColorTemperature,
+            ],
+            min_kelvin: Some(2702),
+            max_kelvin: Some(6535),
+        }
+    }
+
     fn sengled_w41_device(node_id: u64) -> CommissionedDevice {
         CommissionedDevice {
             node_id,
@@ -1661,10 +1680,10 @@ mod tests {
     }
 
     #[test]
-    fn persisted_metadata_applies_local_overrides_after_builtin_and_cloud_profiles() {
+    fn persisted_metadata_applies_local_overrides_without_curated_color_preference() {
         let state = shared_state("persisted-overrides");
         let key = HubKey::new(HubType::new("matter"), "local");
-        let device = h6004_device(107);
+        let device = commissioned_device(107, 1);
         crate::local_quirks::save_device_profile_override(
             &state,
             "matter-107",
@@ -1691,6 +1710,42 @@ mod tests {
         assert_eq!(
             metadata.device_quirks.get("matter-107"),
             Some(&vec![DeviceQuirk::NeedsXyNotCt])
+        );
+    }
+
+    #[test]
+    fn persisted_moes_metadata_replaces_stale_hs_preference_with_curated_ct() {
+        let state = shared_state("persisted-moes-color-preference");
+        let key = HubKey::new(HubType::new("matter"), "local");
+        let device = moes_matter_light(112);
+        crate::local_quirks::save_device_profile_override(
+            &state,
+            "matter-112",
+            Some(vec![
+                DeviceQuirk::NeedsHueSaturationNotCt,
+                DeviceQuirk::CommandThrottleMs(250),
+            ]),
+            None,
+            Some("stale-hs-report".to_string()),
+        )
+        .unwrap();
+
+        let metadata = initial_device_metadata(
+            &state,
+            &[device_info_from_record(&device)],
+            &[device],
+            &crate::cloud_profiles::CloudMatterProfileCatalog::default(),
+            &key,
+        );
+
+        assert_eq!(
+            metadata.device_quirks.get("matter-112"),
+            Some(&vec![
+                DeviceQuirk::CommandThrottleMs(250),
+                DeviceQuirk::Other(
+                    rhythm_devices::quirks::PREFER_COLOR_TEMPERATURE_QUIRK.to_string(),
+                ),
+            ])
         );
     }
 
