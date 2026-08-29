@@ -120,10 +120,7 @@ class RoomDefault {
     );
   }
 
-  Map<String, dynamic> toJson() => {
-        'room_id': roomId,
-        'state': state,
-      };
+  Map<String, dynamic> toJson() => {'room_id': roomId, 'state': state};
 }
 
 class RhythmModeConfig {
@@ -231,10 +228,7 @@ class TransitionDurationFixed extends TransitionDuration {
   const TransitionDurationFixed(this.milliseconds);
 
   @override
-  dynamic toJson() => {
-        'mode': 'fixed',
-        'value': milliseconds,
-      };
+  dynamic toJson() => {'mode': 'fixed', 'value': milliseconds};
   @override
   bool get isAuto => false;
   @override
@@ -301,9 +295,7 @@ class RhythmModeTransitionConfig {
       toMode:
           RhythmMode.fromString(json['to_mode'] as String?) ?? RhythmMode.day,
       trigger: rawTrigger is Map
-          ? RhythmTransitionTrigger.fromJson(
-              rawTrigger.cast<String, dynamic>(),
-            )
+          ? RhythmTransitionTrigger.fromJson(rawTrigger.cast<String, dynamic>())
           : rawTrigger is String
               ? RhythmTransitionTrigger.fromLegacyValue(rawTrigger)
               : const RhythmTransitionTrigger.manual(),
@@ -349,16 +341,54 @@ class RhythmModeTransitionConfig {
   }
 }
 
+/// Reusable named automation lane for rooms and unassigned lights.
+class RhythmLightScheduleConfig {
+  final String id;
+  final String name;
+  final bool enabled;
+  final RhythmMode activeMode;
+  final List<RhythmModeTransitionConfig> transitions;
+
+  const RhythmLightScheduleConfig({
+    required this.id,
+    required this.name,
+    this.enabled = true,
+    this.activeMode = RhythmMode.day,
+    this.transitions = const [],
+  });
+
+  factory RhythmLightScheduleConfig.fromJson(Map<String, dynamic> json) =>
+      RhythmLightScheduleConfig(
+        id: json['id'] as String? ?? '',
+        name: json['name'] as String? ?? '',
+        enabled: json['enabled'] as bool? ?? true,
+        activeMode: RhythmMode.fromString(json['active_mode'] as String?) ??
+            RhythmMode.day,
+        transitions: ((json['transitions'] as List<dynamic>?) ?? const [])
+            .whereType<Map>()
+            .map(
+              (value) => RhythmModeTransitionConfig.fromJson(
+                value.cast<String, dynamic>(),
+              ),
+            )
+            .toList(growable: false),
+      );
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'name': name,
+        'enabled': enabled,
+        'active_mode': activeMode.wireValue,
+        'transitions': transitions.map((value) => value.toJson()).toList(),
+      };
+}
+
 class RhythmTransitionTrigger {
   final String kind;
   final String? event;
   final String? time;
 
-  const RhythmTransitionTrigger._({
-    required this.kind,
-    this.event,
-    this.time,
-  });
+  const RhythmTransitionTrigger._({required this.kind, this.event, this.time});
 
   const RhythmTransitionTrigger.manual() : this._(kind: 'manual');
 
@@ -476,9 +506,7 @@ class RhythmModeResource {
       lightRuntime: lightRuntime,
       hasLightRuntime: runtimeId != null,
       lastChange: lastChangeJson is Map<String, dynamic>
-          ? RhythmModeLastChange.fromJson(
-              lastChangeJson,
-            )
+          ? RhythmModeLastChange.fromJson(lastChangeJson)
           : hasFlatLastChange
               ? RhythmModeLastChange.fromJson(json)
               : null,
@@ -533,27 +561,19 @@ class RhythmSettings {
 class RhythmLightBreaker {
   final bool enabled;
 
-  const RhythmLightBreaker({
-    required this.enabled,
-  });
+  const RhythmLightBreaker({required this.enabled});
 
   factory RhythmLightBreaker.fromJson(Map<String, dynamic> json) {
-    return RhythmLightBreaker(
-      enabled: json['enabled'] as bool? ?? true,
-    );
+    return RhythmLightBreaker(enabled: json['enabled'] as bool? ?? true);
   }
 
-  Map<String, dynamic> toJson() => {
-        'enabled': enabled,
-      };
+  Map<String, dynamic> toJson() => {'enabled': enabled};
 }
 
 class RhythmProfiles {
   final List<RhythmCurveConfig> profiles;
 
-  const RhythmProfiles({
-    this.profiles = const [],
-  });
+  const RhythmProfiles({this.profiles = const []});
 
   factory RhythmProfiles.fromJson(Map<String, dynamic> json) {
     return RhythmProfiles(

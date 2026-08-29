@@ -195,6 +195,18 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["POST"],
     },
     SharedRoute {
+        path: "/api/light-schedules",
+        methods: &["GET", "PUT"],
+    },
+    SharedRoute {
+        path: "/api/light-schedules/assignment",
+        methods: &["PUT"],
+    },
+    SharedRoute {
+        path: "/api/light-schedules/:schedule_id/transitions/:transition_id/trigger",
+        methods: &["POST"],
+    },
+    SharedRoute {
         path: "/api/input-bindings",
         methods: &["GET", "POST"],
     },

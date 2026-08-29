@@ -166,6 +166,18 @@ fn shared_routes() -> Router<SharedState> {
             post(post_transition_trigger),
         )
         .route(
+            "/api/light-schedules",
+            get(get_light_schedules).put(put_light_schedules),
+        )
+        .route(
+            "/api/light-schedules/assignment",
+            put(put_light_schedule_assignment),
+        )
+        .route(
+            "/api/light-schedules/:schedule_id/transitions/:transition_id/trigger",
+            post(post_light_schedule_transition_trigger),
+        )
+        .route(
             "/api/input-bindings",
             get(get_input_bindings).post(post_input_binding),
         )
@@ -677,6 +689,38 @@ async fn post_transition_trigger(
     Path(id): Path<String>,
 ) -> ApiResponse {
     run_blocking(move || handlers::handle_post_transition_trigger(&state, &id)).await
+}
+
+async fn get_light_schedules(State(state): State<SharedState>) -> ApiResponse {
+    handlers::handle_get_light_schedules(&state)
+}
+
+async fn put_light_schedules(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_put_light_schedules(&state, &body)).await
+}
+
+async fn put_light_schedule_assignment(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_put_light_schedule_assignment(&state, &body)).await
+}
+
+async fn post_light_schedule_transition_trigger(
+    State(state): State<SharedState>,
+    Path((schedule_id, transition_id)): Path<(String, String)>,
+) -> ApiResponse {
+    run_blocking(move || {
+        handlers::handle_post_light_schedule_transition_trigger(
+            &state,
+            &schedule_id,
+            &transition_id,
+        )
+    })
+    .await
 }
 
 async fn get_input_bindings(State(state): State<SharedState>) -> ApiResponse {

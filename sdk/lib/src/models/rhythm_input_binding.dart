@@ -167,6 +167,10 @@ sealed class RhythmAutomationAction {
       'mode_cycle' => RhythmModeCycleAction.fromJson(json),
       'mode_set' => RhythmModeSetAction.fromJson(json),
       'mode_toggle' => RhythmModeToggleAction.fromJson(json),
+      'light_schedule_mode_cycle' =>
+        RhythmLightScheduleModeCycleAction.fromJson(json),
+      'light_schedule_mode_set' =>
+        RhythmLightScheduleModeSetAction.fromJson(json),
       _ => RhythmRawAutomationAction(kind: kind, raw: json),
     };
   }
@@ -220,6 +224,67 @@ class RhythmModeSetAction extends RhythmAutomationAction {
   @override
   Map<String, dynamic> toJson() => {
         'kind': 'mode_set',
+        'mode': mode.wireValue,
+        'transition': transition.toJson(),
+      };
+}
+
+class RhythmLightScheduleModeCycleAction extends RhythmAutomationAction {
+  final String scheduleId;
+  final List<RhythmMode> modes;
+  final RhythmModeTransitionSelection transition;
+
+  const RhythmLightScheduleModeCycleAction({
+    required this.scheduleId,
+    required this.modes,
+    this.transition = const RhythmModeTransitionSelection.auto(),
+  });
+
+  factory RhythmLightScheduleModeCycleAction.fromJson(
+    Map<String, dynamic> json,
+  ) =>
+      RhythmLightScheduleModeCycleAction(
+        scheduleId: json['schedule_id'] as String? ?? '',
+        modes: ((json['modes'] as List<dynamic>?) ?? const <dynamic>[])
+            .map((value) => RhythmMode.fromString(value as String?))
+            .nonNulls
+            .toList(growable: false),
+        transition: RhythmModeTransitionSelection.fromJson(json['transition']),
+      );
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'kind': 'light_schedule_mode_cycle',
+        'schedule_id': scheduleId,
+        'modes': modes.map((mode) => mode.wireValue).toList(),
+        'transition': transition.toJson(),
+      };
+}
+
+class RhythmLightScheduleModeSetAction extends RhythmAutomationAction {
+  final String scheduleId;
+  final RhythmMode mode;
+  final RhythmModeTransitionSelection transition;
+
+  const RhythmLightScheduleModeSetAction({
+    required this.scheduleId,
+    required this.mode,
+    this.transition = const RhythmModeTransitionSelection.auto(),
+  });
+
+  factory RhythmLightScheduleModeSetAction.fromJson(
+    Map<String, dynamic> json,
+  ) =>
+      RhythmLightScheduleModeSetAction(
+        scheduleId: json['schedule_id'] as String? ?? '',
+        mode: RhythmMode.fromString(json['mode'] as String?) ?? RhythmMode.day,
+        transition: RhythmModeTransitionSelection.fromJson(json['transition']),
+      );
+
+  @override
+  Map<String, dynamic> toJson() => {
+        'kind': 'light_schedule_mode_set',
+        'schedule_id': scheduleId,
         'mode': mode.wireValue,
         'transition': transition.toJson(),
       };

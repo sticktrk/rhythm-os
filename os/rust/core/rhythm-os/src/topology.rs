@@ -192,6 +192,20 @@ pub enum AutomationAction {
         #[serde(default)]
         transition: ModeTransitionSelection,
     },
+    /// Move one reusable light schedule without changing the global mode.
+    LightScheduleModeCycle {
+        schedule_id: String,
+        modes: Vec<RhythmMode>,
+        #[serde(default)]
+        transition: ModeTransitionSelection,
+    },
+    /// Set one reusable light schedule without changing the global mode.
+    LightScheduleModeSet {
+        schedule_id: String,
+        mode: RhythmMode,
+        #[serde(default)]
+        transition: ModeTransitionSelection,
+    },
     /// Backward-compatible two-mode alias; new presets emit `mode_cycle`.
     ModeToggle {
         first_mode: RhythmMode,

@@ -456,6 +456,34 @@ void main() {
         });
       });
 
+      test('distinguishes named, unscheduled, and legacy schedule authority',
+          () {
+        final named = RhythmNodeProfileSettings.fromJson({
+          'light_schedule': {
+            'kind': 'named',
+            'schedule_id': 'outdoor',
+            'active_mode': 'sleep',
+          },
+        });
+        final unscheduled = RhythmNodeProfileSettings.fromJson({
+          'light_schedule': {'kind': 'unscheduled', 'active_mode': 'day'},
+        });
+        final legacy = RhythmNodeProfileSettings.fromJson(const {});
+
+        expect(named.lightScheduleId, 'outdoor');
+        expect(named.lightScheduleMode, RhythmMode.sleep);
+        expect(named.isExplicitlyUnscheduled, isFalse);
+        expect(named.toJson()['light_schedule'], {
+          'kind': 'named',
+          'schedule_id': 'outdoor',
+          'active_mode': 'sleep',
+        });
+        expect(unscheduled.lightScheduleId, isNull);
+        expect(unscheduled.lightScheduleMode, RhythmMode.day);
+        expect(unscheduled.isExplicitlyUnscheduled, isTrue);
+        expect(legacy.lightSchedule, isNull);
+      });
+
       test('parses legacy active_light_scene_id as mood_scene_id', () {
         final room = RhythmRoom.fromJson({
           'profile_settings': {

@@ -113,5 +113,22 @@ void main() {
       expect(toggle.secondMode, RhythmMode.sleep);
       expect(toggle.transition, isA<RhythmModeTransitionNone>());
     });
+
+    test('round-trips a button action scoped to one named schedule', () {
+      final action = RhythmAutomationAction.fromJson({
+        'kind': 'light_schedule_mode_cycle',
+        'schedule_id': 'outdoor',
+        'modes': ['day', 'sleep'],
+        'transition': {'kind': 'auto'},
+      });
+
+      expect(action, isA<RhythmLightScheduleModeCycleAction>());
+      expect(action.toJson(), {
+        'kind': 'light_schedule_mode_cycle',
+        'schedule_id': 'outdoor',
+        'modes': ['day', 'sleep'],
+        'transition': {'kind': 'auto'},
+      });
+    });
   });
 }
