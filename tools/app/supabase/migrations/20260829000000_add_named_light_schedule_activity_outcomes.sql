@@ -56,7 +56,7 @@ SELECT
   END AS bounded_schedule_source,
   CASE
     WHEN action_id = 'light_schedule_assignment_updated'
-      AND payload ->> 'binding_kind' IN ('named', 'unscheduled')
+      AND payload ->> 'binding_kind' IN ('legacy', 'named', 'unscheduled')
     THEN payload ->> 'binding_kind'
   END AS bounded_schedule_binding_kind,
   CASE

@@ -3076,6 +3076,33 @@ void main() {
             'schedule_id': null,
           })).called(1);
     });
+
+    test('restores legacy schedule authority explicitly', () async {
+      when(() => dio.put(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions:
+                    RequestOptions(path: 'api/light-schedules/assignment'),
+                statusCode: 200,
+                data: {
+                  'nodes': [
+                    {
+                      'room_id': 'porch',
+                      'rhythm_enabled': true,
+                      'profile_settings': const <String, dynamic>{},
+                    },
+                  ],
+                },
+              ));
+
+      final state = await api.clearLightScheduleAssignment(nodeId: 'porch');
+
+      expect(state?.roomId, 'porch');
+      expect(state?.profileSettings?.lightSchedule, isNull);
+      verify(() => dio.put('api/light-schedules/assignment', data: {
+            'node_id': 'porch',
+            'legacy': true,
+          })).called(1);
+    });
   });
 
   group('Matter setup code recovery', () {

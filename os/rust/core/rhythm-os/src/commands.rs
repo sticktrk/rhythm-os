@@ -1144,6 +1144,14 @@ impl RoomProfileSettingsPatch {
         }
         if let Some(room_schedule) = self.room_schedule {
             settings.room_schedule = room_schedule;
+            if room_schedule.is_some() {
+                // A room-local wall-clock schedule is itself an explicit
+                // authority choice. Applying it must replace an inherited or
+                // direct named assignment atomically rather than leaving an
+                // invalid two-authority state that the existing app cannot
+                // recover from.
+                settings.light_schedule = None;
+            }
         }
         if let Some(profile_overrides) = &self.profile_overrides {
             match profile_overrides {
@@ -10198,6 +10206,66 @@ fn validate_light_schedule_config(config: &rhythm_core::LightScheduleConfig) -> 
     Ok(())
 }
 
+fn validate_light_schedule_definitions<'a>(
+    schedules: &'a [rhythm_core::LightScheduleConfig],
+) -> Result<HashSet<&'a str>> {
+    let mut ids = HashSet::new();
+    for schedule in schedules {
+        validate_light_schedule_config(schedule)?;
+        if !ids.insert(schedule.id.as_str()) {
+            return Err(anyhow::anyhow!(
+                "Duplicate light schedule id '{}'",
+                schedule.id
+            ));
+        }
+    }
+    Ok(ids)
+}
+
+fn validate_current_light_schedule_references(
+    state: &SharedState,
+    ids: &HashSet<&str>,
+) -> Result<Vec<(String, String)>> {
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let assigned_roots = s
+        .hub_runtime()
+        .map(|runtime| {
+            addressable_root_snapshots(&runtime)
+                .into_iter()
+                .filter_map(|snapshot| {
+                    snapshot
+                        .profile_settings
+                        .light_schedule
+                        .as_ref()
+                        .and_then(rhythm_core::LightScheduleAssignment::schedule_id)
+                        .map(|schedule_id| (snapshot.id, schedule_id.to_string()))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    for (node_id, schedule_id) in &assigned_roots {
+        if !ids.contains(schedule_id.as_str()) {
+            return Err(anyhow::anyhow!(
+                "Light schedule '{}' is still assigned to node '{}'",
+                schedule_id,
+                node_id
+            ));
+        }
+    }
+    for binding in s.topology.input_bindings() {
+        if let Some(schedule_id) = automation_action_light_schedule_id(&binding.action) {
+            if !ids.contains(schedule_id) {
+                return Err(anyhow::anyhow!(
+                    "Light schedule '{}' is still referenced by input binding '{}'",
+                    schedule_id,
+                    binding.id
+                ));
+            }
+        }
+    }
+    Ok(assigned_roots)
+}
+
 pub fn build_light_schedules(state: &SharedState) -> Result<String> {
     let schedules = state
         .lock()
@@ -10232,60 +10300,12 @@ fn do_light_schedules_set_internal(
     schedules: Vec<rhythm_core::LightScheduleConfig>,
     validate_current_references: bool,
 ) -> Result<String> {
-    let mut ids = HashSet::new();
-    for schedule in &schedules {
-        validate_light_schedule_config(schedule)?;
-        if !ids.insert(schedule.id.as_str()) {
-            return Err(anyhow::anyhow!(
-                "Duplicate light schedule id '{}'",
-                schedule.id
-            ));
-        }
-    }
-
+    let ids = validate_light_schedule_definitions(&schedules)?;
     let assigned_roots = if validate_current_references {
-        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.hub_runtime()
-            .map(|runtime| {
-                addressable_root_snapshots(&runtime)
-                    .into_iter()
-                    .filter_map(|snapshot| {
-                        snapshot
-                            .profile_settings
-                            .light_schedule
-                            .as_ref()
-                            .and_then(rhythm_core::LightScheduleAssignment::schedule_id)
-                            .map(|schedule_id| (snapshot.id, schedule_id.to_string()))
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
+        validate_current_light_schedule_references(state, &ids)?
     } else {
         Vec::new()
     };
-    for (node_id, schedule_id) in &assigned_roots {
-        if !ids.contains(schedule_id.as_str()) {
-            return Err(anyhow::anyhow!(
-                "Light schedule '{}' is still assigned to node '{}'",
-                schedule_id,
-                node_id
-            ));
-        }
-    }
-    if validate_current_references {
-        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        for binding in s.topology.input_bindings() {
-            if let Some(schedule_id) = automation_action_light_schedule_id(&binding.action) {
-                if !ids.contains(schedule_id) {
-                    return Err(anyhow::anyhow!(
-                        "Light schedule '{}' is still referenced by input binding '{}'",
-                        schedule_id,
-                        binding.id
-                    ));
-                }
-            }
-        }
-    }
 
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -10320,7 +10340,38 @@ pub fn do_light_schedule_assignment_set(
     schedule_id: Option<&str>,
     persist: bool,
 ) -> Result<String> {
-    let assignment = {
+    let authority = schedule_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(LightScheduleAuthority::Named)
+        .unwrap_or(LightScheduleAuthority::Unscheduled);
+    do_light_schedule_authority_set(state, node_id, authority, persist)
+}
+
+/// Restore the compatibility state in which the appliance-wide legacy mode
+/// owns this root. This is distinct from an explicit `Unscheduled` opt-out.
+pub fn do_light_schedule_assignment_clear(
+    state: &SharedState,
+    node_id: &str,
+    persist: bool,
+) -> Result<String> {
+    do_light_schedule_authority_set(state, node_id, LightScheduleAuthority::Legacy, persist)
+}
+
+#[derive(Clone, Copy)]
+enum LightScheduleAuthority<'a> {
+    Legacy,
+    Unscheduled,
+    Named(&'a str),
+}
+
+fn do_light_schedule_authority_set(
+    state: &SharedState,
+    node_id: &str,
+    authority: LightScheduleAuthority<'_>,
+    persist: bool,
+) -> Result<String> {
+    let (assignment, active_mode, binding_kind) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let runtime = s
             .hub_runtime()
@@ -10333,31 +10384,38 @@ pub fn do_light_schedule_assignment_set(
                 "Schedule target must be a room or unassigned light node"
             ));
         }
-        let resolved_id = schedule_id.map(str::trim).filter(|id| !id.is_empty());
-        let schedule_mode = resolved_id
-            .map(|id| {
-                s.light_schedules
-                    .get(id)
-                    .ok_or_else(|| anyhow::anyhow!("Unknown light schedule '{}'", id))
-                    .map(|schedule| schedule.active_mode)
-            })
-            .transpose()?;
         let current_mode = snapshot
             .profile_settings
             .schedule_mode(s.active_mode, runtime.current_hour());
-        match (resolved_id, schedule_mode) {
-            (Some(schedule_id), Some(active_mode)) => rhythm_core::LightScheduleAssignment::Named {
-                schedule_id: schedule_id.to_string(),
-                active_mode,
-            },
-            _ => rhythm_core::LightScheduleAssignment::Unscheduled {
-                active_mode: current_mode,
-            },
+        match authority {
+            LightScheduleAuthority::Legacy => (None, s.active_mode, "legacy"),
+            LightScheduleAuthority::Unscheduled => (
+                Some(rhythm_core::LightScheduleAssignment::Unscheduled {
+                    active_mode: current_mode,
+                }),
+                current_mode,
+                "unscheduled",
+            ),
+            LightScheduleAuthority::Named(schedule_id) => {
+                let active_mode = s
+                    .light_schedules
+                    .get(schedule_id)
+                    .ok_or_else(|| anyhow::anyhow!("Unknown light schedule '{}'", schedule_id))?
+                    .active_mode;
+                (
+                    Some(rhythm_core::LightScheduleAssignment::Named {
+                        schedule_id: schedule_id.to_string(),
+                        active_mode,
+                    }),
+                    active_mode,
+                    "named",
+                )
+            }
         }
     };
 
     let patch = RoomProfileSettingsPatch {
-        light_schedule: Some(Some(assignment.clone())),
+        light_schedule: Some(assignment.clone()),
         room_schedule: Some(None),
         ..RoomProfileSettingsPatch::default()
     };
@@ -10371,33 +10429,34 @@ pub fn do_light_schedule_assignment_set(
         Some(&patch),
         persist,
     )?;
-    if let Some(mode) = assignment.active_mode() {
-        let target_state = state
-            .lock()
-            .ok()
-            .map(|s| s.mode_configs())
-            .and_then(|configs| {
-                mode_config_for_mode(&configs, mode).and_then(|config| {
-                    config
-                        .room_defaults
-                        .iter()
-                        .find(|default| default.room_id == node_id)
-                        .map(|default| default.state)
-                })
+    let target_state = state
+        .lock()
+        .ok()
+        .map(|s| s.mode_configs())
+        .and_then(|configs| {
+            mode_config_for_mode(&configs, active_mode).and_then(|config| {
+                config
+                    .room_defaults
+                    .iter()
+                    .find(|default| default.room_id == node_id)
+                    .map(|default| default.state)
             })
-            .unwrap_or(RoomModeState::Active);
-        apply_room_schedule_target(state, node_id, mode, target_state, false, persist, None)?;
-    } else if let Ok(mut s) = state.lock() {
-        s.room_schedule_evaluations.remove(node_id);
-    }
+        })
+        .unwrap_or(RoomModeState::Active);
+    apply_room_schedule_target(
+        state,
+        node_id,
+        active_mode,
+        target_state,
+        false,
+        persist,
+        None,
+    )?;
     let mut activity =
         crate::activity::LightActivityRecord::app(node_id, "light_schedule_assignment_updated");
     activity.payload = Some(serde_json::json!({
         "status": "applied",
-        "binding_kind": match assignment {
-            rhythm_core::LightScheduleAssignment::Named { .. } => "named",
-            rhythm_core::LightScheduleAssignment::Unscheduled { .. } => "unscheduled",
-        },
+        "binding_kind": binding_kind,
     }));
     crate::activity::record_light_activity(state, activity);
     build_node_state(state, node_id).and_then(|node| {
@@ -10887,6 +10946,11 @@ pub fn do_profile_bundle_import(
     }
 
     let profile = bundle.profile;
+
+    if let Some(schedules) = profile.light_schedules.as_ref() {
+        let ids = validate_light_schedule_definitions(schedules)?;
+        validate_current_light_schedule_references(state, &ids)?;
+    }
 
     let imported_profiles = profile.profiles;
     let imported_scenes = normalized_scene_map(profile.scenes)?;
@@ -25561,6 +25625,49 @@ mod tests {
             .profiles
             .iter()
             .any(|profile| profile.id == "focus"));
+    }
+
+    #[test]
+    fn profile_bundle_schedule_conflict_fails_before_mutating_bundle_state() {
+        let (state, _runtime) = setup_state(vec![make_snapshot("room-1", false, false)]);
+        do_light_schedules_set(&state, vec![backup_test_light_schedule("old")]).unwrap();
+        do_light_schedule_assignment_set(&state, "room-1", Some("old"), false).unwrap();
+
+        let before = {
+            let s = state.lock().unwrap();
+            (
+                s.power_save,
+                s.light_profile_configs.clone(),
+                s.scenes.clone(),
+                s.mode_transition_configs(),
+            )
+        };
+        let error = do_profile_bundle_import(
+            &state,
+            ProfileBundleImportPayload::Profile(ProfileBundleData {
+                power_save: !before.0,
+                profiles: vec![make_focus_profile()],
+                scenes: Vec::new(),
+                mode_transitions: vec![rhythm_core::ModeTransitionConfig::new(
+                    RhythmMode::Day,
+                    RhythmMode::Sleep,
+                    4_321,
+                )],
+                light_schedules: Some(vec![backup_test_light_schedule("new")]),
+            }),
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("Light schedule 'old' is still assigned to node 'room-1'"));
+        let s = state.lock().unwrap();
+        assert_eq!(s.power_save, before.0);
+        assert_eq!(s.light_profile_configs, before.1);
+        assert_eq!(s.scenes, before.2);
+        assert_eq!(s.mode_transition_configs(), before.3);
+        assert!(s.light_schedules.contains_key("old"));
+        assert!(!s.light_schedules.contains_key("new"));
     }
 
     #[test]

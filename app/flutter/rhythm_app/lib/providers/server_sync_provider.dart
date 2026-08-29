@@ -1551,6 +1551,7 @@ class ServerSyncProvider extends ChangeNotifier {
         fadeSetting: previousSettings.fadeSetting,
         motionTimeoutSetting: previousSettings.motionTimeoutSetting,
         motionActivationEnabled: enabled,
+        lightSchedule: previousSettings.lightSchedule,
         roomSchedule: previousSettings.roomSchedule,
         profileOverrides: previousSettings.profileOverrides,
         raw: previousSettings.raw,
@@ -1619,6 +1620,7 @@ class ServerSyncProvider extends ChangeNotifier {
       fadeSetting: previousSettings.fadeSetting,
       motionTimeoutSetting: previousSettings.motionTimeoutSetting,
       motionActivationEnabled: previousSettings.motionActivationEnabled,
+      lightSchedule: previousSettings.lightSchedule,
       roomSchedule: previousSettings.roomSchedule,
       profileOverrides: _withMotionTimeoutProfileOverride(
         previousSettings.profileOverrides,
@@ -4165,6 +4167,7 @@ class ServerSyncProvider extends ChangeNotifier {
       fadeSetting: previousSettings.fadeSetting,
       motionTimeoutSetting: previousSettings.motionTimeoutSetting,
       motionActivationEnabled: previousSettings.motionActivationEnabled,
+      lightSchedule: previousSettings.lightSchedule,
       roomSchedule: previousSettings.roomSchedule,
       profileOverrides: Map.unmodifiable(nextOverrides),
       raw: previousSettings.raw,
@@ -4238,6 +4241,7 @@ class ServerSyncProvider extends ChangeNotifier {
       fadeSetting: previousSettings.fadeSetting,
       motionTimeoutSetting: previousSettings.motionTimeoutSetting,
       motionActivationEnabled: previousSettings.motionActivationEnabled,
+      lightSchedule: previousSettings.lightSchedule,
       roomSchedule: previousSettings.roomSchedule,
       raw: previousSettings.raw,
     );

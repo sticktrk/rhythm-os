@@ -1809,8 +1809,30 @@ pub fn handle_put_light_schedule_assignment(state: &SharedState, body: &Value) -
     let Some(node_id) = body.get("node_id").and_then(Value::as_str) else {
         return ApiResponse::bad_request("Missing node_id");
     };
+    let restore_legacy = match body.get("legacy") {
+        None => false,
+        Some(value) => match value.as_bool() {
+            Some(value) => value,
+            None => return ApiResponse::bad_request("legacy must be a boolean"),
+        },
+    };
+    if restore_legacy && body.get("schedule_id").is_some() {
+        return ApiResponse::bad_request("legacy and schedule_id are mutually exclusive");
+    }
+    if restore_legacy {
+        return match commands::do_light_schedule_assignment_clear(state, node_id, true) {
+            Ok(json) => ApiResponse::json_ok(json),
+            Err(error) => light_schedule_mutation_error(
+                state,
+                node_id,
+                "light_schedule_assignment_updated",
+                error,
+            ),
+        };
+    }
     let schedule_id = match body.get("schedule_id") {
-        None | Some(Value::Null) => None,
+        None => return ApiResponse::bad_request("Missing schedule_id or legacy=true"),
+        Some(Value::Null) => None,
         Some(value) => match value.as_str() {
             Some(value) => Some(value),
             None => return ApiResponse::bad_request("schedule_id must be a string or null"),
@@ -7247,6 +7269,48 @@ mod tests {
         assert_eq!(
             cleared["nodes"][0]["profile_settings"]["light_schedule"]["kind"],
             "unscheduled"
+        );
+
+        let legacy = handle_put_light_schedule_assignment(
+            &state,
+            &json!({"node_id": "room1", "legacy": true}),
+        );
+        assert_eq!(legacy.status, 200, "{}", legacy.body);
+        let legacy: Value = serde_json::from_str(&legacy.body).unwrap();
+        assert!(legacy["nodes"][0]["profile_settings"]
+            .get("light_schedule")
+            .is_none());
+
+        assert_eq!(
+            handle_put_light_schedule_assignment(
+                &state,
+                &json!({"node_id": "room1", "schedule_id": "indoor"}),
+            )
+            .status,
+            200
+        );
+        let room_local = handle_put_node_preferences(
+            &state,
+            &json!({
+                "node_id": "room1",
+                "profile_settings": {
+                    "room_schedule": {
+                        "source": "follow_time",
+                        "wake_time": "07:00",
+                        "sleep_time": "23:00"
+                    }
+                }
+            }),
+            true,
+        );
+        assert_eq!(room_local.status, 200, "{}", room_local.body);
+        let room_local: Value = serde_json::from_str(&room_local.body).unwrap();
+        assert!(room_local["nodes"][0]["profile_settings"]
+            .get("light_schedule")
+            .is_none());
+        assert_eq!(
+            room_local["nodes"][0]["profile_settings"]["room_schedule"]["source"],
+            "follow_time"
         );
     }
 

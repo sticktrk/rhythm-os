@@ -1909,7 +1909,7 @@ class RhythmServerApi {
         .toList(growable: false);
   }
 
-  /// Assign a named schedule, or clear it with a null [scheduleId].
+  /// Assign a named schedule, or explicitly opt out with a null [scheduleId].
   Future<RhythmRoomState?> setLightScheduleAssignment({
     required String nodeId,
     required String? scheduleId,
@@ -1917,6 +1917,17 @@ class RhythmServerApi {
     final response = await _dio.put(
       'api/light-schedules/assignment',
       data: {'node_id': nodeId, 'schedule_id': scheduleId},
+    );
+    return _parseAndCacheSingleState(response.data);
+  }
+
+  /// Restore legacy appliance-wide schedule authority for this root.
+  Future<RhythmRoomState?> clearLightScheduleAssignment({
+    required String nodeId,
+  }) async {
+    final response = await _dio.put(
+      'api/light-schedules/assignment',
+      data: {'node_id': nodeId, 'legacy': true},
     );
     return _parseAndCacheSingleState(response.data);
   }
