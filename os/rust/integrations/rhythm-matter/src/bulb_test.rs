@@ -801,9 +801,8 @@ pub fn save_bulb_test_report(state: &SharedState, report: &Value) -> Result<Valu
             quirks.push(preference);
         }
         if !quirks.is_empty() {
-            if let Some(curated_quirks) = curated_device_quirks(state, &native_id) {
-                quirks = crate::local_quirks::apply_quirk_override(&curated_quirks, &quirks);
-            }
+            let curated_quirks = curated_device_quirks(state, &native_id)?;
+            quirks = crate::local_quirks::apply_quirk_override(&curated_quirks, &quirks);
         }
         let capability_override = match capability_hints {
             Some(value) => crate::local_quirks::capability_override_from_value(value)?,
@@ -878,16 +877,28 @@ fn is_color_preference_quirk(quirk: &rhythm_devices::DeviceQuirk) -> bool {
 fn curated_device_quirks(
     state: &SharedState,
     device_id: &str,
-) -> Option<Vec<rhythm_devices::DeviceQuirk>> {
-    let (node_id, _) = crate::lifecycle::parse_device_id(device_id)?;
-    let hub_data = get_hub_data(state).ok()?;
-    let device = hub_data.transport.get()?.probe_light(node_id).ok()?;
+) -> Result<Vec<rhythm_devices::DeviceQuirk>> {
+    let (node_id, _) = crate::lifecycle::parse_device_id(device_id)
+        .with_context(|| format!("Invalid Matter device ID: {}", device_id))?;
+    let hub_data = get_hub_data(state)?;
+    let transport = hub_data
+        .transport
+        .get()
+        .context("Matter transport not initialized")?;
+    let device = transport.probe_light(node_id).with_context(|| {
+        format!(
+            "probing Matter device {} before applying local quirks",
+            node_id
+        )
+    })?;
     let mut caps = crate::commissioning::build_device_capabilities(&device);
     let mut quirks = crate::commissioning::build_device_quirks(&device);
-    if let Ok(cloud_profiles) = hub_data.cloud_profiles.lock() {
-        cloud_profiles.apply_to_device(&device, &mut caps, &mut quirks);
-    }
-    Some(quirks)
+    let cloud_profiles = hub_data
+        .cloud_profiles
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Matter cloud profile lock"))?;
+    cloud_profiles.apply_to_device(&device, &mut caps, &mut quirks);
+    Ok(quirks)
 }
 
 fn get_hub_data(state: &SharedState) -> Result<Arc<MatterHubData>> {
@@ -2297,5 +2308,39 @@ mod tests {
             result["applied_quirks"],
             crate::local_quirks::quirks_to_value(&expected)
         );
+    }
+
+    #[test]
+    fn save_bulb_test_report_does_not_apply_quirks_when_profile_probe_fails() {
+        let transport = Arc::new(SpyTransport::new());
+        let (state, hub_data, _data_dir) = test_state_with_transport(transport);
+
+        let error = save_bulb_test_report(
+            &state,
+            &json!({
+                "device_id": "matter-42",
+                "report_id": "Unverified stale HS",
+                "schema_version": 2,
+                "inferred_quirks": ["needs_hue_saturation_not_ct"],
+                "recommended_control_strategy": {
+                    "color_command": "hue_saturation"
+                }
+            }),
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("probing Matter device 42 before applying local quirks"));
+        assert!(hub_data
+            .device_quirks
+            .lock()
+            .unwrap()
+            .get("matter-42")
+            .is_none());
+        assert!(crate::local_quirks::load_overrides_for_state(&state)
+            .quirks
+            .get("matter-42")
+            .is_none());
     }
 }
