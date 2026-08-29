@@ -23,6 +23,46 @@ void main() {
     );
   }
 
+  group('preferred Matter color command', () {
+    test('keeps adaptive whites on native CT when direct color also works', () {
+      expect(
+        preferredMatterColorCommand(
+          colorTemperatureWorked: true,
+          hueSaturationWorked: true,
+          xyWorked: false,
+        ),
+        'color_temperature',
+      );
+    });
+
+    test('falls back through HS, XY, then dimming only', () {
+      expect(
+        preferredMatterColorCommand(
+          colorTemperatureWorked: false,
+          hueSaturationWorked: true,
+          xyWorked: true,
+        ),
+        'hue_saturation',
+      );
+      expect(
+        preferredMatterColorCommand(
+          colorTemperatureWorked: false,
+          hueSaturationWorked: false,
+          xyWorked: true,
+        ),
+        'xy',
+      );
+      expect(
+        preferredMatterColorCommand(
+          colorTemperatureWorked: false,
+          hueSaturationWorked: false,
+          xyWorked: false,
+        ),
+        'onoff_or_dimming_only',
+      );
+    });
+  });
+
   testWidgets('shows a binary, state-owned 21-step plan', (tester) async {
     await pumpTester(tester);
 

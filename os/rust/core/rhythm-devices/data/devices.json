@@ -541,6 +541,20 @@
     }
   },
   {
+    "manufacturer": "MOES",
+    "model": "MOES Matter Light",
+    "name": "MOES Matter Light",
+    "light_type": "extended_color",
+    "color_modes": ["hue_saturation", "xy", "color_temperature"],
+    "min_kelvin": 2702,
+    "max_kelvin": 6535,
+    "matter": {
+      "vendor_id": 5245,
+      "product_id": 1412,
+      "quirks": [{ "other": "prefer_color_temperature" }]
+    }
+  },
+  {
     "manufacturer": "Sengled",
     "model": "W41-N15A",
     "name": "Sengled W41-N15A",

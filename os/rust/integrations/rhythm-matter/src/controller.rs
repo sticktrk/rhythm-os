@@ -1486,6 +1486,86 @@ mod tests {
     }
 
     #[test]
+    fn moes_matter_light_uses_native_color_temperature_for_adaptive_white() {
+        let (controller, spy, _) = make_controller();
+        let mut moes = profiled_color_bulb(42, "MOES", "MOES Matter Light");
+        moes.vendor_id = 5245;
+        moes.product_id = 1412;
+        moes.color_modes = vec![
+            crate::transport::MatterColorMode::HueSaturation,
+            crate::transport::MatterColorMode::Xy,
+            crate::transport::MatterColorMode::ColorTemperature,
+        ];
+        moes.min_kelvin = Some(2702);
+        moes.max_kelvin = Some(6535);
+        let caps = crate::commissioning::build_device_capabilities(&moes);
+        let quirks = crate::commissioning::build_device_quirks(&moes);
+        controller
+            .hub_data
+            .device_caps
+            .lock()
+            .unwrap()
+            .insert("matter-42".to_string(), caps);
+        controller
+            .hub_data
+            .device_quirks
+            .lock()
+            .unwrap()
+            .insert("matter-42".to_string(), quirks);
+
+        block_on(controller.turn_on_target(
+            &HubDispatchTarget::Devices {
+                native_ids: vec!["matter-42".to_string()],
+            },
+            LightingCommand::from_color(
+                20,
+                rhythm_core::Rgb::new(255, 0, 0),
+                rhythm_core::XyColor { x: 0.64, y: 0.33 },
+                None,
+            ),
+        ))
+        .unwrap();
+        block_on(controller.turn_on_target(
+            &HubDispatchTarget::Devices {
+                native_ids: vec!["matter-42".to_string()],
+            },
+            LightingCommand::new(20, 5500),
+        ))
+        .unwrap();
+
+        assert_eq!(
+            operations_for_node(&spy.operations(), 42),
+            vec![
+                RecordedOperation::SetHueSaturation {
+                    node_id: 42,
+                    endpoint: 1,
+                    hue: 0,
+                    saturation: 254,
+                    transition_ms: None,
+                },
+                RecordedOperation::SetBrightness {
+                    node_id: 42,
+                    endpoint: 1,
+                    level: clusters::brightness_to_level(20),
+                    transition_ms: None,
+                },
+                RecordedOperation::SetColorTemperature {
+                    node_id: 42,
+                    endpoint: 1,
+                    kelvin: 5500,
+                    transition_ms: None,
+                },
+                RecordedOperation::SetBrightness {
+                    node_id: 42,
+                    endpoint: 1,
+                    level: clusters::brightness_to_level(20),
+                    transition_ms: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn h6004_uses_hue_saturation_for_direct_and_adaptive_color() {
         let (controller, spy, _) = make_controller();
         let mut h6004 = profiled_color_bulb(42, "Shenzhen Qianyan Technology", "H6004");

@@ -10,6 +10,21 @@ import '../../services/matter_bulb_test_plan.dart';
 import '../../services/matter_bulb_tester_service.dart';
 import '../../widgets/solar_orbit.dart';
 
+@visibleForTesting
+String preferredMatterColorCommand({
+  required bool colorTemperatureWorked,
+  required bool hueSaturationWorked,
+  required bool xyWorked,
+}) {
+  // Native CT is the only representation that preserves adaptive-white
+  // targets exactly. Direct colors still fall back to HS or XY when CT is the
+  // saved preference, so prefer CT whenever the bulb proves that it works.
+  if (colorTemperatureWorked) return 'color_temperature';
+  if (hueSaturationWorked) return 'hue_saturation';
+  if (xyWorked) return 'xy';
+  return 'onoff_or_dimming_only';
+}
+
 class MatterBulbTesterScreen extends StatefulWidget {
   const MatterBulbTesterScreen({
     super.key,
@@ -957,19 +972,15 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
   }
 
   String _preferredColorCommand() {
-    if (_observations['hue_sat_red']?.worked == true) {
-      return 'hue_saturation';
-    }
-
-    if (_observations['xy_red']?.worked == true) return 'xy';
-
     final colorTemperatureWorked = [
       _observations['color_temperature_warm']?.worked,
       _observations['color_temperature_cool']?.worked,
     ].any((worked) => worked == true);
-    if (colorTemperatureWorked) return 'color_temperature';
-
-    return 'onoff_or_dimming_only';
+    return preferredMatterColorCommand(
+      colorTemperatureWorked: colorTemperatureWorked,
+      hueSaturationWorked: _observations['hue_sat_red']?.worked == true,
+      xyWorked: _observations['xy_red']?.worked == true,
+    );
   }
 
   String _transitionBehavior() {
