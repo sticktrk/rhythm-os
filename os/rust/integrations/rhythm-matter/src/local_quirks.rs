@@ -88,6 +88,63 @@ pub fn apply_capability_override(
     }
 }
 
+/// Applies a saved tester quirk set without allowing an older test result to
+/// contradict an explicit built-in or cloud color-command preference.
+///
+/// Tester results remain authoritative for unprofiled devices and for all
+/// non-color quirks. This lets newly curated device knowledge repair stale
+/// local HS/XY choices after an upgrade without discarding measured command
+/// spacing or other local behavior.
+pub fn apply_quirk_override(
+    curated_quirks: &[DeviceQuirk],
+    local_quirks: &[DeviceQuirk],
+) -> Vec<DeviceQuirk> {
+    let Some(curated_color_preference) = color_preference_quirk(curated_quirks) else {
+        return local_quirks.to_vec();
+    };
+
+    let mut effective_quirks = local_quirks
+        .iter()
+        .filter(|quirk| !is_color_preference_quirk(quirk))
+        .cloned()
+        .collect::<Vec<_>>();
+    effective_quirks.push(curated_color_preference);
+    effective_quirks
+}
+
+fn color_preference_quirk(quirks: &[DeviceQuirk]) -> Option<DeviceQuirk> {
+    quirks
+        .iter()
+        .find(|quirk| {
+            matches!(
+                quirk,
+                DeviceQuirk::Other(value)
+                    if value == rhythm_devices::quirks::PREFER_COLOR_TEMPERATURE_QUIRK
+            )
+        })
+        .or_else(|| {
+            quirks
+                .iter()
+                .find(|quirk| matches!(quirk, DeviceQuirk::NeedsHueSaturationNotCt))
+        })
+        .or_else(|| {
+            quirks
+                .iter()
+                .find(|quirk| matches!(quirk, DeviceQuirk::NeedsXyNotCt))
+        })
+        .cloned()
+}
+
+fn is_color_preference_quirk(quirk: &DeviceQuirk) -> bool {
+    match quirk {
+        DeviceQuirk::NeedsHueSaturationNotCt | DeviceQuirk::NeedsXyNotCt => true,
+        DeviceQuirk::Other(value) => {
+            value == rhythm_devices::quirks::PREFER_COLOR_TEMPERATURE_QUIRK
+        }
+        _ => false,
+    }
+}
+
 pub fn load_for_state(state: &SharedState) -> HashMap<String, Vec<DeviceQuirk>> {
     load_overrides_for_state(state).quirks
 }
@@ -226,6 +283,7 @@ fn now_unix_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rhythm_devices::quirks::PREFER_COLOR_TEMPERATURE_QUIRK;
     use rhythm_devices::LightType;
     use serde_json::json;
 
@@ -245,5 +303,50 @@ mod tests {
 
         assert_eq!(caps.min_brightness, Some(100));
         assert!(!caps.supports_transition);
+    }
+
+    #[test]
+    fn curated_color_preference_replaces_stale_local_preference() {
+        let effective = apply_quirk_override(
+            &[DeviceQuirk::Other(
+                PREFER_COLOR_TEMPERATURE_QUIRK.to_string(),
+            )],
+            &[
+                DeviceQuirk::NeedsHueSaturationNotCt,
+                DeviceQuirk::CommandThrottleMs(250),
+            ],
+        );
+
+        assert_eq!(
+            effective,
+            vec![
+                DeviceQuirk::CommandThrottleMs(250),
+                DeviceQuirk::Other(PREFER_COLOR_TEMPERATURE_QUIRK.to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn unprofiled_device_keeps_local_color_preference() {
+        assert_eq!(
+            apply_quirk_override(&[], &[DeviceQuirk::NeedsHueSaturationNotCt]),
+            vec![DeviceQuirk::NeedsHueSaturationNotCt]
+        );
+    }
+
+    #[test]
+    fn curated_ct_keeps_controller_priority_over_other_curated_color_quirks() {
+        assert_eq!(
+            apply_quirk_override(
+                &[
+                    DeviceQuirk::NeedsHueSaturationNotCt,
+                    DeviceQuirk::Other(PREFER_COLOR_TEMPERATURE_QUIRK.to_string()),
+                ],
+                &[DeviceQuirk::NeedsXyNotCt],
+            ),
+            vec![DeviceQuirk::Other(
+                PREFER_COLOR_TEMPERATURE_QUIRK.to_string()
+            )]
+        );
     }
 }
