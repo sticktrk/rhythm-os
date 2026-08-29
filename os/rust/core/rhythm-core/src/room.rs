@@ -1266,6 +1266,18 @@ impl RoomProfileSettings {
 
     /// Merge this node-local override on top of a parent's effective settings.
     pub fn merged_with_parent(&self, parent: &Self) -> Self {
+        // Schedule authority is one cascading choice even though the legacy
+        // room-local schedule and reusable named assignment have separate
+        // persisted fields. Any local choice must mask both parent fields;
+        // otherwise an inherited named schedule would incorrectly outrank a
+        // room's explicit custom wall-clock schedule in `schedule_mode`.
+        let (light_schedule, room_schedule) = if self.light_schedule.is_some() {
+            (self.light_schedule.clone(), self.room_schedule)
+        } else if self.room_schedule.is_some() {
+            (None, self.room_schedule)
+        } else {
+            (parent.light_schedule.clone(), parent.room_schedule)
+        };
         Self {
             profile_id: self
                 .profile_id
@@ -1288,11 +1300,8 @@ impl RoomProfileSettings {
             motion_activation_enabled: self
                 .motion_activation_enabled
                 .or(parent.motion_activation_enabled),
-            light_schedule: self
-                .light_schedule
-                .clone()
-                .or_else(|| parent.light_schedule.clone()),
-            room_schedule: self.room_schedule.or(parent.room_schedule),
+            light_schedule,
+            room_schedule,
             profile_overrides: {
                 let mut profile_overrides = parent.profile_overrides.clone();
                 profile_overrides.extend(self.profile_overrides.clone());
@@ -2917,5 +2926,71 @@ mod tests {
             settings.schedule_mode(RhythmMode::Sleep, 12.0),
             RhythmMode::Sleep
         );
+    }
+
+    #[test]
+    fn schedule_authority_cascades_and_local_custom_schedule_overrides_parent() {
+        let parent = RoomProfileSettings {
+            light_schedule: Some(LightScheduleAssignment::Named {
+                schedule_id: "indoor".into(),
+                active_mode: RhythmMode::Sleep,
+            }),
+            ..Default::default()
+        };
+        let custom = RoomScheduleConfig {
+            source: RoomScheduleSource::FollowTime,
+            wake_time: ModeTransitionTime::parse("06:00").unwrap(),
+            sleep_time: ModeTransitionTime::parse("23:00").unwrap(),
+        };
+
+        let inherited = RoomProfileSettings::default().merged_with_parent(&parent);
+        assert_eq!(inherited.light_schedule, parent.light_schedule);
+        assert_eq!(
+            inherited.schedule_mode(RhythmMode::Day, 12.0),
+            RhythmMode::Sleep
+        );
+
+        let overridden = RoomProfileSettings {
+            room_schedule: Some(custom),
+            ..Default::default()
+        }
+        .merged_with_parent(&parent);
+        assert_eq!(overridden.light_schedule, None);
+        assert_eq!(overridden.room_schedule, Some(custom));
+        assert_eq!(
+            overridden.schedule_mode(RhythmMode::Sleep, 12.0),
+            RhythmMode::Day
+        );
+    }
+
+    #[test]
+    fn local_named_or_unscheduled_authority_overrides_parent_custom_schedule() {
+        let custom = RoomScheduleConfig {
+            source: RoomScheduleSource::FollowTime,
+            wake_time: ModeTransitionTime::parse("06:00").unwrap(),
+            sleep_time: ModeTransitionTime::parse("23:00").unwrap(),
+        };
+        let parent = RoomProfileSettings {
+            room_schedule: Some(custom),
+            ..Default::default()
+        };
+
+        for assignment in [
+            LightScheduleAssignment::Named {
+                schedule_id: "outdoor".into(),
+                active_mode: RhythmMode::Sleep,
+            },
+            LightScheduleAssignment::Unscheduled {
+                active_mode: RhythmMode::Day,
+            },
+        ] {
+            let effective = RoomProfileSettings {
+                light_schedule: Some(assignment.clone()),
+                ..Default::default()
+            }
+            .merged_with_parent(&parent);
+            assert_eq!(effective.light_schedule, Some(assignment));
+            assert_eq!(effective.room_schedule, None);
+        }
     }
 }
