@@ -55,9 +55,7 @@ class RhythmDeviceRoomAssignmentResult {
       : canonicalCommitted = true,
         projectionStatus = RhythmRoomProjectionStatus.notReported;
 
-  factory RhythmDeviceRoomAssignmentResult.fromJson(
-    Map<String, dynamic> json,
-  ) {
+  factory RhythmDeviceRoomAssignmentResult.fromJson(Map<String, dynamic> json) {
     return RhythmDeviceRoomAssignmentResult(
       canonicalCommitted: json['canonical_committed'] == true,
       projectionStatus: RhythmRoomProjectionStatus.fromWire(
@@ -174,10 +172,10 @@ class RhythmServerApi {
     required String action,
   }) async {
     try {
-      final response = await _dio.put('api/nodes/action', data: {
-        'node_id': nodeId,
-        'action': action,
-      });
+      final response = await _dio.put(
+        'api/nodes/action',
+        data: {'node_id': nodeId, 'action': action},
+      );
       final data = response.data as Map<String, dynamic>?;
       final nodes =
           data?['nodes'] as List<dynamic>? ?? data?['rooms'] as List<dynamic>?;
@@ -230,9 +228,13 @@ class RhythmServerApi {
     try {
       final response = await _dio.put(
         'api/nodes/action',
-        data: _nodesBatchBody([
-          for (final a in actions) {'node_id': a.nodeId, 'action': a.action}
-        ], dispatchSpacingMs: dispatchSpacingMs, correlationId: correlationId),
+        data: _nodesBatchBody(
+          [
+            for (final a in actions) {'node_id': a.nodeId, 'action': a.action},
+          ],
+          dispatchSpacingMs: dispatchSpacingMs,
+          correlationId: correlationId,
+        ),
         options: Options(receiveTimeout: const Duration(seconds: 30)),
       );
       return _parseAndCacheDispatchResponse(response.data);
@@ -248,10 +250,14 @@ class RhythmServerApi {
     int? dispatchSpacingMs,
     String? correlationId,
   }) {
-    return nodeActionBatch([
-      for (final action in actions)
-        (nodeId: action.roomId, action: action.action),
-    ], dispatchSpacingMs: dispatchSpacingMs, correlationId: correlationId);
+    return nodeActionBatch(
+      [
+        for (final action in actions)
+          (nodeId: action.roomId, action: action.action),
+      ],
+      dispatchSpacingMs: dispatchSpacingMs,
+      correlationId: correlationId,
+    );
   }
 
   /// Dispatch actions for multiple rooms in a single request.
@@ -260,10 +266,14 @@ class RhythmServerApi {
     int? dispatchSpacingMs,
     String? correlationId,
   }) {
-    return nodeActionBatchResult([
-      for (final action in actions)
-        (nodeId: action.roomId, action: action.action),
-    ], dispatchSpacingMs: dispatchSpacingMs, correlationId: correlationId);
+    return nodeActionBatchResult(
+      [
+        for (final action in actions)
+          (nodeId: action.roomId, action: action.action),
+      ],
+      dispatchSpacingMs: dispatchSpacingMs,
+      correlationId: correlationId,
+    );
   }
 
   /// Apply a curve brightness modifier to a node.
@@ -274,10 +284,7 @@ class RhythmServerApi {
     required String nodeId,
     required int brightness,
   }) {
-    return _putNodeCurveModifier({
-      'node_id': nodeId,
-      'brightness': brightness,
-    });
+    return _putNodeCurveModifier({'node_id': nodeId, 'brightness': brightness});
   }
 
   /// Apply a curve brightness modifier to a room.
@@ -333,10 +340,7 @@ class RhythmServerApi {
     required String nodeId,
     required int brightness,
   }) {
-    return _putNodeBrightness({
-      'node_id': nodeId,
-      'brightness': brightness,
-    });
+    return _putNodeBrightness({'node_id': nodeId, 'brightness': brightness});
   }
 
   /// Set room brightness via the node-first server contract.
@@ -466,16 +470,22 @@ class RhythmServerApi {
     String? correlationId,
   }) async {
     if (items.isEmpty) return const RhythmDispatchResult();
-    return _putNodeCurveModifierBatch([
-      for (final i in items) {'node_id': i.nodeId, 'brightness': i.brightness}
-    ], dispatchSpacingMs: dispatchSpacingMs, correlationId: correlationId);
+    return _putNodeCurveModifierBatch(
+      [
+        for (final i in items)
+          {'node_id': i.nodeId, 'brightness': i.brightness},
+      ],
+      dispatchSpacingMs: dispatchSpacingMs,
+      correlationId: correlationId,
+    );
   }
 
   /// Apply color-temperature curve modifiers to multiple nodes in a single request.
   Future<List<RhythmRoomState>> nodeCurveColorTemperatureBatch(
-      List<({String nodeId, int kelvin})> items,
-      {int? dispatchSpacingMs,
-      bool preserveBrightness = true}) async {
+    List<({String nodeId, int kelvin})> items, {
+    int? dispatchSpacingMs,
+    bool preserveBrightness = true,
+  }) async {
     return (await nodeCurveColorTemperatureBatchResult(
       items,
       dispatchSpacingMs: dispatchSpacingMs,
@@ -486,9 +496,10 @@ class RhythmServerApi {
 
   /// Apply color-temperature curve modifiers to multiple nodes in a single request.
   Future<RhythmDispatchResult> nodeCurveColorTemperatureBatchResult(
-      List<({String nodeId, int kelvin})> items,
-      {int? dispatchSpacingMs,
-      bool preserveBrightness = true}) async {
+    List<({String nodeId, int kelvin})> items, {
+    int? dispatchSpacingMs,
+    bool preserveBrightness = true,
+  }) async {
     if (items.isEmpty) return const RhythmDispatchResult();
     return _putNodeCurveModifierBatch([
       for (final i in items)
@@ -496,14 +507,15 @@ class RhythmServerApi {
           'node_id': i.nodeId,
           'color_temperature': i.kelvin,
           'preserve_brightness': preserveBrightness,
-        }
+        },
     ], dispatchSpacingMs: dispatchSpacingMs);
   }
 
   /// Apply brightness curve modifiers to multiple rooms in a single request.
   Future<List<RhythmRoomState>> roomCurveBrightnessBatch(
-      List<({String roomId, int brightness})> items,
-      {int? dispatchSpacingMs}) {
+    List<({String roomId, int brightness})> items, {
+    int? dispatchSpacingMs,
+  }) {
     return nodeCurveBrightnessBatch([
       for (final item in items)
         (nodeId: item.roomId, brightness: item.brightness),
@@ -512,8 +524,9 @@ class RhythmServerApi {
 
   /// Apply brightness curve modifiers to multiple rooms in a single request.
   Future<RhythmDispatchResult> roomCurveBrightnessBatchResult(
-      List<({String roomId, int brightness})> items,
-      {int? dispatchSpacingMs}) {
+    List<({String roomId, int brightness})> items, {
+    int? dispatchSpacingMs,
+  }) {
     return nodeCurveBrightnessBatchResult([
       for (final item in items)
         (nodeId: item.roomId, brightness: item.brightness),
@@ -522,32 +535,35 @@ class RhythmServerApi {
 
   /// Apply color-temperature curve modifiers to multiple rooms in a single request.
   Future<List<RhythmRoomState>> roomCurveColorTemperatureBatch(
-      List<({String roomId, int kelvin})> items,
-      {int? dispatchSpacingMs,
-      bool preserveBrightness = true}) {
-    return nodeCurveColorTemperatureBatch([
-      for (final item in items) (nodeId: item.roomId, kelvin: item.kelvin),
-    ],
-        dispatchSpacingMs: dispatchSpacingMs,
-        preserveBrightness: preserveBrightness);
+    List<({String roomId, int kelvin})> items, {
+    int? dispatchSpacingMs,
+    bool preserveBrightness = true,
+  }) {
+    return nodeCurveColorTemperatureBatch(
+      [for (final item in items) (nodeId: item.roomId, kelvin: item.kelvin)],
+      dispatchSpacingMs: dispatchSpacingMs,
+      preserveBrightness: preserveBrightness,
+    );
   }
 
   /// Apply color-temperature curve modifiers to multiple rooms in a single request.
   Future<RhythmDispatchResult> roomCurveColorTemperatureBatchResult(
-      List<({String roomId, int kelvin})> items,
-      {int? dispatchSpacingMs,
-      bool preserveBrightness = true}) {
-    return nodeCurveColorTemperatureBatchResult([
-      for (final item in items) (nodeId: item.roomId, kelvin: item.kelvin),
-    ],
-        dispatchSpacingMs: dispatchSpacingMs,
-        preserveBrightness: preserveBrightness);
+    List<({String roomId, int kelvin})> items, {
+    int? dispatchSpacingMs,
+    bool preserveBrightness = true,
+  }) {
+    return nodeCurveColorTemperatureBatchResult(
+      [for (final item in items) (nodeId: item.roomId, kelvin: item.kelvin)],
+      dispatchSpacingMs: dispatchSpacingMs,
+      preserveBrightness: preserveBrightness,
+    );
   }
 
   /// Set brightness for multiple nodes in a single request.
   Future<List<RhythmRoomState>> nodeBrightnessBatch(
-      List<({String nodeId, int brightness})> items,
-      {int? dispatchSpacingMs}) async {
+    List<({String nodeId, int brightness})> items, {
+    int? dispatchSpacingMs,
+  }) async {
     return (await nodeBrightnessBatchResult(
       items,
       dispatchSpacingMs: dispatchSpacingMs,
@@ -557,18 +573,20 @@ class RhythmServerApi {
 
   /// Set brightness for multiple nodes in a single request.
   Future<RhythmDispatchResult> nodeBrightnessBatchResult(
-      List<({String nodeId, int brightness})> items,
-      {int? dispatchSpacingMs}) async {
+    List<({String nodeId, int brightness})> items, {
+    int? dispatchSpacingMs,
+  }) async {
     if (items.isEmpty) return const RhythmDispatchResult();
     return _putNodeBrightnessBatch([
-      for (final i in items) {'node_id': i.nodeId, 'brightness': i.brightness}
+      for (final i in items) {'node_id': i.nodeId, 'brightness': i.brightness},
     ], dispatchSpacingMs: dispatchSpacingMs);
   }
 
   /// Set brightness for multiple rooms in a single request.
   Future<List<RhythmRoomState>> roomBrightnessBatch(
-      List<({String roomId, int brightness})> items,
-      {int? dispatchSpacingMs}) {
+    List<({String roomId, int brightness})> items, {
+    int? dispatchSpacingMs,
+  }) {
     return nodeBrightnessBatch([
       for (final item in items)
         (nodeId: item.roomId, brightness: item.brightness),
@@ -577,8 +595,9 @@ class RhythmServerApi {
 
   /// Set brightness for multiple rooms in a single request.
   Future<RhythmDispatchResult> roomBrightnessBatchResult(
-      List<({String roomId, int brightness})> items,
-      {int? dispatchSpacingMs}) {
+    List<({String roomId, int brightness})> items, {
+    int? dispatchSpacingMs,
+  }) {
     return roomCurveBrightnessBatchResult(
       items,
       dispatchSpacingMs: dispatchSpacingMs,
@@ -590,10 +609,7 @@ class RhythmServerApi {
     required String nodeId,
     required double timeOffset,
   }) async {
-    await nodeOffsetPreviewResult(
-      timeOffset: timeOffset,
-      nodes: [nodeId],
-    );
+    await nodeOffsetPreviewResult(timeOffset: timeOffset, nodes: [nodeId]);
   }
 
   /// Set the time offset for a single room via the node-first contract.
@@ -606,8 +622,9 @@ class RhythmServerApi {
 
   /// Set time offset for multiple nodes in a single request.
   Future<List<RhythmRoomState>> nodeOffsetBatch(
-      List<({String nodeId, double timeOffset})> items,
-      {int? dispatchSpacingMs}) async {
+    List<({String nodeId, double timeOffset})> items, {
+    int? dispatchSpacingMs,
+  }) async {
     return (await nodeOffsetBatchResult(
       items,
       dispatchSpacingMs: dispatchSpacingMs,
@@ -617,8 +634,9 @@ class RhythmServerApi {
 
   /// Set time offset for multiple nodes in a single request.
   Future<RhythmDispatchResult> nodeOffsetBatchResult(
-      List<({String nodeId, double timeOffset})> items,
-      {int? dispatchSpacingMs}) async {
+    List<({String nodeId, double timeOffset})> items, {
+    int? dispatchSpacingMs,
+  }) async {
     if (items.isEmpty) return const RhythmDispatchResult();
     final timeOffset = items.first.timeOffset;
     final hasMixedOffsets = items.any((i) => i.timeOffset != timeOffset);
@@ -665,8 +683,9 @@ class RhythmServerApi {
 
   /// Set time offset for multiple rooms in a single request.
   Future<List<RhythmRoomState>> roomOffsetBatch(
-      List<({String roomId, double timeOffset})> items,
-      {int? dispatchSpacingMs}) {
+    List<({String roomId, double timeOffset})> items, {
+    int? dispatchSpacingMs,
+  }) {
     return nodeOffsetBatch([
       for (final item in items)
         (nodeId: item.roomId, timeOffset: item.timeOffset),
@@ -675,8 +694,9 @@ class RhythmServerApi {
 
   /// Set time offset for multiple rooms in a single request.
   Future<RhythmDispatchResult> roomOffsetBatchResult(
-      List<({String roomId, double timeOffset})> items,
-      {int? dispatchSpacingMs}) {
+    List<({String roomId, double timeOffset})> items, {
+    int? dispatchSpacingMs,
+  }) {
     return nodeOffsetBatchResult([
       for (final item in items)
         (nodeId: item.roomId, timeOffset: item.timeOffset),
@@ -697,17 +717,21 @@ class RhythmServerApi {
         (softOff == null
             ? null
             : (softOff ? RoomModeState.standby : RoomModeState.active));
-    final normalizedProfileSettings =
-        _normalizeProfileSettings(profileSettings);
-    await _safePut('api/nodes/preferences', data: {
-      'node_id': nodeId,
-      if (rhythmEnabled != null) 'rhythm_enabled': rhythmEnabled,
-      if (disabled != null) 'disabled': disabled,
-      if (standbyEnabled != null) 'standby_enabled': standbyEnabled,
-      if (effectiveState != null) 'state': effectiveState.wireValue,
-      if (normalizedProfileSettings != null)
-        'profile_settings': normalizedProfileSettings,
-    });
+    final normalizedProfileSettings = _normalizeProfileSettings(
+      profileSettings,
+    );
+    await _safePut(
+      'api/nodes/preferences',
+      data: {
+        'node_id': nodeId,
+        if (rhythmEnabled != null) 'rhythm_enabled': rhythmEnabled,
+        if (disabled != null) 'disabled': disabled,
+        if (standbyEnabled != null) 'standby_enabled': standbyEnabled,
+        if (effectiveState != null) 'state': effectiveState.wireValue,
+        if (normalizedProfileSettings != null)
+          'profile_settings': normalizedProfileSettings,
+      },
+    );
   }
 
   /// Set motion admission and return the authoritative post-apply node state.
@@ -790,12 +814,15 @@ class RhythmServerApi {
     String? correlationId,
   }) async {
     try {
-      await _dio.put('api/nodes/profile-overrides', data: {
-        'node_id': nodeId,
-        'profile_overrides': _normalizeProfileOverrides(profileOverrides),
-        if (replace) 'replace': true,
-        if (correlationId != null) 'correlation_id': correlationId,
-      });
+      await _dio.put(
+        'api/nodes/profile-overrides',
+        data: {
+          'node_id': nodeId,
+          'profile_overrides': _normalizeProfileOverrides(profileOverrides),
+          if (replace) 'replace': true,
+          if (correlationId != null) 'correlation_id': correlationId,
+        },
+      );
       return true;
     } catch (e) {
       _log.warning(
@@ -847,9 +874,9 @@ class RhythmServerApi {
     try {
       final response = await _dio.put(
         'api/nodes/preferences',
-        data: _nodesBatchBody(
-            [for (final item in items) _normalizeNodePreferencesItem(item)],
-            dispatchSpacingMs: dispatchSpacingMs),
+        data: _nodesBatchBody([
+          for (final item in items) _normalizeNodePreferencesItem(item),
+        ], dispatchSpacingMs: dispatchSpacingMs),
         options: Options(receiveTimeout: const Duration(seconds: 30)),
       );
       return _parseAndCacheDispatchResponse(response.data);
@@ -876,11 +903,7 @@ class RhythmServerApi {
     int? dispatchSpacingMs,
   }) async {
     return nodePreferencesBatchSetResult([
-      for (final item in items)
-        {
-          ...item,
-          'node_id': item['room_id'],
-        },
+      for (final item in items) {...item, 'node_id': item['room_id']},
     ], dispatchSpacingMs: dispatchSpacingMs);
   }
 
@@ -961,8 +984,9 @@ class RhythmServerApi {
   /// Delete a scene and return the authoritative scene list from the server.
   Future<List<RhythmSceneDefinition>> deleteScene(String id) async {
     try {
-      final response =
-          await _dio.delete('api/scenes/${Uri.encodeComponent(id)}');
+      final response = await _dio.delete(
+        'api/scenes/${Uri.encodeComponent(id)}',
+      );
       return _parseScenesResponse(response.data);
     } catch (e) {
       _log.warning('deleteScene failed', e);
@@ -1014,15 +1038,14 @@ class RhythmServerApi {
     int? durationMs,
   }) {
     return _postSceneAction(
-      'api/scenes/preview',
-      {
-        'scene': scene.toJson(),
-        'target_id': targetId,
-        if (transitionMs != null) 'transition_ms': transitionMs,
-        if (durationMs != null) 'duration_ms': durationMs,
-      },
-      logName: 'previewDraftScene',
-    );
+        'api/scenes/preview',
+        {
+          'scene': scene.toJson(),
+          'target_id': targetId,
+          if (transitionMs != null) 'transition_ms': transitionMs,
+          if (durationMs != null) 'duration_ms': durationMs,
+        },
+        logName: 'previewDraftScene');
   }
 
   /// Commit a currently active scene preview.
@@ -1063,9 +1086,9 @@ class RhythmServerApi {
     return nodeMoodSceneSet(nodeId: roomId, sceneId: sceneId);
   }
 
-// =========================================================================
-// Config
-// =========================================================================
+  // =========================================================================
+  // Config
+  // =========================================================================
 
   /// Fetch a stored profile config by ID.
   Future<RhythmCurveConfig?> getConfig({required String id}) async {
@@ -1123,10 +1146,7 @@ class RhythmServerApi {
     try {
       final response = await _dio.get(
         'api/curve/now',
-        queryParameters: {
-          'id': id,
-          if (hour != null) 'hour': hour,
-        },
+        queryParameters: {'id': id, if (hour != null) 'hour': hour},
       );
       return RhythmTimeInfo.fromJson(response.data as Map<String, dynamic>);
     } catch (e) {
@@ -1151,9 +1171,7 @@ class RhythmServerApi {
     try {
       final response = await _dio.post(
         'api/config/absorb-offset',
-        queryParameters: {
-          if (id != null) 'id': id,
-        },
+        queryParameters: {if (id != null) 'id': id},
         data: {'offset_minutes': offsetMinutes},
       );
       final data = response.data;
@@ -1181,9 +1199,7 @@ class RhythmServerApi {
     try {
       final response = await _dio.post(
         'api/config/reset',
-        queryParameters: {
-          if (id != null) 'id': id,
-        },
+        queryParameters: {if (id != null) 'id': id},
       );
       final data = response.data;
       if (data is Map<String, dynamic>) {
@@ -1215,10 +1231,7 @@ class RhythmServerApi {
     try {
       await _dio.put(
         'api/config',
-        queryParameters: {
-          'id': profileId,
-          if (apply) 'apply': 'true',
-        },
+        queryParameters: {'id': profileId, if (apply) 'apply': 'true'},
         data: config.toJson(),
       );
       return true;
@@ -1238,12 +1251,15 @@ class RhythmServerApi {
     double? utcOffset,
     String? timezoneName,
   }) async {
-    await _safePut('api/location', data: {
-      'lat': lat,
-      'lon': lon,
-      if (utcOffset != null) 'utc_offset': utcOffset,
-      if (timezoneName != null) 'timezone_name': timezoneName,
-    });
+    await _safePut(
+      'api/location',
+      data: {
+        'lat': lat,
+        'lon': lon,
+        if (utcOffset != null) 'utc_offset': utcOffset,
+        if (timezoneName != null) 'timezone_name': timezoneName,
+      },
+    );
   }
 
   // =========================================================================
@@ -1257,11 +1273,14 @@ class RhythmServerApi {
     required Map<String, dynamic> credentials,
   }) async {
     try {
-      final response = await _dio.put('api/hub/credentials', data: {
-        'hub_type': hubType,
-        'address': address,
-        'credentials': credentials,
-      });
+      final response = await _dio.put(
+        'api/hub/credentials',
+        data: {
+          'hub_type': hubType,
+          'address': address,
+          'credentials': credentials,
+        },
+      );
       final data = response.data;
       if (data is Map) {
         return data['hub_connected'] == true;
@@ -1292,23 +1311,26 @@ class RhythmServerApi {
     bool? topologySyncEnabled,
   }) async {
     try {
-      final response = await _dio.put('api/hue/authority', data: {
-        'address': bridge.address,
-        'revision': bridge.revision,
-        'correlation_id': correlationId,
-        if (topologySyncEnabled != null)
-          'topology_sync_enabled': topologySyncEnabled,
-        'rooms': [
-          for (final room in bridge.rooms)
-            {
-              'room_id': room.roomId,
-              'owner': switch (owners[room.roomId] ?? room.owner) {
-                RhythmHueRoomAuthorityOwner.unreviewed => 'hue',
-                final owner => owner.wireValue,
+      final response = await _dio.put(
+        'api/hue/authority',
+        data: {
+          'address': bridge.address,
+          'revision': bridge.revision,
+          'correlation_id': correlationId,
+          if (topologySyncEnabled != null)
+            'topology_sync_enabled': topologySyncEnabled,
+          'rooms': [
+            for (final room in bridge.rooms)
+              {
+                'room_id': room.roomId,
+                'owner': switch (owners[room.roomId] ?? room.owner) {
+                  RhythmHueRoomAuthorityOwner.unreviewed => 'hue',
+                  final owner => owner.wireValue,
+                },
               },
-            },
-        ],
-      });
+          ],
+        },
+      );
       final data = jsonMap(response.data);
       return data == null ? null : RhythmHueAuthority.fromJson(data);
     } catch (e) {
@@ -1332,10 +1354,10 @@ class RhythmServerApi {
     required String address,
   }) async {
     try {
-      await _dio.delete('api/hub/credentials', queryParameters: {
-        'hub_type': hubType,
-        'address': address,
-      });
+      await _dio.delete(
+        'api/hub/credentials',
+        queryParameters: {'hub_type': hubType, 'address': address},
+      );
     } catch (e) {
       _log.warning('hubDisconnectOne failed', e);
     }
@@ -1347,10 +1369,10 @@ class RhythmServerApi {
     required String address,
   }) async {
     try {
-      final response = await _dio.post('api/hub/retry', data: {
-        'hub_type': hubType,
-        'address': address,
-      });
+      final response = await _dio.post(
+        'api/hub/retry',
+        data: {'hub_type': hubType, 'address': address},
+      );
       return response.statusCode == null ||
           (response.statusCode! >= 200 && response.statusCode! < 300);
     } catch (e) {
@@ -1380,9 +1402,9 @@ class RhythmServerApi {
     );
   }
 
-// =========================================================================
-// Settings
-// =========================================================================
+  // =========================================================================
+  // Settings
+  // =========================================================================
 
   /// Fetch app-level settings from the server.
   Future<RhythmSettings?> getSettings() async {
@@ -1399,9 +1421,7 @@ class RhythmServerApi {
   Future<RhythmLightBreaker?> getLightBreaker() async {
     try {
       final response = await _dio.get('api/light-breaker');
-      return RhythmLightBreaker.fromJson(
-        response.data as Map<String, dynamic>,
-      );
+      return RhythmLightBreaker.fromJson(response.data as Map<String, dynamic>);
     } catch (e) {
       _log.warning('getLightBreaker failed', e);
     }
@@ -1435,9 +1455,7 @@ class RhythmServerApi {
   Future<RhythmModeResource?> getMode() async {
     try {
       final response = await _dio.get('api/mode');
-      return RhythmModeResource.fromJson(
-        response.data as Map<String, dynamic>,
-      );
+      return RhythmModeResource.fromJson(response.data as Map<String, dynamic>);
     } catch (e) {
       _log.warning('getMode failed', e);
     }
@@ -1503,10 +1521,7 @@ class RhythmServerApi {
   /// setting and this client no longer sends it.
   ///
   /// Returns `true` when the server accepts the update and `false` on failure.
-  Future<bool> settingsSet({
-    bool? powerSave,
-    bool? autoUpdate,
-  }) async {
+  Future<bool> settingsSet({bool? powerSave, bool? autoUpdate}) async {
     final data = <String, dynamic>{
       if (autoUpdate != null) 'auto_update': autoUpdate,
     };
@@ -1620,8 +1635,9 @@ class RhythmServerApi {
     final encodedId = Uri.encodeComponent(nativeDeviceId);
     final response = await _dio.get(
       'api/matter/setup-code/$encodedId',
-      options:
-          Options(validateStatus: (status) => status == 200 || status == 404),
+      options: Options(
+        validateStatus: (status) => status == 200 || status == 404,
+      ),
     );
     if (response.statusCode == 404) return null;
     if (response.statusCode != 200) {
@@ -1706,10 +1722,10 @@ class RhythmServerApi {
     required String test,
   }) async {
     try {
-      final response = await _dio.post('api/matter/bulb-test/run', data: {
-        'device_id': deviceId,
-        'test': test,
-      });
+      final response = await _dio.post(
+        'api/matter/bulb-test/run',
+        data: {'device_id': deviceId, 'test': test},
+      );
       return response.data as Map<String, dynamic>?;
     } catch (e) {
       _log.warning('runMatterBulbTest failed', e);
@@ -1726,10 +1742,7 @@ class RhythmServerApi {
     try {
       final response = await _dio.post(
         'api/matter/bulb-test/report',
-        data: {
-          ...report,
-          'apply_local': applyLocal,
-        },
+        data: {...report, 'apply_local': applyLocal},
       );
       return response.data as Map<String, dynamic>?;
     } catch (e) {
@@ -1780,9 +1793,10 @@ class RhythmServerApi {
   /// Resolve a triage entry by merging with an existing canonical device.
   Future<bool> resolveTriageMerge(String entryId, String canonicalId) async {
     try {
-      await _dio.put('api/triage/$entryId/merge', data: {
-        'canonical_id': canonicalId,
-      });
+      await _dio.put(
+        'api/triage/$entryId/merge',
+        data: {'canonical_id': canonicalId},
+      );
       return true;
     } catch (e) {
       _log.warning('resolveTriageMerge failed', e);
@@ -1818,9 +1832,10 @@ class RhythmServerApi {
       final response = await _dio.get('api/transitions');
       final data = response.data as Map<String, dynamic>;
       return ((data['transitions'] as List<dynamic>?) ?? const <dynamic>[])
-          .map((e) => RhythmModeTransitionConfig.fromJson(
-                e as Map<String, dynamic>,
-              ))
+          .map(
+            (e) =>
+                RhythmModeTransitionConfig.fromJson(e as Map<String, dynamic>),
+          )
           .toList();
     } catch (e) {
       _log.warning('getTransitions failed', e);
@@ -1830,12 +1845,16 @@ class RhythmServerApi {
 
   /// Push transition configs to the server.
   Future<bool> setTransitions(
-      List<RhythmModeTransitionConfig> transitions) async {
+    List<RhythmModeTransitionConfig> transitions,
+  ) async {
     try {
-      await _dio.put('api/transitions', data: {
-        'transitions':
-            transitions.map((transition) => transition.toJson()).toList(),
-      });
+      await _dio.put(
+        'api/transitions',
+        data: {
+          'transitions':
+              transitions.map((transition) => transition.toJson()).toList(),
+        },
+      );
       return true;
     } catch (e) {
       _log.warning('setTransitions failed', e);
@@ -1857,6 +1876,81 @@ class RhythmServerApi {
     return false;
   }
 
+  /// Fetch every reusable named light schedule.
+  Future<List<RhythmLightScheduleConfig>> getLightSchedules() async {
+    final response = await _dio.get('api/light-schedules');
+    final data = response.data as Map<String, dynamic>;
+    return ((data['schedules'] as List<dynamic>?) ?? const [])
+        .whereType<Map>()
+        .map(
+          (value) =>
+              RhythmLightScheduleConfig.fromJson(value.cast<String, dynamic>()),
+        )
+        .toList(growable: false);
+  }
+
+  /// Atomically replace the reusable schedule registry.
+  Future<List<RhythmLightScheduleConfig>> setLightSchedules(
+    List<RhythmLightScheduleConfig> schedules,
+  ) async {
+    final response = await _dio.put(
+      'api/light-schedules',
+      data: {
+        'schedules': schedules.map((schedule) => schedule.toJson()).toList(),
+      },
+    );
+    final data = response.data as Map<String, dynamic>;
+    return ((data['schedules'] as List<dynamic>?) ?? const [])
+        .whereType<Map>()
+        .map(
+          (value) =>
+              RhythmLightScheduleConfig.fromJson(value.cast<String, dynamic>()),
+        )
+        .toList(growable: false);
+  }
+
+  /// Assign a named schedule, or explicitly opt out with a null [scheduleId].
+  Future<RhythmRoomState?> setLightScheduleAssignment({
+    required String nodeId,
+    required String? scheduleId,
+  }) async {
+    final response = await _dio.put(
+      'api/light-schedules/assignment',
+      data: {'node_id': nodeId, 'schedule_id': scheduleId},
+    );
+    return _parseAndCacheSingleState(response.data);
+  }
+
+  /// Restore legacy appliance-wide schedule authority for this root.
+  Future<RhythmRoomState?> clearLightScheduleAssignment({
+    required String nodeId,
+  }) async {
+    final response = await _dio.put(
+      'api/light-schedules/assignment',
+      data: {'node_id': nodeId, 'legacy': true},
+    );
+    return _parseAndCacheSingleState(response.data);
+  }
+
+  /// Execute one named schedule transition (used by manual tools and inputs).
+  Future<bool> triggerLightScheduleTransition({
+    required String scheduleId,
+    required String transitionId,
+  }) async {
+    try {
+      final encodedScheduleId = Uri.encodeComponent(scheduleId);
+      final encodedTransitionId = Uri.encodeComponent(transitionId);
+      await _dio.post(
+        'api/light-schedules/$encodedScheduleId/transitions/$encodedTransitionId/trigger',
+        data: const <String, dynamic>{},
+      );
+      return true;
+    } catch (error) {
+      _log.warning('triggerLightScheduleTransition failed', error);
+      return false;
+    }
+  }
+
   /// Fetch persisted physical input bindings.
   Future<List<RhythmInputBinding>> getInputBindings() async {
     try {
@@ -1876,12 +1970,15 @@ class RhythmServerApi {
     bool enabled = true,
   }) async {
     try {
-      final response = await _dio.post('api/input-bindings', data: {
-        'preset': preset.wireValue,
-        'source_node_id': sourceNodeId,
-        if (buttonAction != null) 'button_action': buttonAction.wireValue,
-        'enabled': enabled,
-      });
+      final response = await _dio.post(
+        'api/input-bindings',
+        data: {
+          'preset': preset.wireValue,
+          'source_node_id': sourceNodeId,
+          if (buttonAction != null) 'button_action': buttonAction.wireValue,
+          'enabled': enabled,
+        },
+      );
       return _parseInputBindingsResponse(response.data);
     } catch (e) {
       _log.warning('createPresetInputBinding failed', e);
@@ -2007,9 +2104,10 @@ class RhythmServerApi {
   /// Approve a room binding (merge two rooms from different hubs).
   Future<bool> resolveTriageBind(String entryId, {String? targetRoomId}) async {
     try {
-      await _dio.put('api/triage/$entryId/bind', data: {
-        if (targetRoomId != null) 'target_room_id': targetRoomId,
-      });
+      await _dio.put(
+        'api/triage/$entryId/bind',
+        data: {if (targetRoomId != null) 'target_room_id': targetRoomId},
+      );
       return true;
     } catch (e) {
       _log.warning('resolveTriageBind failed', e);
@@ -2020,9 +2118,7 @@ class RhythmServerApi {
   /// Assign an unassigned-device triage entry to a room.
   Future<bool> resolveTriageRoom(String entryId, String roomId) async {
     try {
-      await _dio.put('api/triage/$entryId/room', data: {
-        'room_id': roomId,
-      });
+      await _dio.put('api/triage/$entryId/room', data: {'room_id': roomId});
       return true;
     } catch (e) {
       _log.warning('resolveTriageRoom failed', e);
@@ -2048,9 +2144,10 @@ class RhythmServerApi {
   /// Merge two topology rooms.
   Future<bool> topologyMergeRooms(String targetId, String sourceId) async {
     try {
-      await _dio.put('api/topology/rooms/$targetId/merge', data: {
-        'source_id': sourceId,
-      });
+      await _dio.put(
+        'api/topology/rooms/$targetId/merge',
+        data: {'source_id': sourceId},
+      );
       return true;
     } catch (e) {
       _log.warning('topologyMergeRooms failed', e);
@@ -2065,10 +2162,10 @@ class RhythmServerApi {
     required String toRoomId,
   }) async {
     try {
-      await _dio.put('api/topology/rooms/$toRoomId/devices/move', data: {
-        'device_id': deviceId,
-        'from_room': fromRoomId,
-      });
+      await _dio.put(
+        'api/topology/rooms/$toRoomId/devices/move',
+        data: {'device_id': deviceId, 'from_room': fromRoomId},
+      );
       return true;
     } catch (e) {
       _log.warning('topologyMoveDevice failed', e);
@@ -2260,14 +2357,13 @@ class RhythmServerApi {
   /// Reconcile a pairing request after its POST response or SSE terminal
   /// event was lost. A valid unknown ID is returned as [notFound], not `null`;
   /// `null` is reserved for an unavailable/malformed status response.
-  Future<RhythmPairingResultStatus?> getPairingResult(
-    String sessionId,
-  ) async {
+  Future<RhythmPairingResultStatus?> getPairingResult(String sessionId) async {
     try {
       final response = await _dio.get(
         'api/devices/pair/${Uri.encodeComponent(sessionId)}',
-        options:
-            Options(validateStatus: (status) => status == 200 || status == 404),
+        options: Options(
+          validateStatus: (status) => status == 200 || status == 404,
+        ),
       );
       final data = response.data;
       if (data is Map) {
@@ -2437,8 +2533,10 @@ class RhythmServerApi {
   /// Create a new topology room. Returns the created room JSON.
   Future<Map<String, dynamic>?> createTopologyRoom(String name) async {
     try {
-      final response =
-          await _dio.post('api/topology/rooms', data: {'name': name});
+      final response = await _dio.post(
+        'api/topology/rooms',
+        data: {'name': name},
+      );
       return response.data as Map<String, dynamic>?;
     } catch (e) {
       _log.warning('createTopologyRoom failed', e);
@@ -2492,9 +2590,7 @@ class RhythmServerApi {
     }
   }
 
-  Future<RhythmRoomState?> _putNodeBrightness(
-    Map<String, dynamic> data,
-  ) async {
+  Future<RhythmRoomState?> _putNodeBrightness(Map<String, dynamic> data) async {
     try {
       final response = await _dio.put(
         'api/nodes/brightness',
@@ -2526,9 +2622,7 @@ class RhythmServerApi {
     return const RhythmDispatchResult();
   }
 
-  Future<RhythmRoomState?> _putNodeColor(
-    Map<String, dynamic> data,
-  ) async {
+  Future<RhythmRoomState?> _putNodeColor(Map<String, dynamic> data) async {
     try {
       final response = await _dio.put(
         'api/nodes/color',

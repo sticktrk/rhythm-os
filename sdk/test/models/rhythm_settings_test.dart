@@ -194,6 +194,30 @@ void main() {
     });
   });
 
+  test('named light schedule round-trips independent transition rules', () {
+    final schedule = RhythmLightScheduleConfig.fromJson({
+      'id': 'outdoor',
+      'name': 'Outdoor lights',
+      'enabled': true,
+      'active_mode': 'sleep',
+      'transitions': [
+        {
+          'id': 'outdoor_wake',
+          'from_mode': 'sleep',
+          'to_mode': 'day',
+          'trigger': {'kind': 'scheduled', 'time': '18:00'},
+          'duration_ms': {'mode': 'fixed', 'value': 500},
+          'preserve_hard_off': true,
+        },
+      ],
+    });
+
+    expect(schedule.id, 'outdoor');
+    expect(schedule.activeMode, RhythmMode.sleep);
+    expect(schedule.transitions.single.trigger.time, '18:00');
+    expect(schedule.toJson()['transitions'], hasLength(1));
+  });
+
   group('RhythmModeResource', () {
     test('parses the split mode payload', () {
       final mode = RhythmModeResource.fromJson({

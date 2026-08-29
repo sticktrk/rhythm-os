@@ -180,6 +180,44 @@ class RhythmHubRoomBinding {
       );
 }
 
+class RhythmLightScheduleAssignment {
+  final String kind;
+  final String? scheduleId;
+  final RhythmMode? activeMode;
+
+  const RhythmLightScheduleAssignment.unscheduled({
+    this.activeMode = RhythmMode.day,
+  })  : kind = 'unscheduled',
+        scheduleId = null;
+
+  const RhythmLightScheduleAssignment.named({
+    required this.scheduleId,
+    required this.activeMode,
+  }) : kind = 'named';
+
+  bool get isUnscheduled => kind == 'unscheduled';
+
+  factory RhythmLightScheduleAssignment.fromJson(Map<String, dynamic> json) {
+    if (json['kind'] == 'named') {
+      return RhythmLightScheduleAssignment.named(
+        scheduleId: json['schedule_id'] as String? ?? '',
+        activeMode: RhythmMode.fromString(json['active_mode'] as String?) ??
+            RhythmMode.day,
+      );
+    }
+    return RhythmLightScheduleAssignment.unscheduled(
+      activeMode: RhythmMode.fromString(json['active_mode'] as String?) ??
+          RhythmMode.day,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'kind': kind,
+        if (scheduleId != null) 'schedule_id': scheduleId,
+        if (activeMode != null) 'active_mode': activeMode!.wireValue,
+      };
+}
+
 class RhythmNodeProfileSettings {
   final String? profileId;
   final bool? moodEnabled;
@@ -188,6 +226,7 @@ class RhythmNodeProfileSettings {
   final RhythmTimerSetting? fadeSetting;
   final RhythmTimerSetting? motionTimeoutSetting;
   final bool? motionActivationEnabled;
+  final RhythmLightScheduleAssignment? lightSchedule;
   final RhythmRoomSchedule? roomSchedule;
   final Map<String, RhythmLightProfileNodeOverride> profileOverrides;
   final Map<String, dynamic> raw;
@@ -200,6 +239,7 @@ class RhythmNodeProfileSettings {
     this.fadeSetting,
     this.motionTimeoutSetting,
     this.motionActivationEnabled,
+    this.lightSchedule,
     this.roomSchedule,
     this.profileOverrides = const {},
     this.raw = const <String, dynamic>{},
@@ -208,6 +248,9 @@ class RhythmNodeProfileSettings {
   int? get fadeMs => fadeSetting?.fixedValue;
   int? get motionTimeoutSecs => motionTimeoutSetting?.fixedValue;
   bool get isMotionActivationEnabled => motionActivationEnabled ?? true;
+  String? get lightScheduleId => lightSchedule?.scheduleId;
+  RhythmMode? get lightScheduleMode => lightSchedule?.activeMode;
+  bool get isExplicitlyUnscheduled => lightSchedule?.isUnscheduled ?? false;
 
   bool get isEmpty =>
       profileId == null &&
@@ -217,6 +260,7 @@ class RhythmNodeProfileSettings {
       fadeSetting == null &&
       motionTimeoutSetting == null &&
       motionActivationEnabled == null &&
+      lightSchedule == null &&
       roomSchedule == null &&
       profileOverrides.isEmpty &&
       raw.isEmpty;
@@ -232,6 +276,7 @@ class RhythmNodeProfileSettings {
       ..remove('fade_ms')
       ..remove('motion_timeout_secs')
       ..remove('motion_activation_enabled')
+      ..remove('light_schedule')
       ..remove('room_schedule')
       ..remove('profile_overrides');
     final moodProfileId = json['mood_profile_id'] as String? ??
@@ -248,6 +293,11 @@ class RhythmNodeProfileSettings {
       fadeSetting: _timerSettingFromJson(json, 'fade_ms'),
       motionTimeoutSetting: _timerSettingFromJson(json, 'motion_timeout_secs'),
       motionActivationEnabled: json['motion_activation_enabled'] as bool?,
+      lightSchedule: jsonMap(json['light_schedule']) == null
+          ? null
+          : RhythmLightScheduleAssignment.fromJson(
+              jsonMap(json['light_schedule'])!,
+            ),
       roomSchedule: jsonMap(json['room_schedule']) == null
           ? null
           : RhythmRoomSchedule.fromJson(jsonMap(json['room_schedule'])!),
@@ -267,6 +317,7 @@ class RhythmNodeProfileSettings {
           'motion_timeout_secs': motionTimeoutSetting!.toJson(),
         if (motionActivationEnabled != null)
           'motion_activation_enabled': motionActivationEnabled,
+        if (lightSchedule != null) 'light_schedule': lightSchedule!.toJson(),
         if (roomSchedule != null) 'room_schedule': roomSchedule!.toJson(),
         if (profileOverrides.isNotEmpty)
           'profile_overrides': {
@@ -424,8 +475,10 @@ class RhythmLightProfileNodeOverride {
       ),
       fadeSetting: _timerSettingFromJson(json, 'fade_ms'),
       motionTimeoutSetting: _timerSettingFromJson(json, 'motion_timeout_secs'),
-      rhythmIntervalSetting:
-          _timerSettingFromJson(json, 'rhythm_interval_secs'),
+      rhythmIntervalSetting: _timerSettingFromJson(
+        json,
+        'rhythm_interval_secs',
+      ),
       raw: raw,
     );
   }
@@ -539,11 +592,7 @@ class RhythmObservedPower {
   final bool? fresh;
   final String? source;
 
-  const RhythmObservedPower({
-    this.lightsOn,
-    this.fresh,
-    this.source,
-  });
+  const RhythmObservedPower({this.lightsOn, this.fresh, this.source});
 
   factory RhythmObservedPower.fromJson(Map<String, dynamic> json) {
     return RhythmObservedPower(
@@ -693,8 +742,7 @@ class RhythmLightCapabilities {
       colorTemperature: RhythmColorTemperatureCapabilities.maybeFromJson(
         json['color_temperature'],
       ),
-      individualProfileOverrides:
-          json['individual_profile_overrides'] as bool?,
+      individualProfileOverrides: json['individual_profile_overrides'] as bool?,
     );
   }
 }
@@ -868,8 +916,10 @@ class RhythmRoom {
       pendingDispatch: jsonBool(json['pending_dispatch']),
       rhythmEnabled: json['rhythm_enabled'] as bool? ?? false,
       disabled: json['disabled'] as bool? ?? false,
-      timeOffset: jsonDouble(json['time_offset'],
-              preferredKeys: const ['time_offset']) ??
+      timeOffset: jsonDouble(
+            json['time_offset'],
+            preferredKeys: const ['time_offset'],
+          ) ??
           0.0,
       brightnessOffset: jsonDouble(
             json['brightness_offset'],
@@ -1122,8 +1172,10 @@ class RhythmRoomState {
       transitioning: jsonBool(json['transitioning']),
       pendingDispatch: jsonBool(json['pending_dispatch']),
       rhythmEnabled: json['rhythm_enabled'] as bool? ?? false,
-      timeOffset: jsonDouble(json['time_offset'],
-              preferredKeys: const ['time_offset']) ??
+      timeOffset: jsonDouble(
+            json['time_offset'],
+            preferredKeys: const ['time_offset'],
+          ) ??
           0.0,
       brightnessOffset: jsonDouble(
             json['brightness_offset'],

@@ -1132,6 +1132,11 @@ fn parse_profile_settings_patch(
     let body = value
         .as_object()
         .ok_or_else(|| format!("{field_name} must be an object or null"))?;
+    if body.contains_key("light_schedule") {
+        return Err(format!(
+            "{field_name}.light_schedule must be changed through /api/light-schedules/assignment"
+        ));
+    }
 
     let profile_id = match body.get("profile_id") {
         None => None,
@@ -1209,6 +1214,7 @@ fn parse_profile_settings_patch(
         fade_ms: parse_timer_patch_value(body, "fade_ms")?,
         motion_timeout_secs: parse_timer_patch_value(body, "motion_timeout_secs")?,
         motion_activation_enabled,
+        light_schedule: None,
         room_schedule,
         profile_overrides: parse_profile_overrides_patch_value(body, field_name)?,
         expected_effective_profile_overrides: None,
@@ -1737,6 +1743,129 @@ pub fn handle_post_transition_trigger(state: &SharedState, transition_id: &str) 
             ApiResponse::bad_request(&e.to_string())
         }
         Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_get_light_schedules(state: &SharedState) -> ApiResponse {
+    match commands::build_light_schedules(state) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(error) => ApiResponse::server_error(error),
+    }
+}
+
+fn light_schedule_mutation_error(
+    state: &SharedState,
+    target_id: &str,
+    action: &str,
+    error: anyhow::Error,
+) -> ApiResponse {
+    let message = error.to_string();
+    let rejected = [
+        "Light schedule id",
+        "Light schedule name",
+        "Light schedule must",
+        "Duplicate light schedule",
+        "is still assigned",
+        "is still referenced",
+        "Unknown light schedule",
+        "Unknown transition",
+        "Unknown light schedule transition",
+        "Light schedule transition",
+        "Schedule target was not found",
+        "Schedule target must",
+        " is disabled",
+    ]
+    .iter()
+    .any(|needle| message.contains(needle));
+    let mut activity = crate::activity::LightActivityRecord::app(target_id, action);
+    activity.payload = Some(json!({
+        "status": if rejected { "rejected" } else { "failed" },
+    }));
+    crate::activity::record_light_activity(state, activity);
+    if rejected {
+        ApiResponse::bad_request(&message)
+    } else {
+        ApiResponse::server_error(error)
+    }
+}
+
+pub fn handle_put_light_schedules(state: &SharedState, body: &Value) -> ApiResponse {
+    let Some(value) = body.get("schedules").cloned() else {
+        return ApiResponse::bad_request("Missing schedules");
+    };
+    let schedules = match serde_json::from_value::<Vec<rhythm_core::LightScheduleConfig>>(value) {
+        Ok(schedules) => schedules,
+        Err(error) => return ApiResponse::bad_request(&format!("Invalid schedules: {error}")),
+    };
+    match commands::do_light_schedules_set(state, schedules) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(error) => {
+            light_schedule_mutation_error(state, "global", "light_schedule_config_updated", error)
+        }
+    }
+}
+
+pub fn handle_put_light_schedule_assignment(state: &SharedState, body: &Value) -> ApiResponse {
+    let Some(node_id) = body.get("node_id").and_then(Value::as_str) else {
+        return ApiResponse::bad_request("Missing node_id");
+    };
+    let restore_legacy = match body.get("legacy") {
+        None => false,
+        Some(value) => match value.as_bool() {
+            Some(value) => value,
+            None => return ApiResponse::bad_request("legacy must be a boolean"),
+        },
+    };
+    if restore_legacy && body.get("schedule_id").is_some() {
+        return ApiResponse::bad_request("legacy and schedule_id are mutually exclusive");
+    }
+    if restore_legacy {
+        return match commands::do_light_schedule_assignment_clear(state, node_id, true) {
+            Ok(json) => ApiResponse::json_ok(json),
+            Err(error) => light_schedule_mutation_error(
+                state,
+                node_id,
+                "light_schedule_assignment_updated",
+                error,
+            ),
+        };
+    }
+    let schedule_id = match body.get("schedule_id") {
+        None => return ApiResponse::bad_request("Missing schedule_id or legacy=true"),
+        Some(Value::Null) => None,
+        Some(value) => match value.as_str() {
+            Some(value) => Some(value),
+            None => return ApiResponse::bad_request("schedule_id must be a string or null"),
+        },
+    };
+    match commands::do_light_schedule_assignment_set(state, node_id, schedule_id, true) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(error) => light_schedule_mutation_error(
+            state,
+            node_id,
+            "light_schedule_assignment_updated",
+            error,
+        ),
+    }
+}
+
+pub fn handle_post_light_schedule_transition_trigger(
+    state: &SharedState,
+    schedule_id: &str,
+    transition_id: &str,
+) -> ApiResponse {
+    match commands::do_trigger_light_schedule_transition(state, schedule_id, transition_id) {
+        Ok(outcome) => ApiResponse::json_ok(
+            serde_json::json!({
+                "schedule_id": schedule_id,
+                "active_mode": outcome.target_mode,
+                "transition_id": outcome.transition_id,
+            })
+            .to_string(),
+        ),
+        Err(error) => {
+            light_schedule_mutation_error(state, "global", "light_schedule_boundary", error)
+        }
     }
 }
 
@@ -7023,6 +7152,280 @@ mod tests {
             "follow_time"
         );
         assert!(rx.recv_timeout(Duration::from_millis(25)).is_err());
+    }
+
+    #[test]
+    fn named_light_schedules_isolate_targets_and_allow_no_schedule() {
+        let state = handler_state_with_runtime();
+        let response = handle_put_light_schedules(
+            &state,
+            &json!({
+                "schedules": [
+                    {
+                        "id": "indoor",
+                        "name": "Indoor lights",
+                        "enabled": true,
+                        "active_mode": "day",
+                        "transitions": [{
+                            "id": "indoor_sleep",
+                            "label": "Indoor sleep",
+                            "from_mode": "day",
+                            "to_mode": "sleep",
+                            "trigger": {"kind": "manual"},
+                            "trigger_enabled": true,
+                            "duration_ms": {"mode": "fixed", "value": 0},
+                            "preserve_hard_off": true
+                        }]
+                    },
+                    {
+                        "id": "outdoor",
+                        "name": "Outdoor lights",
+                        "enabled": true,
+                        "active_mode": "day",
+                        "transitions": [{
+                            "id": "outdoor_sleep",
+                            "label": "Outdoor sleep",
+                            "from_mode": "day",
+                            "to_mode": "sleep",
+                            "trigger": {"kind": "scheduled", "time": "23:30"},
+                            "trigger_enabled": true,
+                            "duration_ms": {"mode": "fixed", "value": 0},
+                            "preserve_hard_off": true
+                        }]
+                    }
+                ]
+            }),
+        );
+        assert_eq!(response.status, 200, "{}", response.body);
+
+        let bypass = handle_put_node_preferences(
+            &state,
+            &json!({
+                "node_id": "room1",
+                "profile_settings": {
+                    "light_schedule": {
+                        "kind": "named",
+                        "schedule_id": "outdoor",
+                        "active_mode": "day"
+                    }
+                }
+            }),
+            true,
+        );
+        assert_eq!(bypass.status, 400, "{}", bypass.body);
+
+        let indoor = handle_put_light_schedule_assignment(
+            &state,
+            &json!({"node_id": "room1", "schedule_id": "indoor"}),
+        );
+        assert_eq!(indoor.status, 200, "{}", indoor.body);
+        let outdoor = handle_put_light_schedule_assignment(
+            &state,
+            &json!({"node_id": "room2", "schedule_id": "outdoor"}),
+        );
+        assert_eq!(outdoor.status, 200, "{}", outdoor.body);
+
+        let triggered =
+            handle_post_light_schedule_transition_trigger(&state, "indoor", "indoor_sleep");
+        assert_eq!(triggered.status, 200, "{}", triggered.body);
+
+        let room1 =
+            serde_json::to_value(commands::build_node_state(&state, "room1").unwrap()).unwrap();
+        let room2 =
+            serde_json::to_value(commands::build_node_state(&state, "room2").unwrap()).unwrap();
+        let standalone =
+            serde_json::to_value(commands::build_node_state(&state, "standalone-light").unwrap())
+                .unwrap();
+        assert_eq!(
+            room1["profile_settings"]["light_schedule"]["active_mode"],
+            "sleep"
+        );
+        assert_eq!(
+            room2["profile_settings"]["light_schedule"]["active_mode"],
+            "day"
+        );
+        assert!(standalone["profile_settings"]
+            .get("light_schedule")
+            .is_none());
+
+        let backup = commands::build_backup_bundle_dto(&state, false).unwrap();
+        assert_eq!(backup.configuration.light_schedules.len(), 2);
+        assert!(backup.configuration.rooms.iter().any(|room| {
+            room.id == "room2"
+                && room
+                    .room_profile
+                    .light_schedule
+                    .as_ref()
+                    .and_then(rhythm_core::LightScheduleAssignment::schedule_id)
+                    == Some("outdoor")
+        }));
+
+        let cleared = handle_put_light_schedule_assignment(
+            &state,
+            &json!({"node_id": "room1", "schedule_id": null}),
+        );
+        assert_eq!(cleared.status, 200, "{}", cleared.body);
+        let cleared: Value = serde_json::from_str(&cleared.body).unwrap();
+        assert_eq!(
+            cleared["nodes"][0]["profile_settings"]["light_schedule"]["kind"],
+            "unscheduled"
+        );
+
+        let legacy = handle_put_light_schedule_assignment(
+            &state,
+            &json!({"node_id": "room1", "legacy": true}),
+        );
+        assert_eq!(legacy.status, 200, "{}", legacy.body);
+        let legacy: Value = serde_json::from_str(&legacy.body).unwrap();
+        assert!(legacy["nodes"][0]["profile_settings"]
+            .get("light_schedule")
+            .is_none());
+
+        assert_eq!(
+            handle_put_light_schedule_assignment(
+                &state,
+                &json!({"node_id": "room1", "schedule_id": "indoor"}),
+            )
+            .status,
+            200
+        );
+        let room_local = handle_put_node_preferences(
+            &state,
+            &json!({
+                "node_id": "room1",
+                "profile_settings": {
+                    "room_schedule": {
+                        "source": "follow_time",
+                        "wake_time": "07:00",
+                        "sleep_time": "23:00"
+                    }
+                }
+            }),
+            true,
+        );
+        assert_eq!(room_local.status, 200, "{}", room_local.body);
+        let room_local: Value = serde_json::from_str(&room_local.body).unwrap();
+        assert!(room_local["nodes"][0]["profile_settings"]
+            .get("light_schedule")
+            .is_none());
+        assert_eq!(
+            room_local["nodes"][0]["profile_settings"]["room_schedule"]["source"],
+            "follow_time"
+        );
+    }
+
+    #[test]
+    fn schedule_scoped_automation_action_uses_the_button_action_pipeline() {
+        let state = handler_state_with_runtime();
+        let configured = handle_put_light_schedules(
+            &state,
+            &json!({"schedules": [{
+                "id": "outdoor",
+                "name": "Outdoor lights",
+                "active_mode": "day",
+                "transitions": [{
+                    "id": "outdoor_manual_sleep",
+                    "from_mode": "day",
+                    "to_mode": "sleep",
+                    "trigger": {"kind": "manual"},
+                    "trigger_enabled": true,
+                    "duration_ms": {"mode": "fixed", "value": 500},
+                    "preserve_hard_off": true
+                }]
+            }] }),
+        );
+        assert_eq!(configured.status, 200, "{}", configured.body);
+        assert_eq!(
+            handle_put_light_schedule_assignment(
+                &state,
+                &json!({"node_id": "room1", "schedule_id": "outdoor"}),
+            )
+            .status,
+            200
+        );
+
+        let outcome = commands::do_execute_automation_action(
+            &state,
+            &crate::topology::AutomationAction::LightScheduleModeSet {
+                schedule_id: "outdoor".into(),
+                mode: rhythm_core::RhythmMode::Sleep,
+                transition: crate::topology::ModeTransitionSelection::Auto,
+            },
+        )
+        .unwrap();
+        assert_eq!(outcome.target_mode, rhythm_core::RhythmMode::Sleep);
+        assert_eq!(
+            outcome.transition_id.as_deref(),
+            Some("outdoor_manual_sleep")
+        );
+        assert!(state
+            .lock()
+            .unwrap()
+            .room_mode_transitions
+            .contains_key("room1"));
+    }
+
+    #[test]
+    fn named_schedule_transition_preserves_hard_off_members() {
+        let state = handler_state_with_runtime();
+        assert_eq!(
+            handle_put_light_schedules(
+                &state,
+                &json!({"schedules": [{
+                    "id": "outdoor",
+                    "name": "Outdoor lights",
+                    "active_mode": "day",
+                    "transitions": [{
+                        "id": "outdoor_sleep",
+                        "from_mode": "day",
+                        "to_mode": "sleep",
+                        "trigger": {"kind": "manual"},
+                        "trigger_enabled": true,
+                        "duration_ms": {"mode": "fixed", "value": 0},
+                        "preserve_hard_off": true
+                    }]
+                }] }),
+            )
+            .status,
+            200
+        );
+        assert_eq!(
+            handle_put_light_schedule_assignment(
+                &state,
+                &json!({"node_id": "room1", "schedule_id": "outdoor"}),
+            )
+            .status,
+            200
+        );
+        commands::do_node_preferences_set(
+            &state,
+            "room1",
+            None,
+            None,
+            None,
+            Some(rhythm_core::RoomModeState::HardOff),
+            None,
+            false,
+        )
+        .unwrap();
+
+        commands::do_trigger_light_schedule_transition(&state, "outdoor", "outdoor_sleep").unwrap();
+
+        let snapshot = state
+            .lock()
+            .unwrap()
+            .hub_runtime()
+            .unwrap()
+            .engine_node_snapshot("room1")
+            .unwrap();
+        assert!(snapshot.hard_off);
+        assert!(matches!(
+            snapshot.profile_settings.light_schedule,
+            Some(rhythm_core::LightScheduleAssignment::Named {
+                active_mode: rhythm_core::RhythmMode::Sleep,
+                ..
+            })
+        ));
     }
 
     #[test]

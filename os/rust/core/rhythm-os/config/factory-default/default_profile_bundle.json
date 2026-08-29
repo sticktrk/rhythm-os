@@ -124,6 +124,7 @@
         }
       }
     ],
-    "mode_transitions": []
+    "mode_transitions": [],
+    "light_schedules": []
   }
 }

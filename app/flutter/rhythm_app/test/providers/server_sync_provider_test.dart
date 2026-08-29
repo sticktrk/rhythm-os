@@ -1553,7 +1553,11 @@ void main() {
   });
 
   group('ServerSyncProvider motion activation', () {
-    RhythmHello motionHello({bool supported = true, bool enabled = true}) {
+    RhythmHello motionHello({
+      bool supported = true,
+      bool enabled = true,
+      bool withLightSchedule = false,
+    }) {
       return RhythmHello.fromJson({
         'version': '0.6.509-beta',
         'capabilities': {
@@ -1574,6 +1578,12 @@ void main() {
             'brightness_offset': 0.0,
             'profile_settings': {
               if (supported) 'motion_activation_enabled': enabled,
+              if (withLightSchedule)
+                'light_schedule': {
+                  'kind': 'named',
+                  'schedule_id': 'indoor',
+                  'active_mode': 'day',
+                },
             },
           },
         ],
@@ -1658,7 +1668,7 @@ void main() {
       addTearDown(roomProvider.dispose);
       addTearDown(connection.dispose);
 
-      connection.emitHello(motionHello());
+      connection.emitHello(motionHello(withLightSchedule: true));
       await tester.pump();
 
       final first = provider.setNodeMotionActivationEnabled('room-1', false);
@@ -1683,6 +1693,10 @@ void main() {
       expect(await first, isTrue);
       expect(provider.motionActivationPendingForNode('room-1'), isFalse);
       expect(provider.motionActivationEnabledForNode('room-1'), isFalse);
+      expect(
+        provider.nodeById('room-1')?.profileSettings?.lightScheduleId,
+        'indoor',
+      );
     });
 
     testWidgets('disconnected writes do not change optimistic state', (
@@ -1981,6 +1995,7 @@ void main() {
       bool supported = true,
       bool dayIdleSupported = false,
       bool motionActivationEnabled = false,
+      bool withLightSchedule = false,
     }) {
       return RhythmHello.fromJson({
         'version': '0.6.533-beta',
@@ -2007,6 +2022,12 @@ void main() {
             'brightness_offset': 0.0,
             'profile_settings': {
               'motion_activation_enabled': motionActivationEnabled,
+              if (withLightSchedule)
+                'light_schedule': {
+                  'kind': 'named',
+                  'schedule_id': 'indoor',
+                  'active_mode': 'day',
+                },
               'profile_overrides': {
                 'sleep': {
                   'motion_timeout_secs': {'mode': 'fixed', 'value': 900},
@@ -2055,7 +2076,7 @@ void main() {
       );
       expect(api.nodeProfileOverrideCalls, isEmpty);
 
-      connection.emitHello(roomLightHello());
+      connection.emitHello(roomLightHello(withLightSchedule: true));
       await tester.pump();
       expect(
         await provider.setNodeLightProfileOverride(
@@ -2070,6 +2091,10 @@ void main() {
         isTrue,
       );
       expect(provider.hasNodeLightProfileOverrides('room-1'), isTrue);
+      expect(
+        provider.nodeById('room-1')?.profileSettings?.lightScheduleId,
+        'indoor',
+      );
       expect(
         provider
             .nodeById('room-1')
@@ -2398,7 +2423,7 @@ void main() {
       addTearDown(roomProvider.dispose);
       addTearDown(connection.dispose);
 
-      connection.emitHello(roomLightHello());
+      connection.emitHello(roomLightHello(withLightSchedule: true));
       await tester.pump();
       expect(
         await provider.resetNodeLightProfileOverrides(
@@ -2410,6 +2435,7 @@ void main() {
       final settings = provider.nodeById('room-1')?.profileSettings;
       expect(settings?.profileOverrides, isEmpty);
       expect(settings?.motionActivationEnabled, isFalse);
+      expect(settings?.lightScheduleId, 'indoor');
       final call = api.nodeProfileOverrideCalls.single;
       expect(call.profileOverrides, isNull);
       expect(call.replace, isTrue);

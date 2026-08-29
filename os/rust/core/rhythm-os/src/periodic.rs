@@ -1126,9 +1126,11 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
             match time_check {
                 PeriodicTimeCheckResult::Continuous { last_hour } => {
                     check_mode_transitions(&state, last_hour, current_hour);
+                    check_light_schedule_transitions(&state, last_hour, current_hour);
                 }
                 PeriodicTimeCheckResult::Seeded | PeriodicTimeCheckResult::Discontinuous { .. } => {
                     replay_missed_mode_transitions(&state);
+                    reconcile_light_schedule_transitions(&state, current_hour);
                 }
             }
         }
@@ -1784,6 +1786,116 @@ pub fn check_mode_transitions(state: &SharedState, last_hour: f32, current_hour:
         transition.trigger,
     ) {
         warn!("Failed to apply mode transition: {}", e);
+    }
+}
+
+/// Trigger every enabled named light schedule independently. Physical button
+/// triggers enter through `AutomationAction::LightScheduleMode*`; this pass
+/// owns only clock and solar triggers.
+pub fn check_light_schedule_transitions(state: &SharedState, last_hour: f32, current_hour: f32) {
+    let candidates = {
+        let Ok(s) = state.lock() else { return };
+        let solar = SolarTriggerContext {
+            solar_noon: s.solar_noon_hour(),
+            latitude: s.latitude,
+            longitude: s.longitude,
+            timezone_name: s.timezone_name.as_deref(),
+        };
+        s.light_schedules
+            .values()
+            .filter(|schedule| schedule.enabled)
+            .filter_map(|schedule| {
+                schedule
+                    .transitions
+                    .iter()
+                    .find(|transition| {
+                        if transition.from_mode != schedule.active_mode
+                            || !transition.trigger_enabled
+                            || transition.trigger == rhythm_core::ModeTransitionTrigger::Manual
+                        {
+                            return false;
+                        }
+                        trigger_hour(transition.trigger, transition.to_mode, solar).is_some_and(
+                            |hour| {
+                                rhythm_core::crossed_solar_midnight(last_hour, current_hour, hour)
+                            },
+                        )
+                    })
+                    .map(|transition| (schedule.id.clone(), transition.id.clone()))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    for (schedule_id, transition_id) in candidates {
+        if let Err(error) = crate::commands::do_trigger_light_schedule_transition(
+            state,
+            &schedule_id,
+            &transition_id,
+        ) {
+            warn!(
+                target: "cmd",
+                "Named light schedule '{}' transition '{}' failed: {}",
+                schedule_id,
+                transition_id,
+                error
+            );
+        }
+    }
+}
+
+/// Reconcile each named schedule to the most recent recurring non-manual
+/// boundary. This covers cold starts and large wall-clock corrections where a
+/// crossing cannot be inferred safely from the previous periodic sample.
+pub fn reconcile_light_schedule_transitions(state: &SharedState, current_hour: f32) {
+    let candidates = {
+        let Ok(s) = state.lock() else { return };
+        let solar = SolarTriggerContext {
+            solar_noon: s.solar_noon_hour(),
+            latitude: s.latitude,
+            longitude: s.longitude,
+            timezone_name: s.timezone_name.as_deref(),
+        };
+        s.light_schedules
+            .values()
+            .filter(|schedule| schedule.enabled)
+            .filter_map(|schedule| {
+                schedule
+                    .transitions
+                    .iter()
+                    .filter(|transition| {
+                        transition.trigger_enabled
+                            && transition.trigger != rhythm_core::ModeTransitionTrigger::Manual
+                    })
+                    .filter_map(|transition| {
+                        trigger_hour(transition.trigger, transition.to_mode, solar).map(|hour| {
+                            (
+                                (current_hour - hour).rem_euclid(24.0),
+                                transition.id.clone(),
+                                transition.to_mode,
+                            )
+                        })
+                    })
+                    .min_by(|left, right| left.0.total_cmp(&right.0))
+                    .filter(|(_, _, target_mode)| *target_mode != schedule.active_mode)
+                    .map(|(_, transition_id, _)| (schedule.id.clone(), transition_id))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    for (schedule_id, transition_id) in candidates {
+        if let Err(error) = crate::commands::do_trigger_light_schedule_transition(
+            state,
+            &schedule_id,
+            &transition_id,
+        ) {
+            warn!(
+                target: "cmd",
+                "Named light schedule '{}' restart transition '{}' failed: {}",
+                schedule_id,
+                transition_id,
+                error
+            );
+        }
     }
 }
 
@@ -4070,5 +4182,201 @@ mod tests {
             utc_datetime_from_local(new_york_local, 0.0, Some("America/New_York")),
             Some(utc)
         );
+    }
+
+    #[test]
+    fn named_schedule_clock_trigger_updates_only_its_members() {
+        let state = make_state();
+        let runtime = runtime_with_rooms(&["outdoor", "manual"]);
+        install_runtime(&state, runtime.clone());
+        crate::commands::do_light_schedules_set(
+            &state,
+            vec![rhythm_core::LightScheduleConfig {
+                id: "outdoor".to_string(),
+                name: "Outdoor".to_string(),
+                enabled: true,
+                active_mode: rhythm_core::RhythmMode::Day,
+                transitions: vec![rhythm_core::ModeTransitionConfig {
+                    id: "outdoor-sleep".to_string(),
+                    label: "Outdoor sleep".to_string(),
+                    from_mode: rhythm_core::RhythmMode::Day,
+                    to_mode: rhythm_core::RhythmMode::Sleep,
+                    trigger: rhythm_core::ModeTransitionTrigger::Scheduled(
+                        rhythm_core::ModeTransitionTime::from_hour_minute(23, 30).unwrap(),
+                    ),
+                    trigger_enabled: true,
+                    duration_ms: rhythm_core::TimerSetting::Fixed { value: 0 },
+                    preserve_hard_off: true,
+                }],
+            }],
+        )
+        .unwrap();
+        crate::commands::do_light_schedule_assignment_set(
+            &state,
+            "outdoor",
+            Some("outdoor"),
+            false,
+        )
+        .unwrap();
+        crate::commands::do_light_schedule_assignment_set(&state, "manual", None, false).unwrap();
+
+        check_light_schedule_transitions(&state, 23.4, 23.6);
+
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .light_schedules
+                .get("outdoor")
+                .unwrap()
+                .active_mode,
+            rhythm_core::RhythmMode::Sleep
+        );
+        let outdoor = runtime.engine_node_snapshot("outdoor").unwrap();
+        assert_eq!(
+            outdoor
+                .profile_settings
+                .light_schedule
+                .as_ref()
+                .and_then(rhythm_core::LightScheduleAssignment::active_mode),
+            Some(rhythm_core::RhythmMode::Sleep)
+        );
+        let manual = runtime.engine_node_snapshot("manual").unwrap();
+        assert!(matches!(
+            manual.profile_settings.light_schedule,
+            Some(rhythm_core::LightScheduleAssignment::Unscheduled {
+                active_mode: rhythm_core::RhythmMode::Day
+            })
+        ));
+    }
+
+    #[test]
+    fn named_schedule_reconciles_materialized_mode_after_restart() {
+        let state = make_state();
+        let runtime = runtime_with_rooms(&["outdoor"]);
+        install_runtime(&state, runtime.clone());
+        crate::commands::do_light_schedules_set(
+            &state,
+            vec![rhythm_core::LightScheduleConfig {
+                id: "outdoor".to_string(),
+                name: "Outdoor".to_string(),
+                enabled: true,
+                active_mode: rhythm_core::RhythmMode::Day,
+                transitions: vec![rhythm_core::ModeTransitionConfig::new(
+                    rhythm_core::RhythmMode::Day,
+                    rhythm_core::RhythmMode::Sleep,
+                    0,
+                )],
+            }],
+        )
+        .unwrap();
+        crate::commands::do_light_schedule_assignment_set(
+            &state,
+            "outdoor",
+            Some("outdoor"),
+            false,
+        )
+        .unwrap();
+        state
+            .lock()
+            .unwrap()
+            .light_schedules
+            .get_mut("outdoor")
+            .unwrap()
+            .active_mode = rhythm_core::RhythmMode::Sleep;
+
+        assert!(
+            crate::commands::reconcile_room_schedule_before_tick(&state, "outdoor", 14.0)
+                .unwrap()
+                .is_none()
+        );
+        let snapshot = runtime.engine_node_snapshot("outdoor").unwrap();
+        assert!(matches!(
+            snapshot.profile_settings.light_schedule,
+            Some(rhythm_core::LightScheduleAssignment::Named {
+                active_mode: rhythm_core::RhythmMode::Sleep,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn named_schedule_replays_latest_boundary_after_cold_start() {
+        let state = make_state();
+        let runtime = runtime_with_rooms(&["outdoor"]);
+        install_runtime(&state, runtime.clone());
+        let scheduled = |id: &str,
+                         from_mode: rhythm_core::RhythmMode,
+                         to_mode: rhythm_core::RhythmMode,
+                         hour,
+                         minute| rhythm_core::ModeTransitionConfig {
+            id: id.to_string(),
+            label: id.to_string(),
+            from_mode,
+            to_mode,
+            trigger: rhythm_core::ModeTransitionTrigger::Scheduled(
+                rhythm_core::ModeTransitionTime::from_hour_minute(hour, minute).unwrap(),
+            ),
+            trigger_enabled: true,
+            duration_ms: rhythm_core::TimerSetting::Fixed { value: 0 },
+            preserve_hard_off: true,
+        };
+        crate::commands::do_light_schedules_set(
+            &state,
+            vec![rhythm_core::LightScheduleConfig {
+                id: "outdoor".to_string(),
+                name: "Outdoor".to_string(),
+                enabled: true,
+                active_mode: rhythm_core::RhythmMode::Day,
+                transitions: vec![
+                    scheduled(
+                        "outdoor-day",
+                        rhythm_core::RhythmMode::Sleep,
+                        rhythm_core::RhythmMode::Day,
+                        6,
+                        0,
+                    ),
+                    scheduled(
+                        "outdoor-sleep",
+                        rhythm_core::RhythmMode::Day,
+                        rhythm_core::RhythmMode::Sleep,
+                        23,
+                        30,
+                    ),
+                ],
+            }],
+        )
+        .unwrap();
+        crate::commands::do_light_schedule_assignment_set(
+            &state,
+            "outdoor",
+            Some("outdoor"),
+            false,
+        )
+        .unwrap();
+
+        reconcile_light_schedule_transitions(&state, 0.5);
+
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .light_schedules
+                .get("outdoor")
+                .unwrap()
+                .active_mode,
+            rhythm_core::RhythmMode::Sleep
+        );
+        assert!(matches!(
+            runtime
+                .engine_node_snapshot("outdoor")
+                .unwrap()
+                .profile_settings
+                .light_schedule,
+            Some(rhythm_core::LightScheduleAssignment::Named {
+                active_mode: rhythm_core::RhythmMode::Sleep,
+                ..
+            })
+        ));
     }
 }

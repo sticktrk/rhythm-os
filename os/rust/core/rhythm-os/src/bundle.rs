@@ -70,6 +70,10 @@ pub struct ProfileBundleData {
     pub scenes: Vec<SceneDefinition>,
     #[serde(default)]
     pub mode_transitions: Vec<ModeTransitionConfig>,
+    /// `None` identifies a pre-named-schedules bundle and preserves the
+    /// appliance registry on import; `Some([])` explicitly clears it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub light_schedules: Option<Vec<rhythm_core::LightScheduleConfig>>,
 }
 
 /// Portable top-level profile bundle.
@@ -155,6 +159,8 @@ pub struct BackupConfiguration {
     #[serde(default)]
     pub mode_transitions: Vec<ModeTransitionConfig>,
     #[serde(default)]
+    pub light_schedules: Vec<rhythm_core::LightScheduleConfig>,
+    #[serde(default)]
     pub scenes: Vec<SceneDefinition>,
     #[serde(default)]
     pub rooms: Vec<BackupConfigurationRoom>,
@@ -173,6 +179,7 @@ impl Default for BackupConfiguration {
             profiles: Vec::new(),
             mode_configs: Vec::new(),
             mode_transitions: Vec::new(),
+            light_schedules: Vec::new(),
             scenes: Vec::new(),
             rooms: Vec::new(),
         }

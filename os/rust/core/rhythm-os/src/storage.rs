@@ -637,6 +637,8 @@ pub struct StoredSettings {
     pub modes: Vec<ModeConfig>,
     #[serde(default)]
     pub mode_transitions: Vec<ModeTransitionConfig>,
+    #[serde(default)]
+    pub light_schedules: Vec<rhythm_core::LightScheduleConfig>,
     /// When true, the appliance applies OTA updates automatically during the
     /// daily update window. When false, updates only happen on an explicit
     /// `POST /api/ota/update`.
@@ -2270,6 +2272,7 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
                 s.last_active_mode_change_utc_ms = last_active_mode_change_utc_ms;
                 s.set_mode_configs(settings.modes);
                 s.set_mode_transition_configs(settings.mode_transitions);
+                s.set_light_schedule_configs(settings.light_schedules);
                 s.sync_active_mode_runtime_overrides();
                 let normalized_modes = s.mode_configs();
                 let normalized_transitions = s.mode_transition_configs();
@@ -2292,6 +2295,7 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
                             last_active_mode_change_utc_ms,
                             modes: normalized_modes.clone(),
                             mode_transitions: normalized_transitions,
+                            light_schedules: s.light_schedule_configs(),
                             auto_update: s.auto_update,
                             update_channel: s.update_channel,
                         }) {
@@ -3036,6 +3040,7 @@ mod tests {
                 last_active_mode_change_utc_ms: None,
                 modes: Vec::new(),
                 mode_transitions: Vec::new(),
+                light_schedules: Vec::new(),
                 auto_update: true,
                 update_channel: None,
             })
@@ -3350,6 +3355,7 @@ mod tests {
                 last_active_mode_change_utc_ms: None,
                 modes: vec![],
                 mode_transitions: vec![],
+                light_schedules: vec![],
                 auto_update: true,
                 update_channel: None,
             }),
@@ -3391,6 +3397,7 @@ mod tests {
                     room_defaults: vec![],
                 }],
                 mode_transitions: vec![],
+                light_schedules: vec![],
                 auto_update: true,
                 update_channel: None,
             }),
@@ -3431,6 +3438,7 @@ mod tests {
                     room_defaults: vec![],
                 }],
                 mode_transitions: vec![],
+                light_schedules: vec![],
                 auto_update: true,
                 update_channel: None,
             }),
@@ -3473,6 +3481,7 @@ mod tests {
                 last_active_mode_change_utc_ms: None,
                 modes: vec![],
                 mode_transitions: vec![],
+                light_schedules: vec![],
                 auto_update: true,
                 update_channel: None,
             }),
@@ -3871,6 +3880,7 @@ mod tests {
                 last_active_mode_change_utc_ms: None,
                 modes: vec![],
                 mode_transitions: vec![],
+                light_schedules: vec![],
                 auto_update: true,
                 update_channel: None,
             }),
@@ -4313,6 +4323,17 @@ mod tests {
                 last_active_mode_change_utc_ms: Some(1_234_567_890),
                 modes: rhythm_core::default_mode_configs(),
                 mode_transitions: rhythm_core::default_mode_transition_configs(),
+                light_schedules: vec![rhythm_core::LightScheduleConfig {
+                    id: "outdoor".to_string(),
+                    name: "Outdoor".to_string(),
+                    enabled: true,
+                    active_mode: RhythmMode::Sleep,
+                    transitions: vec![rhythm_core::ModeTransitionConfig::new(
+                        RhythmMode::Day,
+                        RhythmMode::Sleep,
+                        1_000,
+                    )],
+                }],
                 auto_update: false,
                 update_channel: None,
             };
@@ -4330,6 +4351,9 @@ mod tests {
             assert_eq!(loaded.last_active_mode_change_utc_ms, Some(1_234_567_890));
             assert_eq!(loaded.modes.len(), 2);
             assert_eq!(loaded.mode_transitions.len(), 2);
+            assert_eq!(loaded.light_schedules.len(), 1);
+            assert_eq!(loaded.light_schedules[0].id, "outdoor");
+            assert_eq!(loaded.light_schedules[0].active_mode, RhythmMode::Sleep);
             assert_eq!(
                 loaded.mode_transitions[0].trigger,
                 rhythm_core::ModeTransitionTrigger::AstronomicalTwilight
@@ -4355,6 +4379,7 @@ mod tests {
                 last_active_mode_change_utc_ms: None,
                 modes: Vec::new(),
                 mode_transitions: Vec::new(),
+                light_schedules: Vec::new(),
                 auto_update: true,
                 update_channel: None,
             };
@@ -5808,6 +5833,7 @@ mod tests {
                     last_active_mode_change_utc_ms: Some(123),
                     modes: rhythm_core::default_mode_configs(),
                     mode_transitions: rhythm_core::default_mode_transition_configs(),
+                    light_schedules: Vec::new(),
                     auto_update: true,
                     update_channel: None,
                 })
@@ -6493,6 +6519,7 @@ mod tests {
                 last_active_mode_change_utc_ms: None,
                 modes: Vec::new(),
                 mode_transitions: Vec::new(),
+                light_schedules: Vec::new(),
                 auto_update: true,
                 update_channel: None,
             }

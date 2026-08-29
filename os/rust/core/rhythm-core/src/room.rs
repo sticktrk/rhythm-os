@@ -383,6 +383,61 @@ pub struct RoomScheduleConfig {
     pub sleep_time: ModeTransitionTime,
 }
 
+/// Reusable named schedule that can be shared by any number of light roots.
+///
+/// Membership is stored separately on [`RoomProfileSettings`]. Keeping the
+/// policy and membership independent lets rooms and standalone lights opt out
+/// entirely without inventing a special "manual" schedule.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct LightScheduleConfig {
+    pub id: String,
+    pub name: String,
+    #[cfg_attr(feature = "serde", serde(default = "default_light_schedule_enabled"))]
+    pub enabled: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub active_mode: RhythmMode,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub transitions: Vec<ModeTransitionConfig>,
+}
+
+/// Explicit automation ownership for one light-addressable root. Absence of
+/// this field preserves the legacy appliance-wide schedule; `Unscheduled` is
+/// the deliberate opt-out requested by the user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(tag = "kind", rename_all = "snake_case"))]
+pub enum LightScheduleAssignment {
+    Unscheduled {
+        active_mode: RhythmMode,
+    },
+    Named {
+        schedule_id: String,
+        active_mode: RhythmMode,
+    },
+}
+
+impl LightScheduleAssignment {
+    pub fn schedule_id(&self) -> Option<&str> {
+        match self {
+            Self::Unscheduled { .. } => None,
+            Self::Named { schedule_id, .. } => Some(schedule_id),
+        }
+    }
+
+    pub const fn active_mode(&self) -> Option<RhythmMode> {
+        match self {
+            Self::Unscheduled { active_mode } | Self::Named { active_mode, .. } => {
+                Some(*active_mode)
+            }
+        }
+    }
+}
+
+const fn default_light_schedule_enabled() -> bool {
+    true
+}
+
 impl Default for RoomScheduleConfig {
     fn default() -> Self {
         Self {
@@ -1113,6 +1168,14 @@ pub struct RoomProfileSettings {
     )]
     pub motion_activation_enabled: Option<bool>,
 
+    /// Explicit schedule ownership. Absence preserves legacy global behavior;
+    /// `unscheduled` opts out and `named` enrolls the node.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub light_schedule: Option<LightScheduleAssignment>,
+
     /// Optional room-local schedule. Absence preserves legacy preset behavior.
     #[cfg_attr(
         feature = "serde",
@@ -1138,6 +1201,7 @@ impl RoomProfileSettings {
             && self.fade_ms.is_none()
             && self.motion_timeout_secs.is_none()
             && self.motion_activation_enabled.is_none()
+            && self.light_schedule.is_none()
             && self.room_schedule.is_none()
             && self.profile_overrides.is_empty()
     }
@@ -1149,6 +1213,13 @@ impl RoomProfileSettings {
     }
 
     pub fn schedule_mode(&self, global_mode: RhythmMode, local_hour: f32) -> RhythmMode {
+        if let Some(mode) = self
+            .light_schedule
+            .as_ref()
+            .and_then(LightScheduleAssignment::active_mode)
+        {
+            return mode;
+        }
         self.room_schedule
             .filter(|schedule| schedule.follows_time())
             .map(|schedule| schedule.effective_mode(local_hour))
@@ -1195,6 +1266,18 @@ impl RoomProfileSettings {
 
     /// Merge this node-local override on top of a parent's effective settings.
     pub fn merged_with_parent(&self, parent: &Self) -> Self {
+        // Schedule authority is one cascading choice even though the legacy
+        // room-local schedule and reusable named assignment have separate
+        // persisted fields. Any local choice must mask both parent fields;
+        // otherwise an inherited named schedule would incorrectly outrank a
+        // room's explicit custom wall-clock schedule in `schedule_mode`.
+        let (light_schedule, room_schedule) = if self.light_schedule.is_some() {
+            (self.light_schedule.clone(), self.room_schedule)
+        } else if self.room_schedule.is_some() {
+            (None, self.room_schedule)
+        } else {
+            (parent.light_schedule.clone(), parent.room_schedule)
+        };
         Self {
             profile_id: self
                 .profile_id
@@ -1217,7 +1300,8 @@ impl RoomProfileSettings {
             motion_activation_enabled: self
                 .motion_activation_enabled
                 .or(parent.motion_activation_enabled),
-            room_schedule: self.room_schedule.or(parent.room_schedule),
+            light_schedule,
+            room_schedule,
             profile_overrides: {
                 let mut profile_overrides = parent.profile_overrides.clone();
                 profile_overrides.extend(self.profile_overrides.clone());
@@ -1841,6 +1925,7 @@ mod tests {
             fade_ms: Some(TimerSetting::Fixed { value: 250 }),
             motion_timeout_secs: Some(TimerSetting::Fixed { value: 42 }),
             motion_activation_enabled: Some(false),
+            light_schedule: None,
             room_schedule: None,
             profile_overrides: BTreeMap::new(),
         };
@@ -2841,5 +2926,71 @@ mod tests {
             settings.schedule_mode(RhythmMode::Sleep, 12.0),
             RhythmMode::Sleep
         );
+    }
+
+    #[test]
+    fn schedule_authority_cascades_and_local_custom_schedule_overrides_parent() {
+        let parent = RoomProfileSettings {
+            light_schedule: Some(LightScheduleAssignment::Named {
+                schedule_id: "indoor".into(),
+                active_mode: RhythmMode::Sleep,
+            }),
+            ..Default::default()
+        };
+        let custom = RoomScheduleConfig {
+            source: RoomScheduleSource::FollowTime,
+            wake_time: ModeTransitionTime::parse("06:00").unwrap(),
+            sleep_time: ModeTransitionTime::parse("23:00").unwrap(),
+        };
+
+        let inherited = RoomProfileSettings::default().merged_with_parent(&parent);
+        assert_eq!(inherited.light_schedule, parent.light_schedule);
+        assert_eq!(
+            inherited.schedule_mode(RhythmMode::Day, 12.0),
+            RhythmMode::Sleep
+        );
+
+        let overridden = RoomProfileSettings {
+            room_schedule: Some(custom),
+            ..Default::default()
+        }
+        .merged_with_parent(&parent);
+        assert_eq!(overridden.light_schedule, None);
+        assert_eq!(overridden.room_schedule, Some(custom));
+        assert_eq!(
+            overridden.schedule_mode(RhythmMode::Sleep, 12.0),
+            RhythmMode::Day
+        );
+    }
+
+    #[test]
+    fn local_named_or_unscheduled_authority_overrides_parent_custom_schedule() {
+        let custom = RoomScheduleConfig {
+            source: RoomScheduleSource::FollowTime,
+            wake_time: ModeTransitionTime::parse("06:00").unwrap(),
+            sleep_time: ModeTransitionTime::parse("23:00").unwrap(),
+        };
+        let parent = RoomProfileSettings {
+            room_schedule: Some(custom),
+            ..Default::default()
+        };
+
+        for assignment in [
+            LightScheduleAssignment::Named {
+                schedule_id: "outdoor".into(),
+                active_mode: RhythmMode::Sleep,
+            },
+            LightScheduleAssignment::Unscheduled {
+                active_mode: RhythmMode::Day,
+            },
+        ] {
+            let effective = RoomProfileSettings {
+                light_schedule: Some(assignment.clone()),
+                ..Default::default()
+            }
+            .merged_with_parent(&parent);
+            assert_eq!(effective.light_schedule, Some(assignment));
+            assert_eq!(effective.room_schedule, None);
+        }
     }
 }

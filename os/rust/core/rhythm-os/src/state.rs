@@ -7,9 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rhythm_core::{
-    normalize_mode_transition_configs, ButtonAction, LightProfileConfig, ModeChangeCause,
-    ModeConfig, ModeTransitionConfig, RhythmMode, RoomModeDefault, RoomModeState, RuntimeConfig,
-    RuntimeHandle,
+    normalize_mode_transition_configs, ButtonAction, LightProfileConfig, LightScheduleConfig,
+    ModeChangeCause, ModeConfig, ModeTransitionConfig, RhythmMode, RoomModeDefault, RoomModeState,
+    RuntimeConfig, RuntimeHandle,
 };
 use rhythm_profile::profile_config::DEFAULT_FADE_MS;
 use serde::{Deserialize, Serialize};
@@ -393,6 +393,8 @@ pub struct AppState {
     pub mode_configs: BTreeMap<RhythmMode, ModeConfig>,
     /// Configured mode-to-mode rendered-output transitions.
     pub mode_transition_configs: Vec<ModeTransitionConfig>,
+    /// Reusable named schedules keyed by stable schedule ID.
+    pub light_schedules: BTreeMap<String, LightScheduleConfig>,
     /// Stored scene definitions keyed by scene ID.
     pub scenes: BTreeMap<String, crate::scenes::SceneDefinition>,
     /// Ephemeral light scene previews keyed by preview ID.
@@ -995,6 +997,7 @@ impl Default for AppState {
             light_profile_configs: default_light_profile_configs(),
             mode_configs: default_mode_config_map(),
             mode_transition_configs: factory_default_mode_transition_configs(),
+            light_schedules: BTreeMap::new(),
             scenes: default_scene_map(),
             light_scene_previews: HashMap::new(),
             scene_lifecycle_transaction_lock: Arc::new(Mutex::new(())),
@@ -1175,6 +1178,23 @@ impl AppState {
         I: IntoIterator<Item = ModeTransitionConfig>,
     {
         self.mode_transition_configs = normalize_mode_transition_configs(configs);
+    }
+
+    pub fn light_schedule_configs(&self) -> Vec<LightScheduleConfig> {
+        self.light_schedules.values().cloned().collect()
+    }
+
+    pub fn set_light_schedule_configs<I>(&mut self, configs: I)
+    where
+        I: IntoIterator<Item = LightScheduleConfig>,
+    {
+        self.light_schedules = configs
+            .into_iter()
+            .map(|mut config| {
+                config.transitions = normalize_mode_transition_configs(config.transitions);
+                (config.id.clone(), config)
+            })
+            .collect();
     }
 
     /// Resolve the selected base profile ID for a mode, falling back to the

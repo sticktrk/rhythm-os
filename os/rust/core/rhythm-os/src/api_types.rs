@@ -50,6 +50,8 @@ pub struct RoomProfileSettingsDto {
     pub motion_timeout_secs: Option<TimerSetting>,
     pub motion_activation_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub light_schedule: Option<rhythm_core::LightScheduleAssignment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub room_schedule: Option<RoomScheduleConfig>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub profile_overrides: BTreeMap<String, LightProfileNodeOverride>,
@@ -65,6 +67,7 @@ impl RoomProfileSettingsDto {
             fade_ms: settings.fade_ms.clone(),
             motion_timeout_secs: settings.motion_timeout_secs.clone(),
             motion_activation_enabled: settings.motion_activation_enabled(),
+            light_schedule: settings.light_schedule.clone(),
             room_schedule: settings.room_schedule,
             profile_overrides: settings.profile_overrides.clone(),
         }
@@ -276,6 +279,7 @@ pub const API_SCHEMA_VERSION: u32 = 2;
 pub const FEATURE_ASYNC_DEBUG_BUNDLE_UPLOAD: &str = "async_debug_bundle_upload";
 pub const FEATURE_MOTION_ACTIVATION_TOGGLE: &str = "motion_activation_toggle";
 pub const FEATURE_ROOM_SCHEDULE_V1: &str = "room_schedule_v1";
+pub const FEATURE_LIGHT_SCHEDULES_V1: &str = "light_schedules_v1";
 pub const FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES: &str = "room_light_profile_overrides";
 pub const FEATURE_ROOM_DAY_IDLE_PROFILE_OVERRIDES: &str = "room_day_idle_profile_overrides_v1";
 pub const FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES: &str =
@@ -307,6 +311,7 @@ impl Serialize for ApiCapabilitiesDto {
                 FEATURE_ASYNC_DEBUG_BUNDLE_UPLOAD,
                 FEATURE_MOTION_ACTIVATION_TOGGLE,
                 FEATURE_ROOM_SCHEDULE_V1,
+                FEATURE_LIGHT_SCHEDULES_V1,
                 FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES,
                 FEATURE_ROOM_DAY_IDLE_PROFILE_OVERRIDES,
                 FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
@@ -1599,58 +1604,25 @@ mod tests {
             json["capabilities"]["api_schema_version"],
             API_SCHEMA_VERSION
         );
-        assert_eq!(
-            json["capabilities"]["features"][0],
-            FEATURE_ASYNC_DEBUG_BUNDLE_UPLOAD
-        );
-        assert_eq!(
-            json["capabilities"]["features"][1],
-            FEATURE_MOTION_ACTIVATION_TOGGLE
-        );
-        assert_eq!(
-            json["capabilities"]["features"][2],
-            FEATURE_ROOM_SCHEDULE_V1
-        );
-        assert_eq!(
-            json["capabilities"]["features"][3],
-            FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES
-        );
-        assert_eq!(
-            json["capabilities"]["features"][4],
-            FEATURE_ROOM_DAY_IDLE_PROFILE_OVERRIDES
-        );
-        assert_eq!(
-            json["capabilities"]["features"][5],
-            FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES
-        );
-        assert_eq!(
-            json["capabilities"]["features"][6],
-            FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES
-        );
-        assert_eq!(
-            json["capabilities"]["features"][7],
-            FEATURE_HUE_ROOM_AUTHORITY_CONSENT
-        );
-        assert_eq!(
-            json["capabilities"]["features"][8],
-            FEATURE_MATTER_SETUP_CODE_RECOVERY
-        );
-        assert_eq!(
-            json["capabilities"]["features"][9],
-            FEATURE_REMOVED_DEVICE_ARCHIVE
-        );
-        assert_eq!(
-            json["capabilities"]["features"][10],
-            FEATURE_HUE_ROOM_TOPOLOGY_SYNC
-        );
-        assert_eq!(
-            json["capabilities"]["features"][11],
-            FEATURE_SCENE_MOTION_SUPPRESSION
-        );
-        assert_eq!(
-            json["capabilities"]["features"][12],
-            FEATURE_BUTTON_MULTI_ROOM_CONTROLS
-        );
+        let features = json["capabilities"]["features"].as_array().unwrap();
+        for feature in [
+            FEATURE_ASYNC_DEBUG_BUNDLE_UPLOAD,
+            FEATURE_MOTION_ACTIVATION_TOGGLE,
+            FEATURE_ROOM_SCHEDULE_V1,
+            FEATURE_LIGHT_SCHEDULES_V1,
+            FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES,
+            FEATURE_ROOM_DAY_IDLE_PROFILE_OVERRIDES,
+            FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
+            FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
+            FEATURE_HUE_ROOM_AUTHORITY_CONSENT,
+            FEATURE_MATTER_SETUP_CODE_RECOVERY,
+            FEATURE_REMOVED_DEVICE_ARCHIVE,
+            FEATURE_HUE_ROOM_TOPOLOGY_SYNC,
+            FEATURE_SCENE_MOTION_SUPPRESSION,
+            FEATURE_BUTTON_MULTI_ROOM_CONTROLS,
+        ] {
+            assert!(features.contains(&serde_json::json!(feature)));
+        }
         assert_eq!(
             json["capabilities"]["hubs"][0]["device_onboarding_methods"][0],
             "matter_on_network_setup_code"

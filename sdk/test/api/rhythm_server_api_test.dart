@@ -3016,6 +3016,95 @@ void main() {
     });
   });
 
+  group('named light schedules', () {
+    test('fetches reusable schedule definitions', () async {
+      when(() => dio.get('api/light-schedules'))
+          .thenAnswer((_) async => Response(
+                requestOptions: RequestOptions(path: 'api/light-schedules'),
+                statusCode: 200,
+                data: {
+                  'schedules': [
+                    {
+                      'id': 'outdoor',
+                      'name': 'Outdoor lights',
+                      'enabled': true,
+                      'active_mode': 'day',
+                      'transitions': [],
+                    },
+                  ],
+                },
+              ));
+
+      final schedules = await api.getLightSchedules();
+
+      expect(schedules.single.id, 'outdoor');
+      expect(schedules.single.activeMode, RhythmMode.day);
+    });
+
+    test('clears assignment with null and returns authoritative state',
+        () async {
+      when(() => dio.put(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions:
+                    RequestOptions(path: 'api/light-schedules/assignment'),
+                statusCode: 200,
+                data: {
+                  'nodes': [
+                    {
+                      'room_id': 'porch',
+                      'rhythm_enabled': true,
+                      'profile_settings': {
+                        'light_schedule': {
+                          'kind': 'unscheduled',
+                          'active_mode': 'day',
+                        },
+                      },
+                    },
+                  ],
+                },
+              ));
+
+      final state = await api.setLightScheduleAssignment(
+        nodeId: 'porch',
+        scheduleId: null,
+      );
+
+      expect(state?.roomId, 'porch');
+      expect(state?.profileSettings?.isExplicitlyUnscheduled, isTrue);
+      verify(() => dio.put('api/light-schedules/assignment', data: {
+            'node_id': 'porch',
+            'schedule_id': null,
+          })).called(1);
+    });
+
+    test('restores legacy schedule authority explicitly', () async {
+      when(() => dio.put(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions:
+                    RequestOptions(path: 'api/light-schedules/assignment'),
+                statusCode: 200,
+                data: {
+                  'nodes': [
+                    {
+                      'room_id': 'porch',
+                      'rhythm_enabled': true,
+                      'profile_settings': const <String, dynamic>{},
+                    },
+                  ],
+                },
+              ));
+
+      final state = await api.clearLightScheduleAssignment(nodeId: 'porch');
+
+      expect(state?.roomId, 'porch');
+      expect(state?.profileSettings?.lightSchedule, isNull);
+      verify(() => dio.put('api/light-schedules/assignment', data: {
+            'node_id': 'porch',
+            'legacy': true,
+          })).called(1);
+    });
+  });
+
   group('Matter setup code recovery', () {
     test('parses a secret-bearing response without transforming the payload',
         () async {
