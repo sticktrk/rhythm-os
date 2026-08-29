@@ -1927,9 +1927,10 @@ class RhythmServerApi {
     required String transitionId,
   }) async {
     try {
+      final encodedScheduleId = Uri.encodeComponent(scheduleId);
+      final encodedTransitionId = Uri.encodeComponent(transitionId);
       await _dio.post(
-        'api/light-schedules/${Uri.encodeComponent(scheduleId)}/transitions/'
-        '${Uri.encodeComponent(transitionId)}/trigger',
+        'api/light-schedules/$encodedScheduleId/transitions/$encodedTransitionId/trigger',
         data: const <String, dynamic>{},
       );
       return true;

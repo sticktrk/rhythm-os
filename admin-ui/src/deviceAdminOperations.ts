@@ -167,6 +167,41 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     body: {}
   },
   {
+    id: 'light-schedules-get',
+    category: 'Global Settings',
+    label: 'Read light schedules',
+    description: 'Fetch reusable named light schedules.',
+    method: 'GET',
+    path: 'api/light-schedules'
+  },
+  {
+    id: 'light-schedules-set',
+    category: 'Global Settings',
+    label: 'Set light schedules',
+    description: 'Replace the reusable named light schedule registry.',
+    method: 'PUT',
+    path: 'api/light-schedules',
+    body: { schedules: [] }
+  },
+  {
+    id: 'light-schedule-assignment-set',
+    category: 'Global Settings',
+    label: 'Set light schedule assignment',
+    description: 'Assign a room or standalone light to a named schedule.',
+    method: 'PUT',
+    path: 'api/light-schedules/assignment',
+    body: { node_id: '{node_id}', schedule_id: '{schedule_id}' }
+  },
+  {
+    id: 'light-schedule-transition-trigger',
+    category: 'Global Settings',
+    label: 'Trigger light schedule transition',
+    description: 'Run one transition for a reusable named light schedule.',
+    method: 'POST',
+    path: 'api/light-schedules/{schedule_id}/transitions/{transition_id}/trigger',
+    body: {}
+  },
+  {
     id: 'input-bindings-get',
     category: 'Global Settings',
     label: 'Read input bindings',

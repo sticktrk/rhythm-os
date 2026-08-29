@@ -10214,6 +10214,24 @@ pub fn do_light_schedules_set(
     state: &SharedState,
     schedules: Vec<rhythm_core::LightScheduleConfig>,
 ) -> Result<String> {
+    do_light_schedules_set_internal(state, schedules, true)
+}
+
+/// Backup restore replaces the topology and room manager after applying the
+/// imported configuration. Current references therefore belong to the state
+/// being replaced and must not prevent the imported registry from loading.
+fn do_light_schedules_set_for_backup_restore(
+    state: &SharedState,
+    schedules: Vec<rhythm_core::LightScheduleConfig>,
+) -> Result<String> {
+    do_light_schedules_set_internal(state, schedules, false)
+}
+
+fn do_light_schedules_set_internal(
+    state: &SharedState,
+    schedules: Vec<rhythm_core::LightScheduleConfig>,
+    validate_current_references: bool,
+) -> Result<String> {
     let mut ids = HashSet::new();
     for schedule in &schedules {
         validate_light_schedule_config(schedule)?;
@@ -10225,7 +10243,7 @@ pub fn do_light_schedules_set(
         }
     }
 
-    let assigned_roots = {
+    let assigned_roots = if validate_current_references {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.hub_runtime()
             .map(|runtime| {
@@ -10242,6 +10260,8 @@ pub fn do_light_schedules_set(
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default()
+    } else {
+        Vec::new()
     };
     for (node_id, schedule_id) in &assigned_roots {
         if !ids.contains(schedule_id.as_str()) {
@@ -10252,7 +10272,7 @@ pub fn do_light_schedules_set(
             ));
         }
     }
-    {
+    if validate_current_references {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         for binding in s.topology.input_bindings() {
             if let Some(schedule_id) = automation_action_light_schedule_id(&binding.action) {
@@ -10599,6 +10619,48 @@ fn validate_imported_backup_configuration(configuration: &BackupConfiguration) -
                 return Err(anyhow::anyhow!(
                     "Room '{}' references unknown light schedule '{}'",
                     room.id,
+                    schedule_id
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_imported_backup_schedule_references(
+    configuration: &BackupConfiguration,
+    installation: &BackupInstallation,
+) -> Result<()> {
+    let schedule_ids = configuration
+        .light_schedules
+        .iter()
+        .map(|schedule| schedule.id.as_str())
+        .collect::<HashSet<_>>();
+
+    for node in installation.rooms.iter() {
+        if let Some(schedule_id) = node
+            .profile_settings
+            .light_schedule
+            .as_ref()
+            .and_then(rhythm_core::LightScheduleAssignment::schedule_id)
+        {
+            if !schedule_ids.contains(schedule_id) {
+                return Err(anyhow::anyhow!(
+                    "Node '{}' references unknown light schedule '{}'",
+                    node.id,
+                    schedule_id
+                ));
+            }
+        }
+    }
+
+    for binding in installation.topology.input_bindings() {
+        if let Some(schedule_id) = automation_action_light_schedule_id(&binding.action) {
+            if !schedule_ids.contains(schedule_id) {
+                return Err(anyhow::anyhow!(
+                    "Input binding '{}' references unknown light schedule '{}'",
+                    binding.id,
                     schedule_id
                 ));
             }
@@ -10955,7 +11017,7 @@ fn apply_backup_configuration(
         None,
         None,
     )?;
-    do_light_schedules_set(state, imported_light_schedules)?;
+    do_light_schedules_set_for_backup_restore(state, imported_light_schedules)?;
 
     let (applied_rooms, skipped_rooms) =
         apply_backup_configuration_room_preferences(state, &imported_rooms);
@@ -11015,6 +11077,7 @@ pub fn do_backup_restore(state: &SharedState, bundle: BackupBundle) -> Result<St
             Some(&scene_ids),
         )?;
     }
+    validate_imported_backup_schedule_references(&bundle.configuration, &installation)?;
 
     let require_hue_authority = preflight_backup_integration_files(state, &installation)?;
 
@@ -23192,6 +23255,91 @@ mod tests {
             .get(rhythm_core::RHYTHM_PROFILE_ID)
             .unwrap();
         assert_eq!(reexported_override, restored_override);
+    }
+
+    fn backup_test_light_schedule(id: &str) -> rhythm_core::LightScheduleConfig {
+        rhythm_core::LightScheduleConfig {
+            id: id.to_string(),
+            name: id.to_string(),
+            enabled: true,
+            active_mode: RhythmMode::Day,
+            transitions: vec![rhythm_core::ModeTransitionConfig::new(
+                RhythmMode::Day,
+                RhythmMode::Sleep,
+                0,
+            )
+            .with_id(format!("{id}_sleep"))],
+        }
+    }
+
+    fn backup_test_schedule_binding(id: &str, schedule_id: &str) -> crate::topology::InputBinding {
+        crate::topology::InputBinding {
+            id: id.to_string(),
+            preset: None,
+            source_node_id: "button".to_string(),
+            trigger: crate::topology::InputBindingTrigger::button(None),
+            action: crate::topology::AutomationAction::LightScheduleModeSet {
+                schedule_id: schedule_id.to_string(),
+                mode: RhythmMode::Sleep,
+                transition: crate::topology::ModeTransitionSelection::None,
+            },
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn backup_restore_replaces_registry_despite_current_topology_references() {
+        let (source_state, _source_runtime) = setup_state(Vec::new());
+        source_state
+            .lock()
+            .unwrap()
+            .set_light_schedule_configs(vec![backup_test_light_schedule("new")]);
+        let bundle = build_backup_bundle_dto(&source_state, false).unwrap();
+
+        let (target_state, _target_runtime) = setup_state(Vec::new());
+        {
+            let mut target = target_state.lock().unwrap();
+            target.set_light_schedule_configs(vec![backup_test_light_schedule("old")]);
+            target
+                .topology
+                .set_input_binding(backup_test_schedule_binding("old-binding", "old"));
+        }
+
+        do_backup_restore(&target_state, bundle).unwrap();
+
+        let target = target_state.lock().unwrap();
+        assert!(target.light_schedules.contains_key("new"));
+        assert!(!target.light_schedules.contains_key("old"));
+        assert!(target.topology.input_bindings().is_empty());
+    }
+
+    #[test]
+    fn backup_restore_rejects_imported_unknown_schedule_reference_before_mutation() {
+        let (source_state, _source_runtime) = setup_state(Vec::new());
+        source_state
+            .lock()
+            .unwrap()
+            .set_light_schedule_configs(vec![backup_test_light_schedule("new")]);
+        let mut bundle = build_backup_bundle_dto(&source_state, false).unwrap();
+        bundle
+            .installation
+            .topology
+            .set_input_binding(backup_test_schedule_binding("broken-binding", "missing"));
+
+        let (target_state, _target_runtime) = setup_state(Vec::new());
+        target_state
+            .lock()
+            .unwrap()
+            .set_light_schedule_configs(vec![backup_test_light_schedule("old")]);
+
+        let error = do_backup_restore(&target_state, bundle).unwrap_err();
+
+        assert!(error.to_string().contains(
+            "Input binding 'broken-binding' references unknown light schedule 'missing'"
+        ));
+        let target = target_state.lock().unwrap();
+        assert!(target.light_schedules.contains_key("old"));
+        assert!(!target.light_schedules.contains_key("new"));
     }
 
     #[test]
