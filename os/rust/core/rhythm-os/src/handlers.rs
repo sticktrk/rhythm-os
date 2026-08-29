@@ -1215,9 +1215,11 @@ fn parse_profile_settings_patch(
         motion_timeout_secs: parse_timer_patch_value(body, "motion_timeout_secs")?,
         motion_activation_enabled,
         light_schedule: None,
+        light_schedule_overrides: None,
         room_schedule,
         profile_overrides: parse_profile_overrides_patch_value(body, field_name)?,
         expected_effective_profile_overrides: None,
+        expected_effective_light_schedule_overrides: None,
         replace_profile_overrides: body
             .get("replace_profile_overrides")
             .and_then(Value::as_bool)
@@ -1771,6 +1773,10 @@ fn light_schedule_mutation_error(
         "Unknown transition",
         "Unknown light schedule transition",
         "Light schedule transition",
+        "Light schedule override",
+        "solar offset_minutes",
+        "trigger override",
+        "override precondition failed",
         "Schedule target was not found",
         "Schedule target must",
         " is disabled",
@@ -1846,6 +1852,61 @@ pub fn handle_put_light_schedule_assignment(state: &SharedState, body: &Value) -
             "light_schedule_assignment_updated",
             error,
         ),
+    }
+}
+
+pub fn handle_put_light_schedule_override(state: &SharedState, body: &Value) -> ApiResponse {
+    let Some(node_id) = body.get("node_id").and_then(Value::as_str) else {
+        return ApiResponse::bad_request("Missing node_id");
+    };
+    let Some(schedule_id) = body.get("schedule_id").and_then(Value::as_str) else {
+        return ApiResponse::bad_request("Missing schedule_id");
+    };
+    let Some(value) = body.get("override") else {
+        return ApiResponse::bad_request("Missing override");
+    };
+    let schedule_override = if value.is_null() {
+        None
+    } else {
+        match serde_json::from_value::<rhythm_core::LightScheduleOverride>(value.clone()) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                return ApiResponse::bad_request(&format!(
+                    "Invalid light schedule override: {error}"
+                ))
+            }
+        }
+    };
+    let expected_effective_overrides = match body.get("expected_effective_overrides") {
+        None => None,
+        Some(Value::Object(value)) => match serde_json::from_value::<
+            BTreeMap<String, rhythm_core::LightScheduleOverride>,
+        >(Value::Object(value.clone()))
+        {
+            Ok(value) => Some(value),
+            Err(error) => {
+                return ApiResponse::bad_request(&format!(
+                    "Invalid expected_effective_overrides: {error}"
+                ))
+            }
+        },
+        Some(_) => {
+            return ApiResponse::bad_request("expected_effective_overrides must be an object")
+        }
+    };
+    match commands::do_light_schedule_override_set(
+        state,
+        node_id,
+        schedule_id,
+        schedule_override,
+        expected_effective_overrides,
+        correlation_id_from_body(body),
+        true,
+    ) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(error) => {
+            light_schedule_mutation_error(state, node_id, "light_schedule_override_updated", error)
+        }
     }
 }
 
@@ -7267,8 +7328,9 @@ mod tests {
         assert_eq!(cleared.status, 200, "{}", cleared.body);
         let cleared: Value = serde_json::from_str(&cleared.body).unwrap();
         assert_eq!(
-            cleared["nodes"][0]["profile_settings"]["light_schedule"]["kind"],
-            "unscheduled"
+            cleared["nodes"][0]["profile_settings"]["light_schedule"]["kind"], "unscheduled",
+            "{}",
+            cleared
         );
 
         let legacy = handle_put_light_schedule_assignment(
@@ -7312,6 +7374,148 @@ mod tests {
             room_local["nodes"][0]["profile_settings"]["room_schedule"]["source"],
             "follow_time"
         );
+    }
+
+    #[test]
+    fn named_schedule_override_is_sparse_conflict_safe_and_registry_guarded() {
+        let state = handler_state_with_runtime();
+        let configured = handle_put_light_schedules(
+            &state,
+            &json!({"schedules": [{
+                "id": "outdoor",
+                "name": "Outdoor lights",
+                "active_mode": "sleep",
+                "transitions": [{
+                    "id": "wake",
+                    "label": "Wake",
+                    "from_mode": "sleep",
+                    "to_mode": "day",
+                    "trigger": {"kind": "solar", "event": "sunrise", "offset_minutes": 15},
+                    "trigger_enabled": true,
+                    "duration_ms": {"mode": "fixed", "value": 0},
+                    "preserve_hard_off": true
+                }]
+            }]}),
+        );
+        assert_eq!(configured.status, 200, "{}", configured.body);
+        assert_eq!(
+            handle_put_light_schedule_assignment(
+                &state,
+                &json!({"node_id": "room1", "schedule_id": "outdoor"}),
+            )
+            .status,
+            200
+        );
+
+        let overridden = handle_put_light_schedule_override(
+            &state,
+            &json!({
+                "node_id": "room1",
+                "schedule_id": "outdoor",
+                "override": {
+                    "transitions": {
+                        "wake": {"trigger": {"offset_minutes": -30}}
+                    }
+                },
+                "expected_effective_overrides": {},
+                "correlation_id": "override-journey-1"
+            }),
+        );
+        assert_eq!(overridden.status, 200, "{}", overridden.body);
+        let body: Value = serde_json::from_str(&overridden.body).unwrap();
+        assert_eq!(
+            body["profile_settings"]["light_schedule_overrides"]["outdoor"]["transitions"]["wake"]
+                ["trigger"]["offset_minutes"],
+            -30,
+            "{}",
+            overridden.body,
+        );
+
+        let stale = handle_put_light_schedule_override(
+            &state,
+            &json!({
+                "node_id": "room1",
+                "schedule_id": "outdoor",
+                "override": null,
+                "expected_effective_overrides": {},
+                "correlation_id": "override-journey-stale"
+            }),
+        );
+        assert_eq!(stale.status, 400, "{}", stale.body);
+
+        let removed_transition = handle_put_light_schedules(
+            &state,
+            &json!({"schedules": [{
+                "id": "outdoor",
+                "name": "Outdoor lights",
+                "active_mode": "sleep",
+                "transitions": []
+            }]}),
+        );
+        assert_eq!(
+            removed_transition.status, 400,
+            "{}",
+            removed_transition.body
+        );
+
+        commands::do_trigger_light_schedule_transition_for_node(&state, "room1", "outdoor", "wake")
+            .unwrap();
+        let state = state.lock().unwrap();
+        let snapshot = state
+            .hub_runtime()
+            .unwrap()
+            .engine_node_snapshot("room1")
+            .unwrap();
+        assert!(matches!(
+            snapshot.profile_settings.light_schedule,
+            Some(rhythm_core::LightScheduleAssignment::Named {
+                active_mode: rhythm_core::RhythmMode::Day,
+                ..
+            })
+        ));
+        let activity = state
+            .light_activity
+            .iter()
+            .rev()
+            .find(|entry| entry.action_id == "light_schedule_boundary")
+            .unwrap();
+        assert_eq!(
+            activity.payload.as_ref().unwrap()["override_scope"],
+            "effective_override"
+        );
+        assert_eq!(
+            activity.payload.as_ref().unwrap()["offset_direction"],
+            "before"
+        );
+        assert!(activity
+            .payload
+            .as_ref()
+            .unwrap()
+            .get("offset_minutes")
+            .is_none());
+    }
+
+    #[test]
+    fn named_schedule_handler_rejects_invalid_solar_offsets() {
+        let state = handler_state_with_runtime();
+        for offset in [json!(721), json!(1.5)] {
+            let response = handle_put_light_schedules(
+                &state,
+                &json!({"schedules": [{
+                    "id": "outdoor",
+                    "name": "Outdoor lights",
+                    "transitions": [{
+                        "id": "wake",
+                        "from_mode": "sleep",
+                        "to_mode": "day",
+                        "trigger": {"kind": "solar", "event": "sunrise", "offset_minutes": offset},
+                        "duration_ms": {"mode": "auto"},
+                        "preserve_hard_off": true
+                    }]
+                }]}),
+            );
+            assert_eq!(response.status, 400, "{}", response.body);
+        }
     }
 
     #[test]

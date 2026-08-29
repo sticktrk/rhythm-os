@@ -1397,34 +1397,57 @@ pub fn check_solar_midnight(state: &SharedState, current_hour: f32) {
     );
 }
 
+#[cfg(test)]
 fn fallback_solar_trigger_hour(
     trigger: rhythm_core::ModeTransitionTrigger,
     target_mode: rhythm_core::RhythmMode,
     sunrise: f32,
     sunset: f32,
 ) -> Option<f32> {
+    fallback_solar_trigger_hour_unwrapped(trigger, target_mode, sunrise, sunset)
+        .map(|hour| hour.rem_euclid(24.0))
+}
+
+fn fallback_solar_trigger_hour_unwrapped(
+    trigger: rhythm_core::ModeTransitionTrigger,
+    target_mode: rhythm_core::RhythmMode,
+    sunrise: f32,
+    sunset: f32,
+) -> Option<f32> {
     let toward_day = target_mode == rhythm_core::RhythmMode::Day;
-    match trigger {
-        rhythm_core::ModeTransitionTrigger::Manual => None,
-        rhythm_core::ModeTransitionTrigger::Scheduled(time) => Some(time.local_hour()),
-        rhythm_core::ModeTransitionTrigger::Sunrise => Some(sunrise),
-        rhythm_core::ModeTransitionTrigger::Sunset => Some(sunset),
-        rhythm_core::ModeTransitionTrigger::CivilTwilight => Some(if toward_day {
-            (sunrise - 0.5).rem_euclid(24.0)
-        } else {
-            (sunset + 0.5).rem_euclid(24.0)
-        }),
-        rhythm_core::ModeTransitionTrigger::NauticalTwilight => Some(if toward_day {
-            (sunrise - 1.0).rem_euclid(24.0)
-        } else {
-            (sunset + 1.0).rem_euclid(24.0)
-        }),
-        rhythm_core::ModeTransitionTrigger::AstronomicalTwilight => Some(if toward_day {
-            (sunrise - 1.5).rem_euclid(24.0)
-        } else {
-            (sunset + 1.5).rem_euclid(24.0)
-        }),
+    if trigger.is_manual() {
+        return None;
     }
+    if let Some(time) = trigger.scheduled_time() {
+        return Some(time.local_hour());
+    }
+
+    let anchor = match trigger.solar_event()? {
+        rhythm_core::SolarEvent::Sunrise => sunrise,
+        rhythm_core::SolarEvent::Sunset => sunset,
+        rhythm_core::SolarEvent::CivilTwilight => {
+            if toward_day {
+                (sunrise - 0.5).rem_euclid(24.0)
+            } else {
+                (sunset + 0.5).rem_euclid(24.0)
+            }
+        }
+        rhythm_core::SolarEvent::NauticalTwilight => {
+            if toward_day {
+                (sunrise - 1.0).rem_euclid(24.0)
+            } else {
+                (sunset + 1.0).rem_euclid(24.0)
+            }
+        }
+        rhythm_core::SolarEvent::AstronomicalTwilight => {
+            if toward_day {
+                (sunrise - 1.5).rem_euclid(24.0)
+            } else {
+                (sunset + 1.5).rem_euclid(24.0)
+            }
+        }
+    };
+    Some(anchor + f32::from(trigger.offset_minutes()) / 60.0)
 }
 
 #[derive(Clone, Copy)]
@@ -1448,8 +1471,30 @@ fn trigger_hour_for_local_date(
     ctx: SolarTriggerContext<'_>,
     date: chrono::NaiveDate,
 ) -> Option<f32> {
-    if let rhythm_core::ModeTransitionTrigger::Scheduled(time) = trigger {
+    trigger_hour_for_source_date_unwrapped(trigger, target_mode, ctx, date)
+        .map(|hour| hour.rem_euclid(24.0))
+}
+
+/// Resolve against the solar event's source date without folding an offset
+/// across midnight. Replay needs the signed day displacement so an event such
+/// as "12 hours before sunrise" remains attached to that sunrise's date.
+fn trigger_hour_for_source_date_unwrapped(
+    trigger: rhythm_core::ModeTransitionTrigger,
+    target_mode: rhythm_core::RhythmMode,
+    ctx: SolarTriggerContext<'_>,
+    date: chrono::NaiveDate,
+) -> Option<f32> {
+    if let Some(time) = trigger.scheduled_time() {
         return Some(time.local_hour());
+    }
+
+    // Zero-offset triggers retain the legacy deterministic fallback. A new
+    // signed offset must not pretend to be tied to a local solar event when
+    // location or timezone evidence is unavailable.
+    if trigger.offset_minutes() != 0
+        && (ctx.latitude.is_none() || ctx.longitude.is_none() || ctx.timezone_name.is_none())
+    {
+        return None;
     }
 
     let estimated_sunrise = if ctx.latitude.is_some() && ctx.longitude.is_some() {
@@ -1464,7 +1509,7 @@ fn trigger_hour_for_local_date(
     };
 
     let Some(lat) = ctx.latitude else {
-        return fallback_solar_trigger_hour(
+        return fallback_solar_trigger_hour_unwrapped(
             trigger,
             target_mode,
             estimated_sunrise,
@@ -1472,7 +1517,7 @@ fn trigger_hour_for_local_date(
         );
     };
     let Some(lon) = ctx.longitude else {
-        return fallback_solar_trigger_hour(
+        return fallback_solar_trigger_hour_unwrapped(
             trigger,
             target_mode,
             estimated_sunrise,
@@ -1480,7 +1525,7 @@ fn trigger_hour_for_local_date(
         );
     };
     let Some(tz_name) = ctx.timezone_name else {
-        return fallback_solar_trigger_hour(
+        return fallback_solar_trigger_hour_unwrapped(
             trigger,
             target_mode,
             estimated_sunrise,
@@ -1495,13 +1540,11 @@ fn trigger_hour_for_local_date(
     let sun = rhythm_core::calculate_sun_times(lat, lon, year, month, day, &tz);
     let twilight = rhythm_core::calculate_twilight_times(lat, lon, year, month, day, &tz);
 
-    match trigger {
-        rhythm_core::ModeTransitionTrigger::Manual => None,
-        rhythm_core::ModeTransitionTrigger::Scheduled(time) => Some(time.local_hour()),
-        rhythm_core::ModeTransitionTrigger::Sunrise => Some(sun.sunrise),
-        rhythm_core::ModeTransitionTrigger::Sunset => Some(sun.sunset),
-        rhythm_core::ModeTransitionTrigger::CivilTwilight => {
-            Some(if target_mode == rhythm_core::RhythmMode::Day {
+    let anchor = match trigger.solar_event()? {
+        rhythm_core::SolarEvent::Sunrise => sun.sunrise,
+        rhythm_core::SolarEvent::Sunset => sun.sunset,
+        rhythm_core::SolarEvent::CivilTwilight => {
+            if target_mode == rhythm_core::RhythmMode::Day {
                 twilight
                     .dawn
                     .civil
@@ -1511,10 +1554,10 @@ fn trigger_hour_for_local_date(
                     .dusk
                     .civil
                     .unwrap_or((sun.sunset + 0.5).rem_euclid(24.0))
-            })
+            }
         }
-        rhythm_core::ModeTransitionTrigger::NauticalTwilight => {
-            Some(if target_mode == rhythm_core::RhythmMode::Day {
+        rhythm_core::SolarEvent::NauticalTwilight => {
+            if target_mode == rhythm_core::RhythmMode::Day {
                 twilight
                     .dawn
                     .nautical
@@ -1524,10 +1567,10 @@ fn trigger_hour_for_local_date(
                     .dusk
                     .nautical
                     .unwrap_or((sun.sunset + 1.0).rem_euclid(24.0))
-            })
+            }
         }
-        rhythm_core::ModeTransitionTrigger::AstronomicalTwilight => {
-            Some(if target_mode == rhythm_core::RhythmMode::Day {
+        rhythm_core::SolarEvent::AstronomicalTwilight => {
+            if target_mode == rhythm_core::RhythmMode::Day {
                 twilight
                     .dawn
                     .astronomical
@@ -1537,9 +1580,10 @@ fn trigger_hour_for_local_date(
                     .dusk
                     .astronomical
                     .unwrap_or((sun.sunset + 1.5).rem_euclid(24.0))
-            })
+            }
         }
-    }
+    };
+    Some(anchor + f32::from(trigger.offset_minutes()) / 60.0)
 }
 
 fn trigger_hour(
@@ -1594,8 +1638,10 @@ fn resolved_replayed_mode_transition(
 
     let start_local = local_datetime_from_utc(start_utc, ctx.utc_offset, ctx.solar.timezone_name);
     let end_local = local_datetime_from_utc(end_utc, ctx.utc_offset, ctx.solar.timezone_name);
-    let mut date = start_local.date();
-    let end_date = end_local.date();
+    // Solar offsets are bounded to +/- 12 hours, so include one source date
+    // either side of the replay window before filtering by exact UTC time.
+    let mut date = start_local.date().pred_opt().unwrap_or(start_local.date());
+    let end_date = end_local.date().succ_opt().unwrap_or(end_local.date());
     let mut events = Vec::new();
 
     while date <= end_date {
@@ -1606,14 +1652,16 @@ fn resolved_replayed_mode_transition(
         for config in ctx.configs.iter().filter(|config| {
             config.trigger_enabled && config.trigger != rhythm_core::ModeTransitionTrigger::Manual
         }) {
-            let Some(trigger_hour) =
-                trigger_hour_for_local_date(config.trigger, config.to_mode, ctx.solar, date)
-            else {
+            let Some(trigger_hour) = trigger_hour_for_source_date_unwrapped(
+                config.trigger,
+                config.to_mode,
+                ctx.solar,
+                date,
+            ) else {
                 continue;
             };
 
-            let trigger_seconds =
-                ((trigger_hour.rem_euclid(24.0)) * 3600.0).round() as i64 % 86_400;
+            let trigger_seconds = (trigger_hour * 3600.0).round() as i64;
             let event_local = local_midnight + chrono::Duration::seconds(trigger_seconds);
             let Some(event_utc) =
                 utc_datetime_from_local(event_local, ctx.utc_offset, ctx.solar.timezone_name)
@@ -1801,17 +1849,36 @@ pub fn check_light_schedule_transitions(state: &SharedState, last_hour: f32, cur
             longitude: s.longitude,
             timezone_name: s.timezone_name.as_deref(),
         };
-        s.light_schedules
-            .values()
-            .filter(|schedule| schedule.enabled)
-            .filter_map(|schedule| {
-                schedule
+        let Some(runtime) = s.hub_runtime() else {
+            return;
+        };
+        runtime
+            .engine_all_effective_node_snapshots()
+            .into_iter()
+            .filter(|node| node.kind.is_light_addressable() && node.parent_id.is_none())
+            .filter_map(|node| {
+                let assignment = node.profile_settings.light_schedule.as_ref()?;
+                let schedule_id = assignment.schedule_id()?;
+                let schedule = s.light_schedules.get(schedule_id)?;
+                if !schedule.enabled {
+                    return None;
+                }
+                let effective = node
+                    .profile_settings
+                    .light_schedule_overrides
+                    .get(schedule_id)
+                    .map(|value| value.apply_to(schedule))
+                    .transpose()
+                    .ok()?
+                    .unwrap_or_else(|| schedule.clone());
+                let active_mode = assignment.active_mode()?;
+                effective
                     .transitions
                     .iter()
                     .find(|transition| {
-                        if transition.from_mode != schedule.active_mode
+                        if transition.from_mode != active_mode
                             || !transition.trigger_enabled
-                            || transition.trigger == rhythm_core::ModeTransitionTrigger::Manual
+                            || transition.trigger.is_manual()
                         {
                             return false;
                         }
@@ -1821,22 +1888,22 @@ pub fn check_light_schedule_transitions(state: &SharedState, last_hour: f32, cur
                             },
                         )
                     })
-                    .map(|transition| (schedule.id.clone(), transition.id.clone()))
+                    .map(|transition| (node.id.clone(), schedule.id.clone(), transition.id.clone()))
             })
             .collect::<Vec<_>>()
     };
 
-    for (schedule_id, transition_id) in candidates {
-        if let Err(error) = crate::commands::do_trigger_light_schedule_transition(
+    for (node_id, schedule_id, transition_id) in candidates {
+        if let Err(error) = crate::commands::do_trigger_light_schedule_transition_for_node(
             state,
+            &node_id,
             &schedule_id,
             &transition_id,
         ) {
             warn!(
                 target: "cmd",
-                "Named light schedule '{}' transition '{}' failed: {}",
-                schedule_id,
-                transition_id,
+                "Named light schedule '{}' transition '{}' for '{}' failed: {}",
+                schedule_id, transition_id, node_id,
                 error
             );
         }
@@ -1855,16 +1922,34 @@ pub fn reconcile_light_schedule_transitions(state: &SharedState, current_hour: f
             longitude: s.longitude,
             timezone_name: s.timezone_name.as_deref(),
         };
-        s.light_schedules
-            .values()
-            .filter(|schedule| schedule.enabled)
-            .filter_map(|schedule| {
-                schedule
+        let Some(runtime) = s.hub_runtime() else {
+            return;
+        };
+        runtime
+            .engine_all_effective_node_snapshots()
+            .into_iter()
+            .filter(|node| node.kind.is_light_addressable() && node.parent_id.is_none())
+            .filter_map(|node| {
+                let assignment = node.profile_settings.light_schedule.as_ref()?;
+                let schedule_id = assignment.schedule_id()?;
+                let schedule = s.light_schedules.get(schedule_id)?;
+                if !schedule.enabled {
+                    return None;
+                }
+                let effective = node
+                    .profile_settings
+                    .light_schedule_overrides
+                    .get(schedule_id)
+                    .map(|value| value.apply_to(schedule))
+                    .transpose()
+                    .ok()?
+                    .unwrap_or_else(|| schedule.clone());
+                let active_mode = assignment.active_mode()?;
+                effective
                     .transitions
                     .iter()
                     .filter(|transition| {
-                        transition.trigger_enabled
-                            && transition.trigger != rhythm_core::ModeTransitionTrigger::Manual
+                        transition.trigger_enabled && !transition.trigger.is_manual()
                     })
                     .filter_map(|transition| {
                         trigger_hour(transition.trigger, transition.to_mode, solar).map(|hour| {
@@ -1876,23 +1961,25 @@ pub fn reconcile_light_schedule_transitions(state: &SharedState, current_hour: f
                         })
                     })
                     .min_by(|left, right| left.0.total_cmp(&right.0))
-                    .filter(|(_, _, target_mode)| *target_mode != schedule.active_mode)
-                    .map(|(_, transition_id, _)| (schedule.id.clone(), transition_id))
+                    .filter(|(_, _, target_mode)| *target_mode != active_mode)
+                    .map(|(_, transition_id, _)| {
+                        (node.id.clone(), schedule.id.clone(), transition_id)
+                    })
             })
             .collect::<Vec<_>>()
     };
 
-    for (schedule_id, transition_id) in candidates {
-        if let Err(error) = crate::commands::do_trigger_light_schedule_transition(
+    for (node_id, schedule_id, transition_id) in candidates {
+        if let Err(error) = crate::commands::do_trigger_light_schedule_transition_for_node(
             state,
+            &node_id,
             &schedule_id,
             &transition_id,
         ) {
             warn!(
                 target: "cmd",
-                "Named light schedule '{}' restart transition '{}' failed: {}",
-                schedule_id,
-                transition_id,
+                "Named light schedule '{}' restart transition '{}' for '{}' failed: {}",
+                schedule_id, transition_id, node_id,
                 error
             );
         }
@@ -4166,6 +4253,81 @@ mod tests {
     }
 
     #[test]
+    fn replay_keeps_midnight_crossing_offset_attached_to_source_event_date() {
+        let date = NaiveDate::from_ymd_opt(2026, 6, 2).unwrap();
+        let trigger = rhythm_core::ModeTransitionTrigger::Sunrise
+            .with_solar_offset(-720)
+            .unwrap();
+        let solar = SolarTriggerContext {
+            solar_noon: 12.5,
+            latitude: Some(35.804102),
+            longitude: Some(-78.799_3),
+            timezone_name: Some("America/New_York"),
+        };
+        let unwrapped = trigger_hour_for_source_date_unwrapped(
+            trigger,
+            rhythm_core::RhythmMode::Day,
+            solar,
+            date,
+        )
+        .unwrap();
+        assert!(unwrapped < 0.0);
+        let wrapped =
+            trigger_hour_for_local_date(trigger, rhythm_core::RhythmMode::Day, solar, date)
+                .unwrap();
+        assert!((wrapped - unwrapped.rem_euclid(24.0)).abs() < 0.001);
+
+        let config = rhythm_core::ModeTransitionConfig::new(
+            rhythm_core::RhythmMode::Sleep,
+            rhythm_core::RhythmMode::Day,
+            1_000,
+        )
+        .with_id("wake")
+        .with_trigger(trigger);
+        let start_local = NaiveDate::from_ymd_opt(2026, 6, 1)
+            .unwrap()
+            .and_hms_opt(16, 0, 0)
+            .unwrap();
+        let end_local = start_local + chrono::Duration::hours(6);
+        let timezone = rhythm_core::Timezone::new("America/New_York");
+        let start = timezone.utc_datetime_from_local(start_local).unwrap();
+        let end = timezone.utc_datetime_from_local(end_local).unwrap();
+        let resolved = resolved_replayed_mode_transition(
+            rhythm_core::RhythmMode::Sleep,
+            start,
+            end,
+            ReplayTransitionContext {
+                solar,
+                utc_offset: -4.0,
+                configs: &[config],
+            },
+        );
+        assert_eq!(resolved.map(|value| value.id), Some("wake".to_string()));
+    }
+
+    #[test]
+    fn nonzero_solar_offset_waits_for_location_and_timezone() {
+        let trigger = rhythm_core::ModeTransitionTrigger::Sunset
+            .with_solar_offset(30)
+            .unwrap();
+        let date = NaiveDate::from_ymd_opt(2026, 6, 2).unwrap();
+        assert_eq!(
+            trigger_hour_for_local_date(
+                trigger,
+                rhythm_core::RhythmMode::Sleep,
+                SolarTriggerContext {
+                    solar_noon: 12.0,
+                    latitude: None,
+                    longitude: None,
+                    timezone_name: None,
+                },
+                date,
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn local_and_utc_datetime_conversions_use_timezone_or_fixed_offset() {
         let utc = NaiveDate::from_ymd_opt(2026, 1, 15)
             .unwrap()
@@ -4230,7 +4392,7 @@ mod tests {
                 .get("outdoor")
                 .unwrap()
                 .active_mode,
-            rhythm_core::RhythmMode::Sleep
+            rhythm_core::RhythmMode::Day
         );
         let outdoor = runtime.engine_node_snapshot("outdoor").unwrap();
         assert_eq!(
@@ -4248,6 +4410,111 @@ mod tests {
                 active_mode: rhythm_core::RhythmMode::Day
             })
         ));
+    }
+
+    #[test]
+    fn named_schedule_offsets_cross_independently_per_root() {
+        let state = make_state();
+        let runtime = runtime_with_rooms(&["early", "late"]);
+        install_runtime(&state, runtime.clone());
+        {
+            let mut app = state.lock().unwrap();
+            app.latitude = Some(35.804102);
+            app.longitude = Some(-78.799_3);
+            app.timezone_name = Some("America/New_York".to_string());
+        }
+        crate::commands::do_light_schedules_set(
+            &state,
+            vec![rhythm_core::LightScheduleConfig {
+                id: "outdoor".to_string(),
+                name: "Outdoor".to_string(),
+                enabled: true,
+                active_mode: rhythm_core::RhythmMode::Day,
+                transitions: vec![rhythm_core::ModeTransitionConfig::new(
+                    rhythm_core::RhythmMode::Day,
+                    rhythm_core::RhythmMode::Sleep,
+                    0,
+                )
+                .with_id("sleep")
+                .with_trigger(rhythm_core::ModeTransitionTrigger::Sunset)],
+            }],
+        )
+        .unwrap();
+        for node_id in ["early", "late"] {
+            crate::commands::do_light_schedule_assignment_set(
+                &state,
+                node_id,
+                Some("outdoor"),
+                false,
+            )
+            .unwrap();
+        }
+        for (node_id, offset) in [("early", -30), ("late", 30)] {
+            crate::commands::do_light_schedule_override_set(
+                &state,
+                node_id,
+                "outdoor",
+                Some(rhythm_core::LightScheduleOverride {
+                    transitions: std::collections::BTreeMap::from([(
+                        "sleep".to_string(),
+                        rhythm_core::ModeTransitionOverride {
+                            trigger: rhythm_core::ModeTransitionTriggerOverride {
+                                offset_minutes: Some(offset),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                    )]),
+                }),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+        }
+        let solar = SolarTriggerContext {
+            solar_noon: state.lock().unwrap().solar_noon_hour(),
+            latitude: Some(35.804102),
+            longitude: Some(-78.799_3),
+            timezone_name: Some("America/New_York"),
+        };
+        let sunset = trigger_hour(
+            rhythm_core::ModeTransitionTrigger::Sunset,
+            rhythm_core::RhythmMode::Sleep,
+            solar,
+        )
+        .unwrap();
+
+        check_light_schedule_transitions(&state, sunset - 0.6, sunset - 0.4);
+        let early = runtime.engine_node_snapshot("early").unwrap();
+        let late = runtime.engine_node_snapshot("late").unwrap();
+        assert_eq!(
+            early
+                .profile_settings
+                .light_schedule
+                .as_ref()
+                .and_then(rhythm_core::LightScheduleAssignment::active_mode),
+            Some(rhythm_core::RhythmMode::Sleep)
+        );
+        assert_eq!(
+            late.profile_settings
+                .light_schedule
+                .as_ref()
+                .and_then(rhythm_core::LightScheduleAssignment::active_mode),
+            Some(rhythm_core::RhythmMode::Day)
+        );
+
+        check_light_schedule_transitions(&state, sunset + 0.4, sunset + 0.6);
+        assert_eq!(
+            runtime
+                .engine_node_snapshot("late")
+                .unwrap()
+                .profile_settings
+                .light_schedule
+                .as_ref()
+                .and_then(rhythm_core::LightScheduleAssignment::active_mode),
+            Some(rhythm_core::RhythmMode::Sleep)
+        );
     }
 
     #[test]
@@ -4365,7 +4632,7 @@ mod tests {
                 .get("outdoor")
                 .unwrap()
                 .active_mode,
-            rhythm_core::RhythmMode::Sleep
+            rhythm_core::RhythmMode::Day
         );
         assert!(matches!(
             runtime

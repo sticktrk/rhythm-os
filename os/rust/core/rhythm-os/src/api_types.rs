@@ -51,6 +51,8 @@ pub struct RoomProfileSettingsDto {
     pub motion_activation_enabled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub light_schedule: Option<rhythm_core::LightScheduleAssignment>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub light_schedule_overrides: BTreeMap<String, rhythm_core::LightScheduleOverride>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub room_schedule: Option<RoomScheduleConfig>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
@@ -68,6 +70,7 @@ impl RoomProfileSettingsDto {
             motion_timeout_secs: settings.motion_timeout_secs.clone(),
             motion_activation_enabled: settings.motion_activation_enabled(),
             light_schedule: settings.light_schedule.clone(),
+            light_schedule_overrides: settings.light_schedule_overrides.clone(),
             room_schedule: settings.room_schedule,
             profile_overrides: settings.profile_overrides.clone(),
         }
@@ -280,6 +283,8 @@ pub const FEATURE_ASYNC_DEBUG_BUNDLE_UPLOAD: &str = "async_debug_bundle_upload";
 pub const FEATURE_MOTION_ACTIVATION_TOGGLE: &str = "motion_activation_toggle";
 pub const FEATURE_ROOM_SCHEDULE_V1: &str = "room_schedule_v1";
 pub const FEATURE_LIGHT_SCHEDULES_V1: &str = "light_schedules_v1";
+pub const FEATURE_LIGHT_SCHEDULE_OVERRIDES_V1: &str = "light_schedule_overrides_v1";
+pub const FEATURE_LIGHT_SCHEDULE_SOLAR_OFFSETS_V1: &str = "light_schedule_solar_offsets_v1";
 pub const FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES: &str = "room_light_profile_overrides";
 pub const FEATURE_ROOM_DAY_IDLE_PROFILE_OVERRIDES: &str = "room_day_idle_profile_overrides_v1";
 pub const FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES: &str =
@@ -312,6 +317,8 @@ impl Serialize for ApiCapabilitiesDto {
                 FEATURE_MOTION_ACTIVATION_TOGGLE,
                 FEATURE_ROOM_SCHEDULE_V1,
                 FEATURE_LIGHT_SCHEDULES_V1,
+                FEATURE_LIGHT_SCHEDULE_OVERRIDES_V1,
+                FEATURE_LIGHT_SCHEDULE_SOLAR_OFFSETS_V1,
                 FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES,
                 FEATURE_ROOM_DAY_IDLE_PROFILE_OVERRIDES,
                 FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,

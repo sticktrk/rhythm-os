@@ -3103,6 +3103,47 @@ void main() {
             'legacy': true,
           })).called(1);
     });
+
+    test('writes one sparse override with an exact reviewed precondition',
+        () async {
+      when(() => dio.put(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions:
+                    RequestOptions(path: 'api/light-schedules/override'),
+                statusCode: 200,
+                data: {
+                  'nodes': [
+                    {'room_id': 'porch', 'rhythm_enabled': true},
+                  ],
+                },
+              ));
+      const scheduleOverride = RhythmLightScheduleOverride(
+        transitions: {
+          'wake': RhythmModeTransitionOverride(
+            trigger: RhythmTransitionTriggerOverride(offsetMinutes: -30),
+          ),
+        },
+      );
+
+      final state = await api.setLightScheduleOverride(
+        nodeId: 'porch',
+        scheduleId: 'outdoor',
+        scheduleOverride: scheduleOverride,
+        expectedEffectiveOverrides: const {'outdoor': scheduleOverride},
+        correlationId: 'journey-1',
+      );
+
+      expect(state?.roomId, 'porch');
+      verify(() => dio.put('api/light-schedules/override', data: {
+            'node_id': 'porch',
+            'schedule_id': 'outdoor',
+            'override': scheduleOverride.toJson(),
+            'expected_effective_overrides': {
+              'outdoor': scheduleOverride.toJson(),
+            },
+            'correlation_id': 'journey-1',
+          })).called(1);
+    });
   });
 
   group('Matter setup code recovery', () {

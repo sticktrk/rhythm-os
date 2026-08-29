@@ -193,6 +193,7 @@ class RhythmModeConfig {
 }
 
 const Object _sentinel = Object();
+const int maxSolarScheduleOffsetMinutes = 720;
 
 // ---------------------------------------------------------------------------
 // Transition duration — fixed milliseconds or server-resolved auto
@@ -383,17 +384,149 @@ class RhythmLightScheduleConfig {
       };
 }
 
+class RhythmTransitionTriggerOverride {
+  final String? kind;
+  final String? event;
+  final int? offsetMinutes;
+  final String? time;
+
+  const RhythmTransitionTriggerOverride({
+    this.kind,
+    this.event,
+    this.offsetMinutes,
+    this.time,
+  });
+
+  factory RhythmTransitionTriggerOverride.fromJson(
+    Map<String, dynamic> json,
+  ) {
+    final offset = json['offset_minutes'];
+    if (offset != null && offset is! int) {
+      throw const FormatException('offset_minutes must be a whole integer');
+    }
+    if (offset is int &&
+        (offset < -maxSolarScheduleOffsetMinutes ||
+            offset > maxSolarScheduleOffsetMinutes)) {
+      throw const FormatException(
+        'offset_minutes must be between -720 and 720',
+      );
+    }
+    return RhythmTransitionTriggerOverride(
+      kind: json['kind'] as String?,
+      event: json['event'] as String?,
+      offsetMinutes: offset as int?,
+      time: json['time'] as String?,
+    );
+  }
+
+  bool get isEmpty =>
+      kind == null && event == null && offsetMinutes == null && time == null;
+
+  Map<String, dynamic> toJson() => {
+        if (kind != null) 'kind': kind,
+        if (event != null) 'event': event,
+        if (offsetMinutes != null) 'offset_minutes': offsetMinutes,
+        if (time != null) 'time': time,
+      };
+}
+
+class RhythmModeTransitionOverride {
+  final RhythmTransitionTriggerOverride trigger;
+  final bool? triggerEnabled;
+  final TransitionDuration? duration;
+  final bool? preserveHardOff;
+
+  const RhythmModeTransitionOverride({
+    this.trigger = const RhythmTransitionTriggerOverride(),
+    this.triggerEnabled,
+    this.duration,
+    this.preserveHardOff,
+  });
+
+  factory RhythmModeTransitionOverride.fromJson(Map<String, dynamic> json) {
+    final trigger = json['trigger'];
+    return RhythmModeTransitionOverride(
+      trigger: trigger is Map
+          ? RhythmTransitionTriggerOverride.fromJson(
+              trigger.cast<String, dynamic>(),
+            )
+          : const RhythmTransitionTriggerOverride(),
+      triggerEnabled: json['trigger_enabled'] as bool?,
+      duration: json.containsKey('duration_ms')
+          ? TransitionDuration.fromJson(json['duration_ms'])
+          : null,
+      preserveHardOff: json['preserve_hard_off'] as bool?,
+    );
+  }
+
+  bool get isEmpty =>
+      trigger.isEmpty &&
+      triggerEnabled == null &&
+      duration == null &&
+      preserveHardOff == null;
+
+  Map<String, dynamic> toJson() => {
+        if (!trigger.isEmpty) 'trigger': trigger.toJson(),
+        if (triggerEnabled != null) 'trigger_enabled': triggerEnabled,
+        if (duration != null) 'duration_ms': duration!.toJson(),
+        if (preserveHardOff != null) 'preserve_hard_off': preserveHardOff,
+      };
+}
+
+class RhythmLightScheduleOverride {
+  final Map<String, RhythmModeTransitionOverride> transitions;
+
+  const RhythmLightScheduleOverride({this.transitions = const {}});
+
+  factory RhythmLightScheduleOverride.fromJson(Map<String, dynamic> json) {
+    final transitions = json['transitions'];
+    if (transitions is! Map) {
+      return const RhythmLightScheduleOverride();
+    }
+    return RhythmLightScheduleOverride(
+      transitions: {
+        for (final entry in transitions.entries)
+          if (entry.key is String && entry.value is Map)
+            entry.key as String: RhythmModeTransitionOverride.fromJson(
+              (entry.value as Map).cast<String, dynamic>(),
+            ),
+      },
+    );
+  }
+
+  bool get isEmpty => transitions.isEmpty;
+
+  Map<String, dynamic> toJson() => {
+        'transitions': {
+          for (final entry in transitions.entries)
+            entry.key: entry.value.toJson(),
+        },
+      };
+}
+
 class RhythmTransitionTrigger {
   final String kind;
   final String? event;
   final String? time;
+  final int offsetMinutes;
 
-  const RhythmTransitionTrigger._({required this.kind, this.event, this.time});
+  const RhythmTransitionTrigger._({
+    required this.kind,
+    this.event,
+    this.time,
+    this.offsetMinutes = 0,
+  });
 
   const RhythmTransitionTrigger.manual() : this._(kind: 'manual');
 
-  const RhythmTransitionTrigger.solar(String event)
-      : this._(kind: 'solar', event: event);
+  const RhythmTransitionTrigger.solar(
+    String event, {
+    int offsetMinutes = 0,
+  }) : this._(
+          kind: 'solar',
+          event: event,
+          offsetMinutes: offsetMinutes,
+        );
 
   const RhythmTransitionTrigger.scheduled(String time)
       : this._(kind: 'scheduled', time: time);
@@ -402,10 +535,24 @@ class RhythmTransitionTrigger {
     final kind = json['kind'] as String? ?? 'manual';
     final event = json['event'] as String?;
     final time = json['time'] as String?;
+    final rawOffset = json['offset_minutes'];
+    if (rawOffset != null && rawOffset is! int) {
+      throw const FormatException('offset_minutes must be a whole integer');
+    }
+    final offset = rawOffset as int? ?? 0;
+    if (offset < -maxSolarScheduleOffsetMinutes ||
+        offset > maxSolarScheduleOffsetMinutes) {
+      throw const FormatException(
+        'offset_minutes must be between -720 and 720',
+      );
+    }
     return switch (kind) {
       'solar' when event != null && event.isNotEmpty =>
-        RhythmTransitionTrigger.solar(event),
+        RhythmTransitionTrigger.solar(event, offsetMinutes: offset),
       'solar' => const RhythmTransitionTrigger._(kind: 'solar'),
+      'manual' || 'scheduled' when offset != 0 => throw const FormatException(
+          'offset_minutes is valid only for solar triggers',
+        ),
       'scheduled' when time != null && time.isNotEmpty =>
         RhythmTransitionTrigger.scheduled(time),
       'scheduled' => const RhythmTransitionTrigger._(kind: 'scheduled'),
@@ -428,6 +575,7 @@ class RhythmTransitionTrigger {
     return {
       'kind': kind,
       if (isSolar && event != null && event!.isNotEmpty) 'event': event,
+      if (isSolar && offsetMinutes != 0) 'offset_minutes': offsetMinutes,
       if (isScheduled && time != null && time!.isNotEmpty) 'time': time,
     };
   }

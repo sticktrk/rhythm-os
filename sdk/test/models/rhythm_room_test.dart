@@ -484,6 +484,35 @@ void main() {
         expect(legacy.lightSchedule, isNull);
       });
 
+      test('round-trips sparse named schedule overrides', () {
+        final settings = RhythmNodeProfileSettings.fromJson({
+          'light_schedule_overrides': {
+            'outdoor': {
+              'transitions': {
+                'wake': {
+                  'trigger': {'offset_minutes': -20},
+                },
+              },
+            },
+          },
+        });
+
+        expect(
+          settings.lightScheduleOverrides['outdoor']?.transitions['wake']
+              ?.trigger.offsetMinutes,
+          -20,
+        );
+        expect(settings.toJson()['light_schedule_overrides'], {
+          'outdoor': {
+            'transitions': {
+              'wake': {
+                'trigger': {'offset_minutes': -20},
+              },
+            },
+          },
+        });
+      });
+
       test('parses legacy active_light_scene_id as mood_scene_id', () {
         final room = RhythmRoom.fromJson({
           'profile_settings': {

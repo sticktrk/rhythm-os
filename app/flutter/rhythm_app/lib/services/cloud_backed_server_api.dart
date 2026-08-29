@@ -652,6 +652,49 @@ class CloudBackedServerApi {
     return _delegate.triggerTransition(id);
   }
 
+  Future<List<RhythmLightScheduleConfig>> getLightSchedules() {
+    return _delegate.getLightSchedules();
+  }
+
+  Future<List<RhythmLightScheduleConfig>> setLightSchedules(
+    List<RhythmLightScheduleConfig> schedules,
+  ) {
+    return _delegate.setLightSchedules(schedules);
+  }
+
+  Future<RhythmRoomState?> setLightScheduleAssignment({
+    required String nodeId,
+    required String? scheduleId,
+  }) {
+    return _delegate.setLightScheduleAssignment(
+      nodeId: nodeId,
+      scheduleId: scheduleId,
+    );
+  }
+
+  Future<RhythmRoomState?> clearLightScheduleAssignment({
+    required String nodeId,
+  }) {
+    return _delegate.clearLightScheduleAssignment(nodeId: nodeId);
+  }
+
+  Future<RhythmRoomState?> setLightScheduleOverride({
+    required String nodeId,
+    required String scheduleId,
+    required RhythmLightScheduleOverride? scheduleOverride,
+    required Map<String, RhythmLightScheduleOverride>
+        expectedEffectiveOverrides,
+    required String correlationId,
+  }) {
+    return _delegate.setLightScheduleOverride(
+      nodeId: nodeId,
+      scheduleId: scheduleId,
+      scheduleOverride: scheduleOverride,
+      expectedEffectiveOverrides: expectedEffectiveOverrides,
+      correlationId: correlationId,
+    );
+  }
+
   Future<List<RhythmInputBinding>> getInputBindings() {
     return _delegate.getInputBindings();
   }

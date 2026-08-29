@@ -1,6 +1,7 @@
 import '../json_parsing.dart';
 import 'rhythm_curve_config.dart'
     show RhythmCurveConfig, RhythmCurveShape, RhythmTimerSetting;
+import 'rhythm_settings.dart' show RhythmLightScheduleOverride;
 
 enum RhythmMode {
   day,
@@ -227,6 +228,7 @@ class RhythmNodeProfileSettings {
   final RhythmTimerSetting? motionTimeoutSetting;
   final bool? motionActivationEnabled;
   final RhythmLightScheduleAssignment? lightSchedule;
+  final Map<String, RhythmLightScheduleOverride> lightScheduleOverrides;
   final RhythmRoomSchedule? roomSchedule;
   final Map<String, RhythmLightProfileNodeOverride> profileOverrides;
   final Map<String, dynamic> raw;
@@ -240,6 +242,7 @@ class RhythmNodeProfileSettings {
     this.motionTimeoutSetting,
     this.motionActivationEnabled,
     this.lightSchedule,
+    this.lightScheduleOverrides = const {},
     this.roomSchedule,
     this.profileOverrides = const {},
     this.raw = const <String, dynamic>{},
@@ -261,6 +264,7 @@ class RhythmNodeProfileSettings {
       motionTimeoutSetting == null &&
       motionActivationEnabled == null &&
       lightSchedule == null &&
+      lightScheduleOverrides.isEmpty &&
       roomSchedule == null &&
       profileOverrides.isEmpty &&
       raw.isEmpty;
@@ -277,6 +281,7 @@ class RhythmNodeProfileSettings {
       ..remove('motion_timeout_secs')
       ..remove('motion_activation_enabled')
       ..remove('light_schedule')
+      ..remove('light_schedule_overrides')
       ..remove('room_schedule')
       ..remove('profile_overrides');
     final moodProfileId = json['mood_profile_id'] as String? ??
@@ -298,6 +303,8 @@ class RhythmNodeProfileSettings {
           : RhythmLightScheduleAssignment.fromJson(
               jsonMap(json['light_schedule'])!,
             ),
+      lightScheduleOverrides:
+          _lightScheduleOverridesFromJson(json['light_schedule_overrides']),
       roomSchedule: jsonMap(json['room_schedule']) == null
           ? null
           : RhythmRoomSchedule.fromJson(jsonMap(json['room_schedule'])!),
@@ -318,6 +325,11 @@ class RhythmNodeProfileSettings {
         if (motionActivationEnabled != null)
           'motion_activation_enabled': motionActivationEnabled,
         if (lightSchedule != null) 'light_schedule': lightSchedule!.toJson(),
+        if (lightScheduleOverrides.isNotEmpty)
+          'light_schedule_overrides': {
+            for (final entry in lightScheduleOverrides.entries)
+              entry.key: entry.value.toJson(),
+          },
         if (roomSchedule != null) 'room_schedule': roomSchedule!.toJson(),
         if (profileOverrides.isNotEmpty)
           'profile_overrides': {
@@ -325,6 +337,19 @@ class RhythmNodeProfileSettings {
               entry.key: entry.value.toJson(),
           },
       };
+}
+
+Map<String, RhythmLightScheduleOverride> _lightScheduleOverridesFromJson(
+  dynamic value,
+) {
+  if (value is! Map) return const {};
+  return {
+    for (final entry in value.entries)
+      if (entry.key is String && entry.value is Map)
+        entry.key as String: RhythmLightScheduleOverride.fromJson(
+          (entry.value as Map).cast<String, dynamic>(),
+        ),
+  };
 }
 
 enum RhythmRoomScheduleSource {

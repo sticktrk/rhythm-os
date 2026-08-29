@@ -1932,6 +1932,33 @@ class RhythmServerApi {
     return _parseAndCacheSingleState(response.data);
   }
 
+  /// Replace or clear one sparse schedule override on a room or standalone
+  /// light. [expectedEffectiveOverrides] is the caller's reviewed snapshot and
+  /// makes stale concurrent writes fail closed.
+  Future<RhythmRoomState?> setLightScheduleOverride({
+    required String nodeId,
+    required String scheduleId,
+    required RhythmLightScheduleOverride? scheduleOverride,
+    required Map<String, RhythmLightScheduleOverride>
+        expectedEffectiveOverrides,
+    required String correlationId,
+  }) async {
+    final response = await _dio.put(
+      'api/light-schedules/override',
+      data: {
+        'node_id': nodeId,
+        'schedule_id': scheduleId,
+        'override': scheduleOverride?.toJson(),
+        'expected_effective_overrides': {
+          for (final entry in expectedEffectiveOverrides.entries)
+            entry.key: entry.value.toJson(),
+        },
+        'correlation_id': correlationId,
+      },
+    );
+    return _parseAndCacheSingleState(response.data);
+  }
+
   /// Execute one named schedule transition (used by manual tools and inputs).
   Future<bool> triggerLightScheduleTransition({
     required String scheduleId,

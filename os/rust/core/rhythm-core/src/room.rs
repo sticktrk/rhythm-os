@@ -401,6 +401,228 @@ pub struct LightScheduleConfig {
     pub transitions: Vec<ModeTransitionConfig>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum ModeTransitionTriggerType {
+    Manual,
+    Solar,
+    Scheduled,
+}
+
+/// Sparse patch over one typed transition trigger.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct ModeTransitionTriggerOverride {
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub kind: Option<ModeTransitionTriggerType>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub event: Option<SolarEvent>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub offset_minutes: Option<i16>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub time: Option<ModeTransitionTime>,
+}
+
+impl ModeTransitionTriggerOverride {
+    pub fn is_empty(&self) -> bool {
+        self.kind.is_none()
+            && self.event.is_none()
+            && self.offset_minutes.is_none()
+            && self.time.is_none()
+    }
+
+    pub fn merged_with_parent(&self, parent: &Self) -> Self {
+        Self {
+            kind: self.kind.or(parent.kind),
+            event: self.event.or(parent.event),
+            offset_minutes: self.offset_minutes.or(parent.offset_minutes),
+            time: self.time.or(parent.time),
+        }
+    }
+
+    pub fn apply_to(&self, base: ModeTransitionTrigger) -> Result<ModeTransitionTrigger, String> {
+        let inherited_kind = if base.is_manual() {
+            ModeTransitionTriggerType::Manual
+        } else if base.is_solar() {
+            ModeTransitionTriggerType::Solar
+        } else {
+            ModeTransitionTriggerType::Scheduled
+        };
+        match self.kind.unwrap_or(inherited_kind) {
+            ModeTransitionTriggerType::Manual => {
+                if self.event.is_some()
+                    || self.time.is_some()
+                    || self.offset_minutes.is_some_and(|value| value != 0)
+                {
+                    return Err(
+                        "manual trigger override cannot include event, time, or offset_minutes"
+                            .to_string(),
+                    );
+                }
+                Ok(ModeTransitionTrigger::Manual)
+            }
+            ModeTransitionTriggerType::Scheduled => {
+                if self.event.is_some() || self.offset_minutes.is_some_and(|value| value != 0) {
+                    return Err(
+                        "scheduled trigger override cannot include event or offset_minutes"
+                            .to_string(),
+                    );
+                }
+                self.time
+                    .or_else(|| base.scheduled_time())
+                    .map(ModeTransitionTrigger::Scheduled)
+                    .ok_or_else(|| "scheduled trigger override requires time".to_string())
+            }
+            ModeTransitionTriggerType::Solar => {
+                if self.time.is_some() {
+                    return Err("solar trigger override cannot include time".to_string());
+                }
+                let event = self
+                    .event
+                    .or_else(|| base.solar_event())
+                    .ok_or_else(|| "solar trigger override requires event".to_string())?;
+                let offset_minutes = self.offset_minutes.unwrap_or_else(|| {
+                    if base.is_solar() {
+                        base.offset_minutes()
+                    } else {
+                        0
+                    }
+                });
+                ModeTransitionTrigger::solar(event, 0).with_solar_offset(offset_minutes)
+            }
+        }
+    }
+}
+
+/// Sparse patch over one stable transition ID.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct ModeTransitionOverride {
+    #[cfg_attr(
+        feature = "serde",
+        serde(
+            default,
+            skip_serializing_if = "ModeTransitionTriggerOverride::is_empty"
+        )
+    )]
+    pub trigger: ModeTransitionTriggerOverride,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub trigger_enabled: Option<bool>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub duration_ms: Option<TimerSetting>,
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub preserve_hard_off: Option<bool>,
+}
+
+impl ModeTransitionOverride {
+    pub fn is_empty(&self) -> bool {
+        self.trigger.is_empty()
+            && self.trigger_enabled.is_none()
+            && self.duration_ms.is_none()
+            && self.preserve_hard_off.is_none()
+    }
+
+    pub fn merged_with_parent(&self, parent: &Self) -> Self {
+        Self {
+            trigger: self.trigger.merged_with_parent(&parent.trigger),
+            trigger_enabled: self.trigger_enabled.or(parent.trigger_enabled),
+            duration_ms: self
+                .duration_ms
+                .clone()
+                .or_else(|| parent.duration_ms.clone()),
+            preserve_hard_off: self.preserve_hard_off.or(parent.preserve_hard_off),
+        }
+    }
+
+    pub fn apply_to(&self, base: &ModeTransitionConfig) -> Result<ModeTransitionConfig, String> {
+        let mut effective = base.clone();
+        effective.trigger = self.trigger.apply_to(base.trigger)?;
+        if let Some(value) = self.trigger_enabled {
+            effective.trigger_enabled = value;
+        }
+        if let Some(value) = self.duration_ms.as_ref() {
+            effective.duration_ms = value.clone();
+        }
+        if let Some(value) = self.preserve_hard_off {
+            effective.preserve_hard_off = value;
+        }
+        Ok(effective)
+    }
+}
+
+/// Sparse transition patches for one stable named schedule ID.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct LightScheduleOverride {
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "BTreeMap::is_empty")
+    )]
+    pub transitions: BTreeMap<String, ModeTransitionOverride>,
+}
+
+impl LightScheduleOverride {
+    pub fn is_empty(&self) -> bool {
+        self.transitions.is_empty()
+    }
+
+    pub fn merged_with_parent(&self, parent: &Self) -> Self {
+        let mut transitions = parent.transitions.clone();
+        for (transition_id, local) in &self.transitions {
+            let merged = transitions
+                .get(transition_id)
+                .map(|inherited| local.merged_with_parent(inherited))
+                .unwrap_or_else(|| local.clone());
+            transitions.insert(transition_id.clone(), merged);
+        }
+        Self { transitions }
+    }
+
+    pub fn apply_to(&self, schedule: &LightScheduleConfig) -> Result<LightScheduleConfig, String> {
+        for transition_id in self.transitions.keys() {
+            if !schedule
+                .transitions
+                .iter()
+                .any(|transition| transition.id == *transition_id)
+            {
+                return Err(format!(
+                    "Light schedule override references unknown transition '{}'",
+                    transition_id
+                ));
+            }
+        }
+        let mut effective = schedule.clone();
+        for transition in &mut effective.transitions {
+            if let Some(transition_override) = self.transitions.get(&transition.id) {
+                *transition = transition_override.apply_to(transition)?;
+            }
+        }
+        Ok(effective)
+    }
+}
+
 /// Explicit automation ownership for one light-addressable root. Absence of
 /// this field preserves the legacy appliance-wide schedule; `Unscheduled` is
 /// the deliberate opt-out requested by the user.
@@ -496,72 +718,189 @@ impl<'de> Deserialize<'de> for ModeTransitionTime {
     }
 }
 
-/// Trigger that initiates a configured mode transition.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub enum ModeTransitionTrigger {
-    #[default]
-    Manual,
+pub const MAX_SOLAR_OFFSET_MINUTES: i16 = 720;
+
+/// Stable solar anchor used by a mode-transition trigger.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(rename_all = "snake_case"))]
+pub enum SolarEvent {
     Sunrise,
     Sunset,
     CivilTwilight,
     NauticalTwilight,
     AstronomicalTwilight,
+}
+
+impl SolarEvent {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sunrise => "sunrise",
+            Self::Sunset => "sunset",
+            Self::CivilTwilight => "civil_twilight",
+            Self::NauticalTwilight => "nautical_twilight",
+            Self::AstronomicalTwilight => "astronomical_twilight",
+        }
+    }
+
+    pub const fn display_name(self) -> &'static str {
+        match self {
+            Self::Sunrise => "Sunrise",
+            Self::Sunset => "Sunset",
+            Self::CivilTwilight => "Civil Twilight",
+            Self::NauticalTwilight => "Nautical Twilight",
+            Self::AstronomicalTwilight => "Astronomical Twilight",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ModeTransitionTriggerKind {
+    Manual,
+    Solar(SolarEvent),
     Scheduled(ModeTransitionTime),
 }
 
+/// Trigger that initiates a configured mode transition.
+///
+/// Solar offsets stay attached to the typed anchor instead of being flattened
+/// into a wall-clock time. Existing constructors remain zero-offset constants
+/// so older callers and persisted data keep their exact behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ModeTransitionTrigger {
+    kind: ModeTransitionTriggerKind,
+    offset_minutes: i16,
+}
+
+impl Default for ModeTransitionTrigger {
+    fn default() -> Self {
+        Self::Manual
+    }
+}
+
 impl ModeTransitionTrigger {
+    #[allow(non_upper_case_globals)]
+    pub const Manual: Self = Self {
+        kind: ModeTransitionTriggerKind::Manual,
+        offset_minutes: 0,
+    };
+    #[allow(non_upper_case_globals)]
+    pub const Sunrise: Self = Self::solar(SolarEvent::Sunrise, 0);
+    #[allow(non_upper_case_globals)]
+    pub const Sunset: Self = Self::solar(SolarEvent::Sunset, 0);
+    #[allow(non_upper_case_globals)]
+    pub const CivilTwilight: Self = Self::solar(SolarEvent::CivilTwilight, 0);
+    #[allow(non_upper_case_globals)]
+    pub const NauticalTwilight: Self = Self::solar(SolarEvent::NauticalTwilight, 0);
+    #[allow(non_upper_case_globals)]
+    pub const AstronomicalTwilight: Self = Self::solar(SolarEvent::AstronomicalTwilight, 0);
+
+    #[allow(non_snake_case)]
+    pub const fn Scheduled(time: ModeTransitionTime) -> Self {
+        Self {
+            kind: ModeTransitionTriggerKind::Scheduled(time),
+            offset_minutes: 0,
+        }
+    }
+
+    pub const fn solar(event: SolarEvent, offset_minutes: i16) -> Self {
+        Self {
+            kind: ModeTransitionTriggerKind::Solar(event),
+            offset_minutes,
+        }
+    }
+
+    pub fn with_solar_offset(self, offset_minutes: i16) -> Result<Self, String> {
+        if !matches!(self.kind, ModeTransitionTriggerKind::Solar(_)) {
+            return Err("offset_minutes is valid only for solar triggers".to_string());
+        }
+        if !(-MAX_SOLAR_OFFSET_MINUTES..=MAX_SOLAR_OFFSET_MINUTES).contains(&offset_minutes) {
+            return Err(format!(
+                "solar offset_minutes must be between -{} and {}",
+                MAX_SOLAR_OFFSET_MINUTES, MAX_SOLAR_OFFSET_MINUTES
+            ));
+        }
+        Ok(Self {
+            offset_minutes,
+            ..self
+        })
+    }
+
     pub const fn is_manual(self) -> bool {
-        matches!(self, Self::Manual)
+        matches!(self.kind, ModeTransitionTriggerKind::Manual)
+    }
+
+    pub const fn is_solar(self) -> bool {
+        matches!(self.kind, ModeTransitionTriggerKind::Solar(_))
     }
 
     pub const fn kind(self) -> &'static str {
-        match self {
-            Self::Manual => "manual",
-            Self::Scheduled(_) => "scheduled",
-            _ => "solar",
+        match self.kind {
+            ModeTransitionTriggerKind::Manual => "manual",
+            ModeTransitionTriggerKind::Solar(_) => "solar",
+            ModeTransitionTriggerKind::Scheduled(_) => "scheduled",
         }
     }
 
     pub const fn event(self) -> Option<&'static str> {
-        match self {
-            Self::Manual => None,
-            Self::Sunrise => Some("sunrise"),
-            Self::Sunset => Some("sunset"),
-            Self::CivilTwilight => Some("civil_twilight"),
-            Self::NauticalTwilight => Some("nautical_twilight"),
-            Self::AstronomicalTwilight => Some("astronomical_twilight"),
-            Self::Scheduled(_) => None,
+        match self.solar_event() {
+            Some(event) => Some(event.as_str()),
+            None => None,
         }
     }
 
-    pub const fn scheduled_time(self) -> Option<ModeTransitionTime> {
-        match self {
-            Self::Scheduled(time) => Some(time),
+    pub const fn solar_event(self) -> Option<SolarEvent> {
+        match self.kind {
+            ModeTransitionTriggerKind::Solar(event) => Some(event),
             _ => None,
         }
     }
 
+    pub const fn scheduled_time(self) -> Option<ModeTransitionTime> {
+        match self.kind {
+            ModeTransitionTriggerKind::Scheduled(time) => Some(time),
+            _ => None,
+        }
+    }
+
+    pub const fn offset_minutes(self) -> i16 {
+        self.offset_minutes
+    }
+
     pub fn id_suffix(self) -> String {
-        match self {
-            Self::Manual => "manual".to_string(),
-            Self::Sunrise => "sunrise".to_string(),
-            Self::Sunset => "sunset".to_string(),
-            Self::CivilTwilight => "civil_twilight".to_string(),
-            Self::NauticalTwilight => "nautical_twilight".to_string(),
-            Self::AstronomicalTwilight => "astronomical_twilight".to_string(),
-            Self::Scheduled(time) => time.id_suffix(),
+        match self.kind {
+            ModeTransitionTriggerKind::Manual => "manual".to_string(),
+            ModeTransitionTriggerKind::Solar(event) => {
+                if self.offset_minutes == 0 {
+                    event.as_str().to_string()
+                } else {
+                    format!("{}_{:+}", event.as_str(), self.offset_minutes)
+                }
+            }
+            ModeTransitionTriggerKind::Scheduled(time) => time.id_suffix(),
         }
     }
 
     pub fn label_suffix(self) -> Option<String> {
-        match self {
-            Self::Manual => None,
-            Self::Sunrise => Some("Sunrise".to_string()),
-            Self::Sunset => Some("Sunset".to_string()),
-            Self::CivilTwilight => Some("Civil Twilight".to_string()),
-            Self::NauticalTwilight => Some("Nautical Twilight".to_string()),
-            Self::AstronomicalTwilight => Some("Astronomical Twilight".to_string()),
-            Self::Scheduled(time) => Some(time.display()),
+        match self.kind {
+            ModeTransitionTriggerKind::Manual => None,
+            ModeTransitionTriggerKind::Solar(event) => {
+                let label = event.display_name();
+                Some(match self.offset_minutes.cmp(&0) {
+                    core::cmp::Ordering::Less => {
+                        format!(
+                            "{} min before {}",
+                            self.offset_minutes.unsigned_abs(),
+                            label
+                        )
+                    }
+                    core::cmp::Ordering::Greater => {
+                        format!("{} min after {}", self.offset_minutes, label)
+                    }
+                    core::cmp::Ordering::Equal => label.to_string(),
+                })
+            }
+            ModeTransitionTriggerKind::Scheduled(time) => Some(time.display()),
         }
     }
 }
@@ -579,12 +918,19 @@ impl Serialize for ModeTransitionTrigger {
             event: Option<&'a str>,
             #[serde(skip_serializing_if = "Option::is_none")]
             time: Option<ModeTransitionTime>,
+            #[serde(skip_serializing_if = "is_zero_i16")]
+            offset_minutes: i16,
+        }
+
+        fn is_zero_i16(value: &i16) -> bool {
+            *value == 0
         }
 
         TriggerRepr {
             kind: self.kind(),
             event: self.event(),
             time: self.scheduled_time(),
+            offset_minutes: self.offset_minutes(),
         }
         .serialize(serializer)
     }
@@ -622,6 +968,8 @@ impl<'de> Deserialize<'de> for ModeTransitionTrigger {
             event: Option<LegacyTrigger>,
             #[serde(default)]
             time: Option<ModeTransitionTime>,
+            #[serde(default)]
+            offset_minutes: i16,
         }
 
         #[derive(Deserialize)]
@@ -641,21 +989,47 @@ impl<'de> Deserialize<'de> for ModeTransitionTrigger {
                 LegacyTrigger::NauticalTwilight => Self::NauticalTwilight,
                 LegacyTrigger::AstronomicalTwilight => Self::AstronomicalTwilight,
             }),
-            TriggerRepr::Object(TriggerObject { kind, event, time }) => match kind {
-                TriggerKind::Manual => Ok(Self::Manual),
-                TriggerKind::Solar => match event {
-                    Some(LegacyTrigger::Sunrise) => Ok(Self::Sunrise),
-                    Some(LegacyTrigger::Sunset) => Ok(Self::Sunset),
-                    Some(LegacyTrigger::CivilTwilight) => Ok(Self::CivilTwilight),
-                    Some(LegacyTrigger::NauticalTwilight) => Ok(Self::NauticalTwilight),
-                    Some(LegacyTrigger::AstronomicalTwilight) => Ok(Self::AstronomicalTwilight),
-                    Some(LegacyTrigger::Manual) | None => Err(serde::de::Error::custom(
-                        "solar trigger requires a solar event",
-                    )),
-                },
-                TriggerKind::Scheduled => time
+            TriggerRepr::Object(TriggerObject {
+                kind,
+                event,
+                time,
+                offset_minutes,
+            }) => match kind {
+                TriggerKind::Manual if offset_minutes == 0 => Ok(Self::Manual),
+                TriggerKind::Manual => Err(serde::de::Error::custom(
+                    "offset_minutes is valid only for solar triggers",
+                )),
+                TriggerKind::Solar => {
+                    if !(-MAX_SOLAR_OFFSET_MINUTES..=MAX_SOLAR_OFFSET_MINUTES)
+                        .contains(&offset_minutes)
+                    {
+                        return Err(serde::de::Error::custom(format!(
+                            "solar offset_minutes must be between -{} and {}",
+                            MAX_SOLAR_OFFSET_MINUTES, MAX_SOLAR_OFFSET_MINUTES
+                        )));
+                    }
+                    let event = match event {
+                        Some(LegacyTrigger::Sunrise) => SolarEvent::Sunrise,
+                        Some(LegacyTrigger::Sunset) => SolarEvent::Sunset,
+                        Some(LegacyTrigger::CivilTwilight) => SolarEvent::CivilTwilight,
+                        Some(LegacyTrigger::NauticalTwilight) => SolarEvent::NauticalTwilight,
+                        Some(LegacyTrigger::AstronomicalTwilight) => {
+                            SolarEvent::AstronomicalTwilight
+                        }
+                        Some(LegacyTrigger::Manual) | None => {
+                            return Err(serde::de::Error::custom(
+                                "solar trigger requires a solar event",
+                            ))
+                        }
+                    };
+                    Ok(Self::solar(event, offset_minutes))
+                }
+                TriggerKind::Scheduled if offset_minutes == 0 => time
                     .map(Self::Scheduled)
                     .ok_or_else(|| serde::de::Error::custom("scheduled trigger requires time")),
+                TriggerKind::Scheduled => Err(serde::de::Error::custom(
+                    "offset_minutes is valid only for solar triggers",
+                )),
             },
         }
     }
@@ -1176,6 +1550,14 @@ pub struct RoomProfileSettings {
     )]
     pub light_schedule: Option<LightScheduleAssignment>,
 
+    /// Sparse schedule-ID-scoped transition overrides. Entries stay dormant
+    /// while a different schedule is effective and merge root-to-leaf.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "BTreeMap::is_empty")
+    )]
+    pub light_schedule_overrides: BTreeMap<String, LightScheduleOverride>,
+
     /// Optional room-local schedule. Absence preserves legacy preset behavior.
     #[cfg_attr(
         feature = "serde",
@@ -1202,6 +1584,7 @@ impl RoomProfileSettings {
             && self.motion_timeout_secs.is_none()
             && self.motion_activation_enabled.is_none()
             && self.light_schedule.is_none()
+            && self.light_schedule_overrides.is_empty()
             && self.room_schedule.is_none()
             && self.profile_overrides.is_empty()
     }
@@ -1301,6 +1684,17 @@ impl RoomProfileSettings {
                 .motion_activation_enabled
                 .or(parent.motion_activation_enabled),
             light_schedule,
+            light_schedule_overrides: {
+                let mut overrides = parent.light_schedule_overrides.clone();
+                for (schedule_id, local) in &self.light_schedule_overrides {
+                    let merged = overrides
+                        .get(schedule_id)
+                        .map(|inherited| local.merged_with_parent(inherited))
+                        .unwrap_or_else(|| local.clone());
+                    overrides.insert(schedule_id.clone(), merged);
+                }
+                overrides
+            },
             room_schedule,
             profile_overrides: {
                 let mut profile_overrides = parent.profile_overrides.clone();
@@ -1926,6 +2320,7 @@ mod tests {
             motion_timeout_secs: Some(TimerSetting::Fixed { value: 42 }),
             motion_activation_enabled: Some(false),
             light_schedule: None,
+            light_schedule_overrides: BTreeMap::new(),
             room_schedule: None,
             profile_overrides: BTreeMap::new(),
         };
@@ -2992,5 +3387,90 @@ mod tests {
             assert_eq!(effective.light_schedule, Some(assignment));
             assert_eq!(effective.room_schedule, None);
         }
+    }
+
+    #[test]
+    fn solar_trigger_offset_round_trips_and_rejects_invalid_shapes() {
+        let trigger = ModeTransitionTrigger::Sunrise
+            .with_solar_offset(-45)
+            .unwrap();
+        let json = serde_json::to_value(trigger).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "kind": "solar",
+                "event": "sunrise",
+                "offset_minutes": -45,
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<ModeTransitionTrigger>(json).unwrap(),
+            trigger
+        );
+
+        for invalid in [
+            serde_json::json!({"kind": "manual", "offset_minutes": 1}),
+            serde_json::json!({"kind": "scheduled", "time": "08:00", "offset_minutes": 1}),
+            serde_json::json!({"kind": "solar", "event": "sunrise", "offset_minutes": 721}),
+            serde_json::json!({"kind": "solar", "event": "sunrise", "offset_minutes": 1.5}),
+        ] {
+            assert!(serde_json::from_value::<ModeTransitionTrigger>(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn sparse_schedule_overrides_merge_field_by_field_and_follow_base_edits() {
+        let parent = LightScheduleOverride {
+            transitions: BTreeMap::from([(
+                "wake".to_string(),
+                ModeTransitionOverride {
+                    trigger: ModeTransitionTriggerOverride {
+                        offset_minutes: Some(-30),
+                        ..Default::default()
+                    },
+                    trigger_enabled: Some(false),
+                    ..Default::default()
+                },
+            )]),
+        };
+        let local = LightScheduleOverride {
+            transitions: BTreeMap::from([(
+                "wake".to_string(),
+                ModeTransitionOverride {
+                    trigger: ModeTransitionTriggerOverride {
+                        event: Some(SolarEvent::CivilTwilight),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )]),
+        };
+        let merged = local.merged_with_parent(&parent);
+        let mut base = LightScheduleConfig {
+            id: "outdoor".into(),
+            name: "Outdoor".into(),
+            enabled: true,
+            active_mode: RhythmMode::Sleep,
+            transitions: vec![
+                ModeTransitionConfig::new(RhythmMode::Sleep, RhythmMode::Day, 1_000)
+                    .with_id("wake")
+                    .with_trigger(ModeTransitionTrigger::Sunrise),
+            ],
+        };
+
+        let effective = merged.apply_to(&base).unwrap();
+        assert_eq!(
+            effective.transitions[0].trigger.solar_event(),
+            Some(SolarEvent::CivilTwilight)
+        );
+        assert_eq!(effective.transitions[0].trigger.offset_minutes(), -30);
+        assert!(!effective.transitions[0].trigger_enabled);
+
+        base.transitions[0].duration_ms = TimerSetting::Fixed { value: 9_000 };
+        let edited = merged.apply_to(&base).unwrap();
+        assert_eq!(
+            edited.transitions[0].duration_ms,
+            TimerSetting::Fixed { value: 9_000 }
+        );
     }
 }
