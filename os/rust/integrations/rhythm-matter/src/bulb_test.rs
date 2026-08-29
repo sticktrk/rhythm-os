@@ -800,6 +800,11 @@ pub fn save_bulb_test_report(state: &SharedState, report: &Value) -> Result<Valu
             quirks.retain(|quirk| !is_color_preference_quirk(quirk));
             quirks.push(preference);
         }
+        if !quirks.is_empty() {
+            if let Some(curated_quirks) = curated_device_quirks(state, &native_id) {
+                quirks = crate::local_quirks::apply_quirk_override(&curated_quirks, &quirks);
+            }
+        }
         let capability_override = match capability_hints {
             Some(value) => crate::local_quirks::capability_override_from_value(value)?,
             None => crate::local_quirks::LocalCapabilityOverride::default(),
@@ -868,6 +873,21 @@ fn is_color_preference_quirk(quirk: &rhythm_devices::DeviceQuirk) -> bool {
         }
         _ => false,
     }
+}
+
+fn curated_device_quirks(
+    state: &SharedState,
+    device_id: &str,
+) -> Option<Vec<rhythm_devices::DeviceQuirk>> {
+    let (node_id, _) = crate::lifecycle::parse_device_id(device_id)?;
+    let hub_data = get_hub_data(state).ok()?;
+    let device = hub_data.transport.get()?.probe_light(node_id).ok()?;
+    let mut caps = crate::commissioning::build_device_capabilities(&device);
+    let mut quirks = crate::commissioning::build_device_quirks(&device);
+    if let Ok(cloud_profiles) = hub_data.cloud_profiles.lock() {
+        cloud_profiles.apply_to_device(&device, &mut caps, &mut quirks);
+    }
+    Some(quirks)
 }
 
 fn get_hub_data(state: &SharedState) -> Result<Arc<MatterHubData>> {
@@ -1847,6 +1867,25 @@ mod tests {
         }
     }
 
+    fn moes_matter_light() -> CommissionedDevice {
+        CommissionedDevice {
+            node_id: 42,
+            vendor_name: "MOES".to_string(),
+            product_name: "MOES Matter Light".to_string(),
+            vendor_id: 5245,
+            product_id: 1412,
+            serial_number: Some("moes-cache-test".to_string()),
+            light_endpoint: 1,
+            color_modes: vec![
+                MatterColorMode::HueSaturation,
+                MatterColorMode::Xy,
+                MatterColorMode::ColorTemperature,
+            ],
+            min_kelvin: Some(2702),
+            max_kelvin: Some(6535),
+        }
+    }
+
     fn unique_data_dir() -> PathBuf {
         static NEXT_TEST_DIR: AtomicU64 = AtomicU64::new(0);
 
@@ -2214,6 +2253,49 @@ mod tests {
                 .quirks
                 .get("matter-42"),
             Some(&expected)
+        );
+    }
+
+    #[test]
+    fn save_bulb_test_report_cannot_reintroduce_stale_moes_hs_cache() {
+        let transport = Arc::new(SpyTransport::new());
+        transport.set_probe_device(moes_matter_light());
+        let (state, hub_data, _data_dir) = test_state_with_transport(transport);
+
+        let result = save_bulb_test_report(
+            &state,
+            &json!({
+                "device_id": "matter-42",
+                "report_id": "Stale MOES HS",
+                "schema_version": 2,
+                "inferred_quirks": [
+                    "needs_hue_saturation_not_ct",
+                    {"command_throttle_ms": 250}
+                ],
+                "recommended_control_strategy": {
+                    "color_command": "hue_saturation"
+                }
+            }),
+        )
+        .unwrap();
+
+        let expected = vec![
+            DeviceQuirk::CommandThrottleMs(250),
+            DeviceQuirk::Other(rhythm_devices::quirks::PREFER_COLOR_TEMPERATURE_QUIRK.to_string()),
+        ];
+        assert_eq!(
+            hub_data.device_quirks.lock().unwrap().get("matter-42"),
+            Some(&expected)
+        );
+        assert_eq!(
+            crate::local_quirks::load_overrides_for_state(&state)
+                .quirks
+                .get("matter-42"),
+            Some(&expected)
+        );
+        assert_eq!(
+            result["applied_quirks"],
+            crate::local_quirks::quirks_to_value(&expected)
         );
     }
 }
