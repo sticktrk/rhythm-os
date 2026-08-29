@@ -15435,11 +15435,14 @@ fn clear_runtime_node_standalone_state(state: &SharedState, node_id: &str) -> Re
         return Ok(());
     };
     let clear_off_state = snap.soft_off || snap.hard_off;
-    if !clear_off_state && snap.profile_settings.room_schedule.is_none() {
+    let clear_schedule_authority = snap.profile_settings.light_schedule.is_some()
+        || snap.profile_settings.room_schedule.is_some();
+    if !clear_off_state && !clear_schedule_authority {
         return Ok(());
     }
 
     let mut profile_settings = snap.profile_settings;
+    profile_settings.light_schedule = None;
     profile_settings.room_schedule = None;
 
     runtime.restore_node_state(
@@ -34694,15 +34697,10 @@ mod tests {
         state.lock().unwrap().storage = Some(std::sync::Arc::new(storage.clone()));
         let room_id = state.lock().unwrap().topology.create_room("Office");
         let device_id = insert_canonical_device(&state, hub_key, "matter-100", "Desk Lamp", "", "");
-        let schedule = rhythm_core::RoomScheduleConfig {
-            source: rhythm_core::RoomScheduleSource::FollowTime,
-            wake_time: rhythm_core::ModeTransitionTime::parse("07:15").unwrap(),
-            sleep_time: rhythm_core::ModeTransitionTime::parse("23:45").unwrap(),
-        };
-
         {
             let mut s = state.lock().unwrap();
             s.topology.ensure_standalone_device(&device_id);
+            s.set_light_schedule_configs(vec![backup_test_light_schedule("outdoor")]);
             s.set_mode_configs(vec![
                 ModeConfig {
                     mode: RhythmMode::Day,
@@ -34742,7 +34740,10 @@ mod tests {
         }
         reconcile_runtime_from_state(&state).unwrap();
         let mut standalone_settings = RoomProfileSettings::default();
-        standalone_settings.room_schedule = Some(schedule);
+        standalone_settings.light_schedule = Some(rhythm_core::LightScheduleAssignment::Named {
+            schedule_id: "outdoor".to_string(),
+            active_mode: RhythmMode::Sleep,
+        });
         standalone_settings.motion_activation_enabled = Some(true);
         runtime.restore_node_state(
             &device_id,
@@ -34773,6 +34774,7 @@ mod tests {
         assert_eq!(after.parent_id.as_deref(), Some(room_id.as_str()));
         assert!(!after.soft_off);
         assert!(!after.hard_off);
+        assert_eq!(after.profile_settings.light_schedule, None);
         assert_eq!(after.profile_settings.room_schedule, None);
         assert_eq!(after.profile_settings.motion_activation_enabled, Some(true));
 
@@ -34793,6 +34795,7 @@ mod tests {
             .expect("assigned light child should be persisted");
         assert!(!saved_child.soft_off);
         assert!(!saved_child.hard_off);
+        assert_eq!(saved_child.profile_settings.light_schedule, None);
         assert_eq!(saved_child.profile_settings.room_schedule, None);
         assert_eq!(
             saved_child.profile_settings.motion_activation_enabled,
