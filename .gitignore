@@ -41,3 +41,6 @@ tools/app/supabase/.temp/
 
 # Marketing site: its own repo (sticktrk/rhythm-marketing), worked on in place, deployed standalone to prod.
 /rhythm-marketing/
+
+# CHIP checkout
+/connectedhomeip/
