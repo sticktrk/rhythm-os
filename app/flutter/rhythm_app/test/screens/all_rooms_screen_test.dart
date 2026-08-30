@@ -426,7 +426,7 @@ void main() {
   });
 
   testWidgets(
-      'global soften includes Low glow nodes and collapses child bulbs',
+      'global soften skips Low glow nodes and collapses child bulbs',
       (tester) async {
     final harness = await _pumpAllRooms(
       tester,
@@ -451,9 +451,8 @@ void main() {
     expect(harness.api.actionBatches, hasLength(1));
     expect(harness.api.actionBatches.single, [
       (nodeId: 'room-1', action: 'step_down'),
-      (nodeId: 'garage', action: 'step_down'),
     ]);
-    expect(find.text('Adjusted 2 of 2 rooms.'), findsOneWidget);
+    expect(find.text('Adjusted 1 of 1 rooms.'), findsOneWidget);
     expect(
       find.byKey(const ValueKey('global-room-action-undo')),
       findsOneWidget,
@@ -461,7 +460,7 @@ void main() {
   });
 
   testWidgets(
-      'global boost includes legacy Low glow and locks duplicate taps',
+      'global boost skips legacy Low glow and locks duplicate taps',
       (tester) async {
     final harness = await _pumpAllRooms(
       tester,
@@ -483,7 +482,6 @@ void main() {
     expect(harness.api.actionBatches, hasLength(1));
     expect(harness.api.actionBatches.single, [
       (nodeId: 'room-1', action: 'step_up'),
-      (nodeId: 'bedroom', action: 'step_up'),
     ]);
     expect(
       find.byKey(const ValueKey('global-room-action-progress')),
@@ -498,7 +496,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
 
-    expect(find.text('Adjusted 1 of 2 rooms.'), findsOneWidget);
+    expect(find.text('Adjusted 1 of 1 rooms.'), findsOneWidget);
   });
 
   testWidgets('global action result auto-dismisses while offering undo',
@@ -564,6 +562,36 @@ void main() {
       (nodeId: 'room-1', brightness: 50),
       (nodeId: 'bedroom', brightness: 50),
     ]);
+  });
+
+  testWidgets('global reset includes current and legacy Low glow rooms',
+      (tester) async {
+    final harness = await _pumpAllRooms(
+      tester,
+      rooms: const [_room1, _bedroom, _garage],
+    );
+    harness.roomProvider.setRoomStateLocal(
+      _bedroom.id,
+      RoomModeState.standby,
+    );
+    harness.roomProvider.setRoomStateLocal(
+      _garage.id,
+      RoomModeState.idle,
+    );
+    await tester.pump();
+
+    await tester.tap(
+      find.byKey(const ValueKey('global-room-action-reset')),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(harness.api.actionBatches.single, [
+      (nodeId: 'room-1', action: 'reset'),
+      (nodeId: 'bedroom', action: 'reset'),
+      (nodeId: 'garage', action: 'reset'),
+    ]);
+    expect(find.text('Reset 3 of 3 rooms.'), findsOneWidget);
   });
 
   testWidgets('expanded slider applies one exact batch to adaptive-on rooms',

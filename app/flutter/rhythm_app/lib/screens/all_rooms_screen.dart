@@ -918,7 +918,9 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     );
   }
 
-  List<_GlobalRoomTarget> _eligibleGlobalRoomTargets() {
+  List<_GlobalRoomTarget> _eligibleGlobalRoomTargets({
+    bool includeLowGlow = true,
+  }) {
     final roomProvider = context.read<RoomProvider>();
     final provisional = <_GlobalRoomTarget>[];
 
@@ -930,8 +932,9 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
       final isAdaptiveOn = state == RoomModeState.active ||
           state == RoomModeState.wake ||
           state == RoomModeState.warning ||
-          state == RoomModeState.standby ||
-          state == RoomModeState.idle;
+          (includeLowGlow &&
+              (state == RoomModeState.standby ||
+                  state == RoomModeState.idle));
       if (!isLightNode ||
           room.disabled ||
           !room.rhythmEnabled ||
@@ -1046,7 +1049,9 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
       _GlobalRoomAction.boost => 'boost',
       _GlobalRoomAction.reset => 'reset',
     };
-    final eligible = _eligibleGlobalRoomTargets();
+    final eligible = _eligibleGlobalRoomTargets(
+      includeLowGlow: action == _GlobalRoomAction.reset,
+    );
     if (eligible.isEmpty) {
       AnalyticsService().logGlobalRoomActionCompleted(
         journeyId: journeyId,
