@@ -173,6 +173,14 @@ class RoomProvider extends ChangeNotifier {
   final Map<String, RoomModeState> _acknowledgedRoomStates = {};
   final Map<String, bool> _acknowledgedLightsOn = {};
 
+  /// Latest server-reported power, separate from optimistic local locks.
+  ///
+  /// A rejected command can leave [RoomDto.lightsOn] temporarily protected by
+  /// its optimistic lock while the server has already restored `hardOff`.
+  /// Only a matching server report may therefore turn a raw hard-off state
+  /// into an observed-on display.
+  final Map<String, bool> _serverReportedLightsOn = {};
+
   /// Per-room mode state from the server, tracked separately from RoomDto.
   final Map<String, RoomModeState> _roomStates = {};
 
@@ -244,12 +252,19 @@ class RoomProvider extends ChangeNotifier {
   ///
   /// The backend can legitimately report `state=active` while `lightsOn=false`
   /// when a room is configured to participate in Rhythm but was turned off
-  /// outside the app. For "is this room on right now?" UI, `lightsOn` wins.
+  /// outside the app. It can likewise retain `state=hardOff` after a physical
+  /// integration reports the light on. For "is this room on right now?" UI,
+  /// `lightsOn` wins in both directions while [getRoomState] preserves the
+  /// automation intent.
   RoomModeState getDisplayRoomState(String roomId) {
     final state = getRoomState(roomId);
     final room = getRoom(roomId);
     if (room == null) return state;
     if (!room.lightsOn) return RoomModeState.hardOff;
+    if (state == RoomModeState.hardOff &&
+        _serverReportedLightsOn[roomId] == true) {
+      return RoomModeState.active;
+    }
     return state;
   }
 
@@ -350,6 +365,7 @@ class RoomProvider extends ChangeNotifier {
     _roomTransitioning.remove(roomId);
     _nodeDispatchPendingTimers.remove(roomId)?.cancel();
     _nodeDispatchPending.remove(roomId);
+    _serverReportedLightsOn.remove(roomId);
   }
 
   /// Set room state locally with a 3s optimistic lock.
@@ -866,6 +882,10 @@ class RoomProvider extends ChangeNotifier {
     final room = getRoom(roomId);
     if (room == null) return;
 
+    if (lightsOn != null) {
+      _serverReportedLightsOn[roomId] = lightsOn;
+    }
+
     if (tick) {
       _lastTickTime[roomId] = DateTime.now();
       changed = true;
@@ -1201,6 +1221,7 @@ class RoomProvider extends ChangeNotifier {
     _lightsOnLockedUntil.clear();
     _roomStateLockedUntil.clear();
     _cancelLockExpiryTimers();
+    _serverReportedLightsOn.clear();
     _roomStates.clear();
     _roomModes.clear();
     _cancelRoomTransitionTimers();
@@ -1236,6 +1257,7 @@ class RoomProvider extends ChangeNotifier {
     _lightsOnLockedUntil.clear();
     _roomStateLockedUntil.clear();
     _cancelLockExpiryTimers();
+    _serverReportedLightsOn.clear();
     _roomStates.clear();
     _roomModes.clear();
     _cancelRoomTransitionTimers();
