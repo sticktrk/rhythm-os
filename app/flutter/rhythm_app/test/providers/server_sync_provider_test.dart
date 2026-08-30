@@ -26,6 +26,7 @@ import 'package:rhythm_app/screens/hubs/device_pairing_flow.dart';
 import 'package:rhythm_app/screens/hubs/room_device_add_flow.dart';
 import 'package:rhythm_app/widgets/device_detail_sheet.dart';
 import 'package:rhythm_app/widgets/hub_picker_screen.dart';
+import 'package:rhythm_app/widgets/light_schedule_assignment_card.dart';
 import 'package:rhythm_app/widgets/room_settings_sheet.dart';
 import 'package:rhythm_app/widgets/room_schedule_tab.dart';
 import 'package:rhythm_app/widgets/solar_orbit.dart' show CelestialColors;
@@ -1925,6 +1926,7 @@ void main() {
 
     RhythmHello namedScheduleHello({
       bool supported = true,
+      bool offsetsSupported = true,
       Map<String, dynamic>? profileSettings,
       Map<String, dynamic>? roomProfile,
       String? parentId,
@@ -1939,7 +1941,8 @@ void main() {
             RhythmFeature.roomScheduleV1,
             if (supported) RhythmFeature.lightSchedulesV1,
             if (supported) RhythmFeature.lightScheduleOverridesV1,
-            if (supported) RhythmFeature.lightScheduleSolarOffsetsV1,
+            if (supported && offsetsSupported)
+              RhythmFeature.lightScheduleSolarOffsetsV1,
           ],
           'hubs': const <dynamic>[],
         },
@@ -2256,6 +2259,167 @@ void main() {
         tester,
         boundaryKey,
         '06-named-schedule-assignment.png',
+      );
+    });
+
+    testWidgets('base solar offsets require their separate capability',
+        (tester) async {
+      _registerWidgetCleanup(tester);
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(390, 1200));
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()..lightSchedules = [outdoorSchedule];
+      final connection = _HelloRhythmConnection(api);
+      final homeProvider = _TestHomeProvider(
+        const [],
+        currentHome: Home.create(
+          id: 'home-1',
+          name: 'Home',
+          ownerId: 'owner-1',
+          location: const HomeLocation(latitude: 41.88, longitude: -87.63),
+          timezone: 'America/Chicago',
+        ),
+      );
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: homeProvider,
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+      addTearDown(homeProvider.dispose);
+      connection.emitHello(namedScheduleHello(
+        offsetsSupported: false,
+        location: const {
+          'sunrise': 7.0,
+          'timezone_name': 'America/Chicago',
+        },
+      ));
+      await tester.pump();
+      await provider.loadLightSchedules();
+      await tester.pumpWidget(_buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const LightSchedulesScreen(),
+      ));
+      await tester.pumpAndSettle();
+
+      expect(provider.lightSchedulesSupported, isTrue);
+      expect(provider.lightScheduleSolarOffsetsSupported, isFalse);
+      await tester.tap(find.byKey(const ValueKey('light-schedule-outdoor')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('schedule-offset-unsupported')),
+        findsWidgets,
+      );
+      expect(
+        find.byKey(const ValueKey('schedule-offset-Day Start')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('room customization exposes only selected automatic boundaries',
+        (tester) async {
+      _registerWidgetCleanup(tester);
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(390, 1200));
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()
+        ..lightSchedules = const [
+          RhythmLightScheduleConfig(
+            id: 'outdoor',
+            name: 'Outdoor',
+            transitions: [
+              RhythmModeTransitionConfig(
+                id: 'day_start',
+                label: 'Day Start',
+                fromMode: RhythmMode.sleep,
+                toMode: RhythmMode.day,
+                trigger: RhythmTransitionTrigger.scheduled('07:00'),
+                duration: TransitionDuration.auto(),
+                preserveHardOff: true,
+              ),
+              RhythmModeTransitionConfig(
+                id: 'sleep_start',
+                label: 'Sleep Start',
+                fromMode: RhythmMode.day,
+                toMode: RhythmMode.sleep,
+                trigger: RhythmTransitionTrigger.scheduled('22:00'),
+                duration: TransitionDuration.auto(),
+                preserveHardOff: true,
+              ),
+              RhythmModeTransitionConfig(
+                id: 'physical-wake',
+                label: 'Physical Wake',
+                fromMode: RhythmMode.sleep,
+                toMode: RhythmMode.day,
+                trigger: RhythmTransitionTrigger.manual(),
+                duration: TransitionDuration.auto(),
+                preserveHardOff: true,
+              ),
+              RhythmModeTransitionConfig(
+                id: 'vacation-wake',
+                label: 'Vacation Wake',
+                fromMode: RhythmMode.sleep,
+                toMode: RhythmMode.day,
+                trigger: RhythmTransitionTrigger.scheduled('09:00'),
+                duration: TransitionDuration.auto(),
+                preserveHardOff: true,
+              ),
+            ],
+          ),
+        ];
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+      const named = {
+        'light_schedule': {
+          'kind': 'named',
+          'schedule_id': 'outdoor',
+          'active_mode': 'day',
+        },
+      };
+      connection.emitHello(namedScheduleHello(
+        profileSettings: named,
+        roomProfile: named,
+      ));
+      await tester.pump();
+      await provider.loadLightSchedules();
+      await tester.pumpWidget(_buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const Scaffold(
+          body: LightScheduleAssignmentCard(
+            nodeId: 'room-1',
+            targetLabel: 'Room',
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('light-schedule-customize-day_start')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('light-schedule-customize-sleep_start')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('light-schedule-customize-physical-wake')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('light-schedule-customize-vacation-wake')),
+        findsNothing,
       );
     });
 

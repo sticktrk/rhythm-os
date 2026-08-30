@@ -10766,6 +10766,14 @@ pub fn do_light_schedule_assignment_set_with_correlation(
     correlation_id: Option<String>,
     persist: bool,
 ) -> Result<String> {
+    let write_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .light_schedule_write_lock
+        .clone();
+    let _write_guard = write_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("light schedule write lock"))?;
     let authority = schedule_id
         .map(str::trim)
         .filter(|id| !id.is_empty())
@@ -10790,6 +10798,14 @@ pub fn do_light_schedule_assignment_clear_with_correlation(
     correlation_id: Option<String>,
     persist: bool,
 ) -> Result<String> {
+    let write_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .light_schedule_write_lock
+        .clone();
+    let _write_guard = write_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("light schedule write lock"))?;
     do_light_schedule_authority_set(
         state,
         node_id,
@@ -10810,6 +10826,14 @@ pub fn do_light_schedule_override_set(
     correlation_id: Option<String>,
     persist: bool,
 ) -> Result<String> {
+    let write_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .light_schedule_write_lock
+        .clone();
+    let _write_guard = write_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("light schedule write lock"))?;
     let schedule_id = schedule_id.trim();
     if schedule_id.is_empty() {
         return Err(anyhow::anyhow!(
@@ -24156,6 +24180,68 @@ mod tests {
             state.lock().unwrap().light_schedules["outdoor"].active_mode,
             RhythmMode::Sleep
         );
+    }
+
+    #[test]
+    fn schedule_reference_writers_share_the_registry_write_lock() {
+        let (state, _runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        do_light_schedules_set(&state, vec![backup_test_light_schedule("outdoor")]).unwrap();
+        let write_lock = state.lock().unwrap().light_schedule_write_lock.clone();
+
+        let assignment_guard = write_lock.lock().unwrap();
+        let (assignment_started_tx, assignment_started_rx) = std::sync::mpsc::channel();
+        let (assignment_done_tx, assignment_done_rx) = std::sync::mpsc::channel();
+        let assignment_state = state.clone();
+        let assignment = std::thread::spawn(move || {
+            assignment_started_tx.send(()).unwrap();
+            let result = do_light_schedule_assignment_set(
+                &assignment_state,
+                "room1",
+                Some("outdoor"),
+                false,
+            );
+            assignment_done_tx.send(result.is_ok()).unwrap();
+        });
+        assignment_started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(assignment_done_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err());
+        drop(assignment_guard);
+        assert!(assignment_done_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap());
+        assignment.join().unwrap();
+
+        let override_guard = write_lock.lock().unwrap();
+        let (override_started_tx, override_started_rx) = std::sync::mpsc::channel();
+        let (override_done_tx, override_done_rx) = std::sync::mpsc::channel();
+        let override_state = state.clone();
+        let override_write = std::thread::spawn(move || {
+            override_started_tx.send(()).unwrap();
+            let result = do_light_schedule_override_set(
+                &override_state,
+                "room1",
+                "outdoor",
+                Some(rhythm_core::LightScheduleOverride::default()),
+                Some(BTreeMap::new()),
+                None,
+                false,
+            );
+            override_done_tx.send(result.is_ok()).unwrap();
+        });
+        override_started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(override_done_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err());
+        drop(override_guard);
+        assert!(override_done_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap());
+        override_write.join().unwrap();
     }
 
     #[test]

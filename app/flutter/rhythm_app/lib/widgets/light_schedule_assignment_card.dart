@@ -707,7 +707,7 @@ class _LightScheduleAssignmentCardState
                 indent: 56,
                 color: CelestialColors.orbitRing.withValues(alpha: 0.2),
               ),
-              for (final transition in schedule.transitions)
+              for (final transition in _automaticBoundaryTransitions(schedule))
                 ListTile(
                   key: ValueKey('light-schedule-customize-${transition.id}'),
                   leading: Icon(

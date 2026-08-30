@@ -422,6 +422,7 @@ class _LightScheduleEditorState extends State<_LightScheduleEditor> {
             transition: _day,
             dayBoundary: true,
             solarAvailable: solarAvailable,
+            solarOffsetsSupported: sync.lightScheduleSolarOffsetsSupported,
             resolvedLocalTime: _resolvedTime(sync, _day),
             resolutionPending: !_triggerMatchesSaved(_day),
             onChanged: (value) => setState(() => _day = value),
@@ -432,6 +433,7 @@ class _LightScheduleEditorState extends State<_LightScheduleEditor> {
             transition: _sleep,
             dayBoundary: false,
             solarAvailable: solarAvailable,
+            solarOffsetsSupported: sync.lightScheduleSolarOffsetsSupported,
             resolvedLocalTime: _resolvedTime(sync, _sleep),
             resolutionPending: !_triggerMatchesSaved(_sleep),
             onChanged: (value) => setState(() => _sleep = value),
@@ -448,6 +450,7 @@ class _TransitionEditor extends StatelessWidget {
     required this.transition,
     required this.dayBoundary,
     required this.solarAvailable,
+    required this.solarOffsetsSupported,
     required this.resolvedLocalTime,
     required this.resolutionPending,
     required this.onChanged,
@@ -457,6 +460,7 @@ class _TransitionEditor extends StatelessWidget {
   final RhythmModeTransitionConfig transition;
   final bool dayBoundary;
   final bool solarAvailable;
+  final bool solarOffsetsSupported;
   final String? resolvedLocalTime;
   final bool resolutionPending;
   final ValueChanged<RhythmModeTransitionConfig> onChanged;
@@ -564,13 +568,23 @@ class _TransitionEditor extends StatelessWidget {
                     }
                   : null,
             ),
-            const SizedBox(height: 8),
-            Text(
-              trigger.offsetMinutes == 0
-                  ? 'At the solar event'
-                  : '${trigger.offsetMinutes.abs()} minutes ${trigger.offsetMinutes < 0 ? 'before' : 'after'}',
-              style: const TextStyle(color: CelestialColors.textSecondary),
-            ),
+            if (solarOffsetsSupported) ...[
+              const SizedBox(height: 8),
+              Text(
+                trigger.offsetMinutes == 0
+                    ? 'At the solar event'
+                    : '${trigger.offsetMinutes.abs()} minutes ${trigger.offsetMinutes < 0 ? 'before' : 'after'}',
+                style: const TextStyle(color: CelestialColors.textSecondary),
+              ),
+            ] else
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child: Text(
+                  'Solar offset editing requires updated Rhythm Box software.',
+                  key: ValueKey('schedule-offset-unsupported'),
+                  style: TextStyle(color: CelestialColors.textSecondary),
+                ),
+              ),
             const SizedBox(height: 4),
             Text(
               resolutionPending
@@ -585,30 +599,31 @@ class _TransitionEditor extends StatelessWidget {
                     : CelestialColors.textSecondary,
               ),
             ),
-            Slider(
-              key: ValueKey('schedule-offset-$title'),
-              min: -maxSolarScheduleOffsetMinutes.toDouble(),
-              max: maxSolarScheduleOffsetMinutes.toDouble(),
-              divisions: maxSolarScheduleOffsetMinutes * 2,
-              value: trigger.offsetMinutes
-                  .clamp(
-                    -maxSolarScheduleOffsetMinutes,
-                    maxSolarScheduleOffsetMinutes,
-                  )
-                  .toDouble(),
-              label: '${trigger.offsetMinutes} min',
-              onChanged: solarAvailable
-                  ? (value) => onChanged(
-                        transition.copyWith(
-                          trigger: RhythmTransitionTrigger.solar(
-                            trigger.event ??
-                                (dayBoundary ? 'sunrise' : 'sunset'),
-                            offsetMinutes: value.round(),
+            if (solarOffsetsSupported)
+              Slider(
+                key: ValueKey('schedule-offset-$title'),
+                min: -maxSolarScheduleOffsetMinutes.toDouble(),
+                max: maxSolarScheduleOffsetMinutes.toDouble(),
+                divisions: maxSolarScheduleOffsetMinutes * 2,
+                value: trigger.offsetMinutes
+                    .clamp(
+                      -maxSolarScheduleOffsetMinutes,
+                      maxSolarScheduleOffsetMinutes,
+                    )
+                    .toDouble(),
+                label: '${trigger.offsetMinutes} min',
+                onChanged: solarAvailable
+                    ? (value) => onChanged(
+                          transition.copyWith(
+                            trigger: RhythmTransitionTrigger.solar(
+                              trigger.event ??
+                                  (dayBoundary ? 'sunrise' : 'sunset'),
+                              offsetMinutes: value.round(),
+                            ),
                           ),
-                        ),
-                      )
-                  : null,
-            ),
+                        )
+                    : null,
+              ),
           ] else
             TextFormField(
               key: ValueKey('schedule-fixed-time-$title'),
