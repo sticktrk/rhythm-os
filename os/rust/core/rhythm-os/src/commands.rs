@@ -1492,6 +1492,16 @@ fn light_usage_source(
     }
 }
 
+fn is_physical_power_observation(source: ObservedPowerSource) -> bool {
+    matches!(
+        source,
+        ObservedPowerSource::Periodic
+            | ObservedPowerSource::SyncPoll
+            | ObservedPowerSource::LiveSubscription
+            | ObservedPowerSource::AuthoritativeRefresh
+    )
+}
+
 fn observed_power_dto(
     s: &AppState,
     observed: &ObservedPowerState,
@@ -1522,6 +1532,13 @@ fn observed_power_from_cache(
     semantic_override: Option<bool>,
 ) -> ObservedPowerDto {
     let cache_key = effective_lights_on_cache_key(s, node_id, kind, parent_id);
+
+    if let Some(observed) = room_observed_power
+        .get(cache_key)
+        .filter(|observed| is_physical_power_observation(observed.source))
+    {
+        return observed_power_dto(s, observed);
+    }
 
     if let Some(lights_on) = semantic_override {
         return ObservedPowerDto {
@@ -1569,13 +1586,19 @@ fn observed_lights_on_from_cache(
     parent_id: Option<&str>,
     semantic_override: Option<bool>,
 ) -> Option<bool> {
+    let observed =
+        room_observed_power.get(effective_lights_on_cache_key(s, node_id, kind, parent_id));
+    if let Some(observed) = observed.filter(|observed| {
+        semantic_override.is_none() || is_physical_power_observation(observed.source)
+    }) {
+        return Some(observed.lights_on);
+    }
+
     if let Some(lights_on) = semantic_override {
         return Some(lights_on);
     }
 
-    room_observed_power
-        .get(effective_lights_on_cache_key(s, node_id, kind, parent_id))
-        .map(|observed| observed.lights_on)
+    observed.map(|observed| observed.lights_on)
 }
 
 fn update_lights_on_cache_for_node_with_source(
@@ -1835,39 +1858,22 @@ pub(crate) fn refresh_lights_on_cache_for_runtime_snapshot_with_source(
         return;
     }
 
-    let power_save = state.lock().ok().is_some_and(|s| s.power_save);
-    let semantic_override = semantic_lights_on_override(
-        power_save,
-        &snap.profile_settings,
-        snap.hard_off,
-        snap.mood_active,
-        snap.soft_off,
-    );
-    let observation_source = if semantic_override.is_some() {
-        ObservedPowerSource::SemanticOverride
-    } else {
-        source
+    let query_id = {
+        let Ok(s) = state.lock() else { return };
+        light_state_query_id(&s, &snap.id, snap.kind, snap.parent_id.as_deref()).to_string()
     };
-    let lights_on = if let Some(lights_on) = semantic_override {
-        lights_on
-    } else {
-        let query_id = {
-            let Ok(s) = state.lock() else { return };
-            light_state_query_id(&s, &snap.id, snap.kind, snap.parent_id.as_deref()).to_string()
-        };
 
-        match observed_lights_on_for_source(runtime, &query_id, source) {
-            Ok(lights_on) => lights_on,
-            Err(e) => {
-                warn!(
-                    target: "cmd",
-                    "Failed to refresh lights_on for '{}' via '{}': {}",
-                    snap.id,
-                    query_id,
-                    e
-                );
-                return;
-            }
+    let lights_on = match observed_lights_on_for_source(runtime, &query_id, source) {
+        Ok(lights_on) => lights_on,
+        Err(e) => {
+            warn!(
+                target: "cmd",
+                "Failed to refresh lights_on for '{}' via '{}': {}",
+                snap.id,
+                query_id,
+                e
+            );
+            return;
         }
     };
 
@@ -1877,7 +1883,7 @@ pub(crate) fn refresh_lights_on_cache_for_runtime_snapshot_with_source(
         snap.kind,
         snap.parent_id.as_deref(),
         lights_on,
-        observation_source,
+        source,
     );
 
     if let Some(parent_id) = snap
@@ -1921,39 +1927,27 @@ pub(crate) fn refresh_all_lights_on_cache_for_runtime(
             continue;
         }
 
-        let power_save = state.lock().ok().is_some_and(|s| s.power_save);
-        let semantic_override = semantic_lights_on_override(
-            power_save,
-            &snap.profile_settings,
-            snap.hard_off,
-            snap.mood_active,
-            snap.soft_off,
-        );
-        let lights_on = if let Some(lights_on) = semantic_override {
+        let query_id = {
+            let Ok(s) = state.lock() else { continue };
+            light_state_query_id(&s, &snap.id, snap.kind, snap.parent_id.as_deref()).to_string()
+        };
+
+        let lights_on = if let Some(lights_on) = query_results.get(&query_id).copied() {
             lights_on
         } else {
-            let query_id = {
-                let Ok(s) = state.lock() else { continue };
-                light_state_query_id(&s, &snap.id, snap.kind, snap.parent_id.as_deref()).to_string()
-            };
-
-            if let Some(lights_on) = query_results.get(&query_id).copied() {
-                lights_on
-            } else {
-                match observed_lights_on_for_source(runtime, &query_id, source) {
-                    Ok(lights_on) => {
-                        query_results.insert(query_id, lights_on);
-                        lights_on
-                    }
-                    Err(e) => {
-                        warn!(
-                            target: "cmd",
-                            "Failed to refresh lights_on for '{}' during full refresh: {}",
-                            snap.id,
-                            e
-                        );
-                        continue;
-                    }
+            match observed_lights_on_for_source(runtime, &query_id, source) {
+                Ok(lights_on) => {
+                    query_results.insert(query_id, lights_on);
+                    lights_on
+                }
+                Err(e) => {
+                    warn!(
+                        target: "cmd",
+                        "Failed to refresh lights_on for '{}' during full refresh: {}",
+                        snap.id,
+                        e
+                    );
+                    continue;
                 }
             }
         };
@@ -1964,9 +1958,7 @@ pub(crate) fn refresh_all_lights_on_cache_for_runtime(
             snap.kind,
             snap.parent_id.as_deref(),
             lights_on,
-            semantic_override
-                .map(|_| ObservedPowerSource::SemanticOverride)
-                .unwrap_or(source),
+            source,
         );
     }
 
@@ -25473,6 +25465,42 @@ mod tests {
         assert!(!dto.lights_on);
         assert!(!dto.fresh);
         assert_eq!(dto.source.as_deref(), Some("semantic_override"));
+    }
+
+    #[test]
+    fn physical_power_observation_outranks_hard_off_semantics() {
+        let mut hard_off = make_snapshot("room1", false, false);
+        hard_off.hard_off = true;
+        let (state, runtime) = setup_state(vec![hard_off]);
+        runtime.set_light_on("room1", true);
+
+        let snapshots = refresh_observed_power_authoritatively(&state).unwrap();
+
+        assert_eq!(snapshots.len(), 1);
+        let app = state.lock().unwrap();
+        let observed = app.room_observed_power.get("room1").unwrap();
+        assert!(observed.lights_on);
+        assert_eq!(observed.source, ObservedPowerSource::AuthoritativeRefresh);
+        let dto = observed_power_from_cache(
+            &app,
+            &app.room_observed_power,
+            "room1",
+            LightNodeKind::Room,
+            None,
+            Some(false),
+        );
+        assert!(dto.lights_on);
+        assert!(dto.fresh);
+        assert_eq!(dto.source.as_deref(), Some("authoritative_refresh"));
+
+        drop(app);
+        let snapshot = rhythm_core::NodeSnapshot::from_room_snapshot(
+            runtime.engine_room_snapshot("room1").unwrap(),
+        );
+        let event = build_node_state_event(&state, &snapshot);
+        assert_eq!(event.state, RoomModeState::HardOff);
+        assert!(event.lights_on);
+        assert!(event.observed_power.fresh);
     }
 
     #[test]

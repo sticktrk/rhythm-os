@@ -47,6 +47,35 @@ void main() {
       expect(provider.getDisplayRoomState('room-1'), RoomModeState.hardOff);
     });
 
+    test('keeps raw hard-off intent but displays on when observed power is on',
+        () async {
+      await provider.addRoom(
+        const RoomDto(
+          id: 'room-1',
+          name: 'Matter Lamp',
+          source: RoomSourceDto.matter,
+          deviceIds: ['light-1'],
+          rhythmEnabled: true,
+          disabled: false,
+          lightsOn: false,
+          timeOffsetMinutes: 0,
+          brightnessOffset: 0,
+        ),
+      );
+
+      await provider.applyServerNodeState(
+        'room-1',
+        rhythmEnabled: true,
+        timeOffset: 0,
+        brightnessOffset: 0,
+        state: RoomModeState.hardOff,
+        lightsOn: true,
+      );
+
+      expect(provider.getRoomState('room-1'), RoomModeState.hardOff);
+      expect(provider.getDisplayRoomState('room-1'), RoomModeState.active);
+    });
+
     test('defaults raw state to active when only power state is known',
         () async {
       await provider.addRoom(
