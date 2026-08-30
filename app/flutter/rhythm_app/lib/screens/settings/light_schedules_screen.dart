@@ -69,7 +69,7 @@ class _LightSchedulesScreenState extends State<LightSchedulesScreen> {
       mutation: index == -1 ? 'create' : 'update',
       inputMethod: 'editor',
     ));
-    final ok = await sync.saveLightSchedules(schedules);
+    final ok = await sync.saveLightSchedules(schedules, journeyId: journeyId);
     final trigger = updated.transitions.firstOrNull?.trigger ??
         const RhythmTransitionTrigger.manual();
     unawaited(AnalyticsService().logLightScheduleMutationCompleted(
@@ -114,7 +114,7 @@ class _LightSchedulesScreenState extends State<LightSchedulesScreen> {
       mutation: 'delete',
       inputMethod: 'menu',
     ));
-    final ok = await sync.saveLightSchedules(next);
+    final ok = await sync.saveLightSchedules(next, journeyId: journeyId);
     unawaited(AnalyticsService().logLightScheduleMutationCompleted(
       journeyId: journeyId,
       mutation: 'delete',
@@ -519,6 +519,7 @@ class _TransitionEditor extends StatelessWidget {
             ),
           ),
           SwitchListTile.adaptive(
+            key: ValueKey('schedule-trigger-enabled-$title'),
             contentPadding: EdgeInsets.zero,
             title: const Text(
               'Enabled',
@@ -530,6 +531,7 @@ class _TransitionEditor extends StatelessWidget {
             ),
           ),
           DropdownButtonFormField<String>(
+            key: ValueKey('schedule-trigger-$title'),
             initialValue: type,
             dropdownColor: CelestialColors.backgroundDark,
             style: dropdownTextStyle,
@@ -537,11 +539,21 @@ class _TransitionEditor extends StatelessWidget {
               labelText: 'Trigger',
               labelStyle: TextStyle(color: CelestialColors.textSecondary),
             ),
-            items: const [
-              DropdownMenuItem(value: 'solar', child: Text('Solar event')),
-              DropdownMenuItem(value: 'scheduled', child: Text('Fixed time')),
+            items: [
+              DropdownMenuItem(
+                value: 'solar',
+                enabled: solarAvailable || trigger.isSolar,
+                child: const Text('Solar event'),
+              ),
+              const DropdownMenuItem(
+                value: 'scheduled',
+                child: Text('Fixed time'),
+              ),
             ],
             onChanged: (value) {
+              if (value == 'solar' && !solarAvailable && !trigger.isSolar) {
+                return;
+              }
               final next = value == 'scheduled'
                   ? const RhythmTransitionTrigger.scheduled('07:00')
                   : RhythmTransitionTrigger.solar(
@@ -575,7 +587,10 @@ class _TransitionEditor extends StatelessWidget {
                 for (final event in _events)
                   DropdownMenuItem(
                     value: event,
-                    child: Text(event.replaceAll('_', ' ')),
+                    child: Text(lightScheduleSolarEventLabel(
+                      event,
+                      transition.toMode,
+                    )),
                   ),
               ],
               onChanged: solarAvailable

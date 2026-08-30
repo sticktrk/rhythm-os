@@ -861,6 +861,7 @@ class DemoServerApi extends RhythmServerApi {
   Future<List<RhythmLightScheduleConfig>> setLightSchedules(
     List<RhythmLightScheduleConfig> schedules, {
     required List<RhythmLightScheduleConfig> expectedSchedules,
+    String? correlationId,
   }) async {
     ensureSeeded();
     final live = jsonEncode(
@@ -933,6 +934,22 @@ class DemoServerApi extends RhythmServerApi {
     final profile = Map<String, dynamic>.from(
       (node['profile_settings'] as Map?) ?? const {},
     );
+    String encodeOverrides(
+      Map<String, RhythmLightScheduleOverride> value,
+    ) {
+      final keys = value.keys.toList()..sort();
+      return jsonEncode({
+        for (final key in keys) key: value[key]!.toJson(),
+      });
+    }
+
+    final liveEffective = RhythmNodeProfileSettings.fromJson(
+      profile,
+    ).lightScheduleOverrides;
+    if (encodeOverrides(liveEffective) !=
+        encodeOverrides(expectedEffectiveOverrides)) {
+      throw StateError('light schedule override precondition failed');
+    }
     final overrides = Map<String, dynamic>.from(
       (profile['light_schedule_overrides'] as Map?) ?? const {},
     );

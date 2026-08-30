@@ -10639,7 +10639,7 @@ pub fn do_light_schedules_set(
     let _write_guard = write_lock
         .lock()
         .map_err(|_| anyhow::anyhow!("light schedule write lock"))?;
-    do_light_schedules_set_internal(state, schedules, true)
+    do_light_schedules_set_internal(state, schedules, true, None)
 }
 
 /// Replace the reusable schedule registry only when the caller reviewed the
@@ -10649,6 +10649,15 @@ pub fn do_light_schedules_set_guarded(
     state: &SharedState,
     schedules: Vec<rhythm_core::LightScheduleConfig>,
     expected_schedules: Vec<rhythm_core::LightScheduleConfig>,
+) -> Result<String> {
+    do_light_schedules_set_guarded_with_correlation(state, schedules, expected_schedules, None)
+}
+
+pub fn do_light_schedules_set_guarded_with_correlation(
+    state: &SharedState,
+    schedules: Vec<rhythm_core::LightScheduleConfig>,
+    expected_schedules: Vec<rhythm_core::LightScheduleConfig>,
+    correlation_id: Option<String>,
 ) -> Result<String> {
     let write_lock = state
         .lock()
@@ -10667,7 +10676,7 @@ pub fn do_light_schedules_set_guarded(
             "light schedule registry precondition failed: live schedules changed"
         ));
     }
-    do_light_schedules_set_internal(state, schedules, true)
+    do_light_schedules_set_internal(state, schedules, true, correlation_id)
 }
 
 /// Backup restore replaces the topology and room manager after applying the
@@ -10685,13 +10694,14 @@ fn do_light_schedules_set_for_backup_restore(
     let _write_guard = write_lock
         .lock()
         .map_err(|_| anyhow::anyhow!("light schedule write lock"))?;
-    do_light_schedules_set_internal(state, schedules, false)
+    do_light_schedules_set_internal(state, schedules, false, None)
 }
 
 fn do_light_schedules_set_internal(
     state: &SharedState,
     schedules: Vec<rhythm_core::LightScheduleConfig>,
     validate_current_references: bool,
+    correlation_id: Option<String>,
 ) -> Result<String> {
     let ids = validate_light_schedule_definitions(&schedules)?;
     let assigned_roots = if validate_current_references {
@@ -10701,18 +10711,6 @@ fn do_light_schedules_set_internal(
     } else {
         Vec::new()
     };
-    let assigned_targets = assigned_roots
-        .iter()
-        .map(|(node_id, schedule_id)| {
-            let target_mode = schedules
-                .iter()
-                .find(|schedule| schedule.id == *schedule_id)
-                .map(|schedule| schedule.active_mode)
-                .ok_or_else(|| anyhow::anyhow!("Unknown light schedule '{}'", schedule_id))?;
-            Ok((node_id.clone(), schedule_id.clone(), target_mode))
-        })
-        .collect::<Result<Vec<_>>>()?;
-
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.set_light_schedule_configs(schedules);
@@ -10722,17 +10720,9 @@ fn do_light_schedules_set_internal(
         }
     }
 
-    // Update only the node-local state that already owns independent schedule
-    // mode materialization. A plain inheriting child continues to inherit its
-    // parent's assignment and mode instead of being pinned by a registry edit.
-    for (node_id, schedule_id, target_mode) in &assigned_targets {
-        persist_light_schedule_mode_for_node(state, node_id, schedule_id, *target_mode, true)?;
-    }
-    for (node_id, _, target_mode) in &assigned_targets {
-        apply_light_schedule_target_mode(state, node_id, *target_mode, None, true)?;
-    }
     let mut activity =
         crate::activity::LightActivityRecord::app("global", "light_schedule_config_updated");
+    activity.correlation_id = correlation_id;
     activity.payload = Some(serde_json::json!({
         "status": "applied",
         "schedule_count": state

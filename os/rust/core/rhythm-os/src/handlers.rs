@@ -1762,6 +1762,7 @@ fn light_schedule_mutation_error(
     state: &SharedState,
     target_id: &str,
     action: &str,
+    correlation_id: Option<String>,
     error: anyhow::Error,
 ) -> ApiResponse {
     let message = error.to_string();
@@ -1788,6 +1789,7 @@ fn light_schedule_mutation_error(
     .iter()
     .any(|needle| message.contains(needle));
     let mut activity = crate::activity::LightActivityRecord::app(target_id, action);
+    activity.correlation_id = correlation_id;
     activity.payload = Some(json!({
         "status": if rejected { "rejected" } else { "failed" },
     }));
@@ -1817,11 +1819,21 @@ pub fn handle_put_light_schedules(state: &SharedState, body: &Value) -> ApiRespo
                 return ApiResponse::bad_request(&format!("Invalid expected_schedules: {error}"))
             }
         };
-    match commands::do_light_schedules_set_guarded(state, schedules, expected_schedules) {
+    let correlation_id = correlation_id_from_body(body);
+    match commands::do_light_schedules_set_guarded_with_correlation(
+        state,
+        schedules,
+        expected_schedules,
+        correlation_id.clone(),
+    ) {
         Ok(json) => ApiResponse::json_ok(json),
-        Err(error) => {
-            light_schedule_mutation_error(state, "global", "light_schedule_config_updated", error)
-        }
+        Err(error) => light_schedule_mutation_error(
+            state,
+            "global",
+            "light_schedule_config_updated",
+            correlation_id,
+            error,
+        ),
     }
 }
 
@@ -1840,10 +1852,11 @@ pub fn handle_put_light_schedule_assignment(state: &SharedState, body: &Value) -
         return ApiResponse::bad_request("legacy and schedule_id are mutually exclusive");
     }
     if restore_legacy {
+        let correlation_id = correlation_id_from_body(body);
         return match commands::do_light_schedule_assignment_clear_with_correlation(
             state,
             node_id,
-            correlation_id_from_body(body),
+            correlation_id.clone(),
             true,
         ) {
             Ok(json) => ApiResponse::json_ok(json),
@@ -1851,6 +1864,7 @@ pub fn handle_put_light_schedule_assignment(state: &SharedState, body: &Value) -
                 state,
                 node_id,
                 "light_schedule_assignment_updated",
+                correlation_id,
                 error,
             ),
         };
@@ -1863,11 +1877,12 @@ pub fn handle_put_light_schedule_assignment(state: &SharedState, body: &Value) -
             None => return ApiResponse::bad_request("schedule_id must be a string or null"),
         },
     };
+    let correlation_id = correlation_id_from_body(body);
     match commands::do_light_schedule_assignment_set_with_correlation(
         state,
         node_id,
         schedule_id,
-        correlation_id_from_body(body),
+        correlation_id.clone(),
         true,
     ) {
         Ok(json) => ApiResponse::json_ok(json),
@@ -1875,6 +1890,7 @@ pub fn handle_put_light_schedule_assignment(state: &SharedState, body: &Value) -
             state,
             node_id,
             "light_schedule_assignment_updated",
+            correlation_id,
             error,
         ),
     }
@@ -1919,19 +1935,24 @@ pub fn handle_put_light_schedule_override(state: &SharedState, body: &Value) -> 
             return ApiResponse::bad_request("expected_effective_overrides must be an object")
         }
     };
+    let correlation_id = correlation_id_from_body(body);
     match commands::do_light_schedule_override_set(
         state,
         node_id,
         schedule_id,
         schedule_override,
         Some(expected_effective_overrides),
-        correlation_id_from_body(body),
+        correlation_id.clone(),
         true,
     ) {
         Ok(json) => ApiResponse::json_ok(json),
-        Err(error) => {
-            light_schedule_mutation_error(state, node_id, "light_schedule_override_updated", error)
-        }
+        Err(error) => light_schedule_mutation_error(
+            state,
+            node_id,
+            "light_schedule_override_updated",
+            correlation_id,
+            error,
+        ),
     }
 }
 
@@ -1950,7 +1971,7 @@ pub fn handle_post_light_schedule_transition_trigger(
             .to_string(),
         ),
         Err(error) => {
-            light_schedule_mutation_error(state, "global", "light_schedule_boundary", error)
+            light_schedule_mutation_error(state, "global", "light_schedule_boundary", None, error)
         }
     }
 }
@@ -7356,6 +7377,39 @@ mod tests {
             .get("light_schedule")
             .is_none());
 
+        let expected_registry = state.lock().unwrap().light_schedule_configs();
+        let mut edited_registry = expected_registry.clone();
+        edited_registry
+            .iter_mut()
+            .find(|schedule| schedule.id == "indoor")
+            .unwrap()
+            .name = "Indoor lights updated".to_string();
+        let edited = handle_put_light_schedules(
+            &state,
+            &json!({
+                "schedules": edited_registry,
+                "expected_schedules": expected_registry,
+                "correlation_id": "registry-journey-1"
+            }),
+        );
+        assert_eq!(edited.status, 200, "{}", edited.body);
+        let room1_after_edit =
+            serde_json::to_value(commands::build_node_state(&state, "room1").unwrap()).unwrap();
+        let room2_after_edit =
+            serde_json::to_value(commands::build_node_state(&state, "room2").unwrap()).unwrap();
+        assert_eq!(
+            room1_after_edit["profile_settings"]["light_schedule"]["active_mode"],
+            "sleep"
+        );
+        assert_eq!(
+            room2_after_edit["profile_settings"]["light_schedule"]["active_mode"],
+            "day"
+        );
+        assert!(state.lock().unwrap().light_activity.iter().any(|entry| {
+            entry.action_id == "light_schedule_config_updated"
+                && entry.correlation_id.as_deref() == Some("registry-journey-1")
+        }));
+
         let backup = commands::build_backup_bundle_dto(&state, false).unwrap();
         assert_eq!(backup.configuration.light_schedules.len(), 2);
         assert!(backup.configuration.rooms.iter().any(|room| {
@@ -7513,6 +7567,15 @@ mod tests {
             }),
         );
         assert_eq!(stale.status, 400, "{}", stale.body);
+        assert!(state.lock().unwrap().light_activity.iter().any(|entry| {
+            entry.action_id == "light_schedule_override_updated"
+                && entry.correlation_id.as_deref() == Some("override-journey-stale")
+                && entry
+                    .payload
+                    .as_ref()
+                    .and_then(|payload| payload.get("status"))
+                    == Some(&json!("rejected"))
+        }));
 
         let expected_schedules = state.lock().unwrap().light_schedule_configs();
         let stale_registry =

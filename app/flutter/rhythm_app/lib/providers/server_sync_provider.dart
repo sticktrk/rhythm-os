@@ -4726,8 +4726,9 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   Future<bool> saveLightSchedules(
-    List<RhythmLightScheduleConfig> schedules,
-  ) async {
+    List<RhythmLightScheduleConfig> schedules, {
+    String? journeyId,
+  }) async {
     if (!lightSchedulesSupported ||
         _lightSchedulesSavePending ||
         (!HueServiceLocator.isDemoMode && !_connection.connected)) {
@@ -4742,6 +4743,7 @@ class ServerSyncProvider extends ChangeNotifier {
       final authoritative = await api.setLightSchedules(
         optimistic,
         expectedSchedules: previous,
+        correlationId: journeyId,
       );
       _lightSchedules = List<RhythmLightScheduleConfig>.unmodifiable(
         authoritative,

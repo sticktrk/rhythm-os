@@ -1,6 +1,23 @@
 import 'rhythm_curve_config.dart';
 import 'rhythm_room.dart' show RhythmMode;
 
+/// Human-readable solar anchor label for a schedule boundary.
+///
+/// Twilight anchors resolve on the morning side for Day boundaries and on the
+/// evening side for Sleep boundaries, so the label must say dawn or dusk
+/// instead of the ambiguous "twilight".
+String lightScheduleSolarEventLabel(String event, RhythmMode targetMode) {
+  final phase = targetMode == RhythmMode.day ? 'dawn' : 'dusk';
+  return switch (event) {
+    'sunrise' => 'Sunrise',
+    'sunset' => 'Sunset',
+    'civil_twilight' => 'Civil $phase',
+    'nautical_twilight' => 'Nautical $phase',
+    'astronomical_twilight' => 'Astronomical $phase',
+    _ => event.replaceAll('_', ' '),
+  };
+}
+
 const rhythmAdaptiveLightRuntimeId = 'rhythm-adaptive';
 
 enum RhythmLightRuntime {

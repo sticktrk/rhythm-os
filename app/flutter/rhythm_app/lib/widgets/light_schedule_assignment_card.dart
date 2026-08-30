@@ -307,24 +307,33 @@ class _LightScheduleAssignmentCardState
                 ),
                 const SizedBox(height: 12),
                 DropdownButtonFormField<String>(
+                  key: ValueKey(
+                    'light-schedule-override-kind-${transition.id}',
+                  ),
                   initialValue: kindChoice,
                   decoration: const InputDecoration(labelText: 'Trigger type'),
-                  items: const [
-                    DropdownMenuItem(
+                  items: [
+                    const DropdownMenuItem(
                       value: 'inherit',
                       child: Text('Follow schedule'),
                     ),
                     DropdownMenuItem(
                       value: 'solar',
-                      child: Text('Solar event'),
+                      enabled: solarAvailable || kindChoice == 'solar',
+                      child: const Text('Solar event'),
                     ),
-                    DropdownMenuItem(
+                    const DropdownMenuItem(
                       value: 'scheduled',
                       child: Text('Fixed local time'),
                     ),
                   ],
                   onChanged: (value) {
                     if (value == null) return;
+                    if (value == 'solar' &&
+                        !solarAvailable &&
+                        kindChoice != 'solar') {
+                      return;
+                    }
                     setSheetState(() {
                       kindChoice = value;
                       final selected =
@@ -403,17 +412,26 @@ class _LightScheduleAssignmentCardState
                         value: 'sunset',
                         child: Text('Sunset'),
                       ),
-                      const DropdownMenuItem(
+                      DropdownMenuItem(
                         value: 'civil_twilight',
-                        child: Text('Civil twilight'),
+                        child: Text(lightScheduleSolarEventLabel(
+                          'civil_twilight',
+                          transition.toMode,
+                        )),
                       ),
-                      const DropdownMenuItem(
+                      DropdownMenuItem(
                         value: 'nautical_twilight',
-                        child: Text('Nautical twilight'),
+                        child: Text(lightScheduleSolarEventLabel(
+                          'nautical_twilight',
+                          transition.toMode,
+                        )),
                       ),
-                      const DropdownMenuItem(
+                      DropdownMenuItem(
                         value: 'astronomical_twilight',
-                        child: Text('Astronomical twilight'),
+                        child: Text(lightScheduleSolarEventLabel(
+                          'astronomical_twilight',
+                          transition.toMode,
+                        )),
                       ),
                     ],
                     onChanged: solarAvailable
@@ -493,12 +511,7 @@ class _LightScheduleAssignmentCardState
                 ],
                 const SizedBox(height: 8),
                 FilledButton(
-                  onPressed: ((kindChoice == 'inherit'
-                              ? inheritedKind
-                              : kindChoice) ==
-                          'scheduled' ||
-                          solarAvailable)
-                      ? () => Navigator.of(context).pop(
+                  onPressed: () => Navigator.of(context).pop(
                             RhythmModeTransitionOverride(
                               trigger: RhythmTransitionTriggerOverride(
                                 kind:
@@ -516,8 +529,7 @@ class _LightScheduleAssignmentCardState
                                   ? null
                                   : enabledChoice == 'enabled',
                             ),
-                          )
-                      : null,
+                          ),
                   child: const Text('Save customization'),
                 ),
               ],

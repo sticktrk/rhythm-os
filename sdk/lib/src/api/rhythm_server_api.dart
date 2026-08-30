@@ -1893,6 +1893,7 @@ class RhythmServerApi {
   Future<List<RhythmLightScheduleConfig>> setLightSchedules(
     List<RhythmLightScheduleConfig> schedules, {
     required List<RhythmLightScheduleConfig> expectedSchedules,
+    String? correlationId,
   }) async {
     final response = await _dio.put(
       'api/light-schedules',
@@ -1900,6 +1901,7 @@ class RhythmServerApi {
         'schedules': schedules.map((schedule) => schedule.toJson()).toList(),
         'expected_schedules':
             expectedSchedules.map((schedule) => schedule.toJson()).toList(),
+        if (correlationId != null) 'correlation_id': correlationId,
       },
     );
     final data = response.data as Map<String, dynamic>;

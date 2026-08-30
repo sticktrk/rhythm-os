@@ -181,7 +181,11 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     description: 'Replace the reusable named light schedule registry.',
     method: 'PUT',
     path: 'api/light-schedules',
-    body: { schedules: [], expected_schedules: [] }
+    body: {
+      schedules: [],
+      expected_schedules: [],
+      correlation_id: '{correlation_id}'
+    }
   },
   {
     id: 'light-schedule-assignment-set',
@@ -190,7 +194,11 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     description: 'Assign a room or standalone light to a named schedule.',
     method: 'PUT',
     path: 'api/light-schedules/assignment',
-    body: { node_id: '{node_id}', schedule_id: '{schedule_id}' }
+    body: {
+      node_id: '{node_id}',
+      schedule_id: '{schedule_id}',
+      correlation_id: '{correlation_id}'
+    }
   },
   {
     id: 'light-schedule-override-set',

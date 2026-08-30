@@ -659,10 +659,12 @@ class CloudBackedServerApi {
   Future<List<RhythmLightScheduleConfig>> setLightSchedules(
     List<RhythmLightScheduleConfig> schedules, {
     required List<RhythmLightScheduleConfig> expectedSchedules,
+    String? correlationId,
   }) {
     return _delegate.setLightSchedules(
       schedules,
       expectedSchedules: expectedSchedules,
+      correlationId: correlationId,
     );
   }
 

@@ -204,6 +204,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   List<RhythmLightScheduleConfig> lightSchedules = const [];
   final List<List<RhythmLightScheduleConfig>> lightScheduleExpectedRegistryCalls =
       [];
+  final List<String?> lightScheduleRegistryCorrelationIds = [];
   List<RhythmLightScheduleConfig>? lightSchedulesAfterFailedWrite;
   final List<
       ({
@@ -502,10 +503,12 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   Future<List<RhythmLightScheduleConfig>> setLightSchedules(
     List<RhythmLightScheduleConfig> schedules, {
     required List<RhythmLightScheduleConfig> expectedSchedules,
+    String? correlationId,
   }) async {
     lightScheduleExpectedRegistryCalls.add(
       List<RhythmLightScheduleConfig>.from(expectedSchedules),
     );
+    lightScheduleRegistryCorrelationIds.add(correlationId);
     final replacement = lightSchedulesAfterFailedWrite;
     if (replacement != null) {
       lightSchedules = List<RhythmLightScheduleConfig>.from(replacement);
@@ -2021,6 +2024,17 @@ void main() {
       );
     });
 
+    test('names twilight anchors as day dawn and sleep dusk', () {
+      expect(
+        lightScheduleSolarEventLabel('civil_twilight', RhythmMode.day),
+        'Civil dawn',
+      );
+      expect(
+        lightScheduleSolarEventLabel('nautical_twilight', RhythmMode.sleep),
+        'Nautical dusk',
+      );
+    });
+
     Future<
         ({
           _FakeRhythmServerApi api,
@@ -2194,20 +2208,113 @@ void main() {
         ),
       ];
 
-      final saved = await provider.saveLightSchedules(const [
-        RhythmLightScheduleConfig(
-          id: 'outdoor',
-          name: 'My stale edit',
-          activeMode: RhythmMode.sleep,
-        ),
-      ]);
+      final saved = await provider.saveLightSchedules(
+        const [
+          RhythmLightScheduleConfig(
+            id: 'outdoor',
+            name: 'My stale edit',
+            activeMode: RhythmMode.sleep,
+          ),
+        ],
+        journeyId: 'registry-journey-1',
+      );
 
       expect(saved, isFalse);
       expect(
         api.lightScheduleExpectedRegistryCalls.single.single.name,
         'Outdoor',
       );
+      expect(
+        api.lightScheduleRegistryCorrelationIds.single,
+        'registry-journey-1',
+      );
       expect(provider.lightSchedules.single.name, 'Concurrent outdoor');
+    });
+
+    testWidgets('missing location blocks new solar rules', (tester) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()..lightSchedules = [fixedSchedule];
+      final connection = _HelloRhythmConnection(api);
+      final homeProvider = _TestHomeProvider(const []);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: homeProvider,
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+      addTearDown(homeProvider.dispose);
+      connection.emitHello(namedScheduleHello());
+      await tester.pump();
+      await provider.loadLightSchedules();
+      await tester.pumpWidget(_buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const LightSchedulesScreen(),
+      ));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('light-schedule-outdoor')));
+      await tester.pumpAndSettle();
+
+      final trigger = tester.widget<DropdownButton<String>>(
+        find.descendant(
+          of: find.byKey(const ValueKey('schedule-trigger-Day Start')),
+          matching: find.byWidgetPredicate(
+            (widget) => widget is DropdownButton<String>,
+          ),
+        ),
+      );
+      expect(
+        trigger.items!.singleWhere((item) => item.value == 'solar').enabled,
+        isFalse,
+      );
+    });
+
+    testWidgets('missing location can disable an existing solar rule',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()..lightSchedules = [outdoorSchedule];
+      final connection = _HelloRhythmConnection(api);
+      final homeProvider = _TestHomeProvider(const []);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: homeProvider,
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+      addTearDown(homeProvider.dispose);
+      connection.emitHello(namedScheduleHello());
+      await tester.pump();
+      await provider.loadLightSchedules();
+      await tester.pumpWidget(_buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const LightSchedulesScreen(),
+      ));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('light-schedule-outdoor')));
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('Solar anchors are unavailable'),
+        findsOneWidget,
+      );
+      await tester.tap(
+        find.byKey(const ValueKey('schedule-trigger-enabled-Day Start')),
+      );
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+
+      expect(
+        api.lightSchedules.single.transitions
+            .singleWhere((transition) => transition.id == 'wake')
+            .triggerEnabled,
+        isFalse,
+      );
     });
 
     testWidgets('capability gates named schedule assignment UI and write',
@@ -9146,6 +9253,34 @@ void main() {
       expect(provider.hubConfiguredConflicts, hasLength(1));
       expect(provider.reviewHistory, isNotEmpty);
       expect(provider.reviewHistory.first.isPending, isFalse);
+    });
+
+    test('demo override rejects a stale effective snapshot', () async {
+      const scheduleOverride = RhythmLightScheduleOverride(
+        transitions: {
+          'wake': RhythmModeTransitionOverride(triggerEnabled: false),
+        },
+      );
+      final demoApi = DemoServerApi.instance;
+      final applied = await demoApi.setLightScheduleOverride(
+        nodeId: 'hue_demo_1',
+        scheduleId: 'outdoor',
+        scheduleOverride: scheduleOverride,
+        expectedEffectiveOverrides: const {},
+        correlationId: 'demo-override-1',
+      );
+      expect(applied, isNotNull);
+
+      await expectLater(
+        demoApi.setLightScheduleOverride(
+          nodeId: 'hue_demo_1',
+          scheduleId: 'outdoor',
+          scheduleOverride: null,
+          expectedEffectiveOverrides: const {},
+          correlationId: 'demo-override-stale',
+        ),
+        throwsStateError,
+      );
     });
 
     test('refreshes demo topology after assigning an unassigned device',

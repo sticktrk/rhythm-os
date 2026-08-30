@@ -5399,13 +5399,25 @@ mod tests {
         assert!(raw_child.profile_settings.light_schedule_modes.is_empty());
         assert_eq!(
             runtime
+                .engine_node_snapshot("parent")
+                .unwrap()
+                .profile_settings
+                .light_schedule
+                .as_ref()
+                .and_then(rhythm_core::LightScheduleAssignment::active_mode),
+            Some(rhythm_core::RhythmMode::Day),
+            "a registry edit must not act like an explicit mode transition"
+        );
+        assert_eq!(
+            runtime
                 .engine_effective_node_snapshot("child")
                 .unwrap()
                 .profile_settings
                 .light_schedule
                 .as_ref()
                 .and_then(rhythm_core::LightScheduleAssignment::active_mode),
-            Some(rhythm_core::RhythmMode::Sleep)
+            Some(rhythm_core::RhythmMode::Day),
+            "the inheriting child must keep the parent's materialized mode"
         );
     }
 

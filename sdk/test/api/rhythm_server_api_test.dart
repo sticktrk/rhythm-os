@@ -3064,12 +3064,14 @@ void main() {
       final schedules = await api.setLightSchedules(
         const [updated],
         expectedSchedules: const [current],
+        correlationId: 'schedule-journey-1',
       );
 
       expect(schedules.single.name, 'Porch lights');
       verify(() => dio.put('api/light-schedules', data: {
             'schedules': [updated.toJson()],
             'expected_schedules': [current.toJson()],
+            'correlation_id': 'schedule-journey-1',
           })).called(1);
     });
 
