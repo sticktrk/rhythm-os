@@ -566,6 +566,34 @@ void main() {
     ]);
   });
 
+  testWidgets('global reset leaves current and legacy Low glow rooms alone',
+      (tester) async {
+    final harness = await _pumpAllRooms(
+      tester,
+      rooms: const [_room1, _bedroom, _garage],
+    );
+    harness.roomProvider.setRoomStateLocal(
+      _bedroom.id,
+      RoomModeState.standby,
+    );
+    harness.roomProvider.setRoomStateLocal(
+      _garage.id,
+      RoomModeState.idle,
+    );
+    await tester.pump();
+
+    await tester.tap(
+      find.byKey(const ValueKey('global-room-action-reset')),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(harness.api.actionBatches.single, [
+      (nodeId: 'room-1', action: 'reset'),
+    ]);
+    expect(find.text('Reset 1 of 1 rooms.'), findsOneWidget);
+  });
+
   testWidgets('expanded slider applies one exact batch to adaptive-on rooms',
       (tester) async {
     final harness = await _pumpAllRooms(
