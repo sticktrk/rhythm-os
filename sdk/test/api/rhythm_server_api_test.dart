@@ -3041,6 +3041,40 @@ void main() {
       expect(schedules.single.activeMode, RhythmMode.day);
     });
 
+    test('replaces schedules with the exact reviewed registry', () async {
+      const current = RhythmLightScheduleConfig(
+        id: 'outdoor',
+        name: 'Outdoor lights',
+        activeMode: RhythmMode.day,
+      );
+      const updated = RhythmLightScheduleConfig(
+        id: 'outdoor',
+        name: 'Porch lights',
+        activeMode: RhythmMode.day,
+      );
+      when(() => dio.put(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions: RequestOptions(path: 'api/light-schedules'),
+                statusCode: 200,
+                data: {
+                  'schedules': [updated.toJson()],
+                },
+              ));
+
+      final schedules = await api.setLightSchedules(
+        const [updated],
+        expectedSchedules: const [current],
+        correlationId: 'schedule-journey-1',
+      );
+
+      expect(schedules.single.name, 'Porch lights');
+      verify(() => dio.put('api/light-schedules', data: {
+            'schedules': [updated.toJson()],
+            'expected_schedules': [current.toJson()],
+            'correlation_id': 'schedule-journey-1',
+          })).called(1);
+    });
+
     test('clears assignment with null and returns authoritative state',
         () async {
       when(() => dio.put(any(), data: any(named: 'data')))
@@ -3067,6 +3101,7 @@ void main() {
       final state = await api.setLightScheduleAssignment(
         nodeId: 'porch',
         scheduleId: null,
+        correlationId: 'assignment-journey-1',
       );
 
       expect(state?.roomId, 'porch');
@@ -3074,6 +3109,7 @@ void main() {
       verify(() => dio.put('api/light-schedules/assignment', data: {
             'node_id': 'porch',
             'schedule_id': null,
+            'correlation_id': 'assignment-journey-1',
           })).called(1);
     });
 
@@ -3094,13 +3130,58 @@ void main() {
                 },
               ));
 
-      final state = await api.clearLightScheduleAssignment(nodeId: 'porch');
+      final state = await api.clearLightScheduleAssignment(
+        nodeId: 'porch',
+        correlationId: 'legacy-journey-1',
+      );
 
       expect(state?.roomId, 'porch');
       expect(state?.profileSettings?.lightSchedule, isNull);
       verify(() => dio.put('api/light-schedules/assignment', data: {
             'node_id': 'porch',
             'legacy': true,
+            'correlation_id': 'legacy-journey-1',
+          })).called(1);
+    });
+
+    test('writes one sparse override with an exact reviewed precondition',
+        () async {
+      when(() => dio.put(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions:
+                    RequestOptions(path: 'api/light-schedules/override'),
+                statusCode: 200,
+                data: {
+                  'nodes': [
+                    {'room_id': 'porch', 'rhythm_enabled': true},
+                  ],
+                },
+              ));
+      const scheduleOverride = RhythmLightScheduleOverride(
+        transitions: {
+          'wake': RhythmModeTransitionOverride(
+            trigger: RhythmTransitionTriggerOverride(offsetMinutes: -30),
+          ),
+        },
+      );
+
+      final state = await api.setLightScheduleOverride(
+        nodeId: 'porch',
+        scheduleId: 'outdoor',
+        scheduleOverride: scheduleOverride,
+        expectedEffectiveOverrides: const {'outdoor': scheduleOverride},
+        correlationId: 'journey-1',
+      );
+
+      expect(state?.roomId, 'porch');
+      verify(() => dio.put('api/light-schedules/override', data: {
+            'node_id': 'porch',
+            'schedule_id': 'outdoor',
+            'override': scheduleOverride.toJson(),
+            'expected_effective_overrides': {
+              'outdoor': scheduleOverride.toJson(),
+            },
+            'correlation_id': 'journey-1',
           })).called(1);
     });
   });

@@ -203,6 +203,10 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["PUT"],
     },
     SharedRoute {
+        path: "/api/light-schedules/override",
+        methods: &["PUT"],
+    },
+    SharedRoute {
         path: "/api/light-schedules/:schedule_id/transitions/:transition_id/trigger",
         methods: &["POST"],
     },

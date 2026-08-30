@@ -11,6 +11,7 @@ import '../../widgets/mode_room_behavior_section.dart';
 import '../../widgets/settings_row.dart';
 import '../../widgets/solar_orbit.dart' show CelestialColors;
 import 'default_transition_editor_screen.dart';
+import 'light_schedules_screen.dart';
 
 /// The Automations tab — a list of preset automations, each a row that taps
 /// into its own detail screen. New automation types slot in as additional rows
@@ -49,6 +50,20 @@ class AutomationsScreen extends StatelessWidget {
                         ),
                         SettingsGroup(
                           children: [
+                            if (sync.lightSchedulesSupported)
+                              SettingsRow(
+                                key: const ValueKey('light-schedules-open'),
+                                icon: Icons.schedule_rounded,
+                                iconColor: CelestialColors.accentBlue,
+                                label: 'Schedules',
+                                value: sync.lightSchedules.isEmpty
+                                    ? 'Reusable room schedules'
+                                    : '${sync.lightSchedules.length} saved',
+                                onTap: () => _pushDetail(
+                                  context,
+                                  const LightSchedulesScreen(),
+                                ),
+                              ),
                             _automaticRow(context, sync, profileColors),
                             _buttonRow(context, sync, profileColors),
                           ],

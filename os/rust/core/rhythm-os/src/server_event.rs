@@ -5,7 +5,10 @@
 
 use serde::Serialize;
 
-use rhythm_core::{ButtonAction, ModeChangeCause, NodeSnapshot, Rgb, RhythmMode, RoomModeState};
+use rhythm_core::{
+    ButtonAction, ModeChangeCause, NodeSnapshot, Rgb, RhythmMode, RoomModeState,
+    RoomProfileSettings,
+};
 
 use crate::api_types::{
     LightBreakerDto, LightCapabilitiesDto, ObservedPowerDto, RoomProfileSettingsDto, SettingsDto,
@@ -298,6 +301,8 @@ pub struct NodeStateEvent {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub tick: bool,
     pub profile_settings: RoomProfileSettingsDto,
+    #[serde(rename = "room_profile", default)]
+    pub room_profile: RoomProfileSettings,
 }
 
 #[derive(Clone, Debug)]
@@ -317,6 +322,7 @@ pub(crate) struct NodeStateEventParams {
     pub mood_active: bool,
     pub standby_enabled: bool,
     pub standby_active: bool,
+    pub room_profile: RoomProfileSettings,
 }
 
 impl NodeStateEvent {
@@ -338,6 +344,7 @@ impl NodeStateEvent {
             mood_active,
             standby_enabled,
             standby_active,
+            room_profile,
         } = params;
         Self {
             id: snap.id.clone(),
@@ -364,6 +371,7 @@ impl NodeStateEvent {
                 &snap.profile_settings,
                 mood_enabled,
             ),
+            room_profile,
         }
     }
 }

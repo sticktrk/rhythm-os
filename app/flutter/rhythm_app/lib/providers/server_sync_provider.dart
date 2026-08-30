@@ -326,6 +326,15 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Saved mode transitions from the server.
   List<RhythmModeTransitionConfig> _modeTransitions = const [];
 
+  /// Appliance-owned reusable schedule registry. Loaded lazily by schedule
+  /// surfaces because it is intentionally not duplicated in the hello payload.
+  List<RhythmLightScheduleConfig> _lightSchedules = const [];
+  bool _lightSchedulesLoading = false;
+  bool _lightSchedulesLoaded = false;
+  bool _lightSchedulesSavePending = false;
+  final Set<String> _lightScheduleNodeWritesPending = {};
+  final Set<String> _lightScheduleNodeWriteErrors = {};
+
   /// Physical input bindings from the server.
   List<RhythmInputBinding> _inputBindings = const [];
 
@@ -467,6 +476,78 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Saved mode transitions.
   List<RhythmModeTransitionConfig> get modeTransitions => _modeTransitions;
+
+  List<RhythmLightScheduleConfig> get lightSchedules => _lightSchedules;
+  bool get lightSchedulesLoading => _lightSchedulesLoading;
+  bool get lightSchedulesSavePending => _lightSchedulesSavePending;
+
+  bool get lightSchedulesSupported =>
+      HueServiceLocator.isDemoMode ||
+      _capabilities?.supportsFeature(RhythmFeature.lightSchedulesV1) == true;
+
+  bool lightScheduleTargetSupportedForNode(String nodeId) {
+    if (!lightSchedulesSupported) return false;
+    final node = nodeById(nodeId);
+    final parentId = node?.parentId;
+    return node?.kind == RhythmNodeKind.room ||
+        (node?.kind == RhythmNodeKind.lightDevice &&
+            (parentId == null || parentId.isEmpty));
+  }
+
+  bool get lightScheduleOverridesSupported =>
+      HueServiceLocator.isDemoMode ||
+      _capabilities?.supportsFeature(
+            RhythmFeature.lightScheduleOverridesV1,
+          ) ==
+          true;
+
+  bool get lightScheduleSolarOffsetsSupported =>
+      HueServiceLocator.isDemoMode ||
+      _capabilities?.supportsFeature(
+            RhythmFeature.lightScheduleSolarOffsetsV1,
+          ) ==
+          true;
+
+  bool get solarScheduleAnchorsAvailable {
+    if (HueServiceLocator.isDemoMode) return true;
+    final home = _homeProvider.currentHome;
+    return home?.location != null && _isIanaTimezone(home?.timezone);
+  }
+
+  bool lightScheduleWritePendingForNode(String nodeId) =>
+      _lightScheduleNodeWritesPending.contains(nodeId);
+
+  bool lightScheduleWriteRejectedForNode(String nodeId) =>
+      _lightScheduleNodeWriteErrors.contains(nodeId);
+
+  String? resolvedLightScheduleTransitionLocalTime(
+    String nodeId,
+    RhythmLightScheduleConfig schedule,
+    RhythmModeTransitionConfig transition,
+  ) {
+    final effective = schedule.resolvedTransitionsByNode[nodeId];
+    return effective == null
+        ? schedule.resolvedTransitions[transition.id]
+        : effective[transition.id];
+  }
+
+  String? resolvedBaseLightScheduleTransitionLocalTime(
+    RhythmLightScheduleConfig schedule,
+    RhythmModeTransitionConfig transition,
+  ) => schedule.resolvedTransitions[transition.id];
+
+  RhythmModeTransitionOverride? inheritedLightScheduleTransitionOverride(
+    String nodeId,
+    String scheduleId,
+    String transitionId,
+  ) {
+    final parentId = nodeById(nodeId)?.parentId;
+    if (parentId == null || parentId.isEmpty) return null;
+    return nodeById(parentId)
+        ?.profileSettings
+        ?.lightScheduleOverrides[scheduleId]
+        ?.transitions[transitionId];
+  }
 
   /// Physical input bindings.
   List<RhythmInputBinding> get inputBindings => _inputBindings;
@@ -1380,6 +1461,7 @@ class ServerSyncProvider extends ChangeNotifier {
         motionTimeoutSetting: previous.motionTimeoutSetting,
         motionActivationEnabled: previous.motionActivationEnabled,
         roomSchedule: schedule,
+        lightScheduleOverrides: previous.lightScheduleOverrides,
         profileOverrides: previous.profileOverrides,
         raw: previous.raw,
       );
@@ -1552,6 +1634,7 @@ class ServerSyncProvider extends ChangeNotifier {
         motionTimeoutSetting: previousSettings.motionTimeoutSetting,
         motionActivationEnabled: enabled,
         lightSchedule: previousSettings.lightSchedule,
+        lightScheduleOverrides: previousSettings.lightScheduleOverrides,
         roomSchedule: previousSettings.roomSchedule,
         profileOverrides: previousSettings.profileOverrides,
         raw: previousSettings.raw,
@@ -1584,6 +1667,7 @@ class ServerSyncProvider extends ChangeNotifier {
       deviceIds: previous.deviceIds,
       devices: previous.devices,
       profileSettings: profileSettings,
+      localProfileSettings: previous.localProfileSettings,
       observedPower: previous.observedPower,
       moodEnabled: previous.moodEnabled,
       moodActive: previous.moodActive,
@@ -1621,6 +1705,7 @@ class ServerSyncProvider extends ChangeNotifier {
       motionTimeoutSetting: previousSettings.motionTimeoutSetting,
       motionActivationEnabled: previousSettings.motionActivationEnabled,
       lightSchedule: previousSettings.lightSchedule,
+      lightScheduleOverrides: previousSettings.lightScheduleOverrides,
       roomSchedule: previousSettings.roomSchedule,
       profileOverrides: _withMotionTimeoutProfileOverride(
         previousSettings.profileOverrides,
@@ -1651,6 +1736,7 @@ class ServerSyncProvider extends ChangeNotifier {
       deviceIds: previous.deviceIds,
       devices: previous.devices,
       profileSettings: updatedSettings,
+      localProfileSettings: previous.localProfileSettings,
       observedPower: previous.observedPower,
       moodEnabled: previous.moodEnabled,
       moodActive: previous.moodActive,
@@ -1814,6 +1900,7 @@ class ServerSyncProvider extends ChangeNotifier {
       deviceIds: previous.deviceIds,
       devices: previous.devices,
       profileSettings: previous.profileSettings,
+      localProfileSettings: previous.localProfileSettings,
       observedPower: previous.observedPower,
       moodEnabled: previous.moodEnabled,
       moodActive: previous.moodActive,
@@ -3618,6 +3705,12 @@ class ServerSyncProvider extends ChangeNotifier {
     _lightRuntime = RhythmLightRuntime.rhythmAdaptive;
     _activeMode = null;
     _activeProfileId = null;
+    _lightSchedules = const [];
+    _lightSchedulesLoaded = false;
+    _lightSchedulesLoading = false;
+    _lightSchedulesSavePending = false;
+    _lightScheduleNodeWritesPending.clear();
+    _lightScheduleNodeWriteErrors.clear();
     _scenes = const [];
     _roomScenes.clear();
     _optimisticMoodSceneIds.clear();
@@ -4168,6 +4261,7 @@ class ServerSyncProvider extends ChangeNotifier {
       motionTimeoutSetting: previousSettings.motionTimeoutSetting,
       motionActivationEnabled: previousSettings.motionActivationEnabled,
       lightSchedule: previousSettings.lightSchedule,
+      lightScheduleOverrides: previousSettings.lightScheduleOverrides,
       roomSchedule: previousSettings.roomSchedule,
       profileOverrides: Map.unmodifiable(nextOverrides),
       raw: previousSettings.raw,
@@ -4242,6 +4336,7 @@ class ServerSyncProvider extends ChangeNotifier {
       motionTimeoutSetting: previousSettings.motionTimeoutSetting,
       motionActivationEnabled: previousSettings.motionActivationEnabled,
       lightSchedule: previousSettings.lightSchedule,
+      lightScheduleOverrides: previousSettings.lightScheduleOverrides,
       roomSchedule: previousSettings.roomSchedule,
       raw: previousSettings.raw,
     );
@@ -4610,6 +4705,147 @@ class ServerSyncProvider extends ChangeNotifier {
     }
 
     return true;
+  }
+
+  Future<void> loadLightSchedules({bool force = false}) async {
+    if (!lightSchedulesSupported || _lightSchedulesLoading) return;
+    if (_lightSchedulesLoaded && !force) return;
+    _lightSchedulesLoading = true;
+    notifyListeners();
+    try {
+      _lightSchedules = List<RhythmLightScheduleConfig>.unmodifiable(
+        await api.getLightSchedules(),
+      );
+      _lightSchedulesLoaded = true;
+    } catch (error) {
+      debugPrint('ServerSync: light schedule load failed: $error');
+    } finally {
+      _lightSchedulesLoading = false;
+      notifyListeners();
+    }
+  }
+
+  Future<bool> saveLightSchedules(
+    List<RhythmLightScheduleConfig> schedules, {
+    String? journeyId,
+  }) async {
+    if (!lightSchedulesSupported ||
+        _lightSchedulesSavePending ||
+        (!HueServiceLocator.isDemoMode && !_connection.connected)) {
+      return false;
+    }
+    final previous = _lightSchedules;
+    final optimistic = List<RhythmLightScheduleConfig>.unmodifiable(schedules);
+    _lightSchedules = optimistic;
+    _lightSchedulesSavePending = true;
+    notifyListeners();
+    try {
+      final authoritative = await api.setLightSchedules(
+        optimistic,
+        expectedSchedules: previous,
+        correlationId: journeyId,
+      );
+      _lightSchedules = List<RhythmLightScheduleConfig>.unmodifiable(
+        authoritative,
+      );
+      _lightSchedulesLoaded = true;
+      return true;
+    } catch (error) {
+      debugPrint('ServerSync: light schedule save failed: $error');
+      if (identical(_lightSchedules, optimistic)) {
+        _lightSchedules = previous;
+      }
+      await loadLightSchedules(force: true);
+      return false;
+    } finally {
+      _lightSchedulesSavePending = false;
+      notifyListeners();
+    }
+  }
+
+  Future<bool> setNodeLightScheduleAssignment(
+    String nodeId,
+    String? scheduleId, {
+    bool legacy = false,
+    String? journeyId,
+  }) async {
+    if (!lightScheduleTargetSupportedForNode(nodeId) ||
+        _lightScheduleNodeWritesPending.contains(nodeId) ||
+        (!HueServiceLocator.isDemoMode && !_connection.connected)) {
+      return false;
+    }
+    _lightScheduleNodeWritesPending.add(nodeId);
+    _lightScheduleNodeWriteErrors.remove(nodeId);
+    notifyListeners();
+    try {
+      final authoritative = legacy
+          ? await api.clearLightScheduleAssignment(
+              nodeId: nodeId,
+              correlationId: journeyId,
+            )
+          : await api.setLightScheduleAssignment(
+              nodeId: nodeId,
+              scheduleId: scheduleId,
+              correlationId: journeyId,
+            );
+      if (authoritative == null) {
+        _lightScheduleNodeWriteErrors.add(nodeId);
+        return false;
+      }
+      _updateHelloNodeFromRhythmState(authoritative);
+      await loadLightSchedules(force: true);
+      return true;
+    } catch (error) {
+      debugPrint('ServerSync: light schedule assignment failed: $error');
+      _lightScheduleNodeWriteErrors.add(nodeId);
+      return false;
+    } finally {
+      _lightScheduleNodeWritesPending.remove(nodeId);
+      notifyListeners();
+    }
+  }
+
+  Future<bool> setNodeLightScheduleOverride(
+    String nodeId,
+    String scheduleId,
+    RhythmLightScheduleOverride? scheduleOverride, {
+    String? journeyId,
+  }) async {
+    if (!lightScheduleOverridesSupported ||
+        !lightScheduleTargetSupportedForNode(nodeId) ||
+        _lightScheduleNodeWritesPending.contains(nodeId) ||
+        (!HueServiceLocator.isDemoMode && !_connection.connected)) {
+      return false;
+    }
+    final expected = Map<String, RhythmLightScheduleOverride>.from(
+      nodeById(nodeId)?.profileSettings?.lightScheduleOverrides ?? const {},
+    );
+    _lightScheduleNodeWritesPending.add(nodeId);
+    _lightScheduleNodeWriteErrors.remove(nodeId);
+    notifyListeners();
+    try {
+      final authoritative = await api.setLightScheduleOverride(
+        nodeId: nodeId,
+        scheduleId: scheduleId,
+        scheduleOverride: scheduleOverride,
+        expectedEffectiveOverrides: expected,
+        correlationId: journeyId ?? 'light-schedule-override-${_uuid.v4()}',
+      );
+      if (authoritative == null) {
+        _lightScheduleNodeWriteErrors.add(nodeId);
+        return false;
+      }
+      _updateHelloNodeFromRhythmState(authoritative);
+      await loadLightSchedules(force: true);
+      return true;
+    } catch (error) {
+      debugPrint('ServerSync: light schedule override failed: $error');
+      _lightScheduleNodeWriteErrors.add(nodeId);
+      return false;
+    } finally {
+      _lightScheduleNodeWritesPending.remove(nodeId);
+      notifyListeners();
+    }
   }
 
   /// Update a single mode transition on the server.
@@ -5271,6 +5507,8 @@ class ServerSyncProvider extends ChangeNotifier {
       deviceIds: previous.deviceIds,
       devices: previous.devices,
       profileSettings: state.profileSettings ?? previous.profileSettings,
+      localProfileSettings:
+          state.localProfileSettings ?? previous.localProfileSettings,
       moodEnabled: state.moodEnabled ?? previous.moodEnabled,
       moodActive: state.moodActive ?? previous.moodActive,
       standbyEnabled: standbyEnabled,
@@ -5320,6 +5558,7 @@ class ServerSyncProvider extends ChangeNotifier {
       deviceIds: previous.deviceIds,
       devices: previous.devices,
       profileSettings: previous.profileSettings,
+      localProfileSettings: previous.localProfileSettings,
       moodEnabled: previous.moodEnabled,
       moodActive: previous.moodActive,
       standbyEnabled: previous.standbyEnabled,
@@ -5371,6 +5610,8 @@ class ServerSyncProvider extends ChangeNotifier {
             right.lightCapabilities?.individualProfileOverrides ||
         left.profileSettings?.toJson().toString() !=
             right.profileSettings?.toJson().toString() ||
+        left.localProfileSettings?.toJson().toString() !=
+            right.localProfileSettings?.toJson().toString() ||
         left.moodEnabled != right.moodEnabled ||
         left.moodActive != right.moodActive ||
         left.standbyEnabled != right.standbyEnabled ||
@@ -5455,6 +5696,7 @@ class ServerSyncProvider extends ChangeNotifier {
             .toList(),
         devices: devices,
         profileSettings: state?.profileSettings,
+        localProfileSettings: state?.localProfileSettings,
         moodEnabled: state?.moodEnabled ?? false,
         moodActive: state?.moodActive ?? false,
         standbyEnabled: state?.standbyEnabled ?? false,

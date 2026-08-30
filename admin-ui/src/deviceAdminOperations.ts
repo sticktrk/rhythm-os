@@ -181,7 +181,11 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     description: 'Replace the reusable named light schedule registry.',
     method: 'PUT',
     path: 'api/light-schedules',
-    body: { schedules: [] }
+    body: {
+      schedules: [],
+      expected_schedules: [],
+      correlation_id: '{correlation_id}'
+    }
   },
   {
     id: 'light-schedule-assignment-set',
@@ -190,7 +194,33 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     description: 'Assign a room or standalone light to a named schedule.',
     method: 'PUT',
     path: 'api/light-schedules/assignment',
-    body: { node_id: '{node_id}', schedule_id: '{schedule_id}' }
+    body: {
+      node_id: '{node_id}',
+      schedule_id: '{schedule_id}',
+      correlation_id: '{correlation_id}'
+    }
+  },
+  {
+    id: 'light-schedule-override-set',
+    category: 'Global Settings',
+    label: 'Set light schedule override',
+    description: 'Set or reset one node\'s sparse named-schedule customization.',
+    method: 'PUT',
+    path: 'api/light-schedules/override',
+    danger: true,
+    body: {
+      node_id: '{node_id}',
+      schedule_id: '{schedule_id}',
+      override: {
+        transitions: {
+          '{transition_id}': {
+            trigger: { offset_minutes: 0 }
+          }
+        }
+      },
+      expected_effective_overrides: {},
+      correlation_id: '{correlation_id}'
+    }
   },
   {
     id: 'light-schedule-transition-trigger',

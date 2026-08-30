@@ -200,6 +200,10 @@ void main() {
       'name': 'Outdoor lights',
       'enabled': true,
       'active_mode': 'sleep',
+      'resolved_transitions': {'outdoor_wake': '18:00'},
+      'resolved_transitions_by_node': {
+        'porch': {'outdoor_wake': '17:45'},
+      },
       'transitions': [
         {
           'id': 'outdoor_wake',
@@ -215,7 +219,66 @@ void main() {
     expect(schedule.id, 'outdoor');
     expect(schedule.activeMode, RhythmMode.sleep);
     expect(schedule.transitions.single.trigger.time, '18:00');
+    expect(schedule.resolvedTransitions['outdoor_wake'], '18:00');
+    expect(
+      schedule.resolvedTransitionsByNode['porch']?['outdoor_wake'],
+      '17:45',
+    );
     expect(schedule.toJson()['transitions'], hasLength(1));
+    expect(schedule.toJson(), isNot(contains('resolved_transitions')));
+  });
+
+  test('solar offsets and sparse transition overrides round-trip', () {
+    final schedule = RhythmLightScheduleConfig.fromJson({
+      'id': 'outdoor',
+      'name': 'Outdoor',
+      'transitions': [
+        {
+          'id': 'wake',
+          'from_mode': 'sleep',
+          'to_mode': 'day',
+          'trigger': {
+            'kind': 'solar',
+            'event': 'sunrise',
+            'offset_minutes': -45,
+          },
+          'duration_ms': {'mode': 'auto'},
+        },
+      ],
+    });
+    final override = RhythmLightScheduleOverride.fromJson({
+      'transitions': {
+        'wake': {
+          'trigger': {'event': 'civil_twilight', 'offset_minutes': 15},
+          'trigger_enabled': false,
+        },
+      },
+    });
+
+    expect(schedule.transitions.single.trigger.offsetMinutes, -45);
+    expect(
+        schedule.toJson()['transitions'][0]['trigger']['offset_minutes'], -45);
+    expect(override.transitions['wake']?.trigger.event, 'civil_twilight');
+    expect(override.transitions['wake']?.trigger.offsetMinutes, 15);
+    expect(override.transitions['wake']?.triggerEnabled, isFalse);
+    expect(override.toJson()['transitions']['wake']['trigger'], {
+      'event': 'civil_twilight',
+      'offset_minutes': 15,
+    });
+  });
+
+  test('rejects fractional, out-of-range, and non-solar offsets', () {
+    for (final trigger in [
+      {'kind': 'solar', 'event': 'sunrise', 'offset_minutes': 1.5},
+      {'kind': 'solar', 'event': 'sunrise', 'offset_minutes': 721},
+      {'kind': 'manual', 'offset_minutes': 1},
+      {'kind': 'scheduled', 'time': '08:00', 'offset_minutes': 1},
+    ]) {
+      expect(
+        () => RhythmTransitionTrigger.fromJson(trigger),
+        throwsFormatException,
+      );
+    }
   });
 
   group('RhythmModeResource', () {

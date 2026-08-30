@@ -484,6 +484,35 @@ void main() {
         expect(legacy.lightSchedule, isNull);
       });
 
+      test('round-trips sparse named schedule overrides', () {
+        final settings = RhythmNodeProfileSettings.fromJson({
+          'light_schedule_overrides': {
+            'outdoor': {
+              'transitions': {
+                'wake': {
+                  'trigger': {'offset_minutes': -20},
+                },
+              },
+            },
+          },
+        });
+
+        expect(
+          settings.lightScheduleOverrides['outdoor']?.transitions['wake']
+              ?.trigger.offsetMinutes,
+          -20,
+        );
+        expect(settings.toJson()['light_schedule_overrides'], {
+          'outdoor': {
+            'transitions': {
+              'wake': {
+                'trigger': {'offset_minutes': -20},
+              },
+            },
+          },
+        });
+      });
+
       test('parses legacy active_light_scene_id as mood_scene_id', () {
         final room = RhythmRoom.fromJson({
           'profile_settings': {
@@ -497,7 +526,7 @@ void main() {
         });
       });
 
-      test('prefers profile_settings over legacy room_profile', () {
+      test('keeps effective and node-local profile settings separate', () {
         final room = RhythmRoom.fromJson({
           'profile_settings': {'motion_timeout_secs': 111},
           'room_profile': {'motion_timeout_secs': 222},
@@ -505,6 +534,24 @@ void main() {
 
         expect(room.profileSettings?.motionTimeoutSecs, 111);
         expect(room.roomProfile?.motionTimeoutSecs, 111);
+        expect(room.localProfileSettings?.motionTimeoutSecs, 222);
+      });
+
+      test('preserves an explicitly empty local profile for inheritance', () {
+        final room = RhythmRoom.fromJson({
+          'parent_id': 'parent',
+          'profile_settings': {
+            'light_schedule': {
+              'kind': 'named',
+              'schedule_id': 'outdoor',
+              'active_mode': 'day',
+            },
+          },
+          'room_profile': <String, dynamic>{},
+        });
+
+        expect(room.profileSettings?.lightScheduleId, 'outdoor');
+        expect(room.localProfileSettings?.lightSchedule, isNull);
       });
 
       test('parses deviceIds as List<String>', () {

@@ -365,6 +365,67 @@ void main() {
     }
   });
 
+  test('named schedule analytics keep attempts and outcomes bounded', () async {
+    await analytics.logLightSchedulesOpened(source: 'presets');
+    await analytics.logLightScheduleMutationAttempted(
+      journeyId: 'schedule-journey-1',
+      mutation: 'update',
+      inputMethod: 'editor',
+    );
+    await analytics.logLightScheduleMutationCompleted(
+      journeyId: 'schedule-journey-1',
+      mutation: 'update',
+      inputMethod: 'editor',
+      triggerKind: 'solar',
+      solarEvent: 'sunrise',
+      offsetDirection: 'before',
+      outcome: 'succeeded',
+    );
+    await analytics.logLightScheduleAssignmentAttempted(
+      journeyId: 'assignment-journey-1',
+      assignmentKind: 'named',
+      overrideScope: 'transition',
+    );
+    await analytics.logLightScheduleAssignmentCompleted(
+      journeyId: 'assignment-journey-1',
+      assignmentKind: 'named',
+      overrideScope: 'transition',
+      outcome: 'failed',
+      failureStage: 'appliance_ack',
+    );
+
+    expect(backend.events.map((event) => event.name), [
+      'light_schedules_opened',
+      'light_schedule_mutation_attempted',
+      'light_schedule_mutation_completed',
+      'light_schedule_assignment_attempted',
+      'light_schedule_assignment_completed',
+    ]);
+    expect(backend.events[2].properties,
+        containsPair('offset_direction', 'before'));
+    expect(
+      backend.events[3].properties['journey_id'],
+      backend.events[4].properties['journey_id'],
+    );
+    final serialized = backend.events
+        .map((event) => '${event.name}:${event.properties}')
+        .join('\n');
+    for (final forbidden in [
+      'schedule_id',
+      'schedule_name',
+      'room_id',
+      'device_id',
+      'offset_minutes',
+      'wake_time',
+      'sleep_time',
+      'location',
+      'raw',
+      'error',
+    ]) {
+      expect(serialized, isNot(contains(forbidden)));
+    }
+  });
+
   test('support report analytics correlate privacy-safe outcomes', () async {
     await analytics.logSupportReportAttempted(
       journeyId: 'support-report-123',

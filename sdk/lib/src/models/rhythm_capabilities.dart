@@ -43,6 +43,9 @@ abstract final class RhythmFeature {
   static const String motionActivationToggle = 'motion_activation_toggle';
   static const String roomScheduleV1 = 'room_schedule_v1';
   static const String lightSchedulesV1 = 'light_schedules_v1';
+  static const String lightScheduleOverridesV1 = 'light_schedule_overrides_v1';
+  static const String lightScheduleSolarOffsetsV1 =
+      'light_schedule_solar_offsets_v1';
   static const String roomLightProfileOverrides =
       'room_light_profile_overrides';
   static const String roomDayIdleProfileOverrides =

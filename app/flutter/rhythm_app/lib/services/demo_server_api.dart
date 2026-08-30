@@ -5,6 +5,7 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:dio/dio.dart';
 import 'package:rhythm_core/rhythm_core.dart';
@@ -49,6 +50,36 @@ class DemoServerApi extends RhythmServerApi {
   final Map<String, Map<String, dynamic>> _triageEntries = {};
   final Map<String, RhythmInputBinding> _inputBindings = {};
   List<RhythmModeTransitionConfig> _modeTransitions = const [];
+  List<RhythmLightScheduleConfig> _lightSchedules = const [
+    RhythmLightScheduleConfig(
+      id: 'outdoor',
+      name: 'Outdoor',
+      resolvedTransitions: {
+        'day_start': '06:45',
+        'sleep_start': '19:30',
+      },
+      transitions: [
+        RhythmModeTransitionConfig(
+          id: 'day_start',
+          label: 'Day Start',
+          fromMode: RhythmMode.sleep,
+          toMode: RhythmMode.day,
+          trigger: RhythmTransitionTrigger.solar('sunrise'),
+          duration: TransitionDuration.auto(),
+          preserveHardOff: true,
+        ),
+        RhythmModeTransitionConfig(
+          id: 'sleep_start',
+          label: 'Sleep Start',
+          fromMode: RhythmMode.day,
+          toMode: RhythmMode.sleep,
+          trigger: RhythmTransitionTrigger.solar('sunset'),
+          duration: TransitionDuration.auto(),
+          preserveHardOff: true,
+        ),
+      ],
+    ),
+  ];
 
   bool _seeded = false;
   int _nextRoomOrdinal = 1;
@@ -818,6 +849,123 @@ class DemoServerApi extends RhythmServerApi {
     _modeTransitions = List<RhythmModeTransitionConfig>.from(transitions);
     _changes.add(null);
     return true;
+  }
+
+  @override
+  Future<List<RhythmLightScheduleConfig>> getLightSchedules() async {
+    ensureSeeded();
+    return List<RhythmLightScheduleConfig>.unmodifiable(_lightSchedules);
+  }
+
+  @override
+  Future<List<RhythmLightScheduleConfig>> setLightSchedules(
+    List<RhythmLightScheduleConfig> schedules, {
+    required List<RhythmLightScheduleConfig> expectedSchedules,
+    String? correlationId,
+  }) async {
+    ensureSeeded();
+    final live = jsonEncode(
+      _lightSchedules.map((schedule) => schedule.toJson()).toList(),
+    );
+    final expected = jsonEncode(
+      expectedSchedules.map((schedule) => schedule.toJson()).toList(),
+    );
+    if (live != expected) {
+      throw StateError('light schedule registry precondition failed');
+    }
+    _lightSchedules = List<RhythmLightScheduleConfig>.from(schedules);
+    _changes.add(null);
+    return getLightSchedules();
+  }
+
+  @override
+  Future<RhythmRoomState?> setLightScheduleAssignment({
+    required String nodeId,
+    required String? scheduleId,
+    String? correlationId,
+  }) async {
+    ensureSeeded();
+    final node = _nodeStates[nodeId];
+    if (node == null) return null;
+    final profile = Map<String, dynamic>.from(
+      (node['profile_settings'] as Map?) ?? const {},
+    );
+    profile['light_schedule'] = scheduleId == null
+        ? {'kind': 'unscheduled', 'active_mode': 'day'}
+        : {
+            'kind': 'named',
+            'schedule_id': scheduleId,
+            'active_mode': 'day',
+          };
+    profile.remove('room_schedule');
+    node['profile_settings'] = profile;
+    _changes.add(null);
+    return RhythmRoomState.fromJson(Map<String, dynamic>.from(node));
+  }
+
+  @override
+  Future<RhythmRoomState?> clearLightScheduleAssignment({
+    required String nodeId,
+    String? correlationId,
+  }) async {
+    ensureSeeded();
+    final node = _nodeStates[nodeId];
+    if (node == null) return null;
+    final profile = Map<String, dynamic>.from(
+      (node['profile_settings'] as Map?) ?? const {},
+    )..remove('light_schedule');
+    node['profile_settings'] = profile;
+    _changes.add(null);
+    return RhythmRoomState.fromJson(Map<String, dynamic>.from(node));
+  }
+
+  @override
+  Future<RhythmRoomState?> setLightScheduleOverride({
+    required String nodeId,
+    required String scheduleId,
+    required RhythmLightScheduleOverride? scheduleOverride,
+    required Map<String, RhythmLightScheduleOverride>
+        expectedEffectiveOverrides,
+    required String correlationId,
+  }) async {
+    ensureSeeded();
+    final node = _nodeStates[nodeId];
+    if (node == null) return null;
+    final profile = Map<String, dynamic>.from(
+      (node['profile_settings'] as Map?) ?? const {},
+    );
+    String encodeOverrides(
+      Map<String, RhythmLightScheduleOverride> value,
+    ) {
+      final keys = value.keys.toList()..sort();
+      return jsonEncode({
+        for (final key in keys) key: value[key]!.toJson(),
+      });
+    }
+
+    final liveEffective = RhythmNodeProfileSettings.fromJson(
+      profile,
+    ).lightScheduleOverrides;
+    if (encodeOverrides(liveEffective) !=
+        encodeOverrides(expectedEffectiveOverrides)) {
+      throw StateError('light schedule override precondition failed');
+    }
+    final overrides = Map<String, dynamic>.from(
+      (profile['light_schedule_overrides'] as Map?) ?? const {},
+    );
+    if (scheduleOverride == null || scheduleOverride.isEmpty) {
+      overrides.remove(scheduleId);
+    } else {
+      overrides[scheduleId] = scheduleOverride.toJson();
+    }
+    if (overrides.isEmpty) {
+      profile.remove('light_schedule_overrides');
+    } else {
+      profile['light_schedule_overrides'] = overrides;
+    }
+    node['profile_settings'] = profile;
+    _changes.add(null);
+    return RhythmRoomState.fromJson(Map<String, dynamic>.from(node));
   }
 
   @override

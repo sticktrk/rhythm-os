@@ -15,6 +15,7 @@ import 'automation_section_header.dart';
 import 'celestial_segmented_control.dart';
 import 'mode_summary_chip.dart';
 import 'low_glow_switch.dart';
+import 'light_schedule_assignment_card.dart';
 import 'rhythm_clock/rhythm_clock_visuals.dart';
 import 'rhythm_clock/rhythm_schedule_clock.dart';
 import 'room_schedule_behavior_control.dart';
@@ -76,6 +77,9 @@ class _RoomScheduleTabState extends State<RoomScheduleTab> {
     super.initState();
     unawaited(
         AnalyticsService().logRoomScheduleOpened(source: 'room_settings'));
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(context.read<ServerSyncProvider>().loadLightSchedules());
+    });
   }
 
   Future<void> _save(
@@ -178,7 +182,8 @@ class _RoomScheduleTabState extends State<RoomScheduleTab> {
     });
     if (ok) {
       final node = context.read<ServerSyncProvider>().nodeById(widget.roomId);
-      final target = node?.kind == RhythmNodeKind.lightDevice ? 'light' : 'room';
+      final target =
+          node?.kind == RhythmNodeKind.lightDevice ? 'light' : 'room';
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
             content: Text(
@@ -265,12 +270,20 @@ class _RoomScheduleTabState extends State<RoomScheduleTab> {
       final parentId = node?.parentId;
       final inheritsFromRoom =
           isLightNode && parentId != null && parentId.isNotEmpty;
-      final parentName = inheritsFromRoom ? sync.nodeById(parentId)?.name : null;
+      final parentName =
+          inheritsFromRoom ? sync.nodeById(parentId)?.name : null;
       return ListView(
         key: const ValueKey('lighting'),
         padding: const EdgeInsets.symmetric(horizontal: 20),
         children: [
           _buildLightingSettings(sync),
+          if (sync.lightSchedulesSupported) ...[
+            const SizedBox(height: 16),
+            LightScheduleAssignmentCard(
+              nodeId: widget.roomId,
+              targetLabel: target,
+            ),
+          ],
           const SizedBox(height: 16),
           _GroupCard(
             padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
@@ -319,6 +332,13 @@ class _RoomScheduleTabState extends State<RoomScheduleTab> {
       padding: const EdgeInsets.symmetric(horizontal: 20),
       children: [
         _buildLightingSettings(sync),
+        if (sync.lightSchedulesSupported) ...[
+          const SizedBox(height: 16),
+          LightScheduleAssignmentCard(
+            nodeId: widget.roomId,
+            targetLabel: target,
+          ),
+        ],
         const SizedBox(height: 4),
         AutomationSectionHeader(
           step: 1,
@@ -370,8 +390,7 @@ class _RoomScheduleTabState extends State<RoomScheduleTab> {
                           wakeTime: schedule.wakeTime,
                           sleepTime: schedule.sleepTime,
                           enabled: !saving,
-                          solarClockDataOverride:
-                              widget.solarClockDataOverride,
+                          solarClockDataOverride: widget.solarClockDataOverride,
                           onChanged: (wake, sleep, inputMethod) => _save(
                             schedule.copyWith(wakeTime: wake, sleepTime: sleep),
                             changeKind: 'times',

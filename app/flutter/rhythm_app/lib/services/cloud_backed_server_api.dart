@@ -652,6 +652,61 @@ class CloudBackedServerApi {
     return _delegate.triggerTransition(id);
   }
 
+  Future<List<RhythmLightScheduleConfig>> getLightSchedules() {
+    return _delegate.getLightSchedules();
+  }
+
+  Future<List<RhythmLightScheduleConfig>> setLightSchedules(
+    List<RhythmLightScheduleConfig> schedules, {
+    required List<RhythmLightScheduleConfig> expectedSchedules,
+    String? correlationId,
+  }) {
+    return _delegate.setLightSchedules(
+      schedules,
+      expectedSchedules: expectedSchedules,
+      correlationId: correlationId,
+    );
+  }
+
+  Future<RhythmRoomState?> setLightScheduleAssignment({
+    required String nodeId,
+    required String? scheduleId,
+    String? correlationId,
+  }) {
+    return _delegate.setLightScheduleAssignment(
+      nodeId: nodeId,
+      scheduleId: scheduleId,
+      correlationId: correlationId,
+    );
+  }
+
+  Future<RhythmRoomState?> clearLightScheduleAssignment({
+    required String nodeId,
+    String? correlationId,
+  }) {
+    return _delegate.clearLightScheduleAssignment(
+      nodeId: nodeId,
+      correlationId: correlationId,
+    );
+  }
+
+  Future<RhythmRoomState?> setLightScheduleOverride({
+    required String nodeId,
+    required String scheduleId,
+    required RhythmLightScheduleOverride? scheduleOverride,
+    required Map<String, RhythmLightScheduleOverride>
+        expectedEffectiveOverrides,
+    required String correlationId,
+  }) {
+    return _delegate.setLightScheduleOverride(
+      nodeId: nodeId,
+      scheduleId: scheduleId,
+      scheduleOverride: scheduleOverride,
+      expectedEffectiveOverrides: expectedEffectiveOverrides,
+      correlationId: correlationId,
+    );
+  }
+
   Future<List<RhythmInputBinding>> getInputBindings() {
     return _delegate.getInputBindings();
   }

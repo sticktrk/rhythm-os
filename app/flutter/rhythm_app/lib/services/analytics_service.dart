@@ -843,6 +843,72 @@ class AnalyticsService {
     await logEvent('room_schedule_opened', {'source': source});
   }
 
+  Future<void> logLightSchedulesOpened({required String source}) async {
+    await logEvent('light_schedules_opened', {'source': source});
+  }
+
+  Future<void> logLightScheduleMutationAttempted({
+    required String journeyId,
+    required String mutation,
+    required String inputMethod,
+  }) async {
+    await logEvent('light_schedule_mutation_attempted', {
+      'journey_id': journeyId,
+      'mutation': mutation,
+      'input_method': inputMethod,
+    });
+  }
+
+  Future<void> logLightScheduleMutationCompleted({
+    required String journeyId,
+    required String mutation,
+    required String inputMethod,
+    required String triggerKind,
+    required String solarEvent,
+    required String offsetDirection,
+    required String outcome,
+    String? failureStage,
+  }) async {
+    await logEvent('light_schedule_mutation_completed', {
+      'journey_id': journeyId,
+      'mutation': mutation,
+      'input_method': inputMethod,
+      'trigger_kind': triggerKind,
+      'solar_event': solarEvent,
+      'offset_direction': offsetDirection,
+      'outcome': outcome,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
+  Future<void> logLightScheduleAssignmentCompleted({
+    required String journeyId,
+    required String assignmentKind,
+    required String overrideScope,
+    required String outcome,
+    String? failureStage,
+  }) async {
+    await logEvent('light_schedule_assignment_completed', {
+      'journey_id': journeyId,
+      'assignment_kind': assignmentKind,
+      'override_scope': overrideScope,
+      'outcome': outcome,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
+  Future<void> logLightScheduleAssignmentAttempted({
+    required String journeyId,
+    required String assignmentKind,
+    required String overrideScope,
+  }) async {
+    await logEvent('light_schedule_assignment_attempted', {
+      'journey_id': journeyId,
+      'assignment_kind': assignmentKind,
+      'override_scope': overrideScope,
+    });
+  }
+
   Future<void> logRoomScheduleSaveAttempted({
     required String journeyId,
     required int attemptNumber,

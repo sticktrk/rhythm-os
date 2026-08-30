@@ -3,7 +3,8 @@
 //! Thin wrapper around chrono-tz for IANA timezone support with DST handling.
 
 use chrono::{
-    DateTime, Datelike, FixedOffset, NaiveDate, NaiveDateTime, Offset, TimeZone, Timelike, Utc,
+    DateTime, Datelike, FixedOffset, LocalResult, NaiveDate, NaiveDateTime, Offset, TimeZone,
+    Timelike, Utc,
 };
 use chrono_tz::Tz;
 
@@ -120,6 +121,19 @@ impl Timezone {
             .from_local_datetime(&local)
             .single()
             .map(|dt| dt.with_timezone(&Utc).naive_utc())
+    }
+
+    /// Convert a local wall-clock policy into UTC, choosing its first real
+    /// occurrence when the clock repeats during the fall DST transition.
+    /// Nonexistent spring-forward wall times remain unavailable.
+    pub fn earliest_utc_datetime_from_local(&self, local: NaiveDateTime) -> Option<NaiveDateTime> {
+        match self.tz().from_local_datetime(&local) {
+            LocalResult::Single(dt) => Some(dt.with_timezone(&Utc).naive_utc()),
+            LocalResult::Ambiguous(first, second) => {
+                Some(first.min(second).with_timezone(&Utc).naive_utc())
+            }
+            LocalResult::None => None,
+        }
     }
 
     /// Get local date components for a UTC naive datetime.
@@ -277,6 +291,27 @@ mod tests {
             local.format("%Y-%m-%dT%H:%M:%S%:z").to_string(),
             "2026-04-23T15:32:47-04:00"
         );
+    }
+
+    #[test]
+    fn earliest_local_conversion_pins_repeated_hour_and_rejects_missing_hour() {
+        let tz = Timezone::new("America/New_York");
+        let repeated = NaiveDate::from_ymd_opt(2026, 11, 1)
+            .unwrap()
+            .and_hms_opt(1, 30, 0)
+            .unwrap();
+        let missing = NaiveDate::from_ymd_opt(2026, 3, 8)
+            .unwrap()
+            .and_hms_opt(2, 30, 0)
+            .unwrap();
+
+        assert_eq!(
+            tz.earliest_utc_datetime_from_local(repeated),
+            NaiveDate::from_ymd_opt(2026, 11, 1)
+                .unwrap()
+                .and_hms_opt(5, 30, 0)
+        );
+        assert_eq!(tz.earliest_utc_datetime_from_local(missing), None);
     }
 
     /// Verify that utc_offset() changes across the March DST boundary.

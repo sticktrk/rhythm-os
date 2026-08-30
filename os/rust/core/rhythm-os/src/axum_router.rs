@@ -174,6 +174,10 @@ fn shared_routes() -> Router<SharedState> {
             put(put_light_schedule_assignment),
         )
         .route(
+            "/api/light-schedules/override",
+            put(put_light_schedule_override),
+        )
+        .route(
             "/api/light-schedules/:schedule_id/transitions/:transition_id/trigger",
             post(post_light_schedule_transition_trigger),
         )
@@ -707,6 +711,13 @@ async fn put_light_schedule_assignment(
     Json(body): Json<Value>,
 ) -> ApiResponse {
     run_blocking(move || handlers::handle_put_light_schedule_assignment(&state, &body)).await
+}
+
+async fn put_light_schedule_override(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_put_light_schedule_override(&state, &body)).await
 }
 
 async fn post_light_schedule_transition_trigger(

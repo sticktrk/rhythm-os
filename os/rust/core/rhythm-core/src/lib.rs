@@ -83,15 +83,16 @@ pub use primitives::{crossed_solar_midnight, PeriodicTickResult, RhythmEngine};
 pub use room::{
     default_mode_configs, default_mode_transition_configs, normalize_mode_transition_configs,
     EffectiveRoomState, LightNodeKind, LightProfileNodeOverride, LightScheduleAssignment,
-    LightScheduleConfig, ModeChangeCause, ModeConfig, ModeTransitionConfig, ModeTransitionTime,
-    ModeTransitionTrigger, RhythmMode, Room, RoomManager, RoomModeDefault, RoomModeState,
-    RoomProfileSettings, RoomScheduleConfig, RoomScheduleSource,
-    DEFAULT_MODE_TRANSITION_DURATION_MS,
+    LightScheduleConfig, LightScheduleOverride, ModeChangeCause, ModeConfig, ModeTransitionConfig,
+    ModeTransitionOverride, ModeTransitionTime, ModeTransitionTrigger,
+    ModeTransitionTriggerOverride, ModeTransitionTriggerType, RhythmMode, Room, RoomManager,
+    RoomModeDefault, RoomModeState, RoomProfileSettings, RoomScheduleConfig, RoomScheduleSource,
+    SolarEvent, DEFAULT_MODE_TRANSITION_DURATION_MS, MAX_SOLAR_OFFSET_MINUTES,
 };
 pub use solar::{
-    calculate_solar_noon, calculate_solar_noon_from_offset, calculate_sun_times, calculate_sunrise,
-    calculate_sunset, calculate_twilight_times, solar_time_from_location, SolarTime, SunTimes,
-    TwilightPhase, TwilightTimes,
+    calculate_solar_noon, calculate_solar_noon_from_offset, calculate_sun_event_times,
+    calculate_sun_times, calculate_sunrise, calculate_sunset, calculate_twilight_times,
+    solar_time_from_location, SolarTime, SunEventTimes, SunTimes, TwilightPhase, TwilightTimes,
 };
 pub use steps::{CurveBoundaries, StepAction, StepResult};
 pub use timezone::{default_timezone, lookup_timezone, Timezone, DEFAULT_TIMEZONE};

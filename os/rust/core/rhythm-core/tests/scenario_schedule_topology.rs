@@ -1,6 +1,10 @@
+use std::collections::BTreeMap;
+
 use rhythm_core::{
-    LightNodeKind, LightScheduleAssignment, ModeTransitionTime, RhythmMode, RoomManager,
-    RoomProfileSettings, RoomScheduleConfig, RoomScheduleSource,
+    LightNodeKind, LightScheduleAssignment, LightScheduleConfig, LightScheduleOverride,
+    ModeTransitionConfig, ModeTransitionOverride, ModeTransitionTime, ModeTransitionTrigger,
+    ModeTransitionTriggerOverride, RhythmMode, RoomManager, RoomProfileSettings,
+    RoomScheduleConfig, RoomScheduleSource, SolarEvent,
 };
 
 fn custom_room_schedule(wake: &str, sleep: &str) -> RoomScheduleConfig {
@@ -145,4 +149,78 @@ fn scenario_explicit_unscheduled_room_blocks_parent_custom_schedule() {
         light.profile_settings.schedule_mode(RhythmMode::Day, 12.0),
         RhythmMode::Sleep
     );
+}
+
+#[test]
+fn scenario_named_schedule_override_fields_merge_root_to_leaf() {
+    let mut topology = RoomManager::new();
+    topology.add_node("floor", "Main Floor", LightNodeKind::Room, None);
+    topology.add_node("porch", "Porch", LightNodeKind::Room, Some("floor".into()));
+    topology.add_node(
+        "sconce",
+        "Sconce",
+        LightNodeKind::LightDevice,
+        Some("porch".into()),
+    );
+    topology.get_mut("floor").unwrap().profile_settings = RoomProfileSettings {
+        light_schedule: Some(LightScheduleAssignment::Named {
+            schedule_id: "outdoor".into(),
+            active_mode: RhythmMode::Sleep,
+        }),
+        light_schedule_overrides: BTreeMap::from([(
+            "outdoor".into(),
+            LightScheduleOverride {
+                transitions: BTreeMap::from([(
+                    "wake".into(),
+                    ModeTransitionOverride {
+                        trigger: ModeTransitionTriggerOverride {
+                            offset_minutes: Some(-30),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                )]),
+            },
+        )]),
+        ..Default::default()
+    };
+    topology.get_mut("porch").unwrap().profile_settings = RoomProfileSettings {
+        light_schedule_overrides: BTreeMap::from([(
+            "outdoor".into(),
+            LightScheduleOverride {
+                transitions: BTreeMap::from([(
+                    "wake".into(),
+                    ModeTransitionOverride {
+                        trigger: ModeTransitionTriggerOverride {
+                            event: Some(SolarEvent::CivilTwilight),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                )]),
+            },
+        )]),
+        ..Default::default()
+    };
+
+    let effective = topology.effective_state("sconce").unwrap();
+    let schedule_override = &effective.profile_settings.light_schedule_overrides["outdoor"];
+    let schedule = LightScheduleConfig {
+        id: "outdoor".into(),
+        name: "Outdoor".into(),
+        enabled: true,
+        active_mode: RhythmMode::Sleep,
+        transitions: vec![
+            ModeTransitionConfig::new(RhythmMode::Sleep, RhythmMode::Day, 0)
+                .with_id("wake")
+                .with_trigger(ModeTransitionTrigger::Sunrise),
+        ],
+    };
+    let resolved = schedule_override.apply_to(&schedule).unwrap();
+
+    assert_eq!(
+        resolved.transitions[0].trigger.solar_event(),
+        Some(SolarEvent::CivilTwilight)
+    );
+    assert_eq!(resolved.transitions[0].trigger.offset_minutes(), -30);
 }

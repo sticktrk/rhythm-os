@@ -20,13 +20,16 @@ import 'package:rhythm_app/services/account_cloud_sync_service.dart';
 import 'package:rhythm_app/services/demo_server_api.dart';
 import 'package:rhythm_app/services/hue/hue_service_locator.dart';
 import 'package:rhythm_app/services/remote_access_service.dart';
+import 'package:rhythm_app/screens/settings/light_schedules_screen.dart';
 import 'package:rhythm_app/screens/settings/light_screen.dart';
 import 'package:rhythm_app/screens/hubs/device_pairing_flow.dart';
 import 'package:rhythm_app/screens/hubs/room_device_add_flow.dart';
 import 'package:rhythm_app/widgets/device_detail_sheet.dart';
 import 'package:rhythm_app/widgets/hub_picker_screen.dart';
+import 'package:rhythm_app/widgets/light_schedule_assignment_card.dart';
 import 'package:rhythm_app/widgets/room_settings_sheet.dart';
 import 'package:rhythm_app/widgets/room_schedule_tab.dart';
+import 'package:rhythm_app/widgets/solar_orbit.dart' show CelestialColors;
 import 'package:rhythm_app/widgets/solar_clock/solar_clock_exports.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
@@ -198,6 +201,33 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   RhythmInputBinding? lastSetInputBinding;
   String? lastDeletedInputBindingId;
   List<RhythmModeTransitionConfig> transitions = const [];
+  List<RhythmLightScheduleConfig> lightSchedules = const [];
+  final List<List<RhythmLightScheduleConfig>> lightScheduleExpectedRegistryCalls =
+      [];
+  final List<String?> lightScheduleRegistryCorrelationIds = [];
+  List<RhythmLightScheduleConfig>? lightSchedulesAfterFailedWrite;
+  final List<
+      ({
+        String nodeId,
+        String? scheduleId,
+        bool legacy,
+        String? correlationId,
+      })>
+      lightScheduleAssignmentCalls = [];
+  final List<String> lightScheduleOperationCalls = [];
+  final List<
+      ({
+        String nodeId,
+        String scheduleId,
+        RhythmLightScheduleOverride? scheduleOverride,
+        Map<String, RhythmLightScheduleOverride> expected,
+        String correlationId,
+      })> lightScheduleOverrideCalls = [];
+  bool lightScheduleWritesSucceed = true;
+  bool lightScheduleAssignmentWritesSucceed = true;
+  bool lightScheduleOverrideWritesSucceed = true;
+  Map<String, dynamic>? lightScheduleOverrideBaseProfileSettings;
+  Completer<RhythmRoomState?>? lightScheduleOverrideCompleter;
   List<RhythmModeTransitionConfig>? lastSetTransitions;
   int setTransitionsCalls = 0;
   bool setTransitionsResult = true;
@@ -464,6 +494,129 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   @override
   Future<List<RhythmModeTransitionConfig>> getTransitions() async =>
       List<RhythmModeTransitionConfig>.unmodifiable(transitions);
+
+  @override
+  Future<List<RhythmLightScheduleConfig>> getLightSchedules() async =>
+      List<RhythmLightScheduleConfig>.unmodifiable(lightSchedules);
+
+  @override
+  Future<List<RhythmLightScheduleConfig>> setLightSchedules(
+    List<RhythmLightScheduleConfig> schedules, {
+    required List<RhythmLightScheduleConfig> expectedSchedules,
+    String? correlationId,
+  }) async {
+    lightScheduleExpectedRegistryCalls.add(
+      List<RhythmLightScheduleConfig>.from(expectedSchedules),
+    );
+    lightScheduleRegistryCorrelationIds.add(correlationId);
+    final replacement = lightSchedulesAfterFailedWrite;
+    if (replacement != null) {
+      lightSchedules = List<RhythmLightScheduleConfig>.from(replacement);
+      lightSchedulesAfterFailedWrite = null;
+      throw StateError('light schedule registry precondition failed');
+    }
+    if (!lightScheduleWritesSucceed) throw StateError('schedule write failed');
+    lightSchedules = List<RhythmLightScheduleConfig>.from(schedules);
+    return List<RhythmLightScheduleConfig>.unmodifiable(lightSchedules);
+  }
+
+  @override
+  Future<RhythmRoomState?> setLightScheduleAssignment({
+    required String nodeId,
+    required String? scheduleId,
+    String? correlationId,
+  }) async {
+    lightScheduleOperationCalls.add('assignment');
+    lightScheduleAssignmentCalls.add((
+      nodeId: nodeId,
+      scheduleId: scheduleId,
+      legacy: false,
+      correlationId: correlationId,
+    ));
+    if (!lightScheduleWritesSucceed || !lightScheduleAssignmentWritesSucceed) {
+      return null;
+    }
+    return RhythmRoomState.fromJson({
+      'node_id': nodeId,
+      'state': 'active',
+      'profile_settings': {
+        'light_schedule': scheduleId == null
+            ? {'kind': 'unscheduled', 'active_mode': 'day'}
+            : {
+                'kind': 'named',
+                'schedule_id': scheduleId,
+                'active_mode': 'day',
+              },
+      },
+    });
+  }
+
+  @override
+  Future<RhythmRoomState?> clearLightScheduleAssignment({
+    required String nodeId,
+    String? correlationId,
+  }) async {
+    lightScheduleOperationCalls.add('assignment');
+    lightScheduleAssignmentCalls.add((
+      nodeId: nodeId,
+      scheduleId: null,
+      legacy: true,
+      correlationId: correlationId,
+    ));
+    if (!lightScheduleWritesSucceed || !lightScheduleAssignmentWritesSucceed) {
+      return null;
+    }
+    return RhythmRoomState.fromJson({
+      'node_id': nodeId,
+      'state': 'active',
+      'profile_settings': const <String, dynamic>{},
+    });
+  }
+
+  @override
+  Future<RhythmRoomState?> setLightScheduleOverride({
+    required String nodeId,
+    required String scheduleId,
+    required RhythmLightScheduleOverride? scheduleOverride,
+    required Map<String, RhythmLightScheduleOverride>
+        expectedEffectiveOverrides,
+    required String correlationId,
+  }) async {
+    lightScheduleOperationCalls.add('override');
+    lightScheduleOverrideCalls.add((
+      nodeId: nodeId,
+      scheduleId: scheduleId,
+      scheduleOverride: scheduleOverride,
+      expected: expectedEffectiveOverrides,
+      correlationId: correlationId,
+    ));
+    final pending = lightScheduleOverrideCompleter;
+    if (pending != null) return pending.future;
+    if (!lightScheduleWritesSucceed || !lightScheduleOverrideWritesSucceed) {
+      return null;
+    }
+    final profileSettings = Map<String, dynamic>.from(
+      lightScheduleOverrideBaseProfileSettings ??
+          {
+            'light_schedule': {
+              'kind': 'named',
+              'schedule_id': scheduleId,
+              'active_mode': 'day',
+            },
+          },
+    );
+    if (scheduleOverride != null) {
+      profileSettings['light_schedule_overrides'] = {
+        scheduleId: scheduleOverride.toJson(),
+      };
+    }
+    return RhythmRoomState.fromJson({
+      'node_id': nodeId,
+      'state': 'active',
+      'profile_settings': profileSettings,
+      'room_profile': profileSettings,
+    });
+  }
 
   @override
   Future<RhythmLightBreaker?> getLightBreaker() async =>
@@ -1079,6 +1232,7 @@ Widget _buildTestApp({
   required ServerSyncProvider provider,
   required Widget child,
   String? fontFamily,
+  GlobalKey? repaintBoundaryKey,
 }) {
   return MultiProvider(
     providers: [
@@ -1092,9 +1246,13 @@ Widget _buildTestApp({
         create: (_) => _TestHomeProvider(const []),
       ),
     ],
-    child: MaterialApp(
-      theme: ThemeData(fontFamily: fontFamily),
-      home: Scaffold(body: child),
+    child: RepaintBoundary(
+      key: repaintBoundaryKey,
+      child: MaterialApp(
+        debugShowCheckedModeBanner: false,
+        theme: ThemeData(fontFamily: fontFamily),
+        home: Scaffold(body: child),
+      ),
     ),
   );
 }
@@ -1769,6 +1927,1226 @@ void main() {
           sleepTime: '22:30',
         );
 
+    RhythmHello namedScheduleHello({
+      bool supported = true,
+      bool offsetsSupported = true,
+      String kind = 'room',
+      String name = 'Kitchen',
+      Map<String, dynamic>? profileSettings,
+      Map<String, dynamic>? roomProfile,
+      String? parentId,
+      Map<String, dynamic>? location,
+      List<Map<String, dynamic>> additionalNodes = const [],
+    }) {
+      return RhythmHello.fromJson({
+        if (location != null) 'location': location,
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': [
+            RhythmFeature.roomScheduleV1,
+            if (supported) RhythmFeature.lightSchedulesV1,
+            if (supported) RhythmFeature.lightScheduleOverridesV1,
+            if (supported && offsetsSupported)
+              RhythmFeature.lightScheduleSolarOffsetsV1,
+          ],
+          'hubs': const <dynamic>[],
+        },
+        'nodes': [
+          ...additionalNodes,
+          {
+            'id': 'room-1',
+            'name': name,
+            'kind': kind,
+            if (parentId != null) 'parent_id': parentId,
+            'state': 'active',
+            'rhythm_enabled': true,
+            'profile_settings': profileSettings ?? const <String, dynamic>{},
+            if (roomProfile != null) 'room_profile': roomProfile,
+          },
+        ],
+      });
+    }
+
+    const outdoorSchedule = RhythmLightScheduleConfig(
+      id: 'outdoor',
+      name: 'Outdoor',
+      activeMode: RhythmMode.sleep,
+      resolvedTransitions: {'wake': '07:00'},
+      resolvedTransitionsByNode: {
+        'room-1': {'wake': '06:45'},
+      },
+      transitions: [
+        RhythmModeTransitionConfig(
+          id: 'wake',
+          label: 'Wake',
+          fromMode: RhythmMode.sleep,
+          toMode: RhythmMode.day,
+          trigger: RhythmTransitionTrigger.solar('sunrise'),
+          duration: TransitionDuration.auto(),
+          preserveHardOff: true,
+        ),
+      ],
+    );
+
+    const fixedSchedule = RhythmLightScheduleConfig(
+      id: 'outdoor',
+      name: 'Outdoor',
+      activeMode: RhythmMode.day,
+      transitions: [
+        RhythmModeTransitionConfig(
+          id: 'wake',
+          label: 'Wake',
+          fromMode: RhythmMode.sleep,
+          toMode: RhythmMode.day,
+          trigger: RhythmTransitionTrigger.scheduled('07:00'),
+          duration: TransitionDuration.auto(),
+          preserveHardOff: true,
+        ),
+      ],
+    );
+
+    test('allocates stable unique light schedule ids', () {
+      expect(allocateLightScheduleId('Outdoor', const []), 'outdoor');
+      expect(
+        allocateLightScheduleId('Outdoor', const ['outdoor']),
+        'outdoor-2',
+      );
+      expect(
+        allocateLightScheduleId(
+          'outdoor-copy',
+          const ['outdoor-copy', 'outdoor-copy-2'],
+        ),
+        'outdoor-copy-3',
+      );
+      expect(
+        allocateLightScheduleId(List.filled(80, 'x').join(), const []).length,
+        lessThanOrEqualTo(64),
+      );
+    });
+
+    test('names twilight anchors as day dawn and sleep dusk', () {
+      expect(
+        lightScheduleSolarEventLabel('civil_twilight', RhythmMode.day),
+        'Civil dawn',
+      );
+      expect(
+        lightScheduleSolarEventLabel('nautical_twilight', RhythmMode.sleep),
+        'Nautical dusk',
+      );
+    });
+
+    Future<
+        ({
+          _FakeRhythmServerApi api,
+          ServerSyncProvider provider,
+        })> pumpLegacyMigration(
+      WidgetTester tester, {
+      bool overrideSucceeds = true,
+      bool assignmentSucceeds = true,
+      RhythmLightScheduleConfig schedule = outdoorSchedule,
+    }) async {
+      final roomProvider = RoomProvider();
+      const legacySchedule = RhythmRoomSchedule(
+        source: RhythmRoomScheduleSource.followTime,
+        wakeTime: '07:15',
+        sleepTime: '22:45',
+      );
+      final legacyProfile = <String, dynamic>{
+        'room_schedule': legacySchedule.toJson(),
+      };
+      final api = _FakeRhythmServerApi()
+        ..lightSchedules = [schedule]
+        ..lightScheduleOverrideWritesSucceed = overrideSucceeds
+        ..lightScheduleAssignmentWritesSucceed = assignmentSucceeds
+        ..lightScheduleOverrideBaseProfileSettings = legacyProfile;
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+      connection.emitHello(namedScheduleHello(
+        profileSettings: legacyProfile,
+        roomProfile: legacyProfile,
+      ));
+      await tester.pump();
+      await provider.loadLightSchedules();
+      await tester.pumpWidget(_buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const RoomScheduleTab(
+          roomId: 'room-1',
+          roomName: 'Kitchen',
+          showRoomLightingOverride: false,
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Legacy custom time'), findsOneWidget);
+      final card = find.byKey(const ValueKey('named-light-schedule-room-1'));
+      await tester.tap(find.descendant(
+        of: card,
+        matching: find.text('Named schedule'),
+      ));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('light-schedule-assignment-outdoor')),
+      );
+      await tester.pumpAndSettle();
+      return (api: api, provider: provider);
+    }
+
+    testWidgets('migrates legacy fixed times before named assignment',
+        (tester) async {
+      final result = await pumpLegacyMigration(tester);
+
+      expect(result.api.lightScheduleOperationCalls, ['override', 'assignment']);
+      final overrideCall = result.api.lightScheduleOverrideCalls.single;
+      final assignmentCall = result.api.lightScheduleAssignmentCalls.single;
+      expect(overrideCall.correlationId, assignmentCall.correlationId);
+      expect(
+        overrideCall.scheduleOverride?.transitions['wake']?.trigger.kind,
+        'scheduled',
+      );
+      expect(
+        overrideCall.scheduleOverride?.transitions['wake']?.trigger.time,
+        '07:15',
+      );
+      expect(
+        result.provider.nodeById('room-1')?.profileSettings?.lightScheduleId,
+        'outdoor',
+      );
+    });
+
+    testWidgets('legacy migration leaves manual transition IDs untouched',
+        (tester) async {
+      final result = await pumpLegacyMigration(
+        tester,
+        schedule: RhythmLightScheduleConfig(
+          id: outdoorSchedule.id,
+          name: outdoorSchedule.name,
+          activeMode: outdoorSchedule.activeMode,
+          transitions: [
+            ...outdoorSchedule.transitions,
+            const RhythmModeTransitionConfig(
+              id: 'physical-wake',
+              label: 'Physical Wake',
+              fromMode: RhythmMode.sleep,
+              toMode: RhythmMode.day,
+              trigger: RhythmTransitionTrigger.manual(),
+              duration: TransitionDuration.auto(),
+              preserveHardOff: true,
+            ),
+          ],
+        ),
+      );
+
+      expect(
+        result.api.lightScheduleOverrideCalls.single.scheduleOverride
+            ?.transitions.keys,
+        ['wake'],
+      );
+    });
+
+    testWidgets('keeps legacy authority when migration override is rejected',
+        (tester) async {
+      final result = await pumpLegacyMigration(
+        tester,
+        overrideSucceeds: false,
+      );
+
+      expect(result.api.lightScheduleOperationCalls, ['override']);
+      expect(result.api.lightScheduleAssignmentCalls, isEmpty);
+      expect(
+        result.provider.nodeById('room-1')?.profileSettings?.roomSchedule?.source,
+        RhythmRoomScheduleSource.followTime,
+      );
+    });
+
+    testWidgets('keeps legacy authority when assignment after staging fails',
+        (tester) async {
+      final result = await pumpLegacyMigration(
+        tester,
+        assignmentSucceeds: false,
+      );
+
+      expect(result.api.lightScheduleOperationCalls, ['override', 'assignment']);
+      expect(
+        result.api.lightScheduleOverrideCalls.single.correlationId,
+        result.api.lightScheduleAssignmentCalls.single.correlationId,
+      );
+      expect(
+        result.provider.nodeById('room-1')?.profileSettings?.roomSchedule?.source,
+        RhythmRoomScheduleSource.followTime,
+      );
+    });
+
+    testWidgets('schedule save sends exact snapshot and refreshes on conflict',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()..lightSchedules = [outdoorSchedule];
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+      connection.emitHello(namedScheduleHello());
+      await tester.pump();
+      await provider.loadLightSchedules();
+      api.lightSchedulesAfterFailedWrite = const [
+        RhythmLightScheduleConfig(
+          id: 'outdoor',
+          name: 'Concurrent outdoor',
+          activeMode: RhythmMode.sleep,
+        ),
+      ];
+
+      final saved = await provider.saveLightSchedules(
+        const [
+          RhythmLightScheduleConfig(
+            id: 'outdoor',
+            name: 'My stale edit',
+            activeMode: RhythmMode.sleep,
+          ),
+        ],
+        journeyId: 'registry-journey-1',
+      );
+
+      expect(saved, isFalse);
+      expect(
+        api.lightScheduleExpectedRegistryCalls.single.single.name,
+        'Outdoor',
+      );
+      expect(
+        api.lightScheduleRegistryCorrelationIds.single,
+        'registry-journey-1',
+      );
+      expect(provider.lightSchedules.single.name, 'Concurrent outdoor');
+    });
+
+    testWidgets('missing location blocks new solar rules', (tester) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()..lightSchedules = [fixedSchedule];
+      final connection = _HelloRhythmConnection(api);
+      final homeProvider = _TestHomeProvider(const []);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: homeProvider,
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+      addTearDown(homeProvider.dispose);
+      connection.emitHello(namedScheduleHello());
+      await tester.pump();
+      await provider.loadLightSchedules();
+      await tester.pumpWidget(_buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const LightSchedulesScreen(),
+      ));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('light-schedule-outdoor')));
+      await tester.pumpAndSettle();
+
+      final trigger = tester.widget<DropdownButton<String>>(
+        find.descendant(
+          of: find.byKey(const ValueKey('schedule-trigger-Day Start')),
+          matching: find.byWidgetPredicate(
+            (widget) => widget is DropdownButton<String>,
+          ),
+        ),
+      );
+      expect(
+        trigger.items!.singleWhere((item) => item.value == 'solar').enabled,
+        isFalse,
+      );
+    });
+
+    testWidgets('missing location can disable an existing solar rule',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()..lightSchedules = [outdoorSchedule];
+      final connection = _HelloRhythmConnection(api);
+      final homeProvider = _TestHomeProvider(const []);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: homeProvider,
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+      addTearDown(homeProvider.dispose);
+      connection.emitHello(namedScheduleHello());
+      await tester.pump();
+      await provider.loadLightSchedules();
+      await tester.pumpWidget(_buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const LightSchedulesScreen(),
+      ));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('light-schedule-outdoor')));
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining('Solar anchors are unavailable'),
+        findsOneWidget,
+      );
+      await tester.tap(
+        find.byKey(const ValueKey('schedule-trigger-enabled-Day Start')),
+      );
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+
+      expect(
+        api.lightSchedules.single.transitions
+            .singleWhere((transition) => transition.id == 'wake')
+            .triggerEnabled,
+        isFalse,
+      );
+    });
+
+    testWidgets('capability gates named schedule assignment UI and write',
+        (tester) async {
+      _registerWidgetCleanup(tester);
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(390, 1200));
+      final captureEvidence =
+          (Platform.environment['CODEX_UI_SCREENSHOT_DIR'] ?? '').isNotEmpty;
+      if (captureEvidence) {
+        await tester.runAsync(loadUiEvidenceFonts);
+      }
+      final boundaryKey = GlobalKey();
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()..lightSchedules = [outdoorSchedule];
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(namedScheduleHello(supported: false));
+      await tester.pump();
+      expect(provider.lightSchedulesSupported, isFalse);
+
+      connection.emitHello(namedScheduleHello());
+      await tester.pump();
+      await provider.loadLightSchedules();
+      await tester.pumpWidget(_buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        fontFamily: captureEvidence ? uiEvidenceFontFamily : null,
+        child: RepaintBoundary(
+          key: boundaryKey,
+          child: const RoomScheduleTab(
+            roomId: 'room-1',
+            roomName: 'Kitchen',
+            showRoomLightingOverride: false,
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      final card = find.byKey(const ValueKey('named-light-schedule-room-1'));
+      expect(card, findsOneWidget);
+      await tester.tap(find.descendant(
+        of: card,
+        matching: find.text('Named schedule'),
+      ));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('light-schedule-assignment-outdoor')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(api.lightScheduleAssignmentCalls, hasLength(1));
+      expect(api.lightScheduleAssignmentCalls.single.scheduleId, 'outdoor');
+      expect(provider.nodeById('room-1')?.profileSettings?.lightScheduleId,
+          'outdoor');
+      expect(find.text('Outdoor'), findsWidgets);
+      expect(
+        find.byKey(const ValueKey('light-schedule-customize-wake')),
+        findsOneWidget,
+      );
+      await _captureRoomScheduleEvidence(
+        tester,
+        boundaryKey,
+        '06-named-schedule-assignment.png',
+      );
+    });
+
+    testWidgets('base solar offsets require their separate capability',
+        (tester) async {
+      _registerWidgetCleanup(tester);
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(390, 1200));
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()..lightSchedules = [outdoorSchedule];
+      final connection = _HelloRhythmConnection(api);
+      final homeProvider = _TestHomeProvider(
+        const [],
+        currentHome: Home.create(
+          id: 'home-1',
+          name: 'Home',
+          ownerId: 'owner-1',
+          location: const HomeLocation(latitude: 41.88, longitude: -87.63),
+          timezone: 'America/Chicago',
+        ),
+      );
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: homeProvider,
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+      addTearDown(homeProvider.dispose);
+      connection.emitHello(namedScheduleHello(
+        offsetsSupported: false,
+        location: const {
+          'sunrise': 7.0,
+          'timezone_name': 'America/Chicago',
+        },
+      ));
+      await tester.pump();
+      await provider.loadLightSchedules();
+      await tester.pumpWidget(_buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const LightSchedulesScreen(),
+      ));
+      await tester.pumpAndSettle();
+
+      expect(provider.lightSchedulesSupported, isTrue);
+      expect(provider.lightScheduleSolarOffsetsSupported, isFalse);
+      await tester.tap(find.byKey(const ValueKey('light-schedule-outdoor')));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('schedule-offset-unsupported')),
+        findsWidgets,
+      );
+      expect(
+        find.byKey(const ValueKey('schedule-offset-Day Start')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('room customization exposes only selected automatic boundaries',
+        (tester) async {
+      _registerWidgetCleanup(tester);
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(390, 1200));
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()
+        ..lightSchedules = const [
+          RhythmLightScheduleConfig(
+            id: 'outdoor',
+            name: 'Outdoor',
+            transitions: [
+              RhythmModeTransitionConfig(
+                id: 'day_start',
+                label: 'Day Start',
+                fromMode: RhythmMode.sleep,
+                toMode: RhythmMode.day,
+                trigger: RhythmTransitionTrigger.scheduled('07:00'),
+                duration: TransitionDuration.auto(),
+                preserveHardOff: true,
+              ),
+              RhythmModeTransitionConfig(
+                id: 'sleep_start',
+                label: 'Sleep Start',
+                fromMode: RhythmMode.day,
+                toMode: RhythmMode.sleep,
+                trigger: RhythmTransitionTrigger.scheduled('22:00'),
+                duration: TransitionDuration.auto(),
+                preserveHardOff: true,
+              ),
+              RhythmModeTransitionConfig(
+                id: 'physical-wake',
+                label: 'Physical Wake',
+                fromMode: RhythmMode.sleep,
+                toMode: RhythmMode.day,
+                trigger: RhythmTransitionTrigger.manual(),
+                duration: TransitionDuration.auto(),
+                preserveHardOff: true,
+              ),
+              RhythmModeTransitionConfig(
+                id: 'vacation-wake',
+                label: 'Vacation Wake',
+                fromMode: RhythmMode.sleep,
+                toMode: RhythmMode.day,
+                trigger: RhythmTransitionTrigger.scheduled('09:00'),
+                duration: TransitionDuration.auto(),
+                preserveHardOff: true,
+              ),
+            ],
+          ),
+        ];
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+      const named = {
+        'light_schedule': {
+          'kind': 'named',
+          'schedule_id': 'outdoor',
+          'active_mode': 'day',
+        },
+      };
+      connection.emitHello(namedScheduleHello(
+        profileSettings: named,
+        roomProfile: named,
+      ));
+      await tester.pump();
+      await provider.loadLightSchedules();
+      await tester.pumpWidget(_buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const Scaffold(
+          body: LightScheduleAssignmentCard(
+            nodeId: 'room-1',
+            targetLabel: 'Room',
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      expect(
+        find.byKey(const ValueKey('light-schedule-customize-day_start')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('light-schedule-customize-sleep_start')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('light-schedule-customize-physical-wake')),
+        findsNothing,
+      );
+      expect(
+        find.byKey(const ValueKey('light-schedule-customize-vacation-wake')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('base editor shows today resolution and whole-minute range',
+        (tester) async {
+      _registerWidgetCleanup(tester);
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(390, 1200));
+      final captureEvidence =
+          (Platform.environment['CODEX_UI_SCREENSHOT_DIR'] ?? '').isNotEmpty;
+      if (captureEvidence) {
+        await tester.runAsync(loadUiEvidenceFonts);
+      }
+      final boundaryKey = GlobalKey();
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()..lightSchedules = [outdoorSchedule];
+      final connection = _HelloRhythmConnection(api);
+      final homeProvider = _TestHomeProvider(
+        const [],
+        currentHome: Home.create(
+          id: 'home-1',
+          name: 'Home',
+          ownerId: 'owner-1',
+          location: const HomeLocation(latitude: 41.88, longitude: -87.63),
+          timezone: 'America/Chicago',
+        ),
+      );
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: homeProvider,
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+      addTearDown(homeProvider.dispose);
+      connection.emitHello(namedScheduleHello(location: const {
+        'sunrise': 7.0,
+        'timezone_name': 'America/Chicago',
+      }));
+      await tester.pump();
+      await provider.loadLightSchedules();
+      await tester.pumpWidget(_buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        fontFamily: captureEvidence ? uiEvidenceFontFamily : null,
+        repaintBoundaryKey: boundaryKey,
+        child: const LightSchedulesScreen(),
+      ));
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const ValueKey('light-schedule-outdoor')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(tester.takeException(), isNull);
+      final nameField = tester.widget<TextField>(
+        find.byKey(const ValueKey('light-schedule-name')),
+      );
+      expect(nameField.style?.color, CelestialColors.textPrimary);
+      expect(
+        tester.widget<Text>(find.text('Automatic transitions')).style?.color,
+        CelestialColors.textPrimary,
+      );
+      expect(
+        find.ancestor(
+          of: find.text('Enabled').first,
+          matching: find.byType(Material),
+        ),
+        findsWidgets,
+      );
+      expect(
+        find.byKey(const ValueKey('schedule-resolved-time-Day Start')),
+        findsOneWidget,
+      );
+      expect(find.text('Today · 07:00 local'), findsOneWidget);
+      await _captureRoomScheduleEvidence(
+        tester,
+        boundaryKey,
+        '07-base-schedule-editor.png',
+      );
+      await tester.drag(find.byType(ListView).last, const Offset(0, -600));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('schedule-resolved-time-Sleep Start')),
+        findsOneWidget,
+      );
+      expect(find.text('Save to resolve on the appliance'), findsOneWidget);
+      final slider = tester.widget<Slider>(
+        find.byKey(const ValueKey('schedule-offset-Day Start')),
+      );
+      expect(slider.divisions, maxSolarScheduleOffsetMinutes * 2);
+    });
+
+    testWidgets('base editor preserves unrelated and manual transition IDs',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()
+        ..lightSchedules = const [
+          RhythmLightScheduleConfig(
+            id: 'outdoor',
+            name: 'Outdoor',
+            transitions: [
+              RhythmModeTransitionConfig(
+                id: 'day_start',
+                label: 'Day Start',
+                fromMode: RhythmMode.sleep,
+                toMode: RhythmMode.day,
+                trigger: RhythmTransitionTrigger.scheduled('07:00'),
+                duration: TransitionDuration.auto(),
+                preserveHardOff: true,
+              ),
+              RhythmModeTransitionConfig(
+                id: 'sleep_start',
+                label: 'Sleep Start',
+                fromMode: RhythmMode.day,
+                toMode: RhythmMode.sleep,
+                trigger: RhythmTransitionTrigger.scheduled('22:00'),
+                duration: TransitionDuration.auto(),
+                preserveHardOff: true,
+              ),
+              RhythmModeTransitionConfig(
+                id: 'physical-wake',
+                label: 'Physical Wake',
+                fromMode: RhythmMode.sleep,
+                toMode: RhythmMode.day,
+                trigger: RhythmTransitionTrigger.manual(),
+                duration: TransitionDuration.auto(),
+                preserveHardOff: true,
+              ),
+              RhythmModeTransitionConfig(
+                id: 'vacation-wake',
+                label: 'Vacation Wake',
+                fromMode: RhythmMode.sleep,
+                toMode: RhythmMode.day,
+                trigger: RhythmTransitionTrigger.scheduled('09:00'),
+                duration: TransitionDuration.auto(),
+                preserveHardOff: true,
+              ),
+            ],
+          ),
+        ];
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+      connection.emitHello(namedScheduleHello());
+      await tester.pump();
+      await provider.loadLightSchedules();
+      await tester.pumpWidget(_buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const LightSchedulesScreen(),
+      ));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('light-schedule-outdoor')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+
+      final saved = api.lightSchedules.single;
+      expect(
+        saved.transitions.map((transition) => transition.id),
+        containsAll(<String>[
+          'day_start',
+          'sleep_start',
+          'physical-wake',
+          'vacation-wake',
+        ]),
+      );
+      expect(saved.transitions, hasLength(4));
+      expect(
+        saved.transitions
+            .singleWhere((transition) => transition.id == 'physical-wake')
+            .trigger
+            .isManual,
+        isTrue,
+      );
+    });
+
+    testWidgets('resetting a local trigger kind reveals the parent kind',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()..lightSchedules = [fixedSchedule];
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+      const named = {
+        'light_schedule': {
+          'kind': 'named',
+          'schedule_id': 'outdoor',
+          'active_mode': 'day',
+        },
+      };
+      connection.emitHello(namedScheduleHello(
+        parentId: 'parent',
+        profileSettings: {
+          ...named,
+          'light_schedule_overrides': {
+            'outdoor': {
+              'transitions': {
+                'wake': {
+                  'trigger': {
+                    'kind': 'solar',
+                    'event': 'sunrise',
+                    'offset_minutes': -15,
+                  },
+                },
+              },
+            },
+          },
+        },
+        roomProfile: const {
+          'light_schedule_overrides': {
+            'outdoor': {
+              'transitions': {
+                'wake': {
+                  'trigger': {
+                    'kind': 'solar',
+                    'event': 'sunrise',
+                    'offset_minutes': -15,
+                  },
+                },
+              },
+            },
+          },
+        },
+        additionalNodes: const [
+          {
+            'id': 'parent',
+            'name': 'Parent',
+            'kind': 'room',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'profile_settings': named,
+            'room_profile': named,
+          },
+        ],
+      ));
+      await tester.pump();
+      await provider.loadLightSchedules();
+      await tester.pumpWidget(_buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const RoomScheduleTab(
+          roomId: 'room-1',
+          roomName: 'Kitchen',
+          showRoomLightingOverride: false,
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const ValueKey('light-schedule-customize-wake')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Solar event').first);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Follow schedule').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Save customization'));
+      await tester.pumpAndSettle();
+
+      expect(api.lightScheduleOverrideCalls, hasLength(1));
+      expect(api.lightScheduleOverrideCalls.single.scheduleOverride, isNull);
+    });
+
+    testWidgets('override retry reuses the original journey id', (tester) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()
+        ..lightSchedules = [fixedSchedule]
+        ..lightScheduleWritesSucceed = false;
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+      const local = {
+        'light_schedule': {
+          'kind': 'named',
+          'schedule_id': 'outdoor',
+          'active_mode': 'day',
+        },
+        'light_schedule_overrides': {
+          'outdoor': {
+            'transitions': {
+              'wake': {
+                'trigger': {'time': '07:30'},
+              },
+            },
+          },
+        },
+      };
+      connection.emitHello(namedScheduleHello(
+        profileSettings: local,
+        roomProfile: local,
+      ));
+      await tester.pump();
+      await provider.loadLightSchedules();
+      await tester.pumpWidget(_buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const RoomScheduleTab(
+          roomId: 'room-1',
+          roomName: 'Kitchen',
+          showRoomLightingOverride: false,
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const ValueKey('light-schedule-customize-wake')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Save customization'));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('light-schedule-override-retry')),
+        findsOneWidget,
+      );
+      final firstJourney = api.lightScheduleOverrideCalls.single.correlationId;
+
+      api.lightScheduleWritesSucceed = true;
+      await tester.tap(
+        find.byKey(const ValueKey('light-schedule-override-retry')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(api.lightScheduleOverrideCalls, hasLength(2));
+      expect(
+        api.lightScheduleOverrideCalls.last.correlationId,
+        firstJourney,
+      );
+    });
+
+    testWidgets('override write sends exact snapshot and installs response',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()..lightSchedules = [outdoorSchedule];
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+      connection.emitHello(namedScheduleHello(profileSettings: {
+        'light_schedule': {
+          'kind': 'named',
+          'schedule_id': 'outdoor',
+          'active_mode': 'sleep',
+        },
+        'light_schedule_overrides': {
+          'outdoor': {
+            'transitions': {
+              'wake': {
+                'trigger': {'offset_minutes': -15},
+              },
+            },
+          },
+        },
+      }));
+      await tester.pump();
+      const updated = RhythmLightScheduleOverride(
+        transitions: {
+          'wake': RhythmModeTransitionOverride(
+            trigger: RhythmTransitionTriggerOverride(offsetMinutes: -30),
+          ),
+        },
+      );
+
+      expect(
+        await provider.setNodeLightScheduleOverride(
+          'room-1',
+          'outdoor',
+          updated,
+          journeyId: 'override-journey-1',
+        ),
+        isTrue,
+      );
+
+      final call = api.lightScheduleOverrideCalls.single;
+      expect(
+          call.expected['outdoor']?.transitions['wake']?.trigger.offsetMinutes,
+          -15);
+      expect(call.correlationId, 'override-journey-1');
+      expect(
+        provider
+            .nodeById('room-1')
+            ?.profileSettings
+            ?.lightScheduleOverrides['outdoor']
+            ?.transitions['wake']
+            ?.trigger
+            .offsetMinutes,
+        -30,
+      );
+    });
+
+    testWidgets('override exposes pending, rejected, retry, and local reset',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()..lightSchedules = [outdoorSchedule];
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+      connection.emitHello(namedScheduleHello(
+        profileSettings: {
+          'light_schedule': {
+            'kind': 'named',
+            'schedule_id': 'outdoor',
+            'active_mode': 'day',
+          },
+        },
+        roomProfile: {
+          'light_schedule': {
+            'kind': 'named',
+            'schedule_id': 'outdoor',
+            'active_mode': 'day',
+          },
+        },
+      ));
+      await tester.pump();
+      const updated = RhythmLightScheduleOverride(
+        transitions: {
+          'wake': RhythmModeTransitionOverride(
+            trigger: RhythmTransitionTriggerOverride(time: '07:30'),
+          ),
+        },
+      );
+
+      api.lightScheduleOverrideCompleter = Completer<RhythmRoomState?>();
+      final rejected = provider.setNodeLightScheduleOverride(
+        'room-1',
+        'outdoor',
+        updated,
+      );
+      expect(provider.lightScheduleWritePendingForNode('room-1'), isTrue);
+      api.lightScheduleOverrideCompleter!.complete(null);
+      expect(await rejected, isFalse);
+      expect(provider.lightScheduleWritePendingForNode('room-1'), isFalse);
+      expect(provider.lightScheduleWriteRejectedForNode('room-1'), isTrue);
+
+      api.lightScheduleOverrideCompleter = null;
+      expect(
+        await provider.setNodeLightScheduleOverride(
+          'room-1',
+          'outdoor',
+          updated,
+        ),
+        isTrue,
+      );
+      expect(provider.lightScheduleWriteRejectedForNode('room-1'), isFalse);
+      expect(
+        provider
+            .nodeById('room-1')
+            ?.localProfileSettings
+            ?.lightScheduleOverrides['outdoor']
+            ?.transitions['wake']
+            ?.trigger
+            .time,
+        '07:30',
+      );
+
+      expect(
+        await provider.setNodeLightScheduleOverride(
+          'room-1',
+          'outdoor',
+          null,
+        ),
+        isTrue,
+      );
+      expect(
+        provider
+            .nodeById('room-1')
+            ?.localProfileSettings
+            ?.lightScheduleOverrides,
+        isEmpty,
+      );
+    });
+
+    testWidgets(
+        'renders parent inheritance, local resolved time, legacy, and dormant states',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()..lightSchedules = [outdoorSchedule];
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+
+      connection.emitHello(namedScheduleHello(
+        parentId: 'downstairs',
+        profileSettings: {
+          'light_schedule': {
+            'kind': 'named',
+            'schedule_id': 'outdoor',
+            'active_mode': 'day',
+          },
+          'light_schedule_overrides': {
+            'outdoor': {
+              'transitions': {
+                'wake': {
+                  'trigger': {'offset_minutes': -15},
+                },
+              },
+            },
+          },
+        },
+        roomProfile: const {},
+        location: const {
+          'sunrise': 7.0,
+          'timezone_name': 'America/Chicago',
+        },
+      ));
+      await tester.pump();
+      await provider.loadLightSchedules();
+      await tester.pumpWidget(_buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const RoomScheduleTab(
+          roomId: 'room-1',
+          roomName: 'Kitchen',
+          showRoomLightingOverride: false,
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Outdoor · Inherited from parent'), findsOneWidget);
+      expect(
+        find.text('Inherited customization · 06:45 local'),
+        findsOneWidget,
+      );
+
+      connection.emitHello(namedScheduleHello(roomProfile: const {}));
+      await tester.pumpAndSettle();
+      expect(find.text('Legacy whole-home Alarm'), findsOneWidget);
+
+      expect(
+        await provider.saveLightSchedules([
+          RhythmLightScheduleConfig(
+            id: outdoorSchedule.id,
+            name: outdoorSchedule.name,
+            enabled: false,
+            activeMode: outdoorSchedule.activeMode,
+            transitions: outdoorSchedule.transitions,
+          ),
+        ]),
+        isTrue,
+      );
+      connection.emitHello(namedScheduleHello(
+        profileSettings: {
+          'light_schedule': {
+            'kind': 'named',
+            'schedule_id': 'outdoor',
+            'active_mode': 'day',
+          },
+        },
+        roomProfile: {
+          'light_schedule': {
+            'kind': 'named',
+            'schedule_id': 'outdoor',
+            'active_mode': 'day',
+          },
+        },
+      ));
+      await tester.pumpAndSettle();
+      expect(find.text('Outdoor · Dormant'), findsOneWidget);
+    });
+
     testWidgets('supports rooms and unassigned bulbs but not assigned bulbs',
         (tester) async {
       final roomProvider = RoomProvider();
@@ -1805,7 +3183,8 @@ void main() {
     testWidgets('explains that an assigned bulb inherits room settings',
         (tester) async {
       final roomProvider = RoomProvider();
-      final connection = _HelloRhythmConnection(_FakeRhythmServerApi());
+      final api = _FakeRhythmServerApi();
+      final connection = _HelloRhythmConnection(api);
       final provider = ServerSyncProvider(
         connection: connection,
         roomProvider: roomProvider,
@@ -1815,7 +3194,7 @@ void main() {
       addTearDown(roomProvider.dispose);
       addTearDown(connection.dispose);
 
-      connection.emitHello(scheduleHello(
+      connection.emitHello(namedScheduleHello(
         kind: 'light_device',
         name: 'Porch Bulb',
         parentId: 'porch-room',
@@ -1832,8 +3211,28 @@ void main() {
       ));
       await tester.pump();
 
+      expect(
+        await provider.setNodeLightScheduleAssignment('room-1', 'outdoor'),
+        isFalse,
+      );
+      expect(
+        await provider.setNodeLightScheduleOverride(
+          'room-1',
+          'outdoor',
+          null,
+        ),
+        isFalse,
+      );
+      expect(api.lightScheduleAssignmentCalls, isEmpty);
+      expect(api.lightScheduleOverrideCalls, isEmpty);
+
+      expect(provider.lightScheduleTargetSupportedForNode('room-1'), isFalse);
       expect(find.byKey(const ValueKey('light-schedule-inherited')),
           findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('named-light-schedule-room-1')),
+        findsNothing,
+      );
       expect(
         find.text(
             'This bulb uses the custom light settings from its assigned room.'),
@@ -7854,6 +9253,34 @@ void main() {
       expect(provider.hubConfiguredConflicts, hasLength(1));
       expect(provider.reviewHistory, isNotEmpty);
       expect(provider.reviewHistory.first.isPending, isFalse);
+    });
+
+    test('demo override rejects a stale effective snapshot', () async {
+      const scheduleOverride = RhythmLightScheduleOverride(
+        transitions: {
+          'wake': RhythmModeTransitionOverride(triggerEnabled: false),
+        },
+      );
+      final demoApi = DemoServerApi.instance;
+      final applied = await demoApi.setLightScheduleOverride(
+        nodeId: 'hue_demo_1',
+        scheduleId: 'outdoor',
+        scheduleOverride: scheduleOverride,
+        expectedEffectiveOverrides: const {},
+        correlationId: 'demo-override-1',
+      );
+      expect(applied, isNotNull);
+
+      await expectLater(
+        demoApi.setLightScheduleOverride(
+          nodeId: 'hue_demo_1',
+          scheduleId: 'outdoor',
+          scheduleOverride: null,
+          expectedEffectiveOverrides: const {},
+          correlationId: 'demo-override-stale',
+        ),
+        throwsStateError,
+      );
     });
 
     test('refreshes demo topology after assigning an unassigned device',
