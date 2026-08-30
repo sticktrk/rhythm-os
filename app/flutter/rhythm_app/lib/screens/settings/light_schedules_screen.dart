@@ -360,10 +360,17 @@ class _LightScheduleEditorState extends State<_LightScheduleEditor> {
           TextField(
             key: const ValueKey('light-schedule-name'),
             controller: _name,
-            decoration: const InputDecoration(labelText: 'Name'),
+            style: const TextStyle(color: CelestialColors.textPrimary),
+            decoration: const InputDecoration(
+              labelText: 'Name',
+              labelStyle: TextStyle(color: CelestialColors.textSecondary),
+            ),
           ),
           SwitchListTile.adaptive(
-            title: const Text('Automatic transitions'),
+            title: const Text(
+              'Automatic transitions',
+              style: TextStyle(color: CelestialColors.textPrimary),
+            ),
             value: _enabled,
             onChanged: (value) => setState(() => _enabled = value),
           ),
@@ -422,15 +429,18 @@ class _TransitionEditor extends StatelessWidget {
   Widget build(BuildContext context) {
     final trigger = transition.trigger;
     final type = trigger.isScheduled ? 'scheduled' : 'solar';
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white.withValues(alpha: .04),
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
+    final dropdownTextStyle = Theme.of(context)
+        .textTheme
+        .titleMedium
+        ?.copyWith(color: CelestialColors.textPrimary);
+    return Material(
+      color: Colors.white.withValues(alpha: .04),
+      borderRadius: BorderRadius.circular(16),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
           Text(
             title,
             style: const TextStyle(
@@ -440,7 +450,10 @@ class _TransitionEditor extends StatelessWidget {
           ),
           SwitchListTile.adaptive(
             contentPadding: EdgeInsets.zero,
-            title: const Text('Enabled'),
+            title: const Text(
+              'Enabled',
+              style: TextStyle(color: CelestialColors.textPrimary),
+            ),
             value: transition.triggerEnabled,
             onChanged: (value) => onChanged(
               transition.copyWith(triggerEnabled: value),
@@ -448,7 +461,12 @@ class _TransitionEditor extends StatelessWidget {
           ),
           DropdownButtonFormField<String>(
             initialValue: type,
-            decoration: const InputDecoration(labelText: 'Trigger'),
+            dropdownColor: CelestialColors.backgroundDark,
+            style: dropdownTextStyle,
+            decoration: const InputDecoration(
+              labelText: 'Trigger',
+              labelStyle: TextStyle(color: CelestialColors.textSecondary),
+            ),
             items: const [
               DropdownMenuItem(value: 'solar', child: Text('Solar event')),
               DropdownMenuItem(value: 'scheduled', child: Text('Fixed time')),
@@ -477,7 +495,12 @@ class _TransitionEditor extends StatelessWidget {
               initialValue: _events.contains(trigger.event)
                   ? trigger.event
                   : (dayBoundary ? 'sunrise' : 'sunset'),
-              decoration: const InputDecoration(labelText: 'Solar anchor'),
+              dropdownColor: CelestialColors.backgroundDark,
+              style: dropdownTextStyle,
+              decoration: const InputDecoration(
+                labelText: 'Solar anchor',
+                labelStyle: TextStyle(color: CelestialColors.textSecondary),
+              ),
               items: [
                 for (final event in _events)
                   DropdownMenuItem(
@@ -544,15 +567,19 @@ class _TransitionEditor extends StatelessWidget {
             TextFormField(
               key: ValueKey('schedule-fixed-time-$title'),
               initialValue: trigger.time ?? '07:00',
-              decoration:
-                  const InputDecoration(labelText: 'Local time (HH:MM)'),
+              style: const TextStyle(color: CelestialColors.textPrimary),
+              decoration: const InputDecoration(
+                labelText: 'Local time (HH:MM)',
+                labelStyle: TextStyle(color: CelestialColors.textSecondary),
+              ),
               onChanged: (value) => onChanged(
                 transition.copyWith(
                   trigger: RhythmTransitionTrigger.scheduled(value),
                 ),
               ),
             ),
-        ],
+          ],
+        ),
       ),
     );
   }

@@ -181,7 +181,7 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     description: 'Replace the reusable named light schedule registry.',
     method: 'PUT',
     path: 'api/light-schedules',
-    body: { schedules: [] }
+    body: { schedules: [], expected_schedules: [] }
   },
   {
     id: 'light-schedule-assignment-set',

@@ -28,6 +28,7 @@ import 'package:rhythm_app/widgets/device_detail_sheet.dart';
 import 'package:rhythm_app/widgets/hub_picker_screen.dart';
 import 'package:rhythm_app/widgets/room_settings_sheet.dart';
 import 'package:rhythm_app/widgets/room_schedule_tab.dart';
+import 'package:rhythm_app/widgets/solar_orbit.dart' show CelestialColors;
 import 'package:rhythm_app/widgets/solar_clock/solar_clock_exports.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
@@ -200,8 +201,18 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   String? lastDeletedInputBindingId;
   List<RhythmModeTransitionConfig> transitions = const [];
   List<RhythmLightScheduleConfig> lightSchedules = const [];
-  final List<({String nodeId, String? scheduleId, bool legacy})>
+  final List<List<RhythmLightScheduleConfig>> lightScheduleExpectedRegistryCalls =
+      [];
+  List<RhythmLightScheduleConfig>? lightSchedulesAfterFailedWrite;
+  final List<
+      ({
+        String nodeId,
+        String? scheduleId,
+        bool legacy,
+        String? correlationId,
+      })>
       lightScheduleAssignmentCalls = [];
+  final List<String> lightScheduleOperationCalls = [];
   final List<
       ({
         String nodeId,
@@ -211,6 +222,9 @@ class _FakeRhythmServerApi extends RhythmServerApi {
         String correlationId,
       })> lightScheduleOverrideCalls = [];
   bool lightScheduleWritesSucceed = true;
+  bool lightScheduleAssignmentWritesSucceed = true;
+  bool lightScheduleOverrideWritesSucceed = true;
+  Map<String, dynamic>? lightScheduleOverrideBaseProfileSettings;
   Completer<RhythmRoomState?>? lightScheduleOverrideCompleter;
   List<RhythmModeTransitionConfig>? lastSetTransitions;
   int setTransitionsCalls = 0;
@@ -485,8 +499,18 @@ class _FakeRhythmServerApi extends RhythmServerApi {
 
   @override
   Future<List<RhythmLightScheduleConfig>> setLightSchedules(
-    List<RhythmLightScheduleConfig> schedules,
-  ) async {
+    List<RhythmLightScheduleConfig> schedules, {
+    required List<RhythmLightScheduleConfig> expectedSchedules,
+  }) async {
+    lightScheduleExpectedRegistryCalls.add(
+      List<RhythmLightScheduleConfig>.from(expectedSchedules),
+    );
+    final replacement = lightSchedulesAfterFailedWrite;
+    if (replacement != null) {
+      lightSchedules = List<RhythmLightScheduleConfig>.from(replacement);
+      lightSchedulesAfterFailedWrite = null;
+      throw StateError('light schedule registry precondition failed');
+    }
     if (!lightScheduleWritesSucceed) throw StateError('schedule write failed');
     lightSchedules = List<RhythmLightScheduleConfig>.from(schedules);
     return List<RhythmLightScheduleConfig>.unmodifiable(lightSchedules);
@@ -496,13 +520,18 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   Future<RhythmRoomState?> setLightScheduleAssignment({
     required String nodeId,
     required String? scheduleId,
+    String? correlationId,
   }) async {
+    lightScheduleOperationCalls.add('assignment');
     lightScheduleAssignmentCalls.add((
       nodeId: nodeId,
       scheduleId: scheduleId,
       legacy: false,
+      correlationId: correlationId,
     ));
-    if (!lightScheduleWritesSucceed) return null;
+    if (!lightScheduleWritesSucceed || !lightScheduleAssignmentWritesSucceed) {
+      return null;
+    }
     return RhythmRoomState.fromJson({
       'node_id': nodeId,
       'state': 'active',
@@ -521,13 +550,18 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   @override
   Future<RhythmRoomState?> clearLightScheduleAssignment({
     required String nodeId,
+    String? correlationId,
   }) async {
+    lightScheduleOperationCalls.add('assignment');
     lightScheduleAssignmentCalls.add((
       nodeId: nodeId,
       scheduleId: null,
       legacy: true,
+      correlationId: correlationId,
     ));
-    if (!lightScheduleWritesSucceed) return null;
+    if (!lightScheduleWritesSucceed || !lightScheduleAssignmentWritesSucceed) {
+      return null;
+    }
     return RhythmRoomState.fromJson({
       'node_id': nodeId,
       'state': 'active',
@@ -544,6 +578,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
         expectedEffectiveOverrides,
     required String correlationId,
   }) async {
+    lightScheduleOperationCalls.add('override');
     lightScheduleOverrideCalls.add((
       nodeId: nodeId,
       scheduleId: scheduleId,
@@ -553,32 +588,29 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     ));
     final pending = lightScheduleOverrideCompleter;
     if (pending != null) return pending.future;
-    if (!lightScheduleWritesSucceed) return null;
+    if (!lightScheduleWritesSucceed || !lightScheduleOverrideWritesSucceed) {
+      return null;
+    }
+    final profileSettings = Map<String, dynamic>.from(
+      lightScheduleOverrideBaseProfileSettings ??
+          {
+            'light_schedule': {
+              'kind': 'named',
+              'schedule_id': scheduleId,
+              'active_mode': 'day',
+            },
+          },
+    );
+    if (scheduleOverride != null) {
+      profileSettings['light_schedule_overrides'] = {
+        scheduleId: scheduleOverride.toJson(),
+      };
+    }
     return RhythmRoomState.fromJson({
       'node_id': nodeId,
       'state': 'active',
-      'profile_settings': {
-        'light_schedule': {
-          'kind': 'named',
-          'schedule_id': scheduleId,
-          'active_mode': 'day',
-        },
-        if (scheduleOverride != null)
-          'light_schedule_overrides': {
-            scheduleId: scheduleOverride.toJson(),
-          },
-      },
-      'room_profile': {
-        'light_schedule': {
-          'kind': 'named',
-          'schedule_id': scheduleId,
-          'active_mode': 'day',
-        },
-        if (scheduleOverride != null)
-          'light_schedule_overrides': {
-            scheduleId: scheduleOverride.toJson(),
-          },
-      },
+      'profile_settings': profileSettings,
+      'room_profile': profileSettings,
     });
   }
 
@@ -1961,6 +1993,164 @@ void main() {
       ],
     );
 
+    Future<
+        ({
+          _FakeRhythmServerApi api,
+          ServerSyncProvider provider,
+        })> pumpLegacyMigration(
+      WidgetTester tester, {
+      bool overrideSucceeds = true,
+      bool assignmentSucceeds = true,
+    }) async {
+      final roomProvider = RoomProvider();
+      const legacySchedule = RhythmRoomSchedule(
+        source: RhythmRoomScheduleSource.followTime,
+        wakeTime: '07:15',
+        sleepTime: '22:45',
+      );
+      final legacyProfile = <String, dynamic>{
+        'room_schedule': legacySchedule.toJson(),
+      };
+      final api = _FakeRhythmServerApi()
+        ..lightSchedules = [outdoorSchedule]
+        ..lightScheduleOverrideWritesSucceed = overrideSucceeds
+        ..lightScheduleAssignmentWritesSucceed = assignmentSucceeds
+        ..lightScheduleOverrideBaseProfileSettings = legacyProfile;
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+      connection.emitHello(namedScheduleHello(
+        profileSettings: legacyProfile,
+        roomProfile: legacyProfile,
+      ));
+      await tester.pump();
+      await provider.loadLightSchedules();
+      await tester.pumpWidget(_buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const RoomScheduleTab(
+          roomId: 'room-1',
+          roomName: 'Kitchen',
+          showRoomLightingOverride: false,
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Legacy custom time'), findsOneWidget);
+      final card = find.byKey(const ValueKey('named-light-schedule-room-1'));
+      await tester.tap(find.descendant(
+        of: card,
+        matching: find.text('Named schedule'),
+      ));
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byKey(const ValueKey('light-schedule-assignment-outdoor')),
+      );
+      await tester.pumpAndSettle();
+      return (api: api, provider: provider);
+    }
+
+    testWidgets('migrates legacy fixed times before named assignment',
+        (tester) async {
+      final result = await pumpLegacyMigration(tester);
+
+      expect(result.api.lightScheduleOperationCalls, ['override', 'assignment']);
+      final overrideCall = result.api.lightScheduleOverrideCalls.single;
+      final assignmentCall = result.api.lightScheduleAssignmentCalls.single;
+      expect(overrideCall.correlationId, assignmentCall.correlationId);
+      expect(
+        overrideCall.scheduleOverride?.transitions['wake']?.trigger.kind,
+        'scheduled',
+      );
+      expect(
+        overrideCall.scheduleOverride?.transitions['wake']?.trigger.time,
+        '07:15',
+      );
+      expect(
+        result.provider.nodeById('room-1')?.profileSettings?.lightScheduleId,
+        'outdoor',
+      );
+    });
+
+    testWidgets('keeps legacy authority when migration override is rejected',
+        (tester) async {
+      final result = await pumpLegacyMigration(
+        tester,
+        overrideSucceeds: false,
+      );
+
+      expect(result.api.lightScheduleOperationCalls, ['override']);
+      expect(result.api.lightScheduleAssignmentCalls, isEmpty);
+      expect(
+        result.provider.nodeById('room-1')?.profileSettings?.roomSchedule?.source,
+        RhythmRoomScheduleSource.followTime,
+      );
+    });
+
+    testWidgets('keeps legacy authority when assignment after staging fails',
+        (tester) async {
+      final result = await pumpLegacyMigration(
+        tester,
+        assignmentSucceeds: false,
+      );
+
+      expect(result.api.lightScheduleOperationCalls, ['override', 'assignment']);
+      expect(
+        result.api.lightScheduleOverrideCalls.single.correlationId,
+        result.api.lightScheduleAssignmentCalls.single.correlationId,
+      );
+      expect(
+        result.provider.nodeById('room-1')?.profileSettings?.roomSchedule?.source,
+        RhythmRoomScheduleSource.followTime,
+      );
+    });
+
+    testWidgets('schedule save sends exact snapshot and refreshes on conflict',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()..lightSchedules = [outdoorSchedule];
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+      connection.emitHello(namedScheduleHello());
+      await tester.pump();
+      await provider.loadLightSchedules();
+      api.lightSchedulesAfterFailedWrite = const [
+        RhythmLightScheduleConfig(
+          id: 'outdoor',
+          name: 'Concurrent outdoor',
+          activeMode: RhythmMode.sleep,
+        ),
+      ];
+
+      final saved = await provider.saveLightSchedules(const [
+        RhythmLightScheduleConfig(
+          id: 'outdoor',
+          name: 'My stale edit',
+          activeMode: RhythmMode.sleep,
+        ),
+      ]);
+
+      expect(saved, isFalse);
+      expect(
+        api.lightScheduleExpectedRegistryCalls.single.single.name,
+        'Outdoor',
+      );
+      expect(provider.lightSchedules.single.name, 'Concurrent outdoor');
+    });
+
     testWidgets('capability gates named schedule assignment UI and write',
         (tester) async {
       _registerWidgetCleanup(tester);
@@ -2087,6 +2277,22 @@ void main() {
       );
       await tester.pumpAndSettle();
 
+      expect(tester.takeException(), isNull);
+      final nameField = tester.widget<TextField>(
+        find.byKey(const ValueKey('light-schedule-name')),
+      );
+      expect(nameField.style?.color, CelestialColors.textPrimary);
+      expect(
+        tester.widget<Text>(find.text('Automatic transitions')).style?.color,
+        CelestialColors.textPrimary,
+      );
+      expect(
+        find.ancestor(
+          of: find.text('Enabled').first,
+          matching: find.byType(Material),
+        ),
+        findsWidgets,
+      );
       expect(
         find.byKey(const ValueKey('schedule-resolved-time-Day Start')),
         findsOneWidget,

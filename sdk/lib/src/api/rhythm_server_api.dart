@@ -1891,12 +1891,15 @@ class RhythmServerApi {
 
   /// Atomically replace the reusable schedule registry.
   Future<List<RhythmLightScheduleConfig>> setLightSchedules(
-    List<RhythmLightScheduleConfig> schedules,
-  ) async {
+    List<RhythmLightScheduleConfig> schedules, {
+    required List<RhythmLightScheduleConfig> expectedSchedules,
+  }) async {
     final response = await _dio.put(
       'api/light-schedules',
       data: {
         'schedules': schedules.map((schedule) => schedule.toJson()).toList(),
+        'expected_schedules':
+            expectedSchedules.map((schedule) => schedule.toJson()).toList(),
       },
     );
     final data = response.data as Map<String, dynamic>;
@@ -1913,10 +1916,15 @@ class RhythmServerApi {
   Future<RhythmRoomState?> setLightScheduleAssignment({
     required String nodeId,
     required String? scheduleId,
+    String? correlationId,
   }) async {
     final response = await _dio.put(
       'api/light-schedules/assignment',
-      data: {'node_id': nodeId, 'schedule_id': scheduleId},
+      data: {
+        'node_id': nodeId,
+        'schedule_id': scheduleId,
+        if (correlationId != null) 'correlation_id': correlationId,
+      },
     );
     return _parseAndCacheSingleState(response.data);
   }
@@ -1924,10 +1932,15 @@ class RhythmServerApi {
   /// Restore legacy appliance-wide schedule authority for this root.
   Future<RhythmRoomState?> clearLightScheduleAssignment({
     required String nodeId,
+    String? correlationId,
   }) async {
     final response = await _dio.put(
       'api/light-schedules/assignment',
-      data: {'node_id': nodeId, 'legacy': true},
+      data: {
+        'node_id': nodeId,
+        'legacy': true,
+        if (correlationId != null) 'correlation_id': correlationId,
+      },
     );
     return _parseAndCacheSingleState(response.data);
   }

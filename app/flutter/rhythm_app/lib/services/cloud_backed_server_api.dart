@@ -657,25 +657,35 @@ class CloudBackedServerApi {
   }
 
   Future<List<RhythmLightScheduleConfig>> setLightSchedules(
-    List<RhythmLightScheduleConfig> schedules,
-  ) {
-    return _delegate.setLightSchedules(schedules);
+    List<RhythmLightScheduleConfig> schedules, {
+    required List<RhythmLightScheduleConfig> expectedSchedules,
+  }) {
+    return _delegate.setLightSchedules(
+      schedules,
+      expectedSchedules: expectedSchedules,
+    );
   }
 
   Future<RhythmRoomState?> setLightScheduleAssignment({
     required String nodeId,
     required String? scheduleId,
+    String? correlationId,
   }) {
     return _delegate.setLightScheduleAssignment(
       nodeId: nodeId,
       scheduleId: scheduleId,
+      correlationId: correlationId,
     );
   }
 
   Future<RhythmRoomState?> clearLightScheduleAssignment({
     required String nodeId,
+    String? correlationId,
   }) {
-    return _delegate.clearLightScheduleAssignment(nodeId: nodeId);
+    return _delegate.clearLightScheduleAssignment(
+      nodeId: nodeId,
+      correlationId: correlationId,
+    );
   }
 
   Future<RhythmRoomState?> setLightScheduleOverride({

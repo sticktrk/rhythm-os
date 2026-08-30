@@ -1780,6 +1780,7 @@ fn light_schedule_mutation_error(
         "solar offset_minutes",
         "trigger override",
         "override precondition failed",
+        "registry precondition failed",
         "Schedule target was not found",
         "Schedule target must",
         " is disabled",
@@ -1806,7 +1807,17 @@ pub fn handle_put_light_schedules(state: &SharedState, body: &Value) -> ApiRespo
         Ok(schedules) => schedules,
         Err(error) => return ApiResponse::bad_request(&format!("Invalid schedules: {error}")),
     };
-    match commands::do_light_schedules_set(state, schedules) {
+    let Some(expected_value) = body.get("expected_schedules").cloned() else {
+        return ApiResponse::bad_request("Missing expected_schedules");
+    };
+    let expected_schedules =
+        match serde_json::from_value::<Vec<rhythm_core::LightScheduleConfig>>(expected_value) {
+            Ok(schedules) => schedules,
+            Err(error) => {
+                return ApiResponse::bad_request(&format!("Invalid expected_schedules: {error}"))
+            }
+        };
+    match commands::do_light_schedules_set_guarded(state, schedules, expected_schedules) {
         Ok(json) => ApiResponse::json_ok(json),
         Err(error) => {
             light_schedule_mutation_error(state, "global", "light_schedule_config_updated", error)
@@ -1829,7 +1840,12 @@ pub fn handle_put_light_schedule_assignment(state: &SharedState, body: &Value) -
         return ApiResponse::bad_request("legacy and schedule_id are mutually exclusive");
     }
     if restore_legacy {
-        return match commands::do_light_schedule_assignment_clear(state, node_id, true) {
+        return match commands::do_light_schedule_assignment_clear_with_correlation(
+            state,
+            node_id,
+            correlation_id_from_body(body),
+            true,
+        ) {
             Ok(json) => ApiResponse::json_ok(json),
             Err(error) => light_schedule_mutation_error(
                 state,
@@ -1847,7 +1863,13 @@ pub fn handle_put_light_schedule_assignment(state: &SharedState, body: &Value) -
             None => return ApiResponse::bad_request("schedule_id must be a string or null"),
         },
     };
-    match commands::do_light_schedule_assignment_set(state, node_id, schedule_id, true) {
+    match commands::do_light_schedule_assignment_set_with_correlation(
+        state,
+        node_id,
+        schedule_id,
+        correlation_id_from_body(body),
+        true,
+    ) {
         Ok(json) => ApiResponse::json_ok(json),
         Err(error) => light_schedule_mutation_error(
             state,
@@ -7259,7 +7281,8 @@ mod tests {
                             "preserve_hard_off": true
                         }]
                     }
-                ]
+                ],
+                "expected_schedules": []
             }),
         );
         assert_eq!(response.status, 200, "{}", response.body);
@@ -7282,9 +7305,17 @@ mod tests {
 
         let indoor = handle_put_light_schedule_assignment(
             &state,
-            &json!({"node_id": "room1", "schedule_id": "indoor"}),
+            &json!({
+                "node_id": "room1",
+                "schedule_id": "indoor",
+                "correlation_id": "assignment-journey-1"
+            }),
         );
         assert_eq!(indoor.status, 200, "{}", indoor.body);
+        assert!(state.lock().unwrap().light_activity.iter().any(|entry| {
+            entry.action_id == "light_schedule_assignment_updated"
+                && entry.correlation_id.as_deref() == Some("assignment-journey-1")
+        }));
         let outdoor = handle_put_light_schedule_assignment(
             &state,
             &json!({"node_id": "room2", "schedule_id": "outdoor"}),
@@ -7384,6 +7415,9 @@ mod tests {
     #[test]
     fn named_schedule_override_is_sparse_conflict_safe_and_registry_guarded() {
         let state = handler_state_with_runtime();
+        let missing_registry_precondition =
+            handle_put_light_schedules(&state, &json!({"schedules": []}));
+        assert_eq!(missing_registry_precondition.status, 400);
         let configured = handle_put_light_schedules(
             &state,
             &json!({"schedules": [{
@@ -7400,7 +7434,7 @@ mod tests {
                     "duration_ms": {"mode": "fixed", "value": 0},
                     "preserve_hard_off": true
                 }]
-            }]}),
+            }], "expected_schedules": []}),
         );
         assert_eq!(configured.status, 200, "{}", configured.body);
         assert_eq!(
@@ -7469,6 +7503,11 @@ mod tests {
         );
         assert_eq!(stale.status, 400, "{}", stale.body);
 
+        let expected_schedules = state.lock().unwrap().light_schedule_configs();
+        let stale_registry =
+            handle_put_light_schedules(&state, &json!({"schedules": [], "expected_schedules": []}));
+        assert_eq!(stale_registry.status, 400, "{}", stale_registry.body);
+
         let removed_transition = handle_put_light_schedules(
             &state,
             &json!({"schedules": [{
@@ -7476,7 +7515,7 @@ mod tests {
                 "name": "Outdoor lights",
                 "active_mode": "sleep",
                 "transitions": []
-            }]}),
+            }], "expected_schedules": expected_schedules}),
         );
         assert_eq!(
             removed_transition.status, 400,
@@ -7538,7 +7577,7 @@ mod tests {
                         "duration_ms": {"mode": "auto"},
                         "preserve_hard_off": true
                     }]
-                }]}),
+                }], "expected_schedules": []}),
             );
             assert_eq!(response.status, 400, "{}", response.body);
         }
@@ -7562,7 +7601,7 @@ mod tests {
                     "duration_ms": {"mode": "fixed", "value": 500},
                     "preserve_hard_off": true
                 }]
-            }] }),
+            }], "expected_schedules": [] }),
         );
         assert_eq!(configured.status, 200, "{}", configured.body);
         assert_eq!(
@@ -7614,7 +7653,7 @@ mod tests {
                         "duration_ms": {"mode": "fixed", "value": 0},
                         "preserve_hard_off": true
                     }]
-                }] }),
+                }], "expected_schedules": [] }),
             )
             .status,
             200

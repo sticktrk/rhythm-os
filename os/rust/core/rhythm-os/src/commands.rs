@@ -1124,9 +1124,11 @@ impl RoomProfileSettingsPatch {
             // legacy global schedule.
             let light_schedule = settings.light_schedule.clone();
             let light_schedule_overrides = settings.light_schedule_overrides.clone();
+            let light_schedule_modes = settings.light_schedule_modes.clone();
             *settings = RoomProfileSettings::default();
             settings.light_schedule = light_schedule;
             settings.light_schedule_overrides = light_schedule_overrides;
+            settings.light_schedule_modes = light_schedule_modes;
             return;
         }
 
@@ -10583,6 +10585,15 @@ fn validate_effective_light_schedule_overrides(
                 )
             })?;
         }
+        for schedule_id in effective.light_schedule_modes.keys() {
+            if !schedules.contains_key(schedule_id.as_str()) {
+                return Err(anyhow::anyhow!(
+                    "Light schedule '{}' is still referenced by mode state on node '{}'",
+                    schedule_id,
+                    snapshot.id
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -10603,6 +10614,42 @@ pub fn do_light_schedules_set(
     state: &SharedState,
     schedules: Vec<rhythm_core::LightScheduleConfig>,
 ) -> Result<String> {
+    let write_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .light_schedule_write_lock
+        .clone();
+    let _write_guard = write_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("light schedule write lock"))?;
+    do_light_schedules_set_internal(state, schedules, true)
+}
+
+/// Replace the reusable schedule registry only when the caller reviewed the
+/// exact current registry. The registry includes `active_mode`, so this also
+/// prevents a stale editor from rolling back a newer automatic/manual mode.
+pub fn do_light_schedules_set_guarded(
+    state: &SharedState,
+    schedules: Vec<rhythm_core::LightScheduleConfig>,
+    expected_schedules: Vec<rhythm_core::LightScheduleConfig>,
+) -> Result<String> {
+    let write_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .light_schedule_write_lock
+        .clone();
+    let _write_guard = write_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("light schedule write lock"))?;
+    let current = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .light_schedule_configs();
+    if current != expected_schedules {
+        return Err(anyhow::anyhow!(
+            "light schedule registry precondition failed: live schedules changed"
+        ));
+    }
     do_light_schedules_set_internal(state, schedules, true)
 }
 
@@ -10613,6 +10660,14 @@ fn do_light_schedules_set_for_backup_restore(
     state: &SharedState,
     schedules: Vec<rhythm_core::LightScheduleConfig>,
 ) -> Result<String> {
+    let write_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .light_schedule_write_lock
+        .clone();
+    let _write_guard = write_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("light schedule write lock"))?;
     do_light_schedules_set_internal(state, schedules, false)
 }
 
@@ -10680,12 +10735,22 @@ pub fn do_light_schedule_assignment_set(
     schedule_id: Option<&str>,
     persist: bool,
 ) -> Result<String> {
+    do_light_schedule_assignment_set_with_correlation(state, node_id, schedule_id, None, persist)
+}
+
+pub fn do_light_schedule_assignment_set_with_correlation(
+    state: &SharedState,
+    node_id: &str,
+    schedule_id: Option<&str>,
+    correlation_id: Option<String>,
+    persist: bool,
+) -> Result<String> {
     let authority = schedule_id
         .map(str::trim)
         .filter(|id| !id.is_empty())
         .map(LightScheduleAuthority::Named)
         .unwrap_or(LightScheduleAuthority::Unscheduled);
-    do_light_schedule_authority_set(state, node_id, authority, persist)
+    do_light_schedule_authority_set(state, node_id, authority, correlation_id, persist)
 }
 
 /// Restore the compatibility state in which the appliance-wide legacy mode
@@ -10695,7 +10760,22 @@ pub fn do_light_schedule_assignment_clear(
     node_id: &str,
     persist: bool,
 ) -> Result<String> {
-    do_light_schedule_authority_set(state, node_id, LightScheduleAuthority::Legacy, persist)
+    do_light_schedule_assignment_clear_with_correlation(state, node_id, None, persist)
+}
+
+pub fn do_light_schedule_assignment_clear_with_correlation(
+    state: &SharedState,
+    node_id: &str,
+    correlation_id: Option<String>,
+    persist: bool,
+) -> Result<String> {
+    do_light_schedule_authority_set(
+        state,
+        node_id,
+        LightScheduleAuthority::Legacy,
+        correlation_id,
+        persist,
+    )
 }
 
 /// Replace or clear one node-local sparse override for a stable schedule ID.
@@ -10715,7 +10795,7 @@ pub fn do_light_schedule_override_set(
             "Light schedule override requires schedule_id"
         ));
     }
-    let inherited_mode_patch = {
+    let light_schedule_mode_patch = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let schedule = s.light_schedules.get(schedule_id).ok_or_else(|| {
             anyhow::anyhow!(
@@ -10739,7 +10819,13 @@ pub fn do_light_schedule_override_set(
                 "Schedule target must be a room or unassigned light node"
             ));
         }
-        if snapshot.profile_settings.light_schedule.is_none() {
+        if schedule_override.is_none() {
+            // The mode entry is materialized only to keep an inherited
+            // customized root independent. Resetting that schedule override
+            // must also retire its schedule-scoped mode so a later assignment
+            // cannot resurrect stale boundary authority.
+            Some(BTreeMap::from([(schedule_id.to_string(), None)]))
+        } else if snapshot.profile_settings.light_schedule.is_none() {
             let effective = runtime
                 .engine_effective_node_snapshot(node_id)
                 .ok_or_else(|| anyhow::anyhow!("Schedule target was not found"))?;
@@ -10749,13 +10835,7 @@ pub fn do_light_schedule_override_set(
                 .as_ref()
                 .filter(|assignment| assignment.schedule_id() == Some(schedule_id))
                 .and_then(rhythm_core::LightScheduleAssignment::active_mode)
-                .map(|mode| {
-                    if schedule_override.is_some() {
-                        Some(mode)
-                    } else {
-                        None
-                    }
-                })
+                .map(|mode| BTreeMap::from([(schedule_id.to_string(), Some(mode))]))
         } else {
             None
         }
@@ -10766,8 +10846,7 @@ pub fn do_light_schedule_override_set(
             schedule_id.to_string(),
             schedule_override,
         )]))),
-        light_schedule_modes: inherited_mode_patch
-            .map(|mode| BTreeMap::from([(schedule_id.to_string(), mode)])),
+        light_schedule_modes: light_schedule_mode_patch,
         expected_effective_light_schedule_overrides: expected_effective_overrides,
         ..RoomProfileSettingsPatch::default()
     };
@@ -10814,6 +10893,7 @@ fn do_light_schedule_authority_set(
     state: &SharedState,
     node_id: &str,
     authority: LightScheduleAuthority<'_>,
+    correlation_id: Option<String>,
     persist: bool,
 ) -> Result<String> {
     let (assignment, active_mode, binding_kind) = {
@@ -10903,6 +10983,7 @@ fn do_light_schedule_authority_set(
         "status": "applied",
         "binding_kind": binding_kind,
     }));
+    activity.correlation_id = correlation_id;
     crate::activity::record_light_activity(state, activity);
     build_node_state(state, node_id).and_then(|node| {
         serde_json::to_string(&serde_json::json!({ "nodes": [node] }))
@@ -10954,7 +11035,7 @@ fn selected_light_schedule_transition(
     }
 }
 
-fn apply_light_schedule_mode(
+fn apply_light_schedule_mode_internal(
     state: &SharedState,
     schedule_id: &str,
     target_mode: RhythmMode,
@@ -11021,6 +11102,14 @@ pub fn do_set_light_schedule_mode(
     target_mode: RhythmMode,
     selection: &ModeTransitionSelection,
 ) -> Result<AutomationActionOutcome> {
+    let write_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .light_schedule_write_lock
+        .clone();
+    let _write_guard = write_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("light schedule write lock"))?;
     let transition = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let schedule = s
@@ -11029,7 +11118,7 @@ pub fn do_set_light_schedule_mode(
             .ok_or_else(|| anyhow::anyhow!("Unknown light schedule '{}'", schedule_id))?;
         selected_light_schedule_transition(schedule, target_mode, selection)?
     };
-    apply_light_schedule_mode(state, schedule_id, target_mode, transition)
+    apply_light_schedule_mode_internal(state, schedule_id, target_mode, transition)
 }
 
 pub fn do_trigger_light_schedule_transition(
@@ -11037,6 +11126,14 @@ pub fn do_trigger_light_schedule_transition(
     schedule_id: &str,
     transition_id: &str,
 ) -> Result<AutomationActionOutcome> {
+    let write_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .light_schedule_write_lock
+        .clone();
+    let _write_guard = write_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("light schedule write lock"))?;
     let transition = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let schedule = s
@@ -11056,7 +11153,7 @@ pub fn do_trigger_light_schedule_transition(
                 )
             })?
     };
-    apply_light_schedule_mode(state, schedule_id, transition.to_mode, Some(transition))
+    apply_light_schedule_mode_internal(state, schedule_id, transition.to_mode, Some(transition))
 }
 
 /// Apply one automatic boundary to one addressable root. Unlike manual or
@@ -11218,6 +11315,15 @@ fn validate_imported_backup_configuration(configuration: &BackupConfiguration) -
                     error
                 )
             })?;
+        }
+        for schedule_id in room.room_profile.light_schedule_modes.keys() {
+            if !schedule_ids.contains(schedule_id.as_str()) {
+                return Err(anyhow::anyhow!(
+                    "Room '{}' mode state references unknown light schedule '{}'",
+                    room.id,
+                    schedule_id
+                ));
+            }
         }
     }
 
@@ -11698,6 +11804,30 @@ pub fn do_backup_restore(state: &SharedState, bundle: BackupBundle) -> Result<St
         )?;
     }
     validate_imported_backup_schedule_references(&bundle.configuration, &installation)?;
+    let imported_schedule_snapshots = installation
+        .rooms
+        .iter()
+        .map(|room| rhythm_core::NodeSnapshot {
+            id: room.id.clone(),
+            name: room.name.clone(),
+            kind: room.kind,
+            parent_id: room.parent_id.clone(),
+            rhythm_enabled: room.rhythm_enabled,
+            disabled: room.disabled,
+            time_offset_minutes: room.time_offset_minutes,
+            brightness_offset: room.brightness_offset,
+            soft_off: room.soft_off,
+            mood_active: room.mood_active,
+            standby_enabled: room.standby_enabled,
+            hard_off: room.hard_off,
+            profile_settings: room.profile_settings.clone(),
+        })
+        .collect::<Vec<_>>();
+    validate_effective_light_schedule_overrides(
+        &imported_schedule_snapshots,
+        &bundle.configuration.light_schedules,
+        None,
+    )?;
 
     let require_hue_authority = preflight_backup_integration_files(state, &installation)?;
 
@@ -20818,6 +20948,13 @@ mod tests {
         settings.light_schedule = Some(rhythm_core::LightScheduleAssignment::Unscheduled {
             active_mode: RhythmMode::Sleep,
         });
+        settings.light_schedule_overrides.insert(
+            "outdoor".to_string(),
+            rhythm_core::LightScheduleOverride::default(),
+        );
+        settings
+            .light_schedule_modes
+            .insert("outdoor".to_string(), RhythmMode::Sleep);
         clear_all.apply_to(&mut settings);
         assert_eq!(settings.profile_id, None);
         assert!(matches!(
@@ -20826,6 +20963,11 @@ mod tests {
                 active_mode: RhythmMode::Sleep
             })
         ));
+        assert!(settings.light_schedule_overrides.contains_key("outdoor"));
+        assert_eq!(
+            settings.light_schedule_modes.get("outdoor"),
+            Some(&RhythmMode::Sleep)
+        );
 
         let profile_overrides = BTreeMap::from([
             (
@@ -20890,6 +21032,8 @@ mod tests {
             motion_timeout_secs: Some(None),
             motion_activation_enabled: Some(None),
             light_schedule: Some(None),
+            light_schedule_overrides: Some(None),
+            light_schedule_modes: Some(BTreeMap::from([("outdoor".to_string(), None)])),
             profile_overrides: Some(None),
             ..Default::default()
         };
@@ -23943,6 +24087,57 @@ mod tests {
     }
 
     #[test]
+    fn schedule_mode_references_guard_registry_and_reset_with_override() {
+        let mut customized = make_snapshot("room1", false, false);
+        customized
+            .profile_settings
+            .light_schedule_modes
+            .insert("outdoor".to_string(), RhythmMode::Sleep);
+        let (state, runtime) = setup_state(vec![customized]);
+        let snapshots = runtime.engine_all_node_snapshots();
+        let missing =
+            validate_effective_light_schedule_overrides(&snapshots, &[], None).unwrap_err();
+        assert!(missing
+            .to_string()
+            .contains("still referenced by mode state on node 'room1'"));
+        do_light_schedules_set(&state, vec![backup_test_light_schedule("outdoor")]).unwrap();
+        do_light_schedule_override_set(
+            &state,
+            "room1",
+            "outdoor",
+            None,
+            Some(BTreeMap::new()),
+            Some("override-reset-1".to_string()),
+            false,
+        )
+        .unwrap();
+
+        assert!(!runtime
+            .engine_node_snapshot("room1")
+            .unwrap()
+            .profile_settings
+            .light_schedule_modes
+            .contains_key("outdoor"));
+
+        let reviewed_registry = state.lock().unwrap().light_schedule_configs();
+        do_set_light_schedule_mode(
+            &state,
+            "outdoor",
+            RhythmMode::Sleep,
+            &crate::topology::ModeTransitionSelection::None,
+        )
+        .unwrap();
+        let stale =
+            do_light_schedules_set_guarded(&state, reviewed_registry.clone(), reviewed_registry)
+                .unwrap_err();
+        assert!(stale.to_string().contains("registry precondition failed"));
+        assert_eq!(
+            state.lock().unwrap().light_schedules["outdoor"].active_mode,
+            RhythmMode::Sleep
+        );
+    }
+
+    #[test]
     fn backup_restore_replaces_light_schedule_overrides_exactly() {
         let (source_state, _source_runtime) =
             setup_state(vec![make_snapshot("room1", false, false)]);
@@ -24046,6 +24241,85 @@ mod tests {
         let target = target_state.lock().unwrap();
         assert!(target.light_schedules.contains_key("old"));
         assert!(!target.light_schedules.contains_key("new"));
+    }
+
+    #[test]
+    fn backup_restore_rejects_invalid_effective_merged_schedule_override_before_mutation() {
+        let parent = make_snapshot("parent", false, false);
+        let mut child = make_snapshot("child", false, false);
+        child.parent_id = Some("parent".to_string());
+        let (source_state, _source_runtime) = setup_state(vec![parent, child]);
+        source_state
+            .lock()
+            .unwrap()
+            .set_light_schedule_configs(vec![backup_test_light_schedule("outdoor")]);
+        let mut bundle = build_backup_bundle_dto(&source_state, false).unwrap();
+        bundle
+            .installation
+            .rooms
+            .get_mut("parent")
+            .unwrap()
+            .profile_settings
+            .light_schedule_overrides
+            .insert(
+                "outdoor".to_string(),
+                rhythm_core::LightScheduleOverride {
+                    transitions: BTreeMap::from([(
+                        "outdoor_sleep".to_string(),
+                        rhythm_core::ModeTransitionOverride {
+                            trigger: rhythm_core::ModeTransitionTriggerOverride {
+                                kind: Some(rhythm_core::ModeTransitionTriggerType::Scheduled),
+                                time: Some(
+                                    rhythm_core::ModeTransitionTime::from_hour_minute(22, 45)
+                                        .unwrap(),
+                                ),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                    )]),
+                },
+            );
+        bundle
+            .installation
+            .rooms
+            .get_mut("child")
+            .unwrap()
+            .profile_settings
+            .light_schedule_overrides
+            .insert(
+                "outdoor".to_string(),
+                rhythm_core::LightScheduleOverride {
+                    transitions: BTreeMap::from([(
+                        "outdoor_sleep".to_string(),
+                        rhythm_core::ModeTransitionOverride {
+                            trigger: rhythm_core::ModeTransitionTriggerOverride {
+                                event: Some(rhythm_core::SolarEvent::Sunset),
+                                ..Default::default()
+                            },
+                            ..Default::default()
+                        },
+                    )]),
+                },
+            );
+
+        let (target_state, _target_runtime) = setup_state(Vec::new());
+        target_state
+            .lock()
+            .unwrap()
+            .set_light_schedule_configs(vec![backup_test_light_schedule("old")]);
+
+        let error = do_backup_restore(&target_state, bundle).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("Effective light schedule override on node 'child' is invalid"),
+            "unexpected error: {error}"
+        );
+        let target = target_state.lock().unwrap();
+        assert!(target.light_schedules.contains_key("old"));
+        assert!(!target.light_schedules.contains_key("outdoor"));
     }
 
     #[test]

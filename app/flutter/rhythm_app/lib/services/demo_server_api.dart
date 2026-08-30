@@ -5,6 +5,7 @@
 library;
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:dio/dio.dart';
 import 'package:rhythm_core/rhythm_core.dart';
@@ -854,9 +855,19 @@ class DemoServerApi extends RhythmServerApi {
 
   @override
   Future<List<RhythmLightScheduleConfig>> setLightSchedules(
-    List<RhythmLightScheduleConfig> schedules,
-  ) async {
+    List<RhythmLightScheduleConfig> schedules, {
+    required List<RhythmLightScheduleConfig> expectedSchedules,
+  }) async {
     ensureSeeded();
+    final live = jsonEncode(
+      _lightSchedules.map((schedule) => schedule.toJson()).toList(),
+    );
+    final expected = jsonEncode(
+      expectedSchedules.map((schedule) => schedule.toJson()).toList(),
+    );
+    if (live != expected) {
+      throw StateError('light schedule registry precondition failed');
+    }
     _lightSchedules = List<RhythmLightScheduleConfig>.from(schedules);
     _changes.add(null);
     return getLightSchedules();
@@ -866,6 +877,7 @@ class DemoServerApi extends RhythmServerApi {
   Future<RhythmRoomState?> setLightScheduleAssignment({
     required String nodeId,
     required String? scheduleId,
+    String? correlationId,
   }) async {
     ensureSeeded();
     final node = _nodeStates[nodeId];
@@ -889,6 +901,7 @@ class DemoServerApi extends RhythmServerApi {
   @override
   Future<RhythmRoomState?> clearLightScheduleAssignment({
     required String nodeId,
+    String? correlationId,
   }) async {
     ensureSeeded();
     final node = _nodeStates[nodeId];

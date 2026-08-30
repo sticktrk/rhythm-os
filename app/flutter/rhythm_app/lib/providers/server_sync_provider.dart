@@ -4775,7 +4775,10 @@ class ServerSyncProvider extends ChangeNotifier {
     _lightSchedulesSavePending = true;
     notifyListeners();
     try {
-      final authoritative = await api.setLightSchedules(optimistic);
+      final authoritative = await api.setLightSchedules(
+        optimistic,
+        expectedSchedules: previous,
+      );
       _lightSchedules = List<RhythmLightScheduleConfig>.unmodifiable(
         authoritative,
       );
@@ -4786,6 +4789,7 @@ class ServerSyncProvider extends ChangeNotifier {
       if (identical(_lightSchedules, optimistic)) {
         _lightSchedules = previous;
       }
+      await loadLightSchedules(force: true);
       return false;
     } finally {
       _lightSchedulesSavePending = false;
@@ -4797,6 +4801,7 @@ class ServerSyncProvider extends ChangeNotifier {
     String nodeId,
     String? scheduleId, {
     bool legacy = false,
+    String? journeyId,
   }) async {
     if (!lightSchedulesSupported ||
         _lightScheduleNodeWritesPending.contains(nodeId) ||
@@ -4808,10 +4813,14 @@ class ServerSyncProvider extends ChangeNotifier {
     notifyListeners();
     try {
       final authoritative = legacy
-          ? await api.clearLightScheduleAssignment(nodeId: nodeId)
+          ? await api.clearLightScheduleAssignment(
+              nodeId: nodeId,
+              correlationId: journeyId,
+            )
           : await api.setLightScheduleAssignment(
               nodeId: nodeId,
               scheduleId: scheduleId,
+              correlationId: journeyId,
             );
       if (authoritative == null) {
         _lightScheduleNodeWriteErrors.add(nodeId);

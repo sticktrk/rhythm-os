@@ -47,7 +47,12 @@ class _LightScheduleAssignmentCardState
     final node = sync.nodeById(widget.nodeId);
     final assignment = node?.profileSettings?.lightSchedule;
     final localAssignment = node?.localProfileSettings?.lightSchedule;
-    if (assignment == null) return 'Legacy whole-home Alarm';
+    if (assignment == null) {
+      return node?.profileSettings?.roomSchedule?.source ==
+              RhythmRoomScheduleSource.followTime
+          ? 'Legacy custom time'
+          : 'Legacy whole-home Alarm';
+    }
     if (assignment.isUnscheduled) return 'No automatic schedule';
     final schedule = sync.lightSchedules
         .where((value) => value.id == assignment.scheduleId)
@@ -62,30 +67,64 @@ class _LightScheduleAssignmentCardState
   Future<void> _assign(String? scheduleId, {bool legacy = false}) async {
     final sync = context.read<ServerSyncProvider>();
     final journeyId = 'light-schedule-assignment-${_uuid.v4()}';
-    final assignmentKind = legacy
-        ? 'legacy'
-        : scheduleId == null
-            ? 'unscheduled'
-            : 'named';
+    final node = sync.nodeById(widget.nodeId);
+    final legacySchedule = node?.profileSettings?.roomSchedule;
+    final selectedSchedule = sync.lightSchedules
+        .where((schedule) => schedule.id == scheduleId)
+        .firstOrNull;
+    final migratesLegacyTimes = !legacy &&
+        selectedSchedule != null &&
+        node?.profileSettings?.lightSchedule == null &&
+        legacySchedule?.source == RhythmRoomScheduleSource.followTime;
+    final assignmentKind = migratesLegacyTimes
+        ? 'legacy_migration'
+        : legacy
+            ? 'legacy'
+            : scheduleId == null
+                ? 'unscheduled'
+                : 'named';
+    final overrideScope = migratesLegacyTimes ? 'legacy_times' : 'none';
     unawaited(
       AnalyticsService().logLightScheduleAssignmentAttempted(
         journeyId: journeyId,
         assignmentKind: assignmentKind,
-        overrideScope: 'none',
+        overrideScope: overrideScope,
       ),
     );
-    final ok = await sync.setNodeLightScheduleAssignment(
-      widget.nodeId,
-      scheduleId,
-      legacy: legacy,
-    );
+    var failureStage = 'assignment_ack';
+    var ok = true;
+    if (migratesLegacyTimes) {
+      final migrationOverride = _legacyTimeMigrationOverride(
+        node,
+        selectedSchedule,
+        legacySchedule!,
+      );
+      if (migrationOverride != null) {
+        ok = await sync.setNodeLightScheduleOverride(
+          widget.nodeId,
+          selectedSchedule.id,
+          migrationOverride,
+          journeyId: journeyId,
+        );
+        failureStage = 'override_ack';
+      }
+    }
+    if (ok) {
+      failureStage = 'assignment_ack';
+      ok = await sync.setNodeLightScheduleAssignment(
+        widget.nodeId,
+        scheduleId,
+        legacy: legacy,
+        journeyId: journeyId,
+      );
+    }
     unawaited(
       AnalyticsService().logLightScheduleAssignmentCompleted(
         journeyId: journeyId,
         assignmentKind: assignmentKind,
-        overrideScope: 'none',
+        overrideScope: overrideScope,
         outcome: ok ? 'succeeded' : 'failed',
-        failureStage: ok ? null : 'appliance_ack',
+        failureStage: ok ? null : failureStage,
       ),
     );
     if (!mounted) return;
@@ -96,6 +135,47 @@ class _LightScheduleAssignmentCardState
         const SnackBar(content: Text('Could not change the schedule.')),
       );
     }
+  }
+
+  RhythmLightScheduleOverride? _legacyTimeMigrationOverride(
+    RhythmRoom? node,
+    RhythmLightScheduleConfig schedule,
+    RhythmRoomSchedule legacySchedule,
+  ) {
+    final effective = node?.profileSettings?.lightScheduleOverrides[schedule.id];
+    final local = node?.localProfileSettings?.lightScheduleOverrides[schedule.id];
+    final transitions = Map<String, RhythmModeTransitionOverride>.from(
+      local?.transitions ?? const {},
+    );
+    var changed = false;
+    for (final transition in schedule.transitions) {
+      final legacyTime = switch (transition.toMode) {
+        RhythmMode.day => legacySchedule.wakeTime,
+        RhythmMode.sleep => legacySchedule.sleepTime,
+      };
+      final effectiveTransition = effective?.transitions[transition.id];
+      final effectiveKind =
+          effectiveTransition?.trigger.kind ?? transition.trigger.kind;
+      final effectiveTime = effectiveTransition?.trigger.time ??
+          (transition.trigger.isScheduled ? transition.trigger.time : null);
+      if (effectiveKind == 'scheduled' && effectiveTime == legacyTime) {
+        continue;
+      }
+      final current = transitions[transition.id];
+      transitions[transition.id] = RhythmModeTransitionOverride(
+        trigger: RhythmTransitionTriggerOverride(
+          kind: effectiveKind == 'scheduled' ? null : 'scheduled',
+          time: legacyTime,
+        ),
+        triggerEnabled: current?.triggerEnabled,
+        duration: current?.duration,
+        preserveHardOff: current?.preserveHardOff,
+      );
+      changed = true;
+    }
+    return changed
+        ? RhythmLightScheduleOverride(transitions: transitions)
+        : null;
   }
 
   Future<void> _chooseAssignment() async {

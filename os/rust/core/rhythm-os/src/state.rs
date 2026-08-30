@@ -395,6 +395,9 @@ pub struct AppState {
     pub mode_transition_configs: Vec<ModeTransitionConfig>,
     /// Reusable named schedules keyed by stable schedule ID.
     pub light_schedules: BTreeMap<String, LightScheduleConfig>,
+    /// Serializes exact-registry compare-and-set mutations across HTTP,
+    /// backup, automation, and direct command callers.
+    pub light_schedule_write_lock: Arc<Mutex<()>>,
     /// Stored scene definitions keyed by scene ID.
     pub scenes: BTreeMap<String, crate::scenes::SceneDefinition>,
     /// Ephemeral light scene previews keyed by preview ID.
@@ -998,6 +1001,7 @@ impl Default for AppState {
             mode_configs: default_mode_config_map(),
             mode_transition_configs: factory_default_mode_transition_configs(),
             light_schedules: BTreeMap::new(),
+            light_schedule_write_lock: Arc::new(Mutex::new(())),
             scenes: default_scene_map(),
             light_scene_previews: HashMap::new(),
             scene_lifecycle_transaction_lock: Arc::new(Mutex::new(())),
