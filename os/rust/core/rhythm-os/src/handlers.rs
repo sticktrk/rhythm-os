@@ -7286,6 +7286,17 @@ mod tests {
             }),
         );
         assert_eq!(response.status, 200, "{}", response.body);
+        let registry: Value = serde_json::from_str(&response.body).unwrap();
+        let outdoor_resolution = registry["schedules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|schedule| schedule["id"] == "outdoor")
+            .unwrap();
+        assert_eq!(
+            outdoor_resolution["resolved_transitions"]["outdoor_sleep"],
+            "23:30"
+        );
 
         let bypass = handle_put_node_preferences(
             &state,

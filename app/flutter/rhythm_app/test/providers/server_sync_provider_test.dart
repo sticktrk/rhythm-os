@@ -1963,6 +1963,10 @@ void main() {
       id: 'outdoor',
       name: 'Outdoor',
       activeMode: RhythmMode.sleep,
+      resolvedTransitions: {'wake': '07:00'},
+      resolvedTransitionsByNode: {
+        'room-1': {'wake': '06:45'},
+      },
       transitions: [
         RhythmModeTransitionConfig(
           id: 'wake',
@@ -2001,6 +2005,7 @@ void main() {
       WidgetTester tester, {
       bool overrideSucceeds = true,
       bool assignmentSucceeds = true,
+      RhythmLightScheduleConfig schedule = outdoorSchedule,
     }) async {
       final roomProvider = RoomProvider();
       const legacySchedule = RhythmRoomSchedule(
@@ -2012,7 +2017,7 @@ void main() {
         'room_schedule': legacySchedule.toJson(),
       };
       final api = _FakeRhythmServerApi()
-        ..lightSchedules = [outdoorSchedule]
+        ..lightSchedules = [schedule]
         ..lightScheduleOverrideWritesSucceed = overrideSucceeds
         ..lightScheduleAssignmentWritesSucceed = assignmentSucceeds
         ..lightScheduleOverrideBaseProfileSettings = legacyProfile;
@@ -2075,6 +2080,36 @@ void main() {
       expect(
         result.provider.nodeById('room-1')?.profileSettings?.lightScheduleId,
         'outdoor',
+      );
+    });
+
+    testWidgets('legacy migration leaves manual transition IDs untouched',
+        (tester) async {
+      final result = await pumpLegacyMigration(
+        tester,
+        schedule: RhythmLightScheduleConfig(
+          id: outdoorSchedule.id,
+          name: outdoorSchedule.name,
+          activeMode: outdoorSchedule.activeMode,
+          transitions: [
+            ...outdoorSchedule.transitions,
+            const RhythmModeTransitionConfig(
+              id: 'physical-wake',
+              label: 'Physical Wake',
+              fromMode: RhythmMode.sleep,
+              toMode: RhythmMode.day,
+              trigger: RhythmTransitionTrigger.manual(),
+              duration: TransitionDuration.auto(),
+              preserveHardOff: true,
+            ),
+          ],
+        ),
+      );
+
+      expect(
+        result.api.lightScheduleOverrideCalls.single.scheduleOverride
+            ?.transitions.keys,
+        ['wake'],
       );
     });
 
@@ -2309,11 +2344,103 @@ void main() {
         find.byKey(const ValueKey('schedule-resolved-time-Sleep Start')),
         findsOneWidget,
       );
-      expect(find.text('Temporarily unavailable today'), findsOneWidget);
+      expect(find.text('Save to resolve on the appliance'), findsOneWidget);
       final slider = tester.widget<Slider>(
         find.byKey(const ValueKey('schedule-offset-Day Start')),
       );
       expect(slider.divisions, maxSolarScheduleOffsetMinutes * 2);
+    });
+
+    testWidgets('base editor preserves unrelated and manual transition IDs',
+        (tester) async {
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()
+        ..lightSchedules = const [
+          RhythmLightScheduleConfig(
+            id: 'outdoor',
+            name: 'Outdoor',
+            transitions: [
+              RhythmModeTransitionConfig(
+                id: 'day_start',
+                label: 'Day Start',
+                fromMode: RhythmMode.sleep,
+                toMode: RhythmMode.day,
+                trigger: RhythmTransitionTrigger.scheduled('07:00'),
+                duration: TransitionDuration.auto(),
+                preserveHardOff: true,
+              ),
+              RhythmModeTransitionConfig(
+                id: 'sleep_start',
+                label: 'Sleep Start',
+                fromMode: RhythmMode.day,
+                toMode: RhythmMode.sleep,
+                trigger: RhythmTransitionTrigger.scheduled('22:00'),
+                duration: TransitionDuration.auto(),
+                preserveHardOff: true,
+              ),
+              RhythmModeTransitionConfig(
+                id: 'physical-wake',
+                label: 'Physical Wake',
+                fromMode: RhythmMode.sleep,
+                toMode: RhythmMode.day,
+                trigger: RhythmTransitionTrigger.manual(),
+                duration: TransitionDuration.auto(),
+                preserveHardOff: true,
+              ),
+              RhythmModeTransitionConfig(
+                id: 'vacation-wake',
+                label: 'Vacation Wake',
+                fromMode: RhythmMode.sleep,
+                toMode: RhythmMode.day,
+                trigger: RhythmTransitionTrigger.scheduled('09:00'),
+                duration: TransitionDuration.auto(),
+                preserveHardOff: true,
+              ),
+            ],
+          ),
+        ];
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+      connection.emitHello(namedScheduleHello());
+      await tester.pump();
+      await provider.loadLightSchedules();
+      await tester.pumpWidget(_buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const LightSchedulesScreen(),
+      ));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('light-schedule-outdoor')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+
+      final saved = api.lightSchedules.single;
+      expect(
+        saved.transitions.map((transition) => transition.id),
+        containsAll(<String>[
+          'day_start',
+          'sleep_start',
+          'physical-wake',
+          'vacation-wake',
+        ]),
+      );
+      expect(saved.transitions, hasLength(4));
+      expect(
+        saved.transitions
+            .singleWhere((transition) => transition.id == 'physical-wake')
+            .trigger
+            .isManual,
+        isTrue,
+      );
     });
 
     testWidgets('resetting a local trigger kind reveals the parent kind',

@@ -10599,10 +10599,31 @@ fn validate_effective_light_schedule_overrides(
 }
 
 pub fn build_light_schedules(state: &SharedState) -> Result<String> {
+    let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let schedules = state
-        .lock()
-        .map_err(|_| anyhow::anyhow!("lock"))?
-        .light_schedule_configs();
+        .light_schedule_configs()
+        .into_iter()
+        .map(|schedule| {
+            let (resolved_transitions, resolved_transitions_by_node) =
+                crate::periodic::resolved_light_schedule_local_times(&state, &schedule);
+            let mut value = serde_json::to_value(&schedule)
+                .map_err(|error| anyhow::anyhow!("serialize: {}", error))?;
+            let object = value
+                .as_object_mut()
+                .ok_or_else(|| anyhow::anyhow!("serialize: light schedule is not an object"))?;
+            object.insert(
+                "resolved_transitions".to_string(),
+                serde_json::to_value(resolved_transitions)
+                    .map_err(|error| anyhow::anyhow!("serialize: {}", error))?,
+            );
+            object.insert(
+                "resolved_transitions_by_node".to_string(),
+                serde_json::to_value(resolved_transitions_by_node)
+                    .map_err(|error| anyhow::anyhow!("serialize: {}", error))?,
+            );
+            Ok(value)
+        })
+        .collect::<Result<Vec<_>>>()?;
     serde_json::to_string(&serde_json::json!({ "schedules": schedules }))
         .map_err(|error| anyhow::anyhow!("serialize: {}", error))
 }

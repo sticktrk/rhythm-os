@@ -292,9 +292,17 @@ class _LightScheduleEditorState extends State<_LightScheduleEditor> {
     RhythmLightScheduleConfig? schedule,
     RhythmMode target,
   ) {
-    final existing = schedule?.transitions
-        .where((value) => value.toMode == target)
+    final preferredId = target == RhythmMode.day ? 'day_start' : 'sleep_start';
+    final candidates = schedule?.transitions
+            .where((value) =>
+                value.toMode == target && !value.trigger.isManual)
+            .toList(growable: false) ??
+        const <RhythmModeTransitionConfig>[];
+    final preferred = candidates
+        .where((value) => value.id == preferredId)
         .firstOrNull;
+    final existing =
+        preferred ?? (candidates.length == 1 ? candidates.single : null);
     if (existing != null) return existing;
     final isDay = target == RhythmMode.day;
     return RhythmModeTransitionConfig(
@@ -319,13 +327,20 @@ class _LightScheduleEditorState extends State<_LightScheduleEditor> {
     final name = _name.text.trim();
     if (name.isEmpty) return;
     final id = widget.schedule?.id ?? _slug(name);
+    final editedIds = {_day.id, _sleep.id};
     Navigator.of(context).pop(
       RhythmLightScheduleConfig(
         id: id,
         name: name,
         enabled: _enabled,
         activeMode: widget.schedule?.activeMode ?? RhythmMode.day,
-        transitions: [_day, _sleep],
+        transitions: [
+          for (final transition in widget.schedule?.transitions ??
+              const <RhythmModeTransitionConfig>[])
+            if (!editedIds.contains(transition.id)) transition,
+          _day,
+          _sleep,
+        ],
       ),
     );
   }
@@ -338,6 +353,33 @@ class _LightScheduleEditorState extends State<_LightScheduleEditor> {
     return slug.isEmpty
         ? 'schedule-${const Uuid().v4().substring(0, 8)}'
         : slug;
+  }
+
+  RhythmModeTransitionConfig? _savedTransition(
+    RhythmModeTransitionConfig transition,
+  ) => widget.schedule?.transitions
+      .where((saved) => saved.id == transition.id)
+      .firstOrNull;
+
+  bool _triggerMatchesSaved(RhythmModeTransitionConfig transition) {
+    final saved = _savedTransition(transition);
+    if (saved == null) return false;
+    return saved.trigger.kind == transition.trigger.kind &&
+        saved.trigger.event == transition.trigger.event &&
+        saved.trigger.time == transition.trigger.time &&
+        saved.trigger.offsetMinutes == transition.trigger.offsetMinutes;
+  }
+
+  String? _resolvedTime(
+    ServerSyncProvider sync,
+    RhythmModeTransitionConfig transition,
+  ) {
+    final schedule = widget.schedule;
+    if (schedule == null || !_triggerMatchesSaved(transition)) return null;
+    return sync.resolvedBaseLightScheduleTransitionLocalTime(
+      schedule,
+      transition,
+    );
   }
 
   @override
@@ -380,8 +422,8 @@ class _LightScheduleEditorState extends State<_LightScheduleEditor> {
             transition: _day,
             dayBoundary: true,
             solarAvailable: solarAvailable,
-            resolvedLocalTime:
-                sync.resolvedBaseLightScheduleTransitionLocalTime(_day),
+            resolvedLocalTime: _resolvedTime(sync, _day),
+            resolutionPending: !_triggerMatchesSaved(_day),
             onChanged: (value) => setState(() => _day = value),
           ),
           const SizedBox(height: 16),
@@ -390,8 +432,8 @@ class _LightScheduleEditorState extends State<_LightScheduleEditor> {
             transition: _sleep,
             dayBoundary: false,
             solarAvailable: solarAvailable,
-            resolvedLocalTime:
-                sync.resolvedBaseLightScheduleTransitionLocalTime(_sleep),
+            resolvedLocalTime: _resolvedTime(sync, _sleep),
+            resolutionPending: !_triggerMatchesSaved(_sleep),
             onChanged: (value) => setState(() => _sleep = value),
           ),
         ],
@@ -407,6 +449,7 @@ class _TransitionEditor extends StatelessWidget {
     required this.dayBoundary,
     required this.solarAvailable,
     required this.resolvedLocalTime,
+    required this.resolutionPending,
     required this.onChanged,
   });
 
@@ -415,6 +458,7 @@ class _TransitionEditor extends StatelessWidget {
   final bool dayBoundary;
   final bool solarAvailable;
   final String? resolvedLocalTime;
+  final bool resolutionPending;
   final ValueChanged<RhythmModeTransitionConfig> onChanged;
 
   static const _events = [
@@ -529,8 +573,10 @@ class _TransitionEditor extends StatelessWidget {
             ),
             const SizedBox(height: 4),
             Text(
-              resolvedLocalTime == null
-                  ? 'Temporarily unavailable today'
+              resolutionPending
+                  ? 'Save to resolve on the appliance'
+                  : resolvedLocalTime == null
+                      ? 'Temporarily unavailable today'
                   : 'Today · $resolvedLocalTime local',
               key: ValueKey('schedule-resolved-time-$title'),
               style: TextStyle(

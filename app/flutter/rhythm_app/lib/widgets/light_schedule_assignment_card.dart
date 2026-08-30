@@ -148,7 +148,7 @@ class _LightScheduleAssignmentCardState
       local?.transitions ?? const {},
     );
     var changed = false;
-    for (final transition in schedule.transitions) {
+    for (final transition in _automaticBoundaryTransitions(schedule)) {
       final legacyTime = switch (transition.toMode) {
         RhythmMode.day => legacySchedule.wakeTime,
         RhythmMode.sleep => legacySchedule.sleepTime,
@@ -176,6 +176,25 @@ class _LightScheduleAssignmentCardState
     return changed
         ? RhythmLightScheduleOverride(transitions: transitions)
         : null;
+  }
+
+  Iterable<RhythmModeTransitionConfig> _automaticBoundaryTransitions(
+    RhythmLightScheduleConfig schedule,
+  ) sync* {
+    for (final target in [RhythmMode.day, RhythmMode.sleep]) {
+      final preferredId =
+          target == RhythmMode.day ? 'day_start' : 'sleep_start';
+      final candidates = schedule.transitions
+          .where((transition) =>
+              transition.toMode == target && !transition.trigger.isManual)
+          .toList(growable: false);
+      final preferred = candidates
+          .where((transition) => transition.id == preferredId)
+          .firstOrNull;
+      final boundary =
+          preferred ?? (candidates.length == 1 ? candidates.single : null);
+      if (boundary != null) yield boundary;
+    }
   }
 
   Future<void> _chooseAssignment() async {
@@ -565,7 +584,9 @@ class _LightScheduleAssignmentCardState
     final scheduleId = _retryScheduleId;
     final journeyId = _retryJourneyId;
     final overrideScope = _retryOverrideScope;
-    if (scheduleId == null || journeyId == null || overrideScope == null) return;
+    if (scheduleId == null || journeyId == null || overrideScope == null) {
+      return;
+    }
     unawaited(AnalyticsService().logLightScheduleAssignmentAttempted(
       journeyId: journeyId,
       assignmentKind: 'named',

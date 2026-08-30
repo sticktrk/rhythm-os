@@ -54,6 +54,10 @@ class DemoServerApi extends RhythmServerApi {
     RhythmLightScheduleConfig(
       id: 'outdoor',
       name: 'Outdoor',
+      resolvedTransitions: {
+        'day_start': '06:45',
+        'sleep_start': '19:30',
+      },
       transitions: [
         RhythmModeTransitionConfig(
           id: 'day_start',

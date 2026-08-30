@@ -10,7 +10,7 @@
 //! `std::thread::sleep` and `SystemTimeProvider`. On rhythm-server,
 //! this runs inside `tokio::task::spawn_blocking()`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -1115,18 +1115,30 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
     // Only the mode-transition side effects stay breaker-gated.
     {
         let current_hour = SystemTimeProvider::new(utc_offset).current_hour();
+        let observed_at = Instant::now();
+        let previous_observed_at = state.lock().ok().and_then(|s| s.last_check_instant);
+        let current_utc = chrono::Utc::now().naive_utc();
         let time_check = check_solar_midnight_at_gated(
             &state,
             current_hour,
             utc_offset,
-            Instant::now(),
+            observed_at,
             light_breaker_enabled,
         );
         if light_breaker_enabled {
             match time_check {
                 PeriodicTimeCheckResult::Continuous { last_hour } => {
                     check_mode_transitions(&state, last_hour, current_hour);
-                    check_light_schedule_transitions(&state, last_hour, current_hour);
+                    if let Some(previous_observed_at) = previous_observed_at {
+                        let elapsed = observed_at.saturating_duration_since(previous_observed_at);
+                        if let Ok(elapsed) = chrono::Duration::from_std(elapsed) {
+                            check_light_schedule_transitions_between(
+                                &state,
+                                current_utc - elapsed,
+                                current_utc,
+                            );
+                        }
+                    }
                 }
                 PeriodicTimeCheckResult::Seeded | PeriodicTimeCheckResult::Discontinuous { .. } => {
                     replay_missed_mode_transitions(&state);
@@ -1472,6 +1484,23 @@ fn trigger_hour_for_local_date(
     target_date: chrono::NaiveDate,
 ) -> Option<f32> {
     let target_midnight = target_date.and_hms_opt(0, 0, 0)?;
+    let occurrence =
+        resolved_trigger_occurrence_for_local_date(trigger, target_mode, ctx, target_date)?;
+    Some(
+        occurrence
+            .local
+            .signed_duration_since(target_midnight)
+            .num_milliseconds() as f32
+            / 3_600_000.0,
+    )
+}
+
+fn resolved_trigger_occurrence_for_local_date(
+    trigger: rhythm_core::ModeTransitionTrigger,
+    target_mode: rhythm_core::RhythmMode,
+    ctx: SolarTriggerContext<'_>,
+    target_date: chrono::NaiveDate,
+) -> Option<ResolvedTriggerOccurrence> {
     // Offsets are bounded to +/- 12 hours, so the occurrence that lands on
     // this local date can be anchored only to the previous, current, or next
     // solar source date. Looking at the target date alone would attach an
@@ -1488,13 +1517,7 @@ fn trigger_hour_for_local_date(
             continue;
         };
         if occurrence.local.date() == target_date {
-            return Some(
-                occurrence
-                    .local
-                    .signed_duration_since(target_midnight)
-                    .num_milliseconds() as f32
-                    / 3_600_000.0,
-            );
+            return Some(occurrence);
         }
     }
     None
@@ -1520,12 +1543,16 @@ fn resolved_trigger_occurrence_for_source_date(
     }
     let source_midnight = date.and_hms_opt(0, 0, 0)?;
     if let Some(time) = trigger.scheduled_time() {
+        let local = source_midnight
+            + chrono::Duration::milliseconds((time.local_hour() * 3_600_000.0).round() as i64);
         return Some(ResolvedTriggerOccurrence {
-            local: source_midnight
-                + chrono::Duration::milliseconds((time.local_hour() * 3_600_000.0).round() as i64),
-            // Scheduled rules are wall-clock policies. Replay resolves this
-            // local time with its existing fixed-offset/timezone contract.
-            utc: None,
+            local,
+            // Scheduled rules are wall-clock policies. During fall-back the
+            // first occurrence is deterministic; a nonexistent spring-forward
+            // time remains unavailable for that date.
+            utc: ctx.timezone_name.and_then(|tz_name| {
+                rhythm_core::Timezone::new(tz_name).earliest_utc_datetime_from_local(local)
+            }),
         });
     }
 
@@ -1674,7 +1701,7 @@ fn utc_datetime_from_local(
     timezone_name: Option<&str>,
 ) -> Option<chrono::NaiveDateTime> {
     if let Some(tz_name) = timezone_name {
-        rhythm_core::Timezone::new(tz_name).utc_datetime_from_local(local)
+        rhythm_core::Timezone::new(tz_name).earliest_utc_datetime_from_local(local)
     } else {
         Some(local - chrono::Duration::seconds((utc_offset * 3600.0) as i64))
     }
@@ -1884,9 +1911,180 @@ pub fn check_mode_transitions(state: &SharedState, last_hour: f32, current_hour:
     }
 }
 
-/// Trigger every enabled named light schedule independently. Physical button
-/// triggers enter through `AutomationAction::LightScheduleMode*`; this pass
-/// owns only clock and solar triggers.
+fn resolved_transition_local_times(
+    schedule: &rhythm_core::LightScheduleConfig,
+    solar: SolarTriggerContext<'_>,
+    local_date: chrono::NaiveDate,
+) -> BTreeMap<String, String> {
+    schedule
+        .transitions
+        .iter()
+        .filter_map(|transition| {
+            let occurrence = resolved_trigger_occurrence_for_local_date(
+                transition.trigger,
+                transition.to_mode,
+                solar,
+                local_date,
+            )?;
+            if solar.timezone_name.is_some() && occurrence.utc.is_none() {
+                return None;
+            }
+            let rounded = occurrence.local + chrono::Duration::seconds(30);
+            Some((transition.id.clone(), rounded.format("%H:%M").to_string()))
+        })
+        .collect()
+}
+
+/// Appliance-authoritative local display times for a base schedule and every
+/// currently addressable node using that schedule. These use the same
+/// adjacent-date and exact-UTC resolver as dispatch.
+pub(crate) fn resolved_light_schedule_local_times(
+    state: &AppState,
+    schedule: &rhythm_core::LightScheduleConfig,
+) -> (
+    BTreeMap<String, String>,
+    BTreeMap<String, BTreeMap<String, String>>,
+) {
+    let solar = SolarTriggerContext {
+        solar_noon: state.solar_noon_hour(),
+        latitude: state.latitude,
+        longitude: state.longitude,
+        timezone_name: state.timezone_name.as_deref(),
+    };
+    let now_utc = chrono::Utc::now().naive_utc();
+    let local_date = local_datetime_from_utc(
+        now_utc,
+        state.utc_offset_hours,
+        state.timezone_name.as_deref(),
+    )
+    .date();
+    let base = resolved_transition_local_times(schedule, solar, local_date);
+    let mut by_node = BTreeMap::new();
+
+    if let Some(runtime) = state.hub_runtime() {
+        for node in runtime
+            .engine_all_effective_node_snapshots()
+            .into_iter()
+            .filter(|node| {
+                node.kind.is_room()
+                    || (node.kind == rhythm_core::LightNodeKind::LightDevice
+                        && node.parent_id.is_none())
+            })
+        {
+            let Some(assignment) = node.profile_settings.light_schedule.as_ref() else {
+                continue;
+            };
+            if assignment.schedule_id() != Some(schedule.id.as_str()) {
+                continue;
+            }
+            let effective = match node
+                .profile_settings
+                .light_schedule_overrides
+                .get(schedule.id.as_str())
+                .map(|value| value.apply_to(schedule))
+                .transpose()
+            {
+                Ok(value) => value.unwrap_or_else(|| schedule.clone()),
+                Err(_) => continue,
+            };
+            by_node.insert(
+                node.id,
+                resolved_transition_local_times(&effective, solar, local_date),
+            );
+        }
+    }
+
+    (base, by_node)
+}
+
+/// Trigger every enabled named light schedule independently using the exact
+/// UTC interval between periodic samples. Physical button triggers enter
+/// through `AutomationAction::LightScheduleMode*`; this pass owns only clock
+/// and solar triggers.
+pub fn check_light_schedule_transitions_between(
+    state: &SharedState,
+    start_utc: chrono::NaiveDateTime,
+    end_utc: chrono::NaiveDateTime,
+) {
+    let candidates = {
+        let Ok(s) = state.lock() else { return };
+        let solar = SolarTriggerContext {
+            solar_noon: s.solar_noon_hour(),
+            latitude: s.latitude,
+            longitude: s.longitude,
+            timezone_name: s.timezone_name.as_deref(),
+        };
+        let Some(runtime) = s.hub_runtime() else {
+            return;
+        };
+        runtime
+            .engine_all_effective_node_snapshots()
+            .into_iter()
+            .filter(|node| {
+                node.kind.is_room()
+                    || (node.kind == rhythm_core::LightNodeKind::LightDevice
+                        && node.parent_id.is_none())
+            })
+            .filter_map(|node| {
+                let assignment = node.profile_settings.light_schedule.as_ref()?;
+                let schedule_id = assignment.schedule_id()?;
+                let schedule = s.light_schedules.get(schedule_id)?;
+                if !schedule.enabled {
+                    return None;
+                }
+                let effective = match node
+                    .profile_settings
+                    .light_schedule_overrides
+                    .get(schedule_id)
+                    .map(|value| value.apply_to(schedule))
+                    .transpose()
+                {
+                    Ok(value) => value.unwrap_or_else(|| schedule.clone()),
+                    Err(error) => {
+                        warn!(
+                            target: "cmd",
+                            "Effective named light schedule '{}' for '{}' is invalid: {}",
+                            schedule_id,
+                            node.id,
+                            error
+                        );
+                        return None;
+                    }
+                };
+                let active_mode = assignment.active_mode()?;
+                resolved_replayed_mode_transition(
+                    active_mode,
+                    start_utc,
+                    end_utc,
+                    ReplayTransitionContext {
+                        solar,
+                        utc_offset: s.utc_offset_hours,
+                        configs: &effective.transitions,
+                    },
+                )
+                .map(|transition| (node.id, schedule.id.clone(), transition.id))
+            })
+            .collect::<Vec<_>>()
+    };
+
+    for (node_id, schedule_id, transition_id) in candidates {
+        if let Err(error) = crate::commands::do_trigger_light_schedule_transition_for_node(
+            state,
+            &node_id,
+            &schedule_id,
+            &transition_id,
+        ) {
+            warn!(
+                target: "cmd",
+                "Named light schedule '{}' transition '{}' for '{}' failed: {}",
+                schedule_id, transition_id, node_id, error
+            );
+        }
+    }
+}
+
+/// Legacy local-hour harness retained for focused compatibility tests.
+#[cfg(test)]
 pub fn check_light_schedule_transitions(state: &SharedState, last_hour: f32, current_hour: f32) {
     let candidates = {
         let Ok(s) = state.lock() else { return };
@@ -4733,6 +4931,168 @@ mod tests {
                 active_mode: rhythm_core::RhythmMode::Day
             })
         ));
+    }
+
+    fn install_exact_interval_schedule(
+        state: &SharedState,
+        trigger: rhythm_core::ModeTransitionTrigger,
+        from_mode: rhythm_core::RhythmMode,
+        to_mode: rhythm_core::RhythmMode,
+    ) -> Arc<dyn RuntimeHandle> {
+        let runtime = runtime_with_rooms(&["target"]);
+        install_runtime(state, runtime.clone());
+        {
+            let mut app = state.lock().unwrap();
+            app.latitude = Some(35.804102);
+            app.longitude = Some(-78.799_3);
+            app.timezone_name = Some("America/New_York".to_string());
+            app.utc_offset_hours = -5.0;
+        }
+        crate::commands::do_light_schedules_set(
+            state,
+            vec![rhythm_core::LightScheduleConfig {
+                id: "exact".to_string(),
+                name: "Exact".to_string(),
+                enabled: true,
+                active_mode: from_mode,
+                transitions: vec![
+                    rhythm_core::ModeTransitionConfig::new(from_mode, to_mode, 0)
+                        .with_id("boundary")
+                        .with_trigger(trigger),
+                ],
+            }],
+        )
+        .unwrap();
+        crate::commands::do_light_schedule_assignment_set(state, "target", Some("exact"), false)
+            .unwrap();
+        runtime
+    }
+
+    fn assigned_mode(runtime: &Arc<dyn RuntimeHandle>) -> rhythm_core::RhythmMode {
+        runtime
+            .engine_effective_node_snapshot("target")
+            .unwrap()
+            .profile_settings
+            .light_schedule
+            .as_ref()
+            .and_then(rhythm_core::LightScheduleAssignment::active_mode)
+            .unwrap()
+    }
+
+    #[test]
+    fn named_schedule_fall_back_fires_only_at_the_exact_solar_occurrence() {
+        let state = make_state();
+        let trigger = rhythm_core::ModeTransitionTrigger::Sunrise
+            .with_solar_offset(-300)
+            .unwrap();
+        let runtime = install_exact_interval_schedule(
+            &state,
+            trigger,
+            rhythm_core::RhythmMode::Sleep,
+            rhythm_core::RhythmMode::Day,
+        );
+        let solar = SolarTriggerContext {
+            solar_noon: state.lock().unwrap().solar_noon_hour(),
+            latitude: Some(35.804102),
+            longitude: Some(-78.799_3),
+            timezone_name: Some("America/New_York"),
+        };
+        let occurrence = resolved_trigger_occurrence_for_source_date(
+            trigger,
+            rhythm_core::RhythmMode::Day,
+            solar,
+            NaiveDate::from_ymd_opt(2026, 11, 1).unwrap(),
+        )
+        .unwrap();
+        let event_utc = occurrence.utc.unwrap();
+        let first_repeated_hour_utc = rhythm_core::Timezone::new("America/New_York")
+            .earliest_utc_datetime_from_local(occurrence.local)
+            .unwrap();
+
+        assert_eq!(occurrence.local.hour(), 1);
+        assert_eq!(
+            event_utc - first_repeated_hour_utc,
+            chrono::Duration::hours(1)
+        );
+
+        check_light_schedule_transitions_between(
+            &state,
+            first_repeated_hour_utc - chrono::Duration::minutes(1),
+            first_repeated_hour_utc + chrono::Duration::minutes(1),
+        );
+        assert_eq!(assigned_mode(&runtime), rhythm_core::RhythmMode::Sleep);
+
+        check_light_schedule_transitions_between(
+            &state,
+            event_utc - chrono::Duration::minutes(1),
+            event_utc + chrono::Duration::minutes(1),
+        );
+        assert_eq!(assigned_mode(&runtime), rhythm_core::RhythmMode::Day);
+    }
+
+    #[test]
+    fn named_schedule_skips_nonexistent_spring_forward_wall_time() {
+        let state = make_state();
+        let trigger = rhythm_core::ModeTransitionTrigger::Scheduled(
+            rhythm_core::ModeTransitionTime::from_hour_minute(2, 30).unwrap(),
+        );
+        let runtime = install_exact_interval_schedule(
+            &state,
+            trigger,
+            rhythm_core::RhythmMode::Sleep,
+            rhythm_core::RhythmMode::Day,
+        );
+
+        check_light_schedule_transitions_between(
+            &state,
+            NaiveDate::from_ymd_opt(2026, 3, 8)
+                .unwrap()
+                .and_hms_opt(6, 0, 0)
+                .unwrap(),
+            NaiveDate::from_ymd_opt(2026, 3, 8)
+                .unwrap()
+                .and_hms_opt(8, 0, 0)
+                .unwrap(),
+        );
+
+        assert_eq!(assigned_mode(&runtime), rhythm_core::RhythmMode::Sleep);
+    }
+
+    #[test]
+    fn named_schedule_uses_next_day_for_after_midnight_solar_offset() {
+        let state = make_state();
+        let trigger = rhythm_core::ModeTransitionTrigger::Sunset
+            .with_solar_offset(360)
+            .unwrap();
+        let runtime = install_exact_interval_schedule(
+            &state,
+            trigger,
+            rhythm_core::RhythmMode::Day,
+            rhythm_core::RhythmMode::Sleep,
+        );
+        let solar = SolarTriggerContext {
+            solar_noon: state.lock().unwrap().solar_noon_hour(),
+            latitude: Some(35.804102),
+            longitude: Some(-78.799_3),
+            timezone_name: Some("America/New_York"),
+        };
+        let source_date = NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
+        let occurrence = resolved_trigger_occurrence_for_source_date(
+            trigger,
+            rhythm_core::RhythmMode::Sleep,
+            solar,
+            source_date,
+        )
+        .unwrap();
+        let event_utc = occurrence.utc.unwrap();
+
+        assert_eq!(occurrence.local.date(), source_date.succ_opt().unwrap());
+        check_light_schedule_transitions_between(
+            &state,
+            event_utc - chrono::Duration::minutes(1),
+            event_utc + chrono::Duration::minutes(1),
+        );
+        assert_eq!(assigned_mode(&runtime), rhythm_core::RhythmMode::Sleep);
     }
 
     #[test]

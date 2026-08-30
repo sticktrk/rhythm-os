@@ -349,6 +349,11 @@ class RhythmLightScheduleConfig {
   final bool enabled;
   final RhythmMode activeMode;
   final List<RhythmModeTransitionConfig> transitions;
+  /// Appliance-resolved local times for today's base transitions.
+  /// Response metadata; intentionally omitted from writes.
+  final Map<String, String> resolvedTransitions;
+  /// Appliance-resolved effective local times keyed by node ID.
+  final Map<String, Map<String, String>> resolvedTransitionsByNode;
 
   const RhythmLightScheduleConfig({
     required this.id,
@@ -356,6 +361,8 @@ class RhythmLightScheduleConfig {
     this.enabled = true,
     this.activeMode = RhythmMode.day,
     this.transitions = const [],
+    this.resolvedTransitions = const {},
+    this.resolvedTransitionsByNode = const {},
   });
 
   factory RhythmLightScheduleConfig.fromJson(Map<String, dynamic> json) =>
@@ -373,6 +380,12 @@ class RhythmLightScheduleConfig {
               ),
             )
             .toList(growable: false),
+        resolvedTransitions: _lightScheduleResolvedTimes(
+          json['resolved_transitions'],
+        ),
+        resolvedTransitionsByNode: _lightScheduleResolvedTimesByNode(
+          json['resolved_transitions_by_node'],
+        ),
       );
 
   Map<String, dynamic> toJson() => {
@@ -382,6 +395,26 @@ class RhythmLightScheduleConfig {
         'active_mode': activeMode.wireValue,
         'transitions': transitions.map((value) => value.toJson()).toList(),
       };
+}
+
+Map<String, String> _lightScheduleResolvedTimes(Object? value) {
+  if (value is! Map) return const {};
+  return Map<String, String>.unmodifiable({
+    for (final entry in value.entries)
+      if (entry.key is String && entry.value is String)
+        entry.key as String: entry.value as String,
+  });
+}
+
+Map<String, Map<String, String>> _lightScheduleResolvedTimesByNode(
+  Object? value,
+) {
+  if (value is! Map) return const {};
+  return Map<String, Map<String, String>>.unmodifiable({
+    for (final entry in value.entries)
+      if (entry.key is String && entry.value is Map)
+        entry.key as String: _lightScheduleResolvedTimes(entry.value),
+  });
 }
 
 class RhythmTransitionTriggerOverride {

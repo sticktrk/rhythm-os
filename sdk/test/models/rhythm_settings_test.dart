@@ -200,6 +200,10 @@ void main() {
       'name': 'Outdoor lights',
       'enabled': true,
       'active_mode': 'sleep',
+      'resolved_transitions': {'outdoor_wake': '18:00'},
+      'resolved_transitions_by_node': {
+        'porch': {'outdoor_wake': '17:45'},
+      },
       'transitions': [
         {
           'id': 'outdoor_wake',
@@ -215,7 +219,13 @@ void main() {
     expect(schedule.id, 'outdoor');
     expect(schedule.activeMode, RhythmMode.sleep);
     expect(schedule.transitions.single.trigger.time, '18:00');
+    expect(schedule.resolvedTransitions['outdoor_wake'], '18:00');
+    expect(
+      schedule.resolvedTransitionsByNode['porch']?['outdoor_wake'],
+      '17:45',
+    );
     expect(schedule.toJson()['transitions'], hasLength(1));
+    expect(schedule.toJson(), isNot(contains('resolved_transitions')));
   });
 
   test('solar offsets and sparse transition overrides round-trip', () {
