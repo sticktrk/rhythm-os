@@ -1537,49 +1537,31 @@ fn trigger_hour_for_source_date_unwrapped(
     let year = chrono::Datelike::year(&date);
     let month = chrono::Datelike::month(&date);
     let day = chrono::Datelike::day(&date);
-    let sun = rhythm_core::calculate_sun_times(lat, lon, year, month, day, &tz);
+    let sun = rhythm_core::calculate_sun_event_times(lat, lon, year, month, day, &tz);
     let twilight = rhythm_core::calculate_twilight_times(lat, lon, year, month, day, &tz);
 
     let anchor = match trigger.solar_event()? {
-        rhythm_core::SolarEvent::Sunrise => sun.sunrise,
-        rhythm_core::SolarEvent::Sunset => sun.sunset,
+        rhythm_core::SolarEvent::Sunrise => sun.sunrise?,
+        rhythm_core::SolarEvent::Sunset => sun.sunset?,
         rhythm_core::SolarEvent::CivilTwilight => {
             if target_mode == rhythm_core::RhythmMode::Day {
-                twilight
-                    .dawn
-                    .civil
-                    .unwrap_or((sun.sunrise - 0.5).rem_euclid(24.0))
+                twilight.dawn.civil?
             } else {
-                twilight
-                    .dusk
-                    .civil
-                    .unwrap_or((sun.sunset + 0.5).rem_euclid(24.0))
+                twilight.dusk.civil?
             }
         }
         rhythm_core::SolarEvent::NauticalTwilight => {
             if target_mode == rhythm_core::RhythmMode::Day {
-                twilight
-                    .dawn
-                    .nautical
-                    .unwrap_or((sun.sunrise - 1.0).rem_euclid(24.0))
+                twilight.dawn.nautical?
             } else {
-                twilight
-                    .dusk
-                    .nautical
-                    .unwrap_or((sun.sunset + 1.0).rem_euclid(24.0))
+                twilight.dusk.nautical?
             }
         }
         rhythm_core::SolarEvent::AstronomicalTwilight => {
             if target_mode == rhythm_core::RhythmMode::Day {
-                twilight
-                    .dawn
-                    .astronomical
-                    .unwrap_or((sun.sunrise - 1.5).rem_euclid(24.0))
+                twilight.dawn.astronomical?
             } else {
-                twilight
-                    .dusk
-                    .astronomical
-                    .unwrap_or((sun.sunset + 1.5).rem_euclid(24.0))
+                twilight.dusk.astronomical?
             }
         }
     };
@@ -1855,7 +1837,11 @@ pub fn check_light_schedule_transitions(state: &SharedState, last_hour: f32, cur
         runtime
             .engine_all_effective_node_snapshots()
             .into_iter()
-            .filter(|node| node.kind.is_light_addressable() && node.parent_id.is_none())
+            .filter(|node| {
+                node.kind.is_room()
+                    || (node.kind == rhythm_core::LightNodeKind::LightDevice
+                        && node.parent_id.is_none())
+            })
             .filter_map(|node| {
                 let assignment = node.profile_settings.light_schedule.as_ref()?;
                 let schedule_id = assignment.schedule_id()?;
@@ -1863,14 +1849,25 @@ pub fn check_light_schedule_transitions(state: &SharedState, last_hour: f32, cur
                 if !schedule.enabled {
                     return None;
                 }
-                let effective = node
+                let effective = match node
                     .profile_settings
                     .light_schedule_overrides
                     .get(schedule_id)
                     .map(|value| value.apply_to(schedule))
                     .transpose()
-                    .ok()?
-                    .unwrap_or_else(|| schedule.clone());
+                {
+                    Ok(value) => value.unwrap_or_else(|| schedule.clone()),
+                    Err(error) => {
+                        warn!(
+                            target: "cmd",
+                            "Effective named light schedule '{}' for '{}' is invalid: {}",
+                            schedule_id,
+                            node.id,
+                            error
+                        );
+                        return None;
+                    }
+                };
                 let active_mode = assignment.active_mode()?;
                 effective
                     .transitions
@@ -1928,7 +1925,11 @@ pub fn reconcile_light_schedule_transitions(state: &SharedState, current_hour: f
         runtime
             .engine_all_effective_node_snapshots()
             .into_iter()
-            .filter(|node| node.kind.is_light_addressable() && node.parent_id.is_none())
+            .filter(|node| {
+                node.kind.is_room()
+                    || (node.kind == rhythm_core::LightNodeKind::LightDevice
+                        && node.parent_id.is_none())
+            })
             .filter_map(|node| {
                 let assignment = node.profile_settings.light_schedule.as_ref()?;
                 let schedule_id = assignment.schedule_id()?;
@@ -1936,14 +1937,25 @@ pub fn reconcile_light_schedule_transitions(state: &SharedState, current_hour: f
                 if !schedule.enabled {
                     return None;
                 }
-                let effective = node
+                let effective = match node
                     .profile_settings
                     .light_schedule_overrides
                     .get(schedule_id)
                     .map(|value| value.apply_to(schedule))
                     .transpose()
-                    .ok()?
-                    .unwrap_or_else(|| schedule.clone());
+                {
+                    Ok(value) => value.unwrap_or_else(|| schedule.clone()),
+                    Err(error) => {
+                        warn!(
+                            target: "cmd",
+                            "Effective named light schedule '{}' for '{}' is invalid during reconciliation: {}",
+                            schedule_id,
+                            node.id,
+                            error
+                        );
+                        return None;
+                    }
+                };
                 let active_mode = assignment.active_mode()?;
                 effective
                     .transitions
@@ -2169,6 +2181,37 @@ mod tests {
             let mut restored = RestoredNodeState::from(&snap);
             restored.rhythm_enabled = true;
             runtime.restore_node_state(room_id, restored);
+        }
+        runtime
+    }
+
+    fn runtime_with_nested_rooms() -> Arc<dyn RuntimeHandle> {
+        use rhythm_core::controller::NoOpController;
+        use rhythm_core::runtime::orchestrator::RhythmRuntime;
+        use rhythm_core::runtime::registry::SimpleDeviceRegistry;
+        use rhythm_core::runtime::scheduler::NoOpScheduler;
+        use rhythm_core::runtime::time::MockTimeProvider;
+        use rhythm_core::RuntimeConfig;
+
+        let runtime = Arc::new(RhythmRuntime::new(
+            Arc::new(NoOpController::new()),
+            MockTimeProvider::new(14.0, 172, 2026),
+            NoOpScheduler::new(),
+            SimpleDeviceRegistry::new(),
+            RuntimeConfig::default(),
+        ));
+        runtime.add_node("parent", "Parent", rhythm_core::LightNodeKind::Room, None);
+        runtime.add_node(
+            "child",
+            "Child",
+            rhythm_core::LightNodeKind::Room,
+            Some("parent".to_string()),
+        );
+        for node_id in ["parent", "child"] {
+            let snap = runtime.engine_node_snapshot(node_id).unwrap();
+            let mut restored = RestoredNodeState::from(&snap);
+            restored.rhythm_enabled = true;
+            runtime.restore_node_state(node_id, restored);
         }
         runtime
     }
@@ -4328,6 +4371,60 @@ mod tests {
     }
 
     #[test]
+    fn polar_missing_events_stay_unavailable_and_resume_on_a_resolvable_date() {
+        let ctx = SolarTriggerContext {
+            solar_noon: 12.0,
+            latitude: Some(72.0),
+            longitude: Some(15.0),
+            timezone_name: Some("Europe/Oslo"),
+        };
+        let polar_night = NaiveDate::from_ymd_opt(2026, 12, 21).unwrap();
+        let polar_day = NaiveDate::from_ymd_opt(2026, 6, 21).unwrap();
+        let resumed = NaiveDate::from_ymd_opt(2026, 3, 20).unwrap();
+
+        assert_eq!(
+            trigger_hour_for_source_date_unwrapped(
+                rhythm_core::ModeTransitionTrigger::Sunrise
+                    .with_solar_offset(30)
+                    .unwrap(),
+                rhythm_core::RhythmMode::Day,
+                ctx,
+                polar_night,
+            ),
+            None
+        );
+        assert_eq!(
+            trigger_hour_for_source_date_unwrapped(
+                rhythm_core::ModeTransitionTrigger::Sunset
+                    .with_solar_offset(-30)
+                    .unwrap(),
+                rhythm_core::RhythmMode::Sleep,
+                ctx,
+                polar_day,
+            ),
+            None
+        );
+        assert!(trigger_hour_for_source_date_unwrapped(
+            rhythm_core::ModeTransitionTrigger::Sunrise
+                .with_solar_offset(30)
+                .unwrap(),
+            rhythm_core::RhythmMode::Day,
+            ctx,
+            resumed,
+        )
+        .is_some());
+        assert!(trigger_hour_for_source_date_unwrapped(
+            rhythm_core::ModeTransitionTrigger::Sunset
+                .with_solar_offset(-30)
+                .unwrap(),
+            rhythm_core::RhythmMode::Sleep,
+            ctx,
+            resumed,
+        )
+        .is_some());
+    }
+
+    #[test]
     fn local_and_utc_datetime_conversions_use_timezone_or_fixed_offset() {
         let utc = NaiveDate::from_ymd_opt(2026, 1, 15)
             .unwrap()
@@ -4514,6 +4611,117 @@ mod tests {
                 .as_ref()
                 .and_then(rhythm_core::LightScheduleAssignment::active_mode),
             Some(rhythm_core::RhythmMode::Sleep)
+        );
+    }
+
+    #[test]
+    fn nested_room_override_isolated_then_reset_follows_parent_boundary() {
+        let state = make_state();
+        let runtime = runtime_with_nested_rooms();
+        install_runtime(&state, runtime.clone());
+        crate::commands::do_light_schedules_set(
+            &state,
+            vec![rhythm_core::LightScheduleConfig {
+                id: "outdoor".to_string(),
+                name: "Outdoor".to_string(),
+                enabled: true,
+                active_mode: rhythm_core::RhythmMode::Day,
+                transitions: vec![rhythm_core::ModeTransitionConfig {
+                    id: "sleep".to_string(),
+                    label: "Sleep".to_string(),
+                    from_mode: rhythm_core::RhythmMode::Day,
+                    to_mode: rhythm_core::RhythmMode::Sleep,
+                    trigger: rhythm_core::ModeTransitionTrigger::Scheduled(
+                        rhythm_core::ModeTransitionTime::from_hour_minute(22, 0).unwrap(),
+                    ),
+                    trigger_enabled: true,
+                    duration_ms: rhythm_core::TimerSetting::Fixed { value: 0 },
+                    preserve_hard_off: true,
+                }],
+            }],
+        )
+        .unwrap();
+        crate::commands::do_light_schedule_assignment_set(&state, "parent", Some("outdoor"), false)
+            .unwrap();
+        crate::commands::do_light_schedule_override_set(
+            &state,
+            "child",
+            "outdoor",
+            Some(rhythm_core::LightScheduleOverride {
+                transitions: std::collections::BTreeMap::from([(
+                    "sleep".to_string(),
+                    rhythm_core::ModeTransitionOverride {
+                        trigger: rhythm_core::ModeTransitionTriggerOverride {
+                            kind: Some(rhythm_core::ModeTransitionTriggerType::Scheduled),
+                            time: Some(
+                                rhythm_core::ModeTransitionTime::from_hour_minute(23, 0).unwrap(),
+                            ),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                )]),
+            }),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        check_light_schedule_transitions(&state, 21.9, 22.1);
+
+        let parent = runtime.engine_effective_node_snapshot("parent").unwrap();
+        let child = runtime.engine_effective_node_snapshot("child").unwrap();
+        assert_eq!(
+            parent
+                .profile_settings
+                .light_schedule
+                .as_ref()
+                .and_then(rhythm_core::LightScheduleAssignment::active_mode),
+            Some(rhythm_core::RhythmMode::Sleep)
+        );
+        assert_eq!(
+            child
+                .profile_settings
+                .light_schedule
+                .as_ref()
+                .and_then(rhythm_core::LightScheduleAssignment::active_mode),
+            Some(rhythm_core::RhythmMode::Day),
+            "the parent boundary must not consume the child override scope"
+        );
+
+        check_light_schedule_transitions(&state, 22.9, 23.1);
+        assert_eq!(
+            runtime
+                .engine_effective_node_snapshot("child")
+                .unwrap()
+                .profile_settings
+                .light_schedule
+                .as_ref()
+                .and_then(rhythm_core::LightScheduleAssignment::active_mode),
+            Some(rhythm_core::RhythmMode::Sleep)
+        );
+
+        crate::commands::do_light_schedule_override_set(
+            &state, "child", "outdoor", None, None, None, false,
+        )
+        .unwrap();
+        let raw_child = runtime.engine_node_snapshot("child").unwrap();
+        assert!(raw_child
+            .profile_settings
+            .light_schedule_overrides
+            .is_empty());
+        assert!(raw_child.profile_settings.light_schedule_modes.is_empty());
+        assert_eq!(
+            runtime
+                .engine_effective_node_snapshot("child")
+                .unwrap()
+                .profile_settings
+                .light_schedule
+                .as_ref()
+                .and_then(rhythm_core::LightScheduleAssignment::active_mode),
+            Some(rhythm_core::RhythmMode::Sleep),
+            "resetting the child override must reveal the parent mode"
         );
     }
 

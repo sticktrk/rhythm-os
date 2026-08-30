@@ -1097,6 +1097,7 @@ pub struct RoomProfileSettingsPatch {
     pub light_schedule: Option<Option<rhythm_core::LightScheduleAssignment>>,
     pub light_schedule_overrides:
         Option<Option<BTreeMap<String, Option<rhythm_core::LightScheduleOverride>>>>,
+    pub light_schedule_modes: Option<BTreeMap<String, Option<RhythmMode>>>,
     pub room_schedule: Option<Option<rhythm_core::RoomScheduleConfig>>,
     pub profile_overrides: Option<Option<BTreeMap<String, Option<LightProfileNodeOverride>>>>,
     /// Effective override map reviewed by the caller. The dispatch worker
@@ -1105,6 +1106,11 @@ pub struct RoomProfileSettingsPatch {
     pub expected_effective_profile_overrides: Option<BTreeMap<String, LightProfileNodeOverride>>,
     pub expected_effective_light_schedule_overrides:
         Option<BTreeMap<String, rhythm_core::LightScheduleOverride>>,
+    /// Replace the complete schedule override map instead of applying sparse
+    /// endpoint mutation semantics. Backup restore uses this so entries absent
+    /// from the imported snapshot are removed exactly.
+    pub replace_light_schedule_overrides: bool,
+    pub replace_light_schedule_modes: bool,
     /// Replace complete per-profile override entries instead of applying the
     /// legacy timer-only merge semantics.
     pub replace_profile_overrides: bool,
@@ -1152,6 +1158,9 @@ impl RoomProfileSettingsPatch {
             match light_schedule_overrides {
                 None => settings.light_schedule_overrides.clear(),
                 Some(overrides) => {
+                    if self.replace_light_schedule_overrides {
+                        settings.light_schedule_overrides.clear();
+                    }
                     for (schedule_id, schedule_override) in overrides {
                         match schedule_override {
                             Some(schedule_override) if !schedule_override.is_empty() => {
@@ -1164,6 +1173,20 @@ impl RoomProfileSettingsPatch {
                             }
                         }
                     }
+                }
+            }
+        }
+        if let Some(light_schedule_modes) = &self.light_schedule_modes {
+            if self.replace_light_schedule_modes {
+                settings.light_schedule_modes.clear();
+            }
+            for (schedule_id, mode) in light_schedule_modes {
+                if let Some(mode) = mode {
+                    settings
+                        .light_schedule_modes
+                        .insert(schedule_id.clone(), *mode);
+                } else {
+                    settings.light_schedule_modes.remove(schedule_id);
                 }
             }
         }
@@ -1235,6 +1258,7 @@ impl RoomProfileSettingsPatch {
             || self.motion_activation_enabled.is_some()
             || self.light_schedule.is_some()
             || self.light_schedule_overrides.is_some()
+            || self.light_schedule_modes.is_some()
             || self.room_schedule.is_some()
             || self.profile_overrides.is_some()
     }
@@ -1251,6 +1275,7 @@ impl RoomProfileSettingsPatch {
             || self.fade_ms.is_some()
             || self.light_schedule.is_some()
             || self.light_schedule_overrides.is_some()
+            || self.light_schedule_modes.is_some()
             || self.room_schedule.is_some()
         {
             return true;
@@ -1279,6 +1304,10 @@ impl RoomProfileSettingsPatch {
                 .light_schedule_overrides
                 .as_ref()
                 .is_some_and(|overrides| overrides.as_ref().is_some_and(|value| !value.is_empty()))
+            || self
+                .light_schedule_modes
+                .as_ref()
+                .is_some_and(|modes| modes.values().any(Option::is_some))
             || self.room_schedule.as_ref().is_some_and(Option::is_some)
             || self.profile_overrides.as_ref().is_some_and(|overrides| {
                 overrides.as_ref().is_some_and(|overrides| {
@@ -2252,6 +2281,7 @@ fn apply_mood_scene_display_values(
 fn build_node_state_dto_from_snapshot_parts(
     ctx: &NodeStateDtoBuildContext<'_>,
     snap: &rhythm_core::NodeSnapshot,
+    room_profile: &RoomProfileSettings,
     metadata: NodeStateDtoMetadata,
 ) -> NodeStateDto {
     let NodeStateDtoMetadata {
@@ -2379,6 +2409,7 @@ fn build_node_state_dto_from_snapshot_parts(
         standby_enabled: snap.standby_enabled,
         standby_active: snap.soft_off && !snap.hard_off,
         profile_settings: profile_settings_dto(ctx.state.power_save, &snap.profile_settings),
+        room_profile: room_profile.clone(),
         motion_active,
         motion_owned,
         remaining_secs,
@@ -2411,6 +2442,7 @@ pub fn build_node_state_event(
         standby_enabled,
         standby_active,
         pending_dispatch,
+        room_profile,
     ) = {
         let s = state.lock().unwrap_or_else(|e| e.into_inner());
         let mode = s.active_mode;
@@ -2441,6 +2473,11 @@ pub fn build_node_state_event(
         );
         let transitioning = room_mode_transition_active(&s.room_mode_transitions, &snap.id, now);
         let pending_dispatch = node_has_pending_dispatch(&s, &snap.id);
+        let room_profile = s
+            .hub_runtime()
+            .and_then(|runtime| runtime.engine_node_snapshot(&snap.id))
+            .map(|snapshot| snapshot.profile_settings)
+            .unwrap_or_else(|| snap.profile_settings.clone());
         let hub_types = node_hub_types_from_topology(&s, &snap.id);
         let light_capabilities = light_capabilities_for_node(&s, &snap.id, snap.kind);
         let mood_enabled = room_mood_enabled(s.power_save, &snap.profile_settings);
@@ -2494,6 +2531,7 @@ pub fn build_node_state_event(
             standby_enabled,
             standby_active,
             pending_dispatch,
+            room_profile,
         )
     };
     crate::server_event::NodeStateEvent::from_snapshot(
@@ -2514,6 +2552,7 @@ pub fn build_node_state_event(
             mood_active,
             standby_enabled,
             standby_active,
+            room_profile,
         },
     )
 }
@@ -3177,6 +3216,19 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             local_now.date().month(),
             local_now.date().day(),
         );
+        let sun_event_times = match (s.latitude, s.longitude, s.timezone_name.as_deref()) {
+            (Some(latitude), Some(longitude), Some(timezone_name)) => {
+                Some(rhythm_core::calculate_sun_event_times(
+                    latitude,
+                    longitude,
+                    local_now.date().year(),
+                    local_now.date().month(),
+                    local_now.date().day(),
+                    &rhythm_core::Timezone::new(timezone_name),
+                ))
+            }
+            _ => None,
+        };
         let active_profile_effective = active_profile_effective_values(
             &active_profile_cfg,
             current_hour,
@@ -3195,6 +3247,16 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             latitude: s.latitude,
             longitude: s.longitude,
             utc_offset_hours: s.utc_offset_hours,
+            sunrise: sun_event_times.as_ref().and_then(|times| times.sunrise),
+            sunrise_local_time: sun_event_times
+                .as_ref()
+                .and_then(|times| times.sunrise)
+                .map(local_time_string_from_decimal_hour),
+            sunset: sun_event_times.as_ref().and_then(|times| times.sunset),
+            sunset_local_time: sun_event_times
+                .as_ref()
+                .and_then(|times| times.sunset)
+                .map(local_time_string_from_decimal_hour),
             solar_noon: resolved_solar.solar.solar_noon_hour,
             solar_noon_local_time: local_time_string_from_decimal_hour(
                 resolved_solar.solar.solar_noon_hour,
@@ -3288,8 +3350,16 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         let mut nodes = Vec::with_capacity(node_snapshots.len());
         for snap in &node_snapshots {
             let metadata = node_state_dto_metadata(&s, &snap.id);
+            let room_profile = runtime
+                .as_ref()
+                .and_then(|runtime| runtime.engine_node_snapshot(&snap.id))
+                .map(|snapshot| snapshot.profile_settings)
+                .unwrap_or_else(|| snap.profile_settings.clone());
             nodes.push(build_node_state_dto_from_snapshot_parts(
-                &dto_ctx, snap, metadata,
+                &dto_ctx,
+                snap,
+                &room_profile,
+                metadata,
             ));
         }
         nodes.sort_by(|left, right| {
@@ -3541,6 +3611,10 @@ pub fn build_node_state(state: &SharedState, node_id: &str) -> Result<NodeStateD
     let snap = runtime
         .engine_effective_node_snapshot(node_id)
         .ok_or_else(|| anyhow::anyhow!("Node '{}' not found in engine", node_id))?;
+    let room_profile = runtime
+        .engine_node_snapshot(node_id)
+        .map(|snapshot| snapshot.profile_settings)
+        .unwrap_or_else(|| snap.profile_settings.clone());
 
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let mode_configs = s.mode_configs();
@@ -3564,6 +3638,7 @@ pub fn build_node_state(state: &SharedState, node_id: &str) -> Result<NodeStateD
     Ok(build_node_state_dto_from_snapshot_parts(
         &dto_ctx,
         &snap,
+        &room_profile,
         NodeStateDtoMetadata {
             hub_types: node_hub_types_from_topology(&s, node_id),
             topology_parent_id: s
@@ -3642,9 +3717,15 @@ pub fn build_nodes_state(state: &SharedState) -> Result<String> {
     };
     let mut nodes = Vec::with_capacity(node_snapshots.len());
     for snap in &node_snapshots {
+        let room_profile = runtime
+            .as_ref()
+            .and_then(|runtime| runtime.engine_node_snapshot(&snap.id))
+            .map(|snapshot| snapshot.profile_settings)
+            .unwrap_or_else(|| snap.profile_settings.clone());
         nodes.push(build_node_state_dto_from_snapshot_parts(
             &dto_ctx,
             snap,
+            &room_profile,
             node_state_dto_metadata(&s, &snap.id),
         ));
     }
@@ -8853,7 +8934,7 @@ fn apply_room_schedule_target(
     let snapshot = runtime
         .engine_node_snapshot(room_id)
         .ok_or_else(|| anyhow::anyhow!("Schedule target not found in engine"))?;
-    if !snapshot.kind.is_light_addressable() || snapshot.parent_id.is_some() {
+    if !light_schedule_target_is_independent(snapshot.kind, snapshot.parent_id.as_deref()) {
         return Err(anyhow::anyhow!(
             "Schedule target must be a room or unassigned light node"
         ));
@@ -8970,7 +9051,7 @@ pub(crate) fn reconcile_room_schedule_before_tick(
         let Some(snapshot) = runtime.engine_node_snapshot(room_id) else {
             return Ok(None);
         };
-        if !snapshot.kind.is_light_addressable() || snapshot.parent_id.is_some() {
+        if !light_schedule_target_is_independent(snapshot.kind, snapshot.parent_id.as_deref()) {
             return Ok(None);
         }
         let (schedule, light_schedule) = match snapshot.profile_settings.light_schedule.as_ref() {
@@ -9123,7 +9204,7 @@ pub fn do_room_schedule_test(
     let snapshot = runtime
         .engine_node_snapshot(room_id)
         .ok_or_else(|| anyhow::anyhow!("Schedule target not found in engine"))?;
-    if !snapshot.kind.is_light_addressable() || snapshot.parent_id.is_some() {
+    if !light_schedule_target_is_independent(snapshot.kind, snapshot.parent_id.as_deref()) {
         return Err(anyhow::anyhow!(
             "Schedule target must be a room or unassigned light node"
         ));
@@ -9152,7 +9233,7 @@ fn addressable_root_snapshots(runtime: &Arc<dyn RuntimeHandle>) -> Vec<rhythm_co
     runtime
         .engine_all_effective_node_snapshots()
         .into_iter()
-        .filter(|node| node.kind.is_light_addressable() && node.parent_id.is_none())
+        .filter(|node| light_schedule_target_is_independent(node.kind, node.parent_id.as_deref()))
         .map(|node| rhythm_core::RoomSnapshot {
             id: node.id,
             name: node.name,
@@ -9169,6 +9250,10 @@ fn addressable_root_snapshots(runtime: &Arc<dyn RuntimeHandle>) -> Vec<rhythm_co
             profile_settings: node.profile_settings,
         })
         .collect()
+}
+
+fn light_schedule_target_is_independent(kind: LightNodeKind, parent_id: Option<&str>) -> bool {
+    kind.is_room() || (kind == LightNodeKind::LightDevice && parent_id.is_none())
 }
 
 fn addressable_node_snapshots(runtime: &Arc<dyn RuntimeHandle>) -> Vec<rhythm_core::RoomSnapshot> {
@@ -10301,18 +10386,72 @@ fn validate_current_light_schedule_overrides(
     state: &SharedState,
     schedules: &[rhythm_core::LightScheduleConfig],
 ) -> Result<()> {
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let snapshots = s
+        .hub_runtime()
+        .map(|runtime| runtime.engine_all_node_snapshots())
+        .unwrap_or_default();
+    validate_effective_light_schedule_overrides(&snapshots, schedules, None)
+}
+
+fn validate_effective_light_schedule_overrides(
+    snapshots: &[rhythm_core::NodeSnapshot],
+    schedules: &[rhythm_core::LightScheduleConfig],
+    updated: Option<(&str, &RoomProfileSettings)>,
+) -> Result<()> {
+    fn resolve(
+        node_id: &str,
+        nodes: &HashMap<String, (Option<String>, RoomProfileSettings)>,
+        memo: &mut HashMap<String, RoomProfileSettings>,
+        visiting: &mut HashSet<String>,
+    ) -> Result<RoomProfileSettings> {
+        if let Some(settings) = memo.get(node_id) {
+            return Ok(settings.clone());
+        }
+        if !visiting.insert(node_id.to_string()) {
+            return Err(anyhow::anyhow!(
+                "Light schedule override topology contains a cycle at node '{}'",
+                node_id
+            ));
+        }
+        let (parent_id, local) = nodes
+            .get(node_id)
+            .ok_or_else(|| anyhow::anyhow!("Schedule target '{}' was not found", node_id))?;
+        let effective = if let Some(parent_id) = parent_id.as_deref() {
+            if nodes.contains_key(parent_id) {
+                local.merged_with_parent(&resolve(parent_id, nodes, memo, visiting)?)
+            } else {
+                local.clone()
+            }
+        } else {
+            local.clone()
+        };
+        visiting.remove(node_id);
+        memo.insert(node_id.to_string(), effective.clone());
+        Ok(effective)
+    }
+
     let schedules = schedules
         .iter()
         .map(|schedule| (schedule.id.as_str(), schedule))
         .collect::<HashMap<_, _>>();
-    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    let snapshots = s
-        .hub_runtime()
-        .map(|runtime| addressable_node_snapshots(&runtime))
-        .unwrap_or_default();
-    for snapshot in snapshots {
-        for (schedule_id, schedule_override) in &snapshot.profile_settings.light_schedule_overrides
-        {
+    let nodes = snapshots
+        .iter()
+        .map(|snapshot| {
+            let settings = updated
+                .filter(|(node_id, _)| *node_id == snapshot.id)
+                .map(|(_, settings)| settings.clone())
+                .unwrap_or_else(|| snapshot.profile_settings.clone());
+            (snapshot.id.clone(), (snapshot.parent_id.clone(), settings))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut memo = HashMap::new();
+    for snapshot in snapshots
+        .iter()
+        .filter(|snapshot| snapshot.kind.is_light_addressable())
+    {
+        let effective = resolve(&snapshot.id, &nodes, &mut memo, &mut HashSet::new())?;
+        for (schedule_id, schedule_override) in &effective.light_schedule_overrides {
             let schedule = schedules.get(schedule_id.as_str()).ok_or_else(|| {
                 anyhow::anyhow!(
                     "Light schedule '{}' is still referenced by overrides on node '{}'",
@@ -10322,7 +10461,7 @@ fn validate_current_light_schedule_overrides(
             })?;
             schedule_override.apply_to(schedule).map_err(|error| {
                 anyhow::anyhow!(
-                    "Light schedule override on node '{}' is invalid: {}",
+                    "Effective light schedule override on node '{}' is invalid: {}",
                     snapshot.id,
                     error
                 )
@@ -10443,7 +10582,7 @@ pub fn do_light_schedule_override_set(
             "Light schedule override requires schedule_id"
         ));
     }
-    {
+    let inherited_mode_patch = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let schedule = s.light_schedules.get(schedule_id).ok_or_else(|| {
             anyhow::anyhow!(
@@ -10462,20 +10601,40 @@ pub fn do_light_schedule_override_set(
         let snapshot = runtime
             .engine_node_snapshot(node_id)
             .ok_or_else(|| anyhow::anyhow!("Schedule target was not found"))?;
-        if !snapshot.kind.is_light_addressable()
-            || (snapshot.kind == LightNodeKind::LightDevice && snapshot.parent_id.is_some())
-        {
+        if !light_schedule_target_is_independent(snapshot.kind, snapshot.parent_id.as_deref()) {
             return Err(anyhow::anyhow!(
                 "Schedule target must be a room or unassigned light node"
             ));
         }
-    }
+        if snapshot.profile_settings.light_schedule.is_none() {
+            let effective = runtime
+                .engine_effective_node_snapshot(node_id)
+                .ok_or_else(|| anyhow::anyhow!("Schedule target was not found"))?;
+            effective
+                .profile_settings
+                .light_schedule
+                .as_ref()
+                .filter(|assignment| assignment.schedule_id() == Some(schedule_id))
+                .and_then(rhythm_core::LightScheduleAssignment::active_mode)
+                .map(|mode| {
+                    if schedule_override.is_some() {
+                        Some(mode)
+                    } else {
+                        None
+                    }
+                })
+        } else {
+            None
+        }
+    };
 
     let patch = RoomProfileSettingsPatch {
         light_schedule_overrides: Some(Some(BTreeMap::from([(
             schedule_id.to_string(),
             schedule_override,
         )]))),
+        light_schedule_modes: inherited_mode_patch
+            .map(|mode| BTreeMap::from([(schedule_id.to_string(), mode)])),
         expected_effective_light_schedule_overrides: expected_effective_overrides,
         ..RoomProfileSettingsPatch::default()
     };
@@ -10532,7 +10691,7 @@ fn do_light_schedule_authority_set(
         let snapshot = runtime
             .engine_node_snapshot(node_id)
             .ok_or_else(|| anyhow::anyhow!("Schedule target was not found"))?;
-        if !snapshot.kind.is_light_addressable() || snapshot.parent_id.is_some() {
+        if !light_schedule_target_is_independent(snapshot.kind, snapshot.parent_id.as_deref()) {
             return Err(anyhow::anyhow!(
                 "Schedule target must be a room or unassigned light node"
             ));
@@ -10804,7 +10963,7 @@ pub fn do_trigger_light_schedule_transition_for_node(
     schedule_id: &str,
     transition_id: &str,
 ) -> Result<AutomationActionOutcome> {
-    let (transition, target_mode, was_overridden) = {
+    let (transition, target_mode, was_overridden, has_local_assignment) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let schedule = s
             .light_schedules
@@ -10822,6 +10981,10 @@ pub fn do_trigger_light_schedule_transition_for_node(
         let snapshot = runtime
             .engine_effective_node_snapshot(node_id)
             .ok_or_else(|| anyhow::anyhow!("Schedule target was not found"))?;
+        let has_local_assignment = runtime
+            .engine_node_snapshot(node_id)
+            .and_then(|snapshot| snapshot.profile_settings.light_schedule)
+            .is_some();
         let assignment = snapshot
             .profile_settings
             .light_schedule
@@ -10868,14 +11031,19 @@ pub fn do_trigger_light_schedule_transition_for_node(
             transition.clone(),
             transition.to_mode,
             schedule_override.is_some(),
+            has_local_assignment,
         )
     };
 
     let patch = RoomProfileSettingsPatch {
-        light_schedule: Some(Some(rhythm_core::LightScheduleAssignment::Named {
-            schedule_id: schedule_id.to_string(),
-            active_mode: target_mode,
-        })),
+        light_schedule: has_local_assignment.then(|| {
+            Some(rhythm_core::LightScheduleAssignment::Named {
+                schedule_id: schedule_id.to_string(),
+                active_mode: target_mode,
+            })
+        }),
+        light_schedule_modes: (!has_local_assignment)
+            .then(|| BTreeMap::from([(schedule_id.to_string(), Some(target_mode))])),
         room_schedule: Some(None),
         ..RoomProfileSettingsPatch::default()
     };
@@ -11154,6 +11322,13 @@ fn imported_room_profile_patch(room: &BackupConfigurationRoom) -> RoomProfileSet
                 })
                 .collect(),
         )),
+        light_schedule_modes: Some(
+            room.room_profile
+                .light_schedule_modes
+                .iter()
+                .map(|(schedule_id, mode)| (schedule_id.clone(), Some(*mode)))
+                .collect(),
+        ),
         room_schedule: Some(room.room_profile.room_schedule),
         profile_overrides: Some(Some(
             room.room_profile
@@ -11166,6 +11341,8 @@ fn imported_room_profile_patch(room: &BackupConfigurationRoom) -> RoomProfileSet
         )),
         expected_effective_profile_overrides: None,
         expected_effective_light_schedule_overrides: None,
+        replace_light_schedule_overrides: true,
+        replace_light_schedule_modes: true,
         replace_profile_overrides: true,
     }
 }
@@ -14998,6 +15175,12 @@ pub fn do_node_preferences_set(
             .apply_to(schedule)
             .map_err(anyhow::Error::msg)?;
     }
+    let schedule_configs = light_schedules.values().cloned().collect::<Vec<_>>();
+    validate_effective_light_schedule_overrides(
+        &runtime.engine_all_node_snapshots(),
+        &schedule_configs,
+        Some((node_id, &profile_settings)),
+    )?;
     let motion_activation_enabled_after = profile_settings.motion_activation_enabled();
     let persistent_state =
         room_state_for_mood_setting(power_save, &profile_settings, requested_state);
@@ -20545,6 +20728,7 @@ mod tests {
             motion_activation_enabled: Some(false),
             light_schedule: None,
             light_schedule_overrides: BTreeMap::new(),
+            light_schedule_modes: BTreeMap::new(),
             room_schedule: None,
             profile_overrides: BTreeMap::from([(
                 "custom".to_string(),
@@ -23690,6 +23874,57 @@ mod tests {
             },
             enabled: true,
         }
+    }
+
+    #[test]
+    fn backup_restore_replaces_light_schedule_overrides_exactly() {
+        let (source_state, _source_runtime) =
+            setup_state(vec![make_snapshot("room1", false, false)]);
+        source_state
+            .lock()
+            .unwrap()
+            .set_light_schedule_configs(vec![backup_test_light_schedule("outdoor")]);
+        let bundle = build_backup_bundle_dto(&source_state, false).unwrap();
+        assert!(bundle.configuration.rooms[0]
+            .room_profile
+            .light_schedule_overrides
+            .is_empty());
+
+        let mut customized = make_snapshot("room1", false, false);
+        customized.profile_settings.light_schedule_overrides.insert(
+            "outdoor".to_string(),
+            rhythm_core::LightScheduleOverride {
+                transitions: BTreeMap::from([(
+                    "outdoor_sleep".to_string(),
+                    rhythm_core::ModeTransitionOverride {
+                        trigger_enabled: Some(false),
+                        ..Default::default()
+                    },
+                )]),
+            },
+        );
+        let (target_state, _target_runtime) = setup_state(vec![customized]);
+        let target_storage = Arc::new(TestStorage::default());
+        {
+            let mut target = target_state.lock().unwrap();
+            target.storage = Some(target_storage.clone());
+            target.set_light_schedule_configs(vec![backup_test_light_schedule("outdoor")]);
+        }
+
+        do_backup_restore(&target_state, bundle).unwrap();
+
+        let restored_rooms = target_storage.load_rooms().unwrap();
+        assert!(restored_rooms
+            .get("room1")
+            .unwrap()
+            .profile_settings
+            .light_schedule_overrides
+            .is_empty());
+        let reexported = build_backup_bundle_dto(&target_state, false).unwrap();
+        assert!(reexported.configuration.rooms[0]
+            .room_profile
+            .light_schedule_overrides
+            .is_empty());
     }
 
     #[test]

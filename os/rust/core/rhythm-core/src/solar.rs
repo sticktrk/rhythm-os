@@ -150,6 +150,58 @@ pub fn solar_time_from_location(
 // Sunrise / Sunset calculations (using `sunrise` crate)
 // ============================================================================
 
+/// Optional sunrise and sunset anchors for one local date. `None` means the
+/// event does not occur on that polar date.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct SunEventTimes {
+    pub sunrise: Option<f32>,
+    pub sunset: Option<f32>,
+}
+
+pub fn calculate_sun_event_times(
+    latitude: f32,
+    longitude: f32,
+    year: i32,
+    month: u32,
+    day: u32,
+    tz: &Timezone,
+) -> SunEventTimes {
+    use chrono::NaiveDate;
+    use sunrise::{Coordinates, SolarDay, SolarEvent};
+
+    let utc_offset_seconds = (tz.utc_offset(year, month, day, 12) * 3600.0) as i64;
+    let lat = if latitude.is_finite() {
+        (latitude as f64).clamp(-90.0, 90.0)
+    } else {
+        0.0
+    };
+    let lon = if longitude.is_finite() {
+        (longitude as f64).clamp(-180.0, 180.0)
+    } else {
+        0.0
+    };
+    let coords = Coordinates::new(lat, lon)
+        .or_else(|| Coordinates::new(0.0, 0.0))
+        .expect("Coordinates::new(0,0) is always valid");
+    let date = NaiveDate::from_ymd_opt(year, month, day)
+        .or_else(|| NaiveDate::from_ymd_opt(2000, 1, 1))
+        .expect("2000-01-01 is a valid date");
+    let solar_day = SolarDay::new(coords, date);
+    let to_local_hour = |timestamp: i64| {
+        let hour = (((timestamp + utc_offset_seconds) % 86_400) as f32) / 3_600.0;
+        hour.rem_euclid(24.0)
+    };
+
+    SunEventTimes {
+        sunrise: solar_day
+            .event_time(SolarEvent::Sunrise)
+            .map(|value| to_local_hour(value.timestamp())),
+        sunset: solar_day
+            .event_time(SolarEvent::Sunset)
+            .map(|value| to_local_hour(value.timestamp())),
+    }
+}
+
 /// Calculate sunrise and sunset times for a given location and date.
 ///
 /// # Arguments
@@ -183,58 +235,12 @@ pub fn calculate_sun_times(
     day: u32,
     tz: &Timezone,
 ) -> SunTimes {
-    use chrono::NaiveDate;
-    use sunrise::{Coordinates, SolarDay, SolarEvent};
-
-    // Get UTC offset for this date (in seconds)
-    let utc_offset_hours = tz.utc_offset(year, month, day, 12);
-    let utc_offset_seconds = (utc_offset_hours * 3600.0) as i64;
-
-    // Create coordinates and date. Never panic here: lat/lon come from
-    // user-supplied, persisted location data, and this runs on every periodic
-    // tick — a panic would kill the scheduler thread and permanently stop
-    // adaptive lighting. Clamp junk into range instead.
-    let lat = if latitude.is_finite() {
-        (latitude as f64).clamp(-90.0, 90.0)
-    } else {
-        0.0
-    };
-    let lon = if longitude.is_finite() {
-        (longitude as f64).clamp(-180.0, 180.0)
-    } else {
-        0.0
-    };
-    let coords = Coordinates::new(lat, lon)
-        .or_else(|| Coordinates::new(0.0, 0.0))
-        .expect("Coordinates::new(0,0) is always valid");
-    let date = NaiveDate::from_ymd_opt(year, month, day)
-        .or_else(|| NaiveDate::from_ymd_opt(2000, 1, 1))
-        .expect("2000-01-01 is a valid date");
-
-    let solar_day = SolarDay::new(coords, date);
-
-    // Get sunrise/sunset as UTC timestamps
-    let sunrise_ts = solar_day
-        .event_time(SolarEvent::Sunrise)
-        .map(|dt| dt.timestamp())
-        .unwrap_or(0);
-    let sunset_ts = solar_day
-        .event_time(SolarEvent::Sunset)
-        .map(|dt| dt.timestamp())
-        .unwrap_or(0);
-
-    // Convert timestamps to local decimal hours
-    // timestamp is seconds since Unix epoch, we need hour of day
-    let sunrise_local_ts = sunrise_ts + utc_offset_seconds;
-    let sunset_local_ts = sunset_ts + utc_offset_seconds;
-
-    // Extract hour of day from timestamp
-    let sunrise = ((sunrise_local_ts % 86400) as f32) / 3600.0;
-    let sunset = ((sunset_local_ts % 86400) as f32) / 3600.0;
-
-    // Wrap to 0-24 range (handle negative values)
-    let sunrise = ((sunrise % 24.0) + 24.0) % 24.0;
-    let sunset = ((sunset % 24.0) + 24.0) % 24.0;
+    let events = calculate_sun_event_times(latitude, longitude, year, month, day, tz);
+    // Keep the legacy finite `SunTimes` contract for curve callers. Scheduling
+    // paths use `calculate_sun_event_times` directly so a missing polar event
+    // cannot be converted into a midnight boundary.
+    let sunrise = events.sunrise.unwrap_or(0.0);
+    let sunset = events.sunset.unwrap_or(0.0);
 
     let day_length = if sunset > sunrise {
         sunset - sunrise

@@ -100,11 +100,8 @@ pub struct RoomRhythmState {
     pub standby_enabled: bool,
     pub standby_active: bool,
     pub profile_settings: RoomProfileSettingsDto,
-    #[serde(
-        rename = "room_profile",
-        default,
-        skip_serializing_if = "RoomProfileSettings::is_empty"
-    )]
+    /// Node-local settings before topology inheritance is applied.
+    #[serde(rename = "room_profile", default)]
     pub room_profile: RoomProfileSettings,
 }
 
@@ -363,6 +360,18 @@ pub struct LocationDto {
     pub latitude: Option<f32>,
     pub longitude: Option<f32>,
     pub utc_offset_hours: f32,
+    /// Sunrise expressed as a local wall-clock decimal hour, when it exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sunrise: Option<f32>,
+    /// Sunrise expressed as a local wall-clock time string (`HH:MM:SS`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sunrise_local_time: Option<String>,
+    /// Sunset expressed as a local wall-clock decimal hour, when it exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sunset: Option<f32>,
+    /// Sunset expressed as a local wall-clock time string (`HH:MM:SS`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sunset_local_time: Option<String>,
     /// Solar noon expressed as a local wall-clock decimal hour.
     pub solar_noon: f32,
     /// Solar noon expressed as a local wall-clock time string (`HH:MM:SS`).
@@ -586,6 +595,9 @@ pub struct NodeStateDto {
     pub standby_enabled: bool,
     pub standby_active: bool,
     pub profile_settings: RoomProfileSettingsDto,
+    /// Node-local settings before topology inheritance is applied.
+    #[serde(rename = "room_profile", default)]
+    pub room_profile: RoomProfileSettings,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub motion_active: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -936,6 +948,7 @@ mod tests {
                 &rhythm_core::RoomProfileSettings::default(),
                 false,
             ),
+            room_profile: rhythm_core::RoomProfileSettings::default(),
             motion_active: None,
             motion_owned: None,
             remaining_secs: None,
@@ -971,7 +984,7 @@ mod tests {
             json["light_capabilities"]["individual_profile_overrides"],
             true
         );
-        assert!(json.get("room_profile").is_none());
+        assert_eq!(json["room_profile"], serde_json::json!({}));
     }
 
     #[test]
@@ -1313,6 +1326,10 @@ mod tests {
             latitude: Some(35.6),
             longitude: Some(-97.5),
             utc_offset_hours: -6.0,
+            sunrise: Some(7.0),
+            sunrise_local_time: Some("07:00:00".into()),
+            sunset: Some(17.0),
+            sunset_local_time: Some("17:00:00".into()),
             solar_noon: 12.3,
             solar_noon_local_time: "12:18:00".into(),
             solar_midnight: 0.3,
@@ -1363,6 +1380,10 @@ mod tests {
             latitude: None,
             longitude: None,
             utc_offset_hours: 0.0,
+            sunrise: None,
+            sunrise_local_time: None,
+            sunset: None,
+            sunset_local_time: None,
             solar_noon: 12.0,
             solar_noon_local_time: "12:00:00".into(),
             solar_midnight: 0.0,
@@ -1451,6 +1472,10 @@ mod tests {
                 latitude: None,
                 longitude: None,
                 utc_offset_hours: 0.0,
+                sunrise: None,
+                sunrise_local_time: None,
+                sunset: None,
+                sunset_local_time: None,
                 solar_noon: 12.0,
                 solar_noon_local_time: "12:00:00".into(),
                 solar_midnight: 0.0,
@@ -1550,6 +1575,10 @@ mod tests {
                 latitude: Some(35.0),
                 longitude: Some(-97.0),
                 utc_offset_hours: -6.0,
+                sunrise: Some(7.0),
+                sunrise_local_time: Some("07:00:00".into()),
+                sunset: Some(17.0),
+                sunset_local_time: Some("17:00:00".into()),
                 solar_noon: 12.4,
                 solar_noon_local_time: "12:24:00".into(),
                 solar_midnight: 0.4,

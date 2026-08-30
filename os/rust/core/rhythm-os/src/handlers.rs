@@ -1216,6 +1216,7 @@ fn parse_profile_settings_patch(
         motion_activation_enabled,
         light_schedule: None,
         light_schedule_overrides: None,
+        light_schedule_modes: None,
         room_schedule,
         profile_overrides: parse_profile_overrides_patch_value(body, field_name)?,
         expected_effective_profile_overrides: None,
@@ -1224,6 +1225,8 @@ fn parse_profile_settings_patch(
             .get("replace_profile_overrides")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        replace_light_schedule_overrides: false,
+        replace_light_schedule_modes: false,
     }))
 }
 
@@ -3175,7 +3178,9 @@ pub fn handle_put_node_preferences(
             .and_then(|runtime| runtime.engine_node_snapshot(&node_id))
         {
             Some(snapshot)
-                if snapshot.kind.is_light_addressable() && snapshot.parent_id.is_none() =>
+                if snapshot.kind.is_room()
+                    || (snapshot.kind == rhythm_core::LightNodeKind::LightDevice
+                        && snapshot.parent_id.is_none()) =>
             {
                 snapshot.profile_settings.room_schedule
             }

@@ -30,6 +30,8 @@ class LightScheduleAssignmentCard extends StatefulWidget {
 class _LightScheduleAssignmentCardState
     extends State<LightScheduleAssignmentCard> {
   static const _uuid = Uuid();
+  String? _retryScheduleId;
+  RhythmLightScheduleOverride? _retryOverride;
 
   @override
   void initState() {
@@ -40,20 +42,22 @@ class _LightScheduleAssignmentCardState
   }
 
   String _assignmentLabel(ServerSyncProvider sync) {
-    final assignment =
-        sync.nodeById(widget.nodeId)?.profileSettings?.lightSchedule;
-    if (assignment == null) return 'Whole-home Alarm';
+    final node = sync.nodeById(widget.nodeId);
+    final assignment = node?.profileSettings?.lightSchedule;
+    final localAssignment = node?.localProfileSettings?.lightSchedule;
+    if (assignment == null) return 'Legacy whole-home Alarm';
     if (assignment.isUnscheduled) return 'No automatic schedule';
     final schedule = sync.lightSchedules
         .where((value) => value.id == assignment.scheduleId)
         .firstOrNull;
-    return schedule?.name ?? 'Named schedule';
+    final name = schedule?.name ?? 'Named schedule';
+    if (localAssignment == null && node?.parentId != null) {
+      return '$name · Inherited from parent';
+    }
+    return schedule?.enabled == false ? '$name · Dormant' : name;
   }
 
-  Future<void> _assign(
-    String? scheduleId, {
-    bool legacy = false,
-  }) async {
+  Future<void> _assign(String? scheduleId, {bool legacy = false}) async {
     final sync = context.read<ServerSyncProvider>();
     final journeyId = 'light-schedule-assignment-${_uuid.v4()}';
     final assignmentKind = legacy
@@ -61,23 +65,27 @@ class _LightScheduleAssignmentCardState
         : scheduleId == null
             ? 'unscheduled'
             : 'named';
-    unawaited(AnalyticsService().logLightScheduleAssignmentAttempted(
-      journeyId: journeyId,
-      assignmentKind: assignmentKind,
-      overrideScope: 'none',
-    ));
+    unawaited(
+      AnalyticsService().logLightScheduleAssignmentAttempted(
+        journeyId: journeyId,
+        assignmentKind: assignmentKind,
+        overrideScope: 'none',
+      ),
+    );
     final ok = await sync.setNodeLightScheduleAssignment(
       widget.nodeId,
       scheduleId,
       legacy: legacy,
     );
-    unawaited(AnalyticsService().logLightScheduleAssignmentCompleted(
-      journeyId: journeyId,
-      assignmentKind: assignmentKind,
-      overrideScope: 'none',
-      outcome: ok ? 'succeeded' : 'failed',
-      failureStage: ok ? null : 'appliance_ack',
-    ));
+    unawaited(
+      AnalyticsService().logLightScheduleAssignmentCompleted(
+        journeyId: journeyId,
+        assignmentKind: assignmentKind,
+        overrideScope: 'none',
+        outcome: ok ? 'succeeded' : 'failed',
+        failureStage: ok ? null : 'appliance_ack',
+      ),
+    );
     if (!mounted) return;
     if (ok) {
       Navigator.of(context).pop();
@@ -94,8 +102,13 @@ class _LightScheduleAssignmentCardState
       context: context,
       backgroundColor: CelestialColors.backgroundDark,
       showDragHandle: true,
-      builder: (sheetContext) => SafeArea(
-        child: Padding(
+      builder: (sheetContext) => ListTileTheme(
+        data: const ListTileThemeData(
+          textColor: CelestialColors.textPrimary,
+          iconColor: CelestialColors.textSecondary,
+        ),
+        child: SafeArea(
+          child: Padding(
           padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -108,9 +121,11 @@ class _LightScheduleAssignmentCardState
               const SizedBox(height: 8),
               ListTile(
                 key: const ValueKey('light-schedule-assignment-legacy'),
-                leading: const Icon(Icons.home_outlined),
-                title: const Text('Whole-home Alarm'),
-                subtitle: const Text('Use the compatible legacy schedule'),
+                leading: const Icon(Icons.account_tree_outlined),
+                title: const Text('Follow inherited schedule'),
+                subtitle: const Text(
+                  'Use the nearest parent, or the legacy whole-home Alarm',
+                ),
                 onTap: () => _assign(null, legacy: true),
               ),
               ListTile(
@@ -129,6 +144,7 @@ class _LightScheduleAssignmentCardState
                   onTap: () => _assign(schedule.id),
                 ),
             ],
+            ),
           ),
         ),
       ),
@@ -140,16 +156,25 @@ class _LightScheduleAssignmentCardState
     RhythmModeTransitionConfig transition,
   ) async {
     final sync = context.read<ServerSyncProvider>();
-    final current = sync
-        .nodeById(widget.nodeId)
-        ?.profileSettings
-        ?.lightScheduleOverrides[schedule.id]
+    final node = sync.nodeById(widget.nodeId);
+    final effective = node?.profileSettings?.lightScheduleOverrides[schedule.id]
         ?.transitions[transition.id];
-    var followAnchor = current?.trigger.event == null;
-    var event = current?.trigger.event ??
-        transition.trigger.event ??
-        (transition.toMode == RhythmMode.day ? 'sunrise' : 'sunset');
-    var offset = current?.trigger.offsetMinutes ?? 0;
+    final current = node?.localProfileSettings
+        ?.lightScheduleOverrides[schedule.id]?.transitions[transition.id];
+    final effectiveKind = effective?.trigger.kind ?? transition.trigger.kind;
+    var kindChoice = current?.trigger.kind ?? 'inherit';
+    var eventChoice = current?.trigger.event ?? 'inherit';
+    var timeOverride = current?.trigger.time != null;
+    var time = current?.trigger.time ?? transition.trigger.time ?? '07:00';
+    var offsetOverride = current?.trigger.offsetMinutes != null;
+    var offset = current?.trigger.offsetMinutes ??
+        effective?.trigger.offsetMinutes ??
+        transition.trigger.offsetMinutes;
+    var enabledChoice = current?.triggerEnabled == null
+        ? 'inherit'
+        : current!.triggerEnabled!
+            ? 'enabled'
+            : 'disabled';
     final solarAvailable = sync.solarScheduleAnchorsAvailable;
     final updated = await showModalBottomSheet<RhythmModeTransitionOverride>(
       context: context,
@@ -174,43 +199,112 @@ class _LightScheduleAssignmentCardState
                   style: Theme.of(context).textTheme.titleLarge,
                 ),
                 const SizedBox(height: 12),
-                SwitchListTile.adaptive(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Follow schedule anchor'),
-                  subtitle: const Text(
-                    'Future anchor changes keep flowing to this room',
-                  ),
-                  value: followAnchor,
-                  onChanged: solarAvailable
-                      ? (value) => setSheetState(() => followAnchor = value)
-                      : null,
-                ),
-                if (!solarAvailable)
-                  const Padding(
-                    padding: EdgeInsets.only(bottom: 12),
-                    child: Text(
-                      'Solar customization is unavailable until this home has a location and timezone.',
-                      style: TextStyle(color: CelestialColors.sunWarm),
+                DropdownButtonFormField<String>(
+                  initialValue: kindChoice,
+                  decoration: const InputDecoration(labelText: 'Trigger type'),
+                  items: const [
+                    DropdownMenuItem(
+                      value: 'inherit',
+                      child: Text('Follow schedule'),
                     ),
-                  ),
-                if (!followAnchor)
+                    DropdownMenuItem(
+                      value: 'solar',
+                      child: Text('Solar event'),
+                    ),
+                    DropdownMenuItem(
+                      value: 'scheduled',
+                      child: Text('Fixed local time'),
+                    ),
+                  ],
+                  onChanged: (value) {
+                    if (value == null) return;
+                    setSheetState(() {
+                      kindChoice = value;
+                      final selected =
+                          value == 'inherit' ? effectiveKind : value;
+                      if (selected == 'solar') {
+                        timeOverride = false;
+                        if (value != 'inherit' &&
+                            transition.trigger.kind != 'solar' &&
+                            eventChoice == 'inherit') {
+                          eventChoice = transition.toMode == RhythmMode.day
+                              ? 'sunrise'
+                              : 'sunset';
+                        }
+                      } else if (selected == 'scheduled') {
+                        eventChoice = 'inherit';
+                        offsetOverride = false;
+                        if (value != 'inherit' &&
+                            transition.trigger.kind != 'scheduled') {
+                          timeOverride = true;
+                        }
+                      }
+                    });
+                  },
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  initialValue: enabledChoice,
+                  decoration: const InputDecoration(labelText: 'Enabled'),
+                  items: const [
+                    DropdownMenuItem(
+                      value: 'inherit',
+                      child: Text('Follow schedule'),
+                    ),
+                    DropdownMenuItem(
+                      value: 'enabled',
+                      child: Text('Enabled here'),
+                    ),
+                    DropdownMenuItem(
+                      value: 'disabled',
+                      child: Text('Disabled here'),
+                    ),
+                  ],
+                  onChanged: (value) {
+                    if (value != null) {
+                      setSheetState(() => enabledChoice = value);
+                    }
+                  },
+                ),
+                if ((kindChoice == 'inherit' ? effectiveKind : kindChoice) ==
+                    'solar') ...[
+                  if (!solarAvailable)
+                    const Padding(
+                      padding: EdgeInsets.only(top: 12),
+                      child: Text(
+                        'Solar customization is unavailable until this home has a location and timezone.',
+                        style: TextStyle(color: CelestialColors.sunWarm),
+                      ),
+                    ),
+                  const SizedBox(height: 12),
                   DropdownButtonFormField<String>(
-                    initialValue: event,
-                    decoration:
-                        const InputDecoration(labelText: 'Solar anchor'),
-                    items: const [
-                      DropdownMenuItem(
-                          value: 'sunrise', child: Text('Sunrise')),
-                      DropdownMenuItem(value: 'sunset', child: Text('Sunset')),
-                      DropdownMenuItem(
+                    initialValue: eventChoice,
+                    decoration: const InputDecoration(
+                      labelText: 'Solar anchor',
+                    ),
+                    items: [
+                      if (kindChoice == 'inherit' || effectiveKind == 'solar')
+                        const DropdownMenuItem(
+                          value: 'inherit',
+                          child: Text('Follow schedule'),
+                        ),
+                      const DropdownMenuItem(
+                        value: 'sunrise',
+                        child: Text('Sunrise'),
+                      ),
+                      const DropdownMenuItem(
+                        value: 'sunset',
+                        child: Text('Sunset'),
+                      ),
+                      const DropdownMenuItem(
                         value: 'civil_twilight',
                         child: Text('Civil twilight'),
                       ),
-                      DropdownMenuItem(
+                      const DropdownMenuItem(
                         value: 'nautical_twilight',
                         child: Text('Nautical twilight'),
                       ),
-                      DropdownMenuItem(
+                      const DropdownMenuItem(
                         value: 'astronomical_twilight',
                         child: Text('Astronomical twilight'),
                       ),
@@ -218,45 +312,100 @@ class _LightScheduleAssignmentCardState
                     onChanged: solarAvailable
                         ? (value) {
                             if (value != null) {
-                              setSheetState(() => event = value);
+                              setSheetState(() => eventChoice = value);
                             }
                           }
                         : null,
                   ),
-                if (sync.lightScheduleSolarOffsetsSupported) ...[
-                  const SizedBox(height: 12),
-                  Text(
-                    offset == 0
-                        ? 'At the anchor'
-                        : '${offset.abs()} minutes ${offset < 0 ? 'before' : 'after'}',
-                    textAlign: TextAlign.center,
-                  ),
-                  Slider(
-                    key: ValueKey(
-                      'light-schedule-override-offset-${transition.id}',
+                  if (sync.lightScheduleSolarOffsetsSupported) ...[
+                    SwitchListTile.adaptive(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Override offset'),
+                      subtitle: const Text(
+                        'Turn off to follow the schedule offset',
+                      ),
+                      value: offsetOverride,
+                      onChanged: solarAvailable
+                          ? (value) =>
+                              setSheetState(() => offsetOverride = value)
+                          : null,
                     ),
-                    min: -180,
-                    max: 180,
-                    divisions: 72,
-                    value: offset.clamp(-180, 180).toDouble(),
-                    label: '$offset min',
-                    onChanged: solarAvailable
-                        ? (value) => setSheetState(() => offset = value.round())
-                        : null,
+                    if (offsetOverride) ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        offset == 0
+                            ? 'At the anchor'
+                            : '${offset.abs()} minutes ${offset < 0 ? 'before' : 'after'}',
+                        textAlign: TextAlign.center,
+                      ),
+                      Slider(
+                        key: ValueKey(
+                          'light-schedule-override-offset-${transition.id}',
+                        ),
+                        min: -maxSolarScheduleOffsetMinutes.toDouble(),
+                        max: maxSolarScheduleOffsetMinutes.toDouble(),
+                        divisions: 96,
+                        value: offset
+                            .clamp(
+                              -maxSolarScheduleOffsetMinutes,
+                              maxSolarScheduleOffsetMinutes,
+                            )
+                            .toDouble(),
+                        label: '$offset min',
+                        onChanged: solarAvailable
+                            ? (value) =>
+                                setSheetState(() => offset = value.round())
+                            : null,
+                      ),
+                    ],
+                  ],
+                ] else ...[
+                  SwitchListTile.adaptive(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Override local time'),
+                    subtitle: const Text(
+                      'Turn off to follow the schedule time',
+                    ),
+                    value: timeOverride,
+                    onChanged: kindChoice == 'scheduled' &&
+                            effectiveKind != 'scheduled'
+                        ? null
+                        : (value) => setSheetState(() => timeOverride = value),
                   ),
+                  if (timeOverride)
+                    TextFormField(
+                      key: ValueKey(
+                        'light-schedule-override-time-${transition.id}',
+                      ),
+                      initialValue: time,
+                      decoration: const InputDecoration(
+                        labelText: 'Local time (HH:MM)',
+                      ),
+                      onChanged: (value) => time = value,
+                    ),
                 ],
                 const SizedBox(height: 8),
                 FilledButton(
-                  onPressed: solarAvailable
+                  onPressed: (kindChoice == 'scheduled' ||
+                          effectiveKind == 'scheduled' ||
+                          solarAvailable)
                       ? () => Navigator.of(context).pop(
                             RhythmModeTransitionOverride(
                               trigger: RhythmTransitionTriggerOverride(
-                                event: followAnchor ? null : event,
-                                offsetMinutes:
-                                    sync.lightScheduleSolarOffsetsSupported
-                                        ? offset
-                                        : null,
+                                kind:
+                                    kindChoice == 'inherit' ? null : kindChoice,
+                                event: eventChoice == 'inherit'
+                                    ? null
+                                    : eventChoice,
+                                time: timeOverride ? time : null,
+                                offsetMinutes: offsetOverride &&
+                                        sync.lightScheduleSolarOffsetsSupported
+                                    ? offset
+                                    : null,
                               ),
+                              triggerEnabled: enabledChoice == 'inherit'
+                                  ? null
+                                  : enabledChoice == 'enabled',
                             ),
                           )
                       : null,
@@ -271,73 +420,121 @@ class _LightScheduleAssignmentCardState
     if (updated == null || !mounted) return;
     final previous = sync
             .nodeById(widget.nodeId)
-            ?.profileSettings
+            ?.localProfileSettings
             ?.lightScheduleOverrides[schedule.id] ??
         const RhythmLightScheduleOverride();
     final transitions = Map<String, RhythmModeTransitionOverride>.from(
       previous.transitions,
-    )..[transition.id] = updated;
+    );
+    if (updated.isEmpty) {
+      transitions.remove(transition.id);
+    } else {
+      transitions[transition.id] = updated;
+    }
+    final nextOverride = transitions.isEmpty
+        ? null
+        : RhythmLightScheduleOverride(transitions: transitions);
     final journeyId = 'light-schedule-override-${_uuid.v4()}';
-    unawaited(AnalyticsService().logLightScheduleAssignmentAttempted(
-      journeyId: journeyId,
-      assignmentKind: 'named',
-      overrideScope: 'transition',
-    ));
+    unawaited(
+      AnalyticsService().logLightScheduleAssignmentAttempted(
+        journeyId: journeyId,
+        assignmentKind: 'named',
+        overrideScope: 'transition',
+      ),
+    );
     final ok = await sync.setNodeLightScheduleOverride(
       widget.nodeId,
       schedule.id,
-      RhythmLightScheduleOverride(transitions: transitions),
+      nextOverride,
       journeyId: journeyId,
     );
-    unawaited(AnalyticsService().logLightScheduleAssignmentCompleted(
-      journeyId: journeyId,
-      assignmentKind: 'named',
-      overrideScope: 'transition',
-      outcome: ok ? 'succeeded' : 'failed',
-      failureStage: ok ? null : 'appliance_ack',
-    ));
-    if (mounted && !ok) {
+    unawaited(
+      AnalyticsService().logLightScheduleAssignmentCompleted(
+        journeyId: journeyId,
+        assignmentKind: 'named',
+        overrideScope: 'transition',
+        outcome: ok ? 'succeeded' : 'failed',
+        failureStage: ok ? null : 'appliance_ack',
+      ),
+    );
+    if (!mounted) return;
+    setState(() {
+      _retryScheduleId = ok ? null : schedule.id;
+      _retryOverride = ok ? null : nextOverride;
+    });
+    if (!ok) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Could not save the customization.')),
       );
     }
   }
 
+  Future<void> _retryLastOverride() async {
+    final scheduleId = _retryScheduleId;
+    if (scheduleId == null) return;
+    final ok =
+        await context.read<ServerSyncProvider>().setNodeLightScheduleOverride(
+              widget.nodeId,
+              scheduleId,
+              _retryOverride,
+              journeyId: 'light-schedule-retry-${_uuid.v4()}',
+            );
+    if (mounted && ok) {
+      setState(() {
+        _retryScheduleId = null;
+        _retryOverride = null;
+      });
+    }
+  }
+
   Future<void> _resetOverrides(String scheduleId) async {
     final sync = context.read<ServerSyncProvider>();
     final journeyId = 'light-schedule-reset-${_uuid.v4()}';
-    unawaited(AnalyticsService().logLightScheduleAssignmentAttempted(
-      journeyId: journeyId,
-      assignmentKind: 'named',
-      overrideScope: 'reset',
-    ));
+    unawaited(
+      AnalyticsService().logLightScheduleAssignmentAttempted(
+        journeyId: journeyId,
+        assignmentKind: 'named',
+        overrideScope: 'reset',
+      ),
+    );
     final ok = await sync.setNodeLightScheduleOverride(
       widget.nodeId,
       scheduleId,
       null,
       journeyId: journeyId,
     );
-    unawaited(AnalyticsService().logLightScheduleAssignmentCompleted(
-      journeyId: journeyId,
-      assignmentKind: 'named',
-      overrideScope: 'reset',
-      outcome: ok ? 'succeeded' : 'failed',
-      failureStage: ok ? null : 'appliance_ack',
-    ));
+    unawaited(
+      AnalyticsService().logLightScheduleAssignmentCompleted(
+        journeyId: journeyId,
+        assignmentKind: 'named',
+        overrideScope: 'reset',
+        outcome: ok ? 'succeeded' : 'failed',
+        failureStage: ok ? null : 'appliance_ack',
+      ),
+    );
+    if (mounted) {
+      setState(() {
+        _retryScheduleId = ok ? null : scheduleId;
+        _retryOverride = null;
+      });
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final sync = context.watch<ServerSyncProvider>();
     if (!sync.lightSchedulesSupported) return const SizedBox.shrink();
-    final settings = sync.nodeById(widget.nodeId)?.profileSettings;
+    final node = sync.nodeById(widget.nodeId);
+    final settings = node?.profileSettings;
+    final localSettings = node?.localProfileSettings;
     final scheduleId = settings?.lightScheduleId;
     final schedule = sync.lightSchedules
         .where((value) => value.id == scheduleId)
         .firstOrNull;
     final customized = scheduleId != null &&
-        settings?.lightScheduleOverrides[scheduleId]?.isEmpty == false;
+        localSettings?.lightScheduleOverrides[scheduleId]?.isEmpty == false;
     final pending = sync.lightScheduleWritePendingForNode(widget.nodeId);
+    final rejected = sync.lightScheduleWriteRejectedForNode(widget.nodeId);
 
     return Container(
       key: ValueKey('named-light-schedule-${widget.nodeId}'),
@@ -348,55 +545,107 @@ class _LightScheduleAssignmentCardState
           color: CelestialColors.orbitRing.withValues(alpha: 0.3),
         ),
       ),
-      child: Column(
-        children: [
-          ListTile(
-            leading: pending
-                ? const SizedBox.square(
-                    dimension: 20,
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  )
-                : const Icon(
-                    Icons.schedule_rounded,
-                    color: CelestialColors.accentBlue,
-                  ),
-            title: const Text('Named schedule'),
-            subtitle: Text(_assignmentLabel(sync)),
-            trailing: const Icon(Icons.chevron_right_rounded),
-            onTap: pending ? null : _chooseAssignment,
+      child: Material(
+        color: Colors.transparent,
+        borderRadius: BorderRadius.circular(14),
+        child: ListTileTheme(
+          data: const ListTileThemeData(
+            textColor: CelestialColors.textPrimary,
+            iconColor: CelestialColors.textSecondary,
           ),
-          if (schedule != null && sync.lightScheduleOverridesSupported) ...[
-            Divider(
-              height: 1,
-              indent: 56,
-              color: CelestialColors.orbitRing.withValues(alpha: 0.2),
+          child: Column(
+            children: [
+            ListTile(
+              leading: pending
+                  ? const SizedBox.square(
+                      dimension: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(
+                      Icons.schedule_rounded,
+                      color: CelestialColors.accentBlue,
+                    ),
+              title: const Text('Named schedule'),
+              subtitle: Text(_assignmentLabel(sync)),
+              trailing: const Icon(Icons.chevron_right_rounded),
+              onTap: pending ? null : _chooseAssignment,
             ),
-            for (final transition in schedule.transitions)
-              if (transition.trigger.isSolar)
+            if (schedule != null && sync.lightScheduleOverridesSupported) ...[
+              Divider(
+                height: 1,
+                indent: 56,
+                color: CelestialColors.orbitRing.withValues(alpha: 0.2),
+              ),
+              for (final transition in schedule.transitions)
                 ListTile(
-                  key: ValueKey(
-                    'light-schedule-customize-${transition.id}',
-                  ),
+                  key: ValueKey('light-schedule-customize-${transition.id}'),
                   leading: Icon(
                     transition.toMode == RhythmMode.day
                         ? Icons.wb_sunny_outlined
                         : Icons.bedtime_outlined,
                   ),
                   title: Text(transition.label),
-                  subtitle: const Text('Customize anchor or offset'),
+                  subtitle: Builder(
+                    builder: (context) {
+                      final local = localSettings
+                          ?.lightScheduleOverrides[schedule.id]
+                          ?.transitions[transition.id];
+                      final inherited = settings
+                          ?.lightScheduleOverrides[schedule.id]
+                          ?.transitions[transition.id];
+                      final source = local?.isEmpty == false
+                          ? 'Customized here'
+                          : inherited?.isEmpty == false
+                              ? 'Inherited customization'
+                              : 'Following schedule';
+                      final time =
+                          sync.resolvedLightScheduleTransitionLocalTime(
+                        widget.nodeId,
+                        schedule,
+                        transition,
+                      );
+                      return Text(
+                        time == null ? source : '$source · $time local',
+                      );
+                    },
+                  ),
                   trailing: const Icon(Icons.tune_rounded),
                   onTap:
                       pending ? null : () => _customize(schedule, transition),
                 ),
-            if (customized)
-              TextButton.icon(
-                key: const ValueKey('light-schedule-overrides-reset'),
-                onPressed: pending ? null : () => _resetOverrides(schedule.id),
-                icon: const Icon(Icons.restart_alt_rounded),
-                label: const Text('Follow schedule for every field'),
-              ),
-          ],
-        ],
+              if (customized)
+                TextButton.icon(
+                  key: const ValueKey('light-schedule-overrides-reset'),
+                  onPressed:
+                      pending ? null : () => _resetOverrides(schedule.id),
+                  icon: const Icon(Icons.restart_alt_rounded),
+                  label: const Text('Follow schedule for every field'),
+                ),
+              if (rejected)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+                  child: Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'Save rejected by the appliance.',
+                          style: TextStyle(color: CelestialColors.sunWarm),
+                        ),
+                      ),
+                      TextButton(
+                        key: const ValueKey('light-schedule-override-retry'),
+                        onPressed: pending || _retryScheduleId == null
+                            ? null
+                            : _retryLastOverride,
+                        child: const Text('Retry'),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+            ],
+          ),
+        ),
       ),
     );
   }

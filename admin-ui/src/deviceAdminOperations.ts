@@ -193,6 +193,28 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     body: { node_id: '{node_id}', schedule_id: '{schedule_id}' }
   },
   {
+    id: 'light-schedule-override-set',
+    category: 'Global Settings',
+    label: 'Set light schedule override',
+    description: 'Set or reset one node\'s sparse named-schedule customization.',
+    method: 'PUT',
+    path: 'api/light-schedules/override',
+    danger: true,
+    body: {
+      node_id: '{node_id}',
+      schedule_id: '{schedule_id}',
+      override: {
+        transitions: {
+          '{transition_id}': {
+            trigger: { offset_minutes: 0 }
+          }
+        }
+      },
+      expected_effective_overrides: {},
+      correlation_id: '{correlation_id}'
+    }
+  },
+  {
     id: 'light-schedule-transition-trigger',
     category: 'Global Settings',
     label: 'Trigger light schedule transition',

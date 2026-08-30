@@ -160,7 +160,8 @@ class _LightSchedulesScreenState extends State<LightSchedulesScreen> {
                               ? CelestialColors.accentBlue
                               : CelestialColors.textSecondary,
                           label: schedule.name,
-                          value: schedule.enabled ? _summary(schedule) : 'Off',
+                          value: '${schedule.enabled ? _summary(schedule) : 'Dormant'} · '
+                              '${_usageSummary(sync, schedule)}',
                           onTap: () => _edit(schedule),
                           trailing: PopupMenuButton<String>(
                             tooltip: 'Schedule actions',
@@ -198,6 +199,32 @@ class _LightSchedulesScreenState extends State<LightSchedulesScreen> {
         .where((value) => value.toMode == RhythmMode.sleep)
         .firstOrNull;
     return '${_triggerLabel(day?.trigger)} · ${_triggerLabel(sleep?.trigger)}';
+  }
+
+  static String _usageSummary(
+    ServerSyncProvider sync,
+    RhythmLightScheduleConfig schedule,
+  ) {
+    final targets = sync.helloNodes.where(
+      (node) =>
+          node.kind.isRoom ||
+          (node.kind.isLightDevice && node.parentId == null),
+    );
+    final assigned = targets
+        .where(
+          (node) => node.profileSettings?.lightScheduleId == schedule.id,
+        )
+        .length;
+    final customized = targets
+        .where(
+          (node) =>
+              node.profileSettings
+                  ?.lightScheduleOverrides[schedule.id]
+                  ?.isEmpty ==
+              false,
+        )
+        .length;
+    return '$assigned assigned · $customized customized';
   }
 
   static String _triggerLabel(RhythmTransitionTrigger? trigger) {
@@ -472,10 +499,15 @@ class _TransitionEditor extends StatelessWidget {
             ),
             Slider(
               key: ValueKey('schedule-offset-$title'),
-              min: -180,
-              max: 180,
-              divisions: 72,
-              value: trigger.offsetMinutes.clamp(-180, 180).toDouble(),
+              min: -maxSolarScheduleOffsetMinutes.toDouble(),
+              max: maxSolarScheduleOffsetMinutes.toDouble(),
+              divisions: 96,
+              value: trigger.offsetMinutes
+                  .clamp(
+                    -maxSolarScheduleOffsetMinutes,
+                    maxSolarScheduleOffsetMinutes,
+                  )
+                  .toDouble(),
               label: '${trigger.offsetMinutes} min',
               onChanged: solarAvailable
                   ? (value) => onChanged(

@@ -797,6 +797,9 @@ class RhythmRoom {
   final List<String> deviceIds;
   final List<RhythmDevice> devices;
   final RhythmNodeProfileSettings? profileSettings;
+
+  /// Node-local settings before parent inheritance is applied.
+  final RhythmNodeProfileSettings? localProfileSettings;
   final RhythmObservedPower? observedPower;
   final bool? lightsOn;
   final int? brightness;
@@ -833,6 +836,7 @@ class RhythmRoom {
     this.devices = const [],
     RhythmNodeProfileSettings? profileSettings,
     RhythmNodeProfileSettings? roomProfile,
+    this.localProfileSettings,
     this.observedPower,
     this.lightsOn,
     this.brightness,
@@ -928,6 +932,11 @@ class RhythmRoom {
         ),
       _ => null,
     };
+    final localProfileSettings = json['room_profile'] is Map<String, dynamic>
+        ? RhythmNodeProfileSettings.fromJson(
+            json['room_profile'] as Map<String, dynamic>,
+          )
+        : profileSettings;
     final state = RoomModeState.fromJson(json);
     return RhythmRoom(
       id: json['id'] as String? ?? json['node_id'] as String? ?? '',
@@ -968,6 +977,7 @@ class RhythmRoom {
               .toList() ??
           [],
       profileSettings: profileSettings,
+      localProfileSettings: localProfileSettings,
       observedPower: observedPower,
       lightsOn: observedPower?.lightsOn ?? json['lights_on'] as bool?,
       brightness: jsonInt(
@@ -1108,6 +1118,9 @@ class RhythmRoomState {
   final int? kelvin;
   final RhythmRoomColor? color;
   final RhythmNodeProfileSettings? profileSettings;
+
+  /// Node-local settings before parent inheritance is applied.
+  final RhythmNodeProfileSettings? localProfileSettings;
   final bool? moodEnabled;
   final bool? moodActive;
   final bool? standbyEnabled;
@@ -1143,6 +1156,7 @@ class RhythmRoomState {
     this.color,
     RhythmNodeProfileSettings? profileSettings,
     RhythmNodeProfileSettings? roomProfile,
+    this.localProfileSettings,
     this.moodEnabled,
     this.moodActive,
     this.standbyEnabled,
@@ -1186,6 +1200,11 @@ class RhythmRoomState {
         ),
       _ => null,
     };
+    final localProfileSettings = json['room_profile'] is Map<String, dynamic>
+        ? RhythmNodeProfileSettings.fromJson(
+            json['room_profile'] as Map<String, dynamic>,
+          )
+        : profileSettings;
     final state = RoomModeState.fromJson(json);
     return RhythmRoomState(
       nodeId: json['node_id'] as String? ??
@@ -1233,6 +1252,7 @@ class RhythmRoomState {
           ? RhythmRoomColor.fromJson(json['color'] as Map<String, dynamic>)
           : null,
       profileSettings: profileSettings,
+      localProfileSettings: localProfileSettings,
       moodEnabled: json['mood_enabled'] as bool? ??
           profileSettings?.moodEnabled ??
           (state == RoomModeState.mood ? true : null),

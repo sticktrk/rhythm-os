@@ -445,6 +445,29 @@ impl ModeTransitionTriggerOverride {
     }
 
     pub fn merged_with_parent(&self, parent: &Self) -> Self {
+        // A local kind selection starts a typed trigger scope. Inherit only
+        // fields compatible with that type: this preserves same-kind sparse
+        // inheritance even when the parent relies on the schedule's base kind,
+        // while preventing solar fields from leaking into fixed-time rules (or
+        // vice versa). Explicit incompatible local fields remain so `apply_to`
+        // rejects them visibly.
+        if let Some(kind) = self.kind {
+            return match kind {
+                ModeTransitionTriggerType::Manual => self.clone(),
+                ModeTransitionTriggerType::Scheduled => Self {
+                    kind: self.kind,
+                    event: self.event,
+                    offset_minutes: self.offset_minutes,
+                    time: self.time.or(parent.time),
+                },
+                ModeTransitionTriggerType::Solar => Self {
+                    kind: self.kind,
+                    event: self.event.or(parent.event),
+                    offset_minutes: self.offset_minutes.or(parent.offset_minutes),
+                    time: self.time,
+                },
+            };
+        }
         Self {
             kind: self.kind.or(parent.kind),
             event: self.event.or(parent.event),
@@ -461,7 +484,9 @@ impl ModeTransitionTriggerOverride {
         } else {
             ModeTransitionTriggerType::Scheduled
         };
-        match self.kind.unwrap_or(inherited_kind) {
+        let effective_kind = self.kind.unwrap_or(inherited_kind);
+        let kind_changed = self.kind.is_some_and(|kind| kind != inherited_kind);
+        match effective_kind {
             ModeTransitionTriggerType::Manual => {
                 if self.event.is_some()
                     || self.time.is_some()
@@ -482,7 +507,7 @@ impl ModeTransitionTriggerOverride {
                     );
                 }
                 self.time
-                    .or_else(|| base.scheduled_time())
+                    .or_else(|| (!kind_changed).then(|| base.scheduled_time()).flatten())
                     .map(ModeTransitionTrigger::Scheduled)
                     .ok_or_else(|| "scheduled trigger override requires time".to_string())
             }
@@ -492,10 +517,10 @@ impl ModeTransitionTriggerOverride {
                 }
                 let event = self
                     .event
-                    .or_else(|| base.solar_event())
+                    .or_else(|| (!kind_changed).then(|| base.solar_event()).flatten())
                     .ok_or_else(|| "solar trigger override requires event".to_string())?;
                 let offset_minutes = self.offset_minutes.unwrap_or_else(|| {
-                    if base.is_solar() {
+                    if !kind_changed && base.is_solar() {
                         base.offset_minutes()
                     } else {
                         0
@@ -1558,6 +1583,16 @@ pub struct RoomProfileSettings {
     )]
     pub light_schedule_overrides: BTreeMap<String, LightScheduleOverride>,
 
+    /// Per-node automatic mode materialization keyed by named schedule ID.
+    /// This keeps an inherited child room's boundary state independent without
+    /// copying or pinning the parent's schedule assignment. Entries stay
+    /// dormant when another authority is effective.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "BTreeMap::is_empty")
+    )]
+    pub light_schedule_modes: BTreeMap<String, RhythmMode>,
+
     /// Optional room-local schedule. Absence preserves legacy preset behavior.
     #[cfg_attr(
         feature = "serde",
@@ -1585,6 +1620,7 @@ impl RoomProfileSettings {
             && self.motion_activation_enabled.is_none()
             && self.light_schedule.is_none()
             && self.light_schedule_overrides.is_empty()
+            && self.light_schedule_modes.is_empty()
             && self.room_schedule.is_none()
             && self.profile_overrides.is_empty()
     }
@@ -1654,13 +1690,22 @@ impl RoomProfileSettings {
         // persisted fields. Any local choice must mask both parent fields;
         // otherwise an inherited named schedule would incorrectly outrank a
         // room's explicit custom wall-clock schedule in `schedule_mode`.
-        let (light_schedule, room_schedule) = if self.light_schedule.is_some() {
+        let (mut light_schedule, room_schedule) = if self.light_schedule.is_some() {
             (self.light_schedule.clone(), self.room_schedule)
         } else if self.room_schedule.is_some() {
             (None, self.room_schedule)
         } else {
             (parent.light_schedule.clone(), parent.room_schedule)
         };
+        if let Some(LightScheduleAssignment::Named {
+            schedule_id,
+            active_mode,
+        }) = light_schedule.as_mut()
+        {
+            if let Some(mode) = self.light_schedule_modes.get(schedule_id) {
+                *active_mode = *mode;
+            }
+        }
         Self {
             profile_id: self
                 .profile_id
@@ -1695,6 +1740,7 @@ impl RoomProfileSettings {
                 }
                 overrides
             },
+            light_schedule_modes: self.light_schedule_modes.clone(),
             room_schedule,
             profile_overrides: {
                 let mut profile_overrides = parent.profile_overrides.clone();
@@ -2321,6 +2367,7 @@ mod tests {
             motion_activation_enabled: Some(false),
             light_schedule: None,
             light_schedule_overrides: BTreeMap::new(),
+            light_schedule_modes: BTreeMap::new(),
             room_schedule: None,
             profile_overrides: BTreeMap::new(),
         };
@@ -3472,5 +3519,91 @@ mod tests {
             edited.transitions[0].duration_ms,
             TimerSetting::Fixed { value: 9_000 }
         );
+    }
+
+    #[test]
+    fn trigger_kind_switches_clear_incompatible_inherited_fields() {
+        let inherited_solar = ModeTransitionTriggerOverride {
+            event: Some(SolarEvent::CivilTwilight),
+            offset_minutes: Some(-30),
+            ..Default::default()
+        };
+        let scheduled = ModeTransitionTriggerOverride {
+            kind: Some(ModeTransitionTriggerType::Scheduled),
+            time: Some(ModeTransitionTime::from_hour_minute(7, 15).unwrap()),
+            ..Default::default()
+        }
+        .merged_with_parent(&inherited_solar);
+        assert_eq!(scheduled.event, None);
+        assert_eq!(scheduled.offset_minutes, None);
+        assert_eq!(
+            scheduled.time,
+            Some(ModeTransitionTime::from_hour_minute(7, 15).unwrap())
+        );
+        assert_eq!(
+            scheduled.apply_to(ModeTransitionTrigger::Sunrise).unwrap(),
+            ModeTransitionTrigger::Scheduled(ModeTransitionTime::from_hour_minute(7, 15).unwrap())
+        );
+
+        let inherited_scheduled = ModeTransitionTriggerOverride {
+            time: Some(ModeTransitionTime::from_hour_minute(6, 45).unwrap()),
+            ..Default::default()
+        };
+        let solar = ModeTransitionTriggerOverride {
+            kind: Some(ModeTransitionTriggerType::Solar),
+            event: Some(SolarEvent::Sunset),
+            offset_minutes: Some(20),
+            ..Default::default()
+        }
+        .merged_with_parent(&inherited_scheduled);
+        assert_eq!(solar.time, None);
+        assert_eq!(
+            solar
+                .apply_to(ModeTransitionTrigger::Scheduled(
+                    ModeTransitionTime::from_hour_minute(6, 45).unwrap(),
+                ))
+                .unwrap(),
+            ModeTransitionTrigger::Sunset.with_solar_offset(20).unwrap()
+        );
+
+        let sparse_solar = ModeTransitionTriggerOverride {
+            kind: Some(ModeTransitionTriggerType::Solar),
+            offset_minutes: Some(10),
+            ..Default::default()
+        }
+        .merged_with_parent(&inherited_solar);
+        assert_eq!(sparse_solar.event, Some(SolarEvent::CivilTwilight));
+        assert_eq!(sparse_solar.offset_minutes, Some(10));
+
+        let sparse_scheduled = ModeTransitionTriggerOverride {
+            kind: Some(ModeTransitionTriggerType::Scheduled),
+            ..Default::default()
+        }
+        .merged_with_parent(&inherited_scheduled);
+        assert_eq!(
+            sparse_scheduled.time,
+            Some(ModeTransitionTime::from_hour_minute(6, 45).unwrap())
+        );
+    }
+
+    #[test]
+    fn trigger_kind_switch_requires_the_new_kind_fields() {
+        assert!(ModeTransitionTriggerOverride {
+            kind: Some(ModeTransitionTriggerType::Scheduled),
+            ..Default::default()
+        }
+        .apply_to(ModeTransitionTrigger::Sunrise)
+        .unwrap_err()
+        .contains("requires time"));
+
+        assert!(ModeTransitionTriggerOverride {
+            kind: Some(ModeTransitionTriggerType::Solar),
+            ..Default::default()
+        }
+        .apply_to(ModeTransitionTrigger::Scheduled(
+            ModeTransitionTime::from_hour_minute(6, 45).unwrap(),
+        ))
+        .unwrap_err()
+        .contains("requires event"));
     }
 }
