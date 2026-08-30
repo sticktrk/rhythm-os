@@ -1050,7 +1050,7 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
       _GlobalRoomAction.reset => 'reset',
     };
     final eligible = _eligibleGlobalRoomTargets(
-      includeLowGlow: action != _GlobalRoomAction.reset,
+      includeLowGlow: action == _GlobalRoomAction.reset,
     );
     if (eligible.isEmpty) {
       AnalyticsService().logGlobalRoomActionCompleted(

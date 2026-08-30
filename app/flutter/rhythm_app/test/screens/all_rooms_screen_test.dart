@@ -426,7 +426,7 @@ void main() {
   });
 
   testWidgets(
-      'global soften includes Low glow nodes and collapses child bulbs',
+      'global soften skips Low glow nodes and collapses child bulbs',
       (tester) async {
     final harness = await _pumpAllRooms(
       tester,
@@ -451,9 +451,8 @@ void main() {
     expect(harness.api.actionBatches, hasLength(1));
     expect(harness.api.actionBatches.single, [
       (nodeId: 'room-1', action: 'step_down'),
-      (nodeId: 'garage', action: 'step_down'),
     ]);
-    expect(find.text('Adjusted 2 of 2 rooms.'), findsOneWidget);
+    expect(find.text('Adjusted 1 of 1 rooms.'), findsOneWidget);
     expect(
       find.byKey(const ValueKey('global-room-action-undo')),
       findsOneWidget,
@@ -461,7 +460,7 @@ void main() {
   });
 
   testWidgets(
-      'global boost includes legacy Low glow and locks duplicate taps',
+      'global boost skips legacy Low glow and locks duplicate taps',
       (tester) async {
     final harness = await _pumpAllRooms(
       tester,
@@ -483,7 +482,6 @@ void main() {
     expect(harness.api.actionBatches, hasLength(1));
     expect(harness.api.actionBatches.single, [
       (nodeId: 'room-1', action: 'step_up'),
-      (nodeId: 'bedroom', action: 'step_up'),
     ]);
     expect(
       find.byKey(const ValueKey('global-room-action-progress')),
@@ -498,7 +496,7 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 500));
 
-    expect(find.text('Adjusted 1 of 2 rooms.'), findsOneWidget);
+    expect(find.text('Adjusted 1 of 1 rooms.'), findsOneWidget);
   });
 
   testWidgets('global action result auto-dismisses while offering undo',
@@ -566,7 +564,7 @@ void main() {
     ]);
   });
 
-  testWidgets('global reset leaves current and legacy Low glow rooms alone',
+  testWidgets('global reset includes current and legacy Low glow rooms',
       (tester) async {
     final harness = await _pumpAllRooms(
       tester,
@@ -590,8 +588,10 @@ void main() {
 
     expect(harness.api.actionBatches.single, [
       (nodeId: 'room-1', action: 'reset'),
+      (nodeId: 'bedroom', action: 'reset'),
+      (nodeId: 'garage', action: 'reset'),
     ]);
-    expect(find.text('Reset 1 of 1 rooms.'), findsOneWidget);
+    expect(find.text('Reset 3 of 3 rooms.'), findsOneWidget);
   });
 
   testWidgets('expanded slider applies one exact batch to adaptive-on rooms',
