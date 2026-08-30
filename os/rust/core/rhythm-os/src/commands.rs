@@ -9060,17 +9060,13 @@ pub(crate) fn reconcile_room_schedule_before_tick(
             return Ok(None);
         }
         let (schedule, light_schedule) = match snapshot.profile_settings.light_schedule.as_ref() {
-            Some(rhythm_core::LightScheduleAssignment::Named { schedule_id, .. }) => {
-                let configured = s.light_schedules.get(schedule_id).ok_or_else(|| {
+            Some(assignment @ rhythm_core::LightScheduleAssignment::Named { schedule_id, .. }) => {
+                s.light_schedules.get(schedule_id).ok_or_else(|| {
                     anyhow::anyhow!("Named light schedule '{}' was not found", schedule_id)
                 })?;
-                (
-                    None,
-                    Some(rhythm_core::LightScheduleAssignment::Named {
-                        schedule_id: schedule_id.clone(),
-                        active_mode: configured.active_mode,
-                    }),
-                )
+                // Automatic boundaries persist the active mode per addressable root.
+                // The registry mode is only the default for new assignments.
+                (None, Some(assignment.clone()))
             }
             Some(assignment @ rhythm_core::LightScheduleAssignment::Unscheduled { .. }) => {
                 (None, Some(assignment.clone()))
@@ -11210,6 +11206,14 @@ pub fn do_trigger_light_schedule_transition_for_node(
     schedule_id: &str,
     transition_id: &str,
 ) -> Result<AutomationActionOutcome> {
+    let write_lock = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .light_schedule_write_lock
+        .clone();
+    let _write_guard = write_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("light schedule write lock poisoned"))?;
     let (transition, target_mode, was_overridden) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let schedule = s
@@ -24242,6 +24246,32 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(1))
             .unwrap());
         override_write.join().unwrap();
+
+        let transition_guard = write_lock.lock().unwrap();
+        let (transition_started_tx, transition_started_rx) = std::sync::mpsc::channel();
+        let (transition_done_tx, transition_done_rx) = std::sync::mpsc::channel();
+        let transition_state = state.clone();
+        let transition_write = std::thread::spawn(move || {
+            transition_started_tx.send(()).unwrap();
+            let result = do_trigger_light_schedule_transition_for_node(
+                &transition_state,
+                "room1",
+                "outdoor",
+                "outdoor_sleep",
+            );
+            transition_done_tx.send(result.is_ok()).unwrap();
+        });
+        transition_started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(transition_done_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err());
+        drop(transition_guard);
+        assert!(transition_done_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap());
+        transition_write.join().unwrap();
     }
 
     #[test]

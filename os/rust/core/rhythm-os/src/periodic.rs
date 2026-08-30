@@ -5481,7 +5481,7 @@ mod tests {
     }
 
     #[test]
-    fn named_schedule_reconciles_materialized_mode_after_restart() {
+    fn named_schedule_pre_tick_reconcile_preserves_persisted_root_mode() {
         let state = make_state();
         let runtime = runtime_with_rooms(&["outdoor"]);
         install_runtime(&state, runtime.clone());
@@ -5496,7 +5496,8 @@ mod tests {
                     rhythm_core::RhythmMode::Day,
                     rhythm_core::RhythmMode::Sleep,
                     0,
-                )],
+                )
+                .with_id("sleep")],
             }],
         )
         .unwrap();
@@ -5507,13 +5508,14 @@ mod tests {
             false,
         )
         .unwrap();
-        state
-            .lock()
-            .unwrap()
-            .light_schedules
-            .get_mut("outdoor")
-            .unwrap()
-            .active_mode = rhythm_core::RhythmMode::Sleep;
+        crate::commands::do_trigger_light_schedule_transition_for_node(
+            &state, "outdoor", "outdoor", "sleep",
+        )
+        .unwrap();
+        assert_eq!(
+            state.lock().unwrap().light_schedules["outdoor"].active_mode,
+            rhythm_core::RhythmMode::Day
+        );
 
         assert!(
             crate::commands::reconcile_room_schedule_before_tick(&state, "outdoor", 14.0)

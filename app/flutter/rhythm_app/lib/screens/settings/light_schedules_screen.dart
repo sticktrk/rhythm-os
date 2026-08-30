@@ -10,6 +10,27 @@ import '../../services/analytics_service.dart';
 import '../../widgets/settings_row.dart';
 import '../../widgets/solar_orbit.dart' show CelestialColors;
 
+String allocateLightScheduleId(String seed, Iterable<String> existingIds) {
+  var base = seed
+      .toLowerCase()
+      .replaceAll(RegExp('[^a-z0-9]+'), '-')
+      .replaceAll(RegExp(r'^-|-$'), '');
+  if (base.isEmpty) base = 'schedule';
+  if (base.length > 64) base = base.substring(0, 64);
+
+  final existing = existingIds.toSet();
+  if (!existing.contains(base)) return base;
+  for (var sequence = 2;; sequence++) {
+    final suffix = '-$sequence';
+    final prefixLength = 64 - suffix.length;
+    final prefix = base.length > prefixLength
+        ? base.substring(0, prefixLength)
+        : base;
+    final candidate = '$prefix$suffix';
+    if (!existing.contains(candidate)) return candidate;
+  }
+}
+
 class LightSchedulesScreen extends StatefulWidget {
   const LightSchedulesScreen({super.key});
 
@@ -68,8 +89,12 @@ class _LightSchedulesScreenState extends State<LightSchedulesScreen> {
   }
 
   Future<void> _duplicate(RhythmLightScheduleConfig schedule) async {
+    final sync = context.read<ServerSyncProvider>();
     final copy = RhythmLightScheduleConfig(
-      id: '${schedule.id}-copy',
+      id: allocateLightScheduleId(
+        '${schedule.id}-copy',
+        sync.lightSchedules.map((value) => value.id),
+      ),
       name: '${schedule.name} Copy',
       enabled: schedule.enabled,
       activeMode: schedule.activeMode,
@@ -326,7 +351,14 @@ class _LightScheduleEditorState extends State<_LightScheduleEditor> {
   void _save() {
     final name = _name.text.trim();
     if (name.isEmpty) return;
-    final id = widget.schedule?.id ?? _slug(name);
+    final id = widget.schedule?.id ??
+        allocateLightScheduleId(
+          name,
+          context
+              .read<ServerSyncProvider>()
+              .lightSchedules
+              .map((value) => value.id),
+        );
     final editedIds = {_day.id, _sleep.id};
     Navigator.of(context).pop(
       RhythmLightScheduleConfig(
@@ -343,16 +375,6 @@ class _LightScheduleEditorState extends State<_LightScheduleEditor> {
         ],
       ),
     );
-  }
-
-  static String _slug(String value) {
-    final slug = value
-        .toLowerCase()
-        .replaceAll(RegExp('[^a-z0-9]+'), '-')
-        .replaceAll(RegExp(r'^-|-$'), '');
-    return slug.isEmpty
-        ? 'schedule-${const Uuid().v4().substring(0, 8)}'
-        : slug;
   }
 
   RhythmModeTransitionConfig? _savedTransition(

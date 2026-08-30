@@ -485,6 +485,15 @@ class ServerSyncProvider extends ChangeNotifier {
       HueServiceLocator.isDemoMode ||
       _capabilities?.supportsFeature(RhythmFeature.lightSchedulesV1) == true;
 
+  bool lightScheduleTargetSupportedForNode(String nodeId) {
+    if (!lightSchedulesSupported) return false;
+    final node = nodeById(nodeId);
+    final parentId = node?.parentId;
+    return node?.kind == RhythmNodeKind.room ||
+        (node?.kind == RhythmNodeKind.lightDevice &&
+            (parentId == null || parentId.isEmpty));
+  }
+
   bool get lightScheduleOverridesSupported =>
       HueServiceLocator.isDemoMode ||
       _capabilities?.supportsFeature(
@@ -4758,7 +4767,7 @@ class ServerSyncProvider extends ChangeNotifier {
     bool legacy = false,
     String? journeyId,
   }) async {
-    if (!lightSchedulesSupported ||
+    if (!lightScheduleTargetSupportedForNode(nodeId) ||
         _lightScheduleNodeWritesPending.contains(nodeId) ||
         (!HueServiceLocator.isDemoMode && !_connection.connected)) {
       return false;
@@ -4801,6 +4810,7 @@ class ServerSyncProvider extends ChangeNotifier {
     String? journeyId,
   }) async {
     if (!lightScheduleOverridesSupported ||
+        !lightScheduleTargetSupportedForNode(nodeId) ||
         _lightScheduleNodeWritesPending.contains(nodeId) ||
         (!HueServiceLocator.isDemoMode && !_connection.connected)) {
       return false;

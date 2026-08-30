@@ -654,7 +654,9 @@ class _LightScheduleAssignmentCardState
   @override
   Widget build(BuildContext context) {
     final sync = context.watch<ServerSyncProvider>();
-    if (!sync.lightSchedulesSupported) return const SizedBox.shrink();
+    if (!sync.lightScheduleTargetSupportedForNode(widget.nodeId)) {
+      return const SizedBox.shrink();
+    }
     final node = sync.nodeById(widget.nodeId);
     final settings = node?.profileSettings;
     final localSettings = node?.localProfileSettings;

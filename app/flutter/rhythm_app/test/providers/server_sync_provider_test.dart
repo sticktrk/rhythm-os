@@ -1927,6 +1927,8 @@ void main() {
     RhythmHello namedScheduleHello({
       bool supported = true,
       bool offsetsSupported = true,
+      String kind = 'room',
+      String name = 'Kitchen',
       Map<String, dynamic>? profileSettings,
       Map<String, dynamic>? roomProfile,
       String? parentId,
@@ -1950,8 +1952,8 @@ void main() {
           ...additionalNodes,
           {
             'id': 'room-1',
-            'name': 'Kitchen',
-            'kind': 'room',
+            'name': name,
+            'kind': kind,
             if (parentId != null) 'parent_id': parentId,
             'state': 'active',
             'rhythm_enabled': true,
@@ -1999,6 +2001,25 @@ void main() {
         ),
       ],
     );
+
+    test('allocates stable unique light schedule ids', () {
+      expect(allocateLightScheduleId('Outdoor', const []), 'outdoor');
+      expect(
+        allocateLightScheduleId('Outdoor', const ['outdoor']),
+        'outdoor-2',
+      );
+      expect(
+        allocateLightScheduleId(
+          'outdoor-copy',
+          const ['outdoor-copy', 'outdoor-copy-2'],
+        ),
+        'outdoor-copy-3',
+      );
+      expect(
+        allocateLightScheduleId(List.filled(80, 'x').join(), const []).length,
+        lessThanOrEqualTo(64),
+      );
+    });
 
     Future<
         ({
@@ -3055,7 +3076,8 @@ void main() {
     testWidgets('explains that an assigned bulb inherits room settings',
         (tester) async {
       final roomProvider = RoomProvider();
-      final connection = _HelloRhythmConnection(_FakeRhythmServerApi());
+      final api = _FakeRhythmServerApi();
+      final connection = _HelloRhythmConnection(api);
       final provider = ServerSyncProvider(
         connection: connection,
         roomProvider: roomProvider,
@@ -3065,7 +3087,7 @@ void main() {
       addTearDown(roomProvider.dispose);
       addTearDown(connection.dispose);
 
-      connection.emitHello(scheduleHello(
+      connection.emitHello(namedScheduleHello(
         kind: 'light_device',
         name: 'Porch Bulb',
         parentId: 'porch-room',
@@ -3082,8 +3104,28 @@ void main() {
       ));
       await tester.pump();
 
+      expect(
+        await provider.setNodeLightScheduleAssignment('room-1', 'outdoor'),
+        isFalse,
+      );
+      expect(
+        await provider.setNodeLightScheduleOverride(
+          'room-1',
+          'outdoor',
+          null,
+        ),
+        isFalse,
+      );
+      expect(api.lightScheduleAssignmentCalls, isEmpty);
+      expect(api.lightScheduleOverrideCalls, isEmpty);
+
+      expect(provider.lightScheduleTargetSupportedForNode('room-1'), isFalse);
       expect(find.byKey(const ValueKey('light-schedule-inherited')),
           findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('named-light-schedule-room-1')),
+        findsNothing,
+      );
       expect(
         find.text(
             'This bulb uses the custom light settings from its assigned room.'),
