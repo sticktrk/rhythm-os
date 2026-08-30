@@ -1469,103 +1469,175 @@ fn trigger_hour_for_local_date(
     trigger: rhythm_core::ModeTransitionTrigger,
     target_mode: rhythm_core::RhythmMode,
     ctx: SolarTriggerContext<'_>,
-    date: chrono::NaiveDate,
+    target_date: chrono::NaiveDate,
 ) -> Option<f32> {
-    trigger_hour_for_source_date_unwrapped(trigger, target_mode, ctx, date)
-        .map(|hour| hour.rem_euclid(24.0))
+    let target_midnight = target_date.and_hms_opt(0, 0, 0)?;
+    // Offsets are bounded to +/- 12 hours, so the occurrence that lands on
+    // this local date can be anchored only to the previous, current, or next
+    // solar source date. Looking at the target date alone would attach an
+    // after-midnight boundary to the wrong sunset (and a before-midnight
+    // boundary to the wrong sunrise).
+    for source_date in [
+        target_date.pred_opt().unwrap_or(target_date),
+        target_date,
+        target_date.succ_opt().unwrap_or(target_date),
+    ] {
+        let Some(occurrence) =
+            resolved_trigger_occurrence_for_source_date(trigger, target_mode, ctx, source_date)
+        else {
+            continue;
+        };
+        if occurrence.local.date() == target_date {
+            return Some(
+                occurrence
+                    .local
+                    .signed_duration_since(target_midnight)
+                    .num_milliseconds() as f32
+                    / 3_600_000.0,
+            );
+        }
+    }
+    None
+}
+
+#[derive(Clone, Copy)]
+struct ResolvedTriggerOccurrence {
+    local: chrono::NaiveDateTime,
+    /// Retain the exact instant when a timezone is available. Converting an
+    /// offset-adjusted local time back through a fall-DST ambiguity could pick
+    /// the other occurrence of that wall clock hour.
+    utc: Option<chrono::NaiveDateTime>,
+}
+
+fn resolved_trigger_occurrence_for_source_date(
+    trigger: rhythm_core::ModeTransitionTrigger,
+    target_mode: rhythm_core::RhythmMode,
+    ctx: SolarTriggerContext<'_>,
+    date: chrono::NaiveDate,
+) -> Option<ResolvedTriggerOccurrence> {
+    if trigger.is_manual() {
+        return None;
+    }
+    let source_midnight = date.and_hms_opt(0, 0, 0)?;
+    if let Some(time) = trigger.scheduled_time() {
+        return Some(ResolvedTriggerOccurrence {
+            local: source_midnight
+                + chrono::Duration::milliseconds((time.local_hour() * 3_600_000.0).round() as i64),
+            // Scheduled rules are wall-clock policies. Replay resolves this
+            // local time with its existing fixed-offset/timezone contract.
+            utc: None,
+        });
+    }
+
+    let anchor_hour = {
+        // A nonzero offset must be tied to an authoritative solar instant.
+        // Without all three inputs there is no safe source event to shift.
+        if trigger.offset_minutes() != 0
+            && (ctx.latitude.is_none() || ctx.longitude.is_none() || ctx.timezone_name.is_none())
+        {
+            return None;
+        }
+
+        let estimated_sunrise = if ctx.latitude.is_some() && ctx.longitude.is_some() {
+            (ctx.solar_noon - 6.0).rem_euclid(24.0)
+        } else {
+            rhythm_core::config::FALLBACK_SUNRISE_HOUR
+        };
+        let estimated_sunset = if ctx.latitude.is_some() && ctx.longitude.is_some() {
+            (ctx.solar_noon + 6.0).rem_euclid(24.0)
+        } else {
+            rhythm_core::config::FALLBACK_SUNSET_HOUR
+        };
+
+        match (ctx.latitude, ctx.longitude, ctx.timezone_name) {
+            (Some(lat), Some(lon), Some(tz_name)) => {
+                let tz = rhythm_core::Timezone::new(tz_name);
+                let year = chrono::Datelike::year(&date);
+                let month = chrono::Datelike::month(&date);
+                let day = chrono::Datelike::day(&date);
+                let sun = rhythm_core::calculate_sun_event_times(lat, lon, year, month, day, &tz);
+                let twilight =
+                    rhythm_core::calculate_twilight_times(lat, lon, year, month, day, &tz);
+                match trigger.solar_event()? {
+                    rhythm_core::SolarEvent::Sunrise => sun.sunrise?,
+                    rhythm_core::SolarEvent::Sunset => sun.sunset?,
+                    rhythm_core::SolarEvent::CivilTwilight => {
+                        if target_mode == rhythm_core::RhythmMode::Day {
+                            twilight.dawn.civil?
+                        } else {
+                            twilight.dusk.civil?
+                        }
+                    }
+                    rhythm_core::SolarEvent::NauticalTwilight => {
+                        if target_mode == rhythm_core::RhythmMode::Day {
+                            twilight.dawn.nautical?
+                        } else {
+                            twilight.dusk.nautical?
+                        }
+                    }
+                    rhythm_core::SolarEvent::AstronomicalTwilight => {
+                        if target_mode == rhythm_core::RhythmMode::Day {
+                            twilight.dawn.astronomical?
+                        } else {
+                            twilight.dusk.astronomical?
+                        }
+                    }
+                }
+            }
+            _ => {
+                return fallback_solar_trigger_hour_unwrapped(
+                    trigger,
+                    target_mode,
+                    estimated_sunrise,
+                    estimated_sunset,
+                )
+                .map(|hour| ResolvedTriggerOccurrence {
+                    local: source_midnight
+                        + chrono::Duration::milliseconds((hour * 3_600_000.0).round() as i64),
+                    utc: None,
+                });
+            }
+        }
+    };
+
+    let anchor_local = source_midnight
+        + chrono::Duration::milliseconds((anchor_hour * 3_600_000.0).round() as i64);
+    if let Some(tz_name) = ctx.timezone_name {
+        let tz = rhythm_core::Timezone::new(tz_name);
+        let anchor_utc = tz.utc_datetime_from_local(anchor_local)?;
+        let shifted_utc =
+            anchor_utc + chrono::Duration::minutes(i64::from(trigger.offset_minutes()));
+        return Some(ResolvedTriggerOccurrence {
+            local: tz.local_datetime_from_utc(shifted_utc),
+            utc: Some(shifted_utc),
+        });
+    }
+
+    Some(ResolvedTriggerOccurrence {
+        local: anchor_local,
+        utc: None,
+    })
 }
 
 /// Resolve against the solar event's source date without folding an offset
 /// across midnight. Replay needs the signed day displacement so an event such
 /// as "12 hours before sunrise" remains attached to that sunrise's date.
+#[cfg(test)]
 fn trigger_hour_for_source_date_unwrapped(
     trigger: rhythm_core::ModeTransitionTrigger,
     target_mode: rhythm_core::RhythmMode,
     ctx: SolarTriggerContext<'_>,
     date: chrono::NaiveDate,
 ) -> Option<f32> {
-    if let Some(time) = trigger.scheduled_time() {
-        return Some(time.local_hour());
-    }
-
-    // Zero-offset triggers retain the legacy deterministic fallback. A new
-    // signed offset must not pretend to be tied to a local solar event when
-    // location or timezone evidence is unavailable.
-    if trigger.offset_minutes() != 0
-        && (ctx.latitude.is_none() || ctx.longitude.is_none() || ctx.timezone_name.is_none())
-    {
-        return None;
-    }
-
-    let estimated_sunrise = if ctx.latitude.is_some() && ctx.longitude.is_some() {
-        (ctx.solar_noon - 6.0).rem_euclid(24.0)
-    } else {
-        rhythm_core::config::FALLBACK_SUNRISE_HOUR
-    };
-    let estimated_sunset = if ctx.latitude.is_some() && ctx.longitude.is_some() {
-        (ctx.solar_noon + 6.0).rem_euclid(24.0)
-    } else {
-        rhythm_core::config::FALLBACK_SUNSET_HOUR
-    };
-
-    let Some(lat) = ctx.latitude else {
-        return fallback_solar_trigger_hour_unwrapped(
-            trigger,
-            target_mode,
-            estimated_sunrise,
-            estimated_sunset,
-        );
-    };
-    let Some(lon) = ctx.longitude else {
-        return fallback_solar_trigger_hour_unwrapped(
-            trigger,
-            target_mode,
-            estimated_sunrise,
-            estimated_sunset,
-        );
-    };
-    let Some(tz_name) = ctx.timezone_name else {
-        return fallback_solar_trigger_hour_unwrapped(
-            trigger,
-            target_mode,
-            estimated_sunrise,
-            estimated_sunset,
-        );
-    };
-
-    let tz = rhythm_core::Timezone::new(tz_name);
-    let year = chrono::Datelike::year(&date);
-    let month = chrono::Datelike::month(&date);
-    let day = chrono::Datelike::day(&date);
-    let sun = rhythm_core::calculate_sun_event_times(lat, lon, year, month, day, &tz);
-    let twilight = rhythm_core::calculate_twilight_times(lat, lon, year, month, day, &tz);
-
-    let anchor = match trigger.solar_event()? {
-        rhythm_core::SolarEvent::Sunrise => sun.sunrise?,
-        rhythm_core::SolarEvent::Sunset => sun.sunset?,
-        rhythm_core::SolarEvent::CivilTwilight => {
-            if target_mode == rhythm_core::RhythmMode::Day {
-                twilight.dawn.civil?
-            } else {
-                twilight.dusk.civil?
-            }
-        }
-        rhythm_core::SolarEvent::NauticalTwilight => {
-            if target_mode == rhythm_core::RhythmMode::Day {
-                twilight.dawn.nautical?
-            } else {
-                twilight.dusk.nautical?
-            }
-        }
-        rhythm_core::SolarEvent::AstronomicalTwilight => {
-            if target_mode == rhythm_core::RhythmMode::Day {
-                twilight.dawn.astronomical?
-            } else {
-                twilight.dusk.astronomical?
-            }
-        }
-    };
-    Some(anchor + f32::from(trigger.offset_minutes()) / 60.0)
+    let source_midnight = date.and_hms_opt(0, 0, 0)?;
+    let occurrence = resolved_trigger_occurrence_for_source_date(trigger, target_mode, ctx, date)?;
+    Some(
+        occurrence
+            .local
+            .signed_duration_since(source_midnight)
+            .num_milliseconds() as f32
+            / 3_600_000.0,
+    )
 }
 
 fn trigger_hour(
@@ -1627,14 +1699,10 @@ fn resolved_replayed_mode_transition(
     let mut events = Vec::new();
 
     while date <= end_date {
-        let Some(local_midnight) = date.and_hms_opt(0, 0, 0) else {
-            break;
-        };
-
         for config in ctx.configs.iter().filter(|config| {
             config.trigger_enabled && config.trigger != rhythm_core::ModeTransitionTrigger::Manual
         }) {
-            let Some(trigger_hour) = trigger_hour_for_source_date_unwrapped(
+            let Some(occurrence) = resolved_trigger_occurrence_for_source_date(
                 config.trigger,
                 config.to_mode,
                 ctx.solar,
@@ -1642,12 +1710,9 @@ fn resolved_replayed_mode_transition(
             ) else {
                 continue;
             };
-
-            let trigger_seconds = (trigger_hour * 3600.0).round() as i64;
-            let event_local = local_midnight + chrono::Duration::seconds(trigger_seconds);
-            let Some(event_utc) =
-                utc_datetime_from_local(event_local, ctx.utc_offset, ctx.solar.timezone_name)
-            else {
+            let Some(event_utc) = occurrence.utc.or_else(|| {
+                utc_datetime_from_local(occurrence.local, ctx.utc_offset, ctx.solar.timezone_name)
+            }) else {
                 continue;
             };
 
@@ -4315,10 +4380,20 @@ mod tests {
         )
         .unwrap();
         assert!(unwrapped < 0.0);
-        let wrapped =
+        let target_hour =
             trigger_hour_for_local_date(trigger, rhythm_core::RhythmMode::Day, solar, date)
                 .unwrap();
-        assert!((wrapped - unwrapped.rem_euclid(24.0)).abs() < 0.001);
+        let next_source_unwrapped = trigger_hour_for_source_date_unwrapped(
+            trigger,
+            rhythm_core::RhythmMode::Day,
+            solar,
+            date.succ_opt().unwrap(),
+        )
+        .unwrap();
+        assert!(
+            (target_hour - next_source_unwrapped.rem_euclid(24.0)).abs() < 0.001,
+            "the occurrence on June 2 must remain anchored to the June 3 sunrise"
+        );
 
         let config = rhythm_core::ModeTransitionConfig::new(
             rhythm_core::RhythmMode::Sleep,
@@ -4346,6 +4421,157 @@ mod tests {
             },
         );
         assert_eq!(resolved.map(|value| value.id), Some("wake".to_string()));
+    }
+
+    #[test]
+    fn solar_offsets_use_elapsed_time_and_adjacent_source_dates_across_dst() {
+        let solar = SolarTriggerContext {
+            solar_noon: 12.5,
+            latitude: Some(35.804102),
+            longitude: Some(-78.799_3),
+            timezone_name: Some("America/New_York"),
+        };
+        let timezone = rhythm_core::Timezone::new("America/New_York");
+
+        // Spring-forward happens on 2026-03-08. Twelve elapsed hours after
+        // the March 7 sunset spans thirteen local wall-clock hours.
+        let spring_source = NaiveDate::from_ymd_opt(2026, 3, 7).unwrap();
+        let spring_trigger = rhythm_core::ModeTransitionTrigger::Sunset
+            .with_solar_offset(720)
+            .unwrap();
+        let spring = resolved_trigger_occurrence_for_source_date(
+            spring_trigger,
+            rhythm_core::RhythmMode::Sleep,
+            solar,
+            spring_source,
+        )
+        .unwrap();
+        let spring_sunset = rhythm_core::calculate_sun_event_times(
+            solar.latitude.unwrap(),
+            solar.longitude.unwrap(),
+            2026,
+            3,
+            7,
+            &timezone,
+        )
+        .sunset
+        .unwrap();
+        let spring_anchor_local = spring_source.and_hms_opt(0, 0, 0).unwrap()
+            + chrono::Duration::milliseconds((spring_sunset * 3_600_000.0).round() as i64);
+        let spring_anchor_utc = timezone
+            .utc_datetime_from_local(spring_anchor_local)
+            .unwrap();
+        assert_eq!(
+            spring.utc.unwrap() - spring_anchor_utc,
+            chrono::Duration::hours(12)
+        );
+        assert_eq!(spring.local.date(), spring_source.succ_opt().unwrap());
+        assert_eq!(
+            spring.local - spring_anchor_local,
+            chrono::Duration::hours(13)
+        );
+        let spring_target_hour = trigger_hour_for_local_date(
+            spring_trigger,
+            rhythm_core::RhythmMode::Sleep,
+            solar,
+            spring.local.date(),
+        )
+        .unwrap();
+        assert!(
+            (spring_target_hour - spring.local.time().num_seconds_from_midnight() as f32 / 3600.0)
+                .abs()
+                < 0.001
+        );
+
+        // Fall-back happens on 2026-11-01. Twelve elapsed hours before that
+        // morning sunrise spans only eleven local wall-clock hours and lands
+        // on the preceding source-adjacent date.
+        let fall_source = NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+        let fall_trigger = rhythm_core::ModeTransitionTrigger::Sunrise
+            .with_solar_offset(-720)
+            .unwrap();
+        let fall = resolved_trigger_occurrence_for_source_date(
+            fall_trigger,
+            rhythm_core::RhythmMode::Day,
+            solar,
+            fall_source,
+        )
+        .unwrap();
+        let fall_sunrise = rhythm_core::calculate_sun_event_times(
+            solar.latitude.unwrap(),
+            solar.longitude.unwrap(),
+            2026,
+            11,
+            1,
+            &timezone,
+        )
+        .sunrise
+        .unwrap();
+        let fall_anchor_local = fall_source.and_hms_opt(0, 0, 0).unwrap()
+            + chrono::Duration::milliseconds((fall_sunrise * 3_600_000.0).round() as i64);
+        let fall_anchor_utc = timezone.utc_datetime_from_local(fall_anchor_local).unwrap();
+        assert_eq!(
+            fall_anchor_utc - fall.utc.unwrap(),
+            chrono::Duration::hours(12)
+        );
+        assert_eq!(fall.local.date(), fall_source.pred_opt().unwrap());
+        assert_eq!(fall_anchor_local - fall.local, chrono::Duration::hours(11));
+        let fall_target_hour = trigger_hour_for_local_date(
+            fall_trigger,
+            rhythm_core::RhythmMode::Day,
+            solar,
+            fall.local.date(),
+        )
+        .unwrap();
+        assert!(
+            (fall_target_hour - fall.local.time().num_seconds_from_midnight() as f32 / 3600.0)
+                .abs()
+                < 0.001
+        );
+    }
+
+    #[test]
+    fn restart_replay_uses_dst_adjusted_solar_offset_instant() {
+        let solar = SolarTriggerContext {
+            solar_noon: 12.5,
+            latitude: Some(35.804102),
+            longitude: Some(-78.799_3),
+            timezone_name: Some("America/New_York"),
+        };
+        let trigger = rhythm_core::ModeTransitionTrigger::Sunset
+            .with_solar_offset(720)
+            .unwrap();
+        let config = rhythm_core::ModeTransitionConfig::new(
+            rhythm_core::RhythmMode::Day,
+            rhythm_core::RhythmMode::Sleep,
+            1_000,
+        )
+        .with_id("spring-sleep")
+        .with_trigger(trigger);
+        let occurrence = resolved_trigger_occurrence_for_source_date(
+            trigger,
+            rhythm_core::RhythmMode::Sleep,
+            solar,
+            NaiveDate::from_ymd_opt(2026, 3, 7).unwrap(),
+        )
+        .unwrap();
+        let event_utc = occurrence.utc.unwrap();
+
+        let resolved = resolved_replayed_mode_transition(
+            rhythm_core::RhythmMode::Day,
+            event_utc - chrono::Duration::minutes(30),
+            event_utc + chrono::Duration::minutes(30),
+            ReplayTransitionContext {
+                solar,
+                utc_offset: -5.0,
+                configs: &[config],
+            },
+        );
+
+        assert_eq!(
+            resolved.map(|value| value.id),
+            Some("spring-sleep".to_string())
+        );
     }
 
     #[test]
