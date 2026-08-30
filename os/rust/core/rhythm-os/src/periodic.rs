@@ -1142,7 +1142,7 @@ fn run_periodic_cycle<F: Fn()>(state: SharedState, on_tick: Option<&F>) -> Durat
                 }
                 PeriodicTimeCheckResult::Seeded | PeriodicTimeCheckResult::Discontinuous { .. } => {
                     replay_missed_mode_transitions(&state);
-                    reconcile_light_schedule_transitions(&state, current_hour);
+                    reconcile_light_schedule_transitions(&state, current_utc);
                 }
             }
         }
@@ -2170,10 +2170,66 @@ pub fn check_light_schedule_transitions(state: &SharedState, last_hour: f32, cur
     }
 }
 
+fn most_recent_resolved_transition(
+    current_utc: chrono::NaiveDateTime,
+    ctx: ReplayTransitionContext<'_>,
+) -> Option<rhythm_core::ModeTransitionConfig> {
+    // A 48-hour UTC window covers the longest fall-DST local day plus the
+    // +/-12-hour solar offset bound. Include one source date on either side so
+    // an occurrence shifted across local midnight retains its solar date.
+    let start_utc = current_utc - chrono::Duration::hours(48);
+    let start_local = local_datetime_from_utc(start_utc, ctx.utc_offset, ctx.solar.timezone_name);
+    let end_local = local_datetime_from_utc(current_utc, ctx.utc_offset, ctx.solar.timezone_name);
+    let mut source_date = start_local.date().pred_opt().unwrap_or(start_local.date());
+    let final_source_date = end_local.date().succ_opt().unwrap_or(end_local.date());
+    let mut latest = None;
+
+    while source_date <= final_source_date {
+        for transition in ctx
+            .configs
+            .iter()
+            .filter(|transition| transition.trigger_enabled && !transition.trigger.is_manual())
+        {
+            let Some(occurrence) = resolved_trigger_occurrence_for_source_date(
+                transition.trigger,
+                transition.to_mode,
+                ctx.solar,
+                source_date,
+            ) else {
+                continue;
+            };
+            let Some(event_utc) = occurrence.utc.or_else(|| {
+                utc_datetime_from_local(occurrence.local, ctx.utc_offset, ctx.solar.timezone_name)
+            }) else {
+                continue;
+            };
+            if event_utc <= start_utc || event_utc > current_utc {
+                continue;
+            }
+            if latest
+                .as_ref()
+                .is_none_or(|(latest_utc, _)| event_utc > *latest_utc)
+            {
+                latest = Some((event_utc, transition.clone()));
+            }
+        }
+
+        let Some(next_date) = source_date.succ_opt() else {
+            break;
+        };
+        source_date = next_date;
+    }
+
+    latest.map(|(_, transition)| transition)
+}
+
 /// Reconcile each named schedule to the most recent recurring non-manual
 /// boundary. This covers cold starts and large wall-clock corrections where a
 /// crossing cannot be inferred safely from the previous periodic sample.
-pub fn reconcile_light_schedule_transitions(state: &SharedState, current_hour: f32) {
+pub fn reconcile_light_schedule_transitions(
+    state: &SharedState,
+    current_utc: chrono::NaiveDateTime,
+) {
     let candidates = {
         let Ok(s) = state.lock() else { return };
         let solar = SolarTriggerContext {
@@ -2220,26 +2276,16 @@ pub fn reconcile_light_schedule_transitions(state: &SharedState, current_hour: f
                     }
                 };
                 let active_mode = assignment.active_mode()?;
-                effective
-                    .transitions
-                    .iter()
-                    .filter(|transition| {
-                        transition.trigger_enabled && !transition.trigger.is_manual()
-                    })
-                    .filter_map(|transition| {
-                        trigger_hour(transition.trigger, transition.to_mode, solar).map(|hour| {
-                            (
-                                (current_hour - hour).rem_euclid(24.0),
-                                transition.id.clone(),
-                                transition.to_mode,
-                            )
-                        })
-                    })
-                    .min_by(|left, right| left.0.total_cmp(&right.0))
-                    .filter(|(_, _, target_mode)| *target_mode != active_mode)
-                    .map(|(_, transition_id, _)| {
-                        (node.id.clone(), schedule.id.clone(), transition_id)
-                    })
+                most_recent_resolved_transition(
+                    current_utc,
+                    ReplayTransitionContext {
+                        solar,
+                        utc_offset: s.utc_offset_hours,
+                        configs: &effective.transitions,
+                    },
+                )
+                .filter(|transition| transition.to_mode != active_mode)
+                .map(|transition| (node.id.clone(), schedule.id.clone(), transition.id))
             })
             .collect::<Vec<_>>()
     };
@@ -5539,7 +5585,13 @@ mod tests {
         )
         .unwrap();
 
-        reconcile_light_schedule_transitions(&state, 0.5);
+        reconcile_light_schedule_transitions(
+            &state,
+            NaiveDate::from_ymd_opt(2026, 1, 2)
+                .unwrap()
+                .and_hms_opt(0, 30, 0)
+                .unwrap(),
+        );
 
         assert_eq!(
             state
@@ -5562,5 +5614,120 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn named_schedule_reconcile_waits_for_the_exact_fall_back_occurrence() {
+        let state = make_state();
+        let runtime = runtime_with_rooms(&["target"]);
+        install_runtime(&state, runtime.clone());
+        {
+            let mut app = state.lock().unwrap();
+            app.latitude = Some(35.804102);
+            app.longitude = Some(-78.799_3);
+            app.timezone_name = Some("America/New_York".to_string());
+            app.utc_offset_hours = -5.0;
+        }
+        let day_trigger = rhythm_core::ModeTransitionTrigger::Sunrise
+            .with_solar_offset(-300)
+            .unwrap();
+        crate::commands::do_light_schedules_set(
+            &state,
+            vec![rhythm_core::LightScheduleConfig {
+                id: "exact".to_string(),
+                name: "Exact".to_string(),
+                enabled: true,
+                active_mode: rhythm_core::RhythmMode::Sleep,
+                transitions: vec![
+                    rhythm_core::ModeTransitionConfig::new(
+                        rhythm_core::RhythmMode::Sleep,
+                        rhythm_core::RhythmMode::Day,
+                        0,
+                    )
+                    .with_id("day")
+                    .with_trigger(day_trigger),
+                    rhythm_core::ModeTransitionConfig::new(
+                        rhythm_core::RhythmMode::Day,
+                        rhythm_core::RhythmMode::Sleep,
+                        0,
+                    )
+                    .with_id("sleep")
+                    .with_trigger(
+                        rhythm_core::ModeTransitionTrigger::Scheduled(
+                            rhythm_core::ModeTransitionTime::from_hour_minute(0, 30).unwrap(),
+                        ),
+                    ),
+                ],
+            }],
+        )
+        .unwrap();
+        crate::commands::do_light_schedule_assignment_set(&state, "target", Some("exact"), false)
+            .unwrap();
+
+        let solar = SolarTriggerContext {
+            solar_noon: state.lock().unwrap().solar_noon_hour(),
+            latitude: Some(35.804102),
+            longitude: Some(-78.799_3),
+            timezone_name: Some("America/New_York"),
+        };
+        let occurrence = resolved_trigger_occurrence_for_source_date(
+            day_trigger,
+            rhythm_core::RhythmMode::Day,
+            solar,
+            NaiveDate::from_ymd_opt(2026, 11, 1).unwrap(),
+        )
+        .unwrap();
+        let event_utc = occurrence.utc.unwrap();
+        let first_repeated_hour_utc = rhythm_core::Timezone::new("America/New_York")
+            .earliest_utc_datetime_from_local(occurrence.local)
+            .unwrap();
+        assert_eq!(
+            event_utc - first_repeated_hour_utc,
+            chrono::Duration::hours(1)
+        );
+
+        reconcile_light_schedule_transitions(
+            &state,
+            first_repeated_hour_utc + chrono::Duration::minutes(1),
+        );
+        assert_eq!(assigned_mode(&runtime), rhythm_core::RhythmMode::Sleep);
+
+        reconcile_light_schedule_transitions(&state, event_utc + chrono::Duration::minutes(1));
+        assert_eq!(assigned_mode(&runtime), rhythm_core::RhythmMode::Day);
+    }
+
+    #[test]
+    fn named_schedule_reconcile_keeps_after_midnight_solar_source_date() {
+        let state = make_state();
+        let trigger = rhythm_core::ModeTransitionTrigger::Sunset
+            .with_solar_offset(360)
+            .unwrap();
+        let runtime = install_exact_interval_schedule(
+            &state,
+            trigger,
+            rhythm_core::RhythmMode::Day,
+            rhythm_core::RhythmMode::Sleep,
+        );
+        let solar = SolarTriggerContext {
+            solar_noon: state.lock().unwrap().solar_noon_hour(),
+            latitude: Some(35.804102),
+            longitude: Some(-78.799_3),
+            timezone_name: Some("America/New_York"),
+        };
+        let source_date = NaiveDate::from_ymd_opt(2026, 6, 1).unwrap();
+        let occurrence = resolved_trigger_occurrence_for_source_date(
+            trigger,
+            rhythm_core::RhythmMode::Sleep,
+            solar,
+            source_date,
+        )
+        .unwrap();
+        assert_eq!(occurrence.local.date(), source_date.succ_opt().unwrap());
+
+        reconcile_light_schedule_transitions(
+            &state,
+            occurrence.utc.unwrap() + chrono::Duration::minutes(1),
+        );
+        assert_eq!(assigned_mode(&runtime), rhythm_core::RhythmMode::Sleep);
     }
 }

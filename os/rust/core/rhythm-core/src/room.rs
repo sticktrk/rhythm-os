@@ -1690,6 +1690,8 @@ impl RoomProfileSettings {
         // persisted fields. Any local choice must mask both parent fields;
         // otherwise an inherited named schedule would incorrectly outrank a
         // room's explicit custom wall-clock schedule in `schedule_mode`.
+        let inherits_schedule_authority =
+            self.light_schedule.is_none() && self.room_schedule.is_none();
         let (mut light_schedule, room_schedule) = if self.light_schedule.is_some() {
             (self.light_schedule.clone(), self.room_schedule)
         } else if self.room_schedule.is_some() {
@@ -1697,13 +1699,15 @@ impl RoomProfileSettings {
         } else {
             (parent.light_schedule.clone(), parent.room_schedule)
         };
-        if let Some(LightScheduleAssignment::Named {
-            schedule_id,
-            active_mode,
-        }) = light_schedule.as_mut()
-        {
-            if let Some(mode) = self.light_schedule_modes.get(schedule_id) {
-                *active_mode = *mode;
+        if inherits_schedule_authority {
+            if let Some(LightScheduleAssignment::Named {
+                schedule_id,
+                active_mode,
+            }) = light_schedule.as_mut()
+            {
+                if let Some(mode) = self.light_schedule_modes.get(schedule_id) {
+                    *active_mode = *mode;
+                }
             }
         }
         Self {
@@ -3434,6 +3438,48 @@ mod tests {
             assert_eq!(effective.light_schedule, Some(assignment));
             assert_eq!(effective.room_schedule, None);
         }
+    }
+
+    #[test]
+    fn local_schedule_mode_materialization_only_overrides_inherited_authority() {
+        let parent = RoomProfileSettings {
+            light_schedule: Some(LightScheduleAssignment::Named {
+                schedule_id: "outdoor".into(),
+                active_mode: RhythmMode::Day,
+            }),
+            ..Default::default()
+        };
+        let dormant_modes = BTreeMap::from([("outdoor".to_string(), RhythmMode::Sleep)]);
+
+        let inherited = RoomProfileSettings {
+            light_schedule_modes: dormant_modes.clone(),
+            ..Default::default()
+        }
+        .merged_with_parent(&parent);
+        assert!(matches!(
+            inherited.light_schedule,
+            Some(LightScheduleAssignment::Named {
+                active_mode: RhythmMode::Sleep,
+                ..
+            })
+        ));
+
+        let explicit = RoomProfileSettings {
+            light_schedule: Some(LightScheduleAssignment::Named {
+                schedule_id: "outdoor".into(),
+                active_mode: RhythmMode::Day,
+            }),
+            light_schedule_modes: dormant_modes,
+            ..Default::default()
+        }
+        .merged_with_parent(&parent);
+        assert!(matches!(
+            explicit.light_schedule,
+            Some(LightScheduleAssignment::Named {
+                active_mode: RhythmMode::Day,
+                ..
+            })
+        ));
     }
 
     #[test]
