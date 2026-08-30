@@ -1881,18 +1881,18 @@ pub fn handle_put_light_schedule_override(state: &SharedState, body: &Value) -> 
         }
     };
     let expected_effective_overrides = match body.get("expected_effective_overrides") {
-        None => None,
         Some(Value::Object(value)) => match serde_json::from_value::<
             BTreeMap<String, rhythm_core::LightScheduleOverride>,
         >(Value::Object(value.clone()))
         {
-            Ok(value) => Some(value),
+            Ok(value) => value,
             Err(error) => {
                 return ApiResponse::bad_request(&format!(
                     "Invalid expected_effective_overrides: {error}"
                 ))
             }
         },
+        None => return ApiResponse::bad_request("Missing expected_effective_overrides"),
         Some(_) => {
             return ApiResponse::bad_request("expected_effective_overrides must be an object")
         }
@@ -1902,7 +1902,7 @@ pub fn handle_put_light_schedule_override(state: &SharedState, body: &Value) -> 
         node_id,
         schedule_id,
         schedule_override,
-        expected_effective_overrides,
+        Some(expected_effective_overrides),
         correlation_id_from_body(body),
         true,
     ) {
@@ -7411,6 +7411,27 @@ mod tests {
             .status,
             200
         );
+
+        for body in [
+            json!({
+                "node_id": "room1",
+                "schedule_id": "outdoor",
+                "override": null,
+            }),
+            json!({
+                "node_id": "room1",
+                "schedule_id": "outdoor",
+                "override": null,
+                "expected_effective_overrides": null,
+            }),
+        ] {
+            let missing_precondition = handle_put_light_schedule_override(&state, &body);
+            assert_eq!(
+                missing_precondition.status, 400,
+                "{}",
+                missing_precondition.body
+            );
+        }
 
         let overridden = handle_put_light_schedule_override(
             &state,

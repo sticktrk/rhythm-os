@@ -32,6 +32,8 @@ class _LightScheduleAssignmentCardState
   static const _uuid = Uuid();
   String? _retryScheduleId;
   RhythmLightScheduleOverride? _retryOverride;
+  String? _retryJourneyId;
+  String? _retryOverrideScope;
 
   @override
   void initState() {
@@ -157,18 +159,24 @@ class _LightScheduleAssignmentCardState
   ) async {
     final sync = context.read<ServerSyncProvider>();
     final node = sync.nodeById(widget.nodeId);
-    final effective = node?.profileSettings?.lightScheduleOverrides[schedule.id]
-        ?.transitions[transition.id];
     final current = node?.localProfileSettings
         ?.lightScheduleOverrides[schedule.id]?.transitions[transition.id];
-    final effectiveKind = effective?.trigger.kind ?? transition.trigger.kind;
+    final inherited = sync.inheritedLightScheduleTransitionOverride(
+      widget.nodeId,
+      schedule.id,
+      transition.id,
+    );
+    final inheritedKind = inherited?.trigger.kind ?? transition.trigger.kind;
     var kindChoice = current?.trigger.kind ?? 'inherit';
     var eventChoice = current?.trigger.event ?? 'inherit';
     var timeOverride = current?.trigger.time != null;
-    var time = current?.trigger.time ?? transition.trigger.time ?? '07:00';
+    var time = current?.trigger.time ??
+        inherited?.trigger.time ??
+        transition.trigger.time ??
+        '07:00';
     var offsetOverride = current?.trigger.offsetMinutes != null;
     var offset = current?.trigger.offsetMinutes ??
-        effective?.trigger.offsetMinutes ??
+        inherited?.trigger.offsetMinutes ??
         transition.trigger.offsetMinutes;
     var enabledChoice = current?.triggerEnabled == null
         ? 'inherit'
@@ -221,11 +229,11 @@ class _LightScheduleAssignmentCardState
                     setSheetState(() {
                       kindChoice = value;
                       final selected =
-                          value == 'inherit' ? effectiveKind : value;
+                          value == 'inherit' ? inheritedKind : value;
                       if (selected == 'solar') {
                         timeOverride = false;
                         if (value != 'inherit' &&
-                            transition.trigger.kind != 'solar' &&
+                            inheritedKind != 'solar' &&
                             eventChoice == 'inherit') {
                           eventChoice = transition.toMode == RhythmMode.day
                               ? 'sunrise'
@@ -235,7 +243,7 @@ class _LightScheduleAssignmentCardState
                         eventChoice = 'inherit';
                         offsetOverride = false;
                         if (value != 'inherit' &&
-                            transition.trigger.kind != 'scheduled') {
+                            inheritedKind != 'scheduled') {
                           timeOverride = true;
                         }
                       }
@@ -266,7 +274,7 @@ class _LightScheduleAssignmentCardState
                     }
                   },
                 ),
-                if ((kindChoice == 'inherit' ? effectiveKind : kindChoice) ==
+                if ((kindChoice == 'inherit' ? inheritedKind : kindChoice) ==
                     'solar') ...[
                   if (!solarAvailable)
                     const Padding(
@@ -283,7 +291,7 @@ class _LightScheduleAssignmentCardState
                       labelText: 'Solar anchor',
                     ),
                     items: [
-                      if (kindChoice == 'inherit' || effectiveKind == 'solar')
+                      if (kindChoice == 'inherit' || inheritedKind == 'solar')
                         const DropdownMenuItem(
                           value: 'inherit',
                           child: Text('Follow schedule'),
@@ -344,7 +352,7 @@ class _LightScheduleAssignmentCardState
                         ),
                         min: -maxSolarScheduleOffsetMinutes.toDouble(),
                         max: maxSolarScheduleOffsetMinutes.toDouble(),
-                        divisions: 96,
+                        divisions: maxSolarScheduleOffsetMinutes * 2,
                         value: offset
                             .clamp(
                               -maxSolarScheduleOffsetMinutes,
@@ -368,7 +376,7 @@ class _LightScheduleAssignmentCardState
                     ),
                     value: timeOverride,
                     onChanged: kindChoice == 'scheduled' &&
-                            effectiveKind != 'scheduled'
+                            inheritedKind != 'scheduled'
                         ? null
                         : (value) => setSheetState(() => timeOverride = value),
                   ),
@@ -386,8 +394,10 @@ class _LightScheduleAssignmentCardState
                 ],
                 const SizedBox(height: 8),
                 FilledButton(
-                  onPressed: (kindChoice == 'scheduled' ||
-                          effectiveKind == 'scheduled' ||
+                  onPressed: ((kindChoice == 'inherit'
+                              ? inheritedKind
+                              : kindChoice) ==
+                          'scheduled' ||
                           solarAvailable)
                       ? () => Navigator.of(context).pop(
                             RhythmModeTransitionOverride(
@@ -461,6 +471,8 @@ class _LightScheduleAssignmentCardState
     setState(() {
       _retryScheduleId = ok ? null : schedule.id;
       _retryOverride = ok ? null : nextOverride;
+      _retryJourneyId = ok ? null : journeyId;
+      _retryOverrideScope = ok ? null : 'transition';
     });
     if (!ok) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -471,18 +483,34 @@ class _LightScheduleAssignmentCardState
 
   Future<void> _retryLastOverride() async {
     final scheduleId = _retryScheduleId;
-    if (scheduleId == null) return;
+    final journeyId = _retryJourneyId;
+    final overrideScope = _retryOverrideScope;
+    if (scheduleId == null || journeyId == null || overrideScope == null) return;
+    unawaited(AnalyticsService().logLightScheduleAssignmentAttempted(
+      journeyId: journeyId,
+      assignmentKind: 'named',
+      overrideScope: overrideScope,
+    ));
     final ok =
         await context.read<ServerSyncProvider>().setNodeLightScheduleOverride(
               widget.nodeId,
               scheduleId,
               _retryOverride,
-              journeyId: 'light-schedule-retry-${_uuid.v4()}',
+              journeyId: journeyId,
             );
+    unawaited(AnalyticsService().logLightScheduleAssignmentCompleted(
+      journeyId: journeyId,
+      assignmentKind: 'named',
+      overrideScope: overrideScope,
+      outcome: ok ? 'succeeded' : 'failed',
+      failureStage: ok ? null : 'appliance_ack',
+    ));
     if (mounted && ok) {
       setState(() {
         _retryScheduleId = null;
         _retryOverride = null;
+        _retryJourneyId = null;
+        _retryOverrideScope = null;
       });
     }
   }
@@ -516,6 +544,8 @@ class _LightScheduleAssignmentCardState
       setState(() {
         _retryScheduleId = ok ? null : scheduleId;
         _retryOverride = null;
+        _retryJourneyId = ok ? null : journeyId;
+        _retryOverrideScope = ok ? null : 'reset';
       });
     }
   }

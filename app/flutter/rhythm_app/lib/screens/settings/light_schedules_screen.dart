@@ -342,8 +342,8 @@ class _LightScheduleEditorState extends State<_LightScheduleEditor> {
 
   @override
   Widget build(BuildContext context) {
-    final solarAvailable =
-        context.watch<ServerSyncProvider>().solarScheduleAnchorsAvailable;
+    final sync = context.watch<ServerSyncProvider>();
+    final solarAvailable = sync.solarScheduleAnchorsAvailable;
     return Scaffold(
       backgroundColor: CelestialColors.backgroundDark,
       appBar: AppBar(
@@ -373,6 +373,8 @@ class _LightScheduleEditorState extends State<_LightScheduleEditor> {
             transition: _day,
             dayBoundary: true,
             solarAvailable: solarAvailable,
+            resolvedLocalTime:
+                sync.resolvedBaseLightScheduleTransitionLocalTime(_day),
             onChanged: (value) => setState(() => _day = value),
           ),
           const SizedBox(height: 16),
@@ -381,6 +383,8 @@ class _LightScheduleEditorState extends State<_LightScheduleEditor> {
             transition: _sleep,
             dayBoundary: false,
             solarAvailable: solarAvailable,
+            resolvedLocalTime:
+                sync.resolvedBaseLightScheduleTransitionLocalTime(_sleep),
             onChanged: (value) => setState(() => _sleep = value),
           ),
         ],
@@ -395,6 +399,7 @@ class _TransitionEditor extends StatelessWidget {
     required this.transition,
     required this.dayBoundary,
     required this.solarAvailable,
+    required this.resolvedLocalTime,
     required this.onChanged,
   });
 
@@ -402,6 +407,7 @@ class _TransitionEditor extends StatelessWidget {
   final RhythmModeTransitionConfig transition;
   final bool dayBoundary;
   final bool solarAvailable;
+  final String? resolvedLocalTime;
   final ValueChanged<RhythmModeTransitionConfig> onChanged;
 
   static const _events = [
@@ -467,6 +473,7 @@ class _TransitionEditor extends StatelessWidget {
                 ),
               ),
             DropdownButtonFormField<String>(
+              isExpanded: true,
               initialValue: _events.contains(trigger.event)
                   ? trigger.event
                   : (dayBoundary ? 'sunrise' : 'sunset'),
@@ -497,11 +504,23 @@ class _TransitionEditor extends StatelessWidget {
                   : '${trigger.offsetMinutes.abs()} minutes ${trigger.offsetMinutes < 0 ? 'before' : 'after'}',
               style: const TextStyle(color: CelestialColors.textSecondary),
             ),
+            const SizedBox(height: 4),
+            Text(
+              resolvedLocalTime == null
+                  ? 'Temporarily unavailable today'
+                  : 'Today · $resolvedLocalTime local',
+              key: ValueKey('schedule-resolved-time-$title'),
+              style: TextStyle(
+                color: resolvedLocalTime == null
+                    ? CelestialColors.sunWarm
+                    : CelestialColors.textSecondary,
+              ),
+            ),
             Slider(
               key: ValueKey('schedule-offset-$title'),
               min: -maxSolarScheduleOffsetMinutes.toDouble(),
               max: maxSolarScheduleOffsetMinutes.toDouble(),
-              divisions: 96,
+              divisions: maxSolarScheduleOffsetMinutes * 2,
               value: trigger.offsetMinutes
                   .clamp(
                     -maxSolarScheduleOffsetMinutes,

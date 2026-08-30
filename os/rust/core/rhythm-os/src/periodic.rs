@@ -4726,6 +4726,129 @@ mod tests {
     }
 
     #[test]
+    fn registry_edit_preserves_inherited_assignment_authority() {
+        let state = make_state();
+        let runtime = runtime_with_nested_rooms();
+        install_runtime(&state, runtime.clone());
+        let schedule = |active_mode| rhythm_core::LightScheduleConfig {
+            id: "outdoor".to_string(),
+            name: "Outdoor".to_string(),
+            enabled: true,
+            active_mode,
+            transitions: vec![rhythm_core::ModeTransitionConfig {
+                id: "sleep".to_string(),
+                label: "Sleep".to_string(),
+                from_mode: rhythm_core::RhythmMode::Day,
+                to_mode: rhythm_core::RhythmMode::Sleep,
+                trigger: rhythm_core::ModeTransitionTrigger::Scheduled(
+                    rhythm_core::ModeTransitionTime::from_hour_minute(22, 0).unwrap(),
+                ),
+                trigger_enabled: true,
+                duration_ms: rhythm_core::TimerSetting::Fixed { value: 0 },
+                preserve_hard_off: true,
+            }],
+        };
+        crate::commands::do_light_schedules_set(
+            &state,
+            vec![schedule(rhythm_core::RhythmMode::Day)],
+        )
+        .unwrap();
+        crate::commands::do_light_schedule_assignment_set(&state, "parent", Some("outdoor"), false)
+            .unwrap();
+
+        crate::commands::do_light_schedules_set(
+            &state,
+            vec![schedule(rhythm_core::RhythmMode::Sleep)],
+        )
+        .unwrap();
+
+        let raw_child = runtime.engine_node_snapshot("child").unwrap();
+        assert!(raw_child.profile_settings.light_schedule.is_none());
+        assert!(raw_child.profile_settings.light_schedule_modes.is_empty());
+        assert_eq!(
+            runtime
+                .engine_effective_node_snapshot("child")
+                .unwrap()
+                .profile_settings
+                .light_schedule
+                .as_ref()
+                .and_then(rhythm_core::LightScheduleAssignment::active_mode),
+            Some(rhythm_core::RhythmMode::Sleep)
+        );
+    }
+
+    #[test]
+    fn schedule_level_action_updates_inherited_override_mode_without_pinning_assignment() {
+        let state = make_state();
+        let runtime = runtime_with_nested_rooms();
+        install_runtime(&state, runtime.clone());
+        crate::commands::do_light_schedules_set(
+            &state,
+            vec![rhythm_core::LightScheduleConfig {
+                id: "outdoor".to_string(),
+                name: "Outdoor".to_string(),
+                enabled: true,
+                active_mode: rhythm_core::RhythmMode::Day,
+                transitions: vec![rhythm_core::ModeTransitionConfig::new(
+                    rhythm_core::RhythmMode::Day,
+                    rhythm_core::RhythmMode::Sleep,
+                    0,
+                )
+                .with_id("sleep")],
+            }],
+        )
+        .unwrap();
+        crate::commands::do_light_schedule_assignment_set(&state, "parent", Some("outdoor"), false)
+            .unwrap();
+        crate::commands::do_light_schedule_override_set(
+            &state,
+            "child",
+            "outdoor",
+            Some(rhythm_core::LightScheduleOverride {
+                transitions: std::collections::BTreeMap::from([(
+                    "sleep".to_string(),
+                    rhythm_core::ModeTransitionOverride {
+                        trigger_enabled: Some(false),
+                        ..Default::default()
+                    },
+                )]),
+            }),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        crate::commands::do_set_light_schedule_mode(
+            &state,
+            "outdoor",
+            rhythm_core::RhythmMode::Sleep,
+            &crate::topology::ModeTransitionSelection::None,
+        )
+        .unwrap();
+
+        let raw_child = runtime.engine_node_snapshot("child").unwrap();
+        assert!(raw_child.profile_settings.light_schedule.is_none());
+        assert_eq!(
+            raw_child
+                .profile_settings
+                .light_schedule_modes
+                .get("outdoor"),
+            Some(&rhythm_core::RhythmMode::Sleep)
+        );
+        assert_eq!(
+            runtime
+                .engine_effective_node_snapshot("child")
+                .unwrap()
+                .profile_settings
+                .light_schedule
+                .as_ref()
+                .and_then(rhythm_core::LightScheduleAssignment::active_mode),
+            Some(rhythm_core::RhythmMode::Sleep)
+        );
+    }
+
+    #[test]
     fn named_schedule_reconciles_materialized_mode_after_restart() {
         let state = make_state();
         let runtime = runtime_with_rooms(&["outdoor"]);

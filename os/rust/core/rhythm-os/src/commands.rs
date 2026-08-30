@@ -8934,6 +8934,9 @@ fn apply_room_schedule_target(
     let snapshot = runtime
         .engine_node_snapshot(room_id)
         .ok_or_else(|| anyhow::anyhow!("Schedule target not found in engine"))?;
+    let effective_snapshot = runtime
+        .engine_effective_node_snapshot(room_id)
+        .unwrap_or_else(|| snapshot.clone());
     if !light_schedule_target_is_independent(snapshot.kind, snapshot.parent_id.as_deref()) {
         return Err(anyhow::anyhow!(
             "Schedule target must be a room or unassigned light node"
@@ -8969,7 +8972,7 @@ fn apply_room_schedule_target(
         runtime.lights_off_room(room_id, None)?;
         update_lights_on_cache_for_runtime_node(state, &runtime, room_id, false);
     } else {
-        let mut render_settings = snapshot.profile_settings.clone();
+        let mut render_settings = effective_snapshot.profile_settings.clone();
         if !respect_room_schedule {
             render_settings.room_schedule = None;
         }
@@ -9254,6 +9257,119 @@ fn addressable_root_snapshots(runtime: &Arc<dyn RuntimeHandle>) -> Vec<rhythm_co
 
 fn light_schedule_target_is_independent(kind: LightNodeKind, parent_id: Option<&str>) -> bool {
     kind.is_room() || (kind == LightNodeKind::LightDevice && parent_id.is_none())
+}
+
+fn light_schedule_mode_patch_for_node(
+    state: &SharedState,
+    node_id: &str,
+    schedule_id: &str,
+    target_mode: RhythmMode,
+) -> Result<Option<RoomProfileSettingsPatch>> {
+    let runtime = state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .hub_runtime()
+        .ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+    let snapshot = runtime
+        .engine_node_snapshot(node_id)
+        .ok_or_else(|| anyhow::anyhow!("Schedule target was not found"))?;
+    if !light_schedule_target_is_independent(snapshot.kind, snapshot.parent_id.as_deref()) {
+        return Err(anyhow::anyhow!(
+            "Schedule target must be a room or unassigned light node"
+        ));
+    }
+
+    match snapshot.profile_settings.light_schedule.as_ref() {
+        Some(rhythm_core::LightScheduleAssignment::Named {
+            schedule_id: local_schedule_id,
+            ..
+        }) if local_schedule_id == schedule_id => Ok(Some(RoomProfileSettingsPatch {
+            light_schedule: Some(Some(rhythm_core::LightScheduleAssignment::Named {
+                schedule_id: schedule_id.to_string(),
+                active_mode: target_mode,
+            })),
+            room_schedule: Some(None),
+            ..RoomProfileSettingsPatch::default()
+        })),
+        Some(_) => Err(anyhow::anyhow!(
+            "Schedule target local authority does not match '{}'",
+            schedule_id
+        )),
+        None if snapshot
+            .profile_settings
+            .light_schedule_overrides
+            .contains_key(schedule_id)
+            || snapshot
+                .profile_settings
+                .light_schedule_modes
+                .contains_key(schedule_id) =>
+        {
+            Ok(Some(RoomProfileSettingsPatch {
+                light_schedule_modes: Some(BTreeMap::from([(
+                    schedule_id.to_string(),
+                    Some(target_mode),
+                )])),
+                ..RoomProfileSettingsPatch::default()
+            }))
+        }
+        None => Ok(None),
+    }
+}
+
+fn persist_light_schedule_mode_for_node(
+    state: &SharedState,
+    node_id: &str,
+    schedule_id: &str,
+    target_mode: RhythmMode,
+    persist: bool,
+) -> Result<()> {
+    let Some(patch) = light_schedule_mode_patch_for_node(state, node_id, schedule_id, target_mode)?
+    else {
+        return Ok(());
+    };
+    do_node_preferences_set(
+        state,
+        node_id,
+        None,
+        None,
+        None,
+        None,
+        Some(&patch),
+        persist,
+    )?;
+    Ok(())
+}
+
+fn apply_light_schedule_target_mode(
+    state: &SharedState,
+    node_id: &str,
+    target_mode: RhythmMode,
+    transition: Option<&ModeTransitionConfig>,
+    persist: bool,
+) -> Result<()> {
+    let target_state = state
+        .lock()
+        .ok()
+        .map(|s| s.mode_configs())
+        .and_then(|configs| {
+            mode_config_for_mode(&configs, target_mode).and_then(|config| {
+                config
+                    .room_defaults
+                    .iter()
+                    .find(|default| default.room_id == node_id)
+                    .map(|default| default.state)
+            })
+        })
+        .unwrap_or(RoomModeState::Active);
+    apply_room_schedule_target(
+        state,
+        node_id,
+        target_mode,
+        target_state,
+        false,
+        persist,
+        transition,
+    )
 }
 
 fn addressable_node_snapshots(runtime: &Arc<dyn RuntimeHandle>) -> Vec<rhythm_core::RoomSnapshot> {
@@ -10513,6 +10629,17 @@ fn do_light_schedules_set_internal(
     } else {
         Vec::new()
     };
+    let assigned_targets = assigned_roots
+        .iter()
+        .map(|(node_id, schedule_id)| {
+            let target_mode = schedules
+                .iter()
+                .find(|schedule| schedule.id == *schedule_id)
+                .map(|schedule| schedule.active_mode)
+                .ok_or_else(|| anyhow::anyhow!("Unknown light schedule '{}'", schedule_id))?;
+            Ok((node_id.clone(), schedule_id.clone(), target_mode))
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -10523,8 +10650,14 @@ fn do_light_schedules_set_internal(
         }
     }
 
-    for (node_id, schedule_id) in &assigned_roots {
-        do_light_schedule_assignment_set(state, node_id, Some(schedule_id), true)?;
+    // Update only the node-local state that already owns independent schedule
+    // mode materialization. A plain inheriting child continues to inherit its
+    // parent's assignment and mode instead of being pinned by a registry edit.
+    for (node_id, schedule_id, target_mode) in &assigned_targets {
+        persist_light_schedule_mode_for_node(state, node_id, schedule_id, *target_mode, true)?;
+    }
+    for (node_id, _, target_mode) in &assigned_targets {
+        apply_light_schedule_target_mode(state, node_id, *target_mode, None, true)?;
     }
     let mut activity =
         crate::activity::LightActivityRecord::app("global", "light_schedule_config_updated");
@@ -10860,38 +10993,10 @@ fn apply_light_schedule_mode(
     };
 
     for node_id in &target_ids {
-        let patch = RoomProfileSettingsPatch {
-            light_schedule: Some(Some(rhythm_core::LightScheduleAssignment::Named {
-                schedule_id: schedule_id.to_string(),
-                active_mode: target_mode,
-            })),
-            room_schedule: Some(None),
-            ..RoomProfileSettingsPatch::default()
-        };
-        do_node_preferences_set(state, node_id, None, None, None, None, Some(&patch), true)?;
-        let target_state = state
-            .lock()
-            .ok()
-            .map(|s| s.mode_configs())
-            .and_then(|configs| {
-                mode_config_for_mode(&configs, target_mode).and_then(|config| {
-                    config
-                        .room_defaults
-                        .iter()
-                        .find(|default| default.room_id == *node_id)
-                        .map(|default| default.state)
-                })
-            })
-            .unwrap_or(RoomModeState::Active);
-        apply_room_schedule_target(
-            state,
-            node_id,
-            target_mode,
-            target_state,
-            false,
-            true,
-            transition.as_ref(),
-        )?;
+        persist_light_schedule_mode_for_node(state, node_id, schedule_id, target_mode, true)?;
+    }
+    for node_id in &target_ids {
+        apply_light_schedule_target_mode(state, node_id, target_mode, transition.as_ref(), true)?;
     }
 
     let transition_id = transition.as_ref().map(|transition| transition.id.clone());
@@ -10963,7 +11068,7 @@ pub fn do_trigger_light_schedule_transition_for_node(
     schedule_id: &str,
     transition_id: &str,
 ) -> Result<AutomationActionOutcome> {
-    let (transition, target_mode, was_overridden, has_local_assignment) = {
+    let (transition, target_mode, was_overridden) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let schedule = s
             .light_schedules
@@ -10981,10 +11086,6 @@ pub fn do_trigger_light_schedule_transition_for_node(
         let snapshot = runtime
             .engine_effective_node_snapshot(node_id)
             .ok_or_else(|| anyhow::anyhow!("Schedule target was not found"))?;
-        let has_local_assignment = runtime
-            .engine_node_snapshot(node_id)
-            .and_then(|snapshot| snapshot.profile_settings.light_schedule)
-            .is_some();
         let assignment = snapshot
             .profile_settings
             .light_schedule
@@ -11031,46 +11132,11 @@ pub fn do_trigger_light_schedule_transition_for_node(
             transition.clone(),
             transition.to_mode,
             schedule_override.is_some(),
-            has_local_assignment,
         )
     };
 
-    let patch = RoomProfileSettingsPatch {
-        light_schedule: has_local_assignment.then(|| {
-            Some(rhythm_core::LightScheduleAssignment::Named {
-                schedule_id: schedule_id.to_string(),
-                active_mode: target_mode,
-            })
-        }),
-        light_schedule_modes: (!has_local_assignment)
-            .then(|| BTreeMap::from([(schedule_id.to_string(), Some(target_mode))])),
-        room_schedule: Some(None),
-        ..RoomProfileSettingsPatch::default()
-    };
-    do_node_preferences_set(state, node_id, None, None, None, None, Some(&patch), true)?;
-    let target_state = state
-        .lock()
-        .ok()
-        .map(|s| s.mode_configs())
-        .and_then(|configs| {
-            mode_config_for_mode(&configs, target_mode).and_then(|config| {
-                config
-                    .room_defaults
-                    .iter()
-                    .find(|default| default.room_id == node_id)
-                    .map(|default| default.state)
-            })
-        })
-        .unwrap_or(RoomModeState::Active);
-    apply_room_schedule_target(
-        state,
-        node_id,
-        target_mode,
-        target_state,
-        false,
-        true,
-        Some(&transition),
-    )?;
+    persist_light_schedule_mode_for_node(state, node_id, schedule_id, target_mode, true)?;
+    apply_light_schedule_target_mode(state, node_id, target_mode, Some(&transition), true)?;
 
     let mut activity =
         crate::activity::LightActivityRecord::app(node_id, "light_schedule_boundary");

@@ -521,6 +521,37 @@ class ServerSyncProvider extends ChangeNotifier {
         ?.profileSettings
         ?.lightScheduleOverrides[schedule.id]
         ?.transitions[transition.id];
+    return _resolvedLightScheduleTransitionLocalTime(
+      transition,
+      override,
+    );
+  }
+
+  String? resolvedBaseLightScheduleTransitionLocalTime(
+    RhythmModeTransitionConfig transition,
+  ) =>
+      _resolvedLightScheduleTransitionLocalTime(
+        transition,
+        null,
+      );
+
+  RhythmModeTransitionOverride? inheritedLightScheduleTransitionOverride(
+    String nodeId,
+    String scheduleId,
+    String transitionId,
+  ) {
+    final parentId = nodeById(nodeId)?.parentId;
+    if (parentId == null || parentId.isEmpty) return null;
+    return nodeById(parentId)
+        ?.profileSettings
+        ?.lightScheduleOverrides[scheduleId]
+        ?.transitions[transitionId];
+  }
+
+  String? _resolvedLightScheduleTransitionLocalTime(
+    RhythmModeTransitionConfig transition,
+    RhythmModeTransitionOverride? override,
+  ) {
     final overrideTrigger = override?.trigger;
     final kind = overrideTrigger?.kind ?? transition.trigger.kind;
     if (kind == 'scheduled') {
