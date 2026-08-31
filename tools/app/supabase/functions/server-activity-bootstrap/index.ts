@@ -7,6 +7,9 @@ import {
   withAuthenticatedRequest,
 } from '../_shared/auth.ts'
 import { resolveServerIdentity } from '../_shared/server_identity.ts'
+import {
+  pendingServerActivityTokenExpiryIso,
+} from '../_shared/server_activity_token.ts'
 
 type HomeRow = {
   id: string
@@ -58,7 +61,11 @@ Deno.serve((req) =>
       const tokenPrefix = token.slice(0, 12)
       const now = new Date().toISOString()
 
-      await revokeActiveTokens(adminClient, ensured.hub.id, now)
+      // Keep the last proven credential usable until the appliance exercises
+      // this replacement. Cloud bootstrap and the local config PUT are two
+      // separate network operations, so revoking here can strand the device
+      // when the handoff is interrupted or two recovery attempts overlap.
+      await revokeExpiredPendingTokens(adminClient, ensured.hub.id, now)
       const { data, error } = await adminClient
         .from('server_light_activity_device_tokens')
         .insert({
@@ -69,6 +76,7 @@ Deno.serve((req) =>
           token_hash: tokenHash,
           token_prefix: tokenPrefix,
           label: 'rhythm-os-server-activity',
+          activation_expires_at: pendingServerActivityTokenExpiryIso(),
         })
         .select('id')
         .single()
@@ -332,7 +340,7 @@ async function fetchHome(
   return data ?? null
 }
 
-async function revokeActiveTokens(
+async function revokeExpiredPendingTokens(
   adminClient: any,
   hubId: string,
   revokedAt: string,
@@ -342,6 +350,8 @@ async function revokeActiveTokens(
     .update({ revoked_at: revokedAt })
     .eq('hub_id', hubId)
     .is('revoked_at', null)
+    .is('activated_at', null)
+    .lt('activation_expires_at', revokedAt)
   if (error) throw new Error(error.message)
 }
 
@@ -428,15 +438,26 @@ async function resolveStoredServerIdentity(
     .select('server_instance_id')
     .eq('hub_id', hubId)
     .is('revoked_at', null)
-    .maybeSingle()
+    .not('activated_at', 'is', null)
+    .limit(20)
   if (error) throw new Error(error.message)
-  const tokenResolution = resolveServerIdentity(
-    data?.server_instance_id,
-    hubResolution.value,
-  )
-  return tokenResolution.status === 'conflict'
-    ? identityConflictResponse()
-    : tokenResolution.value
+
+  let resolvedIdentity = hubResolution.value
+  for (
+    const token of (data ?? []) as Array<{
+      server_instance_id?: string | null
+    }>
+  ) {
+    const tokenResolution = resolveServerIdentity(
+      token.server_instance_id,
+      resolvedIdentity,
+    )
+    if (tokenResolution.status === 'conflict') {
+      return identityConflictResponse()
+    }
+    resolvedIdentity = tokenResolution.value
+  }
+  return resolvedIdentity
 }
 
 function normalizeEndpoint(data: JsonObject, key: string): Record<string, unknown> {
