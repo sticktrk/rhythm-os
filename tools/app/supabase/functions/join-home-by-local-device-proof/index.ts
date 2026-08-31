@@ -10,6 +10,7 @@ import {
   isDurableRhythmServerIdentity,
   resolveServerIdentity,
 } from '../_shared/server_identity.ts'
+import { serverActivityTokenCanAuthenticate } from '../_shared/server_activity_token.ts'
 
 type HomeRow = {
   id: string
@@ -45,6 +46,9 @@ type DeviceTokenRow = {
   hub_id: string
   server_instance_id?: string | null
   token_hash: string
+  activated_at?: string | null
+  activation_expires_at?: string | null
+  revoked_at?: string | null
 }
 
 type JoinProofVerification =
@@ -169,7 +173,9 @@ async function fetchCandidateDeviceTokens(
 ): Promise<DeviceTokenRow[]> {
   let query = adminClient
     .from('server_light_activity_device_tokens')
-    .select('id,user_id,home_id,hub_id,server_instance_id,token_hash')
+    .select(
+      'id,user_id,home_id,hub_id,server_instance_id,token_hash,activated_at,activation_expires_at,revoked_at',
+    )
     .is('revoked_at', null)
 
   if (proof.token_id) {
@@ -181,7 +187,8 @@ async function fetchCandidateDeviceTokens(
   const { data, error } = await query.limit(20)
   if (error) throw new Error(error.message)
   return ((data as DeviceTokenRow[] | null) ?? []).filter((row) =>
-    typeof row.token_hash === 'string' && row.token_hash.length > 0
+    typeof row.token_hash === 'string' && row.token_hash.length > 0 &&
+    serverActivityTokenCanAuthenticate(row)
   )
 }
 

@@ -4,6 +4,10 @@ import {
   rowForDeviceLifecycle,
 } from './device_lifecycle_contract.ts'
 import { readLightUsageBatch } from './light_usage_contract.ts'
+import {
+  serverActivityTokenCanAuthenticate,
+  serverActivityTokenNeedsActivation,
+} from '../_shared/server_activity_token.ts'
 
 type DeviceTokenRow = {
   id: string
@@ -11,6 +15,9 @@ type DeviceTokenRow = {
   home_id: string
   hub_id: string
   server_instance_id?: string | null
+  activated_at?: string | null
+  activation_expires_at?: string | null
+  revoked_at?: string | null
 }
 
 const corsHeaders = {
@@ -44,7 +51,9 @@ Deno.serve(async (req) => {
       readSupabaseSecretKey(),
     )
     const tokenRow = await lookupDeviceToken(adminClient, token)
-    if (!tokenRow) return jsonResponse({ error: 'Invalid device token' }, 401)
+    if (!tokenRow || !serverActivityTokenCanAuthenticate(tokenRow)) {
+      return jsonResponse({ error: 'Invalid device token' }, 401)
+    }
     if (tokenRow.hub_id !== hubId || tokenRow.home_id !== homeId) {
       return jsonResponse({ error: 'Device token scope mismatch' }, 403)
     }
@@ -68,6 +77,17 @@ Deno.serve(async (req) => {
     if (deviceEvents instanceof Response) return deviceEvents
     const usage = readLightUsageBatch(body)
     if (usage && 'error' in usage) return jsonResponse({ error: usage.error }, 400)
+
+    // Promotion happens only after the staged credential proves the same
+    // scope, authorization, identity, and payload contract as an active one.
+    // Existing active credentials remain usable, so interrupted or competing
+    // bootstrap attempts cannot take the appliance offline.
+    if (
+      serverActivityTokenNeedsActivation(tokenRow) &&
+      !await activateDeviceToken(adminClient, tokenRow.id)
+    ) {
+      return jsonResponse({ error: 'Invalid device token' }, 401)
+    }
     if (events.length === 0 && deviceEvents.length === 0 && !usage) {
       return jsonResponse({ status: 'ok', inserted: 0 })
     }
@@ -168,12 +188,26 @@ async function lookupDeviceToken(
   const tokenHash = await sha256Hex(token)
   const { data, error } = await adminClient
     .from('server_light_activity_device_tokens')
-    .select('id,user_id,home_id,hub_id,server_instance_id')
+    .select(
+      'id,user_id,home_id,hub_id,server_instance_id,activated_at,activation_expires_at,revoked_at',
+    )
     .eq('token_hash', tokenHash)
     .is('revoked_at', null)
     .maybeSingle()
   if (error) throw new Error(error.message)
   return data ?? null
+}
+
+async function activateDeviceToken(
+  adminClient: any,
+  tokenId: string,
+): Promise<boolean> {
+  const { data, error } = await adminClient.rpc(
+    'activate_server_light_activity_device_token',
+    { token_uuid: tokenId },
+  )
+  if (error) throw new Error(error.message)
+  return data === true
 }
 
 async function tokenStillAuthorized(
