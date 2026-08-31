@@ -7282,8 +7282,7 @@ mod tests {
                             "to_mode": "sleep",
                             "trigger": {"kind": "manual"},
                             "trigger_enabled": true,
-                            "duration_ms": {"mode": "fixed", "value": 0},
-                            "preserve_hard_off": true
+                            "duration_ms": {"mode": "fixed", "value": 0}
                         }]
                     },
                     {
@@ -7298,8 +7297,7 @@ mod tests {
                             "to_mode": "sleep",
                             "trigger": {"kind": "scheduled", "time": "23:30"},
                             "trigger_enabled": true,
-                            "duration_ms": {"mode": "fixed", "value": 0},
-                            "preserve_hard_off": true
+                            "duration_ms": {"mode": "fixed", "value": 0}
                         }]
                     }
                 ],
@@ -7496,8 +7494,7 @@ mod tests {
                     "to_mode": "day",
                     "trigger": {"kind": "solar", "event": "sunrise", "offset_minutes": 15},
                     "trigger_enabled": true,
-                    "duration_ms": {"mode": "fixed", "value": 0},
-                    "preserve_hard_off": true
+                        "duration_ms": {"mode": "fixed", "value": 0}
                 }]
             }], "expected_schedules": []}),
         );
@@ -7648,8 +7645,7 @@ mod tests {
                         "from_mode": "sleep",
                         "to_mode": "day",
                         "trigger": {"kind": "solar", "event": "sunrise", "offset_minutes": offset},
-                        "duration_ms": {"mode": "auto"},
-                        "preserve_hard_off": true
+                        "duration_ms": {"mode": "auto"}
                     }]
                 }], "expected_schedules": []}),
             );
@@ -7672,8 +7668,7 @@ mod tests {
                     "to_mode": "sleep",
                     "trigger": {"kind": "manual"},
                     "trigger_enabled": true,
-                    "duration_ms": {"mode": "fixed", "value": 500},
-                    "preserve_hard_off": true
+                    "duration_ms": {"mode": "fixed", "value": 500}
                 }]
             }], "expected_schedules": [] }),
         );
@@ -7709,7 +7704,7 @@ mod tests {
     }
 
     #[test]
-    fn named_schedule_transition_preserves_hard_off_members() {
+    fn named_schedule_transition_applies_target_to_hard_off_members() {
         let state = handler_state_with_runtime();
         assert_eq!(
             handle_put_light_schedules(
@@ -7724,8 +7719,7 @@ mod tests {
                         "to_mode": "sleep",
                         "trigger": {"kind": "manual"},
                         "trigger_enabled": true,
-                        "duration_ms": {"mode": "fixed", "value": 0},
-                        "preserve_hard_off": true
+                    "duration_ms": {"mode": "fixed", "value": 0}
                     }]
                 }], "expected_schedules": [] }),
             )
@@ -7761,7 +7755,7 @@ mod tests {
             .unwrap()
             .engine_node_snapshot("room1")
             .unwrap();
-        assert!(snapshot.hard_off);
+        assert!(!snapshot.hard_off);
         assert!(matches!(
             snapshot.profile_settings.light_schedule,
             Some(rhythm_core::LightScheduleAssignment::Named {

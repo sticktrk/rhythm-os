@@ -4935,7 +4935,6 @@ mod tests {
                     ),
                     trigger_enabled: true,
                     duration_ms: rhythm_core::TimerSetting::Fixed { value: 0 },
-                    preserve_hard_off: true,
                 }],
             }],
         )
@@ -5268,7 +5267,6 @@ mod tests {
                     ),
                     trigger_enabled: true,
                     duration_ms: rhythm_core::TimerSetting::Fixed { value: 0 },
-                    preserve_hard_off: true,
                 }],
             }],
         )
@@ -5377,7 +5375,6 @@ mod tests {
                 ),
                 trigger_enabled: true,
                 duration_ms: rhythm_core::TimerSetting::Fixed { value: 0 },
-                preserve_hard_off: true,
             }],
         };
         crate::commands::do_light_schedules_set(
@@ -5563,7 +5560,6 @@ mod tests {
             ),
             trigger_enabled: true,
             duration_ms: rhythm_core::TimerSetting::Fixed { value: 0 },
-            preserve_hard_off: true,
         };
         crate::commands::do_light_schedules_set(
             &state,

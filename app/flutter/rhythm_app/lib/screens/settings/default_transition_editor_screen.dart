@@ -284,7 +284,6 @@ class _DefaultTransitionEditorScreenState
       toMode: mode,
       trigger: RhythmTransitionTrigger.solar(isDay ? 'sunrise' : 'sunset'),
       duration: const TransitionDuration.auto(),
-      preserveHardOff: true,
     );
   }
 
@@ -729,7 +728,6 @@ class _DefaultTransitionEditorScreenState
     return a.id == b.id &&
         a.fromMode == b.fromMode &&
         a.toMode == b.toMode &&
-        a.preserveHardOff == b.preserveHardOff &&
         a.duration.isAuto == b.duration.isAuto &&
         a.durationMs == b.durationMs &&
         a.trigger.kind == b.trigger.kind &&

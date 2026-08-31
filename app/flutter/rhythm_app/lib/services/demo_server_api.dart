@@ -66,7 +66,6 @@ class DemoServerApi extends RhythmServerApi {
           toMode: RhythmMode.day,
           trigger: RhythmTransitionTrigger.solar('sunrise'),
           duration: TransitionDuration.auto(),
-          preserveHardOff: true,
         ),
         RhythmModeTransitionConfig(
           id: 'sleep_start',
@@ -75,7 +74,6 @@ class DemoServerApi extends RhythmServerApi {
           toMode: RhythmMode.sleep,
           trigger: RhythmTransitionTrigger.solar('sunset'),
           duration: TransitionDuration.auto(),
-          preserveHardOff: true,
         ),
       ],
     ),
@@ -103,7 +101,6 @@ class DemoServerApi extends RhythmServerApi {
         toMode: RhythmMode.day,
         trigger: RhythmTransitionTrigger.solar('astronomical_twilight'),
         duration: TransitionDuration.auto(),
-        preserveHardOff: true,
       ),
       RhythmModeTransitionConfig(
         id: 'day_to_sleep',
@@ -112,7 +109,6 @@ class DemoServerApi extends RhythmServerApi {
         toMode: RhythmMode.sleep,
         trigger: RhythmTransitionTrigger.solar('nautical_twilight'),
         duration: TransitionDuration.auto(),
-        preserveHardOff: true,
       ),
     ];
   }

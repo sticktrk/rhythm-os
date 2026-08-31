@@ -169,7 +169,6 @@ class _LightScheduleAssignmentCardState
         ),
         triggerEnabled: current?.triggerEnabled,
         duration: current?.duration,
-        preserveHardOff: current?.preserveHardOff,
       );
       changed = true;
     }

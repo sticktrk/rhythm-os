@@ -155,7 +155,6 @@ class _TransitionEditScreenState extends State<TransitionEditScreen>
       toMode: mode,
       trigger: RhythmTransitionTrigger.solar(isDay ? 'sunrise' : 'sunset'),
       duration: const TransitionDuration.auto(),
-      preserveHardOff: true,
     );
   }
 

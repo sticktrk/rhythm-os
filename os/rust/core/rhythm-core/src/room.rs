@@ -554,19 +554,11 @@ pub struct ModeTransitionOverride {
         serde(default, skip_serializing_if = "Option::is_none")
     )]
     pub duration_ms: Option<TimerSetting>,
-    #[cfg_attr(
-        feature = "serde",
-        serde(default, skip_serializing_if = "Option::is_none")
-    )]
-    pub preserve_hard_off: Option<bool>,
 }
 
 impl ModeTransitionOverride {
     pub fn is_empty(&self) -> bool {
-        self.trigger.is_empty()
-            && self.trigger_enabled.is_none()
-            && self.duration_ms.is_none()
-            && self.preserve_hard_off.is_none()
+        self.trigger.is_empty() && self.trigger_enabled.is_none() && self.duration_ms.is_none()
     }
 
     pub fn merged_with_parent(&self, parent: &Self) -> Self {
@@ -577,7 +569,6 @@ impl ModeTransitionOverride {
                 .duration_ms
                 .clone()
                 .or_else(|| parent.duration_ms.clone()),
-            preserve_hard_off: self.preserve_hard_off.or(parent.preserve_hard_off),
         }
     }
 
@@ -589,9 +580,6 @@ impl ModeTransitionOverride {
         }
         if let Some(value) = self.duration_ms.as_ref() {
             effective.duration_ms = value.clone();
-        }
-        if let Some(value) = self.preserve_hard_off {
-            effective.preserve_hard_off = value;
         }
         Ok(effective)
     }
@@ -1070,10 +1058,6 @@ pub enum ModeChangeCause {
     Schedule,
 }
 
-fn default_preserve_hard_off() -> bool {
-    true
-}
-
 fn default_trigger_enabled() -> bool {
     false
 }
@@ -1104,8 +1088,6 @@ pub struct ModeTransitionConfig {
         serde(default = "default_mode_transition_duration_ms")
     )]
     pub duration_ms: TimerSetting,
-    #[cfg_attr(feature = "serde", serde(default = "default_preserve_hard_off"))]
-    pub preserve_hard_off: bool,
 }
 
 impl ModeTransitionConfig {
@@ -1118,7 +1100,6 @@ impl ModeTransitionConfig {
             trigger: ModeTransitionTrigger::Manual,
             trigger_enabled: true,
             duration_ms: TimerSetting::Fixed { value: duration_ms },
-            preserve_hard_off: true,
         }
     }
 
@@ -2832,17 +2813,24 @@ mod tests {
         }
 
         #[test]
-        fn test_mode_transition_deserialize_defaults_duration_and_preserve_hard_off() {
+        fn test_mode_transition_ignores_legacy_preserve_hard_off() {
             let json = r#"{
                 "from_mode": "sleep",
                 "to_mode": "day",
-                "trigger": "sunrise"
+                "trigger": "sunrise",
+                "preserve_hard_off": true
             }"#;
 
             let config: ModeTransitionConfig = serde_json::from_str(json).unwrap();
             assert_eq!(config.duration_ms, TimerSetting::Auto);
-            assert!(config.preserve_hard_off);
             assert!(!config.trigger_enabled);
+            assert!(
+                serde_json::to_value(config)
+                    .unwrap()
+                    .get("preserve_hard_off")
+                    .is_none(),
+                "legacy inputs remain readable but the retired field is not emitted"
+            );
         }
 
         #[test]
@@ -3018,7 +3006,6 @@ mod tests {
                 trigger: ModeTransitionTrigger::NauticalTwilight,
                 trigger_enabled: true,
                 duration_ms: TimerSetting::Fixed { value: 2_000 },
-                preserve_hard_off: true,
             }]);
 
             assert_eq!(configs.len(), 1);
@@ -3071,7 +3058,6 @@ mod tests {
                     trigger: ModeTransitionTrigger::Manual,
                     trigger_enabled: true,
                     duration_ms: TimerSetting::Fixed { value: 1_000 },
-                    preserve_hard_off: true,
                 },
                 ModeTransitionConfig {
                     id: String::new(),
@@ -3083,7 +3069,6 @@ mod tests {
                     ),
                     trigger_enabled: true,
                     duration_ms: TimerSetting::Fixed { value: 2_000 },
-                    preserve_hard_off: true,
                 },
             ]);
 
@@ -3103,7 +3088,6 @@ mod tests {
                     trigger: ModeTransitionTrigger::Manual,
                     trigger_enabled: true,
                     duration_ms: TimerSetting::Fixed { value: 1_000 },
-                    preserve_hard_off: true,
                 },
                 ModeTransitionConfig {
                     id: "day_to_sleep_nautical_twilight".into(),
@@ -3113,7 +3097,6 @@ mod tests {
                     trigger: ModeTransitionTrigger::NauticalTwilight,
                     trigger_enabled: true,
                     duration_ms: TimerSetting::Fixed { value: 2_000 },
-                    preserve_hard_off: true,
                 },
             ]);
 

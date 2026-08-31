@@ -85,7 +85,6 @@ void main() {
       expect(transition.triggerEnabled, isFalse);
       expect(transition.duration, isA<TransitionDurationFixed>());
       expect(transition.durationMs, 5000);
-      expect(transition.preserveHardOff, isTrue);
       expect(transition.toJson(), {
         'id': 'day_to_sleep_nautical_twilight',
         'label': 'Day to Sleep (Nautical Twilight)',
@@ -97,8 +96,8 @@ void main() {
         },
         'trigger_enabled': false,
         'duration_ms': {'mode': 'fixed', 'value': 5000},
-        'preserve_hard_off': true,
       });
+      expect(transition.toJson(), isNot(contains('preserve_hard_off')));
     });
 
     test('defaults missing trigger_enabled to true', () {
@@ -119,7 +118,6 @@ void main() {
         'to_mode': 'day',
         'trigger': 'sunrise',
         'duration_ms': 3000,
-        'preserve_hard_off': false,
       });
 
       expect(transition.trigger.kind, 'solar');
@@ -135,7 +133,6 @@ void main() {
           'time': '22:00',
         },
         'duration_ms': 5000,
-        'preserve_hard_off': true,
       });
 
       expect(transition.trigger.kind, 'scheduled');
@@ -152,7 +149,6 @@ void main() {
         'to_mode': 'day',
         'trigger': {'kind': 'solar', 'event': 'sunrise'},
         'duration_ms': {'mode': 'auto'},
-        'preserve_hard_off': true,
       });
 
       expect(transition.duration, isA<TransitionDurationAuto>());
@@ -166,7 +162,6 @@ void main() {
         'from_mode': 'day',
         'to_mode': 'sleep',
         'duration_ms': {'mode': 'fixed', 'value': 10000},
-        'preserve_hard_off': false,
       });
 
       expect(transition.duration, isA<TransitionDurationFixed>());
@@ -182,7 +177,6 @@ void main() {
         'from_mode': 'day',
         'to_mode': 'sleep',
         'duration_ms': 10000,
-        'preserve_hard_off': false,
       });
 
       expect(transition.duration, isA<TransitionDurationFixed>());
@@ -211,7 +205,6 @@ void main() {
           'to_mode': 'day',
           'trigger': {'kind': 'scheduled', 'time': '18:00'},
           'duration_ms': {'mode': 'fixed', 'value': 500},
-          'preserve_hard_off': true,
         },
       ],
     });

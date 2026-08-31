@@ -8936,13 +8936,6 @@ fn apply_room_schedule_target(
             "Schedule target must be a room or unassigned light node"
         ));
     }
-    if snapshot.hard_off && transition.is_some_and(|config| config.preserve_hard_off) {
-        if persist {
-            persist_rooms(state);
-        }
-        emit_node_state_event_after_apply(state, &runtime, room_id);
-        return Ok(());
-    }
     let (soft_off, mood_active, hard_off) = room_flags_for_target_state(target_state)?;
 
     runtime.restore_node_state(
@@ -9512,7 +9505,6 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
     let mut dispatch_snapshots = Vec::new();
     let mut transitioned_rooms = Vec::new();
     let mut changed_room_ids = Vec::new();
-    let mut preserved_hard_off = 0usize;
     let mut empty_rooms_skipped = 0usize;
     let mut hidden_rooms = 0usize;
     let mut unresolved_rooms = 0usize;
@@ -9539,15 +9531,6 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
         // command for a controller that cannot exist.
         if empty_topology_rooms.contains(&snap.id) {
             empty_rooms_skipped += 1;
-            continue;
-        }
-
-        if room_state == RoomModeState::HardOff
-            && transition
-                .as_ref()
-                .is_some_and(|config| config.preserve_hard_off)
-        {
-            preserved_hard_off += 1;
             continue;
         }
 
@@ -9690,13 +9673,12 @@ fn apply_active_mode_outputs(state: &SharedState, request: ActiveModeOutputApply
 
     debug!(
         target: "cmd",
-        "active_mode_apply: {} rooms scanned, {} changed, {} transitioning, {} empty, {} hidden, {} preserved hard-off, {} unresolved",
+        "active_mode_apply: {} rooms scanned, {} changed, {} transitioning, {} empty, {} hidden, {} unresolved",
         snapshots.len(),
         changed_room_ids.len(),
         transitioned_rooms.len(),
         empty_rooms_skipped,
         hidden_rooms,
-        preserved_hard_off,
         unresolved_rooms
     );
     if reset_motion_timers_for_outputs {
@@ -24102,6 +24084,51 @@ mod tests {
         }
     }
 
+    #[test]
+    fn named_schedule_sunset_releases_source_schedule_hard_off() {
+        let (state, runtime) = setup_state(vec![make_snapshot("porch", false, false)]);
+        {
+            let mut s = state.lock().unwrap();
+            let mut day = ModeConfig::default_for_mode(RhythmMode::Day);
+            day.room_defaults = vec![rhythm_core::RoomModeDefault {
+                room_id: "porch".into(),
+                state: RoomModeState::HardOff,
+            }];
+            let mut sleep = ModeConfig::default_for_mode(RhythmMode::Sleep);
+            sleep.room_defaults = vec![rhythm_core::RoomModeDefault {
+                room_id: "porch".into(),
+                state: RoomModeState::Active,
+            }];
+            s.set_mode_configs(vec![day, sleep]);
+        }
+        let mut outdoor = backup_test_light_schedule("outdoor");
+        outdoor.transitions[0].trigger = rhythm_core::ModeTransitionTrigger::Sunset;
+        do_light_schedules_set(&state, vec![outdoor]).unwrap();
+        do_light_schedule_assignment_set(&state, "porch", Some("outdoor"), false).unwrap();
+
+        let day_snapshot = runtime.engine_node_snapshot("porch").unwrap();
+        assert!(day_snapshot.hard_off);
+        assert!(!runtime.any_target_lights_on("porch"));
+
+        do_trigger_light_schedule_transition_for_node(&state, "porch", "outdoor", "outdoor_sleep")
+            .unwrap();
+
+        let sleep_snapshot = runtime.engine_node_snapshot("porch").unwrap();
+        assert!(!sleep_snapshot.hard_off);
+        assert!(runtime
+            .applied_commands()
+            .iter()
+            .any(|(node_id, _)| node_id == "porch"));
+        assert_eq!(
+            sleep_snapshot
+                .profile_settings
+                .light_schedule
+                .as_ref()
+                .and_then(rhythm_core::LightScheduleAssignment::active_mode),
+            Some(RhythmMode::Sleep)
+        );
+    }
+
     fn backup_test_schedule_binding(id: &str, schedule_id: &str) -> crate::topology::InputBinding {
         crate::topology::InputBinding {
             id: id.to_string(),
@@ -33303,7 +33330,7 @@ mod tests {
     }
 
     #[test]
-    fn room_default_overrides_preserve_hard_off_for_explicit_room() {
+    fn room_default_overrides_existing_hard_off_for_explicit_room() {
         let mut snapshot = make_snapshot("r1", false, false);
         snapshot.hard_off = true;
         let (state, runtime) = setup_state(vec![snapshot]);
