@@ -1509,7 +1509,6 @@ void main() {
         toMode: RhythmMode.day,
         trigger: RhythmTransitionTrigger.solar('sunrise'),
         duration: TransitionDuration.auto(),
-        preserveHardOff: true,
       ),
       RhythmModeTransitionConfig(
         id: 'day_to_sleep',
@@ -1518,7 +1517,6 @@ void main() {
         toMode: RhythmMode.sleep,
         trigger: RhythmTransitionTrigger.solar('sunset'),
         duration: TransitionDuration.auto(),
-        preserveHardOff: true,
       ),
     ]);
     await serverSync.dispatchSetActiveMode(RhythmMode.day);

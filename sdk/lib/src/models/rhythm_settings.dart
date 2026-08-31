@@ -287,7 +287,6 @@ class RhythmModeTransitionConfig {
   final RhythmTransitionTrigger trigger;
   final bool triggerEnabled;
   final TransitionDuration duration;
-  final bool preserveHardOff;
 
   const RhythmModeTransitionConfig({
     this.id = '',
@@ -297,7 +296,6 @@ class RhythmModeTransitionConfig {
     this.trigger = const RhythmTransitionTrigger.manual(),
     this.triggerEnabled = true,
     required this.duration,
-    required this.preserveHardOff,
   });
 
   /// Convenience getter for backward-compatible int access.
@@ -319,7 +317,6 @@ class RhythmModeTransitionConfig {
               : const RhythmTransitionTrigger.manual(),
       triggerEnabled: json['trigger_enabled'] as bool? ?? true,
       duration: TransitionDuration.fromJson(json['duration_ms']),
-      preserveHardOff: json['preserve_hard_off'] as bool? ?? true,
     );
   }
 
@@ -332,7 +329,6 @@ class RhythmModeTransitionConfig {
       'trigger': trigger.toJson(),
       'trigger_enabled': triggerEnabled,
       'duration_ms': duration.toJson(),
-      'preserve_hard_off': preserveHardOff,
     };
   }
 
@@ -344,7 +340,6 @@ class RhythmModeTransitionConfig {
     RhythmTransitionTrigger? trigger,
     bool? triggerEnabled,
     TransitionDuration? duration,
-    bool? preserveHardOff,
   }) {
     return RhythmModeTransitionConfig(
       id: id ?? this.id,
@@ -354,7 +349,6 @@ class RhythmModeTransitionConfig {
       trigger: trigger ?? this.trigger,
       triggerEnabled: triggerEnabled ?? this.triggerEnabled,
       duration: duration ?? this.duration,
-      preserveHardOff: preserveHardOff ?? this.preserveHardOff,
     );
   }
 }
@@ -484,13 +478,11 @@ class RhythmModeTransitionOverride {
   final RhythmTransitionTriggerOverride trigger;
   final bool? triggerEnabled;
   final TransitionDuration? duration;
-  final bool? preserveHardOff;
 
   const RhythmModeTransitionOverride({
     this.trigger = const RhythmTransitionTriggerOverride(),
     this.triggerEnabled,
     this.duration,
-    this.preserveHardOff,
   });
 
   factory RhythmModeTransitionOverride.fromJson(Map<String, dynamic> json) {
@@ -505,21 +497,18 @@ class RhythmModeTransitionOverride {
       duration: json.containsKey('duration_ms')
           ? TransitionDuration.fromJson(json['duration_ms'])
           : null,
-      preserveHardOff: json['preserve_hard_off'] as bool?,
     );
   }
 
   bool get isEmpty =>
       trigger.isEmpty &&
       triggerEnabled == null &&
-      duration == null &&
-      preserveHardOff == null;
+      duration == null;
 
   Map<String, dynamic> toJson() => {
         if (!trigger.isEmpty) 'trigger': trigger.toJson(),
         if (triggerEnabled != null) 'trigger_enabled': triggerEnabled,
         if (duration != null) 'duration_ms': duration!.toJson(),
-        if (preserveHardOff != null) 'preserve_hard_off': preserveHardOff,
       };
 }
 

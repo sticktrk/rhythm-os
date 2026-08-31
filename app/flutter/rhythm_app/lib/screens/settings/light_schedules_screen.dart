@@ -338,7 +338,6 @@ class _LightScheduleEditorState extends State<_LightScheduleEditor> {
       trigger: RhythmTransitionTrigger.solar(isDay ? 'sunrise' : 'sunset'),
       triggerEnabled: true,
       duration: const TransitionDuration.auto(),
-      preserveHardOff: true,
     );
   }
 

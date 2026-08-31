@@ -1983,7 +1983,6 @@ void main() {
           toMode: RhythmMode.day,
           trigger: RhythmTransitionTrigger.solar('sunrise'),
           duration: TransitionDuration.auto(),
-          preserveHardOff: true,
         ),
       ],
     );
@@ -2000,7 +1999,6 @@ void main() {
           toMode: RhythmMode.day,
           trigger: RhythmTransitionTrigger.scheduled('07:00'),
           duration: TransitionDuration.auto(),
-          preserveHardOff: true,
         ),
       ],
     );
@@ -2138,7 +2136,6 @@ void main() {
               toMode: RhythmMode.day,
               trigger: RhythmTransitionTrigger.manual(),
               duration: TransitionDuration.auto(),
-              preserveHardOff: true,
             ),
           ],
         ),
@@ -2467,7 +2464,6 @@ void main() {
                 toMode: RhythmMode.day,
                 trigger: RhythmTransitionTrigger.scheduled('07:00'),
                 duration: TransitionDuration.auto(),
-                preserveHardOff: true,
               ),
               RhythmModeTransitionConfig(
                 id: 'sleep_start',
@@ -2476,7 +2472,6 @@ void main() {
                 toMode: RhythmMode.sleep,
                 trigger: RhythmTransitionTrigger.scheduled('22:00'),
                 duration: TransitionDuration.auto(),
-                preserveHardOff: true,
               ),
               RhythmModeTransitionConfig(
                 id: 'physical-wake',
@@ -2485,7 +2480,6 @@ void main() {
                 toMode: RhythmMode.day,
                 trigger: RhythmTransitionTrigger.manual(),
                 duration: TransitionDuration.auto(),
-                preserveHardOff: true,
               ),
               RhythmModeTransitionConfig(
                 id: 'vacation-wake',
@@ -2494,7 +2488,6 @@ void main() {
                 toMode: RhythmMode.day,
                 trigger: RhythmTransitionTrigger.scheduled('09:00'),
                 duration: TransitionDuration.auto(),
-                preserveHardOff: true,
               ),
             ],
           ),
@@ -2659,7 +2652,6 @@ void main() {
                 toMode: RhythmMode.day,
                 trigger: RhythmTransitionTrigger.scheduled('07:00'),
                 duration: TransitionDuration.auto(),
-                preserveHardOff: true,
               ),
               RhythmModeTransitionConfig(
                 id: 'sleep_start',
@@ -2668,7 +2660,6 @@ void main() {
                 toMode: RhythmMode.sleep,
                 trigger: RhythmTransitionTrigger.scheduled('22:00'),
                 duration: TransitionDuration.auto(),
-                preserveHardOff: true,
               ),
               RhythmModeTransitionConfig(
                 id: 'physical-wake',
@@ -2677,7 +2668,6 @@ void main() {
                 toMode: RhythmMode.day,
                 trigger: RhythmTransitionTrigger.manual(),
                 duration: TransitionDuration.auto(),
-                preserveHardOff: true,
               ),
               RhythmModeTransitionConfig(
                 id: 'vacation-wake',
@@ -2686,7 +2676,6 @@ void main() {
                 toMode: RhythmMode.day,
                 trigger: RhythmTransitionTrigger.scheduled('09:00'),
                 duration: TransitionDuration.auto(),
-                preserveHardOff: true,
               ),
             ],
           ),
@@ -7186,7 +7175,6 @@ void main() {
           toMode: RhythmMode.day,
           trigger: RhythmTransitionTrigger.solar('sunrise'),
           duration: TransitionDuration.auto(),
-          preserveHardOff: true,
         ),
         RhythmModeTransitionConfig(
           id: 'day_to_sleep',
@@ -7195,7 +7183,6 @@ void main() {
           toMode: RhythmMode.sleep,
           trigger: RhythmTransitionTrigger.solar('sunset'),
           duration: TransitionDuration.auto(),
-          preserveHardOff: true,
         ),
       ];
     }

@@ -638,21 +638,6 @@ function TransitionEditor({
         </div>
       </div>
 
-      <div className="formRow">
-        <div className="formRowLabel">
-          <span>Preserve hard off</span>
-          <small>Skip rooms the customer switched hard-off</small>
-        </div>
-        <div className="formRowControl">
-          <ToggleSwitch
-            checked={asBoolean(draft.preserve_hard_off) ?? false}
-            onChange={(value) =>
-              onChange({ ...draft, preserve_hard_off: value })
-            }
-          />
-        </div>
-      </div>
-
       <h4 className="p5SubHeading">Full transition JSON</h4>
       <JsonEditor value={text} rows={10} onChange={onTextChange} />
     </div>
