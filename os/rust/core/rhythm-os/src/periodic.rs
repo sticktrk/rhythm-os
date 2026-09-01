@@ -2223,6 +2223,65 @@ fn most_recent_resolved_transition(
     latest.map(|(_, transition)| transition)
 }
 
+fn most_recent_light_schedule_transition_for_target(
+    state: &AppState,
+    node_id: &str,
+    schedule_id: &str,
+    current_utc: chrono::NaiveDateTime,
+    require_complete_cycle: bool,
+) -> anyhow::Result<Option<rhythm_core::ModeTransitionConfig>> {
+    let runtime = state
+        .hub_runtime()
+        .ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+    let node = runtime
+        .engine_effective_node_snapshot(node_id)
+        .ok_or_else(|| anyhow::anyhow!("Schedule target was not found"))?;
+    let schedule = state
+        .light_schedules
+        .get(schedule_id)
+        .ok_or_else(|| anyhow::anyhow!("Unknown light schedule '{}'", schedule_id))?;
+    if !schedule.enabled {
+        return Ok(None);
+    }
+    let effective = node
+        .profile_settings
+        .light_schedule_overrides
+        .get(schedule_id)
+        .map(|value| value.apply_to(schedule))
+        .transpose()
+        .map_err(anyhow::Error::msg)?
+        .unwrap_or_else(|| schedule.clone());
+    if require_complete_cycle {
+        let has_day_boundary = effective.transitions.iter().any(|transition| {
+            transition.trigger_enabled
+                && !transition.trigger.is_manual()
+                && transition.to_mode == rhythm_core::RhythmMode::Day
+        });
+        let has_sleep_boundary = effective.transitions.iter().any(|transition| {
+            transition.trigger_enabled
+                && !transition.trigger.is_manual()
+                && transition.to_mode == rhythm_core::RhythmMode::Sleep
+        });
+        if !has_day_boundary || !has_sleep_boundary {
+            return Ok(None);
+        }
+    }
+    let solar = SolarTriggerContext {
+        solar_noon: state.solar_noon_hour(),
+        latitude: state.latitude,
+        longitude: state.longitude,
+        timezone_name: state.timezone_name.as_deref(),
+    };
+    Ok(most_recent_resolved_transition(
+        current_utc,
+        ReplayTransitionContext {
+            solar,
+            utc_offset: state.utc_offset_hours,
+            configs: &effective.transitions,
+        },
+    ))
+}
+
 fn resolved_light_schedule_transition_for_node(
     state: &SharedState,
     node_id: &str,
@@ -2245,36 +2304,36 @@ fn resolved_light_schedule_transition_for_node(
     let active_mode = assignment
         .active_mode()
         .ok_or_else(|| anyhow::anyhow!("Schedule target has no active mode"))?;
-    let schedule = s
-        .light_schedules
-        .get(schedule_id)
-        .ok_or_else(|| anyhow::anyhow!("Unknown light schedule '{}'", schedule_id))?;
-    if !schedule.enabled {
-        return Ok(None);
-    }
-    let effective = node
-        .profile_settings
-        .light_schedule_overrides
-        .get(schedule_id)
-        .map(|value| value.apply_to(schedule))
-        .transpose()
-        .map_err(anyhow::Error::msg)?
-        .unwrap_or_else(|| schedule.clone());
-    let solar = SolarTriggerContext {
-        solar_noon: s.solar_noon_hour(),
-        latitude: s.latitude,
-        longitude: s.longitude,
-        timezone_name: s.timezone_name.as_deref(),
-    };
-    Ok(most_recent_resolved_transition(
+    Ok(most_recent_light_schedule_transition_for_target(
+        &s,
+        node_id,
+        schedule_id,
         current_utc,
-        ReplayTransitionContext {
-            solar,
-            utc_offset: s.utc_offset_hours,
-            configs: &effective.transitions,
-        },
-    )
+        false,
+    )?
     .map(|transition| (active_mode, transition)))
+}
+
+/// Resolve the recurring mode that a newly assigned target should enter now.
+/// This deliberately ignores the target's current assignment so configuration
+/// writers do not mistake the registry's default mode for clock authority. A
+/// one-way or manual-only schedule retains that explicit default because it has
+/// no complete recurring interval to infer.
+pub(crate) fn resolved_light_schedule_mode_for_target(
+    state: &SharedState,
+    node_id: &str,
+    schedule_id: &str,
+    current_utc: chrono::NaiveDateTime,
+) -> anyhow::Result<Option<rhythm_core::RhythmMode>> {
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    Ok(most_recent_light_schedule_transition_for_target(
+        &s,
+        node_id,
+        schedule_id,
+        current_utc,
+        true,
+    )?
+    .map(|transition| transition.to_mode))
 }
 
 /// Resolve the recurring clock/solar mode that is effective for one named
