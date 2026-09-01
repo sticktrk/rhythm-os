@@ -59,7 +59,7 @@ class _RoomCardState extends State<RoomCard> {
   bool _lastMoodSelectionActive = false;
   bool _localActionPending = false;
   int _localActionFeedbackGeneration = 0;
-  Timer? _localActionFeedbackTimer;
+  final Set<Timer> _minimumFeedbackTimers = {};
   static const int _minKelvin = 2000;
   static const int _maxKelvin = 6500;
 
@@ -67,19 +67,27 @@ class _RoomCardState extends State<RoomCard> {
   /// the server acknowledged (or rejected) it, with the usual minimum spinner
   /// duration. This closes the gap where a second power tap could race the
   /// first request before the server's `pending_dispatch` flag arrives.
+  ///
+  /// The minimum-duration delay is a cancellable [Timer] cancelled by
+  /// [dispose] — an unmounted card must not leave a pending timer behind.
+  /// After disposal the returned future never completes, which is safe: every
+  /// continuation behind it checks `mounted`.
   Future<T> _trackActionFeedback<T>(Future<T> action) async {
-    _localActionFeedbackTimer?.cancel();
-    _localActionFeedbackTimer = null;
     final generation = ++_localActionFeedbackGeneration;
     if (!_localActionPending) {
       setState(() => _localActionPending = true);
     }
-    final minimumFeedback =
-        Future<void>.delayed(_minimumActionFeedbackDuration);
+    final minimumFeedback = Completer<void>();
+    late final Timer minimumTimer;
+    minimumTimer = Timer(_minimumActionFeedbackDuration, () {
+      _minimumFeedbackTimers.remove(minimumTimer);
+      minimumFeedback.complete();
+    });
+    _minimumFeedbackTimers.add(minimumTimer);
     try {
       return await action;
     } finally {
-      await minimumFeedback;
+      await minimumFeedback.future;
       if (mounted &&
           generation == _localActionFeedbackGeneration &&
           _localActionPending) {
@@ -90,7 +98,10 @@ class _RoomCardState extends State<RoomCard> {
 
   @override
   void dispose() {
-    _localActionFeedbackTimer?.cancel();
+    for (final timer in _minimumFeedbackTimers) {
+      timer.cancel();
+    }
+    _minimumFeedbackTimers.clear();
     super.dispose();
   }
 
