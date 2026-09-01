@@ -4180,19 +4180,32 @@ class ServerSyncProvider extends ChangeNotifier {
       dispatchNodeColor(roomId, r, g, b);
 
   /// Push node preferences to the server (user-state only, no topology).
-  /// Returns a future completing when the server acknowledged the write, so
-  /// callers that must order a follow-up request can await it.
-  Future<void> pushNodePreferences(String nodeId,
+  /// Completes when the server acknowledged the write, so callers that must
+  /// order a follow-up request can await it.
+  ///
+  /// Reports [RhythmWriteAck.rejected] only when the connected server
+  /// actively refused the write, leaving the optimistic state unacknowledged
+  /// so the caller can restore the pre-command presentation. Transport
+  /// uncertainty reports [RhythmWriteAck.indeterminate]: the write may have
+  /// committed, so nothing is acknowledged and nothing should be restored —
+  /// the optimistic lock expiry re-applies authoritative server state. Demo
+  /// mode, local-only operation, and server-originated updates report
+  /// accepted: there the local optimistic state is authoritative.
+  Future<RhythmWriteAck> pushNodePreferences(String nodeId,
       {bool? rhythmEnabled,
       bool? disabled,
       bool? standbyEnabled,
       RoomModeState? state,
       Map<String, dynamic>? profileSettings}) async {
-    if (HueServiceLocator.isDemoMode) return; // optimistic UI already applied
-    if (!_connection.connected || _receivingFromServer) return;
+    if (HueServiceLocator.isDemoMode) {
+      return RhythmWriteAck.accepted; // optimistic UI already applied
+    }
+    if (!_connection.connected || _receivingFromServer) {
+      return RhythmWriteAck.accepted;
+    }
     debugPrint(
         'ServerSync: pushNodePreferences $nodeId rhythmEnabled=$rhythmEnabled disabled=$disabled standbyEnabled=$standbyEnabled state=${state?.wireValue}');
-    await api.nodePreferencesSet(
+    final ack = await api.nodePreferencesSet(
       nodeId: nodeId,
       rhythmEnabled: rhythmEnabled,
       disabled: disabled,
@@ -4200,11 +4213,13 @@ class ServerSyncProvider extends ChangeNotifier {
       state: state,
       profileSettings: profileSettings,
     );
+    if (ack != RhythmWriteAck.accepted) return ack;
     _roomProvider.acknowledgeOptimisticNodeState(
       nodeId,
       state: state,
       lightsOn: _expectedLightsOnForState(state),
     );
+    return ack;
   }
 
   /// Patch legacy timer-only per-profile overrides for one node.
@@ -4419,7 +4434,17 @@ class ServerSyncProvider extends ChangeNotifier {
     return RoomModeState.fromString(roomDefaultStateForMode(nodeId, mode));
   }
 
-  bool _dispatchResetNode(String nodeId, {required bool modeDefault}) {
+  /// Dispatch a reset action and report its acceptance outcome.
+  ///
+  /// The optimistic state is acknowledged only when the server accepted the
+  /// action; a null action response no longer counts as acceptance. Rejection
+  /// leaves the optimistic state unacknowledged so the caller can restore the
+  /// pre-command presentation; transport uncertainty leaves it to the
+  /// optimistic lock expiry to reconcile against authoritative server state.
+  Future<RhythmWriteAck> _dispatchResetNodeChecked(
+    String nodeId, {
+    required bool modeDefault,
+  }) async {
     final supportsModeDefault =
         _capabilities?.supportsFeature(RhythmFeature.resetToModeDefault) ==
             true;
@@ -4435,7 +4460,7 @@ class ServerSyncProvider extends ChangeNotifier {
         brightness: targetState == RoomModeState.active ? 75 : 1,
         kelvin: _roomProvider.getKelvin(nodeId) ?? 3200,
       );
-      _roomProvider.applyServerNodeState(
+      await _roomProvider.applyServerNodeState(
         nodeId,
         rhythmEnabled: _roomProvider.getNode(nodeId)?.rhythmEnabled ?? true,
         timeOffset: 0,
@@ -4446,23 +4471,30 @@ class ServerSyncProvider extends ChangeNotifier {
         kelvin: _roomProvider.getKelvin(nodeId) ?? 3200,
       );
       _roomProvider.bumpResetGeneration();
-      return true;
+      return RhythmWriteAck.accepted;
     }
-    if (!_connection.connected) return false;
+    // Local-only operation: the optimistic state is authoritative.
+    if (!_connection.connected) return RhythmWriteAck.accepted;
     _clearRecentDispatchFailure(nodeId);
-    _connection.api
-        .nodeAction(nodeId: nodeId, action: action)
-        .then((serverState) {
-      if (serverState != null) {
-        _onRhythmState(serverState, fromActionResponse: true);
-      }
+    final result =
+        await _connection.api.nodeActionChecked(nodeId: nodeId, action: action);
+    if (result.state != null) {
+      _onRhythmState(result.state!, fromActionResponse: true);
+    }
+    if (result.ack == RhythmWriteAck.accepted) {
       _roomProvider.acknowledgeOptimisticNodeState(
         nodeId,
         state: targetState,
         lightsOn: lightsOn,
       );
-      _roomProvider.bumpResetGeneration();
-    });
+    }
+    _roomProvider.bumpResetGeneration();
+    return result.ack;
+  }
+
+  bool _dispatchResetNode(String nodeId, {required bool modeDefault}) {
+    if (!HueServiceLocator.isDemoMode && !_connection.connected) return false;
+    unawaited(_dispatchResetNodeChecked(nodeId, modeDefault: modeDefault));
     return true;
   }
 
@@ -4470,9 +4502,17 @@ class ServerSyncProvider extends ChangeNotifier {
   bool dispatchResetNode(String nodeId) =>
       _dispatchResetNode(nodeId, modeDefault: true);
 
+  /// [dispatchResetNode] reporting the server's acceptance outcome.
+  Future<RhythmWriteAck> dispatchResetNodeChecked(String nodeId) =>
+      _dispatchResetNodeChecked(nodeId, modeDefault: true);
+
   /// Clear curve offsets while explicitly entering the active On state.
   bool dispatchResetActiveNode(String nodeId) =>
       _dispatchResetNode(nodeId, modeDefault: false);
+
+  /// [dispatchResetActiveNode] reporting the server's acceptance outcome.
+  Future<RhythmWriteAck> dispatchResetActiveNodeChecked(String nodeId) =>
+      _dispatchResetNodeChecked(nodeId, modeDefault: false);
 
   bool dispatchResetRoom(String roomId) => dispatchResetNode(roomId);
 

@@ -5,7 +5,11 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show RhythmSceneDefinition, RhythmSceneSourceKind, RoomModeState;
+    show
+        RhythmSceneDefinition,
+        RhythmSceneSourceKind,
+        RhythmWriteAck,
+        RoomModeState;
 import '../providers/server_sync_provider.dart';
 import '../providers/room_provider.dart';
 import '../services/analytics_service.dart';
@@ -54,25 +58,50 @@ class _RoomCardState extends State<RoomCard> {
   RoomMode? _lastRenderedMode;
   bool _lastMoodSelectionActive = false;
   bool _localActionPending = false;
-  Timer? _localActionFeedbackTimer;
+  int _localActionFeedbackGeneration = 0;
+  final Set<Timer> _minimumFeedbackTimers = {};
   static const int _minKelvin = 2000;
   static const int _maxKelvin = 6500;
 
-  void _beginActionFeedback() {
-    _localActionFeedbackTimer?.cancel();
+  /// Hold `_localActionPending` from the moment a power action starts until
+  /// the server acknowledged (or rejected) it, with the usual minimum spinner
+  /// duration. This closes the gap where a second power tap could race the
+  /// first request before the server's `pending_dispatch` flag arrives.
+  ///
+  /// The minimum-duration delay is a cancellable [Timer] cancelled by
+  /// [dispose] — an unmounted card must not leave a pending timer behind.
+  /// After disposal the returned future never completes, which is safe: every
+  /// continuation behind it checks `mounted`.
+  Future<T> _trackActionFeedback<T>(Future<T> action) async {
+    final generation = ++_localActionFeedbackGeneration;
     if (!_localActionPending) {
       setState(() => _localActionPending = true);
     }
-    _localActionFeedbackTimer = Timer(_minimumActionFeedbackDuration, () {
-      _localActionFeedbackTimer = null;
-      if (!mounted || !_localActionPending) return;
-      setState(() => _localActionPending = false);
+    final minimumFeedback = Completer<void>();
+    late final Timer minimumTimer;
+    minimumTimer = Timer(_minimumActionFeedbackDuration, () {
+      _minimumFeedbackTimers.remove(minimumTimer);
+      minimumFeedback.complete();
     });
+    _minimumFeedbackTimers.add(minimumTimer);
+    try {
+      return await action;
+    } finally {
+      await minimumFeedback.future;
+      if (mounted &&
+          generation == _localActionFeedbackGeneration &&
+          _localActionPending) {
+        setState(() => _localActionPending = false);
+      }
+    }
   }
 
   @override
   void dispose() {
-    _localActionFeedbackTimer?.cancel();
+    for (final timer in _minimumFeedbackTimers) {
+      timer.cancel();
+    }
+    _minimumFeedbackTimers.clear();
     super.dispose();
   }
 
@@ -171,10 +200,15 @@ class _RoomCardState extends State<RoomCard> {
     _showMoodScenePicker(previewCurrentCt: !alreadyInMood);
   }
 
-  Future<void> _applyModeChange(RoomMode newMode) {
+  Future<void> _applyModeChange(RoomMode newMode) async {
     final roomProvider = context.read<RoomProvider>();
     final room = roomProvider.getRoom(widget.roomId);
-    if (room == null) return Future.value();
+    if (room == null) return;
+    final previousState = roomProvider.getRoomState(widget.roomId);
+    final previousLightsOn = room.lightsOn;
+    final previousRhythmEnabled = room.rhythmEnabled;
+    final previousMoodEnabled = roomProvider.isMoodEnabled(widget.roomId);
+    final previousMoodActive = roomProvider.isMoodActive(widget.roomId);
     final previousMode =
         _analyticsModeForState(roomProvider.getDisplayRoomState(widget.roomId));
 
@@ -184,7 +218,7 @@ class _RoomCardState extends State<RoomCard> {
         roomProvider.getDisplayRoomState(widget.roomId) == RoomModeState.mood) {
       HapticFeedback.lightImpact();
       _showMoodScenePicker();
-      return Future.value();
+      return;
     }
 
     final effectiveMode = newMode;
@@ -246,7 +280,20 @@ class _RoomCardState extends State<RoomCard> {
       previousMode: previousMode,
       nextMode: effectiveMode.name,
     );
-    return push;
+    final ack = await _trackActionFeedback(push);
+    // Restore only on definitive rejection: an indeterminate outcome (e.g. a
+    // timeout after the server committed) is left to the optimistic lock
+    // expiry, which re-applies authoritative server state.
+    if (ack == RhythmWriteAck.rejected && mounted) {
+      await roomProvider.restoreRejectedOptimisticNodeState(
+        widget.roomId,
+        rhythmEnabled: previousRhythmEnabled,
+        state: previousState,
+        lightsOn: previousLightsOn,
+        moodEnabled: previousMoodEnabled,
+        moodActive: previousMoodActive,
+      );
+    }
   }
 
   void _toggleExpandedControl(
@@ -456,6 +503,35 @@ class _RoomCardState extends State<RoomCard> {
     );
   }
 
+  /// Capture the current presentation, await a fenced power action, and
+  /// restore the capture when the server definitively rejected it. Reset and
+  /// on actions share the same acknowledgment fence as the power switch:
+  /// `_localActionPending` holds until the request resolves, not for a fixed
+  /// interval.
+  Future<void> _performFencedPowerAction(
+    Future<RhythmWriteAck> Function() dispatch,
+  ) async {
+    final roomProvider = context.read<RoomProvider>();
+    final room = roomProvider.getRoom(widget.roomId);
+    final previousState = roomProvider.getRoomState(widget.roomId);
+    final previousLightsOn = room?.lightsOn ?? true;
+    final previousRhythmEnabled = room?.rhythmEnabled ?? true;
+    final previousMoodEnabled = roomProvider.isMoodEnabled(widget.roomId);
+    final previousMoodActive = roomProvider.isMoodActive(widget.roomId);
+
+    final ack = await _trackActionFeedback(dispatch());
+    if (ack == RhythmWriteAck.rejected && mounted) {
+      await roomProvider.restoreRejectedOptimisticNodeState(
+        widget.roomId,
+        rhythmEnabled: previousRhythmEnabled,
+        state: previousState,
+        lightsOn: previousLightsOn,
+        moodEnabled: previousMoodEnabled,
+        moodActive: previousMoodActive,
+      );
+    }
+  }
+
   /// "On" from any non-adaptive state (Off / Mood / standby):
   /// turn the room on and reset it to the live adaptive curve — same outcome as
   /// the "Reset to curve" affordance.
@@ -469,12 +545,12 @@ class _RoomCardState extends State<RoomCard> {
     // Reset is the complete server action: it enables Rhythm, clears offsets,
     // leaves off states, and dispatches the live curve. Sending an Active
     // preference first duplicates the physical Matter command.
-    roomProvider.setRoomLightsOnLocal(widget.roomId, true);
-    roomProvider.setRoomRhythmEnabled(widget.roomId, true);
-    roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.active);
-    if (serverSync.dispatchResetActiveNode(widget.roomId)) {
-      _beginActionFeedback();
-    }
+    unawaited(_performFencedPowerAction(() {
+      roomProvider.setRoomLightsOnLocal(widget.roomId, true);
+      roomProvider.setRoomRhythmEnabled(widget.roomId, true);
+      roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.active);
+      return serverSync.dispatchResetActiveNodeChecked(widget.roomId);
+    }));
     AnalyticsService().logRoomModeChanged(
       roomId: widget.roomId,
       previousMode: previousMode,
@@ -491,9 +567,9 @@ class _RoomCardState extends State<RoomCard> {
   void _resetRoom() {
     HapticFeedback.mediumImpact();
     final serverSync = context.read<ServerSyncProvider>();
-    if (serverSync.dispatchResetNode(widget.roomId)) {
-      _beginActionFeedback();
-    }
+    unawaited(_performFencedPowerAction(
+      () => serverSync.dispatchResetNodeChecked(widget.roomId),
+    ));
     AnalyticsService().logRoomResetToCurve(roomId: widget.roomId);
     setState(() {
       _sliderBrightness = null;
@@ -953,6 +1029,12 @@ class _RoomCardState extends State<RoomCard> {
         final adaptiveControlsAvailable =
             mode == RoomMode.on || mode == RoomMode.standby;
         final controlInteractionEnabled = hubConnected && !isTransitioning;
+        // Power actions (switch, reset, double-tap reset) stay fenced while a
+        // previous power command is unacknowledged or physically undelivered.
+        // Brightness and color adjustments deliberately stay available.
+        final powerInteractionEnabled = controlInteractionEnabled &&
+            !_localActionPending &&
+            !isDispatchPending;
         final brightnessControlAvailable = mode != RoomMode.off;
         final colorControlAvailable = adaptiveControlsAvailable &&
             deviceColorTemperatureSupported != false;
@@ -989,7 +1071,8 @@ class _RoomCardState extends State<RoomCard> {
             child: GestureDetector(
               // Only register double-tap when reset is available to avoid tap
               // delay on cards that are already following the curve.
-              onDoubleTap: resetAvailable ? _resetRoom : null,
+              onDoubleTap:
+                  resetAvailable && powerInteractionEnabled ? _resetRoom : null,
               child: AnimatedContainer(
                 key: ValueKey('room-card-surface-${widget.roomId}'),
                 duration: const Duration(milliseconds: 400),
@@ -1308,6 +1391,7 @@ class _RoomCardState extends State<RoomCard> {
                                       'room-card-reset-control-${widget.roomId}',
                                     ),
                                     color: glowColor,
+                                    enabled: powerInteractionEnabled,
                                     onReset: _resetRoom,
                                   ),
                                 ),
@@ -1398,7 +1482,7 @@ class _RoomCardState extends State<RoomCard> {
                                   onModeChanged: _onModeChanged,
                                   onReset: _resetToOn,
                                   cctColor: cctColor,
-                                  enabled: controlInteractionEnabled,
+                                  enabled: powerInteractionEnabled,
                                 ),
                               ),
                               AnimatedSize(
@@ -3467,11 +3551,13 @@ class _OrbitRingPainter extends CustomPainter {
 /// Keeping it in the row prevents reset from painting over motion or status.
 class _OffCurveResetButton extends StatelessWidget {
   final Color color;
+  final bool enabled;
   final VoidCallback onReset;
   final Key? controlKey;
 
   const _OffCurveResetButton({
     required this.color,
+    required this.enabled,
     required this.onReset,
     this.controlKey,
   });
@@ -3480,13 +3566,16 @@ class _OffCurveResetButton extends StatelessWidget {
   Widget build(BuildContext context) {
     return Semantics(
       button: true,
+      enabled: enabled,
       label: 'Reset to curve',
       child: GestureDetector(
         key: controlKey,
-        onTap: () {
-          HapticFeedback.selectionClick();
-          onReset();
-        },
+        onTap: enabled
+            ? () {
+                HapticFeedback.selectionClick();
+                onReset();
+              }
+            : null,
         behavior: HitTestBehavior.opaque,
         child: SizedBox.square(
           dimension: _roomHeaderActionHitSize,

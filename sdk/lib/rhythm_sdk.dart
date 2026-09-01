@@ -33,6 +33,7 @@ export 'src/models/rhythm_scene.dart';
 export 'src/models/rhythm_settings.dart';
 export 'src/models/rhythm_step_sequences.dart';
 export 'src/models/rhythm_time_info.dart';
+export 'src/models/rhythm_write_ack.dart';
 
 // Errors
 export 'src/errors/rhythm_exception.dart';

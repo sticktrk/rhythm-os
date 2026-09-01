@@ -88,6 +88,9 @@ class _FakeRhythmServerApi extends RhythmServerApi {
       motionActivationCalls = [];
   Completer<RhythmRoomState?>? motionActivationCompleter;
   bool motionActivationSucceeds = true;
+  Completer<void>? nodePreferencesCompleter;
+  RhythmWriteAck nodePreferencesAck = RhythmWriteAck.accepted;
+  RhythmWriteAck nodeActionAck = RhythmWriteAck.accepted;
   final List<({String nodeId, int brightness})> nodeCurveBrightnessCalls = [];
   final List<({String nodeId, String action})> nodeActionCalls = [];
   final List<
@@ -188,7 +191,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   }
 
   @override
-  Future<void> nodePreferencesSet({
+  Future<RhythmWriteAck> nodePreferencesSet({
     required String nodeId,
     bool? rhythmEnabled,
     bool? disabled,
@@ -206,6 +209,9 @@ class _FakeRhythmServerApi extends RhythmServerApi {
       softOff: softOff,
       profileSettings: profileSettings,
     ));
+    final pending = nodePreferencesCompleter;
+    if (pending != null) await pending.future;
+    return nodePreferencesAck;
   }
 
   @override
@@ -233,12 +239,12 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   }
 
   @override
-  Future<RhythmRoomState?> nodeAction({
+  Future<({RhythmWriteAck ack, RhythmRoomState? state})> nodeActionChecked({
     required String nodeId,
     required String action,
   }) async {
     nodeActionCalls.add((nodeId: nodeId, action: action));
-    return null;
+    return (ack: nodeActionAck, state: null);
   }
 }
 
@@ -390,6 +396,7 @@ Future<void> _tapPowerAt(
   WidgetTester tester,
   double position, {
   String roomId = 'room-1',
+  bool waitForActionFeedback = true,
 }) async {
   expect(
     _powerSwitch(roomId: roomId).hitTestable(),
@@ -403,9 +410,12 @@ Future<void> _tapPowerAt(
       track.center.dy,
     ),
   );
-  // Let the parent card's double-tap recognizer release its short-lived timer.
-  // The switch itself updates from raw pointer-up before this timeout.
-  await tester.pump(const Duration(milliseconds: 350));
+  // The parent card's double-tap recognizer resolves before the minimum
+  // action-feedback interval starts. Most callers wait for both; the focused
+  // feedback test stops earlier so it can inspect the active spinner.
+  await tester.pump(
+    Duration(milliseconds: waitForActionFeedback ? 800 : 350),
+  );
 }
 
 void main() {
@@ -1296,7 +1306,7 @@ void main() {
     expect(find.byType(CircularProgressIndicator), findsNothing);
   });
 
-  testWidgets('shows spinner for pending dispatch without disabling controls',
+  testWidgets('pending dispatch disables power without blocking adjustments',
       (tester) async {
     final roomProvider = RoomProvider();
     await roomProvider.addRoom(
@@ -1343,6 +1353,15 @@ void main() {
 
     expect(find.byType(CircularProgressIndicator), findsNothing);
     expect(find.byType(Slider), findsNothing);
+    expect(tester.widget<GestureDetector>(_powerSwitch()).onTap, isNotNull);
+    expect(
+      tester
+          .widget<GestureDetector>(
+            find.byKey(const ValueKey('room-card-reset-control-room-1')),
+          )
+          .onTap,
+      isNotNull,
+    );
     await _tapRoomSegment(tester, 'Brightness');
     expect(tester.widget<Slider>(_brightnessSlider()).onChanged, isNotNull);
 
@@ -1358,6 +1377,16 @@ void main() {
     await tester.pump();
 
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(tester.widget<GestureDetector>(_powerSwitch()).onTap, isNull);
+    expect(
+      tester
+          .widget<GestureDetector>(
+            find.byKey(const ValueKey('room-card-reset-control-room-1')),
+          )
+          .onTap,
+      isNull,
+      reason: 'reset is a power action and must share the pending fence',
+    );
     expect(tester.widget<Slider>(_brightnessSlider()).onChanged, isNotNull);
     expect(
       tester.widget<GestureDetector>(_roomSegment('Color')).onTap,
@@ -1377,6 +1406,183 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
 
     expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(tester.widget<GestureDetector>(_powerSwitch()).onTap, isNotNull);
+  });
+
+  testWidgets(
+      'power stays disabled while its preference request is awaiting acknowledgment',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await roomProvider.addRoom(
+      const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.matter,
+        kind: RoomNodeKind.room,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    final homeProvider = _FakeHomeProvider();
+    final connection = _TestRhythmConnection();
+    final preferenceAck = Completer<void>();
+    connection.api.nodePreferencesCompleter = preferenceAck;
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'room-1',
+              globalConfig: defaultCurveConfig,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    tester.widget<GestureDetector>(_powerSwitch()).onTap!();
+    await tester.pump();
+
+    expect(connection.api.nodePreferenceCalls, hasLength(1));
+    expect(preferenceAck.isCompleted, isFalse);
+    expect(
+      tester.widget<GestureDetector>(_powerSwitch()).onTap,
+      isNull,
+      reason:
+          'a second power command must not be accepted before the first request is acknowledged',
+    );
+
+    preferenceAck.complete();
+    await tester.pump(const Duration(milliseconds: 500));
+  });
+
+  testWidgets('rejected power preference restores the previous room state',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await roomProvider.addRoom(
+      const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.matter,
+        kind: RoomNodeKind.room,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    final homeProvider = _FakeHomeProvider();
+    final connection = _TestRhythmConnection();
+    connection.api.nodePreferencesAck = RhythmWriteAck.rejected;
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'room-1',
+              globalConfig: defaultCurveConfig,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    tester.widget<GestureDetector>(_powerSwitch()).onTap!();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(connection.api.nodePreferenceCalls, hasLength(1));
+    expect(roomProvider.getRoomState('room-1'), RoomModeState.active);
+    expect(roomProvider.getRoom('room-1')!.lightsOn, isTrue);
+    expect(tester.widget<GestureDetector>(_powerSwitch()).onTap, isNotNull);
+  });
+
+  testWidgets(
+      'indeterminate power preference outcome keeps the optimistic state',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await roomProvider.addRoom(
+      const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.matter,
+        kind: RoomNodeKind.room,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    final homeProvider = _FakeHomeProvider();
+    final connection = _TestRhythmConnection();
+    // A timeout after the server may have committed must not roll back the
+    // optimistic state; the lock expiry reconciles against server truth.
+    connection.api.nodePreferencesAck = RhythmWriteAck.indeterminate;
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'room-1',
+              globalConfig: defaultCurveConfig,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    tester.widget<GestureDetector>(_powerSwitch()).onTap!();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(connection.api.nodePreferenceCalls, hasLength(1));
+    expect(roomProvider.getRoomState('room-1'), isNot(RoomModeState.active));
+    await tester.pump(const Duration(seconds: 4));
   });
 
   testWidgets('pending dispatch uses a neutral surface instead of light color',
@@ -1820,7 +2026,11 @@ void main() {
     expect(_brightnessSlider(), findsNothing);
     expect(_cctSlider(), findsNothing);
 
-    await _tapPowerAt(tester, 0.95);
+    await _tapPowerAt(
+      tester,
+      0.95,
+      waitForActionFeedback: false,
+    );
 
     expect(roomProvider.getDisplayRoomState('room-1'), RoomModeState.active);
     expect(find.byType(Slider), findsNothing);
@@ -2183,7 +2393,7 @@ void main() {
       powerTrack.center,
       Offset(-powerTrack.width * 0.45, 0),
     );
-    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump(const Duration(milliseconds: 800));
 
     expect(roomProvider.getRoom('room-1')?.lightsOn, isFalse);
     expect(roomProvider.getRoomState('room-1'), RoomModeState.hardOff);
@@ -2209,7 +2419,7 @@ void main() {
       powerTrack.center,
       Offset(powerTrack.width * 0.45, 0),
     );
-    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump(const Duration(milliseconds: 800));
 
     expect(roomProvider.getRoom('room-1')?.lightsOn, isTrue);
     expect(roomProvider.getRoomState('room-1'), RoomModeState.active);
@@ -2232,7 +2442,7 @@ void main() {
       powerTrack.center,
       Offset(powerTrack.width * 0.45, 0),
     );
-    await tester.pump(const Duration(milliseconds: 350));
+    await tester.pump(const Duration(milliseconds: 800));
     expect(connection.api.nodeActionCalls, hasLength(2));
     semantics.dispose();
   });
