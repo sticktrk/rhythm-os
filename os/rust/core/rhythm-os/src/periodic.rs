@@ -2006,6 +2006,8 @@ pub fn check_light_schedule_transitions_between(
     start_utc: chrono::NaiveDateTime,
     end_utc: chrono::NaiveDateTime,
 ) {
+    let mut named_targets = 0usize;
+    let mut disabled_targets = 0usize;
     let candidates = {
         let Ok(s) = state.lock() else { return };
         let solar = SolarTriggerContext {
@@ -2028,8 +2030,18 @@ pub fn check_light_schedule_transitions_between(
             .filter_map(|node| {
                 let assignment = node.profile_settings.light_schedule.as_ref()?;
                 let schedule_id = assignment.schedule_id()?;
-                let schedule = s.light_schedules.get(schedule_id)?;
+                let Some(schedule) = s.light_schedules.get(schedule_id) else {
+                    warn!(
+                        target: "cmd",
+                        "Named light schedule '{}' assigned to '{}' is missing from the registry",
+                        schedule_id,
+                        node.id
+                    );
+                    return None;
+                };
+                named_targets += 1;
                 if !schedule.enabled {
+                    disabled_targets += 1;
                     return None;
                 }
                 let effective = match node
@@ -2051,7 +2063,15 @@ pub fn check_light_schedule_transitions_between(
                         return None;
                     }
                 };
-                let active_mode = assignment.active_mode()?;
+                let Some(active_mode) = assignment.active_mode() else {
+                    warn!(
+                        target: "cmd",
+                        "Named light schedule '{}' assignment for '{}' has no active mode",
+                        schedule_id,
+                        node.id
+                    );
+                    return None;
+                };
                 resolved_replayed_mode_transition(
                     active_mode,
                     start_utc,
@@ -2066,6 +2086,15 @@ pub fn check_light_schedule_transitions_between(
             })
             .collect::<Vec<_>>()
     };
+    debug!(
+        target: "periodic",
+        "named_schedule_scan window=({} -> {}) targets={} disabled={} candidates={}",
+        start_utc,
+        end_utc,
+        named_targets,
+        disabled_targets,
+        candidates.len()
+    );
 
     for (node_id, schedule_id, transition_id) in candidates {
         if let Err(error) = crate::commands::do_trigger_light_schedule_transition_for_node(
@@ -2223,6 +2252,83 @@ fn most_recent_resolved_transition(
     latest.map(|(_, transition)| transition)
 }
 
+/// Outcome of replaying one named schedule target's recurring boundaries.
+enum TargetTransitionResolution {
+    /// The most recent recurring boundary at or before `current_utc`.
+    Resolved(rhythm_core::ModeTransitionConfig),
+    /// The schedule is disabled, or the caller required a complete recurring
+    /// Day/Sleep cycle and the schedule does not configure one. The stored
+    /// default mode is authoritative in this case.
+    NotApplicable,
+    /// Recurring boundaries are configured but none produced an occurrence in
+    /// the replay window — typically a solar trigger with an offset while
+    /// latitude/longitude/timezone are unset.
+    NoOccurrence,
+}
+
+fn most_recent_light_schedule_transition_for_target(
+    state: &AppState,
+    node_id: &str,
+    schedule_id: &str,
+    current_utc: chrono::NaiveDateTime,
+    require_complete_cycle: bool,
+) -> anyhow::Result<TargetTransitionResolution> {
+    let runtime = state
+        .hub_runtime()
+        .ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+    let node = runtime
+        .engine_effective_node_snapshot(node_id)
+        .ok_or_else(|| anyhow::anyhow!("Schedule target was not found"))?;
+    let schedule = state
+        .light_schedules
+        .get(schedule_id)
+        .ok_or_else(|| anyhow::anyhow!("Unknown light schedule '{}'", schedule_id))?;
+    if !schedule.enabled {
+        return Ok(TargetTransitionResolution::NotApplicable);
+    }
+    let effective = node
+        .profile_settings
+        .light_schedule_overrides
+        .get(schedule_id)
+        .map(|value| value.apply_to(schedule))
+        .transpose()
+        .map_err(anyhow::Error::msg)?
+        .unwrap_or_else(|| schedule.clone());
+    if require_complete_cycle {
+        let has_day_boundary = effective.transitions.iter().any(|transition| {
+            transition.trigger_enabled
+                && !transition.trigger.is_manual()
+                && transition.to_mode == rhythm_core::RhythmMode::Day
+        });
+        let has_sleep_boundary = effective.transitions.iter().any(|transition| {
+            transition.trigger_enabled
+                && !transition.trigger.is_manual()
+                && transition.to_mode == rhythm_core::RhythmMode::Sleep
+        });
+        if !has_day_boundary || !has_sleep_boundary {
+            return Ok(TargetTransitionResolution::NotApplicable);
+        }
+    }
+    let solar = SolarTriggerContext {
+        solar_noon: state.solar_noon_hour(),
+        latitude: state.latitude,
+        longitude: state.longitude,
+        timezone_name: state.timezone_name.as_deref(),
+    };
+    Ok(most_recent_resolved_transition(
+        current_utc,
+        ReplayTransitionContext {
+            solar,
+            utc_offset: state.utc_offset_hours,
+            configs: &effective.transitions,
+        },
+    )
+    .map_or(
+        TargetTransitionResolution::NoOccurrence,
+        TargetTransitionResolution::Resolved,
+    ))
+}
+
 fn resolved_light_schedule_transition_for_node(
     state: &SharedState,
     node_id: &str,
@@ -2245,36 +2351,64 @@ fn resolved_light_schedule_transition_for_node(
     let active_mode = assignment
         .active_mode()
         .ok_or_else(|| anyhow::anyhow!("Schedule target has no active mode"))?;
-    let schedule = s
-        .light_schedules
-        .get(schedule_id)
-        .ok_or_else(|| anyhow::anyhow!("Unknown light schedule '{}'", schedule_id))?;
-    if !schedule.enabled {
-        return Ok(None);
-    }
-    let effective = node
-        .profile_settings
-        .light_schedule_overrides
-        .get(schedule_id)
-        .map(|value| value.apply_to(schedule))
-        .transpose()
-        .map_err(anyhow::Error::msg)?
-        .unwrap_or_else(|| schedule.clone());
-    let solar = SolarTriggerContext {
-        solar_noon: s.solar_noon_hour(),
-        latitude: s.latitude,
-        longitude: s.longitude,
-        timezone_name: s.timezone_name.as_deref(),
-    };
-    Ok(most_recent_resolved_transition(
-        current_utc,
-        ReplayTransitionContext {
-            solar,
-            utc_offset: s.utc_offset_hours,
-            configs: &effective.transitions,
+    Ok(
+        match most_recent_light_schedule_transition_for_target(
+            &s,
+            node_id,
+            schedule_id,
+            current_utc,
+            false,
+        )? {
+            TargetTransitionResolution::Resolved(transition) => Some((active_mode, transition)),
+            TargetTransitionResolution::NotApplicable
+            | TargetTransitionResolution::NoOccurrence => None,
         },
     )
-    .map(|transition| (active_mode, transition)))
+}
+
+/// How the recurring mode for a newly assigned named-schedule target resolved.
+pub(crate) enum NamedScheduleModeResolution {
+    /// The mode implied by the most recent recurring boundary.
+    Replayed(rhythm_core::RhythmMode),
+    /// The schedule is disabled or has no complete recurring Day/Sleep cycle;
+    /// the registry's default mode is the intended assignment mode.
+    NoCompleteCycle,
+    /// A complete recurring cycle is configured but no trigger occurrence
+    /// resolved in the replay window (e.g. an offset solar trigger while
+    /// latitude/longitude/timezone are unset). Falling back to the registry
+    /// default here reproduces the stale-mode bug the replay exists to avoid.
+    Unresolvable,
+}
+
+/// Resolve the recurring mode that a newly assigned target should enter now.
+/// This deliberately ignores the target's current assignment so configuration
+/// writers do not mistake the registry's default mode for clock authority. A
+/// one-way or manual-only schedule retains that explicit default because it has
+/// no complete recurring interval to infer.
+pub(crate) fn resolved_light_schedule_mode_for_target(
+    state: &SharedState,
+    node_id: &str,
+    schedule_id: &str,
+    current_utc: chrono::NaiveDateTime,
+) -> anyhow::Result<NamedScheduleModeResolution> {
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    Ok(
+        match most_recent_light_schedule_transition_for_target(
+            &s,
+            node_id,
+            schedule_id,
+            current_utc,
+            true,
+        )? {
+            TargetTransitionResolution::Resolved(transition) => {
+                NamedScheduleModeResolution::Replayed(transition.to_mode)
+            }
+            TargetTransitionResolution::NotApplicable => {
+                NamedScheduleModeResolution::NoCompleteCycle
+            }
+            TargetTransitionResolution::NoOccurrence => NamedScheduleModeResolution::Unresolvable,
+        },
+    )
 }
 
 /// Resolve the recurring clock/solar mode that is effective for one named
@@ -2375,16 +2509,34 @@ pub fn reconcile_light_schedule_transitions(
                     }
                 };
                 let active_mode = assignment.active_mode()?;
-                most_recent_resolved_transition(
+                let resolved = most_recent_resolved_transition(
                     current_utc,
                     ReplayTransitionContext {
                         solar,
                         utc_offset: s.utc_offset_hours,
                         configs: &effective.transitions,
                     },
-                )
-                .filter(|transition| transition.to_mode != active_mode)
-                .map(|transition| (node.id.clone(), schedule.id.clone(), transition.id))
+                );
+                let Some(transition) = resolved else {
+                    // A recurring boundary always lands inside the 48-hour
+                    // replay window, so an empty result means the triggers
+                    // themselves cannot resolve to occurrences.
+                    if effective.transitions.iter().any(|transition| {
+                        transition.trigger_enabled && !transition.trigger.is_manual()
+                    }) {
+                        warn!(
+                            target: "cmd",
+                            "Named light schedule '{}' for '{}' resolved no recurring boundary in the replay window; check location/timezone for solar triggers",
+                            schedule_id,
+                            node.id
+                        );
+                    }
+                    return None;
+                };
+                if transition.to_mode == active_mode {
+                    return None;
+                }
+                Some((node.id.clone(), schedule.id.clone(), transition.id))
             })
             .collect::<Vec<_>>()
     };

@@ -10726,6 +10726,24 @@ pub fn do_light_schedule_assignment_set_with_correlation(
     correlation_id: Option<String>,
     persist: bool,
 ) -> Result<String> {
+    do_light_schedule_assignment_set_with_correlation_at(
+        state,
+        node_id,
+        schedule_id,
+        correlation_id,
+        persist,
+        chrono::Utc::now().naive_utc(),
+    )
+}
+
+fn do_light_schedule_assignment_set_with_correlation_at(
+    state: &SharedState,
+    node_id: &str,
+    schedule_id: Option<&str>,
+    correlation_id: Option<String>,
+    persist: bool,
+    current_utc: chrono::NaiveDateTime,
+) -> Result<String> {
     let write_lock = state
         .lock()
         .map_err(|_| anyhow::anyhow!("lock"))?
@@ -10739,7 +10757,14 @@ pub fn do_light_schedule_assignment_set_with_correlation(
         .filter(|id| !id.is_empty())
         .map(LightScheduleAuthority::Named)
         .unwrap_or(LightScheduleAuthority::Unscheduled);
-    do_light_schedule_authority_set(state, node_id, authority, correlation_id, persist)
+    do_light_schedule_authority_set(
+        state,
+        node_id,
+        authority,
+        correlation_id,
+        persist,
+        current_utc,
+    )
 }
 
 /// Restore the compatibility state in which the appliance-wide legacy mode
@@ -10772,6 +10797,7 @@ pub fn do_light_schedule_assignment_clear_with_correlation(
         LightScheduleAuthority::Legacy,
         correlation_id,
         persist,
+        chrono::Utc::now().naive_utc(),
     )
 }
 
@@ -10947,7 +10973,35 @@ fn do_light_schedule_authority_set(
     authority: LightScheduleAuthority<'_>,
     correlation_id: Option<String>,
     persist: bool,
+    current_utc: chrono::NaiveDateTime,
 ) -> Result<String> {
+    let (resolved_named_mode, mode_resolution) = match authority {
+        LightScheduleAuthority::Named(schedule_id) => {
+            match crate::periodic::resolved_light_schedule_mode_for_target(
+                state,
+                node_id,
+                schedule_id,
+                current_utc,
+            )? {
+                crate::periodic::NamedScheduleModeResolution::Replayed(mode) => {
+                    (Some(mode), "replayed")
+                }
+                crate::periodic::NamedScheduleModeResolution::NoCompleteCycle => {
+                    (None, "registry_default")
+                }
+                crate::periodic::NamedScheduleModeResolution::Unresolvable => {
+                    warn!(
+                        target: "cmd",
+                        "Named light schedule '{}' for '{}' has recurring boundaries but none resolved in the replay window; assigning the registry default mode (check location/timezone for solar triggers)",
+                        schedule_id,
+                        node_id
+                    );
+                    (None, "registry_default_unresolvable")
+                }
+            }
+        }
+        LightScheduleAuthority::Legacy | LightScheduleAuthority::Unscheduled => (None, "none"),
+    };
     let (assignment, active_mode, binding_kind) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let runtime = s
@@ -10974,11 +11028,11 @@ fn do_light_schedule_authority_set(
                 "unscheduled",
             ),
             LightScheduleAuthority::Named(schedule_id) => {
-                let active_mode = s
+                let schedule = s
                     .light_schedules
                     .get(schedule_id)
-                    .ok_or_else(|| anyhow::anyhow!("Unknown light schedule '{}'", schedule_id))?
-                    .active_mode;
+                    .ok_or_else(|| anyhow::anyhow!("Unknown light schedule '{}'", schedule_id))?;
+                let active_mode = resolved_named_mode.unwrap_or(schedule.active_mode);
                 (
                     Some(rhythm_core::LightScheduleAssignment::Named {
                         schedule_id: schedule_id.to_string(),
@@ -11034,6 +11088,7 @@ fn do_light_schedule_authority_set(
     activity.payload = Some(serde_json::json!({
         "status": "applied",
         "binding_kind": binding_kind,
+        "resolved_mode": mode_resolution,
     }));
     activity.correlation_id = correlation_id;
     crate::activity::record_light_activity(state, activity);
@@ -24173,6 +24228,94 @@ mod tests {
                 .as_ref()
                 .and_then(rhythm_core::LightScheduleAssignment::active_mode),
             Some(RhythmMode::Sleep)
+        );
+    }
+
+    #[test]
+    fn named_schedule_assignment_enters_current_recurring_interval() {
+        let (state, runtime) = setup_state(vec![make_snapshot("porch", false, false)]);
+        {
+            let mut s = state.lock().unwrap();
+            s.utc_offset_hours = 0.0;
+            s.timezone_name = None;
+            let mut day = ModeConfig::default_for_mode(RhythmMode::Day);
+            day.room_defaults = vec![rhythm_core::RoomModeDefault {
+                room_id: "porch".into(),
+                state: RoomModeState::HardOff,
+            }];
+            let mut sleep = ModeConfig::default_for_mode(RhythmMode::Sleep);
+            sleep.room_defaults = vec![rhythm_core::RoomModeDefault {
+                room_id: "porch".into(),
+                state: RoomModeState::Active,
+            }];
+            s.set_mode_configs(vec![day, sleep]);
+        }
+        let scheduled = |id: &str, from_mode: RhythmMode, to_mode: RhythmMode, hour: u8| {
+            rhythm_core::ModeTransitionConfig::new(from_mode, to_mode, 0)
+                .with_id(id)
+                .with_trigger(rhythm_core::ModeTransitionTrigger::Scheduled(
+                    rhythm_core::ModeTransitionTime::from_hour_minute(hour, 0).unwrap(),
+                ))
+        };
+        do_light_schedules_set(
+            &state,
+            vec![rhythm_core::LightScheduleConfig {
+                id: "outdoor".into(),
+                name: "Outdoor".into(),
+                enabled: true,
+                active_mode: RhythmMode::Day,
+                transitions: vec![
+                    scheduled("day_start", RhythmMode::Sleep, RhythmMode::Day, 6),
+                    scheduled("sleep_start", RhythmMode::Day, RhythmMode::Sleep, 18),
+                ],
+            }],
+        )
+        .unwrap();
+        let assignment_utc = chrono::NaiveDate::from_ymd_opt(2026, 9, 1)
+            .unwrap()
+            .and_hms_opt(5, 59, 0)
+            .unwrap();
+
+        do_light_schedule_assignment_set_with_correlation_at(
+            &state,
+            "porch",
+            Some("outdoor"),
+            None,
+            false,
+            assignment_utc,
+        )
+        .unwrap();
+
+        let assigned = runtime.engine_node_snapshot("porch").unwrap();
+        assert!(!assigned.hard_off);
+        assert!(runtime
+            .applied_commands()
+            .iter()
+            .any(|(node_id, _)| node_id == "porch"));
+        assert_eq!(
+            assigned
+                .profile_settings
+                .light_schedule
+                .as_ref()
+                .and_then(rhythm_core::LightScheduleAssignment::active_mode),
+            Some(RhythmMode::Sleep),
+            "assignment before the day boundary must not copy the registry's stale Day default"
+        );
+
+        crate::periodic::check_light_schedule_transitions_between(
+            &state,
+            assignment_utc,
+            assignment_utc + chrono::Duration::minutes(2),
+        );
+        let after_boundary = runtime.engine_node_snapshot("porch").unwrap();
+        assert!(after_boundary.hard_off);
+        assert_eq!(
+            after_boundary
+                .profile_settings
+                .light_schedule
+                .as_ref()
+                .and_then(rhythm_core::LightScheduleAssignment::active_mode),
+            Some(RhythmMode::Day)
         );
     }
 
