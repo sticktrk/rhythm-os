@@ -10786,12 +10786,34 @@ pub fn do_light_schedule_override_set(
     correlation_id: Option<String>,
     persist: bool,
 ) -> Result<String> {
+    do_light_schedule_override_set_at(
+        state,
+        node_id,
+        schedule_id,
+        schedule_override,
+        expected_effective_overrides,
+        correlation_id,
+        persist,
+        chrono::Utc::now().naive_utc(),
+    )
+}
+
+fn do_light_schedule_override_set_at(
+    state: &SharedState,
+    node_id: &str,
+    schedule_id: &str,
+    schedule_override: Option<rhythm_core::LightScheduleOverride>,
+    expected_effective_overrides: Option<BTreeMap<String, rhythm_core::LightScheduleOverride>>,
+    correlation_id: Option<String>,
+    persist: bool,
+    current_utc: chrono::NaiveDateTime,
+) -> Result<String> {
     let write_lock = state
         .lock()
         .map_err(|_| anyhow::anyhow!("lock"))?
         .light_schedule_write_lock
         .clone();
-    let _write_guard = write_lock
+    let write_guard = write_lock
         .lock()
         .map_err(|_| anyhow::anyhow!("light schedule write lock"))?;
     let schedule_id = schedule_id.trim();
@@ -10800,6 +10822,12 @@ pub fn do_light_schedule_override_set(
             "Light schedule override requires schedule_id"
         ));
     }
+    let previous_resolved_mode = crate::periodic::resolved_light_schedule_mode_for_node(
+        state,
+        node_id,
+        schedule_id,
+        current_utc,
+    )?;
     let light_schedule_mode_patch = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let schedule = s.light_schedules.get(schedule_id).ok_or_else(|| {
@@ -10855,7 +10883,7 @@ pub fn do_light_schedule_override_set(
         expected_effective_light_schedule_overrides: expected_effective_overrides,
         ..RoomProfileSettingsPatch::default()
     };
-    let response = do_node_preferences_set(
+    do_node_preferences_set(
         state,
         node_id,
         None,
@@ -10884,7 +10912,26 @@ pub fn do_light_schedule_override_set(
     }));
     activity.correlation_id = correlation_id;
     crate::activity::record_light_activity(state, activity);
-    Ok(response)
+    let current_resolved_mode = crate::periodic::resolved_light_schedule_mode_for_node(
+        state,
+        node_id,
+        schedule_id,
+        current_utc,
+    )?;
+    drop(write_guard);
+
+    if current_resolved_mode.is_some() && current_resolved_mode != previous_resolved_mode {
+        crate::periodic::reconcile_light_schedule_transition_for_node(
+            state,
+            node_id,
+            schedule_id,
+            current_utc,
+        )?;
+    }
+
+    build_node_state(state, node_id).and_then(|node| {
+        serde_json::to_string(&node).map_err(|error| anyhow::anyhow!("serialize: {}", error))
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -24121,6 +24168,112 @@ mod tests {
             .any(|(node_id, _)| node_id == "porch"));
         assert_eq!(
             sleep_snapshot
+                .profile_settings
+                .light_schedule
+                .as_ref()
+                .and_then(rhythm_core::LightScheduleAssignment::active_mode),
+            Some(RhythmMode::Sleep)
+        );
+    }
+
+    #[test]
+    fn moving_crossed_schedule_boundary_forward_reconciles_before_next_tick() {
+        let (state, runtime) = setup_state(vec![make_snapshot("porch", false, false)]);
+        {
+            let mut s = state.lock().unwrap();
+            s.utc_offset_hours = 0.0;
+            s.timezone_name = None;
+            let mut day = ModeConfig::default_for_mode(RhythmMode::Day);
+            day.room_defaults = vec![rhythm_core::RoomModeDefault {
+                room_id: "porch".into(),
+                state: RoomModeState::HardOff,
+            }];
+            let mut sleep = ModeConfig::default_for_mode(RhythmMode::Sleep);
+            sleep.room_defaults = vec![rhythm_core::RoomModeDefault {
+                room_id: "porch".into(),
+                state: RoomModeState::Active,
+            }];
+            s.set_mode_configs(vec![day, sleep]);
+        }
+        let scheduled = |id: &str, from_mode: RhythmMode, to_mode: RhythmMode, hour: u8| {
+            rhythm_core::ModeTransitionConfig::new(from_mode, to_mode, 0)
+                .with_id(id)
+                .with_trigger(rhythm_core::ModeTransitionTrigger::Scheduled(
+                    rhythm_core::ModeTransitionTime::from_hour_minute(hour, 0).unwrap(),
+                ))
+        };
+        do_light_schedules_set(
+            &state,
+            vec![rhythm_core::LightScheduleConfig {
+                id: "outdoor".into(),
+                name: "Outdoor".into(),
+                enabled: true,
+                active_mode: RhythmMode::Day,
+                transitions: vec![
+                    scheduled("day_start", RhythmMode::Sleep, RhythmMode::Day, 6),
+                    scheduled("sleep_start", RhythmMode::Day, RhythmMode::Sleep, 18),
+                ],
+            }],
+        )
+        .unwrap();
+        do_light_schedule_assignment_set(&state, "porch", Some("outdoor"), false).unwrap();
+        do_trigger_light_schedule_transition_for_node(&state, "porch", "outdoor", "sleep_start")
+            .unwrap();
+        assert!(!runtime.engine_node_snapshot("porch").unwrap().hard_off);
+
+        let current_utc = chrono::NaiveDate::from_ymd_opt(2026, 8, 31)
+            .unwrap()
+            .and_hms_opt(20, 0, 0)
+            .unwrap();
+        do_light_schedule_override_set_at(
+            &state,
+            "porch",
+            "outdoor",
+            Some(rhythm_core::LightScheduleOverride {
+                transitions: BTreeMap::from([(
+                    "sleep_start".into(),
+                    rhythm_core::ModeTransitionOverride {
+                        trigger: rhythm_core::ModeTransitionTriggerOverride {
+                            kind: Some(rhythm_core::ModeTransitionTriggerType::Scheduled),
+                            time: Some(
+                                rhythm_core::ModeTransitionTime::from_hour_minute(23, 0).unwrap(),
+                            ),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                )]),
+            }),
+            Some(BTreeMap::new()),
+            None,
+            false,
+            current_utc,
+        )
+        .unwrap();
+
+        let reconciled = runtime.engine_node_snapshot("porch").unwrap();
+        assert!(reconciled.hard_off);
+        assert_eq!(
+            reconciled
+                .profile_settings
+                .light_schedule
+                .as_ref()
+                .and_then(rhythm_core::LightScheduleAssignment::active_mode),
+            Some(RhythmMode::Day),
+            "moving the boundary later must restore the currently effective interval"
+        );
+        let command_count_before_new_boundary = runtime.applied_commands().len();
+
+        crate::periodic::check_light_schedule_transitions_between(
+            &state,
+            current_utc + chrono::Duration::hours(2) + chrono::Duration::minutes(59),
+            current_utc + chrono::Duration::hours(3) + chrono::Duration::minutes(1),
+        );
+        let after_new_boundary = runtime.engine_node_snapshot("porch").unwrap();
+        assert!(!after_new_boundary.hard_off);
+        assert!(runtime.applied_commands().len() > command_count_before_new_boundary);
+        assert_eq!(
+            after_new_boundary
                 .profile_settings
                 .light_schedule
                 .as_ref()
