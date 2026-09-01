@@ -10975,16 +10975,32 @@ fn do_light_schedule_authority_set(
     persist: bool,
     current_utc: chrono::NaiveDateTime,
 ) -> Result<String> {
-    let resolved_named_mode = match authority {
+    let (resolved_named_mode, mode_resolution) = match authority {
         LightScheduleAuthority::Named(schedule_id) => {
-            crate::periodic::resolved_light_schedule_mode_for_target(
+            match crate::periodic::resolved_light_schedule_mode_for_target(
                 state,
                 node_id,
                 schedule_id,
                 current_utc,
-            )?
+            )? {
+                crate::periodic::NamedScheduleModeResolution::Replayed(mode) => {
+                    (Some(mode), "replayed")
+                }
+                crate::periodic::NamedScheduleModeResolution::NoCompleteCycle => {
+                    (None, "registry_default")
+                }
+                crate::periodic::NamedScheduleModeResolution::Unresolvable => {
+                    warn!(
+                        target: "cmd",
+                        "Named light schedule '{}' for '{}' has recurring boundaries but none resolved in the replay window; assigning the registry default mode (check location/timezone for solar triggers)",
+                        schedule_id,
+                        node_id
+                    );
+                    (None, "registry_default_unresolvable")
+                }
+            }
         }
-        LightScheduleAuthority::Legacy | LightScheduleAuthority::Unscheduled => None,
+        LightScheduleAuthority::Legacy | LightScheduleAuthority::Unscheduled => (None, "none"),
     };
     let (assignment, active_mode, binding_kind) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -11072,6 +11088,7 @@ fn do_light_schedule_authority_set(
     activity.payload = Some(serde_json::json!({
         "status": "applied",
         "binding_kind": binding_kind,
+        "resolved_mode": mode_resolution,
     }));
     activity.correlation_id = correlation_id;
     crate::activity::record_light_activity(state, activity);
