@@ -7,6 +7,7 @@ import 'package:uuid/uuid.dart';
 
 import '../../providers/server_sync_provider.dart';
 import '../../services/analytics_service.dart';
+import '../../widgets/light_schedule_offset_slider.dart';
 import '../../widgets/settings_row.dart';
 import '../../widgets/solar_orbit.dart' show CelestialColors;
 
@@ -636,25 +637,16 @@ class _TransitionEditor extends StatelessWidget {
               ),
             ),
             if (solarOffsetsSupported)
-              Slider(
-                key: ValueKey('schedule-offset-$title'),
-                min: -maxSolarScheduleOffsetMinutes.toDouble(),
-                max: maxSolarScheduleOffsetMinutes.toDouble(),
-                divisions: maxSolarScheduleOffsetMinutes * 2,
-                value: trigger.offsetMinutes
-                    .clamp(
-                      -maxSolarScheduleOffsetMinutes,
-                      maxSolarScheduleOffsetMinutes,
-                    )
-                    .toDouble(),
-                label: '${trigger.offsetMinutes} min',
+              LightScheduleOffsetSlider(
+                sliderKey: ValueKey('schedule-offset-$title'),
+                offsetMinutes: trigger.offsetMinutes,
                 onChanged: solarAvailable
                     ? (value) => onChanged(
                           transition.copyWith(
                             trigger: RhythmTransitionTrigger.solar(
                               trigger.event ??
                                   (dayBoundary ? 'sunrise' : 'sunset'),
-                              offsetMinutes: value.round(),
+                              offsetMinutes: value,
                             ),
                           ),
                         )
