@@ -4180,19 +4180,25 @@ class ServerSyncProvider extends ChangeNotifier {
       dispatchNodeColor(roomId, r, g, b);
 
   /// Push node preferences to the server (user-state only, no topology).
-  /// Returns a future completing when the server acknowledged the write, so
-  /// callers that must order a follow-up request can await it.
-  Future<void> pushNodePreferences(String nodeId,
+  /// Completes when the server acknowledged the write, so callers that must
+  /// order a follow-up request can await it.
+  ///
+  /// Returns false only when the connected server actively rejected the
+  /// write, leaving the optimistic state unacknowledged so the caller can
+  /// restore the pre-command presentation. Demo mode, local-only operation,
+  /// and server-originated updates return true: there the local optimistic
+  /// state is authoritative and must stand.
+  Future<bool> pushNodePreferences(String nodeId,
       {bool? rhythmEnabled,
       bool? disabled,
       bool? standbyEnabled,
       RoomModeState? state,
       Map<String, dynamic>? profileSettings}) async {
-    if (HueServiceLocator.isDemoMode) return; // optimistic UI already applied
-    if (!_connection.connected || _receivingFromServer) return;
+    if (HueServiceLocator.isDemoMode) return true; // optimistic UI already applied
+    if (!_connection.connected || _receivingFromServer) return true;
     debugPrint(
         'ServerSync: pushNodePreferences $nodeId rhythmEnabled=$rhythmEnabled disabled=$disabled standbyEnabled=$standbyEnabled state=${state?.wireValue}');
-    await api.nodePreferencesSet(
+    final accepted = await api.nodePreferencesSet(
       nodeId: nodeId,
       rhythmEnabled: rhythmEnabled,
       disabled: disabled,
@@ -4200,11 +4206,13 @@ class ServerSyncProvider extends ChangeNotifier {
       state: state,
       profileSettings: profileSettings,
     );
+    if (!accepted) return false;
     _roomProvider.acknowledgeOptimisticNodeState(
       nodeId,
       state: state,
       lightsOn: _expectedLightsOnForState(state),
     );
+    return true;
   }
 
   /// Patch legacy timer-only per-profile overrides for one node.

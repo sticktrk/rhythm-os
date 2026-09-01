@@ -359,6 +359,42 @@ void main() {
   });
 
   group('node preference writes', () {
+    test('nodePreferencesSet reports an accepted write', () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenAnswer((_) async => Response(
+            requestOptions: RequestOptions(path: 'api/nodes/preferences'),
+            statusCode: 204,
+          ));
+
+      final accepted = await api.nodePreferencesSet(
+        nodeId: 'node-1',
+        state: RoomModeState.hardOff,
+      );
+
+      expect(accepted, isTrue);
+    });
+
+    test('nodePreferencesSet reports a rejected write', () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenThrow(DioException(
+        requestOptions: RequestOptions(path: 'api/nodes/preferences'),
+        type: DioExceptionType.badResponse,
+      ));
+
+      final accepted = await api.nodePreferencesSet(
+        nodeId: 'node-1',
+        state: RoomModeState.hardOff,
+      );
+
+      expect(accepted, isFalse);
+    });
+
     test('nodePreferencesSet sends profile_settings on the node endpoint',
         () async {
       when(() => dio.put(

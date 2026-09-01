@@ -704,7 +704,11 @@ class RhythmServerApi {
   }
 
   /// Push node preferences (rhythm_enabled, disabled, state).
-  Future<void> nodePreferencesSet({
+  ///
+  /// Returns whether the server accepted the write, so callers applying
+  /// optimistic UI can revert when the request itself is rejected. Physical
+  /// delivery problems still surface later via dispatch-failure events.
+  Future<bool> nodePreferencesSet({
     required String nodeId,
     bool? rhythmEnabled,
     bool? disabled,
@@ -720,7 +724,7 @@ class RhythmServerApi {
     final normalizedProfileSettings = _normalizeProfileSettings(
       profileSettings,
     );
-    await _safePut(
+    return _safePut(
       'api/nodes/preferences',
       data: {
         'node_id': nodeId,
@@ -842,8 +846,8 @@ class RhythmServerApi {
     RoomModeState? state,
     bool? softOff,
     Map<String, dynamic>? profileSettings,
-  }) {
-    return nodePreferencesSet(
+  }) async {
+    await nodePreferencesSet(
       nodeId: roomId,
       rhythmEnabled: rhythmEnabled,
       disabled: disabled,
@@ -1070,8 +1074,8 @@ class RhythmServerApi {
   Future<void> nodeMoodSceneSet({
     required String nodeId,
     required String sceneId,
-  }) {
-    return nodePreferencesSet(
+  }) async {
+    await nodePreferencesSet(
       nodeId: nodeId,
       state: RoomModeState.mood,
       profileSettings: {'mood_scene_id': sceneId},
@@ -2620,15 +2624,17 @@ class RhythmServerApi {
   // Internal helpers
   // =========================================================================
 
-  Future<void> _safePut(
+  Future<bool> _safePut(
     String path, {
     required Object data,
     Map<String, dynamic>? queryParameters,
   }) async {
     try {
       await _dio.put(path, data: data, queryParameters: queryParameters);
+      return true;
     } catch (e) {
       _log.warning('PUT $path failed', e);
+      return false;
     }
   }
 

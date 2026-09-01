@@ -179,6 +179,15 @@ pub enum WorkItem {
         dispatch_spacing: Duration,
         dispatch_generation: u64,
     },
+    /// Authoritative observed-power refresh after a failed physical dispatch.
+    ///
+    /// A user power command commits command-derived observed power before
+    /// delivery; when the physical dispatch then fails, that cache asserts a
+    /// state the lights never reached. This item re-samples the runtime and
+    /// broadcasts corrected node state so clients revert to reality instead
+    /// of trusting the undelivered command. Queued at most once at a time
+    /// (`observed_power_failure_refresh_queued`).
+    RefreshObservedPowerAfterDispatchFailure,
     /// Deferred persist after inline button processing.
     DeferredPersist { node_id: String },
     /// Full state persist (registry + rooms) after batch HTTP operations.
@@ -206,6 +215,7 @@ impl WorkItem {
             | WorkItem::ApplyNodeCommand { node_id, .. }
             | WorkItem::LightsOffRoom { node_id, .. } => Some(node_id.as_str()),
             WorkItem::PeriodicNodeTick { .. }
+            | WorkItem::RefreshObservedPowerAfterDispatchFailure
             | WorkItem::DeferredPersist { .. }
             | WorkItem::DeferredPersistState => None,
         }
@@ -526,6 +536,10 @@ pub struct AppState {
     /// Keyed by the effective light-state cache key (topology room IDs for
     /// normal room dispatch, parent room IDs for composite/group dispatch).
     pub room_observed_power: HashMap<String, ObservedPowerState>,
+    /// Whether a `RefreshObservedPowerAfterDispatchFailure` work item is
+    /// already queued. Coalesces bursts of failure outcomes (room fan-out,
+    /// multi-route commands) into one authoritative re-sample.
+    pub observed_power_failure_refresh_queued: bool,
     /// Low-write authoritative observed-power duration ledger.
     pub light_usage: crate::light_usage::LightUsageLedger,
 
@@ -1040,6 +1054,7 @@ impl Default for AppState {
             external_topology_transaction_lock: Arc::new(Mutex::new(())),
             external_controller_policy_transaction_lock: Arc::new(Mutex::new(())),
             room_observed_power: HashMap::new(),
+            observed_power_failure_refresh_queued: false,
             light_usage: crate::light_usage::LightUsageLedger::default(),
             motion_snapshots: HashMap::new(),
             motion_timer_restores: HashMap::new(),

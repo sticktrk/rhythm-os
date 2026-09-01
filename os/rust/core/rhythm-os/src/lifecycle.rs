@@ -89,6 +89,10 @@ pub fn install_dispatch_outcome_listener(
                                     epoch_ms: chrono::Utc::now().timestamp_millis(),
                                 },
                             );
+                            crate::commands::request_observed_power_refresh_after_dispatch_failure(
+                                &state,
+                                &outcome.node_id,
+                            );
                         }
                     }
                     if registration.complete {
@@ -115,6 +119,10 @@ pub fn install_dispatch_outcome_listener(
                             dispatch_ms: outcome.dispatch_ms,
                             epoch_ms: chrono::Utc::now().timestamp_millis(),
                         },
+                    );
+                    crate::commands::request_observed_power_refresh_after_dispatch_failure(
+                        &state,
+                        &outcome.node_id,
                     );
                     crate::commands::clear_node_dispatch_pending(&state, &outcome.node_id);
                 }
@@ -144,6 +152,10 @@ pub fn install_dispatch_outcome_listener(
                     dispatch_ms: outcome.dispatch_ms,
                     epoch_ms: chrono::Utc::now().timestamp_millis(),
                 },
+            );
+            crate::commands::request_observed_power_refresh_after_dispatch_failure(
+                &state,
+                &outcome.node_id,
             );
         }
         crate::commands::clear_node_dispatch_pending(&state, &outcome.node_id);

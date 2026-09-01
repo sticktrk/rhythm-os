@@ -3082,6 +3082,70 @@ pub fn refresh_observed_power_authoritatively(
     Ok(snapshots)
 }
 
+/// Queue one authoritative observed-power refresh after a physical dispatch
+/// failure on a user-initiated command.
+///
+/// User power commands commit command-derived observed power before physical
+/// delivery, so a terminal failure leaves the cache (and every client's
+/// switch) asserting a state the lights never reached. Rather than rolling
+/// back the committed intent, re-sample reality on the worker and broadcast
+/// the corrected node state; `getDisplayRoomState`-style client logic then
+/// reverts the visible switch on its own.
+///
+/// Must be called before the failure path clears the node's pending count:
+/// the user-pending gate is what keeps routine periodic-tick failures against
+/// an unreachable bulb from re-sampling every cycle.
+pub(crate) fn request_observed_power_refresh_after_dispatch_failure(
+    state: &SharedState,
+    node_id: &str,
+) {
+    if !node_has_user_pending_dispatch(state, node_id) {
+        return;
+    }
+    let tx = {
+        let Ok(mut s) = state.lock() else { return };
+        if s.observed_power_failure_refresh_queued {
+            return;
+        }
+        let Some(tx) = s.work_tx.clone() else { return };
+        s.observed_power_failure_refresh_queued = true;
+        tx
+    };
+    if tx
+        .try_send(crate::state::WorkItem::RefreshObservedPowerAfterDispatchFailure)
+        .is_err()
+    {
+        warn!(
+            target: "cmd",
+            "Observed-power refresh after dispatch failure dropped: work channel full"
+        );
+        if let Ok(mut s) = state.lock() {
+            s.observed_power_failure_refresh_queued = false;
+        }
+    }
+}
+
+/// Worker-side execution of [`request_observed_power_refresh_after_dispatch_failure`].
+pub(crate) fn run_observed_power_refresh_after_dispatch_failure(state: &SharedState) {
+    if let Ok(mut s) = state.lock() {
+        s.observed_power_failure_refresh_queued = false;
+    }
+    match refresh_observed_power_authoritatively_and_emit(state) {
+        Ok(count) => {
+            debug!(
+                target: "cmd",
+                "Observed power re-sampled after dispatch failure ({count} node events)"
+            );
+        }
+        Err(e) => {
+            warn!(
+                target: "cmd",
+                "Observed-power refresh after dispatch failure failed: {e}"
+            );
+        }
+    }
+}
+
 pub fn refresh_observed_power_authoritatively_and_emit(state: &SharedState) -> Result<usize> {
     let snapshots = refresh_observed_power_authoritatively(state)?;
     let events: Vec<_> = snapshots
@@ -25907,6 +25971,51 @@ mod tests {
         let observed = app.room_observed_power.get("room1").unwrap();
         assert!(observed.lights_on);
         assert_eq!(observed.source, ObservedPowerSource::AuthoritativeRefresh);
+    }
+
+    #[test]
+    fn dispatch_failure_refresh_requires_user_pending_dispatch() {
+        let (state, _runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        state.lock().unwrap().work_tx = Some(tx);
+
+        // Periodic-tick failures never mark the node pending, so they must not
+        // schedule a refresh: an unreachable bulb fails every cycle.
+        request_observed_power_refresh_after_dispatch_failure(&state, "room1");
+
+        assert!(rx.try_recv().is_err());
+        assert!(!state.lock().unwrap().observed_power_failure_refresh_queued);
+    }
+
+    #[test]
+    fn dispatch_failure_refresh_coalesces_and_resamples_reality() {
+        let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        let (tx, rx) = std::sync::mpsc::sync_channel(8);
+        state.lock().unwrap().work_tx = Some(tx);
+        // A user power-on committed optimistic observed power, then the
+        // physical route failed: the lights are actually still off.
+        set_observed_lights_on(&state, "room1", true);
+        runtime.set_light_on("room1", false);
+        mark_node_dispatch_pending(&state, "room1");
+
+        request_observed_power_refresh_after_dispatch_failure(&state, "room1");
+        // A room fan-out emits one failure per target; only one refresh queues.
+        request_observed_power_refresh_after_dispatch_failure(&state, "room1");
+
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(crate::state::WorkItem::RefreshObservedPowerAfterDispatchFailure)
+        ));
+        assert!(rx.try_recv().is_err());
+
+        run_observed_power_refresh_after_dispatch_failure(&state);
+
+        let app = state.lock().unwrap();
+        let observed = app.room_observed_power.get("room1").unwrap();
+        assert!(!observed.lights_on);
+        assert_eq!(observed.source, ObservedPowerSource::AuthoritativeRefresh);
+        // The coalescing flag must clear so a later failure re-samples again.
+        assert!(!app.observed_power_failure_refresh_queued);
     }
 
     #[test]

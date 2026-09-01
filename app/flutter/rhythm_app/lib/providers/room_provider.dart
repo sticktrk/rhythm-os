@@ -412,6 +412,42 @@ class RoomProvider extends ChangeNotifier {
     }
   }
 
+  /// Restore the presentation captured before a rejected optimistic command.
+  ///
+  /// Unlike an ordinary local setter, this clears the optimistic locks so a
+  /// server refusal cannot leave the failed state protected as acknowledged.
+  Future<void> restoreRejectedOptimisticNodeState(
+    String nodeId, {
+    required bool rhythmEnabled,
+    required RoomModeState state,
+    required bool lightsOn,
+    required bool moodEnabled,
+    required bool moodActive,
+  }) async {
+    _lockExpiryTimers.remove(nodeId)?.cancel();
+    _roomStateLockedUntil.remove(nodeId);
+    _lightsOnLockedUntil.remove(nodeId);
+    _suppressedRoomStates.remove(nodeId);
+    _suppressedLightsOn.remove(nodeId);
+    _acknowledgedRoomStates.remove(nodeId);
+    _acknowledgedLightsOn.remove(nodeId);
+    _roomStates[nodeId] = state;
+    _roomMoodEnabled[nodeId] = moodEnabled;
+    _roomMoodActive[nodeId] = moodActive;
+    _state = room_state.setRoomRhythmEnabled(
+      state: _state,
+      roomId: nodeId,
+      rhythmEnabled: rhythmEnabled,
+    );
+    _state = room_state.setRoomLightsOn(
+      state: _state,
+      roomId: nodeId,
+      lightsOn: lightsOn,
+    );
+    await _save();
+    notifyListeners();
+  }
+
   /// Re-apply server values a lock suppressed once that lock expires.
   ///
   /// Fires slightly after the latest known expiry; each value re-checks its

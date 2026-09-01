@@ -2259,6 +2259,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                         epoch_ms: chrono::Utc::now().timestamp_millis(),
                     },
                 );
+                commands::request_observed_power_refresh_after_dispatch_failure(state, &node_id);
             }
             if dispatch_complete {
                 commands::clear_node_dispatch_pending(state, &node_id);
@@ -2298,6 +2299,7 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                         epoch_ms: chrono::Utc::now().timestamp_millis(),
                     },
                 );
+                commands::request_observed_power_refresh_after_dispatch_failure(state, &node_id);
                 commands::clear_node_dispatch_pending(state, &node_id);
             }
         }
@@ -3987,6 +3989,10 @@ fn process_work_item_inner(state: &SharedState, item: WorkItem) {
                 dispatch_generation,
             );
         }
+        WorkItem::RefreshObservedPowerAfterDispatchFailure => {
+            commands::run_observed_power_refresh_after_dispatch_failure(state);
+        }
+
         WorkItem::DeferredPersist { node_id: _ } => {
             commands::persist_rooms(state);
         }
