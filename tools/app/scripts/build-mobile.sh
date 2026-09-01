@@ -9,7 +9,7 @@
 #   --release          Build in release mode
 #   --ipa              Build IPA for TestFlight (implies --release --no-run)
 #   --testflight       Build IPA and upload to TestFlight (implies --clean --release --no-run)
-#   --testflight-notes-file FILE  Required "What to Test" notes for a TestFlight upload
+#   --testflight-notes-file FILE  Optional "What to Test" notes for a TestFlight upload
 #   --aab              Build AAB for Google Play (implies --android --release --no-run)
 #   --googleplay       Build AAB and upload to Google Play (implies --clean --release --no-run)
 #   --release-all      Run --testflight then --googleplay (ship to both stores)
@@ -542,12 +542,7 @@ if [ "$RELEASE_ALL" = true ]; then
     exit 0
 fi
 
-if [ "$UPLOAD_TESTFLIGHT" = true ]; then
-    if [ -z "$TESTFLIGHT_NOTES_FILE" ]; then
-        echo "Error: TestFlight uploads require build-specific 'What to Test' notes."
-        echo "Pass --testflight-notes-file FILE or set RHYTHM_TESTFLIGHT_NOTES_FILE."
-        exit 1
-    fi
+if [ "$UPLOAD_TESTFLIGHT" = true ] && [ -n "$TESTFLIGHT_NOTES_FILE" ]; then
     if [ ! -f "$TESTFLIGHT_NOTES_FILE" ]; then
         echo "Error: TestFlight notes file not found: $TESTFLIGHT_NOTES_FILE"
         exit 1
@@ -961,11 +956,15 @@ else
             fi
 
             echo "Uploading: $IPA_FILE"
-            fastlane pilot upload \
-                --api_key_path "$ASC_API_KEY_PATH" \
-                --ipa "$IPA_FILE" \
-                --changelog "$TESTFLIGHT_CHANGELOG" \
+            TESTFLIGHT_UPLOAD_ARGS=(
+                --api_key_path "$ASC_API_KEY_PATH"
+                --ipa "$IPA_FILE"
                 --skip_waiting_for_build_processing
+            )
+            if [ -n "$TESTFLIGHT_CHANGELOG" ]; then
+                TESTFLIGHT_UPLOAD_ARGS+=(--changelog "$TESTFLIGHT_CHANGELOG")
+            fi
+            fastlane pilot upload "${TESTFLIGHT_UPLOAD_ARGS[@]}"
             write_store_build_receipt \
                 app-store-connect testflight "$IPA_FILE" "$RESOLVED_BUILD_NUMBER"
 

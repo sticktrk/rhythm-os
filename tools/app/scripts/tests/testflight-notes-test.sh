@@ -100,15 +100,19 @@ LONG_LENGTH="$(awk '{ total += length($0) + (NR > 1 ? 1 : 0) } END { print total
 grep -Eq '\.\.\.$' "$TEST_ROOT/long.txt" || fail "truncated notes lack a marker"
 
 set +e
-MISSING_OUTPUT="$(RHYTHM_TESTFLIGHT_NOTES_FILE= "$BUILD_SCRIPT" --testflight 2>&1)"
+MISSING_OUTPUT="$(RHYTHM_TESTFLIGHT_NOTES_FILE= "$BUILD_SCRIPT" --testflight --testflight-notes-file "$TEST_ROOT/missing.txt" 2>&1)"
 MISSING_STATUS=$?
 set -e
-[ "$MISSING_STATUS" -ne 0 ] || fail "TestFlight upload accepted missing notes"
-grep -Fq "require build-specific 'What to Test' notes" <<<"$MISSING_OUTPUT" || \
-    fail "missing-notes failure was not actionable"
+[ "$MISSING_STATUS" -ne 0 ] || fail "TestFlight upload accepted a nonexistent notes file"
+grep -Fq "TestFlight notes file not found" <<<"$MISSING_OUTPUT" || \
+    fail "nonexistent-notes failure was not actionable"
 
-grep -Fq -- '--changelog "$TESTFLIGHT_CHANGELOG"' "$BUILD_SCRIPT" || \
-    fail "Fastlane upload does not receive rendered changelog"
+grep -Fq 'if [ "$UPLOAD_TESTFLIGHT" = true ] && [ -n "$TESTFLIGHT_NOTES_FILE" ]; then' \
+    "$BUILD_SCRIPT" || fail "TestFlight notes validation is not optional"
+grep -Fq 'TESTFLIGHT_UPLOAD_ARGS+=(--changelog "$TESTFLIGHT_CHANGELOG")' "$BUILD_SCRIPT" || \
+    fail "Fastlane upload does not conditionally receive the rendered changelog"
+grep -Fq 'fastlane pilot upload "${TESTFLIGHT_UPLOAD_ARGS[@]}"' "$BUILD_SCRIPT" || \
+    fail "Fastlane upload does not use the optional argument list"
 grep -Fq 'RHYTHM_TESTFLIGHT_NOTES_FILE="$NOTES_FILE"' "$WORKER" || \
     fail "PR dispatch worker does not hand notes to the uploader"
 
