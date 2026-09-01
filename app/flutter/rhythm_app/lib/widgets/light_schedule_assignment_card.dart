@@ -7,6 +7,7 @@ import 'package:uuid/uuid.dart';
 
 import '../providers/server_sync_provider.dart';
 import '../services/analytics_service.dart';
+import 'light_schedule_offset_slider.dart';
 import 'solar_orbit.dart' show CelestialColors;
 
 /// Capability-gated named-schedule authority and sparse override controls for
@@ -462,23 +463,13 @@ class _LightScheduleAssignmentCardState
                             : '${offset.abs()} minutes ${offset < 0 ? 'before' : 'after'}',
                         textAlign: TextAlign.center,
                       ),
-                      Slider(
-                        key: ValueKey(
+                      LightScheduleOffsetSlider(
+                        sliderKey: ValueKey(
                           'light-schedule-override-offset-${transition.id}',
                         ),
-                        min: -maxSolarScheduleOffsetMinutes.toDouble(),
-                        max: maxSolarScheduleOffsetMinutes.toDouble(),
-                        divisions: maxSolarScheduleOffsetMinutes * 2,
-                        value: offset
-                            .clamp(
-                              -maxSolarScheduleOffsetMinutes,
-                              maxSolarScheduleOffsetMinutes,
-                            )
-                            .toDouble(),
-                        label: '$offset min',
+                        offsetMinutes: offset,
                         onChanged: solarAvailable
-                            ? (value) =>
-                                setSheetState(() => offset = value.round())
+                            ? (value) => setSheetState(() => offset = value)
                             : null,
                       ),
                     ],

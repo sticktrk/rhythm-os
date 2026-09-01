@@ -2633,7 +2633,85 @@ void main() {
       final slider = tester.widget<Slider>(
         find.byKey(const ValueKey('schedule-offset-Day Start')),
       );
-      expect(slider.divisions, maxSolarScheduleOffsetMinutes * 2);
+      expect(slider.min, -60);
+      expect(slider.max, 60);
+      expect(slider.divisions, 120);
+    });
+
+    testWidgets('named schedule override offset slider is limited to one hour',
+        (tester) async {
+      _registerWidgetCleanup(tester);
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(390, 1200));
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi()..lightSchedules = [outdoorSchedule];
+      final connection = _HelloRhythmConnection(api);
+      final homeProvider = _TestHomeProvider(
+        const [],
+        currentHome: Home.create(
+          id: 'home-1',
+          name: 'Home',
+          ownerId: 'owner-1',
+          location: const HomeLocation(latitude: 41.88, longitude: -87.63),
+          timezone: 'America/Chicago',
+        ),
+      );
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: homeProvider,
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+      addTearDown(homeProvider.dispose);
+      const named = {
+        'light_schedule': {
+          'kind': 'named',
+          'schedule_id': 'outdoor',
+          'active_mode': 'day',
+        },
+      };
+      connection.emitHello(namedScheduleHello(
+        profileSettings: named,
+        roomProfile: named,
+        location: const {
+          'sunrise': 7.0,
+          'timezone_name': 'America/Chicago',
+        },
+      ));
+      await tester.pump();
+      await provider.loadLightSchedules();
+      await tester.pumpWidget(_buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const Scaffold(
+          body: LightScheduleAssignmentCard(
+            nodeId: 'room-1',
+            targetLabel: 'Room',
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      await tester.tap(
+        find.byKey(const ValueKey('light-schedule-customize-wake')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Override offset'));
+      await tester.pumpAndSettle();
+
+      final slider = tester.widget<Slider>(
+        find.byKey(
+          const ValueKey('light-schedule-override-offset-wake'),
+        ),
+      );
+      expect(slider.min, -60);
+      expect(slider.max, 60);
+      expect(slider.divisions, 120);
+      slider.onChanged!(60);
+      await tester.pump();
+      expect(find.text('60 minutes after'), findsOneWidget);
     });
 
     testWidgets('base editor preserves unrelated and manual transition IDs',
