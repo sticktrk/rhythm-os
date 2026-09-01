@@ -2223,6 +2223,105 @@ fn most_recent_resolved_transition(
     latest.map(|(_, transition)| transition)
 }
 
+fn resolved_light_schedule_transition_for_node(
+    state: &SharedState,
+    node_id: &str,
+    schedule_id: &str,
+    current_utc: chrono::NaiveDateTime,
+) -> anyhow::Result<Option<(rhythm_core::RhythmMode, rhythm_core::ModeTransitionConfig)>> {
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let runtime = s
+        .hub_runtime()
+        .ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+    let node = runtime
+        .engine_effective_node_snapshot(node_id)
+        .ok_or_else(|| anyhow::anyhow!("Schedule target was not found"))?;
+    let Some(assignment) = node.profile_settings.light_schedule.as_ref() else {
+        return Ok(None);
+    };
+    if assignment.schedule_id() != Some(schedule_id) {
+        return Ok(None);
+    }
+    let active_mode = assignment
+        .active_mode()
+        .ok_or_else(|| anyhow::anyhow!("Schedule target has no active mode"))?;
+    let schedule = s
+        .light_schedules
+        .get(schedule_id)
+        .ok_or_else(|| anyhow::anyhow!("Unknown light schedule '{}'", schedule_id))?;
+    if !schedule.enabled {
+        return Ok(None);
+    }
+    let effective = node
+        .profile_settings
+        .light_schedule_overrides
+        .get(schedule_id)
+        .map(|value| value.apply_to(schedule))
+        .transpose()
+        .map_err(anyhow::Error::msg)?
+        .unwrap_or_else(|| schedule.clone());
+    let solar = SolarTriggerContext {
+        solar_noon: s.solar_noon_hour(),
+        latitude: s.latitude,
+        longitude: s.longitude,
+        timezone_name: s.timezone_name.as_deref(),
+    };
+    Ok(most_recent_resolved_transition(
+        current_utc,
+        ReplayTransitionContext {
+            solar,
+            utc_offset: s.utc_offset_hours,
+            configs: &effective.transitions,
+        },
+    )
+    .map(|transition| (active_mode, transition)))
+}
+
+/// Resolve the recurring clock/solar mode that is effective for one named
+/// schedule target at `current_utc`.
+///
+/// Configuration writers use this before and after a trigger edit so they can
+/// distinguish a harmless metadata change from moving a boundary across the
+/// current time. Returning `None` for a dormant assignment or a schedule with
+/// no recurring boundary preserves manual schedule state.
+pub(crate) fn resolved_light_schedule_mode_for_node(
+    state: &SharedState,
+    node_id: &str,
+    schedule_id: &str,
+    current_utc: chrono::NaiveDateTime,
+) -> anyhow::Result<Option<rhythm_core::RhythmMode>> {
+    Ok(
+        resolved_light_schedule_transition_for_node(state, node_id, schedule_id, current_utc)?
+            .map(|(_, transition)| transition.to_mode),
+    )
+}
+
+/// Reconcile one named schedule target to its most recent recurring boundary.
+/// The schedule write lock must not be held by the caller because applying the
+/// selected transition acquires it again.
+pub(crate) fn reconcile_light_schedule_transition_for_node(
+    state: &SharedState,
+    node_id: &str,
+    schedule_id: &str,
+    current_utc: chrono::NaiveDateTime,
+) -> anyhow::Result<bool> {
+    let Some((active_mode, transition)) =
+        resolved_light_schedule_transition_for_node(state, node_id, schedule_id, current_utc)?
+    else {
+        return Ok(false);
+    };
+    if transition.to_mode == active_mode {
+        return Ok(false);
+    }
+    crate::commands::do_trigger_light_schedule_transition_for_node(
+        state,
+        node_id,
+        schedule_id,
+        &transition.id,
+    )?;
+    Ok(true)
+}
+
 /// Reconcile each named schedule to the most recent recurring non-manual
 /// boundary. This covers cold starts and large wall-clock corrections where a
 /// crossing cannot be inferred safely from the previous periodic sample.
