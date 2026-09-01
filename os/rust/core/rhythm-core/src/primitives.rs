@@ -747,6 +747,57 @@ impl<C: LightController> RhythmEngine<C> {
         self.plan_non_periodic_turn_on(room_id, command)
     }
 
+    pub(crate) fn plan_reset_to_mode_default(
+        &mut self,
+        room_id: &str,
+        current_hour: f32,
+    ) -> ManualActionPlan {
+        let target_state = self.profile_registry.active_mode_room_default(room_id);
+        {
+            let room = self.rooms.get_or_create(room_id, room_id);
+            room.reset_offsets();
+            room.enable_rhythm();
+            match target_state {
+                RoomModeState::Active => room.clear_off_states(),
+                RoomModeState::Mood => room.set_mood(),
+                RoomModeState::Standby => room.set_standby(),
+                RoomModeState::HardOff => room.set_hard_off(),
+                RoomModeState::Wake | RoomModeState::Warning => room.clear_off_states(),
+            }
+        }
+
+        let dispatch = match target_state {
+            RoomModeState::HardOff => self.plan_non_periodic_turn_off(room_id, None),
+            RoomModeState::Mood | RoomModeState::Standby | RoomModeState::Active => {
+                let effective = self.effective_room_state(room_id);
+                let values = self.values_for_room_state(
+                    Some(&effective.profile_settings),
+                    target_state,
+                    current_hour,
+                    0.0,
+                );
+                let command = Self::build_command(&values, values.brightness);
+                self.plan_non_periodic_turn_on(room_id, command)
+            }
+            RoomModeState::Wake | RoomModeState::Warning => {
+                let effective = self.effective_room_state(room_id);
+                let values = self.values_for_room_state(
+                    Some(&effective.profile_settings),
+                    RoomModeState::Active,
+                    current_hour,
+                    0.0,
+                );
+                let command = Self::build_command(&values, values.brightness);
+                self.plan_non_periodic_turn_on(room_id, command)
+            }
+        };
+
+        ManualActionPlan::Dispatch {
+            dispatch,
+            turned_on: target_state != RoomModeState::HardOff,
+        }
+    }
+
     pub(crate) fn plan_toggle(
         &mut self,
         room_id: &str,
@@ -796,6 +847,9 @@ impl<C: LightController> RhythmEngine<C> {
                 dispatch: self.plan_reset(room_id, current_hour),
                 turned_on: true,
             },
+            ButtonAction::ResetToModeDefault => {
+                self.plan_reset_to_mode_default(room_id, current_hour)
+            }
             ButtonAction::UpPress => ManualActionPlan::Dispatch {
                 dispatch: self.plan_dim(room_id, current_hour, 20.0),
                 turned_on: true,
@@ -2009,6 +2063,45 @@ mod tests {
         engine.reset("living_room", 6.0).await.unwrap();
 
         let room = engine.rooms.get("living_room").unwrap();
+        assert_eq!(room.time_offset_minutes, 0.0);
+        assert_eq!(room.brightness_offset, 0.0);
+    }
+
+    #[test]
+    fn reset_to_mode_default_restores_configured_standby_instead_of_active() {
+        let mut engine = test_engine();
+        let mut day = crate::ModeConfig::default_for_mode(crate::RhythmMode::Day);
+        day.room_defaults = vec![crate::RoomModeDefault {
+            room_id: "living_room".to_string(),
+            state: RoomModeState::Standby,
+        }];
+        engine.set_mode_configs([
+            day,
+            crate::ModeConfig::default_for_mode(crate::RhythmMode::Sleep),
+        ]);
+
+        let room = engine.rooms.get_or_create("living_room", "Living room");
+        room.set_mood();
+        room.time_offset_minutes = 90.0;
+        room.brightness_offset = 20.0;
+
+        let plan =
+            engine.plan_button_action("living_room", ButtonAction::ResetToModeDefault, 20.0, None);
+
+        let ManualActionPlan::Dispatch {
+            dispatch: ManualDispatchPlan::TurnOn { command, .. },
+            turned_on,
+        } = plan
+        else {
+            panic!("configured Standby reset should render a low-glow command");
+        };
+        assert!(turned_on);
+        assert_eq!(command.brightness, 1);
+        let room = engine.rooms.get("living_room").unwrap();
+        assert!(room.rhythm_enabled);
+        assert!(room.soft_off);
+        assert!(!room.mood_active);
+        assert!(!room.hard_off);
         assert_eq!(room.time_offset_minutes, 0.0);
         assert_eq!(room.brightness_offset, 0.0);
     }

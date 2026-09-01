@@ -472,7 +472,7 @@ class _RoomCardState extends State<RoomCard> {
     roomProvider.setRoomLightsOnLocal(widget.roomId, true);
     roomProvider.setRoomRhythmEnabled(widget.roomId, true);
     roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.active);
-    if (serverSync.dispatchResetNode(widget.roomId)) {
+    if (serverSync.dispatchResetActiveNode(widget.roomId)) {
       _beginActionFeedback();
     }
     AnalyticsService().logRoomModeChanged(

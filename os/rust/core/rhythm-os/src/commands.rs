@@ -25950,6 +25950,17 @@ mod tests {
     }
 
     #[test]
+    fn room_action_reset_to_mode_default() {
+        let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
+        let result = do_node_action(&state, "room1", "reset_to_mode_default", false);
+        assert!(result.is_ok());
+        assert_eq!(
+            runtime.events(),
+            vec![("room1".into(), ButtonAction::ResetToModeDefault)]
+        );
+    }
+
+    #[test]
     fn room_action_rhythm_on() {
         let (state, runtime) = setup_state(vec![make_snapshot("room1", false, false)]);
         let result = do_node_action(&state, "room1", "rhythm_on", false);

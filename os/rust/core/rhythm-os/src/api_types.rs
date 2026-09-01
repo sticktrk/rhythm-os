@@ -294,6 +294,7 @@ pub const FEATURE_REMOVED_DEVICE_ARCHIVE: &str = "removed_device_archive_v1";
 pub const FEATURE_HUE_ROOM_TOPOLOGY_SYNC: &str = "hue_room_topology_sync_v1";
 pub const FEATURE_SCENE_MOTION_SUPPRESSION: &str = "scene_motion_suppression_v1";
 pub const FEATURE_BUTTON_MULTI_ROOM_CONTROLS: &str = "button_multi_room_controls_v1";
+pub const FEATURE_RESET_TO_MODE_DEFAULT: &str = "reset_to_mode_default_v1";
 
 #[derive(Clone, Debug)]
 pub struct ApiCapabilitiesDto {
@@ -326,6 +327,7 @@ impl Serialize for ApiCapabilitiesDto {
                 FEATURE_HUE_ROOM_TOPOLOGY_SYNC,
                 FEATURE_SCENE_MOTION_SUPPRESSION,
                 FEATURE_BUTTON_MULTI_ROOM_CONTROLS,
+                FEATURE_RESET_TO_MODE_DEFAULT,
             ],
         )?;
         state.serialize_field("hubs", &self.hubs)?;
@@ -1656,6 +1658,7 @@ mod tests {
             FEATURE_HUE_ROOM_TOPOLOGY_SYNC,
             FEATURE_SCENE_MOTION_SUPPRESSION,
             FEATURE_BUTTON_MULTI_ROOM_CONTROLS,
+            FEATURE_RESET_TO_MODE_DEFAULT,
         ] {
             assert!(features.contains(&serde_json::json!(feature)));
         }

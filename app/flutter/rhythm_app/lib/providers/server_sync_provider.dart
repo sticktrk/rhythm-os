@@ -4409,13 +4409,30 @@ class ServerSyncProvider extends ChangeNotifier {
     pushBatchNodePreferences(items);
   }
 
-  /// Reset a single node to its current adaptive curve position.
-  bool dispatchResetNode(String nodeId) {
+  RoomModeState _resetTargetState(String nodeId, {required bool modeDefault}) {
+    if (!modeDefault ||
+        _capabilities?.supportsFeature(RhythmFeature.resetToModeDefault) !=
+            true) {
+      return RoomModeState.active;
+    }
+    final mode = _activeMode ?? RhythmMode.day;
+    return RoomModeState.fromString(roomDefaultStateForMode(nodeId, mode));
+  }
+
+  bool _dispatchResetNode(String nodeId, {required bool modeDefault}) {
+    final supportsModeDefault =
+        _capabilities?.supportsFeature(RhythmFeature.resetToModeDefault) ==
+            true;
+    final action = modeDefault && supportsModeDefault
+        ? 'reset_to_mode_default'
+        : 'reset';
+    final targetState = _resetTargetState(nodeId, modeDefault: modeDefault);
+    final lightsOn = targetState != RoomModeState.hardOff;
     if (HueServiceLocator.isDemoMode) {
       DemoServerApi.instance.updateRoomLightState(
         nodeId,
-        on: true,
-        brightness: 75,
+        on: lightsOn,
+        brightness: targetState == RoomModeState.active ? 75 : 1,
         kelvin: _roomProvider.getKelvin(nodeId) ?? 3200,
       );
       _roomProvider.applyServerNodeState(
@@ -4423,9 +4440,9 @@ class ServerSyncProvider extends ChangeNotifier {
         rhythmEnabled: _roomProvider.getNode(nodeId)?.rhythmEnabled ?? true,
         timeOffset: 0,
         brightnessOffset: 0,
-        state: RoomModeState.active,
-        lightsOn: true,
-        brightness: 75,
+        state: targetState,
+        lightsOn: lightsOn,
+        brightness: targetState == RoomModeState.active ? 75 : 1,
         kelvin: _roomProvider.getKelvin(nodeId) ?? 3200,
       );
       _roomProvider.bumpResetGeneration();
@@ -4434,20 +4451,28 @@ class ServerSyncProvider extends ChangeNotifier {
     if (!_connection.connected) return false;
     _clearRecentDispatchFailure(nodeId);
     _connection.api
-        .nodeAction(nodeId: nodeId, action: 'reset')
+        .nodeAction(nodeId: nodeId, action: action)
         .then((serverState) {
       if (serverState != null) {
         _onRhythmState(serverState, fromActionResponse: true);
       }
       _roomProvider.acknowledgeOptimisticNodeState(
         nodeId,
-        state: RoomModeState.active,
-        lightsOn: true,
+        state: targetState,
+        lightsOn: lightsOn,
       );
       _roomProvider.bumpResetGeneration();
     });
     return true;
   }
+
+  /// Reset a node to the current mode's configured state when supported.
+  bool dispatchResetNode(String nodeId) =>
+      _dispatchResetNode(nodeId, modeDefault: true);
+
+  /// Clear curve offsets while explicitly entering the active On state.
+  bool dispatchResetActiveNode(String nodeId) =>
+      _dispatchResetNode(nodeId, modeDefault: false);
 
   bool dispatchResetRoom(String roomId) => dispatchResetNode(roomId);
 

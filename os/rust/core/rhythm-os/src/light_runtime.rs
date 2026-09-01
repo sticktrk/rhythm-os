@@ -822,7 +822,8 @@ fn runtime_event_activates_direct_children(event: &RuntimeEvent) -> bool {
             | rhythm_runtime_api::InputAction::StepDown
     ) || matches!(
         &input.action,
-        rhythm_runtime_api::InputAction::Named(name) if name == "sleep_off"
+        rhythm_runtime_api::InputAction::Named(name)
+            if name == "sleep_off" || name == "reset_to_mode_default"
     )
 }
 
@@ -832,6 +833,7 @@ pub(crate) fn button_action_activates_direct_children(action: rhythm_core::Butto
         rhythm_core::ButtonAction::OnPress
             | rhythm_core::ButtonAction::Toggle
             | rhythm_core::ButtonAction::Reset
+            | rhythm_core::ButtonAction::ResetToModeDefault
             | rhythm_core::ButtonAction::UpPress
             | rhythm_core::ButtonAction::DownPress
             | rhythm_core::ButtonAction::UpHold

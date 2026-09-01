@@ -105,7 +105,7 @@ class _CompactRoomOrbState extends State<CompactRoomOrb> {
     // Push time offset to server — it will apply the values to lights
     // Server treats this as a reset action at the new offset
     final serverSync = context.read<ServerSyncProvider>();
-    serverSync.dispatchNodeAction(widget.roomId, 'reset');
+    serverSync.dispatchResetNode(widget.roomId);
   }
 
   Future<void> _toggleLight() async {
@@ -151,7 +151,7 @@ class _CompactRoomOrbState extends State<CompactRoomOrb> {
     });
 
     final serverSync = context.read<ServerSyncProvider>();
-    serverSync.dispatchNodeAction(widget.roomId, 'reset');
+    serverSync.dispatchResetNode(widget.roomId);
   }
 
   void _onBrightnessChanged(int brightness) {

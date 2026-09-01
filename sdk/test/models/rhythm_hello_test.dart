@@ -380,6 +380,7 @@ void main() {
             RhythmFeature.targetGuardedRoomLightProfileOverrides,
             RhythmFeature.sceneMotionSuppression,
             RhythmFeature.buttonMultiRoomControls,
+            RhythmFeature.resetToModeDefault,
             RhythmFeature.removedDeviceArchive,
           ],
           'hubs': [
@@ -461,6 +462,10 @@ void main() {
       expect(
         hello.capabilities!
             .supportsFeature(RhythmFeature.buttonMultiRoomControls),
+        isTrue,
+      );
+      expect(
+        hello.capabilities!.supportsFeature(RhythmFeature.resetToModeDefault),
         isTrue,
       );
       expect(

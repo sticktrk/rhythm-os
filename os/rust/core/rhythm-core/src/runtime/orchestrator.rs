@@ -223,6 +223,9 @@ where
             ButtonAction::Toggle => info!("toggle for {}", event.room_id),
             ButtonAction::OffPress => info!("turn_off for {}", event.room_id),
             ButtonAction::Reset => info!("reset for {}", event.room_id),
+            ButtonAction::ResetToModeDefault => {
+                info!("reset_to_mode_default for {}", event.room_id)
+            }
             ButtonAction::UpPress => info!("dim_up for {}", event.room_id),
             ButtonAction::DownPress => info!("dim_down for {}", event.room_id),
             ButtonAction::UpHold => info!("step_up for {}", event.room_id),
