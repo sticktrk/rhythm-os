@@ -89,7 +89,8 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   Completer<RhythmRoomState?>? motionActivationCompleter;
   bool motionActivationSucceeds = true;
   Completer<void>? nodePreferencesCompleter;
-  bool nodePreferencesSucceeds = true;
+  RhythmWriteAck nodePreferencesAck = RhythmWriteAck.accepted;
+  RhythmWriteAck nodeActionAck = RhythmWriteAck.accepted;
   final List<({String nodeId, int brightness})> nodeCurveBrightnessCalls = [];
   final List<({String nodeId, String action})> nodeActionCalls = [];
   final List<
@@ -190,7 +191,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   }
 
   @override
-  Future<bool> nodePreferencesSet({
+  Future<RhythmWriteAck> nodePreferencesSet({
     required String nodeId,
     bool? rhythmEnabled,
     bool? disabled,
@@ -210,7 +211,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     ));
     final pending = nodePreferencesCompleter;
     if (pending != null) await pending.future;
-    return nodePreferencesSucceeds;
+    return nodePreferencesAck;
   }
 
   @override
@@ -238,12 +239,12 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   }
 
   @override
-  Future<RhythmRoomState?> nodeAction({
+  Future<({RhythmWriteAck ack, RhythmRoomState? state})> nodeActionChecked({
     required String nodeId,
     required String action,
   }) async {
     nodeActionCalls.add((nodeId: nodeId, action: action));
-    return null;
+    return (ack: nodeActionAck, state: null);
   }
 }
 
@@ -1491,7 +1492,7 @@ void main() {
     );
     final homeProvider = _FakeHomeProvider();
     final connection = _TestRhythmConnection();
-    connection.api.nodePreferencesSucceeds = false;
+    connection.api.nodePreferencesAck = RhythmWriteAck.rejected;
     final serverSync = ServerSyncProvider(
       connection: connection,
       roomProvider: roomProvider,
@@ -1525,6 +1526,63 @@ void main() {
     expect(roomProvider.getRoomState('room-1'), RoomModeState.active);
     expect(roomProvider.getRoom('room-1')!.lightsOn, isTrue);
     expect(tester.widget<GestureDetector>(_powerSwitch()).onTap, isNotNull);
+  });
+
+  testWidgets(
+      'indeterminate power preference outcome keeps the optimistic state',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    await roomProvider.addRoom(
+      const RoomDto(
+        id: 'room-1',
+        name: 'Kitchen',
+        source: RoomSourceDto.matter,
+        kind: RoomNodeKind.room,
+        deviceIds: ['light-1'],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ),
+    );
+    final homeProvider = _FakeHomeProvider();
+    final connection = _TestRhythmConnection();
+    // A timeout after the server may have committed must not roll back the
+    // optimistic state; the lock expiry reconciles against server truth.
+    connection.api.nodePreferencesAck = RhythmWriteAck.indeterminate;
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+          ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+        ],
+        child: MaterialApp(
+          home: Scaffold(
+            body: RoomCard(
+              roomId: 'room-1',
+              globalConfig: defaultCurveConfig,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    tester.widget<GestureDetector>(_powerSwitch()).onTap!();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(connection.api.nodePreferenceCalls, hasLength(1));
+    expect(roomProvider.getRoomState('room-1'), isNot(RoomModeState.active));
+    await tester.pump(const Duration(seconds: 4));
   });
 
   testWidgets('pending dispatch uses a neutral surface instead of light color',

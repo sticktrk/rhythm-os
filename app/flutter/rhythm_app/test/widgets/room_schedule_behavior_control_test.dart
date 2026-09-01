@@ -44,7 +44,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   }
 
   @override
-  Future<bool> nodePreferencesSet({
+  Future<RhythmWriteAck> nodePreferencesSet({
     required String nodeId,
     bool? rhythmEnabled,
     bool? disabled,
@@ -58,7 +58,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
       state: state,
       rhythmEnabled: rhythmEnabled,
     ));
-    return true;
+    return RhythmWriteAck.accepted;
   }
 }
 

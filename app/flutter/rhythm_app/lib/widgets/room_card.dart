@@ -5,7 +5,11 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show RhythmSceneDefinition, RhythmSceneSourceKind, RoomModeState;
+    show
+        RhythmSceneDefinition,
+        RhythmSceneSourceKind,
+        RhythmWriteAck,
+        RoomModeState;
 import '../providers/server_sync_provider.dart';
 import '../providers/room_provider.dart';
 import '../services/analytics_service.dart';
@@ -58,23 +62,6 @@ class _RoomCardState extends State<RoomCard> {
   Timer? _localActionFeedbackTimer;
   static const int _minKelvin = 2000;
   static const int _maxKelvin = 6500;
-
-  void _beginActionFeedback() {
-    _localActionFeedbackTimer?.cancel();
-    final generation = ++_localActionFeedbackGeneration;
-    if (!_localActionPending) {
-      setState(() => _localActionPending = true);
-    }
-    _localActionFeedbackTimer = Timer(_minimumActionFeedbackDuration, () {
-      _localActionFeedbackTimer = null;
-      if (!mounted ||
-          generation != _localActionFeedbackGeneration ||
-          !_localActionPending) {
-        return;
-      }
-      setState(() => _localActionPending = false);
-    });
-  }
 
   /// Hold `_localActionPending` from the moment a power action starts until
   /// the server acknowledged (or rejected) it, with the usual minimum spinner
@@ -282,8 +269,11 @@ class _RoomCardState extends State<RoomCard> {
       previousMode: previousMode,
       nextMode: effectiveMode.name,
     );
-    final accepted = await _trackActionFeedback(push);
-    if (!accepted && mounted) {
+    final ack = await _trackActionFeedback(push);
+    // Restore only on definitive rejection: an indeterminate outcome (e.g. a
+    // timeout after the server committed) is left to the optimistic lock
+    // expiry, which re-applies authoritative server state.
+    if (ack == RhythmWriteAck.rejected && mounted) {
       await roomProvider.restoreRejectedOptimisticNodeState(
         widget.roomId,
         rhythmEnabled: previousRhythmEnabled,
@@ -502,6 +492,35 @@ class _RoomCardState extends State<RoomCard> {
     );
   }
 
+  /// Capture the current presentation, await a fenced power action, and
+  /// restore the capture when the server definitively rejected it. Reset and
+  /// on actions share the same acknowledgment fence as the power switch:
+  /// `_localActionPending` holds until the request resolves, not for a fixed
+  /// interval.
+  Future<void> _performFencedPowerAction(
+    Future<RhythmWriteAck> Function() dispatch,
+  ) async {
+    final roomProvider = context.read<RoomProvider>();
+    final room = roomProvider.getRoom(widget.roomId);
+    final previousState = roomProvider.getRoomState(widget.roomId);
+    final previousLightsOn = room?.lightsOn ?? true;
+    final previousRhythmEnabled = room?.rhythmEnabled ?? true;
+    final previousMoodEnabled = roomProvider.isMoodEnabled(widget.roomId);
+    final previousMoodActive = roomProvider.isMoodActive(widget.roomId);
+
+    final ack = await _trackActionFeedback(dispatch());
+    if (ack == RhythmWriteAck.rejected && mounted) {
+      await roomProvider.restoreRejectedOptimisticNodeState(
+        widget.roomId,
+        rhythmEnabled: previousRhythmEnabled,
+        state: previousState,
+        lightsOn: previousLightsOn,
+        moodEnabled: previousMoodEnabled,
+        moodActive: previousMoodActive,
+      );
+    }
+  }
+
   /// "On" from any non-adaptive state (Off / Mood / standby):
   /// turn the room on and reset it to the live adaptive curve — same outcome as
   /// the "Reset to curve" affordance.
@@ -515,12 +534,12 @@ class _RoomCardState extends State<RoomCard> {
     // Reset is the complete server action: it enables Rhythm, clears offsets,
     // leaves off states, and dispatches the live curve. Sending an Active
     // preference first duplicates the physical Matter command.
-    roomProvider.setRoomLightsOnLocal(widget.roomId, true);
-    roomProvider.setRoomRhythmEnabled(widget.roomId, true);
-    roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.active);
-    if (serverSync.dispatchResetActiveNode(widget.roomId)) {
-      _beginActionFeedback();
-    }
+    unawaited(_performFencedPowerAction(() {
+      roomProvider.setRoomLightsOnLocal(widget.roomId, true);
+      roomProvider.setRoomRhythmEnabled(widget.roomId, true);
+      roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.active);
+      return serverSync.dispatchResetActiveNodeChecked(widget.roomId);
+    }));
     AnalyticsService().logRoomModeChanged(
       roomId: widget.roomId,
       previousMode: previousMode,
@@ -537,9 +556,9 @@ class _RoomCardState extends State<RoomCard> {
   void _resetRoom() {
     HapticFeedback.mediumImpact();
     final serverSync = context.read<ServerSyncProvider>();
-    if (serverSync.dispatchResetNode(widget.roomId)) {
-      _beginActionFeedback();
-    }
+    unawaited(_performFencedPowerAction(
+      () => serverSync.dispatchResetNodeChecked(widget.roomId),
+    ));
     AnalyticsService().logRoomResetToCurve(roomId: widget.roomId);
     setState(() {
       _sliderBrightness = null;

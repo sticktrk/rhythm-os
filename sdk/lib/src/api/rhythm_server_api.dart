@@ -13,6 +13,7 @@ import '../models/rhythm_room.dart';
 import '../models/rhythm_scene.dart';
 import '../models/rhythm_settings.dart';
 import '../models/rhythm_time_info.dart';
+import '../models/rhythm_write_ack.dart';
 
 String? _plainTextResponseError(Object? value) {
   if (value is! String) return null;
@@ -171,11 +172,38 @@ class RhythmServerApi {
     required String nodeId,
     required String action,
   }) async {
+    final result = await nodeActionChecked(nodeId: nodeId, action: action);
+    return result.state;
+  }
+
+  /// [nodeAction] with an explicit acceptance outcome for callers that must
+  /// distinguish definitive server rejection from transport uncertainty.
+  Future<({RhythmWriteAck ack, RhythmRoomState? state})> nodeActionChecked({
+    required String nodeId,
+    required String action,
+  }) async {
+    final Response<dynamic> response;
     try {
-      final response = await _dio.put(
+      response = await _dio.put(
         'api/nodes/action',
         data: {'node_id': nodeId, 'action': action},
       );
+    } on DioException catch (e) {
+      _log.warning('nodeAction failed', e);
+      // Only an actual error response proves the server refused the action.
+      return (
+        ack: e.response != null
+            ? RhythmWriteAck.rejected
+            : RhythmWriteAck.indeterminate,
+        state: null,
+      );
+    } catch (e) {
+      _log.warning('nodeAction failed', e);
+      return (ack: RhythmWriteAck.indeterminate, state: null);
+    }
+    // The action was accepted; a missing or unparseable state payload only
+    // means no immediate readback is available.
+    try {
       final data = response.data as Map<String, dynamic>?;
       final nodes =
           data?['nodes'] as List<dynamic>? ?? data?['rooms'] as List<dynamic>?;
@@ -188,12 +216,12 @@ class RhythmServerApi {
       if (nodeJson != null && nodeJson.containsKey('rhythm_enabled')) {
         final state = RhythmRoomState.fromJson(nodeJson);
         _onStatesReceived?.call([state]);
-        return state;
+        return (ack: RhythmWriteAck.accepted, state: state);
       }
     } catch (e) {
-      _log.warning('nodeAction failed', e);
+      _log.warning('nodeAction response parse failed', e);
     }
-    return null;
+    return (ack: RhythmWriteAck.accepted, state: null);
   }
 
   /// Dispatch a room action via the node-first server contract.
@@ -705,10 +733,11 @@ class RhythmServerApi {
 
   /// Push node preferences (rhythm_enabled, disabled, state).
   ///
-  /// Returns whether the server accepted the write, so callers applying
-  /// optimistic UI can revert when the request itself is rejected. Physical
-  /// delivery problems still surface later via dispatch-failure events.
-  Future<bool> nodePreferencesSet({
+  /// Reports whether the server accepted, definitively rejected, or gave no
+  /// conclusive answer for the write, so callers applying optimistic UI can
+  /// revert only on definitive rejection. Physical delivery problems still
+  /// surface later via dispatch-failure events.
+  Future<RhythmWriteAck> nodePreferencesSet({
     required String nodeId,
     bool? rhythmEnabled,
     bool? disabled,
@@ -2624,17 +2653,24 @@ class RhythmServerApi {
   // Internal helpers
   // =========================================================================
 
-  Future<bool> _safePut(
+  Future<RhythmWriteAck> _safePut(
     String path, {
     required Object data,
     Map<String, dynamic>? queryParameters,
   }) async {
     try {
       await _dio.put(path, data: data, queryParameters: queryParameters);
-      return true;
+      return RhythmWriteAck.accepted;
+    } on DioException catch (e) {
+      _log.warning('PUT $path failed', e);
+      // Only an actual error response proves the server refused the write; a
+      // timeout or connection drop may have happened after it committed.
+      return e.response != null
+          ? RhythmWriteAck.rejected
+          : RhythmWriteAck.indeterminate;
     } catch (e) {
       _log.warning('PUT $path failed', e);
-      return false;
+      return RhythmWriteAck.indeterminate;
     }
   }
 

@@ -369,15 +369,15 @@ void main() {
             statusCode: 204,
           ));
 
-      final accepted = await api.nodePreferencesSet(
+      final ack = await api.nodePreferencesSet(
         nodeId: 'node-1',
         state: RoomModeState.hardOff,
       );
 
-      expect(accepted, isTrue);
+      expect(ack, RhythmWriteAck.accepted);
     });
 
-    test('nodePreferencesSet reports a rejected write', () async {
+    test('nodePreferencesSet reports a definitive server rejection', () async {
       when(() => dio.put(
             any(),
             data: any(named: 'data'),
@@ -385,14 +385,72 @@ void main() {
           )).thenThrow(DioException(
         requestOptions: RequestOptions(path: 'api/nodes/preferences'),
         type: DioExceptionType.badResponse,
+        response: Response(
+          requestOptions: RequestOptions(path: 'api/nodes/preferences'),
+          statusCode: 400,
+        ),
       ));
 
-      final accepted = await api.nodePreferencesSet(
+      final ack = await api.nodePreferencesSet(
         nodeId: 'node-1',
         state: RoomModeState.hardOff,
       );
 
-      expect(accepted, isFalse);
+      expect(ack, RhythmWriteAck.rejected);
+    });
+
+    test('nodePreferencesSet reports transport uncertainty as indeterminate',
+        () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+            queryParameters: any(named: 'queryParameters'),
+          )).thenThrow(DioException(
+        requestOptions: RequestOptions(path: 'api/nodes/preferences'),
+        type: DioExceptionType.receiveTimeout,
+      ));
+
+      final ack = await api.nodePreferencesSet(
+        nodeId: 'node-1',
+        state: RoomModeState.hardOff,
+      );
+
+      // The server may have committed the write before the timeout; callers
+      // must not treat this as a definitive rejection.
+      expect(ack, RhythmWriteAck.indeterminate);
+    });
+
+    test('nodeActionChecked distinguishes rejection from uncertainty',
+        () async {
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+          )).thenThrow(DioException(
+        requestOptions: RequestOptions(path: 'api/nodes/action'),
+        type: DioExceptionType.badResponse,
+        response: Response(
+          requestOptions: RequestOptions(path: 'api/nodes/action'),
+          statusCode: 409,
+        ),
+      ));
+
+      final rejected =
+          await api.nodeActionChecked(nodeId: 'node-1', action: 'reset');
+      expect(rejected.ack, RhythmWriteAck.rejected);
+      expect(rejected.state, isNull);
+
+      when(() => dio.put(
+            any(),
+            data: any(named: 'data'),
+          )).thenThrow(DioException(
+        requestOptions: RequestOptions(path: 'api/nodes/action'),
+        type: DioExceptionType.connectionTimeout,
+      ));
+
+      final uncertain =
+          await api.nodeActionChecked(nodeId: 'node-1', action: 'reset');
+      expect(uncertain.ack, RhythmWriteAck.indeterminate);
+      expect(uncertain.state, isNull);
     });
 
     test('nodePreferencesSet sends profile_settings on the node endpoint',

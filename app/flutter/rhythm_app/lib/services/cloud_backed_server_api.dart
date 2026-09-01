@@ -245,7 +245,7 @@ class CloudBackedServerApi {
     );
   }
 
-  Future<bool> nodePreferencesSet({
+  Future<RhythmWriteAck> nodePreferencesSet({
     required String nodeId,
     bool? rhythmEnabled,
     bool? disabled,
