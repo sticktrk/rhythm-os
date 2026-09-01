@@ -53,6 +53,9 @@ pub enum ButtonAction {
     /// Reset to current time position (maps to reset)
     Reset,
 
+    /// Reset to the current mode's configured room default.
+    ResetToModeDefault,
+
     /// Dim up (brightness only)
     UpPress,
 
@@ -177,7 +180,7 @@ impl ButtonAction {
     /// Service names from the custom integration:
     /// - rhythm_on, rhythm_off, rhythm_toggle
     /// - step_up, step_down, dim_up, dim_down
-    /// - reset, lights_off
+    /// - reset, reset_to_mode_default, lights_off
     pub fn from_service_name(service: &str) -> Option<Self> {
         match service {
             "rhythm_on" => Some(Self::RhythmOn),
@@ -188,6 +191,7 @@ impl ButtonAction {
             "dim_up" => Some(Self::UpPress),
             "dim_down" => Some(Self::DownPress),
             "reset" => Some(Self::Reset),
+            "reset_to_mode_default" => Some(Self::ResetToModeDefault),
             "lights_off" => Some(Self::LightsOff),
             "sleep_on" => Some(Self::SleepOn),
             "sleep_off" => Some(Self::SleepOff),
@@ -372,6 +376,7 @@ mod tests {
             ("dim_up", ButtonAction::UpPress),
             ("dim_down", ButtonAction::DownPress),
             ("reset", ButtonAction::Reset),
+            ("reset_to_mode_default", ButtonAction::ResetToModeDefault),
             ("lights_off", ButtonAction::LightsOff),
         ];
 

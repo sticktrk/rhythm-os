@@ -103,6 +103,7 @@ pub fn runtime_input_from_button_action(action: ButtonAction) -> InputAction {
         ButtonAction::OffPress => InputAction::Named("off_press".to_string()),
         ButtonAction::LightsOff => InputAction::Off,
         ButtonAction::Reset => InputAction::Reset,
+        ButtonAction::ResetToModeDefault => InputAction::Named("reset_to_mode_default".to_string()),
         ButtonAction::UpPress => InputAction::BrightnessUp,
         ButtonAction::DownPress => InputAction::BrightnessDown,
         ButtonAction::UpHold => InputAction::StepUp,
@@ -133,6 +134,7 @@ pub fn button_action_from_runtime_input(action: &InputAction) -> Option<ButtonAc
             "sleep_off" => Some(ButtonAction::SleepOff),
             "off_press" => Some(ButtonAction::OffPress),
             "lights_off" => Some(ButtonAction::LightsOff),
+            "reset_to_mode_default" => Some(ButtonAction::ResetToModeDefault),
             _ => None,
         },
     }
@@ -470,6 +472,10 @@ mod tests {
             (InputAction::Off, Some(ButtonAction::LightsOff)),
             (InputAction::Toggle, Some(ButtonAction::Toggle)),
             (InputAction::Reset, Some(ButtonAction::Reset)),
+            (
+                InputAction::Named("reset_to_mode_default".to_string()),
+                Some(ButtonAction::ResetToModeDefault),
+            ),
             (InputAction::BrightnessUp, Some(ButtonAction::UpPress)),
             (InputAction::BrightnessDown, Some(ButtonAction::DownPress)),
             (InputAction::StepUp, Some(ButtonAction::UpHold)),

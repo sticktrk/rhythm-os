@@ -3383,7 +3383,7 @@ void main() {
   });
 
   testWidgets(
-      'active Scenes exposes Mood brightness and disables color temperature',
+      'active Scenes reset restores the configured mode default',
       (tester) async {
     final semantics = tester.ensureSemantics();
     final roomProvider = RoomProvider();
@@ -3420,6 +3420,43 @@ void main() {
     addTearDown(roomProvider.dispose);
     addTearDown(serverSync.dispose);
     addTearDown(connection.dispose);
+
+    connection.emitHello(
+      RhythmHello.fromJson({
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': [RhythmFeature.resetToModeDefault],
+          'hubs': const <dynamic>[],
+        },
+        'mode': {
+          'active': 'day',
+          'configs': [
+            {
+              'mode': 'day',
+              'active_profile_id': 'rhythm',
+              'room_defaults': [
+                {'room_id': 'room-1', 'state': 'standby'},
+              ],
+            },
+          ],
+        },
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'hub_types': ['hue'],
+            'state': 'mood',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'lights_on': true,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+          },
+        ],
+      }),
+    );
+    await tester.pump();
 
     await tester.pumpWidget(
       MultiProvider(
@@ -3543,7 +3580,7 @@ void main() {
 
     expect(
       connection.api.nodeActionCalls,
-      [(nodeId: 'room-1', action: 'reset')],
+      [(nodeId: 'room-1', action: 'reset_to_mode_default')],
     );
     semantics.dispose();
   });

@@ -1219,7 +1219,7 @@ class _AnimatedRoomOrbState extends State<_AnimatedRoomOrb> {
     roomProvider.setRoomLightsOnLocal(widget.roomId, true);
     roomProvider.setRoomRhythmEnabled(widget.roomId, true);
     roomProvider.setRoomStateLocal(widget.roomId, RoomModeState.active);
-    serverSync.dispatchResetNode(widget.roomId);
+    serverSync.dispatchResetActiveNode(widget.roomId);
   }
 
   @override

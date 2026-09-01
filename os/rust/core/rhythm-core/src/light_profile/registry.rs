@@ -415,6 +415,19 @@ impl LightProfileRegistry {
         RhythmMode::from_profile_id(self.active_profile_id())
     }
 
+    /// Resolve a room's configured target for the current high-level mode.
+    ///
+    /// Rooms omitted from the mode config retain the historical Active
+    /// default so older persisted configs keep their behavior.
+    pub fn active_mode_room_default(&self, room_id: &str) -> RoomModeState {
+        self.mode_config_or_default(self.active_mode())
+            .room_defaults
+            .into_iter()
+            .find(|default| default.room_id == room_id)
+            .map(|default| default.state)
+            .unwrap_or(RoomModeState::Active)
+    }
+
     /// Get the ID of the active profile.
     pub fn active_profile_id(&self) -> &str {
         &self.active_profile_id

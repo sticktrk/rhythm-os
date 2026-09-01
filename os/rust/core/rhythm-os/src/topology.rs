@@ -307,6 +307,7 @@ fn button_action_id_part(action: ButtonAction) -> &'static str {
         ButtonAction::Toggle => "toggle",
         ButtonAction::OffPress => "off_press",
         ButtonAction::Reset => "reset",
+        ButtonAction::ResetToModeDefault => "reset_to_mode_default",
         ButtonAction::UpPress => "up_press",
         ButtonAction::DownPress => "down_press",
         ButtonAction::UpHold => "up_hold",

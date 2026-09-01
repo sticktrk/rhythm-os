@@ -300,6 +300,7 @@ pub fn button_action_id(action: ButtonAction) -> &'static str {
         ButtonAction::Toggle => "toggle",
         ButtonAction::OffPress => "turn_off",
         ButtonAction::Reset => "reset",
+        ButtonAction::ResetToModeDefault => "reset_to_mode_default",
         ButtonAction::UpPress => "dim_up",
         ButtonAction::DownPress => "dim_down",
         ButtonAction::UpHold => "step_up",
