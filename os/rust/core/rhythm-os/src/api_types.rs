@@ -1656,6 +1656,7 @@ mod tests {
             FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
             FEATURE_HUE_ROOM_AUTHORITY_CONSENT,
             FEATURE_MATTER_SETUP_CODE_RECOVERY,
+            FEATURE_MATTER_UNREACHABLE_DEVICE_TRIAGE,
             FEATURE_REMOVED_DEVICE_ARCHIVE,
             FEATURE_HUE_ROOM_TOPOLOGY_SYNC,
             FEATURE_SCENE_MOTION_SUPPRESSION,
@@ -1664,10 +1665,6 @@ mod tests {
         ] {
             assert!(features.contains(&serde_json::json!(feature)));
         }
-        assert_eq!(
-            json["capabilities"]["features"][8],
-            FEATURE_MATTER_UNREACHABLE_DEVICE_TRIAGE
-        );
         assert_eq!(
             json["capabilities"]["hubs"][0]["device_onboarding_methods"][0],
             "matter_on_network_setup_code"

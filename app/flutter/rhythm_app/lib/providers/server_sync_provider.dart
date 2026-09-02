@@ -534,7 +534,8 @@ class ServerSyncProvider extends ChangeNotifier {
   String? resolvedBaseLightScheduleTransitionLocalTime(
     RhythmLightScheduleConfig schedule,
     RhythmModeTransitionConfig transition,
-  ) => schedule.resolvedTransitions[transition.id];
+  ) =>
+      schedule.resolvedTransitions[transition.id];
 
   RhythmModeTransitionOverride? inheritedLightScheduleTransitionOverride(
     String nodeId,
@@ -4462,9 +4463,8 @@ class ServerSyncProvider extends ChangeNotifier {
     final supportsModeDefault =
         _capabilities?.supportsFeature(RhythmFeature.resetToModeDefault) ==
             true;
-    final action = modeDefault && supportsModeDefault
-        ? 'reset_to_mode_default'
-        : 'reset';
+    final action =
+        modeDefault && supportsModeDefault ? 'reset_to_mode_default' : 'reset';
     final targetState = _resetTargetState(nodeId, modeDefault: modeDefault);
     final lightsOn = targetState != RoomModeState.hardOff;
     if (HueServiceLocator.isDemoMode) {

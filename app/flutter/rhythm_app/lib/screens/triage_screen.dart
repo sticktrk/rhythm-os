@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
-import 'package:uuid/uuid.dart';
 import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
 import '../services/analytics_service.dart';
@@ -18,6 +17,15 @@ import 'hubs/hue_authority_screen.dart';
 import 'hubs/rhythmserver_settings_screen.dart';
 
 enum _TriageFilter { all, devices, rooms }
+
+@visibleForTesting
+class TriageRequestFence {
+  int _generation = 0;
+
+  int begin() => ++_generation;
+
+  bool isCurrent(int generation) => generation == _generation;
+}
 
 /// Triage resolution screen.
 ///
@@ -63,6 +71,7 @@ class _TriageScreenState extends State<TriageScreen> {
   final Set<String> _awaitingRecoveryEntries = {};
   final Map<String, String> _unreachableJourneyIds = {};
   Timer? _recoveryRefreshTimer;
+  final TriageRequestFence _loadFence = TriageRequestFence();
 
   @override
   void initState() {
@@ -140,6 +149,7 @@ class _TriageScreenState extends State<TriageScreen> {
   }
 
   Future<void> _loadEntries({bool sync = false}) async {
+    final loadGeneration = _loadFence.begin();
     debugPrint(
         'TriageScreen: _loadEntries called (busy=$_busy, loading=$_loading, sync=$sync)');
     try {
@@ -183,14 +193,13 @@ class _TriageScreenState extends State<TriageScreen> {
         debugPrint(
             'TriageScreen: first entry keys=${entries.first.keys.toList()}, id=${entries.first['id']} (${entries.first['id'].runtimeType})');
       }
-      if (mounted) {
-        setState(() {
-          _connectionError = entries == null;
-          _entries = entries ?? [];
-          _hueAuthority = hueAuthority;
-          _loading = false;
-        });
-      }
+      if (!mounted || !_loadFence.isCurrent(loadGeneration)) return;
+      setState(() {
+        _connectionError = entries == null;
+        _entries = entries ?? [];
+        _hueAuthority = hueAuthority;
+        _loading = false;
+      });
       if (entries != null) {
         _recordUnreachableEntryBoundaries(attentionEntries!);
         _scheduleRecoveryRefresh(attentionEntries);
@@ -204,7 +213,7 @@ class _TriageScreenState extends State<TriageScreen> {
       }
     } catch (e, st) {
       debugPrint('TriageScreen: _loadEntries failed: $e\n$st');
-      if (mounted) {
+      if (mounted && _loadFence.isCurrent(loadGeneration)) {
         setState(() {
           _connectionError = true;
           _loading = false;
@@ -222,6 +231,10 @@ class _TriageScreenState extends State<TriageScreen> {
         .toSet();
     for (final entry in entries) {
       final entryId = entry['id']?.toString() ?? '';
+      final advertisedJourneyId = entry['journey_id']?.toString() ?? '';
+      if (entryId.isNotEmpty && advertisedJourneyId.isNotEmpty) {
+        _unreachableJourneyIds.putIfAbsent(entryId, () => advertisedJourneyId);
+      }
       if (entryId.isEmpty || !_reportedUnreachableEntries.add(entryId)) {
         continue;
       }
@@ -249,10 +262,13 @@ class _TriageScreenState extends State<TriageScreen> {
     }
   }
 
-  String _journeyIdFor(String entryId) => _unreachableJourneyIds.putIfAbsent(
-        entryId,
-        () => 'unreachable-device-${const Uuid().v4()}',
-      );
+  String _journeyIdFor(String entryId) {
+    final journeyId = _unreachableJourneyIds[entryId];
+    if (journeyId == null || journeyId.isEmpty) {
+      throw StateError('Device attention entry is missing its review journey.');
+    }
+    return journeyId;
+  }
 
   void _scheduleRecoveryRefresh(List<Map<String, dynamic>> entries) {
     final needsRefresh = entries.any(

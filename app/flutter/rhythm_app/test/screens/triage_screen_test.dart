@@ -31,6 +31,8 @@ class _FakeTriageServerApi extends RhythmServerApi {
   int snoozeDeviceAttentionCalls = 0;
   int stillInstalledCalls = 0;
   int removalSelectedCalls = 0;
+  final List<String> attentionCorrelationIds = [];
+  final List<String?> unpairCorrelationIds = [];
   final List<bool> unpairForces = [];
   Map<String, dynamic>? unpairResult = {'status': 'complete'};
   Map<String, dynamic>? forceUnpairResult = {'status': 'complete'};
@@ -60,6 +62,7 @@ class _FakeTriageServerApi extends RhythmServerApi {
     required String correlationId,
   }) async {
     snoozeDeviceAttentionCalls++;
+    attentionCorrelationIds.add(correlationId);
     deviceAttentionEntries = [];
     return true;
   }
@@ -70,6 +73,7 @@ class _FakeTriageServerApi extends RhythmServerApi {
     required String correlationId,
   }) async {
     stillInstalledCalls++;
+    attentionCorrelationIds.add(correlationId);
     deviceAttentionEntries = [
       for (final entry in deviceAttentionEntries)
         {...entry, 'status': 'awaiting_recovery'},
@@ -83,6 +87,7 @@ class _FakeTriageServerApi extends RhythmServerApi {
     required String correlationId,
   }) async {
     removalSelectedCalls++;
+    attentionCorrelationIds.add(correlationId);
     return true;
   }
 
@@ -94,9 +99,11 @@ class _FakeTriageServerApi extends RhythmServerApi {
     String? deviceType,
     String? correlationId,
     bool force = false,
+    bool archive = false,
     Duration receiveTimeout = const Duration(seconds: 90),
   }) async {
     unpairForces.add(force);
+    unpairCorrelationIds.add(correlationId);
     final result = force ? forceUnpairResult : unpairResult;
     if (result?['status'] == 'complete') deviceAttentionEntries = [];
     return result;
@@ -315,6 +322,7 @@ Map<String, dynamic> _unassignedDeviceEntry() {
 Map<String, dynamic> _unreachableDeviceEntry() {
   return {
     'id': 'unreachable-opaque-1',
+    'journey_id': 'unreachable-device-review-1',
     'kind': 'unreachable_device',
     'status': 'pending',
     'device': {
@@ -338,6 +346,15 @@ Map<String, dynamic> _unreachableDeviceEntry() {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test('triage request fence rejects an older refresh response', () {
+    final fence = TriageRequestFence();
+    final older = fence.begin();
+    final newer = fence.begin();
+
+    expect(fence.isCurrent(older), isFalse);
+    expect(fence.isCurrent(newer), isTrue);
+  });
 
   group('TriageScreen actions', () {
     late RoomProvider roomProvider;
@@ -821,6 +838,7 @@ void main() {
       await _tapVisible(tester, find.text("It's Still Installed"));
 
       expect(api.stillInstalledCalls, 1);
+      expect(api.attentionCorrelationIds, ['unreachable-device-review-1']);
       expect(find.text('Waiting for Hall Lamp'), findsOneWidget);
       expect(
         find.textContaining('Turn mains power off for about 10 seconds'),
@@ -902,6 +920,7 @@ void main() {
       await _tapVisible(tester, find.text('Not Now'));
 
       expect(api.snoozeDeviceAttentionCalls, 1);
+      expect(api.attentionCorrelationIds, ['unreachable-device-review-1']);
       expect(find.text('Hall Lamp may be unreachable'), findsNothing);
     });
 
@@ -937,6 +956,14 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(api.unpairForces, [false, true]);
+      expect(
+        api.attentionCorrelationIds,
+        ['unreachable-device-review-1'],
+      );
+      expect(
+        api.unpairCorrelationIds,
+        ['unreachable-device-review-1', 'unreachable-device-review-1'],
+      );
       expect(connection.reconnectCalls, 1);
       expect(find.text('Hall Lamp may be unreachable'), findsNothing);
     });

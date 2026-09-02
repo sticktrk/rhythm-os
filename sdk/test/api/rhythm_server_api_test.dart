@@ -3331,6 +3331,7 @@ void main() {
             data: [
               {
                 'id': 'unreachable-opaque-1',
+                'journey_id': 'unreachable-device-review-1',
                 'kind': 'unreachable_device',
                 'status': 'pending',
                 'device': {
@@ -3344,6 +3345,27 @@ void main() {
                 'guidance': 'Power cycle the light.',
                 'future_field': true,
               },
+              {
+                'id': 'missing-review-journey',
+                'kind': 'unreachable_device',
+                'status': 'pending',
+                'device': {
+                  'native_id': 'matter-43-1',
+                  'hub_type': 'matter',
+                },
+                'evidence': const <String, dynamic>{},
+              },
+              {
+                'id': 'future-kind',
+                'journey_id': 'unreachable-device-review-2',
+                'kind': 'future_attention_kind',
+                'status': 'future_status',
+                'device': {
+                  'native_id': 'matter-44-1',
+                  'hub_type': 'matter',
+                },
+                'evidence': const <String, dynamic>{},
+              },
             ],
           ));
 
@@ -3351,6 +3373,7 @@ void main() {
 
       expect(entries, hasLength(1));
       expect(entries!.single.device.name, 'Hall Lamp');
+      expect(entries.single.journeyId, 'unreachable-device-review-1');
       expect(entries.single.evidence.failureCount, 3);
       verify(() => dio.get('api/device-attention')).called(1);
     });

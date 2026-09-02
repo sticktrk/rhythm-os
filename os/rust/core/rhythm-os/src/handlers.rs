@@ -55,6 +55,11 @@ fn correlation_id_from_body(body: &Value) -> Option<String> {
     (!correlation_id.is_empty() && correlation_id.len() <= 128).then(|| correlation_id.to_string())
 }
 
+fn required_correlation_id_from_body(body: &Value) -> Result<String, &'static str> {
+    correlation_id_from_body(body)
+        .ok_or("correlation_id must be a non-empty string of at most 128 bytes")
+}
+
 fn dispatch_spacing_from_body(body: &Value) -> Result<Duration, String> {
     let Some(value) = body.get("dispatch_spacing_ms") else {
         return Ok(commands::default_http_batch_dispatch_spacing());
@@ -4735,8 +4740,11 @@ pub fn handle_put_device_attention_snooze(
     entry_id: &str,
     body: &Value,
 ) -> ApiResponse {
-    let correlation_id = correlation_id_from_body(body);
-    match commands::do_device_attention_snooze(state, entry_id, correlation_id.as_deref()) {
+    let correlation_id = match required_correlation_id_from_body(body) {
+        Ok(value) => value,
+        Err(error) => return ApiResponse::bad_request(error),
+    };
+    match commands::do_device_attention_snooze(state, entry_id, Some(&correlation_id)) {
         Ok(json) => ApiResponse::json_ok(json),
         Err(error) => ApiResponse::bad_request(&error.to_string()),
     }
@@ -4747,9 +4755,11 @@ pub fn handle_put_device_attention_still_installed(
     entry_id: &str,
     body: &Value,
 ) -> ApiResponse {
-    let correlation_id = correlation_id_from_body(body);
-    match commands::do_device_attention_still_installed(state, entry_id, correlation_id.as_deref())
-    {
+    let correlation_id = match required_correlation_id_from_body(body) {
+        Ok(value) => value,
+        Err(error) => return ApiResponse::bad_request(error),
+    };
+    match commands::do_device_attention_still_installed(state, entry_id, Some(&correlation_id)) {
         Ok(json) => ApiResponse::json_ok(json),
         Err(error) => ApiResponse::bad_request(&error.to_string()),
     }
@@ -4760,9 +4770,11 @@ pub fn handle_put_device_attention_removal_selected(
     entry_id: &str,
     body: &Value,
 ) -> ApiResponse {
-    let correlation_id = correlation_id_from_body(body);
-    match commands::do_device_attention_removal_selected(state, entry_id, correlation_id.as_deref())
-    {
+    let correlation_id = match required_correlation_id_from_body(body) {
+        Ok(value) => value,
+        Err(error) => return ApiResponse::bad_request(error),
+    };
+    match commands::do_device_attention_removal_selected(state, entry_id, Some(&correlation_id)) {
         Ok(json) => ApiResponse::json_ok(json),
         Err(error) => ApiResponse::bad_request(&error.to_string()),
     }
@@ -5207,6 +5219,27 @@ mod tests {
         let r = ApiResponse::bad_request("err");
         assert_eq!(r.status, 400);
         assert_eq!(r.body, "err");
+    }
+
+    #[test]
+    fn device_attention_mutations_require_bounded_review_correlation() {
+        let state = test_state();
+        for body in [
+            json!({}),
+            json!({"correlation_id": ""}),
+            json!({
+                "correlation_id": "x".repeat(129),
+            }),
+        ] {
+            for response in [
+                handle_put_device_attention_snooze(&state, "entry", &body),
+                handle_put_device_attention_still_installed(&state, "entry", &body),
+                handle_put_device_attention_removal_selected(&state, "entry", &body),
+            ] {
+                assert_eq!(response.status, 400);
+                assert!(response.body.contains("correlation_id"));
+            }
+        }
     }
 
     #[test]

@@ -80,6 +80,7 @@ class RhythmDeviceAttentionEvidence {
 
 class RhythmDeviceAttention {
   final String id;
+  final String journeyId;
   final String kind;
   final RhythmDeviceAttentionStatus status;
   final RhythmDeviceAttentionDevice device;
@@ -88,6 +89,7 @@ class RhythmDeviceAttention {
 
   const RhythmDeviceAttention({
     required this.id,
+    required this.journeyId,
     required this.kind,
     required this.status,
     required this.device,
@@ -97,6 +99,7 @@ class RhythmDeviceAttention {
 
   bool get isActionable =>
       id.isNotEmpty &&
+      journeyId.isNotEmpty &&
       kind == 'unreachable_device' &&
       device.hubType == 'matter' &&
       device.nativeId.isNotEmpty &&
@@ -105,6 +108,7 @@ class RhythmDeviceAttention {
   factory RhythmDeviceAttention.fromJson(Map<String, dynamic> json) {
     return RhythmDeviceAttention(
       id: json['id'] as String? ?? '',
+      journeyId: json['journey_id'] as String? ?? '',
       kind: json['kind'] as String? ?? '',
       status: RhythmDeviceAttentionStatus.fromWire(json['status']),
       device: RhythmDeviceAttentionDevice.fromJson(
@@ -119,6 +123,7 @@ class RhythmDeviceAttention {
 
   Map<String, dynamic> toJson() => {
         'id': id,
+        'journey_id': journeyId,
         'kind': kind,
         'status': status.wireValue,
         'device': {

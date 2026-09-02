@@ -4578,7 +4578,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            13
+            14
         );
         assert!(!manifest["missing_persisted_files"]
             .as_array()

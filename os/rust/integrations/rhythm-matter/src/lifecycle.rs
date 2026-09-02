@@ -747,12 +747,9 @@ fn start_controller_event_stream(
                                 (termination.node_id, termination.endpoint),
                                 on_off_observations.as_ref(),
                             );
-                            let reachability_class = match termination.failure_class {
-                                MatterSubscriptionFailureClass::AddressResolution => {
-                                    rhythm_os::hub::DeviceReachabilityFailureClass::AddressResolution
-                                }
-                                _ => rhythm_os::hub::DeviceReachabilityFailureClass::Subscription,
-                            };
+                            let reachability_class = subscription_reachability_failure_class(
+                                termination.failure_class,
+                            );
                             let _ = event_tx.send(HubEvent::DeviceReachability {
                                 hub_key: None,
                                 device_id: format_device_id(
@@ -829,6 +826,17 @@ fn reachability_failure_class(
         || detail.contains("broken pipe")
         || detail.contains("chip error 0x32"))
     .then_some(rhythm_os::hub::DeviceReachabilityFailureClass::Command)
+}
+
+fn subscription_reachability_failure_class(
+    class: MatterSubscriptionFailureClass,
+) -> rhythm_os::hub::DeviceReachabilityFailureClass {
+    match class {
+        MatterSubscriptionFailureClass::AddressResolution => {
+            rhythm_os::hub::DeviceReachabilityFailureClass::AddressResolution
+        }
+        _ => rhythm_os::hub::DeviceReachabilityFailureClass::Subscription,
+    }
 }
 
 /// Connect to the local Matter fabric.
@@ -2576,7 +2584,7 @@ mod tests {
     }
 
     #[test]
-    fn terminated_subscription_is_scheduled_for_recovery_and_not_forwarded_to_the_hub() {
+    fn terminated_subscription_schedules_recovery_and_forwards_exact_endpoint_failure() {
         let transport = Arc::new(FakeMatterTransport::new(
             Vec::new(),
             vec![commissioned_device(93, 1)],
@@ -2602,10 +2610,31 @@ mod tests {
             transport.clone(),
             event_tx,
             shutdown.clone(),
+            "fabric-test".to_string(),
             Arc::new(Mutex::new(HashMap::new())),
             observations.clone(),
         );
 
+        match event_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            HubEvent::DeviceReachability {
+                device_id,
+                fabric_id,
+                controller_stream_id,
+                evidence,
+                ..
+            } => {
+                assert_eq!(device_id, format_device_id(93, 1));
+                assert_eq!(fabric_id, "fabric-test");
+                assert!(controller_stream_id.is_some());
+                assert_eq!(
+                    evidence,
+                    rhythm_os::hub::DeviceReachabilityEvidence::Failure(
+                        rhythm_os::hub::DeviceReachabilityFailureClass::Subscription,
+                    )
+                );
+            }
+            other => panic!("expected reachability failure, got {other:?}"),
+        }
         assert!(matches!(
             event_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
             HubEvent::Connected { .. }
@@ -2623,7 +2652,7 @@ mod tests {
         }
         assert!(
             event_rx.recv_timeout(Duration::from_millis(50)).is_err(),
-            "a subscription lifecycle change is not a hub event"
+            "one termination must emit only one reachability event"
         );
         // The default worker backoff is 30s, so recovery is scheduled rather
         // than attempted inline: the termination must not start a retry storm.
@@ -2631,6 +2660,28 @@ mod tests {
         assert_eq!(transport.subscribe_calls.load(Ordering::SeqCst), 1);
 
         shutdown.store(true, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn structured_subscription_failure_classes_map_without_parsing_logs() {
+        assert_eq!(
+            subscription_reachability_failure_class(
+                MatterSubscriptionFailureClass::AddressResolution,
+            ),
+            rhythm_os::hub::DeviceReachabilityFailureClass::AddressResolution,
+        );
+        for class in [
+            MatterSubscriptionFailureClass::CaseSession,
+            MatterSubscriptionFailureClass::ResourceBusy,
+            MatterSubscriptionFailureClass::Timeout,
+            MatterSubscriptionFailureClass::PeerClosed,
+            MatterSubscriptionFailureClass::Other,
+        ] {
+            assert_eq!(
+                subscription_reachability_failure_class(class),
+                rhythm_os::hub::DeviceReachabilityFailureClass::Subscription,
+            );
+        }
     }
 
     #[test]
