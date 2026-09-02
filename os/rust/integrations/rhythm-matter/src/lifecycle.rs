@@ -684,23 +684,18 @@ fn start_controller_event_stream(
                                 outcome.status,
                                 crate::transport::MatterCommandOutcomeStatus::Failed
                             ) {
-                                if let Some(class) =
-                                    reachability_failure_class(outcome.detail.as_deref())
-                                {
-                                    let _ = event_tx.send(HubEvent::DeviceReachability {
-                                        hub_key: None,
-                                        device_id: format_device_id(
-                                            outcome.node_id,
-                                            outcome.endpoint,
-                                        ),
-                                        fabric_id: fabric_id.clone(),
-                                        controller_stream_id: Some(event_stream_id.clone()),
-                                        evidence:
-                                            rhythm_os::hub::DeviceReachabilityEvidence::Failure(
-                                                class,
-                                             ),
-                                     });
-                                 }
+                                let _ = event_tx.send(HubEvent::DeviceReachability {
+                                    hub_key: None,
+                                    device_id: format_device_id(
+                                        outcome.node_id,
+                                        outcome.endpoint,
+                                    ),
+                                    fabric_id: fabric_id.clone(),
+                                    controller_stream_id: Some(event_stream_id.clone()),
+                                    evidence: rhythm_os::hub::DeviceReachabilityEvidence::Failure(
+                                        rhythm_os::hub::DeviceReachabilityFailureClass::Command,
+                                    ),
+                                });
                             }
                             Some(crate::events::translate_command_outcome(
                                 event_stream_id.clone(),
@@ -807,25 +802,6 @@ fn start_controller_event_stream(
     if let Err(error) = spawn_result {
         warn!(target: "evt", "Failed to start Matter controller event stream: {error}");
     }
-}
-
-fn reachability_failure_class(
-    detail: Option<&str>,
-) -> Option<rhythm_os::hub::DeviceReachabilityFailureClass> {
-    let detail = detail?.to_ascii_lowercase();
-    if detail.contains("mdns")
-        || detail.contains("address")
-        || detail.contains("operational discovery")
-    {
-        return Some(rhythm_os::hub::DeviceReachabilityFailureClass::AddressResolution);
-    }
-    (detail.contains("timeout")
-        || detail.contains("timed out")
-        || detail.contains("failed to connect")
-        || detail.contains("unavailable")
-        || detail.contains("broken pipe")
-        || detail.contains("chip error 0x32"))
-    .then_some(rhythm_os::hub::DeviceReachabilityFailureClass::Command)
 }
 
 fn subscription_reachability_failure_class(
@@ -2658,6 +2634,47 @@ mod tests {
         // than attempted inline: the termination must not start a retry storm.
         wait_for_atomic_at_least(&transport.subscribe_calls, 1);
         assert_eq!(transport.subscribe_calls.load(Ordering::SeqCst), 1);
+
+        shutdown.store(true, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn failed_command_outcome_is_bounded_command_evidence_without_text_parsing() {
+        let transport = Arc::new(FakeMatterTransport::new(
+            Vec::new(),
+            vec![commissioned_device(94, 1)],
+        ));
+        transport.queue_controller_event(MatterControllerEvent::CommandOutcome(
+            crate::transport::MatterCommandOutcome {
+                command_id: 7,
+                node_id: 94,
+                endpoint: 1,
+                status: crate::transport::MatterCommandOutcomeStatus::Failed,
+                detail: Some("an arbitrary future transport failure".to_string()),
+            },
+        ));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+
+        start_controller_event_stream(
+            transport,
+            event_tx,
+            shutdown.clone(),
+            "fabric-test".to_string(),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+
+        assert!(matches!(
+            event_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            HubEvent::DeviceReachability {
+                device_id,
+                evidence: rhythm_os::hub::DeviceReachabilityEvidence::Failure(
+                    rhythm_os::hub::DeviceReachabilityFailureClass::Command,
+                ),
+                ..
+            } if device_id == format_device_id(94, 1)
+        ));
 
         shutdown.store(true, Ordering::SeqCst);
     }

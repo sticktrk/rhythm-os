@@ -4735,6 +4735,17 @@ pub fn handle_get_device_attention(state: &SharedState) -> ApiResponse {
     }
 }
 
+fn device_attention_error_response(error: commands::DeviceAttentionError) -> ApiResponse {
+    let message = error.to_string();
+    match error {
+        commands::DeviceAttentionError::NotFound => ApiResponse::not_found(&message),
+        commands::DeviceAttentionError::JourneyMismatch => ApiResponse::bad_request(&message),
+        commands::DeviceAttentionError::Persist(_) | commands::DeviceAttentionError::Lock => {
+            ApiResponse::server_error(message)
+        }
+    }
+}
+
 pub fn handle_put_device_attention_snooze(
     state: &SharedState,
     entry_id: &str,
@@ -4746,7 +4757,7 @@ pub fn handle_put_device_attention_snooze(
     };
     match commands::do_device_attention_snooze(state, entry_id, Some(&correlation_id)) {
         Ok(json) => ApiResponse::json_ok(json),
-        Err(error) => ApiResponse::bad_request(&error.to_string()),
+        Err(error) => device_attention_error_response(error),
     }
 }
 
@@ -4761,7 +4772,7 @@ pub fn handle_put_device_attention_still_installed(
     };
     match commands::do_device_attention_still_installed(state, entry_id, Some(&correlation_id)) {
         Ok(json) => ApiResponse::json_ok(json),
-        Err(error) => ApiResponse::bad_request(&error.to_string()),
+        Err(error) => device_attention_error_response(error),
     }
 }
 
@@ -4776,7 +4787,7 @@ pub fn handle_put_device_attention_removal_selected(
     };
     match commands::do_device_attention_removal_selected(state, entry_id, Some(&correlation_id)) {
         Ok(json) => ApiResponse::json_ok(json),
-        Err(error) => ApiResponse::bad_request(&error.to_string()),
+        Err(error) => device_attention_error_response(error),
     }
 }
 
@@ -5240,6 +5251,37 @@ mod tests {
                 assert!(response.body.contains("correlation_id"));
             }
         }
+    }
+
+    #[test]
+    fn device_attention_mutations_use_specific_http_error_classes() {
+        let state = test_state();
+        let body = json!({"correlation_id": "unreachable-device-review-1"});
+        for response in [
+            handle_put_device_attention_snooze(&state, "missing", &body),
+            handle_put_device_attention_still_installed(&state, "missing", &body),
+            handle_put_device_attention_removal_selected(&state, "missing", &body),
+        ] {
+            assert_eq!(response.status, 404);
+            assert!(response.body.contains("not found or no longer actionable"));
+        }
+
+        let mismatch =
+            device_attention_error_response(commands::DeviceAttentionError::JourneyMismatch);
+        assert_eq!(mismatch.status, 400);
+        assert!(mismatch
+            .body
+            .contains("review journey does not match the entry"));
+
+        let persist = device_attention_error_response(commands::DeviceAttentionError::Persist(
+            anyhow::anyhow!("disk unavailable"),
+        ));
+        assert_eq!(persist.status, 500);
+        assert!(persist.body.contains("disk unavailable"));
+        assert_eq!(
+            device_attention_error_response(commands::DeviceAttentionError::Lock).status,
+            500,
+        );
     }
 
     #[test]

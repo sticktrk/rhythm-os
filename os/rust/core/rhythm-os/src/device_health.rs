@@ -127,6 +127,39 @@ struct ControllerHealth {
     grace_until: u64,
 }
 
+#[derive(Default)]
+struct PeerProofSummary {
+    newest: Option<(String, u64)>,
+    second_newest_at: u64,
+}
+
+impl PeerProofSummary {
+    fn observe(&mut self, key: &str, proof_at: u64) {
+        let Some((newest_key, newest_at)) = self.newest.as_mut() else {
+            self.newest = Some((key.to_string(), proof_at));
+            return;
+        };
+        if proof_at > *newest_at {
+            self.second_newest_at = self.second_newest_at.max(*newest_at);
+            *newest_key = key.to_string();
+            *newest_at = proof_at;
+        } else if key != newest_key {
+            self.second_newest_at = self.second_newest_at.max(proof_at);
+        }
+    }
+
+    fn newest_excluding(&self, key: &str) -> Option<u64> {
+        let (newest_key, newest_at) = self.newest.as_ref()?;
+        if newest_key != key {
+            Some(*newest_at)
+        } else if self.second_newest_at > 0 {
+            Some(self.second_newest_at)
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeviceHealthTransition {
     Admitted,
@@ -356,7 +389,7 @@ impl DeviceHealthLedger {
         let controller_stream_fingerprint = controller_stream_id
             .filter(|value| !value.is_empty())
             .map(crate::device_health::fabric_fingerprint);
-        let Some(record) = self.records.get_mut(&key) else {
+        let Some(record) = self.records.get(&key) else {
             // Prior proof on this exact fabric is an admission prerequisite.
             return DeviceHealthUpdate::default();
         };
@@ -365,6 +398,20 @@ impl DeviceHealthLedger {
         {
             return DeviceHealthUpdate::default();
         }
+        let controller_healthy = self
+            .controllers
+            .get(&hub_key.to_string())
+            .is_some_and(|controller| controller.connected && now >= controller.grace_until);
+        if !controller_healthy {
+            return DeviceHealthUpdate::default();
+        }
+        // See light_usage.rs clock_discontinuity_count for the same wall-clock precedent.
+        if now < record.last_proof_at || now < record.last_failure_at.unwrap_or(0) {
+            return DeviceHealthUpdate::default();
+        }
+        let Some(record) = self.records.get_mut(&key) else {
+            return DeviceHealthUpdate::default();
+        };
         if let Some(stream_id) = controller_stream_fingerprint {
             record.controller_stream_fingerprint = Some(stream_id);
         }
@@ -399,13 +446,15 @@ impl DeviceHealthLedger {
     }
 
     pub fn evaluate(&mut self, now: u64) -> DeviceHealthUpdate {
-        let snapshot: Vec<(String, DeviceHealthRecord)> = self
-            .records
-            .iter()
-            .map(|(key, record)| (key.clone(), record.clone()))
-            .collect();
+        let mut peer_proofs: HashMap<(HubKey, String), PeerProofSummary> = HashMap::new();
+        for (key, record) in &self.records {
+            peer_proofs
+                .entry((record.hub_key.clone(), record.fabric_fingerprint.clone()))
+                .or_default()
+                .observe(key, record.last_proof_at);
+        }
         let mut update = DeviceHealthUpdate::default();
-        for (key, candidate) in &snapshot {
+        for (key, candidate) in &mut self.records {
             if !matches!(
                 candidate.status,
                 DeviceHealthStatus::Monitoring | DeviceHealthStatus::Snoozed
@@ -423,17 +472,24 @@ impl DeviceHealthLedger {
             let Some(last_failure) = candidate.last_failure_at else {
                 continue;
             };
+            // See light_usage.rs clock_discontinuity_count for the same wall-clock precedent.
+            if now < candidate.last_proof_at || now < last_failure {
+                continue;
+            }
             let controller_healthy = self
                 .controllers
                 .get(&candidate.hub_key.to_string())
                 .is_some_and(|controller| controller.connected && now >= controller.grace_until);
-            let peer_healthy = snapshot.iter().any(|(peer_key, peer)| {
-                peer_key != key
-                    && peer.hub_key == candidate.hub_key
-                    && peer.fabric_fingerprint == candidate.fabric_fingerprint
-                    && peer.last_proof_at >= first_failure
-                    && peer.last_proof_at <= now
-                    && now.saturating_sub(peer.last_proof_at) <= HEALTHY_PEER_MAX_AGE_SECS
+            let newest_peer_proof = peer_proofs
+                .get(&(
+                    candidate.hub_key.clone(),
+                    candidate.fabric_fingerprint.clone(),
+                ))
+                .and_then(|summary| summary.newest_excluding(key));
+            let peer_healthy = newest_peer_proof.is_some_and(|proof_at| {
+                proof_at >= first_failure
+                    && proof_at <= now
+                    && now.saturating_sub(proof_at) <= HEALTHY_PEER_MAX_AGE_SECS
             });
             if !controller_healthy
                 || !peer_healthy
@@ -443,19 +499,16 @@ impl DeviceHealthLedger {
             {
                 continue;
             }
-            let Some(record) = self.records.get_mut(key) else {
-                continue;
-            };
-            record.status = DeviceHealthStatus::Pending;
-            record.snoozed_until = None;
-            let entry_id = record
+            candidate.status = DeviceHealthStatus::Pending;
+            candidate.snoozed_until = None;
+            let entry_id = candidate
                 .entry_id
                 .get_or_insert_with(generate_entry_id)
                 .clone();
-            record
+            candidate
                 .review_correlation_id
                 .get_or_insert_with(generate_review_correlation_id);
-            record.created_at.get_or_insert(now);
+            candidate.created_at.get_or_insert(now);
             update
                 .transitions
                 .push((entry_id, DeviceHealthTransition::Admitted));
@@ -758,6 +811,103 @@ mod tests {
     }
 
     #[test]
+    fn failures_during_controller_outage_or_grace_are_not_admitted() {
+        let mut ledger = DeviceHealthLedger::default();
+        ledger.note_controller_connected(&key(), 1);
+        for native_id in ["matter-1-1", "matter-2-1"] {
+            ledger.note_proof(
+                &format!("canonical-{native_id}"),
+                &key(),
+                native_id,
+                "fabric-a",
+                Some("stream-a"),
+                1,
+            );
+        }
+
+        ledger.note_controller_disconnected(&key());
+        let [outage_first, outage_second, outage_last] =
+            separated_failure_times(CONTROLLER_RESTART_GRACE_SECS + 2);
+        for at in [outage_first, outage_second, outage_last] {
+            admit_failure(
+                &mut ledger,
+                "matter-1-1",
+                DeviceReachabilityFailureClass::Read,
+                at,
+            );
+        }
+
+        let reconnected_at = outage_last + 1;
+        ledger.note_controller_connected(&key(), reconnected_at);
+        admit_failure(
+            &mut ledger,
+            "matter-1-1",
+            DeviceReachabilityFailureClass::Subscription,
+            reconnected_at + 1,
+        );
+        let after_grace = reconnected_at + CONTROLLER_RESTART_GRACE_SECS + 1;
+        ledger.note_proof(
+            "canonical-matter-2-1",
+            &key(),
+            "matter-2-1",
+            "fabric-a",
+            Some("stream-b"),
+            after_grace,
+        );
+        assert!(ledger.evaluate(after_grace).transitions.is_empty());
+        assert_eq!(
+            ledger
+                .records()
+                .find(|record| record.native_id == "matter-1-1")
+                .unwrap()
+                .failure_count,
+            0,
+        );
+
+        let [first, second, admitted_at] = separated_failure_times(after_grace + 1);
+        for (class, at) in [
+            (DeviceReachabilityFailureClass::Subscription, first),
+            (DeviceReachabilityFailureClass::Read, second),
+            (DeviceReachabilityFailureClass::Command, admitted_at),
+        ] {
+            admit_failure(&mut ledger, "matter-1-1", class, at);
+        }
+        ledger.note_proof(
+            "canonical-matter-2-1",
+            &key(),
+            "matter-2-1",
+            "fabric-a",
+            Some("stream-b"),
+            admitted_at,
+        );
+        assert_eq!(ledger.evaluate(admitted_at).transitions.len(), 1);
+    }
+
+    #[test]
+    fn frequent_proof_updates_do_not_require_immediate_persistence() {
+        let mut ledger = DeviceHealthLedger::default();
+        let first = ledger.note_proof(
+            "canonical-matter-1-1",
+            &key(),
+            "matter-1-1",
+            "fabric-a",
+            Some("stream-a"),
+            100,
+        );
+        let second = ledger.note_proof(
+            "canonical-matter-1-1",
+            &key(),
+            "matter-1-1",
+            "fabric-a",
+            Some("stream-a"),
+            100 + PROOF_PERSIST_INTERVAL_SECS - 1,
+        );
+
+        assert!(first.persist);
+        assert!(!second.persist);
+    }
+
+    #[test]
     fn healthy_peer_and_spanning_failures_admit_exactly_one_entry() {
         let mut ledger = DeviceHealthLedger::default();
         ledger.note_controller_connected(&key(), 1);
@@ -826,7 +976,8 @@ mod tests {
             Some("stream-a"),
             1,
         );
-        let [first_failure, second_failure, admitted_at] = separated_failure_times(2);
+        let [first_failure, second_failure, admitted_at] =
+            separated_failure_times(CONTROLLER_RESTART_GRACE_SECS + 2);
         for (class, at) in [
             (DeviceReachabilityFailureClass::Subscription, first_failure),
             (DeviceReachabilityFailureClass::Read, second_failure),
@@ -868,7 +1019,8 @@ mod tests {
             Some("stream-a"),
             1,
         );
-        let [first_failure, second_failure, admitted_at] = separated_failure_times(2);
+        let [first_failure, second_failure, admitted_at] =
+            separated_failure_times(CONTROLLER_RESTART_GRACE_SECS + 2);
         for (class, at) in [
             (DeviceReachabilityFailureClass::Subscription, first_failure),
             (DeviceReachabilityFailureClass::Read, second_failure),
@@ -1064,5 +1216,59 @@ mod tests {
             Some("journey-1")
         );
         assert!(ledger.visible_records(u64::MAX).is_empty());
+    }
+
+    #[test]
+    fn backwards_clock_never_records_or_admits() {
+        let mut ledger = DeviceHealthLedger::default();
+        ledger.note_controller_connected(&key(), 1);
+        for native_id in ["matter-1-1", "matter-2-1"] {
+            ledger.note_proof(
+                &format!("canonical-{native_id}"),
+                &key(),
+                native_id,
+                "fabric-a",
+                Some("stream-a"),
+                CONTROLLER_RESTART_GRACE_SECS + 1,
+            );
+        }
+        let [first, second, admitted_at] =
+            separated_failure_times(CONTROLLER_RESTART_GRACE_SECS + 2);
+        for (class, at) in [
+            (DeviceReachabilityFailureClass::Subscription, first),
+            (DeviceReachabilityFailureClass::Read, second),
+            (DeviceReachabilityFailureClass::Command, admitted_at),
+        ] {
+            admit_failure(&mut ledger, "matter-1-1", class, at);
+        }
+        ledger.note_proof(
+            "canonical-matter-2-1",
+            &key(),
+            "matter-2-1",
+            "fabric-a",
+            Some("stream-a"),
+            admitted_at,
+        );
+
+        let update = ledger.note_failure(
+            "canonical-matter-1-1",
+            &key(),
+            "matter-1-1",
+            "fabric-a",
+            Some("stream-a"),
+            DeviceReachabilityFailureClass::Read,
+            admitted_at - 1,
+        );
+        assert!(!update.persist);
+        assert_eq!(
+            ledger
+                .records()
+                .find(|record| record.native_id == "matter-1-1")
+                .unwrap()
+                .failure_count,
+            UNREACHABLE_MIN_FAILURES,
+        );
+        assert!(ledger.evaluate(admitted_at - 1).transitions.is_empty());
+        assert_eq!(ledger.evaluate(admitted_at).transitions.len(), 1);
     }
 }

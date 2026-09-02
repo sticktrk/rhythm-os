@@ -5,14 +5,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
+import 'package:rhythm_app/backend/backend.dart';
 import 'package:rhythm_app/providers/home_provider.dart';
 import 'package:rhythm_app/providers/room_provider.dart';
 import 'package:rhythm_app/providers/server_sync_provider.dart';
 import 'package:rhythm_app/screens/triage_screen.dart';
+import 'package:rhythm_app/services/analytics_service.dart';
 import 'package:rhythm_app/services/hue_ble_auto_discovery_service.dart';
 import 'package:rhythm_app/widgets/settings_row.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
+
+import '../helpers/capturing_analytics_backend.dart';
 
 class _TestHomeProvider extends HomeProvider {
   @override
@@ -26,6 +30,7 @@ class _FakeTriageServerApi extends RhythmServerApi {
 
   List<Map<String, dynamic>> triageEntries;
   List<Map<String, dynamic>> deviceAttentionEntries = [];
+  bool deviceAttentionUnavailable = false;
   int getTriageEntriesCalls = 0;
   int getDeviceAttentionEntriesCalls = 0;
   int snoozeDeviceAttentionCalls = 0;
@@ -51,6 +56,7 @@ class _FakeTriageServerApi extends RhythmServerApi {
   @override
   Future<List<RhythmDeviceAttention>?> getDeviceAttentionEntries() async {
     getDeviceAttentionEntriesCalls++;
+    if (deviceAttentionUnavailable) return null;
     return deviceAttentionEntries
         .map(RhythmDeviceAttention.fromJson)
         .toList(growable: false);
@@ -319,12 +325,16 @@ Map<String, dynamic> _unassignedDeviceEntry() {
   };
 }
 
-Map<String, dynamic> _unreachableDeviceEntry() {
+Map<String, dynamic> _unreachableDeviceEntry({
+  String status = 'pending',
+}) {
+  final threeDaysAgo = DateTime.now().millisecondsSinceEpoch ~/ 1000 -
+      3 * Duration.secondsPerDay;
   return {
     'id': 'unreachable-opaque-1',
     'journey_id': 'unreachable-device-review-1',
     'kind': 'unreachable_device',
-    'status': 'pending',
+    'status': status,
     'device': {
       'name': 'Hall Lamp',
       'native_id': 'matter-42-1',
@@ -334,7 +344,7 @@ Map<String, dynamic> _unreachableDeviceEntry() {
     },
     'evidence': {
       'failure_count': 3,
-      'last_proof_at': 100,
+      'last_proof_at': threeDaysAgo,
       'first_failure_at': 200,
       'last_failure_at': 90000,
       'created_at': 90000,
@@ -362,8 +372,19 @@ void main() {
     late _FakeTriageServerApi api;
     late _FakeRhythmConnection connection;
     late _TestServerSyncProvider serverSyncProvider;
+    late CapturingAnalyticsBackend analyticsBackend;
+    late AnalyticsService analytics;
 
     setUp(() async {
+      analyticsBackend = CapturingAnalyticsBackend();
+      await analyticsBackend.initialize();
+      BackendProvider.setInstanceForTesting(
+        auth: OfflineAuthBackend(),
+        analytics: analyticsBackend,
+      );
+      analytics = AnalyticsService();
+      analytics.resetForTesting();
+      await analytics.initialize();
       roomProvider = RoomProvider();
       await roomProvider.addRoom(const RoomDto(
         id: 'room-kitchen',
@@ -387,6 +408,8 @@ void main() {
     });
 
     tearDown(() {
+      analytics.resetForTesting();
+      BackendProvider.resetForTesting();
       serverSyncProvider.dispose();
       roomProvider.dispose();
       connection.dispose();
@@ -812,7 +835,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(api.getDeviceAttentionEntriesCalls, 0);
-      expect(find.text('Hall Lamp may be unreachable'), findsNothing);
+      expect(find.text("Haven't heard from Hall Lamp"), findsNothing);
     });
 
     testWidgets('guides recovery and waits for fresh device proof',
@@ -830,10 +853,10 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await _scrollTo(tester, find.text('Hall Lamp may be unreachable'));
+      await _scrollTo(tester, find.text("Haven't heard from Hall Lamp"));
       expect(find.byKey(const ValueKey('unreachable-device-card')),
           findsOneWidget);
-      expect(find.text('3 separate checks failed'), findsOneWidget);
+      expect(find.text('Last heard from 3 days ago'), findsOneWidget);
 
       await _tapVisible(tester, find.text("It's Still Installed"));
 
@@ -845,9 +868,63 @@ void main() {
         findsOneWidget,
       );
       expect(
-        find.textContaining('clears only after Rhythm receives fresh proof'),
+        find.text('This clears on its own once the light reports in.'),
         findsOneWidget,
       );
+      expect(find.text('Check Again'), findsNothing);
+    });
+
+    testWidgets('recovery polling does not log repeated review views',
+        (tester) async {
+      api.triageEntries = [];
+      api.deviceAttentionEntries = [
+        _unreachableDeviceEntry(status: 'awaiting_recovery'),
+      ];
+      serverSyncProvider.matterUnreachableTriageSupportedForTest = true;
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          connection: connection,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final callsAfterInitialLoad = api.getDeviceAttentionEntriesCalls;
+      await tester.pump(const Duration(seconds: 16));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 15));
+      await tester.pump();
+
+      expect(
+        api.getDeviceAttentionEntriesCalls,
+        greaterThanOrEqualTo(callsAfterInitialLoad + 2),
+      );
+      expect(
+        analyticsBackend.events
+            .where((event) => event.name == 'device_review_loaded'),
+        hasLength(1),
+      );
+    });
+
+    testWidgets('keeps legacy review entries when attention loading fails',
+        (tester) async {
+      api.triageEntries = [_roomBindingEntry()];
+      api.deviceAttentionUnavailable = true;
+      serverSyncProvider.matterUnreachableTriageSupportedForTest = true;
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          connection: connection,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Merge Rooms'), findsOneWidget);
+      expect(find.text('Not connected to server'), findsNothing);
     });
 
     testWidgets('renders deterministic unreachable-device review evidence',
@@ -880,7 +957,6 @@ void main() {
                   onStillInstalled: () {},
                   onRemoved: () {},
                   onSnooze: () {},
-                  onRecheck: () {},
                 ),
               ),
             ),
@@ -889,7 +965,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       final screenshotFinder =
-          find.byKey(const ValueKey('unreachable-device-evidence-surface'));
+          find.byKey(const ValueKey('unreachable-device-card'));
       expect(screenshotFinder, findsOneWidget);
 
       if (outputDir.isNotEmpty) {
@@ -921,7 +997,7 @@ void main() {
 
       expect(api.snoozeDeviceAttentionCalls, 1);
       expect(api.attentionCorrelationIds, ['unreachable-device-review-1']);
-      expect(find.text('Hall Lamp may be unreachable'), findsNothing);
+      expect(find.text("Haven't heard from Hall Lamp"), findsNothing);
     });
 
     testWidgets('uses graceful Matter removal before local-only cleanup',
@@ -941,8 +1017,8 @@ void main() {
       await tester.pumpAndSettle();
 
       await _tapVisible(tester, find.text('I Removed It'));
-      expect(find.text('Try Graceful Removal'), findsOneWidget);
-      await tester.tap(find.text('Try Graceful Removal'));
+      expect(find.text('Remove Device'), findsOneWidget);
+      await tester.tap(find.text('Remove Device'));
       await tester.pumpAndSettle();
 
       expect(api.unpairForces, [false]);
@@ -965,7 +1041,39 @@ void main() {
         ['unreachable-device-review-1', 'unreachable-device-review-1'],
       );
       expect(connection.reconnectCalls, 1);
-      expect(find.text('Hall Lamp may be unreachable'), findsNothing);
+      expect(find.text("Haven't heard from Hall Lamp"), findsNothing);
+    });
+
+    testWidgets('cancelling graceful removal preserves the review journey',
+        (tester) async {
+      api.triageEntries = [];
+      api.deviceAttentionEntries = [_unreachableDeviceEntry()];
+      api.unpairResult = {'status': 'failed', 'error': 'offline'};
+      serverSyncProvider.matterUnreachableTriageSupportedForTest = true;
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          connection: connection,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await _tapVisible(tester, find.text('I Removed It'));
+      await tester.tap(find.text('Remove Device'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Keep Device'));
+      await tester.pumpAndSettle();
+
+      api.attentionCorrelationIds.clear();
+      await _tapVisible(tester, find.text('Not Now'));
+
+      expect(api.snoozeDeviceAttentionCalls, 1);
+      expect(
+        api.attentionCorrelationIds,
+        ['unreachable-device-review-1'],
+      );
     });
   });
 }

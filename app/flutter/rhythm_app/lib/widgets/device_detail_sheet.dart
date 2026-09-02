@@ -2326,7 +2326,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   (IconData, Color) _iconForType(RhythmDeviceType type) => switch (type) {
         RhythmDeviceType.light => (
             Icons.lightbulb_outline,
-            const Color(0xFFFFB74D)
+            CelestialColors.warning,
           ),
         RhythmDeviceType.button => (
             Icons.touch_app_outlined,
@@ -2338,7 +2338,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
           ),
         RhythmDeviceType.contact => (
             Icons.sensor_door_outlined,
-            const Color(0xFFFFB74D)
+            CelestialColors.warning,
           ),
       };
 }
@@ -2458,7 +2458,6 @@ class _FlashButton extends StatefulWidget {
 
 class _FlashButtonState extends State<_FlashButton>
     with SingleTickerProviderStateMixin {
-  static const _amber = Color(0xFFFFB74D);
   static const _hot = Color(0xFFFFE082);
 
   late final AnimationController _flash;
@@ -2552,7 +2551,7 @@ class _FlashButtonState extends State<_FlashButton>
                               Icon(
                                 Icons.lightbulb_outline,
                                 size: 20,
-                                color: _amber.withValues(
+                                color: CelestialColors.warning.withValues(
                                   alpha: 0.9 - intensity * 0.5,
                                 ),
                                 shadows: [

@@ -970,11 +970,6 @@ impl HubLightController for MatterLightController {
                 Some(false) => {}
                 None => {
                     indeterminate_count += 1;
-                    self.hub_data.record_endpoint_failure(
-                        node_id,
-                        endpoint,
-                        DeviceReachabilityFailureClass::Subscription,
-                    );
                 }
             }
         }
@@ -1075,6 +1070,16 @@ mod tests {
         Arc<SpyTransport>,
         Arc<Mutex<MatterDeviceRegistry>>,
     ) {
+        let (controller, spy, registry, _event_rx) = make_controller_with_events();
+        (controller, spy, registry)
+    }
+
+    fn make_controller_with_events() -> (
+        MatterLightController,
+        Arc<SpyTransport>,
+        Arc<Mutex<MatterDeviceRegistry>>,
+        std::sync::mpsc::Receiver<rhythm_os::hub::HubEvent>,
+    ) {
         let spy = Arc::new(SpyTransport::new());
         let registry = Arc::new(Mutex::new(MatterDeviceRegistry::with_options(true)));
 
@@ -1089,7 +1094,7 @@ mod tests {
             vec!["matter-42".to_string(), "matter-43".to_string()],
         );
 
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
         let hub_data = Arc::new(crate::hub_state::MatterHubData {
             transport: std::sync::OnceLock::new(),
             capture_dir: std::sync::OnceLock::new(),
@@ -1110,7 +1115,7 @@ mod tests {
         });
 
         let controller = MatterLightController::new(spy.clone(), hub_data);
-        (controller, spy, registry)
+        (controller, spy, registry, rx)
     }
 
     fn set_kitchen_group(registry: &Arc<Mutex<MatterDeviceRegistry>>, group_id: u16) {
@@ -1273,6 +1278,23 @@ mod tests {
         assert_eq!(
             MatterLightController::parse_device_id("matter-42"),
             Some((42, 1))
+        );
+    }
+
+    #[test]
+    fn missing_periodic_observation_is_indeterminate_without_failure_evidence() {
+        let (controller, _spy, _registry, event_rx) = make_controller_with_events();
+
+        let result = block_on(controller.any_lights_on_target_for_periodic(
+            &HubDispatchTarget::Devices {
+                native_ids: vec!["matter-42".to_string()],
+            },
+        ));
+
+        assert!(matches!(result, Err(LightControlError::ConnectionError(_))));
+        assert!(
+            event_rx.try_recv().is_err(),
+            "absence of a cached report must not manufacture reachability failure evidence"
         );
     }
 

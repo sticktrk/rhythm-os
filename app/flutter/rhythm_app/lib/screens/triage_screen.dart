@@ -148,7 +148,7 @@ class _TriageScreenState extends State<TriageScreen> {
     return _entries.where(matches).toList();
   }
 
-  Future<void> _loadEntries({bool sync = false}) async {
+  Future<void> _loadEntries({bool sync = false, bool logView = true}) async {
     final loadGeneration = _loadFence.begin();
     debugPrint(
         'TriageScreen: _loadEntries called (busy=$_busy, loading=$_loading, sync=$sync)');
@@ -169,10 +169,11 @@ class _TriageScreenState extends State<TriageScreen> {
       } else {
         typedAttentionEntries = const <RhythmDeviceAttention>[];
       }
-      final attentionEntries = typedAttentionEntries
-          ?.map((entry) => entry.toJson())
-          .toList(growable: false);
-      final entries = legacyEntries == null || attentionEntries == null
+      final attentionEntries =
+          (typedAttentionEntries ?? const <RhythmDeviceAttention>[])
+              .map((entry) => entry.toJson())
+              .toList(growable: false);
+      final entries = legacyEntries == null
           ? null
           : <Map<String, dynamic>>[
               ...legacyEntries,
@@ -200,20 +201,28 @@ class _TriageScreenState extends State<TriageScreen> {
         _hueAuthority = hueAuthority;
         _loading = false;
       });
+      if (entries == null) {
+        _recoveryRefreshTimer?.cancel();
+        _recoveryRefreshTimer = null;
+      }
       if (entries != null) {
-        _recordUnreachableEntryBoundaries(attentionEntries!);
+        _recordUnreachableEntryBoundaries(attentionEntries);
         _scheduleRecoveryRefresh(attentionEntries);
-        final deviceCount = entries.where(_isDeviceEntry).length;
-        final roomCount = entries.where(_isRoomEntry).length;
-        AnalyticsService().logTriageViewed(
-          entryCount: entries.length,
-          deviceCount: deviceCount,
-          roomCount: roomCount,
-        );
+        if (logView) {
+          final deviceCount = entries.where(_isDeviceEntry).length;
+          final roomCount = entries.where(_isRoomEntry).length;
+          AnalyticsService().logTriageViewed(
+            entryCount: entries.length,
+            deviceCount: deviceCount,
+            roomCount: roomCount,
+          );
+        }
       }
     } catch (e, st) {
       debugPrint('TriageScreen: _loadEntries failed: $e\n$st');
       if (mounted && _loadFence.isCurrent(loadGeneration)) {
+        _recoveryRefreshTimer?.cancel();
+        _recoveryRefreshTimer = null;
         setState(() {
           _connectionError = true;
           _loading = false;
@@ -239,6 +248,7 @@ class _TriageScreenState extends State<TriageScreen> {
         continue;
       }
       final journeyId = _journeyIdFor(entryId);
+      if (journeyId == null) continue;
       unawaited(
         AnalyticsService().logUnreachableDeviceAttention(
           journeyId: journeyId,
@@ -251,21 +261,28 @@ class _TriageScreenState extends State<TriageScreen> {
     for (final entryId in recovered) {
       _awaitingRecoveryEntries.remove(entryId);
       final journeyId = _journeyIdFor(entryId);
-      unawaited(
-        AnalyticsService().logUnreachableDeviceAttention(
-          journeyId: journeyId,
-          action: 'recovery_verified',
-          state: 'recovered',
-        ),
-      );
-      _unreachableJourneyIds.remove(entryId);
+      if (journeyId != null) {
+        unawaited(
+          AnalyticsService().logUnreachableDeviceAttention(
+            journeyId: journeyId,
+            action: 'no_longer_listed',
+            state: 'awaiting_recovery',
+          ),
+        );
+      }
     }
+    _unreachableJourneyIds.removeWhere(
+      (entryId, _) => !currentIds.contains(entryId),
+    );
+    _reportedUnreachableEntries.removeWhere(
+      (entryId) => !currentIds.contains(entryId),
+    );
   }
 
-  String _journeyIdFor(String entryId) {
+  String? _journeyIdFor(String entryId) {
     final journeyId = _unreachableJourneyIds[entryId];
     if (journeyId == null || journeyId.isEmpty) {
-      throw StateError('Device attention entry is missing its review journey.');
+      return null;
     }
     return journeyId;
   }
@@ -282,7 +299,7 @@ class _TriageScreenState extends State<TriageScreen> {
     _recoveryRefreshTimer ??= Timer.periodic(
       const Duration(seconds: 15),
       (_) {
-        if (mounted && !_busy) unawaited(_loadEntries());
+        if (mounted && !_busy) unawaited(_loadEntries(logView: false));
       },
     );
   }
@@ -729,7 +746,6 @@ class _TriageScreenState extends State<TriageScreen> {
           onStillInstalled: () => _markDeviceStillInstalled(entry),
           onRemoved: () => _removeUnreachableDevice(entry),
           onSnooze: () => _snoozeUnreachableDevice(entry),
-          onRecheck: () => _loadEntries(),
         ),
       );
     }
@@ -1034,6 +1050,14 @@ class _TriageScreenState extends State<TriageScreen> {
     final entryId = entry['id']?.toString() ?? '';
     if (_busy || entryId.isEmpty) return;
     final journeyId = _journeyIdFor(entryId);
+    if (journeyId == null) {
+      _showAttentionError(
+        'This item needs to be refreshed',
+        StateError('Missing review journey.'),
+      );
+      unawaited(_loadEntries());
+      return;
+    }
     setState(() => _busy = true);
     try {
       final success = await context
@@ -1048,7 +1072,6 @@ class _TriageScreenState extends State<TriageScreen> {
         state: entry['status']?.toString() ?? 'pending',
       );
       if (mounted) await _loadEntries();
-      _unreachableJourneyIds.remove(entryId);
     } catch (error) {
       _showAttentionError('Could not snooze this device', error);
     } finally {
@@ -1062,6 +1085,14 @@ class _TriageScreenState extends State<TriageScreen> {
     final entryId = entry['id']?.toString() ?? '';
     if (_busy || entryId.isEmpty) return;
     final journeyId = _journeyIdFor(entryId);
+    if (journeyId == null) {
+      _showAttentionError(
+        'This item needs to be refreshed',
+        StateError('Missing review journey.'),
+      );
+      unawaited(_loadEntries());
+      return;
+    }
     setState(() => _busy = true);
     try {
       final success = await context
@@ -1100,6 +1131,14 @@ class _TriageScreenState extends State<TriageScreen> {
     final hubAddress = device['hub_address']?.toString() ?? '';
     if (entryId.isEmpty || deviceId.isEmpty || hubType != 'matter') return;
     final journeyId = _journeyIdFor(entryId);
+    if (journeyId == null) {
+      _showAttentionError(
+        'This item needs to be refreshed',
+        StateError('Missing review journey.'),
+      );
+      unawaited(_loadEntries());
+      return;
+    }
     final syncProvider = context.read<ServerSyncProvider>();
 
     final confirmed = await showDialog<bool>(
@@ -1111,8 +1150,8 @@ class _TriageScreenState extends State<TriageScreen> {
           style: TextStyle(color: CelestialColors.textPrimary),
         ),
         content: Text(
-          'Rhythm will first try to remove $name from its Matter fabric. '
-          'If the light cannot be reached, you can separately choose local-only cleanup.',
+          'Rhythm will try to remove $name from the Matter network first. '
+          'If the light cannot be reached, you can choose to remove it from Rhythm only.',
           style: const TextStyle(color: CelestialColors.textSecondary),
         ),
         actions: [
@@ -1123,7 +1162,7 @@ class _TriageScreenState extends State<TriageScreen> {
           TextButton(
             onPressed: () => Navigator.of(dialogContext).pop(true),
             child: Text(
-              'Try Graceful Removal',
+              'Remove Device',
               style: TextStyle(color: Colors.red.shade300),
             ),
           ),
@@ -1168,9 +1207,9 @@ class _TriageScreenState extends State<TriageScreen> {
             context: context,
             builder: (dialogContext) => AlertDialog(
               backgroundColor: CelestialColors.backgroundCard,
-              title: const Text(
-                'Matter removal could not finish',
-                style: TextStyle(color: CelestialColors.textPrimary),
+              title: Text(
+                '$name did not respond',
+                style: const TextStyle(color: CelestialColors.textPrimary),
               ),
               content: Text(
                 '$error\n\nLocal-only cleanup removes this light from Rhythm but cannot remove the Matter fabric credentials stored on the offline light. You may need to factory-reset it before pairing it again.',
@@ -1215,7 +1254,6 @@ class _TriageScreenState extends State<TriageScreen> {
     } catch (error) {
       _showAttentionError('Could not remove this device', error);
     } finally {
-      _unreachableJourneyIds.remove(entryId);
       if (mounted) setState(() => _busy = false);
     }
   }
@@ -1534,6 +1572,21 @@ class _TriageCard extends StatelessWidget {
 // Unreachable Matter device card
 // =============================================================================
 
+String _relativeAge(int unixSeconds) {
+  if (unixSeconds <= 0) return 'unknown';
+  final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+  final elapsedSeconds = now > unixSeconds ? now - unixSeconds : 0;
+  final days = elapsedSeconds ~/ Duration.secondsPerDay;
+  if (days > 0) return '$days ${days == 1 ? 'day' : 'days'} ago';
+  final hours = elapsedSeconds ~/ Duration.secondsPerHour;
+  if (hours > 0) return '$hours ${hours == 1 ? 'hour' : 'hours'} ago';
+  final minutes = elapsedSeconds ~/ Duration.secondsPerMinute;
+  if (minutes > 0) {
+    return '$minutes ${minutes == 1 ? 'minute' : 'minutes'} ago';
+  }
+  return 'just now';
+}
+
 class UnreachableDeviceAttentionCard extends StatelessWidget {
   const UnreachableDeviceAttentionCard({
     super.key,
@@ -1542,7 +1595,6 @@ class UnreachableDeviceAttentionCard extends StatelessWidget {
     required this.onStillInstalled,
     required this.onRemoved,
     required this.onSnooze,
-    required this.onRecheck,
   });
 
   final Map<String, dynamic> entry;
@@ -1550,9 +1602,6 @@ class UnreachableDeviceAttentionCard extends StatelessWidget {
   final VoidCallback onStillInstalled;
   final VoidCallback onRemoved;
   final VoidCallback onSnooze;
-  final VoidCallback onRecheck;
-
-  static const _warning = Color(0xFFFFB74D);
 
   @override
   Widget build(BuildContext context) {
@@ -1561,145 +1610,140 @@ class UnreachableDeviceAttentionCard extends StatelessWidget {
     final name = device['name']?.toString() ?? 'Matter light';
     final status = entry['status']?.toString() ?? 'pending';
     final awaitingRecovery = status == 'awaiting_recovery';
-    final failureCount = evidence['failure_count'] as int? ?? 0;
+    final lastProofAt = (evidence['last_proof_at'] as num?)?.toInt() ?? 0;
     final guidance = entry['guidance']?.toString() ??
         'Confirm whether the light is still installed and powered.';
 
-    return RepaintBoundary(
-      key: const ValueKey('unreachable-device-card-screenshot'),
-      child: Semantics(
-        container: true,
-        label: '$name needs attention',
-        child: Container(
-          key: const ValueKey('unreachable-device-card'),
-          decoration: BoxDecoration(
-            color: CelestialColors.backgroundCard,
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: _warning.withValues(alpha: 0.38)),
-          ),
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
+    return Container(
+      key: const ValueKey('unreachable-device-card'),
+      decoration: BoxDecoration(
+        color: CelestialColors.backgroundCard,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: CelestialColors.warning.withValues(alpha: 0.25),
+        ),
+      ),
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
             children: [
-              Row(
-                children: [
-                  Container(
-                    width: 42,
-                    height: 42,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: _warning.withValues(alpha: 0.16),
-                    ),
-                    child: Icon(
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: CelestialColors.warning.withValues(alpha: 0.16),
+                ),
+                child: Icon(
+                  awaitingRecovery
+                      ? Icons.power_settings_new_rounded
+                      : Icons.lightbulb_outline_rounded,
+                  color: CelestialColors.warning,
+                  size: 22,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
                       awaitingRecovery
-                          ? Icons.power_settings_new_rounded
-                          : Icons.lightbulb_outline_rounded,
-                      color: _warning,
-                      size: 22,
+                          ? 'Waiting for $name'
+                          : 'Haven\'t heard from $name',
+                      style: const TextStyle(
+                        color: CelestialColors.textPrimary,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
+                    Text(
+                      awaitingRecovery
+                          ? 'Waiting for the light to report in'
+                          : 'Last heard from ${_relativeAge(lastProofAt)}',
+                      style: TextStyle(
+                        color: CelestialColors.textSecondary
+                            .withValues(alpha: 0.7),
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Text(
+            guidance,
+            style: TextStyle(
+              color: CelestialColors.textSecondary.withValues(alpha: 0.78),
+              fontSize: 13,
+              height: 1.4,
+            ),
+          ),
+          if (awaitingRecovery) ...[
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: CelestialColors.warning.withValues(alpha: 0.09),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(
+                    Icons.verified_outlined,
+                    color: CelestialColors.warning,
+                    size: 18,
                   ),
-                  const SizedBox(width: 12),
+                  SizedBox(width: 8),
                   Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          awaitingRecovery
-                              ? 'Waiting for $name'
-                              : '$name may be unreachable',
-                          style: const TextStyle(
-                            color: CelestialColors.textPrimary,
-                            fontSize: 15,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        Text(
-                          awaitingRecovery
-                              ? 'Recovery check in progress'
-                              : '$failureCount separate checks failed',
-                          style: TextStyle(
-                            color: CelestialColors.textSecondary
-                                .withValues(alpha: 0.7),
-                            fontSize: 12,
-                          ),
-                        ),
-                      ],
+                    child: Text(
+                      'This clears on its own once the light reports in.',
+                      style: TextStyle(
+                        color: CelestialColors.textSecondary,
+                        fontSize: 12,
+                        height: 1.35,
+                      ),
                     ),
                   ),
                 ],
               ),
-              const SizedBox(height: 12),
-              Text(
-                awaitingRecovery
-                    ? guidance
-                    : 'Rhythm has not received a fresh report, read, or acknowledged command from this light while other Matter devices remained healthy.',
-                style: TextStyle(
-                  color: CelestialColors.textSecondary.withValues(alpha: 0.78),
-                  fontSize: 13,
-                  height: 1.4,
-                ),
-              ),
-              if (awaitingRecovery) ...[
-                const SizedBox(height: 10),
-                Container(
-                  padding: const EdgeInsets.all(10),
-                  decoration: BoxDecoration(
-                    color: _warning.withValues(alpha: 0.09),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: const Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+            ),
+          ],
+          const SizedBox(height: 16),
+          Opacity(
+            opacity: busy ? 0.5 : 1,
+            child: IgnorePointer(
+              ignoring: busy,
+              child: Column(
+                children: [
+                  if (!awaitingRecovery) ...[
+                    SizedBox(
+                      width: double.infinity,
+                      child: _ActionButton(
+                        label: "It's Still Installed",
+                        color: CelestialColors.warning,
+                        onTap: onStillInstalled,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                  ],
+                  Row(
                     children: [
-                      Icon(Icons.verified_outlined, color: _warning, size: 18),
-                      SizedBox(width: 8),
                       Expanded(
-                        child: Text(
-                          'The card clears only after Rhythm receives fresh proof from the light.',
-                          style: TextStyle(
-                            color: CelestialColors.textSecondary,
-                            fontSize: 12,
-                            height: 1.35,
-                          ),
+                        child: _ActionButton(
+                          label: 'I Removed It',
+                          color: CelestialColors.textSecondary,
+                          onTap: onRemoved,
                         ),
                       ),
-                    ],
-                  ),
-                ),
-              ],
-              const SizedBox(height: 16),
-              Opacity(
-                opacity: busy ? 0.5 : 1,
-                child: IgnorePointer(
-                  ignoring: busy,
-                  child: Column(
-                    children: [
-                      Row(
-                        children: [
-                          Expanded(
-                            child: _ActionButton(
-                              label: awaitingRecovery
-                                  ? 'Check Again'
-                                  : "It's Still Installed",
-                              color: _warning,
-                              onTap: awaitingRecovery
-                                  ? onRecheck
-                                  : onStillInstalled,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: _ActionButton(
-                              label: 'I Removed It',
-                              color: Colors.redAccent,
-                              onTap: onRemoved,
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      SizedBox(
-                        width: double.infinity,
+                      const SizedBox(width: 8),
+                      Expanded(
                         child: _ActionButton(
                           label: 'Not Now',
                           color: CelestialColors.textSecondary,
@@ -1708,11 +1752,11 @@ class UnreachableDeviceAttentionCard extends StatelessWidget {
                       ),
                     ],
                   ),
-                ),
+                ],
               ),
-            ],
+            ),
           ),
-        ),
+        ],
       ),
     );
   }
@@ -2276,22 +2320,28 @@ class _ActionButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        decoration: BoxDecoration(
-          color: color.withValues(alpha: 0.12),
-          borderRadius: BorderRadius.circular(10),
-          border: Border.all(color: color.withValues(alpha: 0.3)),
-        ),
-        child: Center(
-          child: Text(
-            label,
-            style: TextStyle(
-              color: color,
-              fontSize: 13,
-              fontWeight: FontWeight.w600,
+    return Semantics(
+      button: true,
+      enabled: true,
+      label: label,
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          constraints: const BoxConstraints(minHeight: 44),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.12),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: color.withValues(alpha: 0.3)),
+          ),
+          child: Center(
+            child: Text(
+              label,
+              style: TextStyle(
+                color: color,
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+              ),
             ),
           ),
         ),

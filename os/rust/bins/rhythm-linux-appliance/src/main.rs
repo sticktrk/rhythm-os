@@ -273,6 +273,7 @@ fn main() -> Result<()> {
             ),
         ));
     }
+    rhythm_os::commands::reconcile_device_health(&state);
     install_factory_reset_hook(&state)?;
     hydrate_persisted_wifi_credentials(&state);
 

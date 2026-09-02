@@ -531,7 +531,7 @@ class _BehaviorMenuRow extends StatelessWidget {
           ),
         RoomScheduleBehavior.standby => (
             Icons.nightlight_round,
-            const Color(0xFFFFB74D),
+            CelestialColors.warning,
             'Faint night-light glow',
           ),
         RoomScheduleBehavior.off => (
