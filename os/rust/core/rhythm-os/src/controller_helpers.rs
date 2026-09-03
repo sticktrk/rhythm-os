@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use rhythm_core::controller::{LightControlError, LightControlResult};
 use rhythm_core::lighting::LightingCommand;
 use rhythm_core::room::Room;
-use rhythm_core::{kelvin_to_xy, Rgb};
+use rhythm_core::{kelvin_to_rgb, kelvin_to_xy, Rgb};
 use rhythm_devices::{
     adapt_command, builtin_db, AdaptedCommand, ColorPreference, ColorRequest, LightCapabilities,
     LightType,
@@ -73,7 +73,7 @@ pub fn adapt_lighting_command(
         ColorRequest::ColorTemperature {
             kelvin: clamped_kelvin,
             xy: (clamped_xy.x, clamped_xy.y),
-            hue_saturation: Some(rgb_to_matter_hue_saturation(command.rgb)),
+            hue_saturation: Some(rgb_to_matter_hue_saturation(kelvin_to_rgb(clamped_kelvin))),
         }
     };
 
@@ -281,12 +281,14 @@ mod tests {
     }
 
     #[test]
-    fn adapt_lighting_command_can_use_hue_saturation_for_adaptive_white() {
+    fn adapt_lighting_command_recomputes_hue_saturation_from_clamped_kelvin() {
         let caps = LightCapabilities {
             color_modes: vec![
                 rhythm_devices::ColorMode::HueSaturation,
                 rhythm_devices::ColorMode::ColorTemperature,
             ],
+            min_kelvin: Some(3080),
+            max_kelvin: Some(6120),
             ..LightCapabilities::defaults_for(LightType::ExtendedColor)
         };
         let command = LightingCommand::new(77, 1800);
@@ -297,6 +299,10 @@ mod tests {
         assert_eq!(adapted.kelvin, None);
         assert_eq!(adapted.xy, None);
         assert_eq!(
+            adapted.hue_saturation,
+            Some(rgb_to_matter_hue_saturation(kelvin_to_rgb(3080)))
+        );
+        assert_ne!(
             adapted.hue_saturation,
             Some(rgb_to_matter_hue_saturation(command.rgb))
         );
