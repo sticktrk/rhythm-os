@@ -54,14 +54,6 @@ OUTPUT="$(tools/ci/detect-changed-surfaces.sh --base HEAD^ --head HEAD)"
 assert_output "$OUTPUT" 'flutter=true'
 assert_output "$OUTPUT" 'flutter_ui=true'
 
-mkdir -p os/rust/integrations/rhythm-matter/src
-printf 'pub struct Profile;\n' > os/rust/integrations/rhythm-matter/src/profile.rs
-git add os/rust/integrations/rhythm-matter/src/profile.rs
-git commit -qm matter
-OUTPUT="$(tools/ci/detect-changed-surfaces.sh --base HEAD^ --head HEAD)"
-assert_output "$OUTPUT" 'rust=true'
-assert_output "$OUTPUT" 'matter=true'
-
 mkdir -p app/flutter/rhythm_app/lib/onboarding/screens
 printf 'class WelcomeScreen {}\n' > app/flutter/rhythm_app/lib/onboarding/screens/welcome_screen.dart
 git add app/flutter/rhythm_app/lib/onboarding/screens/welcome_screen.dart
@@ -78,7 +70,6 @@ assert_output "$OUTPUT" 'flutter_ui=true'
 
 OUTPUT="$(tools/ci/detect-changed-surfaces.sh --all)"
 assert_output "$OUTPUT" 'flutter_ui=true'
-assert_output "$OUTPUT" 'matter=true'
 
 GITHUB_OUTPUT="$TMP_DIR/github-output.txt"
 export GITHUB_OUTPUT

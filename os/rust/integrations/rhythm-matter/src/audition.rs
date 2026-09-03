@@ -82,13 +82,12 @@ pub fn run_audition(state: &SharedState, params: &Value) -> Result<Value> {
         .ok()
         .and_then(|profiles| profiles.get(&native_id).cloned())
         .unwrap_or_default();
-    if scenario == "try_with" {
-        apply_try_with_override(
-            &mut profile,
-            params
-                .get("profile_override")
-                .context("try_with requires profile_override")?,
-        )?;
+    // Accepted Try-with fields ride along on every later scenario so the
+    // rest of the audition rehearses the strategy the operator validated.
+    match params.get("profile_override") {
+        Some(profile_override) => apply_try_with_override(&mut profile, profile_override)?,
+        None if scenario == "try_with" => anyhow::bail!("try_with requires profile_override"),
+        None => {}
     }
 
     let capability_snapshot = transport
@@ -238,9 +237,12 @@ fn scenario_actions(scenario: &str, params: &Value) -> Result<Vec<AuditionAction
         "subscription_establish" | "subscription_external_change" | "subscription_liveness" => {
             Vec::new()
         }
+        // Alternate targets so every plan has to move colour and level;
+        // repeating one target would let a dropped command pass readback.
         "command_spacing" => COMMAND_SPACING_GAPS_MS
             .iter()
-            .map(|_| AuditionAction::On(cool()))
+            .enumerate()
+            .map(|(index, _)| AuditionAction::On(if index % 2 == 0 { cool() } else { warm() }))
             .collect(),
         "try_with" => {
             let base = params
@@ -1030,6 +1032,19 @@ mod tests {
             profile.command_spacing_ms.source,
             MatterProfileSource::TryWith
         );
+    }
+
+    #[test]
+    fn command_spacing_alternates_targets_so_every_plan_must_move_the_bulb() {
+        let actions = scenario_actions("command_spacing", &Value::Null).unwrap();
+        let kelvins = actions
+            .iter()
+            .map(|action| match action {
+                AuditionAction::On(command) => command.kelvin,
+                AuditionAction::Off => 0,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(kelvins, vec![6000, 2700, 6000, 2700]);
     }
 
     #[test]

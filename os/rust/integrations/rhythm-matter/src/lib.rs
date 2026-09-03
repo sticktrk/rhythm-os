@@ -23,6 +23,8 @@ pub mod controller;
 pub mod device_store;
 pub mod discovery;
 pub mod events;
+#[cfg(test)]
+mod fake_bulb;
 pub mod groups;
 pub mod hub_state;
 pub mod lifecycle;

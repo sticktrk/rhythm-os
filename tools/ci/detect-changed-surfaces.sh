@@ -77,7 +77,6 @@ sdk=false
 admin_api=false
 admin_ui=false
 supabase=false
-matter=false
 
 mark_all() {
     rust=true
@@ -87,7 +86,6 @@ mark_all() {
     admin_api=true
     admin_ui=true
     supabase=true
-    matter=true
 }
 
 if [ "$ALL" = true ]; then
@@ -142,11 +140,6 @@ else
                 supabase=true
                 ;;
         esac
-        case "$path" in
-            os/rust/integrations/rhythm-matter/*|os/rust/bins/rhythm-chipd/*|tools/os/scripts/tests/matter-bulb-audition-lighting-app.sh)
-                matter=true
-                ;;
-        esac
     done <<EOF
 $CHANGED_FILES
 EOF
@@ -174,4 +167,3 @@ emit sdk "$sdk"
 emit admin_api "$admin_api"
 emit admin_ui "$admin_ui"
 emit supabase "$supabase"
-emit matter "$matter"

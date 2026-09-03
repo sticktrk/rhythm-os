@@ -1400,6 +1400,13 @@ mod tests {
         Arc<Mutex<MatterDeviceRegistry>>,
     ) {
         let spy = Arc::new(SpyTransport::new());
+        let (controller, registry) = make_controller_with_transport(spy.clone());
+        (controller, spy, registry)
+    }
+
+    fn make_controller_with_transport(
+        transport: Arc<dyn MatterTransport>,
+    ) -> (MatterLightController, Arc<Mutex<MatterDeviceRegistry>>) {
         let registry = Arc::new(Mutex::new(MatterDeviceRegistry::with_options(true)));
 
         registry.lock().unwrap().upsert_room(
@@ -1445,8 +1452,8 @@ mod tests {
             event_tx: tx,
         });
 
-        let controller = MatterLightController::new(spy.clone(), hub_data);
-        (controller, spy, registry)
+        let controller = MatterLightController::new(transport, hub_data);
+        (controller, registry)
     }
 
     fn set_kitchen_group(registry: &Arc<Mutex<MatterDeviceRegistry>>, group_id: u16) {
@@ -1575,6 +1582,173 @@ mod tests {
                 "{turn_on:?}"
             );
         }
+    }
+
+    // Fake-bulb contract: the runtime plan builder against a bulb that
+    // behaves like the Matter reference implementation.
+
+    fn fake_bulb_controller(
+        honours_execute_if_off: bool,
+    ) -> (MatterLightController, Arc<crate::fake_bulb::FakeMatterBulb>) {
+        let bulb = Arc::new(crate::fake_bulb::FakeMatterBulb::new(
+            42,
+            1,
+            honours_execute_if_off,
+        ));
+        let (controller, _) = make_controller_with_transport(bulb.clone());
+        set_device_capabilities(
+            &controller,
+            42,
+            LightCapabilities {
+                min_kelvin: Some(2000),
+                max_kelvin: Some(6500),
+                ..LightCapabilities::defaults_for(LightType::ExtendedColor)
+            },
+        );
+        (controller, bulb)
+    }
+
+    fn run_plans_on_fake_bulb(
+        controller: &MatterLightController,
+        bulb: &crate::fake_bulb::FakeMatterBulb,
+        command: &LightingCommand,
+        profile: &MatterControlProfile,
+    ) -> MatterEndpointCommandPlan {
+        let plans = controller
+            .audition_turn_on_plans(&["matter-42".to_string()], command, profile)
+            .unwrap();
+        assert_eq!(plans.len(), 1);
+        let submissions = bulb.submit_endpoint_plans(&plans).unwrap();
+        assert!(
+            submissions.iter().all(|submission| submission.completed),
+            "a spec bulb acknowledges every command"
+        );
+        plans.into_iter().next().unwrap()
+    }
+
+    fn ct_profile(execute_if_off_honoured: bool) -> MatterControlProfile {
+        MatterControlProfile {
+            color_route: MatterColorRoute::ColorTemperature,
+            execute_if_off_honoured,
+            ..MatterControlProfile::default()
+        }
+    }
+
+    #[test]
+    fn fake_bulb_default_plan_from_off_reaches_the_requested_color_and_level() {
+        let (controller, bulb) = fake_bulb_controller(true);
+        let plan = run_plans_on_fake_bulb(
+            &controller,
+            &bulb,
+            &LightingCommand::new(30, 2700),
+            &ct_profile(true),
+        );
+
+        let state = bulb.state();
+        assert!(state.on);
+        assert_eq!(state.level, clusters::brightness_to_level(30));
+        assert_eq!(state.mireds, 370);
+        assert_eq!(
+            turn_on_readback_mismatch(&plan, &bulb.read_light_state(42, 1).unwrap()),
+            None
+        );
+    }
+
+    #[test]
+    fn fake_bulb_that_ignores_execute_if_off_is_caught_as_ack_without_effect() {
+        let (controller, bulb) = fake_bulb_controller(false);
+        let plan = run_plans_on_fake_bulb(
+            &controller,
+            &bulb,
+            &LightingCommand::new(30, 2700),
+            &ct_profile(true),
+        );
+
+        // Every command was acknowledged, the bulb is on at the right level,
+        // and the colour staged while off never applied.
+        let state = bulb.state();
+        assert!(state.on);
+        assert_eq!(state.level, clusters::brightness_to_level(30));
+        assert_eq!(state.mireds, 153);
+        assert_eq!(
+            turn_on_readback_mismatch(&plan, &bulb.read_light_state(42, 1).unwrap()),
+            Some("color")
+        );
+    }
+
+    #[test]
+    fn explicit_on_first_profile_recovers_a_bulb_that_ignores_execute_if_off() {
+        let (controller, bulb) = fake_bulb_controller(false);
+        let plan = run_plans_on_fake_bulb(
+            &controller,
+            &bulb,
+            &LightingCommand::new(30, 2700),
+            &ct_profile(false),
+        );
+
+        assert!(matches!(
+            plan.steps.first(),
+            Some(MatterCommandStep::SetOnOff { on: true })
+        ));
+        let state = bulb.state();
+        assert!(state.on);
+        assert_eq!(state.level, clusters::brightness_to_level(30));
+        assert_eq!(state.mireds, 370);
+        assert_eq!(
+            turn_on_readback_mismatch(&plan, &bulb.read_light_state(42, 1).unwrap()),
+            None
+        );
+    }
+
+    #[test]
+    fn runtime_plan_sets_the_new_level_instead_of_the_one_a_plain_on_restores() {
+        let (controller, bulb) = fake_bulb_controller(true);
+        bulb.set_brightness(42, 1, 200, None).unwrap();
+        bulb.set_on_off(42, 1, false).unwrap();
+
+        // A bare On restores 200, which is the spec behaviour the profile
+        // field `on_restores_previous` describes.
+        bulb.set_on_off(42, 1, true).unwrap();
+        assert_eq!(bulb.state().level, 200);
+        bulb.set_on_off(42, 1, false).unwrap();
+
+        let plan = run_plans_on_fake_bulb(
+            &controller,
+            &bulb,
+            &LightingCommand::new(30, 2700),
+            &ct_profile(true),
+        );
+        assert_eq!(bulb.state().level, clusters::brightness_to_level(30));
+        assert_eq!(
+            turn_on_readback_mismatch(&plan, &bulb.read_light_state(42, 1).unwrap()),
+            None
+        );
+    }
+
+    #[test]
+    fn tick_while_on_changes_color_and_level_together_on_the_fake_bulb() {
+        let (controller, bulb) = fake_bulb_controller(true);
+        run_plans_on_fake_bulb(
+            &controller,
+            &bulb,
+            &LightingCommand::new(30, 2700),
+            &ct_profile(true),
+        );
+        let plan = run_plans_on_fake_bulb(
+            &controller,
+            &bulb,
+            &LightingCommand::new(80, 6000),
+            &ct_profile(true),
+        );
+
+        let state = bulb.state();
+        assert!(state.on);
+        assert_eq!(state.level, clusters::brightness_to_level(80));
+        assert_eq!(state.mireds, 166);
+        assert_eq!(
+            turn_on_readback_mismatch(&plan, &bulb.read_light_state(42, 1).unwrap()),
+            None
+        );
     }
 
     #[test]
