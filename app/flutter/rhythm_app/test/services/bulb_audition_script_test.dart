@@ -38,4 +38,64 @@ void main() {
     expect(activeMatterBulbTestSteps(xyFailed: true), bulbAuditionScenarios);
     expect(skippedMatterBulbTestIds(xyFailed: true), isEmpty);
   });
+
+  test('operator answers become sourced typed profile fields', () {
+    final profile = applyBulbAuditionAnswersToControlProfile(
+      {
+        'turn_on': 'stage_color_then_level_with_on_off',
+        'power_on_behavior': 'unknown',
+        'on_restores_previous': false,
+        'supports_transition': true,
+        'source': {
+          'turn_on': 'safe_default',
+          'power_on_behavior': 'safe_default',
+          'on_restores_previous': 'safe_default',
+          'min_brightness': 'safe_default',
+          'supports_transition': 'safe_default',
+        },
+      },
+      const {
+        'turn_on_from_off': false,
+        'dim_floor': false,
+        'dim_ramp': false,
+        'power_cycle_then_tick': true,
+        'off_then_on_restore': false,
+      },
+    );
+
+    expect(profile['turn_on'], 'explicit_on_first');
+    expect(profile['min_brightness'], 10);
+    expect(profile['supports_transition'], isFalse);
+    expect(profile['power_on_behavior'], 'restore_previous');
+    expect(profile['on_restores_previous'], isTrue);
+    expect(profile['source'], containsPair('turn_on', 'audition'));
+    expect(profile['source'], containsPair('min_brightness', 'audition'));
+    expect(
+      profile['source'],
+      containsPair('supports_transition', 'audition'),
+    );
+    expect(
+      profile['source'],
+      containsPair('power_on_behavior', 'audition'),
+    );
+    expect(
+      profile['source'],
+      containsPair('on_restores_previous', 'audition'),
+    );
+    expect(controlProfileHasAuditionEvidence(profile), isTrue);
+  });
+
+  test('accepted turn-on override outranks a negative default-plan answer', () {
+    final profile = applyBulbAuditionAnswersToControlProfile(
+      {
+        'turn_on': 'level_with_on_off_then_color',
+        'source': {'turn_on': 'try_with'},
+      },
+      const {'turn_on_from_off': false},
+      acceptedOverrideFields: const {'turn_on'},
+    );
+
+    expect(profile['turn_on'], 'level_with_on_off_then_color');
+    expect(profile['source'], containsPair('turn_on', 'try_with'));
+  });
 }

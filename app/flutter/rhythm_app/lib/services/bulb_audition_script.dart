@@ -18,6 +18,62 @@ class BulbAuditionScenario {
   final bool operatorAnswer;
 }
 
+const bulbAuditionLowDimMinBrightnessHint = 10;
+
+/// Applies operator answers to the typed profile that runtime planning reads.
+///
+/// The server-supplied profile remains authoritative for fields the operator
+/// did not exercise. Negative answers become explicit audition evidence, while
+/// an accepted Try-with choice keeps its stronger `try_with` source.
+Map<String, dynamic> applyBulbAuditionAnswersToControlProfile(
+  Map<String, dynamic> baseProfile,
+  Map<String, bool?> answers, {
+  Set<String> acceptedOverrideFields = const {},
+}) {
+  final profile = Map<String, dynamic>.from(baseProfile);
+  final sources = profile['source'] is Map
+      ? Map<String, dynamic>.from(profile['source'] as Map)
+      : <String, dynamic>{};
+
+  if (answers['dim_ramp'] == false) {
+    profile['supports_transition'] = false;
+    sources['supports_transition'] = 'audition';
+  }
+  if (answers['dim_floor'] == false) {
+    profile['min_brightness'] = bulbAuditionLowDimMinBrightnessHint;
+    sources['min_brightness'] = 'audition';
+  }
+  if (answers['turn_on_from_off'] == false &&
+      !acceptedOverrideFields.contains('turn_on')) {
+    profile['turn_on'] = 'explicit_on_first';
+    sources['turn_on'] = 'audition';
+  }
+  final powerCycleWorked = answers['power_cycle_then_tick'];
+  if (powerCycleWorked != null) {
+    profile['power_on_behavior'] =
+        powerCycleWorked ? 'restore_previous' : 'unknown';
+    sources['power_on_behavior'] = 'audition';
+  }
+  if (answers['off_then_on_restore'] == false) {
+    profile['on_restores_previous'] = true;
+    sources['on_restores_previous'] = 'audition';
+  }
+
+  profile['source'] = sources;
+  return profile;
+}
+
+bool controlProfileHasAuditionEvidence(Map<String, dynamic> profile) {
+  bool containsEvidence(dynamic value) {
+    if (value == 'audition' || value == 'try_with') return true;
+    if (value is Map) return value.values.any(containsEvidence);
+    if (value is Iterable) return value.any(containsEvidence);
+    return false;
+  }
+
+  return containsEvidence(profile);
+}
+
 const bulbAuditionScenarios = <BulbAuditionScenario>[
   BulbAuditionScenario(
     id: 'preflight',

@@ -30,10 +30,13 @@ class MatterBulbTesterScreen extends StatefulWidget {
     super.key,
     required this.device,
     required this.nativeDeviceId,
+    this.reportService,
   });
 
   final RhythmDevice device;
   final String nativeDeviceId;
+  @visibleForTesting
+  final BulbAuditionReportService? reportService;
 
   @override
   State<MatterBulbTesterScreen> createState() => _MatterBulbTesterScreenState();
@@ -41,7 +44,6 @@ class MatterBulbTesterScreen extends StatefulWidget {
 
 class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
   static const _uuid = Uuid();
-  static const _lowDimMinBrightnessHint = 10;
 
   final _notesController = TextEditingController();
   final String _journeyId = 'bulb-audition-${_uuid.v4()}';
@@ -51,9 +53,11 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
   bool _running = false;
   bool _saving = false;
   String? _status;
-  Map<String, dynamic>? _acceptedTryWithProfile;
+  final Map<String, Object> _acceptedOverrides = {};
+  Map<String, dynamic>? _latestProfileUsed;
   Map<String, dynamic>? _pendingTryWithProfile;
   String? _pendingTryWithScenario;
+  _TryWithChoice? _pendingTryWithChoice;
 
   @override
   void initState() {
@@ -511,12 +515,7 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
   }
 
   Widget _buildEvidenceColumns(_StepObservation observation) {
-    final reported = observation.serverResult?['reported'];
-    final reportedLabel = observation.serverResult?['needs_audition'] == true
-        ? 'Mismatch detected'
-        : reported == null
-            ? 'Not available'
-            : 'State captured';
+    final reportedLabel = _reportedStateLabel(observation.serverResult);
     final observedLabel = !observation.answered
         ? 'Awaiting operator'
         : observation.worked == true
@@ -678,12 +677,16 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
           deviceId: widget.device.id,
           scenario: step.id,
           journeyId: _journeyId,
+          profileOverride: _acceptedOverrides.isEmpty
+              ? null
+              : Map<String, dynamic>.from(_acceptedOverrides),
           legacyTest: step.legacyTest,
         );
 
     if (!mounted) return;
     final existing = _observations[step.id];
     final autoComplete = !step.operatorAnswer && result != null;
+    final profile = result?['profile_used'];
     setState(() {
       _observations[step.id] = _StepObservation(
         worked:
@@ -692,6 +695,9 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
         serverResult: result,
         recordedAt: existing?.recordedAt ?? DateTime.now(),
       );
+      if (profile is Map) {
+        _latestProfileUsed = Map<String, dynamic>.from(profile);
+      }
       if (autoComplete) {
         final activeSteps = _activeSteps();
         final currentIndex =
@@ -732,7 +738,10 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
       scenario: 'try_with',
       journeyId: _journeyId,
       baseScenario: step.id,
-      profileOverride: {choice.field: choice.value},
+      profileOverride: {
+        ..._acceptedOverrides,
+        choice.field: choice.value,
+      },
     );
 
     if (!mounted) return;
@@ -747,6 +756,7 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
       _pendingTryWithProfile =
           profile is Map ? Map<String, dynamic>.from(profile) : null;
       _pendingTryWithScenario = _pendingTryWithProfile == null ? null : step.id;
+      _pendingTryWithChoice = _pendingTryWithProfile == null ? null : choice;
       _running = false;
       _status = switch (result?['status']) {
         'unsupported' =>
@@ -770,13 +780,18 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
     final existing = _observations[step.id];
     setState(() {
       if (_pendingTryWithScenario == step.id) {
-        if (worked && _pendingTryWithProfile != null) {
-          _acceptedTryWithProfile = Map<String, dynamic>.from(
+        if (worked &&
+            _pendingTryWithProfile != null &&
+            _pendingTryWithChoice != null) {
+          _acceptedOverrides[_pendingTryWithChoice!.field] =
+              _pendingTryWithChoice!.value;
+          _latestProfileUsed = Map<String, dynamic>.from(
             _pendingTryWithProfile!,
           );
         }
         _pendingTryWithProfile = null;
         _pendingTryWithScenario = null;
+        _pendingTryWithChoice = null;
       }
       _observations[step.id] = _StepObservation(
         worked: worked,
@@ -804,12 +819,15 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
 
     final sync = context.read<ServerSyncProvider>();
     final report = _buildReport();
-    final applyLocal = !_observations.values.any(
-      (observation) =>
-          observation.serverResult?['needs_audition'] == true ||
-          (observation.answered && observation.worked != true),
+    final profile = Map<String, dynamic>.from(
+      report['control_profile'] as Map,
     );
-    final service = BulbAuditionService.instance;
+    final answered = _observations.values.where(
+      (observation) => observation.answered,
+    );
+    final applyLocal = controlProfileHasAuditionEvidence(profile) ||
+        answered.every((observation) => observation.worked == true);
+    final service = widget.reportService ?? BulbAuditionService.instance;
     await service.saveLocalReport({
       ...report,
       'local_status': 'pending',
@@ -995,6 +1013,60 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
     return null;
   }
 
+  Map<String, dynamic>? _lastServerMap(String key) {
+    for (final step in matterBulbTestSteps.reversed) {
+      final value = _observations[step.id]?.serverResult?[key];
+      if (value is Map) {
+        return Map<String, dynamic>.from(value);
+      }
+    }
+    return null;
+  }
+
+  String _reportedStateLabel(Map<String, dynamic>? serverResult) {
+    dynamic fieldValue(Map<dynamic, dynamic> state, String field) {
+      final value = state[field];
+      if (value is Map) {
+        if (value['ok'] == false) return null;
+        return value['value'];
+      }
+      return value;
+    }
+
+    final reported = serverResult?['reported'];
+    final after = reported is Map ? reported['after_1500ms'] : null;
+    final parts = <String>[];
+    if (after is Map) {
+      final on = fieldValue(after, 'onoff');
+      if (on == false) {
+        parts.add('Off');
+      } else {
+        if (on == true) parts.add('On');
+        final level = fieldValue(after, 'current_level');
+        if (level is num) {
+          parts.add('${(level * 100 / 254).round().clamp(0, 100)} %');
+        }
+        final mireds = fieldValue(after, 'color_temperature_mireds');
+        if (mireds is num && mireds > 0) {
+          parts.add('${(1000000 / mireds).round()} K');
+        } else {
+          final hue = fieldValue(after, 'current_hue');
+          final saturation = fieldValue(after, 'current_saturation');
+          if (hue is num && saturation is num) {
+            parts.add('hue ${hue.round()} sat ${saturation.round()}');
+          }
+        }
+      }
+    }
+    final mismatch = serverResult?['mismatch_field']?.toString();
+    if (mismatch != null && mismatch.isNotEmpty) {
+      parts.add('${mismatch.replaceAll('_', ' ')} mismatch');
+    }
+    if (parts.isNotEmpty) return parts.join(' · ');
+    if (serverResult?['needs_audition'] == true) return 'Mismatch detected';
+    return reported == null ? 'Not available' : 'State captured';
+  }
+
   bool _hasTrustedReportedField(Iterable<String> fieldNames) {
     for (final observation in _observations.values) {
       if (!observation.answered ||
@@ -1161,8 +1233,7 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
   }
 
   Map<String, dynamic> _controlProfile() {
-    final fromServer =
-        _acceptedTryWithProfile ?? _firstServerMap('profile_used');
+    final fromServer = _latestProfileUsed ?? _lastServerMap('profile_used');
     if (fromServer != null) {
       final profile = Map<String, dynamic>.from(fromServer);
       final sources = profile['source'] is Map
@@ -1242,9 +1313,13 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
         sources['subscription'] = 'audition';
       }
       profile['source'] = sources;
-      return profile;
+      return applyBulbAuditionAnswersToControlProfile(
+        profile,
+        _profileAnswers(),
+        acceptedOverrideFields: _acceptedOverrides.keys.toSet(),
+      );
     }
-    return {
+    final fallback = <String, dynamic>{
       'schema_version': 1,
       'color_route': 'hue_saturation',
       'hs_white_curve': const [],
@@ -1258,7 +1333,7 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
       'execute_if_off_honoured': true,
       'on_restores_previous': false,
       'power_on_behavior': 'unknown',
-      'supports_transition': _observations['dim_ramp']?.worked != false,
+      'supports_transition': true,
       'readback_trust': {
         'on_off': false,
         'level': false,
@@ -1280,14 +1355,30 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
         'power_on_behavior': 'safe_default',
         'kelvin_range': 'safe_default',
         'min_brightness': 'safe_default',
-        'supports_transition': _observations['dim_ramp']?.answered == true
-            ? 'audition'
-            : 'safe_default',
+        'supports_transition': 'safe_default',
         'readback_trust': 'safe_default',
         'subscription': 'safe_default',
       },
     };
+    return applyBulbAuditionAnswersToControlProfile(
+      fallback,
+      _profileAnswers(),
+      acceptedOverrideFields: _acceptedOverrides.keys.toSet(),
+    );
   }
+
+  Map<String, bool?> _profileAnswers() => {
+        for (final scenario in const [
+          'dim_ramp',
+          'dim_floor',
+          'turn_on_from_off',
+          'power_cycle_then_tick',
+          'off_then_on_restore',
+        ])
+          scenario: _observations[scenario]?.answered == true
+              ? _observations[scenario]?.worked
+              : null,
+      };
 
   Map<String, dynamic>? _subscriptionFor(String scenario) {
     final value = _observations[scenario]?.serverResult?['subscription'];
@@ -1444,7 +1535,7 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
   Map<String, dynamic> _capabilityHints() {
     final hints = <String, dynamic>{};
     if (_observations['dim_floor']?.worked == false) {
-      hints['min_brightness'] = _lowDimMinBrightnessHint;
+      hints['min_brightness'] = bulbAuditionLowDimMinBrightnessHint;
     }
     if (_observations['dim_ramp']?.worked == false) {
       hints['supports_transition'] = false;

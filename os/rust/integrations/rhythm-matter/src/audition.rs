@@ -706,64 +706,66 @@ fn apply_try_with_override(profile: &mut MatterControlProfile, value: &Value) ->
     let object = value
         .as_object()
         .context("profile_override must be an object")?;
-    if object.len() != 1 {
-        anyhow::bail!("profile_override must change exactly one field");
+    if !(1..=8).contains(&object.len()) {
+        anyhow::bail!("profile_override must change between one and eight fields");
     }
-    let (field, value) = object.iter().next().expect("checked one override");
-    match field.as_str() {
-        "color_route" => {
-            profile.color_route = serde_json::from_value::<MatterColorRoute>(value.clone())?;
-            profile.source.color_route = MatterProfileSource::TryWith;
-        }
-        "hs_white_curve" => {
-            let curve = serde_json::from_value::<Vec<MatterHsWhitePoint>>(value.clone())?;
-            if !(2..=8).contains(&curve.len())
-                || curve.iter().any(|point| {
-                    !(1_000..=10_000).contains(&point.kelvin)
-                        || point.hue > 254
-                        || point.saturation > 254
-                })
-                || curve
-                    .windows(2)
-                    .any(|points| points[0].kelvin >= points[1].kelvin)
-            {
-                anyhow::bail!("HS white curve must contain 2-8 ordered valid Matter points");
+    for (field, value) in object {
+        match field.as_str() {
+            "color_route" => {
+                profile.color_route = serde_json::from_value::<MatterColorRoute>(value.clone())?;
+                profile.source.color_route = MatterProfileSource::TryWith;
             }
-            profile.hs_white_curve = curve;
-            profile.source.hs_white_curve = MatterProfileSource::TryWith;
-        }
-        "turn_on" => {
-            profile.turn_on = serde_json::from_value::<MatterTurnOnStrategy>(value.clone())?;
-            profile.source.turn_on = MatterProfileSource::TryWith;
-        }
-        "level_command" => {
-            profile.level_command = serde_json::from_value::<MatterLevelCommand>(value.clone())?;
-            profile.source.level_command = MatterProfileSource::TryWith;
-        }
-        "command_spacing_ms" => {
-            let value_ms = value
-                .as_u64()
-                .context("command spacing must be milliseconds")?;
-            if value_ms > 10_000 {
-                anyhow::bail!("command spacing exceeds 10000 ms");
+            "hs_white_curve" => {
+                let curve = serde_json::from_value::<Vec<MatterHsWhitePoint>>(value.clone())?;
+                if !(2..=8).contains(&curve.len())
+                    || curve.iter().any(|point| {
+                        !(1_000..=10_000).contains(&point.kelvin)
+                            || point.hue > 254
+                            || point.saturation > 254
+                    })
+                    || curve
+                        .windows(2)
+                        .any(|points| points[0].kelvin >= points[1].kelvin)
+                {
+                    anyhow::bail!("HS white curve must contain 2-8 ordered valid Matter points");
+                }
+                profile.hs_white_curve = curve;
+                profile.source.hs_white_curve = MatterProfileSource::TryWith;
             }
-            profile.command_spacing_ms.value_ms = value_ms as u32;
-            profile.command_spacing_ms.basis = MatterMeasurementBasis::Measured;
-            profile.command_spacing_ms.source = MatterProfileSource::TryWith;
+            "turn_on" => {
+                profile.turn_on = serde_json::from_value::<MatterTurnOnStrategy>(value.clone())?;
+                profile.source.turn_on = MatterProfileSource::TryWith;
+            }
+            "level_command" => {
+                profile.level_command =
+                    serde_json::from_value::<MatterLevelCommand>(value.clone())?;
+                profile.source.level_command = MatterProfileSource::TryWith;
+            }
+            "command_spacing_ms" => {
+                let value_ms = value
+                    .as_u64()
+                    .context("command spacing must be milliseconds")?;
+                if value_ms > 10_000 {
+                    anyhow::bail!("command spacing exceeds 10000 ms");
+                }
+                profile.command_spacing_ms.value_ms = value_ms as u32;
+                profile.command_spacing_ms.basis = MatterMeasurementBasis::Measured;
+                profile.command_spacing_ms.source = MatterProfileSource::TryWith;
+            }
+            "execute_if_off_honoured" => {
+                profile.execute_if_off_honoured = value
+                    .as_bool()
+                    .context("execute_if_off_honoured must be boolean")?;
+                profile.source.execute_if_off_honoured = MatterProfileSource::TryWith;
+            }
+            "supports_transition" => {
+                profile.supports_transition = value
+                    .as_bool()
+                    .context("supports_transition must be boolean")?;
+                profile.source.supports_transition = MatterProfileSource::TryWith;
+            }
+            _ => anyhow::bail!("unsupported try-with profile field: {field}"),
         }
-        "execute_if_off_honoured" => {
-            profile.execute_if_off_honoured = value
-                .as_bool()
-                .context("execute_if_off_honoured must be boolean")?;
-            profile.source.execute_if_off_honoured = MatterProfileSource::TryWith;
-        }
-        "supports_transition" => {
-            profile.supports_transition = value
-                .as_bool()
-                .context("supports_transition must be boolean")?;
-            profile.source.supports_transition = MatterProfileSource::TryWith;
-        }
-        _ => anyhow::bail!("unsupported try-with profile field: {field}"),
     }
     Ok(())
 }
@@ -822,15 +824,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn try_with_requires_exactly_one_bounded_typed_override() {
+    fn try_with_accepts_multiple_accepted_overrides() {
         let mut profile = MatterControlProfile::default();
-        apply_try_with_override(&mut profile, &json!({"color_route": "xy"})).unwrap();
+        apply_try_with_override(
+            &mut profile,
+            &json!({
+                "color_route": "xy",
+                "turn_on": "explicit_on_first",
+            }),
+        )
+        .unwrap();
         assert_eq!(profile.color_route, MatterColorRoute::Xy);
         assert_eq!(profile.source.color_route, MatterProfileSource::TryWith);
+        assert_eq!(profile.turn_on, MatterTurnOnStrategy::ExplicitOnFirst);
+        assert_eq!(profile.source.turn_on, MatterProfileSource::TryWith);
 
         assert!(apply_try_with_override(
             &mut profile,
-            &json!({"color_route": "xy", "turn_on": "explicit_on_first"})
+            &json!({
+                "field_1": true,
+                "field_2": true,
+                "field_3": true,
+                "field_4": true,
+                "field_5": true,
+                "field_6": true,
+                "field_7": true,
+                "field_8": true,
+                "field_9": true,
+            })
         )
         .is_err());
         assert!(
