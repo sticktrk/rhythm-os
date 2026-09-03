@@ -101,9 +101,11 @@ color-sensitive spaces even after its Kelvin mapping is corrected.
 
 ### Fast Matter behavior
 
-Use the existing rpiz Matter tester rather than rebuilding commissioning and
-cluster control in the lab crate. Capture only the behavior needed to operate
-the bulb correctly in this phase:
+Use the rpiz **Bulb Audition** rather than rebuilding commissioning and cluster
+control in the lab crate. Audition runs the runtime's real plan builder,
+records direct readback beside operator observation, and emits the typed
+control profile. Capture only the behavior needed to operate the bulb
+correctly in this phase:
 
 - accepted capabilities and readback;
 - minimum stable brightness behavior;
@@ -113,7 +115,12 @@ the bulb correctly in this phase:
 - the command interval below which commands are dropped;
 - one bounded power-cycle recovery check when safe mains control exists.
 
-Full fabrics, subscriptions, groups, scenes, OTA, Thread, ecosystem, stress,
+Audition also records OnOff, Level, and Color subscription truth and latency;
+its adaptive-white scenario rehearses 2200/2700/4000/6500 K through the
+resolved route and can persist an operator-validated Kelvin-to-HS curve for
+bulbs whose RGB emitters do not render the generic sRGB conversion faithfully.
+The optical bench remains responsible for measured Kelvin, Duv, lumen, and
+brightness-curve work. Full groups, scenes, OTA, Thread, ecosystem, stress,
 and certification testing remains in the long-term Matter phase.
 
 ## Immediate deployment output

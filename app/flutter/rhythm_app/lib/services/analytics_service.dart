@@ -1076,6 +1076,51 @@ class AnalyticsService {
     });
   }
 
+  /// Track entry into the privacy-bounded Bulb Audition journey.
+  Future<void> logBulbAuditionStarted({
+    required String journeyId,
+    required String source,
+    required int plannedTestCount,
+  }) async {
+    await logEvent('bulb_audition_started', {
+      'journey_id': journeyId,
+      'source': source,
+      'planned_scenario_count': plannedTestCount,
+    });
+  }
+
+  /// Track one terminal scenario result without device or customer identity.
+  Future<void> logBulbAuditionScenarioCompleted({
+    required String journeyId,
+    required String scenario,
+    required String outcome,
+    String? failureStage,
+  }) async {
+    await logEvent('bulb_audition_scenario_completed', {
+      'journey_id': journeyId,
+      'scenario': scenario,
+      'outcome': outcome,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
+  /// Track the terminal app-observed save result for a schema-v3 audition.
+  Future<void> logBulbAuditionSaveCompleted({
+    required String journeyId,
+    required String outcome,
+    required int answeredTestCount,
+    required String serverOutcome,
+    required String cloudOutcome,
+  }) async {
+    await logEvent('bulb_audition_save_completed', {
+      'journey_id': journeyId,
+      'outcome': outcome,
+      'answered_scenario_count': answeredTestCount,
+      'server_outcome': serverOutcome,
+      'cloud_outcome': cloudOutcome,
+    });
+  }
+
   /// Track the terminal app-observed result of assigning a device parent.
   Future<void> logDeviceRoomMoveCompleted({
     required String journeyId,

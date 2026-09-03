@@ -3433,4 +3433,55 @@ void main() {
       expect(await api.getDeviceAttentionEntries(), isNull);
     });
   });
+
+  group('Bulb Audition', () {
+    test('runs a canonical scenario with its correlation and override',
+        () async {
+      when(() => dio.post(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions: RequestOptions(path: 'api/matter/audition/run'),
+                statusCode: 200,
+                data: {'schema_version': 3, 'status': 'ok'},
+              ));
+
+      final result = await api.runBulbAudition(
+        deviceId: 'matter-42-2',
+        scenario: 'try_with',
+        journeyId: 'bulb-audition-1',
+        baseScenario: 'turn_on_from_off',
+        profileOverride: {'turn_on': 'explicit_on_first'},
+      );
+
+      expect(result?['schema_version'], 3);
+      verify(() => dio.post('api/matter/audition/run', data: {
+            'device_id': 'matter-42-2',
+            'scenario': 'try_with',
+            'journey_id': 'bulb-audition-1',
+            'base_scenario': 'turn_on_from_off',
+            'profile_override': {'turn_on': 'explicit_on_first'},
+          })).called(1);
+    });
+
+    test('always saves the canonical report as schema v3', () async {
+      when(() => dio.post(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions:
+                    RequestOptions(path: 'api/matter/audition/report'),
+                statusCode: 200,
+                data: {'status': 'saved'},
+              ));
+
+      final result = await api.saveBulbAuditionReport(
+        {'schema_version': 2, 'report_id': 'report-1'},
+        applyLocal: false,
+      );
+
+      expect(result?['status'], 'saved');
+      verify(() => dio.post('api/matter/audition/report', data: {
+            'schema_version': 3,
+            'report_id': 'report-1',
+            'apply_local': false,
+          })).called(1);
+    });
+  });
 }

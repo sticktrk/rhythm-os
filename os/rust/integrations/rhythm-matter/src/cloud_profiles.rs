@@ -130,6 +130,21 @@ impl CloudMatterProfileCatalog {
             device.product_id
         );
     }
+
+    /// Build a sparse typed overlay for the matching approved profile. Source
+    /// metadata identifies the fields that are truly present in legacy feeds.
+    pub fn control_profile_for_device(
+        &self,
+        device: &CommissionedDevice,
+    ) -> Option<crate::control_profile::MatterControlProfile> {
+        let cloud = self
+            .profiles
+            .iter()
+            .find(|candidate| candidate.matches(device))?;
+        let mut profile = crate::control_profile::MatterControlProfile::default();
+        cloud.apply_to_control_profile(&mut profile);
+        Some(profile)
+    }
 }
 
 impl CloudMatterDeviceProfile {
@@ -196,11 +211,7 @@ impl CloudMatterDeviceProfile {
                 DeviceQuirk::Other(PREFER_COLOR_TEMPERATURE_QUIRK.to_string()),
             );
         }
-        if let Some(ms) = self
-            .quirks
-            .recommended_command_spacing_ms
-            .filter(|ms| *ms > 0)
-        {
+        if let Some(ms) = self.quirks.recommended_command_spacing_ms {
             push_unique_quirk(quirks, DeviceQuirk::CommandThrottleMs(ms));
         }
 
@@ -208,6 +219,98 @@ impl CloudMatterDeviceProfile {
             if let Some(quirk) = device_quirk_from_value(value) {
                 push_unique_quirk(quirks, quirk);
             }
+        }
+    }
+
+    fn apply_to_control_profile(&self, profile: &mut crate::control_profile::MatterControlProfile) {
+        use crate::control_profile::{
+            MatterColorRoute, MatterCommandSpacing, MatterLevelCommand, MatterMeasurementBasis,
+            MatterPowerOnBehavior, MatterProfileSource, MatterTurnOnStrategy,
+        };
+
+        let source = MatterProfileSource::Cloud;
+        if let Ok(typed_profile) = serde_json::from_value::<
+            crate::control_profile::MatterControlProfile,
+        >(self.recommended_control_strategy.clone())
+        {
+            crate::control_profile::overlay_profile(profile, &typed_profile, source);
+            return;
+        }
+        if let Some(color_route) = self
+            .capabilities
+            .preferred_color_command
+            .as_deref()
+            .and_then(|value| match value {
+                "hue_saturation" => Some(MatterColorRoute::HueSaturation),
+                "xy" => Some(MatterColorRoute::Xy),
+                "color_temperature" => Some(MatterColorRoute::ColorTemperature),
+                _ => None,
+            })
+        {
+            profile.color_route = color_route;
+            profile.source.color_route = source;
+        }
+        if self.quirks.needs_explicit_on == Some(true) {
+            profile.turn_on = MatterTurnOnStrategy::ExplicitOnFirst;
+            profile.source.turn_on = source;
+        }
+        if let Some(level_command) = self
+            .capabilities
+            .preferred_level_command
+            .as_deref()
+            .and_then(|value| match value {
+                "move_to_level_with_onoff" => Some(MatterLevelCommand::MoveToLevelWithOnOff),
+                "move_to_level" => Some(MatterLevelCommand::MoveToLevel),
+                "step_with_onoff" => Some(MatterLevelCommand::StepWithOnOff),
+                _ => None,
+            })
+        {
+            profile.level_command = level_command;
+            profile.source.level_command = source;
+        }
+        if let Some(value_ms) = self.quirks.recommended_command_spacing_ms {
+            profile.command_spacing_ms = MatterCommandSpacing {
+                value_ms,
+                // The v2 cloud schema did not carry measurement provenance.
+                basis: MatterMeasurementBasis::Assumed,
+                source,
+            };
+        }
+        if let Some(value) = self.quirks.on_restores_previous_level {
+            profile.on_restores_previous = value;
+            profile.source.on_restores_previous = source;
+        }
+        if let Some(value) =
+            self.quirks
+                .power_on_behavior
+                .as_deref()
+                .and_then(|value| match value {
+                    "restore_previous" => Some(MatterPowerOnBehavior::RestorePrevious),
+                    "off" => Some(MatterPowerOnBehavior::Off),
+                    "on" => Some(MatterPowerOnBehavior::On),
+                    "unknown" => Some(MatterPowerOnBehavior::Unknown),
+                    _ => None,
+                })
+        {
+            profile.power_on_behavior = value;
+            profile.source.power_on_behavior = source;
+        }
+        if self.capabilities.usable_min_kelvin.is_some()
+            || self.capabilities.usable_max_kelvin.is_some()
+        {
+            profile.kelvin_range = self
+                .capabilities
+                .usable_min_kelvin
+                .zip(self.capabilities.usable_max_kelvin);
+            profile.source.kelvin_range = source;
+        }
+        if let Some(value) = self.capabilities.min_brightness {
+            profile.min_brightness = Some(value.clamp(1, 100));
+            profile.source.min_brightness = source;
+        }
+        if let Some(value) = self.capabilities.supports_transition {
+            profile.supports_transition = value;
+            profile.source.supports_transition = source;
         }
     }
 }
@@ -435,6 +538,20 @@ mod tests {
         assert!(quirks.contains(&DeviceQuirk::Other(
             PREFER_COLOR_TEMPERATURE_QUIRK.to_string()
         )));
+
+        let overlay = catalog.control_profile_for_device(&device()).unwrap();
+        assert_eq!(
+            overlay.source.color_route,
+            crate::control_profile::MatterProfileSource::Cloud
+        );
+        assert_eq!(
+            overlay.source.supports_transition,
+            crate::control_profile::MatterProfileSource::Cloud
+        );
+        assert_eq!(
+            overlay.source.turn_on,
+            crate::control_profile::MatterProfileSource::SafeDefault
+        );
     }
 
     #[test]
@@ -495,7 +612,48 @@ mod tests {
         );
         assert!(quirks.contains(&DeviceQuirk::NeedsXyNotCt));
         assert!(quirks.contains(&DeviceQuirk::NeedsHueSaturationNotCt));
+        assert!(quirks.contains(&DeviceQuirk::CommandThrottleMs(0)));
         assert!(quirks.contains(&DeviceQuirk::CommandThrottleMs(125)));
+    }
+
+    #[test]
+    fn zero_command_spacing_disables_the_gap_while_none_uses_the_default() {
+        let matching = CloudMatterProfileMatch {
+            matter_vendor_id: Some(1),
+            matter_product_id: Some(2),
+            ..Default::default()
+        };
+        let catalog = CloudMatterProfileCatalog {
+            profiles: vec![CloudMatterDeviceProfile {
+                profile_key: "zero-spacing".to_string(),
+                match_data: matching.clone(),
+                quirks: CloudMatterProfileQuirks {
+                    recommended_command_spacing_ms: Some(0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut caps = crate::capabilities::capabilities_from_commissioned(&device());
+        let mut quirks = Vec::new();
+        catalog.apply_to_device(&device(), &mut caps, &mut quirks);
+        assert_eq!(quirks, vec![DeviceQuirk::CommandThrottleMs(0)]);
+
+        let catalog = CloudMatterProfileCatalog {
+            profiles: vec![CloudMatterDeviceProfile {
+                profile_key: "default-spacing".to_string(),
+                match_data: matching,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut caps = crate::capabilities::capabilities_from_commissioned(&device());
+        let mut quirks = Vec::new();
+        catalog.apply_to_device(&device(), &mut caps, &mut quirks);
+        assert!(!quirks
+            .iter()
+            .any(|quirk| matches!(quirk, DeviceQuirk::CommandThrottleMs(_))));
     }
 
     #[test]

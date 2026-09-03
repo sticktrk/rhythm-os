@@ -578,14 +578,44 @@ class CloudBackedServerApi {
     required String deviceId,
     required String test,
   }) {
+    // ignore: deprecated_member_use -- one-release compatibility surface.
     return _delegate.runMatterBulbTest(deviceId: deviceId, test: test);
+  }
+
+  Future<Map<String, dynamic>?> runBulbAudition({
+    required String deviceId,
+    required String scenario,
+    String? journeyId,
+    String? baseScenario,
+    Map<String, dynamic>? profileOverride,
+    String? legacyTest,
+  }) {
+    return _delegate.runBulbAudition(
+      deviceId: deviceId,
+      scenario: scenario,
+      journeyId: journeyId,
+      baseScenario: baseScenario,
+      profileOverride: profileOverride,
+      legacyTest: legacyTest,
+    );
   }
 
   Future<Map<String, dynamic>?> saveMatterBulbTestReport(
     Map<String, dynamic> report, {
     bool applyLocal = true,
   }) {
+    // ignore: deprecated_member_use -- one-release compatibility surface.
     return _delegate.saveMatterBulbTestReport(
+      report,
+      applyLocal: applyLocal,
+    );
+  }
+
+  Future<Map<String, dynamic>?> saveBulbAuditionReport(
+    Map<String, dynamic> report, {
+    bool applyLocal = true,
+  }) {
+    return _delegate.saveBulbAuditionReport(
       report,
       applyLocal: applyLocal,
     );

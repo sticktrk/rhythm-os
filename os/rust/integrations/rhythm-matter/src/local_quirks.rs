@@ -1,6 +1,6 @@
 //! Local Matter quirk overrides discovered by the bulb tester.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -28,6 +28,13 @@ struct LocalQuirkOverride {
     updated_at_unix_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     report_id: Option<String>,
+    /// Additive typed profile written by Bulb Audition. Legacy binaries ignore
+    /// this field and continue to consume `quirks` and `capabilities`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    control_profile: Option<crate::control_profile::MatterControlProfile>,
+    /// Runtime reconciliation signal retained across appliance restarts.
+    #[serde(default, skip_serializing_if = "is_false")]
+    needs_audition: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -42,6 +49,8 @@ pub struct LocalCapabilityOverride {
 pub struct LocalMatterOverrides {
     pub quirks: HashMap<String, Vec<DeviceQuirk>>,
     pub capabilities: HashMap<String, LocalCapabilityOverride>,
+    pub control_profiles: HashMap<String, crate::control_profile::MatterControlProfile>,
+    pub needs_audition: HashSet<String>,
 }
 
 impl Default for LocalQuirkStore {
@@ -52,6 +61,10 @@ impl Default for LocalQuirkStore {
             devices: BTreeMap::new(),
         }
     }
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 pub fn quirks_from_value(value: &serde_json::Value) -> Result<Vec<DeviceQuirk>> {
@@ -163,8 +176,18 @@ pub fn load_overrides_for_state(state: &SharedState) -> LocalMatterOverrides {
                 if let Some(mut capabilities) = entry.capabilities {
                     capabilities.normalize();
                     if !capabilities.is_empty() {
-                        overrides.capabilities.insert(device_id, capabilities);
+                        overrides
+                            .capabilities
+                            .insert(device_id.clone(), capabilities);
                     }
+                }
+                if let Some(profile) = entry.control_profile {
+                    overrides
+                        .control_profiles
+                        .insert(device_id.clone(), profile);
+                }
+                if entry.needs_audition {
+                    overrides.needs_audition.insert(device_id);
                 }
             }
             overrides
@@ -214,6 +237,8 @@ pub fn save_device_profile_override(
             source: "matter_bulb_tester".to_string(),
             updated_at_unix_ms: now,
             report_id: None,
+            control_profile: None,
+            needs_audition: false,
         });
     if let Some(quirks) = quirks {
         entry.quirks = quirks;
@@ -239,6 +264,88 @@ pub fn save_device_profile_override(
     Ok(())
 }
 
+/// Persist the typed profile without removing the legacy representation. The
+/// compatibility fields remain writable by the previous field floor, while a
+/// later current binary can recover this exact audition strategy.
+pub fn save_device_control_profile(
+    state: &SharedState,
+    device_id: &str,
+    profile: crate::control_profile::MatterControlProfile,
+    report_id: Option<String>,
+) -> Result<()> {
+    let path = store_path(state).context("data_dir not configured on AppState")?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating local quirk dir {}", parent.display()))?;
+    }
+
+    let mut store = load_store(&path).unwrap_or_default();
+    let now = now_unix_ms();
+    let mut entry = store
+        .devices
+        .remove(device_id)
+        .unwrap_or_else(|| LocalQuirkOverride {
+            quirks: Vec::new(),
+            capabilities: None,
+            source: "bulb_audition".to_string(),
+            updated_at_unix_ms: now,
+            report_id: None,
+            control_profile: None,
+            needs_audition: false,
+        });
+    entry.control_profile = Some(profile);
+    entry.source = "bulb_audition".to_string();
+    entry.updated_at_unix_ms = now;
+    entry.report_id = report_id;
+    store.updated_at_unix_ms = now;
+    store.devices.insert(device_id.to_string(), entry);
+
+    let body = serde_json::to_vec_pretty(&store).context("serializing local profile store")?;
+    let tmp_path = path.with_extension("json.tmp");
+    fs::write(&tmp_path, body).with_context(|| format!("writing {}", tmp_path.display()))?;
+    fs::rename(&tmp_path, &path)
+        .with_context(|| format!("renaming {} to {}", tmp_path.display(), path.display()))?;
+    Ok(())
+}
+
+pub(crate) fn save_needs_audition_at_path(
+    path: &Path,
+    device_id: &str,
+    needs_audition: bool,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating local quirk dir {}", parent.display()))?;
+    }
+
+    let mut store = load_store(path).unwrap_or_default();
+    let now = now_unix_ms();
+    let existing = store.devices.remove(device_id);
+    if existing.is_none() && !needs_audition {
+        return Ok(());
+    }
+    let mut entry = existing.unwrap_or_else(|| LocalQuirkOverride {
+        quirks: Vec::new(),
+        capabilities: None,
+        source: "runtime_readback".to_string(),
+        updated_at_unix_ms: now,
+        report_id: None,
+        control_profile: None,
+        needs_audition: false,
+    });
+    entry.needs_audition = needs_audition;
+    entry.updated_at_unix_ms = now;
+    store.updated_at_unix_ms = now;
+    store.devices.insert(device_id.to_string(), entry);
+
+    let body = serde_json::to_vec_pretty(&store).context("serializing local audition state")?;
+    let tmp_path = path.with_extension("json.tmp");
+    fs::write(&tmp_path, body).with_context(|| format!("writing {}", tmp_path.display()))?;
+    fs::rename(&tmp_path, path)
+        .with_context(|| format!("renaming {} to {}", tmp_path.display(), path.display()))?;
+    Ok(())
+}
+
 impl LocalCapabilityOverride {
     pub fn is_empty(&self) -> bool {
         self.min_brightness.is_none() && self.supports_transition.is_none()
@@ -251,7 +358,7 @@ impl LocalCapabilityOverride {
     }
 }
 
-fn store_path(state: &SharedState) -> Option<PathBuf> {
+pub(crate) fn store_path(state: &SharedState) -> Option<PathBuf> {
     let data_dir = state.lock().ok()?.data_dir.clone();
     if data_dir.is_empty() {
         return None;
@@ -283,8 +390,11 @@ fn now_unix_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
     use rhythm_devices::quirks::PREFER_COLOR_TEMPERATURE_QUIRK;
     use rhythm_devices::LightType;
+    use rhythm_os::state::AppState;
     use serde_json::json;
 
     #[test]
@@ -348,5 +458,30 @@ mod tests {
                 PREFER_COLOR_TEMPERATURE_QUIRK.to_string()
             )]
         );
+    }
+
+    #[test]
+    fn load_overrides_for_state_round_trips_needs_audition() {
+        let dir = std::env::temp_dir().join(format!(
+            "rhythm-matter-needs-audition-{}",
+            std::process::id()
+        ));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+        std::fs::create_dir_all(&dir).unwrap();
+        let state = Arc::new(Mutex::new(AppState::default()));
+        state.lock().unwrap().data_dir = dir.to_string_lossy().to_string();
+        let path = store_path(&state).unwrap();
+
+        save_needs_audition_at_path(&path, "matter-42", true).unwrap();
+        assert!(load_overrides_for_state(&state)
+            .needs_audition
+            .contains("matter-42"));
+
+        save_needs_audition_at_path(&path, "matter-42", false).unwrap();
+        assert!(!load_overrides_for_state(&state)
+            .needs_audition
+            .contains("matter-42"));
     }
 }

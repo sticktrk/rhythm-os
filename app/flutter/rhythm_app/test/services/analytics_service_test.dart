@@ -819,6 +819,46 @@ void main() {
     }
   });
 
+  test('Bulb Audition analytics records bounded scenario outcomes', () async {
+    await analytics.logBulbAuditionStarted(
+      journeyId: 'bulb-audition-123',
+      source: 'device_detail',
+      plannedTestCount: 14,
+    );
+    await analytics.logBulbAuditionScenarioCompleted(
+      journeyId: 'bulb-audition-123',
+      scenario: 'turn_on_from_off',
+      outcome: 'needs_audition',
+      failureStage: 'color',
+    );
+    await analytics.logBulbAuditionSaveCompleted(
+      journeyId: 'bulb-audition-123',
+      outcome: 'succeeded',
+      answeredTestCount: 13,
+      serverOutcome: 'saved',
+      cloudOutcome: 'uploaded',
+    );
+
+    expect(backend.events.map((event) => event.name), [
+      'bulb_audition_started',
+      'bulb_audition_scenario_completed',
+      'bulb_audition_save_completed',
+    ]);
+    expect(backend.events[1].properties, {
+      'journey_id': 'bulb-audition-123',
+      'scenario': 'turn_on_from_off',
+      'outcome': 'needs_audition',
+      'failure_stage': 'color',
+    });
+    final serialized = backend.events
+        .expand((event) => event.properties.entries)
+        .map((entry) => '${entry.key}:${entry.value}')
+        .join('|');
+    for (final forbidden in ['device_id', 'node_id', 'device_name', 'notes']) {
+      expect(serialized, isNot(contains(forbidden)));
+    }
+  });
+
   test('analytics remains a no-op when the backend is unavailable', () async {
     BackendProvider.resetForTesting();
 

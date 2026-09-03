@@ -9,6 +9,7 @@
 //! duplication. Brand identity comes from `CanonicalDevice.manufacturer` +
 //! the `rhythm-devices` database.
 
+pub mod audition;
 pub mod bulb_test;
 pub mod capabilities;
 pub mod capture;
@@ -17,10 +18,13 @@ pub mod chip_transport;
 pub mod cloud_profiles;
 pub mod clusters;
 pub mod commissioning;
+pub mod control_profile;
 pub mod controller;
 pub mod device_store;
 pub mod discovery;
 pub mod events;
+#[cfg(test)]
+mod fake_bulb;
 pub mod groups;
 pub mod hub_state;
 pub mod lifecycle;

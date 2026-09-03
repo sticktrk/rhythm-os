@@ -198,21 +198,34 @@ export function getMatterCapture(client: DeviceClient, captureId: string) {
   );
 }
 
-export function runBulbTest(
+export function runBulbAudition(
   client: DeviceClient,
   deviceId: string,
-  test: string
+  scenario: string
 ) {
+  return client.post('api/matter/audition/run', {
+    body: { device_id: deviceId, scenario },
+    timeoutSeconds: 60
+  });
+}
+
+export function reportBulbAudition(
+  client: DeviceClient,
+  body: Record<string, unknown>
+) {
+  return client.post('api/matter/audition/report', { body });
+}
+
+/** @deprecated One-release compatibility alias. */
+export function runBulbTest(client: DeviceClient, deviceId: string, test: string) {
   return client.post('api/matter/bulb-test/run', {
     body: { device_id: deviceId, test },
     timeoutSeconds: 60
   });
 }
 
-export function reportBulbTest(
-  client: DeviceClient,
-  body: Record<string, unknown>
-) {
+/** @deprecated One-release compatibility alias. */
+export function reportBulbTest(client: DeviceClient, body: Record<string, unknown>) {
   return client.post('api/matter/bulb-test/report', { body });
 }
 

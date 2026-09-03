@@ -66,3 +66,22 @@ possible on your host, switch to `HashRouter` in `src/App.tsx`.
 The dashboard reads `GET /ready` from `admin-api` after sign-in and warns when
 remote rpiz debugging is not fully configured. A ready deployment reports
 `remoteDebugReady: true`.
+
+## Approve a Bulb Audition profile candidate
+
+Candidate evidence stays pending until a Rhythm admin explicitly promotes it.
+After inspecting the immutable candidate payload, call the authenticated
+Supabase RPC with an admin user's access token (replace the placeholders):
+
+```sh
+curl "$SUPABASE_URL/rest/v1/rpc/approve_matter_profile_candidate" \
+  -H "apikey: $SUPABASE_ANON_KEY" \
+  -H "Authorization: Bearer $RHYTHM_ADMIN_ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  --data '{"candidate_id":"00000000-0000-0000-0000-000000000000"}'
+```
+
+The function atomically publishes that exact candidate version, records the
+reviewer and review time, and marks the candidate approved. It rejects
+non-admin callers, missing candidates, and candidates already reviewed. Do not
+save or paste the access token into an issue, report, or command transcript.

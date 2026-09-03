@@ -287,6 +287,11 @@ fn shared_routes() -> Router<SharedState> {
         .route("/api/matter/captures", get(get_matter_captures))
         .route("/api/matter/captures/:id", get(get_matter_capture))
         .route("/api/matter/setup-code/:id", get(get_matter_setup_code))
+        .route("/api/matter/audition/run", post(post_matter_audition_run))
+        .route(
+            "/api/matter/audition/report",
+            post(post_matter_audition_report),
+        )
         .route("/api/matter/bulb-test/run", post(post_matter_bulb_test_run))
         .route(
             "/api/matter/bulb-test/report",
@@ -1396,11 +1401,25 @@ pub async fn post_matter_bulb_test_run(
     run_blocking(move || handlers::handle_matter_bulb_test_run(&state, &body)).await
 }
 
+pub async fn post_matter_audition_run(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_matter_audition_run(&state, &body)).await
+}
+
 pub async fn post_matter_bulb_test_report(
     State(state): State<SharedState>,
     Json(body): Json<Value>,
 ) -> ApiResponse {
     run_blocking(move || handlers::handle_matter_bulb_test_report(&state, &body)).await
+}
+
+pub async fn post_matter_audition_report(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_matter_audition_report(&state, &body)).await
 }
 
 // ---------------------------------------------------------------------------

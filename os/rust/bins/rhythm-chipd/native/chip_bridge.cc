@@ -851,30 +851,53 @@ uint8_t ClassifySubscriptionFailure(CHIP_ERROR error)
     return static_cast<uint8_t>(RHYTHM_CHIP_BRIDGE_SUB_FAIL_OTHER);
 }
 
-class OnOffSubscriptionOperation final : public DeviceConnectionOperation, public app::ReadClient::Callback
+class LightStateSubscriptionOperation final : public DeviceConnectionOperation, public app::ReadClient::Callback
 {
 public:
-    using ReportFn     = std::function<void(NodeId, EndpointId, bool)>;
+    using ReportFn =
+        std::function<void(NodeId, EndpointId, uint32_t, uint32_t, uint8_t, bool, uint64_t)>;
     using TerminatedFn = std::function<void(NodeId, EndpointId, CHIP_ERROR)>;
 
-    OnOffSubscriptionOperation(NodeId nodeId, EndpointId endpoint, uint16_t minIntervalSecs, uint16_t maxIntervalSecs,
-                               ReportFn onReport, TerminatedFn onTerminated) :
+    LightStateSubscriptionOperation(NodeId nodeId, EndpointId endpoint, uint16_t minIntervalSecs,
+                                    uint16_t maxIntervalSecs, ReportFn onReport, TerminatedFn onTerminated) :
         DeviceConnectionOperation(nodeId),
         mNodeId(nodeId), mEndpoint(endpoint), mMinIntervalSecs(minIntervalSecs), mMaxIntervalSecs(maxIntervalSecs),
         mOnReport(std::move(onReport)), mOnTerminated(std::move(onTerminated)),
-        mAttributePath(endpoint, OnOff::Id, OnOff::Attributes::OnOff::Id)
+        mAttributePaths{ app::AttributePathParams(endpoint, OnOff::Id, OnOff::Attributes::OnOff::Id),
+                         app::AttributePathParams(endpoint, LevelControl::Id,
+                                                  LevelControl::Attributes::CurrentLevel::Id),
+                         app::AttributePathParams(endpoint, ColorControl::Id,
+                                                  ColorControl::Attributes::CurrentHue::Id),
+                         app::AttributePathParams(endpoint, ColorControl::Id,
+                                                  ColorControl::Attributes::CurrentSaturation::Id),
+                         app::AttributePathParams(endpoint, ColorControl::Id, ColorControl::Attributes::CurrentX::Id),
+                         app::AttributePathParams(endpoint, ColorControl::Id, ColorControl::Attributes::CurrentY::Id),
+                         app::AttributePathParams(endpoint, ColorControl::Id,
+                                                  ColorControl::Attributes::ColorTemperatureMireds::Id) }
     {
-        SetOperationLabel("onoff-subscribe");
+        SetOperationLabel("light-state-subscribe");
     }
 
     bool IsActive() const { return mActive.load(std::memory_order_acquire); }
+    bool UsesIntervals(uint16_t minIntervalSecs, uint16_t maxIntervalSecs) const
+    {
+        return mMinIntervalSecs == minIntervalSecs && mMaxIntervalSecs == maxIntervalSecs;
+    }
+    void StopForReplacement()
+    {
+        // Destruction of ReadClient aborts its exchange and timers without
+        // invoking OnDone, so a deliberate interval change is not reported as
+        // a peer failure to Rust's retry worker.
+        mReadClient = nullptr;
+        mActive.store(false, std::memory_order_release);
+    }
 
 protected:
     CHIP_ERROR HandleConnected(Messaging::ExchangeManager & exchangeMgr, const SessionHandle & sessionHandle) override
     {
         app::ReadPrepareParams params(sessionHandle);
-        params.mpAttributePathParamsList    = &mAttributePath;
-        params.mAttributePathParamsListSize = 1;
+        params.mpAttributePathParamsList    = mAttributePaths.data();
+        params.mAttributePathParamsListSize = mAttributePaths.size();
         params.mMinIntervalFloorSeconds     = mMinIntervalSecs;
         params.mMaxIntervalCeilingSeconds   = mMaxIntervalSecs;
         params.mKeepSubscriptions           = true;
@@ -901,19 +924,64 @@ private:
     {
         (void) readClient;
         mActive.store(true, std::memory_order_release);
+        if (mOnReport)
+        {
+            // A possibly-empty ReportData is the authoritative liveness signal.
+            mOnReport(mNodeId, mEndpoint, 0, 0, RHYTHM_CHIP_BRIDGE_ATTRIBUTE_VALUE_SUBSCRIPTION_ALIVE, false, 0);
+        }
     }
 
     void OnAttributeData(const app::ConcreteDataAttributePath & path, TLV::TLVReader * data,
                          const app::StatusIB & status) override
     {
-        if (!status.IsSuccess() || data == nullptr || path.mClusterId != OnOff::Id ||
-            path.mAttributeId != OnOff::Attributes::OnOff::Id)
+        if (!status.IsSuccess() || data == nullptr)
         {
             return;
         }
 
-        OnOff::Attributes::OnOff::TypeInfo::DecodableType value;
-        if (app::DataModel::Decode(*data, value) != CHIP_NO_ERROR)
+        uint8_t valueType = 0;
+        bool boolValue    = false;
+        uint64_t unsignedValue = 0;
+        if (path.mClusterId == OnOff::Id && path.mAttributeId == OnOff::Attributes::OnOff::Id)
+        {
+            bool value;
+            if (data->Get(value) != CHIP_NO_ERROR)
+            {
+                return;
+            }
+            valueType = RHYTHM_CHIP_BRIDGE_ATTRIBUTE_VALUE_BOOL;
+            boolValue = value;
+        }
+        else if ((path.mClusterId == LevelControl::Id &&
+                  path.mAttributeId == LevelControl::Attributes::CurrentLevel::Id) ||
+                 (path.mClusterId == ColorControl::Id &&
+                  (path.mAttributeId == ColorControl::Attributes::CurrentHue::Id ||
+                   path.mAttributeId == ColorControl::Attributes::CurrentSaturation::Id)))
+        {
+            uint8_t value;
+            if (data->Get(value) != CHIP_NO_ERROR)
+            {
+                // CurrentLevel is nullable; a null report carries no usable
+                // observed value and is intentionally omitted.
+                return;
+            }
+            valueType     = RHYTHM_CHIP_BRIDGE_ATTRIBUTE_VALUE_U8;
+            unsignedValue = value;
+        }
+        else if (path.mClusterId == ColorControl::Id &&
+                 (path.mAttributeId == ColorControl::Attributes::CurrentX::Id ||
+                  path.mAttributeId == ColorControl::Attributes::CurrentY::Id ||
+                  path.mAttributeId == ColorControl::Attributes::ColorTemperatureMireds::Id))
+        {
+            uint16_t value;
+            if (data->Get(value) != CHIP_NO_ERROR)
+            {
+                return;
+            }
+            valueType     = RHYTHM_CHIP_BRIDGE_ATTRIBUTE_VALUE_U16;
+            unsignedValue = value;
+        }
+        else
         {
             return;
         }
@@ -921,7 +989,8 @@ private:
         mActive.store(true, std::memory_order_release);
         if (mOnReport)
         {
-            mOnReport(mNodeId, mEndpoint, value);
+            mOnReport(mNodeId, mEndpoint, path.mClusterId, path.mAttributeId, valueType, boolValue,
+                      unsignedValue);
         }
     }
 
@@ -975,7 +1044,7 @@ private:
     uint16_t mMaxIntervalSecs;
     ReportFn mOnReport;
     TerminatedFn mOnTerminated;
-    app::AttributePathParams mAttributePath;
+    std::array<app::AttributePathParams, 7> mAttributePaths;
     Platform::UniquePtr<app::ReadClient> mReadClient;
     std::atomic<bool> mActive{ false };
     bool mEstablished      = false;
@@ -985,11 +1054,11 @@ private:
 // One live On/Off subscription plus the key it was requested for. Key and
 // operation are kept in a single record so they can never desync, and the whole
 // table is owned by the Matter thread.
-struct OnOffSubscriptionEntry
+struct LightStateSubscriptionEntry
 {
     NodeId nodeId;
     EndpointId endpoint;
-    std::unique_ptr<OnOffSubscriptionOperation> operation;
+    std::unique_ptr<LightStateSubscriptionOperation> operation;
 };
 
 class BlockingPairingDelegate final : public DevicePairingDelegate
@@ -1367,7 +1436,7 @@ public:
             err = mCommissioner->UnpairDevice(nodeId);
             if (err == CHIP_NO_ERROR)
             {
-                RemoveOnOffSubscriptionsForNode(nodeId);
+                RemoveLightStateSubscriptionsForNode(nodeId);
             }
         }));
         return err;
@@ -1538,6 +1607,8 @@ public:
         ColorControl::Commands::MoveToColorTemperature::Type request;
         request.colorTemperatureMireds = KelvinToMireds(kelvin);
         request.transitionTime         = transitionMs.has_value() ? MillisecondsToTenths(*transitionMs) : 0;
+        request.optionsMask.Set(ColorControl::OptionsBitmap::kExecuteIfOff);
+        request.optionsOverride.Set(ColorControl::OptionsBitmap::kExecuteIfOff);
         CHIP_ERROR err = InvokeGroupCommand(groupId, request);
         if (err == CHIP_NO_ERROR)
         {
@@ -1555,6 +1626,8 @@ public:
         request.colorX         = XyToMatterCoordinate(x);
         request.colorY         = XyToMatterCoordinate(y);
         request.transitionTime = transitionMs.has_value() ? MillisecondsToTenths(*transitionMs) : 0;
+        request.optionsMask.Set(ColorControl::OptionsBitmap::kExecuteIfOff);
+        request.optionsOverride.Set(ColorControl::OptionsBitmap::kExecuteIfOff);
         CHIP_ERROR err = InvokeGroupCommand(groupId, request);
         if (err == CHIP_NO_ERROR)
         {
@@ -1573,8 +1646,8 @@ public:
         request.hue             = hue;
         request.saturation      = saturation;
         request.transitionTime  = transitionMs.has_value() ? MillisecondsToTenths(*transitionMs) : 0;
-        request.optionsMask     = chip::BitMask<ColorControl::OptionsBitmap>();
-        request.optionsOverride = chip::BitMask<ColorControl::OptionsBitmap>();
+        request.optionsMask.Set(ColorControl::OptionsBitmap::kExecuteIfOff);
+        request.optionsOverride.Set(ColorControl::OptionsBitmap::kExecuteIfOff);
         CHIP_ERROR err = InvokeGroupCommand(groupId, request);
         if (err == CHIP_NO_ERROR)
         {
@@ -1660,6 +1733,8 @@ public:
         ColorControl::Commands::MoveToColorTemperature::Type request;
         request.colorTemperatureMireds = KelvinToMireds(kelvin);
         request.transitionTime         = transitionMs.has_value() ? MillisecondsToTenths(*transitionMs) : 0;
+        request.optionsMask.Set(ColorControl::OptionsBitmap::kExecuteIfOff);
+        request.optionsOverride.Set(ColorControl::OptionsBitmap::kExecuteIfOff);
         return InvokeCommand(nodeId, endpoint, request);
     }
 
@@ -1669,6 +1744,8 @@ public:
         request.colorX         = XyToMatterCoordinate(x);
         request.colorY         = XyToMatterCoordinate(y);
         request.transitionTime = transitionMs.has_value() ? MillisecondsToTenths(*transitionMs) : 0;
+        request.optionsMask.Set(ColorControl::OptionsBitmap::kExecuteIfOff);
+        request.optionsOverride.Set(ColorControl::OptionsBitmap::kExecuteIfOff);
         return InvokeCommand(nodeId, endpoint, request);
     }
 
@@ -1679,9 +1756,25 @@ public:
         request.hue             = hue;
         request.saturation      = saturation;
         request.transitionTime  = transitionMs.has_value() ? MillisecondsToTenths(*transitionMs) : 0;
-        request.optionsMask     = chip::BitMask<ColorControl::OptionsBitmap>();
-        request.optionsOverride = chip::BitMask<ColorControl::OptionsBitmap>();
+        request.optionsMask.Set(ColorControl::OptionsBitmap::kExecuteIfOff);
+        request.optionsOverride.Set(ColorControl::OptionsBitmap::kExecuteIfOff);
         return InvokeCommand(nodeId, endpoint, request);
+    }
+
+    CHIP_ERROR WriteColorControlOptions(NodeId nodeId, EndpointId endpoint, bool executeIfOff)
+    {
+        chip::BitMask<ColorControl::OptionsBitmap> options;
+        ReturnErrorOnFailure(
+            ReadValueAttribute<ColorControl::Attributes::Options::TypeInfo>(nodeId, endpoint, options));
+        if (executeIfOff)
+        {
+            options.Set(ColorControl::OptionsBitmap::kExecuteIfOff);
+        }
+        else
+        {
+            options.Clear(ColorControl::OptionsBitmap::kExecuteIfOff);
+        }
+        return WriteAttribute<ColorControl::Attributes::Options::TypeInfo>(nodeId, endpoint, options);
     }
 
     CHIP_ERROR ReadOnOff(NodeId nodeId, EndpointId endpoint, bool & on)
@@ -1735,6 +1828,7 @@ public:
         std::vector<AttributeId> colorAttributes;
         uint32_t colorFeatureMap = 0;
         chip::BitMask<ColorControl::ColorCapabilitiesBitmap> colorCapabilities;
+        chip::BitMask<ColorControl::OptionsBitmap> colorOptions;
         uint16_t minMireds = 0;
         uint16_t maxMireds = 0;
         uint16_t currentX = 0;
@@ -1748,6 +1842,8 @@ public:
         (void) ReadValueAttribute<ColorControl::Attributes::FeatureMap::TypeInfo>(nodeId, endpoint, colorFeatureMap);
         CHIP_ERROR colorCapabilitiesErr =
             ReadValueAttribute<ColorControl::Attributes::ColorCapabilities::TypeInfo>(nodeId, endpoint, colorCapabilities);
+        CHIP_ERROR colorOptionsErr =
+            ReadValueAttribute<ColorControl::Attributes::Options::TypeInfo>(nodeId, endpoint, colorOptions);
         CHIP_ERROR minMiredsErr =
             ReadValueAttribute<ColorControl::Attributes::ColorTempPhysicalMinMireds::TypeInfo>(nodeId, endpoint, minMireds);
         CHIP_ERROR maxMiredsErr =
@@ -1831,6 +1927,15 @@ public:
         AppendReadValue(json, "current_y", currentYErr, currentY);
         AppendReadValue(json, "current_hue", currentHueErr, currentHue);
         AppendReadValue(json, "current_saturation", currentSaturationErr, currentSaturation);
+        json << ",\"options\":";
+        if (colorOptionsErr == CHIP_NO_ERROR)
+        {
+            json << static_cast<unsigned>(colorOptions.Raw());
+        }
+        else
+        {
+            json << "null";
+        }
         json << '}';
         json << '}';
         out = json.str();
@@ -1874,7 +1979,7 @@ public:
     }
 
     CHIP_ERROR SubscribeOnOff(const rhythm_chip_bridge_subscription_target * targets, size_t targetCount,
-                              uint16_t minIntervalSecs, uint16_t maxIntervalSecs)
+                              uint16_t minIntervalSecs, uint16_t maxIntervalSecs, bool replaceExisting = false)
     {
         VerifyOrReturnError(mCommissioner != nullptr, CHIP_ERROR_INCORRECT_STATE);
         VerifyOrReturnError(targets != nullptr || targetCount == 0, CHIP_ERROR_INVALID_ARGUMENT);
@@ -1891,7 +1996,7 @@ public:
         // service no longer serializes SubscribeOnOff behind the lifecycle lock.
         // Prune terminal non-resubscribing clients before deciding whether a
         // target already has a live Rust-owned subscription.
-        ReturnErrorOnFailure(ExecuteOnMatterThread([this]() { PruneInactiveOnOffSubscriptions(); }));
+        ReturnErrorOnFailure(ExecuteOnMatterThread([this]() { PruneInactiveLightStateSubscriptions(); }));
 
         for (size_t i = 0; i < targetCount; ++i)
         {
@@ -1905,11 +2010,28 @@ public:
             // and install a second ReadClient for the same endpoint, which
             // mKeepSubscriptions=true would keep alive on the peer.
             bool skip = false;
-            ReturnErrorOnFailure(ExecuteOnMatterThread([this, nodeId, endpoint, key, &skip]() {
-                skip = HasOnOffSubscription(nodeId, endpoint) || mPendingOnOffSubscriptions.count(key) != 0;
+            ReturnErrorOnFailure(ExecuteOnMatterThread([this, nodeId, endpoint, minIntervalSecs, maxIntervalSecs,
+                                                        replaceExisting, key, &skip]() {
+                auto existing = std::find_if(
+                    mLightStateSubscriptions.begin(), mLightStateSubscriptions.end(),
+                    [nodeId, endpoint](const LightStateSubscriptionEntry & entry) {
+                        return entry.nodeId == nodeId && entry.endpoint == endpoint && entry.operation != nullptr &&
+                            entry.operation->IsActive();
+                    });
+                if (existing != mLightStateSubscriptions.end())
+                {
+                    if (!replaceExisting || existing->operation->UsesIntervals(minIntervalSecs, maxIntervalSecs))
+                    {
+                        skip = true;
+                        return;
+                    }
+                    existing->operation->StopForReplacement();
+                    mLightStateSubscriptions.erase(existing);
+                }
+                skip = mPendingLightStateSubscriptions.count(key) != 0;
                 if (!skip)
                 {
-                    mPendingOnOffSubscriptions.insert(key);
+                    mPendingLightStateSubscriptions.insert(key);
                 }
             }));
             if (skip)
@@ -1920,14 +2042,17 @@ public:
             // Releases the reservation on every early return below. Disarmed
             // once the bookkeeping hop has taken ownership of the operation.
             ScopeGuard releaseReservation([this, key]() {
-                CHIP_ERROR ignored = ExecuteOnMatterThread([this, key]() { mPendingOnOffSubscriptions.erase(key); });
+                CHIP_ERROR ignored =
+                    ExecuteOnMatterThread([this, key]() { mPendingLightStateSubscriptions.erase(key); });
                 (void) ignored;
             });
 
-            auto subscription = std::make_unique<OnOffSubscriptionOperation>(
+            auto subscription = std::make_unique<LightStateSubscriptionOperation>(
                 nodeId, endpoint, minIntervalSecs, maxIntervalSecs,
-                [this](NodeId reportNodeId, EndpointId reportEndpoint, bool on) {
-                    this->QueueOnOffReport(reportNodeId, reportEndpoint, on);
+                [this](NodeId reportNodeId, EndpointId reportEndpoint, uint32_t clusterId, uint32_t attributeId,
+                       uint8_t valueType, bool boolValue, uint64_t unsignedValue) {
+                    this->QueueLightStateReport(reportNodeId, reportEndpoint, clusterId, attributeId, valueType,
+                                                boolValue, unsignedValue);
                 },
                 [this](NodeId terminatedNodeId, EndpointId terminatedEndpoint, CHIP_ERROR error) {
                     this->QueueSubscriptionTermination(terminatedNodeId, terminatedEndpoint, error);
@@ -1939,7 +2064,7 @@ public:
             ReturnErrorOnFailure(RunConnectionOperation(*subscription));
 
             const CHIP_ERROR bookkeeping = ExecuteOnMatterThread([this, nodeId, endpoint, key, &subscription]() {
-                mPendingOnOffSubscriptions.erase(key);
+                mPendingLightStateSubscriptions.erase(key);
                 if (subscription == nullptr)
                 {
                     return;
@@ -1952,7 +2077,8 @@ public:
                     subscription.reset();
                     return;
                 }
-                mOnOffSubscriptions.push_back(OnOffSubscriptionEntry{ nodeId, endpoint, std::move(subscription) });
+                mLightStateSubscriptions.push_back(
+                    LightStateSubscriptionEntry{ nodeId, endpoint, std::move(subscription) });
             });
             if (bookkeeping != CHIP_NO_ERROR)
             {
@@ -2017,8 +2143,8 @@ public:
         }
 
         CHIP_ERROR teardown = ExecuteOnMatterThread([this]() {
-            mOnOffSubscriptions.clear();
-            mPendingOnOffSubscriptions.clear();
+            mLightStateSubscriptions.clear();
+            mPendingLightStateSubscriptions.clear();
             mUnpairedNodes.clear();
             if (mCommissioner != nullptr)
             {
@@ -2616,46 +2742,51 @@ private:
 
     // The three helpers below must run on the Matter thread: they read and
     // destroy ReadClient-owning operations.
-    bool HasOnOffSubscription(NodeId nodeId, EndpointId endpoint) const
+    bool HasLightStateSubscription(NodeId nodeId, EndpointId endpoint) const
     {
-        return std::any_of(mOnOffSubscriptions.begin(), mOnOffSubscriptions.end(),
-                           [nodeId, endpoint](const OnOffSubscriptionEntry & entry) {
+        return std::any_of(mLightStateSubscriptions.begin(), mLightStateSubscriptions.end(),
+                           [nodeId, endpoint](const LightStateSubscriptionEntry & entry) {
                                return entry.nodeId == nodeId && entry.endpoint == endpoint && entry.operation != nullptr &&
                                    entry.operation->IsActive();
                            });
     }
 
-    void PruneInactiveOnOffSubscriptions()
+    void PruneInactiveLightStateSubscriptions()
     {
-        mOnOffSubscriptions.erase(std::remove_if(mOnOffSubscriptions.begin(), mOnOffSubscriptions.end(),
-                                                 [](const OnOffSubscriptionEntry & entry) {
-                                                     return entry.operation == nullptr || !entry.operation->IsActive();
-                                                 }),
-                                  mOnOffSubscriptions.end());
+        mLightStateSubscriptions.erase(
+            std::remove_if(mLightStateSubscriptions.begin(), mLightStateSubscriptions.end(),
+                           [](const LightStateSubscriptionEntry & entry) {
+                               return entry.operation == nullptr || !entry.operation->IsActive();
+                           }),
+            mLightStateSubscriptions.end());
     }
 
-    void RemoveOnOffSubscriptionsForNode(NodeId nodeId)
+    void RemoveLightStateSubscriptionsForNode(NodeId nodeId)
     {
-        mOnOffSubscriptions.erase(std::remove_if(mOnOffSubscriptions.begin(), mOnOffSubscriptions.end(),
-                                                 [nodeId](const OnOffSubscriptionEntry & entry) {
-                                                     return entry.nodeId == nodeId;
-                                                 }),
-                                  mOnOffSubscriptions.end());
+        mLightStateSubscriptions.erase(
+            std::remove_if(mLightStateSubscriptions.begin(), mLightStateSubscriptions.end(),
+                           [nodeId](const LightStateSubscriptionEntry & entry) { return entry.nodeId == nodeId; }),
+            mLightStateSubscriptions.end());
         // Tombstone the unpaired node so a SubscribeOnOff that is still in
         // flight for it cannot re-install a subscription afterwards. Cleared
         // when the node is commissioned again, and on controller init.
         mUnpairedNodes.insert(nodeId);
     }
 
-    void QueueOnOffReport(NodeId nodeId, EndpointId endpoint, bool on)
+    void QueueLightStateReport(NodeId nodeId, EndpointId endpoint, uint32_t clusterId, uint32_t attributeId,
+                               uint8_t valueType, bool boolValue, uint64_t unsignedValue)
     {
         rhythm_chip_bridge_attribute_report report;
         report.node_id      = nodeId;
         report.endpoint     = endpoint;
-        report.cluster_id   = OnOff::Id;
-        report.attribute_id = OnOff::Attributes::OnOff::Id;
-        report.value_type   = RHYTHM_CHIP_BRIDGE_ATTRIBUTE_VALUE_BOOL;
-        report.bool_value   = on;
+        report.cluster_id   = clusterId;
+        report.attribute_id = attributeId;
+        report.value_type   = valueType;
+        report.bool_value   = boolValue;
+        report.unsigned_value = unsignedValue;
+        report.received_at_unix_ms = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                               std::chrono::system_clock::now().time_since_epoch())
+                                                               .count());
 
         std::lock_guard<std::mutex> lock(mReportMutex);
         constexpr size_t kMaxQueuedAttributeReports = 1024;
@@ -2666,7 +2797,7 @@ private:
         mAttributeReports.push_back(report);
     }
 
-    // Called on the Matter thread from OnOffSubscriptionOperation::OnDone once
+    // Called on the Matter thread from LightStateSubscriptionOperation::OnDone once
     // an established subscription has ended. Only established subscriptions
     // reach here; pre-establishment failures surface as the SubscribeOnOff RPC
     // error instead.
@@ -2699,8 +2830,8 @@ private:
     std::unique_ptr<DeviceCommissioner> mCommissioner;
     // Matter-thread-owned subscription table plus the reservations and unpair
     // tombstones that keep concurrent RPCs from racing it.
-    std::vector<OnOffSubscriptionEntry> mOnOffSubscriptions;
-    std::set<std::pair<NodeId, EndpointId>> mPendingOnOffSubscriptions;
+    std::vector<LightStateSubscriptionEntry> mLightStateSubscriptions;
+    std::set<std::pair<NodeId, EndpointId>> mPendingLightStateSubscriptions;
     std::set<NodeId> mUnpairedNodes;
     std::mutex mReportMutex;
     std::vector<rhythm_chip_bridge_attribute_report> mAttributeReports;
@@ -2984,11 +3115,19 @@ bool rhythm_chip_bridge_read_light_state(uint64_t node_id, uint16_t endpoint, ch
     return WriteJsonOutput(json, out_json, json_size, out_json_len, error_message, error_message_size);
 }
 
-bool rhythm_chip_bridge_subscribe_on_off(const struct rhythm_chip_bridge_subscription_target * targets, size_t target_count,
-                                         uint16_t min_interval_secs, uint16_t max_interval_secs, char * error_message,
-                                         size_t error_message_size)
+bool rhythm_chip_bridge_write_color_control_options(uint64_t node_id, uint16_t endpoint, bool execute_if_off,
+                                                    char * error_message, size_t error_message_size)
 {
-    return HandleBridgeResult(gContext.SubscribeOnOff(targets, target_count, min_interval_secs, max_interval_secs),
+    return HandleBridgeResult(gContext.WriteColorControlOptions(node_id, endpoint, execute_if_off), error_message,
+                              error_message_size, "writing Matter ColorControl Options");
+}
+
+bool rhythm_chip_bridge_subscribe_on_off(const struct rhythm_chip_bridge_subscription_target * targets, size_t target_count,
+                                         uint16_t min_interval_secs, uint16_t max_interval_secs, bool replace_existing,
+                                         char * error_message, size_t error_message_size)
+{
+    return HandleBridgeResult(gContext.SubscribeOnOff(targets, target_count, min_interval_secs, max_interval_secs,
+                                                       replace_existing),
                               error_message, error_message_size, "subscribing to Matter on/off attributes");
 }
 

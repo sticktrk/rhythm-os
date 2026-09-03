@@ -35,8 +35,8 @@ fn scenario_sync_imports_roomless_commissioned_device() {
             .as_ref()
             .and_then(|value| value.pointer("/automatic_naming/color_kind"))
             .and_then(serde_json::Value::as_str),
-        Some("color"),
-        "discovery should attach naming evidence without renaming the existing inventory"
+        None,
+        "fallback capabilities must not guess a naming color before a successful probe"
     );
     assert!(canonical.room_id.is_none());
     let canonical_id = canonical.id.clone();

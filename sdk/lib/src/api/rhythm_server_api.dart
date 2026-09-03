@@ -1747,10 +1747,71 @@ class RhythmServerApi {
     return false;
   }
 
-  /// Run a raw Matter bulb tester command variant against a Matter light.
+  /// Run one Bulb Audition scenario through the appliance runtime plan builder.
+  Future<Map<String, dynamic>?> runBulbAudition({
+    required String deviceId,
+    required String scenario,
+    String? journeyId,
+    String? baseScenario,
+    Map<String, dynamic>? profileOverride,
+    String? legacyTest,
+  }) async {
+    try {
+      final response = await _dio.post(
+        'api/matter/audition/run',
+        data: {
+          'device_id': deviceId,
+          'scenario': scenario,
+          if (journeyId != null) 'journey_id': journeyId,
+          if (baseScenario != null) 'base_scenario': baseScenario,
+          if (profileOverride != null) 'profile_override': profileOverride,
+        },
+      );
+      return response.data as Map<String, dynamic>?;
+    } on DioException catch (error) {
+      if (error.response?.statusCode == 404 && legacyTest != null) {
+        return runMatterBulbTest(deviceId: deviceId, test: legacyTest);
+      }
+      if (error.response?.statusCode == 404) {
+        return const {
+          'status': 'unsupported',
+          'required_capability': 'bulb_audition_v3',
+        };
+      }
+      _log.warning('runBulbAudition failed', error);
+    } catch (error) {
+      _log.warning('runBulbAudition failed', error);
+    }
+    return null;
+  }
+
+  /// Save a schema-v3 Bulb Audition report and its typed control profile.
+  Future<Map<String, dynamic>?> saveBulbAuditionReport(
+    Map<String, dynamic> report, {
+    bool applyLocal = true,
+  }) async {
+    try {
+      final response = await _dio.post(
+        'api/matter/audition/report',
+        data: {...report, 'schema_version': 3, 'apply_local': applyLocal},
+      );
+      return response.data as Map<String, dynamic>?;
+    } on DioException catch (error) {
+      if (error.response?.statusCode == 404) {
+        return saveMatterBulbTestReport(report, applyLocal: applyLocal);
+      }
+      _log.warning('saveBulbAuditionReport failed', error);
+    } catch (error) {
+      _log.warning('saveBulbAuditionReport failed', error);
+    }
+    return null;
+  }
+
+  /// One-release compatibility alias for the raw Matter bulb tester.
   ///
   /// [deviceId] may be either a canonical Rhythm device ID or a Matter native
   /// ID such as `matter-100`.
+  @Deprecated('Use runBulbAudition')
   Future<Map<String, dynamic>?> runMatterBulbTest({
     required String deviceId,
     required String test,
@@ -1767,8 +1828,8 @@ class RhythmServerApi {
     return null;
   }
 
-  /// Save a Matter bulb tester report on the server and optionally apply the
-  /// inferred local quirks immediately.
+  /// One-release compatibility alias for schema-v2 bulb-test reports.
+  @Deprecated('Use saveBulbAuditionReport')
   Future<Map<String, dynamic>?> saveMatterBulbTestReport(
     Map<String, dynamic> report, {
     bool applyLocal = true,
