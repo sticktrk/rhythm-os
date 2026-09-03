@@ -1538,6 +1538,8 @@ public:
         ColorControl::Commands::MoveToColorTemperature::Type request;
         request.colorTemperatureMireds = KelvinToMireds(kelvin);
         request.transitionTime         = transitionMs.has_value() ? MillisecondsToTenths(*transitionMs) : 0;
+        request.optionsMask.Set(ColorControl::OptionsBitmap::kExecuteIfOff);
+        request.optionsOverride.Set(ColorControl::OptionsBitmap::kExecuteIfOff);
         CHIP_ERROR err = InvokeGroupCommand(groupId, request);
         if (err == CHIP_NO_ERROR)
         {
@@ -1555,6 +1557,8 @@ public:
         request.colorX         = XyToMatterCoordinate(x);
         request.colorY         = XyToMatterCoordinate(y);
         request.transitionTime = transitionMs.has_value() ? MillisecondsToTenths(*transitionMs) : 0;
+        request.optionsMask.Set(ColorControl::OptionsBitmap::kExecuteIfOff);
+        request.optionsOverride.Set(ColorControl::OptionsBitmap::kExecuteIfOff);
         CHIP_ERROR err = InvokeGroupCommand(groupId, request);
         if (err == CHIP_NO_ERROR)
         {
@@ -1660,6 +1664,8 @@ public:
         ColorControl::Commands::MoveToColorTemperature::Type request;
         request.colorTemperatureMireds = KelvinToMireds(kelvin);
         request.transitionTime         = transitionMs.has_value() ? MillisecondsToTenths(*transitionMs) : 0;
+        request.optionsMask.Set(ColorControl::OptionsBitmap::kExecuteIfOff);
+        request.optionsOverride.Set(ColorControl::OptionsBitmap::kExecuteIfOff);
         return InvokeCommand(nodeId, endpoint, request);
     }
 
@@ -1669,6 +1675,8 @@ public:
         request.colorX         = XyToMatterCoordinate(x);
         request.colorY         = XyToMatterCoordinate(y);
         request.transitionTime = transitionMs.has_value() ? MillisecondsToTenths(*transitionMs) : 0;
+        request.optionsMask.Set(ColorControl::OptionsBitmap::kExecuteIfOff);
+        request.optionsOverride.Set(ColorControl::OptionsBitmap::kExecuteIfOff);
         return InvokeCommand(nodeId, endpoint, request);
     }
 
