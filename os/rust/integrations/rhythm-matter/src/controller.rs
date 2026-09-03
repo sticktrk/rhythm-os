@@ -1207,6 +1207,8 @@ pub(crate) fn schedule_turn_on_readback(
     needs_audition: Arc<Mutex<std::collections::HashSet<(u64, u16)>>>,
     readback: Arc<crate::hub_state::MatterReadbackCoordinator>,
 ) {
+    // The shared coordinator emits `matter_command_ack_without_effect` and
+    // persists the endpoint warning after its authoritative readback.
     let settle_ms = plan
         .steps
         .iter()
