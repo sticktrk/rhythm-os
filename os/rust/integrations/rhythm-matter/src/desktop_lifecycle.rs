@@ -650,7 +650,7 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
         state: &SharedState,
         params: &serde_json::Value,
     ) -> Result<serde_json::Value> {
-        crate::bulb_test::run_bulb_test(state, params)
+        crate::audition::run_audition(state, params)
     }
 
     fn save_device_test_report(
@@ -658,7 +658,7 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
         state: &SharedState,
         report: &serde_json::Value,
     ) -> Result<serde_json::Value> {
-        crate::bulb_test::save_bulb_test_report(state, report)
+        crate::audition::save_audition_report(state, report)
     }
 }
 
@@ -869,11 +869,16 @@ mod tests {
             next_node_id: AtomicU64::new(10),
             device_caps: Mutex::new(HashMap::new()),
             device_quirks: Mutex::new(HashMap::new()),
+            device_profiles: Mutex::new(HashMap::new()),
+            pending_turn_on_plans: Arc::new(Mutex::new(HashMap::new())),
+            needs_audition: Arc::new(Mutex::new(HashSet::new())),
+            local_overrides: Mutex::new(crate::local_quirks::LocalMatterOverrides::default()),
             cloud_profiles: Mutex::new(CloudMatterProfileCatalog::default()),
             decommissioning: Mutex::new(HashSet::new()),
             recently_decommissioned: Mutex::new(HashMap::new()),
             node_proof_of_life: Arc::new(Mutex::new(HashMap::new())),
             on_off_observations: Arc::new(Mutex::new(HashMap::new())),
+            attribute_report_history: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             event_tx,
         })
     }

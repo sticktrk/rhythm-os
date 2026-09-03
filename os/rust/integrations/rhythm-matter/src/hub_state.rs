@@ -1,6 +1,6 @@
 //! Matter hub-specific state stored in `ActiveHub::hub_data`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -11,7 +11,7 @@ use rhythm_os::hub::HubEvent;
 use crate::cloud_profiles::CloudMatterProfileCatalog;
 use crate::controller::MatterDeviceRegistry;
 use crate::transport::MatterTransport;
-use crate::transport::{CommissionedDevice, MatterDeviceInfo};
+use crate::transport::{CommissionedDevice, MatterAttributeReport, MatterDeviceInfo};
 
 const DECOMMISSION_SUPPRESSION_WINDOW: Duration = Duration::from_secs(120);
 /// Matter-specific state stored in `ActiveHub::hub_data`.
@@ -32,6 +32,17 @@ pub struct MatterHubData {
     pub device_caps: Mutex<HashMap<String, LightCapabilities>>,
     /// Per-device Matter quirks from `rhythm-devices`.
     pub device_quirks: Mutex<HashMap<String, Vec<DeviceQuirk>>>,
+    /// Per-device effective typed control profiles consumed by runtime plans.
+    pub device_profiles: Mutex<HashMap<String, crate::control_profile::MatterControlProfile>>,
+    /// Runtime turn-on plans awaiting terminal acknowledgement and readback.
+    pub pending_turn_on_plans:
+        Arc<Mutex<HashMap<u64, crate::transport::MatterEndpointCommandPlan>>>,
+    /// Endpoints whose successful command acknowledgement did not produce the
+    /// intended reported state. The app reads this through Audition status.
+    pub needs_audition: Arc<Mutex<HashSet<(u64, u16)>>>,
+    /// Local audition inputs cached for startup, pairing, discovery, and
+    /// on-demand probes so all metadata paths use one resolver.
+    pub local_overrides: Mutex<crate::local_quirks::LocalMatterOverrides>,
     /// Approved cloud profile overlay catalog cached at hub startup.
     pub cloud_profiles: Mutex<CloudMatterProfileCatalog>,
     /// Matter nodes currently being decommissioned.
@@ -42,6 +53,9 @@ pub struct MatterHubData {
     pub node_proof_of_life: Arc<Mutex<HashMap<u64, Instant>>>,
     /// Latest authoritative On/Off subscription report by node and endpoint.
     pub on_off_observations: Arc<Mutex<HashMap<(u64, u16), (bool, Instant)>>>,
+    /// Recent reports from the controller event stream. Audition reads this
+    /// shared history instead of racing chipd's native report drain.
+    pub attribute_report_history: Arc<Mutex<VecDeque<MatterAttributeReport>>>,
     /// Event channel sender kept alive by the hub data.
     pub event_tx: std::sync::mpsc::Sender<HubEvent>,
 }
@@ -99,8 +113,20 @@ impl MatterHubData {
         if let Ok(mut quirks) = self.device_quirks.lock() {
             quirks.retain(|key, _| key != &prefix && !key.starts_with(&format!("{}-", prefix)));
         }
+        if let Ok(mut profiles) = self.device_profiles.lock() {
+            profiles.retain(|key, _| key != &prefix && !key.starts_with(&format!("{}-", prefix)));
+        }
+        if let Ok(mut pending) = self.pending_turn_on_plans.lock() {
+            pending.retain(|_, plan| plan.node_id != node_id);
+        }
+        if let Ok(mut needs_audition) = self.needs_audition.lock() {
+            needs_audition.retain(|(observed_node_id, _)| *observed_node_id != node_id);
+        }
         if let Ok(mut observations) = self.on_off_observations.lock() {
             observations.retain(|(observed_node_id, _), _| *observed_node_id != node_id);
+        }
+        if let Ok(mut reports) = self.attribute_report_history.lock() {
+            reports.retain(|report| report.node_id != node_id);
         }
     }
 
@@ -279,11 +305,16 @@ mod tests {
             next_node_id: AtomicU64::new(100),
             device_caps: Mutex::new(HashMap::new()),
             device_quirks: Mutex::new(HashMap::new()),
+            device_profiles: Mutex::new(HashMap::new()),
+            pending_turn_on_plans: Arc::new(Mutex::new(HashMap::new())),
+            needs_audition: Arc::new(Mutex::new(HashSet::new())),
+            local_overrides: Mutex::new(crate::local_quirks::LocalMatterOverrides::default()),
             cloud_profiles: Mutex::new(CloudMatterProfileCatalog::default()),
             decommissioning: Mutex::new(HashSet::new()),
             recently_decommissioned: Mutex::new(HashMap::new()),
             node_proof_of_life: Arc::new(Mutex::new(HashMap::new())),
             on_off_observations: Arc::new(Mutex::new(HashMap::new())),
+            attribute_report_history: Arc::new(Mutex::new(VecDeque::new())),
             event_tx,
         }
     }

@@ -1627,6 +1627,7 @@ impl ChipTransport {
                         targets: targets.to_vec(),
                         min_interval_secs: DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
                         max_interval_secs: DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS,
+                        replace_existing: false,
                     },
                     context,
                 )
@@ -2033,7 +2034,7 @@ impl MatterTransport for ChipTransport {
         Ok(response.value)
     }
 
-    fn subscribe_on_off(
+    fn subscribe_light_state(
         &self,
         targets: &[MatterSubscriptionTarget],
         min_interval_secs: u16,
@@ -2043,8 +2044,33 @@ impl MatterTransport for ChipTransport {
             targets: targets.to_vec(),
             min_interval_secs,
             max_interval_secs,
+            replace_existing: false,
         })?;
         Ok(())
+    }
+
+    fn refresh_light_state_subscription(
+        &self,
+        targets: &[MatterSubscriptionTarget],
+        min_interval_secs: u16,
+        max_interval_secs: u16,
+    ) -> Result<()> {
+        let _: crate::chip_rpc::ChipRpcEmpty = self.call(ChipRpcRequest::SubscribeOnOff {
+            targets: targets.to_vec(),
+            min_interval_secs,
+            max_interval_secs,
+            replace_existing: true,
+        })?;
+        Ok(())
+    }
+
+    fn subscribe_on_off(
+        &self,
+        targets: &[MatterSubscriptionTarget],
+        min_interval_secs: u16,
+        max_interval_secs: u16,
+    ) -> Result<()> {
+        self.subscribe_light_state(targets, min_interval_secs, max_interval_secs)
     }
 
     fn drain_attribute_reports(&self) -> Result<Vec<MatterAttributeReport>> {
@@ -2301,6 +2327,7 @@ mod tests {
                 }],
                 min_interval_secs: 1,
                 max_interval_secs: 30,
+                replace_existing: false,
             }),
             RPC_TIMEOUT
         );
@@ -2320,6 +2347,7 @@ mod tests {
                 }],
                 min_interval_secs: 1,
                 max_interval_secs: 30,
+                replace_existing: false,
             }
         ));
         assert!(is_plain_failure_on_timeout(&ChipRpcRequest::SetOnOff {
@@ -2742,6 +2770,7 @@ mod tests {
                     targets,
                     min_interval_secs,
                     max_interval_secs,
+                    replace_existing,
                 } => {
                     assert_eq!(
                         targets,
@@ -2752,6 +2781,7 @@ mod tests {
                     );
                     assert_eq!(min_interval_secs, 1);
                     assert_eq!(max_interval_secs, 60);
+                    assert!(!replace_existing);
                 }
                 other => panic!("unexpected request: {:?}", other),
             }
@@ -2775,9 +2805,47 @@ mod tests {
     }
 
     #[test]
+    fn refresh_subscription_requests_native_replacement() {
+        let socket_path = temp_socket_path("refresh-subscription");
+        let server = spawn_fake_server(socket_path.clone(), |request| {
+            match request.request {
+                ChipRpcRequest::SubscribeOnOff {
+                    targets,
+                    min_interval_secs,
+                    max_interval_secs,
+                    replace_existing,
+                } => {
+                    assert_eq!(targets.len(), 1);
+                    assert_eq!(min_interval_secs, 1);
+                    assert_eq!(max_interval_secs, 2);
+                    assert!(replace_existing);
+                }
+                other => panic!("unexpected request: {:?}", other),
+            }
+            ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new())
+        });
+
+        let transport = ChipTransport::for_test(socket_path.clone());
+        transport
+            .refresh_light_state_subscription(
+                &[MatterSubscriptionTarget {
+                    node_id: 7,
+                    endpoint: 2,
+                }],
+                1,
+                2,
+            )
+            .unwrap();
+
+        server.join().unwrap();
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
     fn drain_attribute_reports_uses_rpc_contract() {
         let socket_path = temp_socket_path("drain-attr-reports");
         let expected = MatterAttributeReport {
+            received_at_unix_ms: 0,
             node_id: 7,
             endpoint: 2,
             cluster: crate::clusters::CLUSTER_ON_OFF_U32,
@@ -3816,6 +3884,7 @@ mod tests {
                     targets,
                     min_interval_secs,
                     max_interval_secs,
+                    replace_existing,
                 } => {
                     assert_eq!(
                         targets,
@@ -3826,6 +3895,7 @@ mod tests {
                     );
                     assert_eq!(*min_interval_secs, DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS);
                     assert_eq!(*max_interval_secs, DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS);
+                    assert!(!replace_existing);
                     ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new())
                 }
                 other => panic!("unexpected RPC during repeat-pair recovery: {other:?}"),

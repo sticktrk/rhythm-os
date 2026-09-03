@@ -11,7 +11,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RhythmRoomProjectionStatus;
 import 'package:uuid/uuid.dart';
 import '../providers/server_sync_provider.dart';
-import '../screens/hubs/matter_bulb_tester_screen.dart';
+import '../screens/hubs/bulb_audition_screen.dart';
 import '../screens/settings/light_screen.dart';
 import '../services/analytics_service.dart';
 import '../services/matter_removal_flow.dart';
@@ -730,6 +730,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   bool _loading = true;
   bool _moving = false;
   bool _loadingMatterSetupCode = false;
+  bool _matterNeedsAudition = false;
   _DeviceEndpoint? _removingEndpoint;
   _DeviceTab _selectedTab = _DeviceTab.settings;
 
@@ -742,9 +743,28 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   Future<void> _loadCanonicalData() async {
     final http = context.read<ServerSyncProvider>().api;
     final data = await http.getCanonicalDevice(widget.device.id);
+    var needsAudition = false;
+    final endpoints = data?['endpoints'] as List<dynamic>? ?? const [];
+    String? matterNativeId;
+    for (final endpoint in endpoints) {
+      if (endpoint is! Map<String, dynamic>) continue;
+      final hubKey = endpoint['hub_key'] as Map<String, dynamic>? ?? const {};
+      if (hubKey['hub_type']?.toString() == 'matter') {
+        matterNativeId = endpoint['native_id']?.toString();
+        break;
+      }
+    }
+    if (matterNativeId != null && matterNativeId.isNotEmpty) {
+      final status = await http.runBulbAudition(
+        deviceId: matterNativeId,
+        scenario: 'status',
+      );
+      needsAudition = status?['needs_audition'] == true;
+    }
     if (mounted) {
       setState(() {
         _canonicalData = data;
+        _matterNeedsAudition = needsAudition;
         _loading = false;
       });
     }
@@ -1500,7 +1520,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       onTap: () {
         Navigator.of(context).push(
           MaterialPageRoute(
-            builder: (_) => MatterBulbTesterScreen(
+            builder: (_) => BulbAuditionScreen(
               device: widget.device,
               nativeDeviceId: nativeId,
             ),
@@ -1524,13 +1544,39 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
               size: 20,
             ),
             const SizedBox(width: 12),
-            const Expanded(
-              child: Text(
-                'Matter Bulb Tester',
-                style: TextStyle(
-                  color: CelestialColors.textPrimary,
-                  fontSize: 15,
-                ),
+            Expanded(
+              child: Row(
+                children: [
+                  const Text(
+                    'Bulb Audition',
+                    style: TextStyle(
+                      color: CelestialColors.textPrimary,
+                      fontSize: 15,
+                    ),
+                  ),
+                  if (_matterNeedsAudition) ...[
+                    const SizedBox(width: 8),
+                    Container(
+                      key: const ValueKey('matter-needs-audition-badge'),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 7,
+                        vertical: 3,
+                      ),
+                      decoration: BoxDecoration(
+                        color: CelestialColors.sunWarm.withValues(alpha: 0.16),
+                        borderRadius: BorderRadius.circular(9),
+                      ),
+                      child: const Text(
+                        'Needs audition',
+                        style: TextStyle(
+                          color: CelestialColors.sunWarm,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
               ),
             ),
             const Icon(

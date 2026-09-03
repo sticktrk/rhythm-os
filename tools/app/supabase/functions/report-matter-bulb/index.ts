@@ -5,6 +5,7 @@ import {
   readJson,
   withAuthenticatedRequest,
 } from '../_shared/auth.ts'
+import { matterProfileCandidateIngestionPlan } from './matter_profile_candidate_contract.ts'
 
 type JsonObject = Record<string, unknown>
 type SupabaseClient = ReturnType<typeof createClient>
@@ -67,7 +68,7 @@ Deno.serve(async (req) => {
       return jsonResponse({ error: error.message }, 500)
     }
 
-    const profileResult = await upsertPublishedMatterDeviceProfile(
+    const profileResult = await createPendingMatterDeviceProfile(
       adminClient,
       data?.id ?? null,
       report,
@@ -81,7 +82,7 @@ Deno.serve(async (req) => {
   })
 })
 
-async function upsertPublishedMatterDeviceProfile(
+async function createPendingMatterDeviceProfile(
   adminClient: SupabaseClient,
   sourceReportId: string | null,
   report: JsonObject,
@@ -103,7 +104,7 @@ async function upsertPublishedMatterDeviceProfile(
 
   const { data: existing, error: existingError } = await adminClient
     .from('published_matter_device_profiles')
-    .select('profile_version,report_count')
+    .select('profile_version,report_count,approved')
     .eq('profile_key', profileKey)
     .maybeSingle()
 
@@ -116,25 +117,37 @@ async function upsertPublishedMatterDeviceProfile(
     }
   }
 
-  const profileVersion = readNumber(existing ?? {}, 'profile_version') ?? 0
-  const reportCount = readNumber(existing ?? {}, 'report_count') ?? 0
+  const { data: latestCandidate, error: candidateLookupError } = await adminClient
+    .from('matter_device_profile_candidates')
+    .select('candidate_version')
+    .eq('profile_key', profileKey)
+    .order('candidate_version', { ascending: false })
+    .limit(1)
+    .maybeSingle()
+  if (candidateLookupError) {
+    console.error('Matter profile candidate lookup failed:', candidateLookupError.message)
+    return {
+      upserted: false,
+      profile_key: profileKey,
+      error: candidateLookupError.message,
+    }
+  }
 
-  const { error } = await adminClient
-    .from('published_matter_device_profiles')
-    .upsert(
-      {
-        ...profile,
-        profile_version: profileVersion + 1,
-        report_count: reportCount + 1,
-        approved: false,
-        approved_at: null,
-        approved_by: null,
-      },
-      { onConflict: 'profile_key' },
-    )
+  const ingestion = matterProfileCandidateIngestionPlan(
+    profileKey,
+    profile,
+    sourceReportId,
+    existing,
+    readNumber(latestCandidate ?? {}, 'candidate_version'),
+  )
+  const { data: candidate, error } = await adminClient
+    .from('matter_device_profile_candidates')
+    .insert(ingestion.candidateInsert)
+    .select('id')
+    .single()
 
   if (error) {
-    console.error('Matter profile upsert failed:', error.message)
+    console.error('Matter profile candidate insert failed:', error.message)
     return {
       upserted: false,
       profile_key: profileKey,
@@ -142,11 +155,25 @@ async function upsertPublishedMatterDeviceProfile(
     }
   }
 
+  // Reporting activity is useful on an existing curated row, but its content
+  // and approval receipt are immutable until an explicit staff review.
+  if (ingestion.publishedCountUpdate) {
+    const { error: countError } = await adminClient
+      .from('published_matter_device_profiles')
+      .update(ingestion.publishedCountUpdate)
+      .eq('profile_key', profileKey)
+    if (countError) {
+      console.error('Matter profile report count update failed:', countError.message)
+    }
+  }
+
   return {
     upserted: true,
-    approved: false,
+    candidate_id: candidate?.id,
+    status: 'pending',
+    approved_profile_preserved: ingestion.approvedProfilePreserved,
     profile_key: profileKey,
-    profile_version: profileVersion + 1,
+    profile_version: ingestion.candidateInsert.candidate_version,
   }
 }
 
@@ -157,7 +184,8 @@ function buildMatterDeviceProfile(
   const device = asObject(report.device) ?? {}
   const claimed = asObject(report.claimed_capabilities) ?? {}
   const rawSnapshot = asObject(report.raw_capability_snapshot) ?? {}
-  const strategy = asObject(report.recommended_control_strategy) ?? {}
+  const controlProfile = asObject(report.control_profile)
+  const strategy = controlProfile ?? asObject(report.recommended_control_strategy) ?? {}
   const capabilityHints = asObject(report.capability_hints) ?? {}
   const testedCapabilities = asObject(report.tested_capabilities) ?? {}
   const readbackConsistency = asObject(report.readback_consistency) ?? {}
@@ -187,12 +215,15 @@ function buildMatterDeviceProfile(
 
   const preferredColorCommand =
     readString(strategy, 'color_command') ??
-    readString(strategy, 'preferred_color_command')
+    readString(strategy, 'preferred_color_command') ??
+    readString(strategy, 'color_route')
   const preferredLevelCommand =
     readString(strategy, 'preferred_level_command') ??
-    readString(strategy, 'brightness_command')
+    readString(strategy, 'brightness_command') ??
+    readString(strategy, 'level_command')
   const spacingMs =
     readNumber(strategy, 'recommended_command_spacing_ms') ??
+    readNumber(asObject(strategy.command_spacing_ms) ?? {}, 'value_ms') ??
     commandThrottleFromQuirks(inferredQuirks)
   const transitionBehavior = readString(strategy, 'transition_behavior')
   const supportsTransition =
@@ -211,7 +242,8 @@ function buildMatterDeviceProfile(
   )
   const needsExplicitOn =
     runtimeQuirks.includes('needs_explicit_on') ||
-    readString(strategy, 'turn_on_sequence')?.startsWith('explicit_on') === true
+    readString(strategy, 'turn_on_sequence')?.startsWith('explicit_on') === true ||
+    readString(strategy, 'turn_on') === 'explicit_on_first'
 
   return {
     profile_key: profileKey,
@@ -249,7 +281,9 @@ function buildMatterDeviceProfile(
       needs_xy_not_ct: runtimeQuirks.includes('needs_xy_not_ct'),
       xy_color_commands_ack_but_no_visible_change: xyAckNoVisibleChange,
       recommended_command_spacing_ms: spacingMs,
-      on_restores_previous_level: readBoolean(strategy, 'on_restores_previous_level'),
+      on_restores_previous_level:
+        readBoolean(strategy, 'on_restores_previous_level') ??
+        readBoolean(strategy, 'on_restores_previous'),
       power_on_behavior: readString(strategy, 'power_on_behavior'),
     }),
     recommended_control_strategy: strategy,

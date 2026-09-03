@@ -38,7 +38,9 @@ pub fn translate_command_outcome(
 pub fn translate_report(report: &MatterAttributeReport) -> Option<HubEvent> {
     match (report.cluster, report.attr_id) {
         (clusters::CLUSTER_ON_OFF_U32, clusters::ATTR_ON_OFF_U32) => {
-            let MatterAttributeValue::Bool(is_on) = &report.value;
+            let MatterAttributeValue::Bool(is_on) = &report.value else {
+                return None;
+            };
             let is_on = *is_on;
             log::debug!(
                 target: "evt",
@@ -72,6 +74,7 @@ mod tests {
     #[test]
     fn translates_on_off_report_to_light_power_event() {
         let event = translate_report(&MatterAttributeReport {
+            received_at_unix_ms: 0,
             node_id: 42,
             endpoint: 2,
             cluster: clusters::CLUSTER_ON_OFF_U32,
@@ -91,5 +94,18 @@ mod tests {
             }
             other => panic!("unexpected event: {:?}", other),
         }
+    }
+
+    #[test]
+    fn subscription_activity_is_not_a_device_state_event() {
+        assert!(translate_report(&MatterAttributeReport {
+            received_at_unix_ms: 1,
+            node_id: 42,
+            endpoint: 2,
+            cluster: 0,
+            attr_id: 0,
+            value: MatterAttributeValue::SubscriptionAlive,
+        })
+        .is_none());
     }
 }

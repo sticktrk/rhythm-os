@@ -19,6 +19,10 @@ const explicitExemptions = new Set([
   'GET api/ota/version',
   // Owner-only Matter setup secrets must never become staff/admin operations.
   'GET api/matter/setup-code/{}',
+  // One-release bulb-test aliases remain SDK-callable for version skew but
+  // the admin catalog exposes only the canonical Bulb Audition operations.
+  'POST api/matter/bulb-test/run',
+  'POST api/matter/bulb-test/report',
   // Owner-only archived customer-device metadata is not a staff/admin surface.
   'GET api/devices/removed',
   // Owner-only permanent deletion must never become a staff/admin operation.

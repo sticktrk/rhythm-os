@@ -56,6 +56,9 @@ struct rhythm_chip_bridge_device
 enum rhythm_chip_bridge_attribute_value_type
 {
     RHYTHM_CHIP_BRIDGE_ATTRIBUTE_VALUE_BOOL = 1,
+    RHYTHM_CHIP_BRIDGE_ATTRIBUTE_VALUE_U8 = 2,
+    RHYTHM_CHIP_BRIDGE_ATTRIBUTE_VALUE_U16 = 3,
+    RHYTHM_CHIP_BRIDGE_ATTRIBUTE_VALUE_SUBSCRIPTION_ALIVE = 4,
 };
 
 enum rhythm_chip_bridge_level_command
@@ -100,6 +103,8 @@ struct rhythm_chip_bridge_attribute_report
     uint32_t attribute_id;
     uint8_t value_type;
     bool bool_value;
+    uint64_t unsigned_value;
+    uint64_t received_at_unix_ms;
 };
 
 /// Terminal failure class for an established subscription. Values are stable
@@ -183,8 +188,8 @@ bool rhythm_chip_bridge_read_light_capability_snapshot(uint64_t node_id, uint16_
 bool rhythm_chip_bridge_read_light_state(uint64_t node_id, uint16_t endpoint, char * out_json, size_t json_size,
                                          size_t * out_json_len, char * error_message, size_t error_message_size);
 bool rhythm_chip_bridge_subscribe_on_off(const struct rhythm_chip_bridge_subscription_target * targets, size_t target_count,
-                                         uint16_t min_interval_secs, uint16_t max_interval_secs, char * error_message,
-                                         size_t error_message_size);
+                                         uint16_t min_interval_secs, uint16_t max_interval_secs, bool replace_existing,
+                                         char * error_message, size_t error_message_size);
 bool rhythm_chip_bridge_drain_attribute_reports(struct rhythm_chip_bridge_attribute_report * reports, size_t reports_capacity,
                                                 size_t * out_report_count, char * error_message, size_t error_message_size);
 bool rhythm_chip_bridge_drain_subscription_terminations(struct rhythm_chip_bridge_subscription_termination * terminations,

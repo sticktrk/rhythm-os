@@ -105,6 +105,11 @@ pub struct MatterCommandOutcome {
     pub node_id: u64,
     pub endpoint: u16,
     pub status: MatterCommandOutcomeStatus,
+    /// Sidecar wall-clock time when device execution reached a terminal
+    /// outcome. Older sidecars omit it; consumers retain a receive-time
+    /// fallback for one-release compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at_unix_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
@@ -584,7 +589,32 @@ pub trait MatterTransport: Send + Sync {
         anyhow::bail!("Matter light state snapshots are not supported by this transport")
     }
 
-    /// Subscribe to On/Off attribute reports for the given light endpoints.
+    /// Subscribe to the light-state attributes used by runtime verification:
+    /// OnOff, CurrentLevel, and the current ColorControl attributes.
+    fn subscribe_light_state(
+        &self,
+        targets: &[MatterSubscriptionTarget],
+        min_interval_secs: u16,
+        max_interval_secs: u16,
+    ) -> Result<()> {
+        // One-release compatibility for transports that only implement the
+        // former OnOff subscription surface.
+        self.subscribe_on_off(targets, min_interval_secs, max_interval_secs)
+    }
+
+    /// Replace the endpoint's existing runtime subscription with the same
+    /// canonical attribute set and new intervals. Bulb Audition uses this for
+    /// one bounded liveness rehearsal, then restores the runtime intervals.
+    fn refresh_light_state_subscription(
+        &self,
+        targets: &[MatterSubscriptionTarget],
+        min_interval_secs: u16,
+        max_interval_secs: u16,
+    ) -> Result<()> {
+        self.subscribe_light_state(targets, min_interval_secs, max_interval_secs)
+    }
+
+    /// Compatibility alias for the former On/Off-only subscription surface.
     fn subscribe_on_off(
         &self,
         targets: &[MatterSubscriptionTarget],
@@ -628,11 +658,19 @@ pub struct MatterGroup {
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum MatterAttributeValue {
     Bool(bool),
+    U8(u8),
+    U16(u16),
+    /// A possibly-empty ReportData proved the peer and subscription alive.
+    SubscriptionAlive,
 }
 
 /// A raw attribute report from a Matter subscription.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MatterAttributeReport {
+    /// Native receipt time, used to measure report latency without depending
+    /// on how long the client waits before draining the queue.
+    #[serde(default)]
+    pub received_at_unix_ms: u64,
     /// Source device node ID.
     pub node_id: u64,
     /// Endpoint the report came from.
@@ -921,6 +959,7 @@ mod tests {
         assert_eq!(decoded, request);
 
         let report = MatterAttributeReport {
+            received_at_unix_ms: 1_700_000_000_000,
             node_id: 42,
             endpoint: 1,
             cluster: 6,

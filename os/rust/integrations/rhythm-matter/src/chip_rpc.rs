@@ -158,6 +158,8 @@ pub enum ChipRpcRequest {
         targets: Vec<MatterSubscriptionTarget>,
         min_interval_secs: u16,
         max_interval_secs: u16,
+        #[serde(default)]
+        replace_existing: bool,
     },
     DrainAttributeReports,
     /// Accept complete endpoint plans for asynchronous controller-owned

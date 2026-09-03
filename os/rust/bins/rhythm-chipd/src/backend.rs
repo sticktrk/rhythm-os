@@ -111,6 +111,14 @@ pub trait ChipControllerBackend: Send + Sync {
         min_interval_secs: u16,
         max_interval_secs: u16,
     ) -> Result<()>;
+    fn replace_on_off_subscription(
+        &self,
+        targets: &[MatterSubscriptionTarget],
+        min_interval_secs: u16,
+        max_interval_secs: u16,
+    ) -> Result<()> {
+        self.subscribe_on_off(targets, min_interval_secs, max_interval_secs)
+    }
     fn drain_attribute_reports(&self) -> Result<Vec<MatterAttributeReport>>;
     /// Drain terminal subscription failures reported by the controller.
     ///
@@ -329,6 +337,19 @@ impl ChipControllerBackend for NativeChipBackend {
     ) -> Result<()> {
         self.controller_ref()?
             .subscribe_on_off(targets, min_interval_secs, max_interval_secs)
+    }
+
+    fn replace_on_off_subscription(
+        &self,
+        targets: &[MatterSubscriptionTarget],
+        min_interval_secs: u16,
+        max_interval_secs: u16,
+    ) -> Result<()> {
+        self.controller_ref()?.replace_on_off_subscription(
+            targets,
+            min_interval_secs,
+            max_interval_secs,
+        )
     }
 
     fn drain_attribute_reports(&self) -> Result<Vec<MatterAttributeReport>> {

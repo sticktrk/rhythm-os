@@ -402,13 +402,31 @@ impl ChipFfiController {
     ) -> Result<()> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
-            ffi_probe::subscribe_on_off(targets, min_interval_secs, max_interval_secs)
+            ffi_probe::subscribe_on_off(targets, min_interval_secs, max_interval_secs, false)
         }
 
         #[cfg(not(rhythm_chipd_chip_ffi))]
         {
             let _ = (targets, min_interval_secs, max_interval_secs);
             Err(self.unsupported("subscribe_on_off"))
+        }
+    }
+
+    pub fn replace_on_off_subscription(
+        &self,
+        targets: &[MatterSubscriptionTarget],
+        min_interval_secs: u16,
+        max_interval_secs: u16,
+    ) -> Result<()> {
+        #[cfg(rhythm_chipd_chip_ffi)]
+        {
+            ffi_probe::subscribe_on_off(targets, min_interval_secs, max_interval_secs, true)
+        }
+
+        #[cfg(not(rhythm_chipd_chip_ffi))]
+        {
+            let _ = (targets, min_interval_secs, max_interval_secs);
+            Err(self.unsupported("replace_on_off_subscription"))
         }
     }
 
@@ -635,6 +653,9 @@ mod ffi_probe {
     const COLOR_MODE_XY: u32 = 1 << 1;
     const COLOR_MODE_COLOR_TEMPERATURE: u32 = 1 << 2;
     const ATTRIBUTE_VALUE_BOOL: u8 = 1;
+    const ATTRIBUTE_VALUE_U8: u8 = 2;
+    const ATTRIBUTE_VALUE_U16: u8 = 3;
+    const ATTRIBUTE_VALUE_SUBSCRIPTION_ALIVE: u8 = 4;
     const MAX_DRAINED_REPORTS: usize = 128;
     const MAX_DRAINED_TERMINATIONS: usize = 128;
     // Mirrors `enum rhythm_chip_bridge_subscription_failure_class`; 0 and any
@@ -710,6 +731,8 @@ mod ffi_probe {
         attribute_id: u32,
         value_type: c_uchar,
         bool_value: bool,
+        unsigned_value: u64,
+        received_at_unix_ms: u64,
     }
 
     #[repr(C)]
@@ -903,6 +926,7 @@ mod ffi_probe {
             target_count: usize,
             min_interval_secs: c_ushort,
             max_interval_secs: c_ushort,
+            replace_existing: bool,
             error_message: *mut c_char,
             error_message_size: usize,
         ) -> bool;
@@ -1467,6 +1491,7 @@ mod ffi_probe {
         targets: &[MatterSubscriptionTarget],
         min_interval_secs: u16,
         max_interval_secs: u16,
+        replace_existing: bool,
     ) -> Result<()> {
         let ffi_targets = targets
             .iter()
@@ -1482,6 +1507,7 @@ mod ffi_probe {
                 ffi_targets.len(),
                 min_interval_secs,
                 max_interval_secs,
+                replace_existing,
                 error_buffer.as_mut_ptr(),
                 error_buffer.len(),
             )
@@ -1501,6 +1527,8 @@ mod ffi_probe {
             attribute_id: 0,
             value_type: 0,
             bool_value: false,
+            unsigned_value: 0,
+            received_at_unix_ms: 0,
         };
         let mut reports = vec![empty_report; MAX_DRAINED_REPORTS];
         let mut report_count = 0usize;
@@ -1679,6 +1707,9 @@ mod ffi_probe {
     fn decode_attribute_report(report: ChipBridgeAttributeReport) -> Result<MatterAttributeReport> {
         let value = match report.value_type {
             ATTRIBUTE_VALUE_BOOL => MatterAttributeValue::Bool(report.bool_value),
+            ATTRIBUTE_VALUE_U8 => MatterAttributeValue::U8(report.unsigned_value as u8),
+            ATTRIBUTE_VALUE_U16 => MatterAttributeValue::U16(report.unsigned_value as u16),
+            ATTRIBUTE_VALUE_SUBSCRIPTION_ALIVE => MatterAttributeValue::SubscriptionAlive,
             other => anyhow::bail!("unsupported Matter attribute report value type {}", other),
         };
 
@@ -1688,6 +1719,7 @@ mod ffi_probe {
             cluster: report.cluster_id,
             attr_id: report.attribute_id,
             value,
+            received_at_unix_ms: report.received_at_unix_ms,
         })
     }
 

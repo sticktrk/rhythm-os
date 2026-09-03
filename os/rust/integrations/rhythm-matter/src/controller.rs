@@ -3,10 +3,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
-
-#[cfg(test)]
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -17,12 +14,17 @@ use rhythm_core::controller::{
 };
 use rhythm_core::lighting::LightingCommand;
 use rhythm_core::room::Room;
+#[cfg(test)]
 use rhythm_devices::quirks::PREFER_COLOR_TEMPERATURE_QUIRK;
 #[cfg(test)]
 use rhythm_devices::LightType;
 use rhythm_devices::{ColorPreference, DeviceQuirk, LightCapabilities};
 
 use crate::clusters;
+use crate::control_profile::{
+    MatterColorRoute, MatterControlProfile, MatterLevelCommand, MatterProfileSource,
+    MatterTurnOnStrategy,
+};
 use crate::hub_state::MatterHubData;
 use crate::transport::{MatterCommandStep, MatterEndpointCommandPlan, MatterTransport};
 
@@ -127,10 +129,18 @@ impl MatterLightController {
         if plans.is_empty() {
             return Ok(HubCommandReceipt::delivered());
         }
+        if let Ok(mut pending) = self.hub_data.pending_turn_on_plans.lock() {
+            for plan in &plans {
+                if plan_requests_turn_on(plan) {
+                    pending.insert(plan.command_id, plan.clone());
+                }
+            }
+        }
         let expected_ids: Vec<u64> = plans.iter().map(|plan| plan.command_id).collect();
         let submissions = match self.transport.submit_endpoint_plans(&plans) {
             Ok(submissions) => submissions,
             Err(error) => {
+                remove_pending_plans(&self.hub_data.pending_turn_on_plans, &expected_ids);
                 if Self::looks_like_connectivity_timeout(&error) {
                     for plan in &plans {
                         self.mark_connectivity_failed(plan.node_id, plan.endpoint);
@@ -147,6 +157,7 @@ impl MatterLightController {
             .map(|submission| submission.command_id)
             .collect();
         if returned_ids != expected_ids {
+            remove_pending_plans(&self.hub_data.pending_turn_on_plans, &expected_ids);
             return Err(LightControlError::CommandFailed(format!(
                 "Matter controller returned mismatched command ids for target {}",
                 target_label
@@ -155,6 +166,16 @@ impl MatterLightController {
         for (plan, submission) in plans.iter().zip(&submissions) {
             if submission.completed {
                 self.clear_connectivity_backoff(plan.node_id, plan.endpoint);
+                if let Ok(mut pending) = self.hub_data.pending_turn_on_plans.lock() {
+                    pending.remove(&plan.command_id);
+                }
+                if plan_requests_turn_on(plan) {
+                    schedule_turn_on_readback(
+                        self.transport.clone(),
+                        plan.clone(),
+                        self.hub_data.needs_audition.clone(),
+                    );
+                }
             }
         }
         let pending_ids: Vec<u64> = submissions
@@ -188,10 +209,30 @@ impl MatterLightController {
         }
     }
 
-    fn turn_on_plans(
+    pub(crate) fn turn_on_plans(
         &self,
         device_ids: &[String],
         command: &LightingCommand,
+    ) -> LightControlResult<Vec<MatterEndpointCommandPlan>> {
+        self.turn_on_plans_with_profile(device_ids, command, None)
+    }
+
+    /// Build an audition plan through the exact runtime builder while changing
+    /// one controlled profile in memory for this run only.
+    pub(crate) fn audition_turn_on_plans(
+        &self,
+        device_ids: &[String],
+        command: &LightingCommand,
+        profile: &MatterControlProfile,
+    ) -> LightControlResult<Vec<MatterEndpointCommandPlan>> {
+        self.turn_on_plans_with_profile(device_ids, command, Some(profile))
+    }
+
+    fn turn_on_plans_with_profile(
+        &self,
+        device_ids: &[String],
+        command: &LightingCommand,
+        audition_profile: Option<&MatterControlProfile>,
     ) -> LightControlResult<Vec<MatterEndpointCommandPlan>> {
         let mut plans = Vec::with_capacity(device_ids.len());
         for device_id in device_ids {
@@ -199,42 +240,150 @@ impl MatterLightController {
                 warn!(target: "cmd", "Matter: invalid device ID format: {}", device_id);
                 continue;
             };
-            let (caps, quirks) = self.device_metadata(device_id, node_id);
-            let adapted = rhythm_os::controller_helpers::adapt_lighting_command(
+            let (mut caps, _quirks, resolved_profile) = self.device_metadata(device_id, node_id);
+            let profile = audition_profile.unwrap_or(&resolved_profile);
+            // A Color Temperature physical range does not constrain whites
+            // rendered through RGB emitters. Once Audition has supplied an HS
+            // curve, preserve the requested Kelvin for curve interpolation.
+            if let Some((min_kelvin, max_kelvin)) = profile.kelvin_range.filter(|_| {
+                profile.color_route != MatterColorRoute::HueSaturation
+                    || profile.hs_white_curve.is_empty()
+            }) {
+                caps.min_kelvin = Some(min_kelvin);
+                caps.max_kelvin = Some(max_kelvin);
+            } else if profile.color_route == MatterColorRoute::HueSaturation
+                && !profile.hs_white_curve.is_empty()
+            {
+                caps.min_kelvin = None;
+                caps.max_kelvin = None;
+            }
+            if let Some(min_brightness) = profile.min_brightness {
+                caps.min_brightness = Some(min_brightness);
+            }
+            caps.supports_transition = profile.supports_transition;
+            let mut adapted = rhythm_os::controller_helpers::adapt_lighting_command(
                 &caps,
                 command,
-                Self::color_preference(&quirks),
+                Self::profile_color_preference(&profile),
             );
-            let mut steps = Vec::new();
-            let needs_explicit_on = adapted.on && Self::needs_explicit_on(&quirks);
-            if needs_explicit_on {
-                steps.push(MatterCommandStep::SetOnOff { on: true });
+            if !command.is_direct_color && adapted.hue_saturation.is_some() {
+                if let Some(calibrated) =
+                    calibrated_hs_white(&profile.hs_white_curve, command.kelvin)
+                {
+                    adapted.hue_saturation = Some(calibrated);
+                }
             }
-            if let Some((hue, saturation)) = adapted.hue_saturation {
-                steps.push(MatterCommandStep::SetHueSaturation {
+            let color_step = if let Some((hue, saturation)) = adapted.hue_saturation {
+                Some(MatterCommandStep::SetHueSaturation {
                     hue,
                     saturation,
                     transition_ms: adapted.transition_ms,
-                });
+                })
             } else if let Some((x, y)) = adapted.xy {
-                steps.push(MatterCommandStep::SetXy {
+                Some(MatterCommandStep::SetXy {
                     x,
                     y,
                     transition_ms: adapted.transition_ms,
-                });
+                })
             } else if let Some(kelvin) = adapted.kelvin {
-                steps.push(MatterCommandStep::SetColorTemperature {
+                Some(MatterCommandStep::SetColorTemperature {
                     kelvin,
                     transition_ms: adapted.transition_ms,
-                });
-            }
-            if let Some(brightness) = adapted.brightness {
-                steps.push(MatterCommandStep::SetBrightness {
-                    level: clusters::brightness_to_level(brightness),
-                    transition_ms: adapted.transition_ms,
-                });
-            } else if adapted.on && !needs_explicit_on {
-                steps.push(MatterCommandStep::SetOnOff { on: true });
+                })
+            } else {
+                None
+            };
+            let level_step = adapted.brightness.map(|brightness| {
+                let level = clusters::brightness_to_level(brightness);
+                match profile.level_command {
+                    MatterLevelCommand::MoveToLevelWithOnOff => MatterCommandStep::SetBrightness {
+                        level,
+                        transition_ms: adapted.transition_ms,
+                    },
+                    MatterLevelCommand::MoveToLevel => MatterCommandStep::RunLevel {
+                        command: crate::transport::MatterLevelCommandVariant::MoveToLevel,
+                        level_or_step: level,
+                        step_mode: None,
+                        transition_ms: adapted.transition_ms,
+                    },
+                    MatterLevelCommand::StepWithOnOff => {
+                        let current_level = self
+                            .transport
+                            .read_light_state(node_id, endpoint)
+                            .ok()
+                            .and_then(|state| reported_u64(&state, "current_level"))
+                            .and_then(|value| u8::try_from(value).ok())
+                            .unwrap_or(0);
+                        let (step_mode, step_size) = if current_level > level {
+                            (
+                                crate::transport::MatterLevelStepMode::Down,
+                                current_level - level,
+                            )
+                        } else {
+                            (
+                                crate::transport::MatterLevelStepMode::Up,
+                                level.saturating_sub(current_level),
+                            )
+                        };
+                        MatterCommandStep::RunLevel {
+                            command: crate::transport::MatterLevelCommandVariant::StepWithOnOff,
+                            level_or_step: step_size,
+                            step_mode: Some(step_mode),
+                            transition_ms: adapted.transition_ms,
+                        }
+                    }
+                }
+            });
+            let mut steps = Vec::new();
+            let turn_on = if !profile.execute_if_off_honoured
+                && profile.turn_on == MatterTurnOnStrategy::StageColorThenLevelWithOnOff
+            {
+                MatterTurnOnStrategy::ExplicitOnFirst
+            } else {
+                profile.turn_on
+            };
+            let level_turns_on = matches!(
+                profile.level_command,
+                MatterLevelCommand::MoveToLevelWithOnOff | MatterLevelCommand::StepWithOnOff
+            );
+            match turn_on {
+                MatterTurnOnStrategy::ExplicitOnFirst => {
+                    if adapted.on {
+                        steps.push(MatterCommandStep::SetOnOff { on: true });
+                    }
+                    if let Some(step) = color_step {
+                        steps.push(step);
+                    }
+                    if let Some(step) = level_step {
+                        steps.push(step);
+                    }
+                }
+                MatterTurnOnStrategy::LevelWithOnOffThenColor => {
+                    if adapted.on && !level_turns_on {
+                        steps.push(MatterCommandStep::SetOnOff { on: true });
+                    }
+                    if let Some(step) = level_step {
+                        steps.push(step);
+                    } else if adapted.on {
+                        steps.push(MatterCommandStep::SetOnOff { on: true });
+                    }
+                    if let Some(step) = color_step {
+                        steps.push(step);
+                    }
+                }
+                MatterTurnOnStrategy::StageColorThenLevelWithOnOff => {
+                    if let Some(step) = color_step {
+                        steps.push(step);
+                    }
+                    if adapted.on && !level_turns_on {
+                        steps.push(MatterCommandStep::SetOnOff { on: true });
+                    }
+                    if let Some(step) = level_step {
+                        steps.push(step);
+                    } else if adapted.on {
+                        steps.push(MatterCommandStep::SetOnOff { on: true });
+                    }
+                }
             }
             if steps.is_empty() {
                 continue;
@@ -244,10 +393,8 @@ impl MatterLightController {
                 node_id,
                 endpoint,
                 steps,
-                inter_step_delay_ms: quirks.iter().find_map(|quirk| match quirk {
-                    DeviceQuirk::CommandThrottleMs(ms) if *ms > 0 => Some(u64::from(*ms)),
-                    _ => None,
-                }),
+                inter_step_delay_ms: (profile.command_spacing_ms.value_ms > 0)
+                    .then_some(u64::from(profile.command_spacing_ms.value_ms)),
             });
         }
         if plans.is_empty() && !device_ids.is_empty() {
@@ -258,7 +405,7 @@ impl MatterLightController {
         Ok(plans)
     }
 
-    fn turn_off_plans(
+    pub(crate) fn turn_off_plans(
         &self,
         device_ids: &[String],
     ) -> LightControlResult<Vec<MatterEndpointCommandPlan>> {
@@ -419,7 +566,7 @@ impl MatterLightController {
         &self,
         device_id: &str,
         node_id: u64,
-    ) -> (LightCapabilities, Vec<DeviceQuirk>) {
+    ) -> (LightCapabilities, Vec<DeviceQuirk>, MatterControlProfile) {
         let cached_caps = self
             .hub_data
             .device_caps
@@ -432,22 +579,54 @@ impl MatterLightController {
             .lock()
             .ok()
             .and_then(|device_quirks| device_quirks.get(device_id).cloned());
+        let cached_profile = self
+            .hub_data
+            .device_profiles
+            .lock()
+            .ok()
+            .and_then(|profiles| profiles.get(device_id).cloned());
 
+        if let (Some(caps), Some(quirks), Some(profile)) =
+            (cached_caps.clone(), cached_quirks.clone(), cached_profile)
+        {
+            return (caps, quirks, profile);
+        }
         if let (Some(caps), Some(quirks)) = (cached_caps, cached_quirks) {
-            return (caps, quirks);
+            let profile = crate::control_profile::profile_from_legacy(
+                &caps,
+                &quirks,
+                MatterProfileSource::Builtin,
+            );
+            return (caps, quirks, profile);
         }
 
         match self.transport.probe_light(node_id) {
             Ok(device) => {
-                let mut caps = crate::commissioning::build_device_capabilities(&device);
-                let mut quirks = crate::commissioning::build_device_quirks(&device);
-                if let Ok(cloud_profiles) = self.hub_data.cloud_profiles.lock() {
-                    cloud_profiles.apply_to_device(&device, &mut caps, &mut quirks);
-                }
                 let probed_id =
                     crate::lifecycle::format_device_id(device.node_id, device.light_endpoint);
+                let cloud_profiles = self
+                    .hub_data
+                    .cloud_profiles
+                    .lock()
+                    .map(|profiles| profiles.clone())
+                    .unwrap_or_default();
+                let local_overrides = self
+                    .hub_data
+                    .local_overrides
+                    .lock()
+                    .map(|overrides| overrides.clone())
+                    .unwrap_or_default();
+                let resolved = crate::commissioning::resolve_device_metadata(
+                    &device,
+                    &probed_id,
+                    &cloud_profiles,
+                    &local_overrides,
+                );
+                let caps = resolved.capabilities;
+                let quirks = resolved.quirks;
+                let profile = resolved.control_profile;
 
-                self.cache_device_metadata(device_id, &probed_id, &caps, &quirks);
+                self.cache_device_metadata(device_id, &probed_id, &caps, &quirks, &profile);
                 if let Err(error) = crate::capture::persist_device_capture(
                     &self.hub_data,
                     &device,
@@ -466,7 +645,7 @@ impl MatterLightController {
                     "Matter: probed device metadata on demand for {}",
                     device_id
                 );
-                (caps, quirks)
+                (caps, quirks, profile)
             }
             Err(error) => {
                 warn!(
@@ -476,10 +655,14 @@ impl MatterLightController {
                     node_id,
                     error
                 );
-                (
-                    crate::commissioning::fallback_device_capabilities(),
-                    Vec::new(),
-                )
+                let caps = crate::commissioning::fallback_device_capabilities();
+                let quirks = Vec::new();
+                let profile = crate::control_profile::profile_from_legacy(
+                    &caps,
+                    &quirks,
+                    MatterProfileSource::SafeDefault,
+                );
+                (caps, quirks, profile)
             }
         }
     }
@@ -490,6 +673,7 @@ impl MatterLightController {
         probed_id: &str,
         caps: &LightCapabilities,
         quirks: &[DeviceQuirk],
+        profile: &MatterControlProfile,
     ) {
         if let Ok(mut device_caps) = self.hub_data.device_caps.lock() {
             device_caps.insert(requested_id.to_string(), caps.clone());
@@ -504,39 +688,20 @@ impl MatterLightController {
                 device_quirks.insert(probed_id.to_string(), quirks.to_vec());
             }
         }
-    }
-
-    /// Exact built-in, cloud, and saved tester profiles are authoritative.
-    /// Unprofiled Matter bulbs default to Hue/Saturation because it is the
-    /// safest cross-vendor color path; capability adaptation still falls back
-    /// when the device does not advertise it.
-    fn color_preference(quirks: &[DeviceQuirk]) -> ColorPreference {
-        if quirks.iter().any(|quirk| {
-            matches!(
-                quirk,
-                DeviceQuirk::Other(value) if value == PREFER_COLOR_TEMPERATURE_QUIRK
-            )
-        }) {
-            ColorPreference::PreferColorTemperature
-        } else if quirks
-            .iter()
-            .any(|quirk| matches!(quirk, DeviceQuirk::NeedsHueSaturationNotCt))
-        {
-            ColorPreference::PreferHueSaturation
-        } else if quirks
-            .iter()
-            .any(|quirk| matches!(quirk, DeviceQuirk::NeedsXyNotCt))
-        {
-            ColorPreference::PreferXy
-        } else {
-            ColorPreference::PreferHueSaturation
+        if let Ok(mut device_profiles) = self.hub_data.device_profiles.lock() {
+            device_profiles.insert(requested_id.to_string(), profile.clone());
+            if requested_id != probed_id {
+                device_profiles.insert(probed_id.to_string(), profile.clone());
+            }
         }
     }
 
-    fn needs_explicit_on(quirks: &[DeviceQuirk]) -> bool {
-        quirks
-            .iter()
-            .any(|quirk| matches!(quirk, DeviceQuirk::NeedsExplicitOn))
+    fn profile_color_preference(profile: &MatterControlProfile) -> ColorPreference {
+        match profile.color_route {
+            MatterColorRoute::HueSaturation => ColorPreference::PreferHueSaturation,
+            MatterColorRoute::Xy => ColorPreference::PreferXy,
+            MatterColorRoute::ColorTemperature => ColorPreference::PreferColorTemperature,
+        }
     }
 
     fn clear_connectivity_backoff(&self, node_id: u64, endpoint: u16) {
@@ -1009,6 +1174,198 @@ impl LightController for MatterLightController {
     }
 }
 
+fn remove_pending_plans(
+    pending: &Arc<Mutex<HashMap<u64, MatterEndpointCommandPlan>>>,
+    command_ids: &[u64],
+) {
+    if let Ok(mut pending) = pending.lock() {
+        for command_id in command_ids {
+            pending.remove(command_id);
+        }
+    }
+}
+
+pub(crate) fn plan_requests_turn_on(plan: &MatterEndpointCommandPlan) -> bool {
+    plan.steps.iter().any(|step| match step {
+        MatterCommandStep::SetOnOff { on } => *on,
+        MatterCommandStep::SetBrightness { .. } => true,
+        MatterCommandStep::RunLevel { command, .. } => matches!(
+            command,
+            crate::transport::MatterLevelCommandVariant::MoveToLevelWithOnOff
+                | crate::transport::MatterLevelCommandVariant::StepWithOnOff
+        ),
+        MatterCommandStep::Identify { .. }
+        | MatterCommandStep::SetColorTemperature { .. }
+        | MatterCommandStep::SetXy { .. }
+        | MatterCommandStep::SetHueSaturation { .. } => false,
+    })
+}
+
+pub(crate) fn schedule_turn_on_readback(
+    transport: Arc<dyn MatterTransport>,
+    plan: MatterEndpointCommandPlan,
+    needs_audition: Arc<Mutex<std::collections::HashSet<(u64, u16)>>>,
+) {
+    let settle_ms = plan
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            MatterCommandStep::SetBrightness { transition_ms, .. }
+            | MatterCommandStep::RunLevel { transition_ms, .. }
+            | MatterCommandStep::SetColorTemperature { transition_ms, .. }
+            | MatterCommandStep::SetXy { transition_ms, .. }
+            | MatterCommandStep::SetHueSaturation { transition_ms, .. } => *transition_ms,
+            MatterCommandStep::SetOnOff { .. } | MatterCommandStep::Identify { .. } => None,
+        })
+        .max()
+        .unwrap_or(0)
+        .saturating_add(500)
+        .min(5_000);
+    let spawn_result = std::thread::Builder::new()
+        .name("matter-turn-on-readback".to_string())
+        .spawn(move || {
+            std::thread::sleep(Duration::from_millis(u64::from(settle_ms)));
+            let Ok(reported) = transport.read_light_state(plan.node_id, plan.endpoint) else {
+                return;
+            };
+            if let Some(mismatch_field) = turn_on_readback_mismatch(&plan, &reported) {
+                tracing::warn!(
+                    target: "cmd",
+                    event = "matter_command_ack_without_effect",
+                    node_id = plan.node_id,
+                    endpoint = plan.endpoint,
+                    command_id = plan.command_id,
+                    mismatch_field,
+                    "Matter command completed but authoritative readback did not show the requested effect"
+                );
+                if let Ok(mut needs_audition) = needs_audition.lock() {
+                    needs_audition.insert((plan.node_id, plan.endpoint));
+                }
+            }
+        });
+    if let Err(error) = spawn_result {
+        warn!(target: "cmd", "Failed to schedule Matter command readback: {error}");
+    }
+}
+
+pub(crate) fn turn_on_readback_mismatch(
+    plan: &MatterEndpointCommandPlan,
+    reported: &serde_json::Value,
+) -> Option<&'static str> {
+    if reported_bool(reported, "onoff") == Some(false) {
+        return Some("on_off");
+    }
+
+    let final_level = plan.steps.iter().rev().find_map(|step| match step {
+        MatterCommandStep::SetBrightness { level, .. } => Some(*level),
+        MatterCommandStep::RunLevel {
+            command:
+                crate::transport::MatterLevelCommandVariant::MoveToLevel
+                | crate::transport::MatterLevelCommandVariant::MoveToLevelWithOnOff,
+            level_or_step,
+            ..
+        } => Some(*level_or_step),
+        _ => None,
+    });
+    if let (Some(expected), Some(actual)) = (final_level, reported_u64(reported, "current_level")) {
+        if actual.abs_diff(u64::from(expected)) > 5 {
+            return Some("level");
+        }
+    }
+
+    for step in plan.steps.iter().rev() {
+        match step {
+            MatterCommandStep::SetColorTemperature { kelvin, .. } if *kelvin > 0 => {
+                if let Some(actual) = reported_u64(reported, "color_temperature_mireds") {
+                    let expected = 1_000_000_u64 / u64::from(*kelvin);
+                    if actual.abs_diff(expected) > 10 {
+                        return Some("color");
+                    }
+                }
+                break;
+            }
+            MatterCommandStep::SetXy { x, y, .. } => {
+                let expected_x = (*x * 65_535.0).round() as u64;
+                let expected_y = (*y * 65_535.0).round() as u64;
+                if let (Some(actual_x), Some(actual_y)) = (
+                    reported_u64(reported, "current_x"),
+                    reported_u64(reported, "current_y"),
+                ) {
+                    if actual_x.abs_diff(expected_x) > 2_500
+                        || actual_y.abs_diff(expected_y) > 2_500
+                    {
+                        return Some("color");
+                    }
+                }
+                break;
+            }
+            MatterCommandStep::SetHueSaturation {
+                hue, saturation, ..
+            } => {
+                if let (Some(actual_hue), Some(actual_saturation)) = (
+                    reported_u64(reported, "current_hue"),
+                    reported_u64(reported, "current_saturation"),
+                ) {
+                    if actual_hue.abs_diff(u64::from(*hue)) > 5
+                        || actual_saturation.abs_diff(u64::from(*saturation)) > 5
+                    {
+                        return Some("color");
+                    }
+                }
+                break;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn reported_bool(reported: &serde_json::Value, field: &str) -> Option<bool> {
+    reported.get(field)?.get("value")?.as_bool()
+}
+
+fn reported_u64(reported: &serde_json::Value, field: &str) -> Option<u64> {
+    reported.get(field)?.get("value")?.as_u64()
+}
+
+fn calibrated_hs_white(
+    curve: &[crate::control_profile::MatterHsWhitePoint],
+    kelvin: u16,
+) -> Option<(u8, u8)> {
+    let first = curve.first()?;
+    if kelvin <= first.kelvin {
+        return Some((first.hue, first.saturation));
+    }
+    for points in curve.windows(2) {
+        let low = &points[0];
+        let high = &points[1];
+        if kelvin <= high.kelvin {
+            let span = u32::from(high.kelvin.saturating_sub(low.kelvin)).max(1);
+            let offset = u32::from(kelvin.saturating_sub(low.kelvin));
+            let interpolate = |low: u8, high: u8| -> u8 {
+                let low = i64::from(low);
+                let delta = i64::from(high) - low;
+                (low + delta * i64::from(offset) / i64::from(span)).clamp(0, 254) as u8
+            };
+            let interpolate_hue = |low: u8, high: u8| -> u8 {
+                let low = i64::from(low);
+                let mut delta = i64::from(high) - low;
+                if delta > 127 {
+                    delta -= 255;
+                } else if delta < -127 {
+                    delta += 255;
+                }
+                (low + delta * i64::from(offset) / i64::from(span)).rem_euclid(255) as u8
+            };
+            return Some((
+                interpolate_hue(low.hue, high.hue),
+                interpolate(low.saturation, high.saturation),
+            ));
+        }
+    }
+    curve.last().map(|point| (point.hue, point.saturation))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1068,6 +1425,14 @@ mod tests {
             next_node_id: std::sync::atomic::AtomicU64::new(100),
             device_caps: std::sync::Mutex::new(std::collections::HashMap::new()),
             device_quirks: std::sync::Mutex::new(std::collections::HashMap::new()),
+            device_profiles: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pending_turn_on_plans: Arc::new(
+                std::sync::Mutex::new(std::collections::HashMap::new()),
+            ),
+            needs_audition: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            local_overrides: std::sync::Mutex::new(
+                crate::local_quirks::LocalMatterOverrides::default(),
+            ),
             cloud_profiles: std::sync::Mutex::new(
                 crate::cloud_profiles::CloudMatterProfileCatalog::default(),
             ),
@@ -1075,6 +1440,9 @@ mod tests {
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             on_off_observations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            attribute_report_history: Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
             event_tx: tx,
         });
 
@@ -1150,6 +1518,130 @@ mod tests {
             .count()
     }
 
+    #[test]
+    fn audition_uses_the_exact_runtime_plan_builder_for_the_same_profile() {
+        let (controller, _, _) = make_controller();
+        let device_id = "matter-42".to_string();
+        let command = LightingCommand::new(30, 2700);
+        let (_, _, profile) = controller.device_metadata(&device_id, 42);
+        let runtime = controller
+            .turn_on_plans(std::slice::from_ref(&device_id), &command)
+            .unwrap();
+        let audition = controller
+            .audition_turn_on_plans(std::slice::from_ref(&device_id), &command, &profile)
+            .unwrap();
+
+        assert_eq!(runtime.len(), audition.len());
+        for (runtime, audition) in runtime.iter().zip(&audition) {
+            assert_eq!(runtime.node_id, audition.node_id);
+            assert_eq!(runtime.endpoint, audition.endpoint);
+            assert_eq!(runtime.steps, audition.steps);
+            assert_eq!(runtime.inter_step_delay_ms, audition.inter_step_delay_ms);
+        }
+    }
+
+    #[test]
+    fn hs_white_curve_preserves_requested_kelvin_and_drives_runtime_plan() {
+        let (controller, _, _) = make_controller();
+        set_device_capabilities(
+            &controller,
+            42,
+            LightCapabilities {
+                color_modes: vec![
+                    rhythm_devices::ColorMode::HueSaturation,
+                    rhythm_devices::ColorMode::ColorTemperature,
+                ],
+                min_kelvin: Some(3080),
+                max_kelvin: Some(6500),
+                ..LightCapabilities::defaults_for(LightType::ExtendedColor)
+            },
+        );
+        let profile = MatterControlProfile {
+            color_route: MatterColorRoute::HueSaturation,
+            hs_white_curve: vec![
+                crate::control_profile::MatterHsWhitePoint {
+                    kelvin: 2200,
+                    hue: 21,
+                    saturation: 100,
+                },
+                crate::control_profile::MatterHsWhitePoint {
+                    kelvin: 6500,
+                    hue: 219,
+                    saturation: 5,
+                },
+            ],
+            kelvin_range: Some((3080, 6500)),
+            ..MatterControlProfile::default()
+        };
+
+        let plans = controller
+            .audition_turn_on_plans(
+                &["matter-42".to_string()],
+                &LightingCommand::new(60, 2200),
+                &profile,
+            )
+            .unwrap();
+
+        assert!(plans[0].steps.iter().any(|step| matches!(
+            step,
+            MatterCommandStep::SetHueSaturation {
+                hue: 21,
+                saturation: 100,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn hs_white_curve_interpolates_hue_across_the_wraparound() {
+        let curve = vec![
+            crate::control_profile::MatterHsWhitePoint {
+                kelvin: 2_000,
+                hue: 250,
+                saturation: 100,
+            },
+            crate::control_profile::MatterHsWhitePoint {
+                kelvin: 4_000,
+                hue: 5,
+                saturation: 20,
+            },
+        ];
+
+        let (hue, saturation) = calibrated_hs_white(&curve, 3_000).unwrap();
+        assert!(hue <= 5 || hue >= 250);
+        assert_eq!(saturation, 60);
+    }
+
+    #[test]
+    fn successful_ack_with_spec_ignored_color_is_a_readback_mismatch() {
+        let plan = MatterEndpointCommandPlan {
+            command_id: 7,
+            node_id: 42,
+            endpoint: 1,
+            steps: vec![
+                MatterCommandStep::SetColorTemperature {
+                    kelvin: 2700,
+                    transition_ms: None,
+                },
+                MatterCommandStep::SetBrightness {
+                    level: 76,
+                    transition_ms: None,
+                },
+            ],
+            inter_step_delay_ms: None,
+        };
+        let ignored_color = serde_json::json!({
+            "onoff": {"ok": true, "value": true},
+            "current_level": {"ok": true, "value": 76},
+            "color_temperature_mireds": {"ok": true, "value": 250}
+        });
+
+        assert_eq!(
+            turn_on_readback_mismatch(&plan, &ignored_color),
+            Some("color")
+        );
+    }
+
     fn operations_for_node(
         operations: &[RecordedOperation],
         expected_node_id: u64,
@@ -1201,6 +1693,14 @@ mod tests {
                 LightCapabilities::defaults_for(LightType::ExtendedColor),
             )])),
             device_quirks: std::sync::Mutex::new(std::collections::HashMap::new()),
+            device_profiles: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pending_turn_on_plans: Arc::new(
+                std::sync::Mutex::new(std::collections::HashMap::new()),
+            ),
+            needs_audition: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            local_overrides: std::sync::Mutex::new(
+                crate::local_quirks::LocalMatterOverrides::default(),
+            ),
             cloud_profiles: std::sync::Mutex::new(
                 crate::cloud_profiles::CloudMatterProfileCatalog::default(),
             ),
@@ -1208,6 +1708,9 @@ mod tests {
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             on_off_observations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            attribute_report_history: Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
@@ -2526,6 +3029,14 @@ mod tests {
             next_node_id: std::sync::atomic::AtomicU64::new(100),
             device_caps: std::sync::Mutex::new(std::collections::HashMap::new()),
             device_quirks: std::sync::Mutex::new(std::collections::HashMap::new()),
+            device_profiles: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pending_turn_on_plans: Arc::new(
+                std::sync::Mutex::new(std::collections::HashMap::new()),
+            ),
+            needs_audition: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            local_overrides: std::sync::Mutex::new(
+                crate::local_quirks::LocalMatterOverrides::default(),
+            ),
             cloud_profiles: std::sync::Mutex::new(
                 crate::cloud_profiles::CloudMatterProfileCatalog::default(),
             ),
@@ -2533,6 +3044,9 @@ mod tests {
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             on_off_observations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            attribute_report_history: Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
             event_tx: tx,
         });
 
@@ -2670,6 +3184,14 @@ mod tests {
                 "matter-42".to_string(),
                 vec![DeviceQuirk::NeedsXyNotCt],
             )])),
+            device_profiles: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pending_turn_on_plans: Arc::new(
+                std::sync::Mutex::new(std::collections::HashMap::new()),
+            ),
+            needs_audition: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            local_overrides: std::sync::Mutex::new(
+                crate::local_quirks::LocalMatterOverrides::default(),
+            ),
             cloud_profiles: std::sync::Mutex::new(
                 crate::cloud_profiles::CloudMatterProfileCatalog::default(),
             ),
@@ -2677,6 +3199,9 @@ mod tests {
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             on_off_observations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            attribute_report_history: Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
@@ -2787,6 +3312,14 @@ mod tests {
                 "matter-42".to_string(),
                 Vec::new(),
             )])),
+            device_profiles: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pending_turn_on_plans: Arc::new(
+                std::sync::Mutex::new(std::collections::HashMap::new()),
+            ),
+            needs_audition: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            local_overrides: std::sync::Mutex::new(
+                crate::local_quirks::LocalMatterOverrides::default(),
+            ),
             cloud_profiles: std::sync::Mutex::new(
                 crate::cloud_profiles::CloudMatterProfileCatalog::default(),
             ),
@@ -2794,6 +3327,9 @@ mod tests {
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             on_off_observations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            attribute_report_history: Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
@@ -2886,6 +3422,14 @@ mod tests {
                 "matter-42".to_string(),
                 vec![DeviceQuirk::NeedsExplicitOn],
             )])),
+            device_profiles: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pending_turn_on_plans: Arc::new(
+                std::sync::Mutex::new(std::collections::HashMap::new()),
+            ),
+            needs_audition: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            local_overrides: std::sync::Mutex::new(
+                crate::local_quirks::LocalMatterOverrides::default(),
+            ),
             cloud_profiles: std::sync::Mutex::new(
                 crate::cloud_profiles::CloudMatterProfileCatalog::default(),
             ),
@@ -2893,6 +3437,9 @@ mod tests {
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             on_off_observations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            attribute_report_history: Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
@@ -3096,6 +3643,14 @@ mod tests {
                 "matter-42".to_string(),
                 vec![DeviceQuirk::NeedsXyNotCt],
             )])),
+            device_profiles: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pending_turn_on_plans: Arc::new(
+                std::sync::Mutex::new(std::collections::HashMap::new()),
+            ),
+            needs_audition: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            local_overrides: std::sync::Mutex::new(
+                crate::local_quirks::LocalMatterOverrides::default(),
+            ),
             cloud_profiles: std::sync::Mutex::new(
                 crate::cloud_profiles::CloudMatterProfileCatalog::default(),
             ),
@@ -3103,6 +3658,9 @@ mod tests {
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             on_off_observations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            attribute_report_history: Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
             event_tx: tx,
         });
         let controller = MatterLightController::new(transport.clone(), hub_data);
@@ -3290,6 +3848,14 @@ mod tests {
                 "matter-42".to_string(),
                 vec![DeviceQuirk::NeedsXyNotCt],
             )])),
+            device_profiles: std::sync::Mutex::new(std::collections::HashMap::new()),
+            pending_turn_on_plans: Arc::new(
+                std::sync::Mutex::new(std::collections::HashMap::new()),
+            ),
+            needs_audition: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            local_overrides: std::sync::Mutex::new(
+                crate::local_quirks::LocalMatterOverrides::default(),
+            ),
             cloud_profiles: std::sync::Mutex::new(
                 crate::cloud_profiles::CloudMatterProfileCatalog::default(),
             ),
@@ -3297,6 +3863,9 @@ mod tests {
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             on_off_observations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            attribute_report_history: Arc::new(std::sync::Mutex::new(
+                std::collections::VecDeque::new(),
+            )),
             event_tx: tx,
         });
         let controller = MatterLightController::new(transport.clone(), hub_data);

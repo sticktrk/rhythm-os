@@ -28,6 +28,10 @@ struct LocalQuirkOverride {
     updated_at_unix_ms: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     report_id: Option<String>,
+    /// Additive typed profile written by Bulb Audition. Legacy binaries ignore
+    /// this field and continue to consume `quirks` and `capabilities`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    control_profile: Option<crate::control_profile::MatterControlProfile>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -42,6 +46,7 @@ pub struct LocalCapabilityOverride {
 pub struct LocalMatterOverrides {
     pub quirks: HashMap<String, Vec<DeviceQuirk>>,
     pub capabilities: HashMap<String, LocalCapabilityOverride>,
+    pub control_profiles: HashMap<String, crate::control_profile::MatterControlProfile>,
 }
 
 impl Default for LocalQuirkStore {
@@ -163,8 +168,13 @@ pub fn load_overrides_for_state(state: &SharedState) -> LocalMatterOverrides {
                 if let Some(mut capabilities) = entry.capabilities {
                     capabilities.normalize();
                     if !capabilities.is_empty() {
-                        overrides.capabilities.insert(device_id, capabilities);
+                        overrides
+                            .capabilities
+                            .insert(device_id.clone(), capabilities);
                     }
+                }
+                if let Some(profile) = entry.control_profile {
+                    overrides.control_profiles.insert(device_id, profile);
                 }
             }
             overrides
@@ -214,6 +224,7 @@ pub fn save_device_profile_override(
             source: "matter_bulb_tester".to_string(),
             updated_at_unix_ms: now,
             report_id: None,
+            control_profile: None,
         });
     if let Some(quirks) = quirks {
         entry.quirks = quirks;
@@ -232,6 +243,49 @@ pub fn save_device_profile_override(
     store.devices.insert(device_id.to_string(), entry);
 
     let body = serde_json::to_vec_pretty(&store).context("serializing local quirk store")?;
+    let tmp_path = path.with_extension("json.tmp");
+    fs::write(&tmp_path, body).with_context(|| format!("writing {}", tmp_path.display()))?;
+    fs::rename(&tmp_path, &path)
+        .with_context(|| format!("renaming {} to {}", tmp_path.display(), path.display()))?;
+    Ok(())
+}
+
+/// Persist the typed profile without removing the legacy representation. The
+/// compatibility fields remain writable by the previous field floor, while a
+/// later current binary can recover this exact audition strategy.
+pub fn save_device_control_profile(
+    state: &SharedState,
+    device_id: &str,
+    profile: crate::control_profile::MatterControlProfile,
+    report_id: Option<String>,
+) -> Result<()> {
+    let path = store_path(state).context("data_dir not configured on AppState")?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating local quirk dir {}", parent.display()))?;
+    }
+
+    let mut store = load_store(&path).unwrap_or_default();
+    let now = now_unix_ms();
+    let mut entry = store
+        .devices
+        .remove(device_id)
+        .unwrap_or_else(|| LocalQuirkOverride {
+            quirks: Vec::new(),
+            capabilities: None,
+            source: "bulb_audition".to_string(),
+            updated_at_unix_ms: now,
+            report_id: None,
+            control_profile: None,
+        });
+    entry.control_profile = Some(profile);
+    entry.source = "bulb_audition".to_string();
+    entry.updated_at_unix_ms = now;
+    entry.report_id = report_id;
+    store.updated_at_unix_ms = now;
+    store.devices.insert(device_id.to_string(), entry);
+
+    let body = serde_json::to_vec_pretty(&store).context("serializing local profile store")?;
     let tmp_path = path.with_extension("json.tmp");
     fs::write(&tmp_path, body).with_context(|| format!("writing {}", tmp_path.display()))?;
     fs::rename(&tmp_path, &path)
