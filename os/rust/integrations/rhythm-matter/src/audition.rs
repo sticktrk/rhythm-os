@@ -146,9 +146,7 @@ pub fn run_audition(state: &SharedState, params: &Value) -> Result<Value> {
         &profile,
     )?;
     if result.get("needs_audition").and_then(Value::as_bool) == Some(true) {
-        if let Ok(mut devices) = hub_data.needs_audition.lock() {
-            devices.insert((node_id, endpoint));
-        }
+        hub_data.set_needs_audition(node_id, endpoint, true);
     }
     Ok(result)
 }
@@ -164,9 +162,7 @@ pub fn save_audition_report(state: &SharedState, report: &Value) -> Result<Value
             .and_then(Value::as_str);
         if let Some((node_id, endpoint)) = native_id.and_then(crate::lifecycle::parse_device_id) {
             if let Ok(hub_data) = get_hub_data(state) {
-                if let Ok(mut devices) = hub_data.needs_audition.lock() {
-                    devices.remove(&(node_id, endpoint));
-                }
+                hub_data.set_needs_audition(node_id, endpoint, false);
             }
         }
     }

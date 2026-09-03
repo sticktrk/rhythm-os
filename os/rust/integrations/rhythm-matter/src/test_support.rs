@@ -6,6 +6,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
+use serde_json::Value;
 
 use crate::transport::{
     CommissionedDevice, MatterColorMode, MatterCommissionRequest, MatterDeviceInfo, MatterGroup,
@@ -253,6 +254,8 @@ pub struct SpyTransport {
     devices: Mutex<Vec<MatterDeviceInfo>>,
     probes: Mutex<HashMap<u64, CommissionedDevice>>,
     on_off_state: Mutex<HashMap<u64, bool>>,
+    light_state: Mutex<HashMap<(u64, u16), Value>>,
+    light_state_reads: AtomicUsize,
     groups: Mutex<HashMap<u16, MatterGroup>>,
     failing_nodes: Mutex<HashSet<u64>>,
     failing_read_nodes: Mutex<HashSet<u64>>,
@@ -275,6 +278,8 @@ impl SpyTransport {
             devices: Mutex::new(Vec::new()),
             probes: Mutex::new(HashMap::new()),
             on_off_state: Mutex::new(HashMap::new()),
+            light_state: Mutex::new(HashMap::new()),
+            light_state_reads: AtomicUsize::new(0),
             groups: Mutex::new(HashMap::new()),
             failing_nodes: Mutex::new(HashSet::new()),
             failing_read_nodes: Mutex::new(HashSet::new()),
@@ -326,6 +331,17 @@ impl SpyTransport {
 
     pub fn set_on_off_state(&self, node_id: u64, is_on: bool) {
         self.on_off_state.lock().unwrap().insert(node_id, is_on);
+    }
+
+    pub fn set_light_state(&self, node_id: u64, endpoint: u16, state: Value) {
+        self.light_state
+            .lock()
+            .unwrap()
+            .insert((node_id, endpoint), state);
+    }
+
+    pub fn light_state_read_count(&self) -> usize {
+        self.light_state_reads.load(Ordering::SeqCst)
     }
 
     pub fn fail_node(&self, node_id: u64) {
@@ -761,6 +777,18 @@ impl MatterTransport for SpyTransport {
             .get(&node_id)
             .copied()
             .unwrap_or(false))
+    }
+
+    fn read_light_state(&self, node_id: u64, endpoint: u16) -> Result<Value> {
+        self.light_state_reads.fetch_add(1, Ordering::SeqCst);
+        self.light_state
+            .lock()
+            .unwrap()
+            .get(&(node_id, endpoint))
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!("light state for {node_id}/{endpoint} is not configured")
+            })
     }
 }
 

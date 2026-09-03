@@ -129,6 +129,7 @@ impl MatterLightController {
         if plans.is_empty() {
             return Ok(HubCommandReceipt::delivered());
         }
+        self.hub_data.readback.record_submitted(&plans);
         if let Ok(mut pending) = self.hub_data.pending_turn_on_plans.lock() {
             for plan in &plans {
                 if plan_requests_turn_on(plan) {
@@ -174,6 +175,7 @@ impl MatterLightController {
                         self.transport.clone(),
                         plan.clone(),
                         self.hub_data.needs_audition.clone(),
+                        self.hub_data.readback.clone(),
                     );
                 }
             }
@@ -312,11 +314,8 @@ impl MatterLightController {
                     },
                     MatterLevelCommand::StepWithOnOff => {
                         let current_level = self
-                            .transport
-                            .read_light_state(node_id, endpoint)
-                            .ok()
-                            .and_then(|state| reported_u64(&state, "current_level"))
-                            .and_then(|value| u8::try_from(value).ok())
+                            .hub_data
+                            .observed_current_level(node_id, endpoint)
                             .unwrap_or(0);
                         let (step_mode, step_size) = if current_level > level {
                             (
@@ -1209,6 +1208,7 @@ pub(crate) fn schedule_turn_on_readback(
     transport: Arc<dyn MatterTransport>,
     plan: MatterEndpointCommandPlan,
     needs_audition: Arc<Mutex<std::collections::HashSet<(u64, u16)>>>,
+    readback: Arc<crate::hub_state::MatterReadbackCoordinator>,
 ) {
     let settle_ms = plan
         .steps
@@ -1225,38 +1225,33 @@ pub(crate) fn schedule_turn_on_readback(
         .unwrap_or(0)
         .saturating_add(500)
         .min(5_000);
-    let spawn_result = std::thread::Builder::new()
-        .name("matter-turn-on-readback".to_string())
-        .spawn(move || {
-            std::thread::sleep(Duration::from_millis(u64::from(settle_ms)));
-            let Ok(reported) = transport.read_light_state(plan.node_id, plan.endpoint) else {
-                return;
-            };
-            if let Some(mismatch_field) = turn_on_readback_mismatch(&plan, &reported) {
-                tracing::warn!(
-                    target: "cmd",
-                    event = "matter_command_ack_without_effect",
-                    node_id = plan.node_id,
-                    endpoint = plan.endpoint,
-                    command_id = plan.command_id,
-                    mismatch_field,
-                    "Matter command completed but authoritative readback did not show the requested effect"
-                );
-                if let Ok(mut needs_audition) = needs_audition.lock() {
-                    needs_audition.insert((plan.node_id, plan.endpoint));
-                }
-            }
-        });
-    if let Err(error) = spawn_result {
-        warn!(target: "cmd", "Failed to schedule Matter command readback: {error}");
-    }
+    readback.schedule(
+        transport,
+        plan,
+        needs_audition,
+        Duration::from_millis(u64::from(settle_ms)),
+    );
 }
 
 pub(crate) fn turn_on_readback_mismatch(
     plan: &MatterEndpointCommandPlan,
     reported: &serde_json::Value,
 ) -> Option<&'static str> {
-    if reported_bool(reported, "onoff") == Some(false) {
+    let requests_on = plan.steps.iter().rev().find_map(|step| match step {
+        MatterCommandStep::SetOnOff { on } => Some(*on),
+        MatterCommandStep::SetBrightness { .. } => Some(true),
+        MatterCommandStep::RunLevel { command, .. }
+            if matches!(
+                command,
+                crate::transport::MatterLevelCommandVariant::MoveToLevelWithOnOff
+                    | crate::transport::MatterLevelCommandVariant::StepWithOnOff
+            ) =>
+        {
+            Some(true)
+        }
+        _ => None,
+    });
+    if requests_on == Some(true) && reported_bool(reported, "onoff") == Some(false) {
         return Some("on_off");
     }
 
@@ -1434,6 +1429,7 @@ mod tests {
                 std::sync::Mutex::new(std::collections::HashMap::new()),
             ),
             needs_audition: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            readback: Arc::new(crate::hub_state::MatterReadbackCoordinator::default()),
             local_overrides: std::sync::Mutex::new(
                 crate::local_quirks::LocalMatterOverrides::default(),
             ),
@@ -1646,6 +1642,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn step_with_on_off_plan_builder_uses_cached_level_without_transport_read() {
+        let (controller, spy, _) = make_controller();
+        set_device_capabilities(
+            &controller,
+            42,
+            LightCapabilities::defaults_for(LightType::ExtendedColor),
+        );
+        controller
+            .hub_data
+            .attribute_report_history
+            .lock()
+            .unwrap()
+            .push_back(crate::transport::MatterAttributeReport {
+                received_at_unix_ms: 1,
+                node_id: 42,
+                endpoint: 1,
+                cluster: 0x0008,
+                attr_id: 0x0000,
+                value: crate::transport::MatterAttributeValue::U8(200),
+            });
+        let profile = MatterControlProfile {
+            level_command: MatterLevelCommand::StepWithOnOff,
+            ..MatterControlProfile::default()
+        };
+
+        let plans = controller
+            .audition_turn_on_plans(
+                &["matter-42".to_string()],
+                &LightingCommand::new(30, 2_700),
+                &profile,
+            )
+            .unwrap();
+
+        assert_eq!(spy.light_state_read_count(), 0);
+        assert!(plans[0].steps.iter().any(|step| matches!(
+            step,
+            MatterCommandStep::RunLevel {
+                command: crate::transport::MatterLevelCommandVariant::StepWithOnOff,
+                step_mode: Some(crate::transport::MatterLevelStepMode::Down),
+                ..
+            }
+        )));
+    }
+
     fn operations_for_node(
         operations: &[RecordedOperation],
         expected_node_id: u64,
@@ -1702,6 +1743,7 @@ mod tests {
                 std::sync::Mutex::new(std::collections::HashMap::new()),
             ),
             needs_audition: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            readback: Arc::new(crate::hub_state::MatterReadbackCoordinator::default()),
             local_overrides: std::sync::Mutex::new(
                 crate::local_quirks::LocalMatterOverrides::default(),
             ),
@@ -3038,6 +3080,7 @@ mod tests {
                 std::sync::Mutex::new(std::collections::HashMap::new()),
             ),
             needs_audition: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            readback: Arc::new(crate::hub_state::MatterReadbackCoordinator::default()),
             local_overrides: std::sync::Mutex::new(
                 crate::local_quirks::LocalMatterOverrides::default(),
             ),
@@ -3229,6 +3272,7 @@ mod tests {
                 std::sync::Mutex::new(std::collections::HashMap::new()),
             ),
             needs_audition: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            readback: Arc::new(crate::hub_state::MatterReadbackCoordinator::default()),
             local_overrides: std::sync::Mutex::new(
                 crate::local_quirks::LocalMatterOverrides::default(),
             ),
@@ -3357,6 +3401,7 @@ mod tests {
                 std::sync::Mutex::new(std::collections::HashMap::new()),
             ),
             needs_audition: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            readback: Arc::new(crate::hub_state::MatterReadbackCoordinator::default()),
             local_overrides: std::sync::Mutex::new(
                 crate::local_quirks::LocalMatterOverrides::default(),
             ),
@@ -3467,6 +3512,7 @@ mod tests {
                 std::sync::Mutex::new(std::collections::HashMap::new()),
             ),
             needs_audition: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            readback: Arc::new(crate::hub_state::MatterReadbackCoordinator::default()),
             local_overrides: std::sync::Mutex::new(
                 crate::local_quirks::LocalMatterOverrides::default(),
             ),
@@ -3688,6 +3734,7 @@ mod tests {
                 std::sync::Mutex::new(std::collections::HashMap::new()),
             ),
             needs_audition: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            readback: Arc::new(crate::hub_state::MatterReadbackCoordinator::default()),
             local_overrides: std::sync::Mutex::new(
                 crate::local_quirks::LocalMatterOverrides::default(),
             ),
@@ -3893,6 +3940,7 @@ mod tests {
                 std::sync::Mutex::new(std::collections::HashMap::new()),
             ),
             needs_audition: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            readback: Arc::new(crate::hub_state::MatterReadbackCoordinator::default()),
             local_overrides: std::sync::Mutex::new(
                 crate::local_quirks::LocalMatterOverrides::default(),
             ),

@@ -601,6 +601,7 @@ fn start_controller_event_stream(
     on_off_observations: Arc<Mutex<OnOffObservations>>,
     pending_turn_on_plans: Arc<Mutex<HashMap<u64, MatterEndpointCommandPlan>>>,
     needs_audition: Arc<Mutex<HashSet<(u64, u16)>>>,
+    readback: Arc<crate::hub_state::MatterReadbackCoordinator>,
     attribute_report_history: Arc<Mutex<VecDeque<MatterAttributeReport>>>,
 ) {
     let subscription_refresh =
@@ -688,6 +689,7 @@ fn start_controller_event_stream(
                                         transport.clone(),
                                         plan,
                                         needs_audition.clone(),
+                                        readback.clone(),
                                     );
                                 }
                                 if let Ok(mut proof) = node_proof_of_life.lock() {
@@ -852,9 +854,20 @@ pub fn connect_matter(
     let pending_turn_on_plans = Arc::new(Mutex::new(HashMap::new()));
     let pending_turn_on_plans_for_closure = pending_turn_on_plans.clone();
     let pending_turn_on_plans_for_events = pending_turn_on_plans.clone();
-    let needs_audition = Arc::new(Mutex::new(HashSet::new()));
+    let needs_audition = Arc::new(Mutex::new(
+        local_overrides
+            .needs_audition
+            .iter()
+            .filter_map(|device_id| crate::lifecycle::parse_device_id(device_id))
+            .collect::<HashSet<_>>(),
+    ));
     let needs_audition_for_closure = needs_audition.clone();
     let needs_audition_for_events = needs_audition.clone();
+    let readback = Arc::new(crate::hub_state::MatterReadbackCoordinator::new(
+        crate::local_quirks::store_path(state),
+    ));
+    let readback_for_closure = readback.clone();
+    let readback_for_events = readback.clone();
     let attribute_report_history = Arc::new(Mutex::new(VecDeque::new()));
     let attribute_report_history_for_closure = attribute_report_history.clone();
     let attribute_report_history_for_events = attribute_report_history.clone();
@@ -888,6 +901,7 @@ pub fn connect_matter(
                 device_profiles: std::sync::Mutex::new(initial_metadata.device_profiles.clone()),
                 pending_turn_on_plans: pending_turn_on_plans_for_closure.clone(),
                 needs_audition: needs_audition_for_closure.clone(),
+                readback: readback_for_closure.clone(),
                 local_overrides: std::sync::Mutex::new(local_overrides_for_hub_data.clone()),
                 cloud_profiles: std::sync::Mutex::new(cloud_profiles_for_hub_data.clone()),
                 decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
@@ -907,6 +921,7 @@ pub fn connect_matter(
                 on_off_observations_for_events,
                 pending_turn_on_plans_for_events,
                 needs_audition_for_events,
+                readback_for_events,
                 attribute_report_history_for_events,
             );
             event_rx
@@ -2664,6 +2679,7 @@ mod tests {
             observations.clone(),
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(HashSet::new())),
+            Arc::new(crate::hub_state::MatterReadbackCoordinator::default()),
             Arc::new(Mutex::new(VecDeque::new())),
         );
 
@@ -2711,6 +2727,7 @@ mod tests {
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(HashSet::new())),
+            Arc::new(crate::hub_state::MatterReadbackCoordinator::default()),
             Arc::new(Mutex::new(VecDeque::new())),
         );
 

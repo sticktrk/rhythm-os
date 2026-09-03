@@ -1,8 +1,9 @@
 //! Matter hub-specific state stored in `ActiveHub::hub_data`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use rhythm_devices::{DeviceQuirk, LightCapabilities};
@@ -11,9 +12,197 @@ use rhythm_os::hub::HubEvent;
 use crate::cloud_profiles::CloudMatterProfileCatalog;
 use crate::controller::MatterDeviceRegistry;
 use crate::transport::MatterTransport;
-use crate::transport::{CommissionedDevice, MatterAttributeReport, MatterDeviceInfo};
+use crate::transport::{
+    CommissionedDevice, MatterAttributeReport, MatterAttributeValue, MatterDeviceInfo,
+    MatterEndpointCommandPlan,
+};
 
 const DECOMMISSION_SUPPRESSION_WINDOW: Duration = Duration::from_secs(120);
+
+#[derive(Debug)]
+struct ScheduledReadback {
+    due_at: Instant,
+    plan: MatterEndpointCommandPlan,
+}
+
+/// One scheduler and worker for all delayed authoritative command readbacks.
+pub(crate) struct MatterReadbackCoordinator {
+    latest_command_ids: Arc<Mutex<HashMap<(u64, u16), u64>>>,
+    sender: OnceLock<mpsc::Sender<ScheduledReadback>>,
+    store_path: Option<PathBuf>,
+}
+
+impl MatterReadbackCoordinator {
+    pub(crate) fn new(store_path: Option<PathBuf>) -> Self {
+        Self {
+            latest_command_ids: Arc::new(Mutex::new(HashMap::new())),
+            sender: OnceLock::new(),
+            store_path,
+        }
+    }
+
+    pub(crate) fn record_submitted(&self, plans: &[MatterEndpointCommandPlan]) {
+        if let Ok(mut latest) = self.latest_command_ids.lock() {
+            for plan in plans {
+                latest.insert((plan.node_id, plan.endpoint), plan.command_id);
+            }
+        }
+    }
+
+    pub(crate) fn schedule(
+        &self,
+        transport: Arc<dyn MatterTransport>,
+        plan: MatterEndpointCommandPlan,
+        needs_audition: Arc<Mutex<HashSet<(u64, u16)>>>,
+        delay: Duration,
+    ) {
+        let latest_command_ids = self.latest_command_ids.clone();
+        let store_path = self.store_path.clone();
+        let sender = self.sender.get_or_init(|| {
+            let (sender, receiver) = mpsc::channel();
+            let spawn_result = std::thread::Builder::new()
+                .name("matter-readback".to_string())
+                .spawn(move || {
+                    readback_worker(
+                        receiver,
+                        transport,
+                        latest_command_ids,
+                        needs_audition,
+                        store_path,
+                    )
+                });
+            if let Err(error) = spawn_result {
+                log::warn!(target: "cmd", "Failed to start Matter readback worker: {error}");
+            }
+            sender
+        });
+        if sender
+            .send(ScheduledReadback {
+                due_at: Instant::now() + delay,
+                plan,
+            })
+            .is_err()
+        {
+            log::warn!(target: "cmd", "Matter readback worker is unavailable");
+        }
+    }
+
+    fn store_path(&self) -> Option<&PathBuf> {
+        self.store_path.as_ref()
+    }
+}
+
+impl Default for MatterReadbackCoordinator {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+fn readback_worker(
+    receiver: mpsc::Receiver<ScheduledReadback>,
+    transport: Arc<dyn MatterTransport>,
+    latest_command_ids: Arc<Mutex<HashMap<(u64, u16), u64>>>,
+    needs_audition: Arc<Mutex<HashSet<(u64, u16)>>>,
+    store_path: Option<PathBuf>,
+) {
+    let mut scheduled = Vec::<ScheduledReadback>::new();
+    loop {
+        if scheduled.is_empty() {
+            let Ok(request) = receiver.recv() else {
+                return;
+            };
+            scheduled.push(request);
+        }
+        scheduled.sort_by_key(|request| request.due_at);
+        let wait = scheduled[0]
+            .due_at
+            .saturating_duration_since(Instant::now());
+        match receiver.recv_timeout(wait) {
+            Ok(request) => {
+                scheduled.push(request);
+                continue;
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+
+        let request = scheduled.remove(0);
+        let key = (request.plan.node_id, request.plan.endpoint);
+        if !is_latest_command(&latest_command_ids, key, request.plan.command_id) {
+            continue;
+        }
+        let Ok(reported) = transport.read_light_state(request.plan.node_id, request.plan.endpoint)
+        else {
+            continue;
+        };
+        if !is_latest_command(&latest_command_ids, key, request.plan.command_id) {
+            continue;
+        }
+        let mismatch = crate::controller::turn_on_readback_mismatch(&request.plan, &reported);
+        if let Some(mismatch_field) = mismatch {
+            tracing::warn!(
+                target: "cmd",
+                event = "matter_command_ack_without_effect",
+                node_id = request.plan.node_id,
+                endpoint = request.plan.endpoint,
+                command_id = request.plan.command_id,
+                mismatch_field,
+                "Matter command completed but authoritative readback did not show the requested effect"
+            );
+        }
+        persist_needs_audition_change(
+            &needs_audition,
+            store_path.as_ref(),
+            key,
+            mismatch.is_some(),
+        );
+    }
+}
+
+fn is_latest_command(
+    latest_command_ids: &Mutex<HashMap<(u64, u16), u64>>,
+    key: (u64, u16),
+    command_id: u64,
+) -> bool {
+    latest_command_ids
+        .lock()
+        .ok()
+        .and_then(|latest| latest.get(&key).copied())
+        == Some(command_id)
+}
+
+fn persist_needs_audition_change(
+    needs_audition: &Mutex<HashSet<(u64, u16)>>,
+    store_path: Option<&PathBuf>,
+    key: (u64, u16),
+    value: bool,
+) {
+    let changed = needs_audition
+        .lock()
+        .map(|mut devices| {
+            if value {
+                devices.insert(key)
+            } else {
+                devices.remove(&key)
+            }
+        })
+        .unwrap_or(false);
+    if !changed {
+        return;
+    }
+    if let Some(path) = store_path {
+        let device_id = crate::lifecycle::format_device_id(key.0, key.1);
+        if let Err(error) =
+            crate::local_quirks::save_needs_audition_at_path(path, &device_id, value)
+        {
+            log::warn!(
+                target: "cmd",
+                "Failed to persist Matter needs-audition state for {device_id}: {error:#}"
+            );
+        }
+    }
+}
+
 /// Matter-specific state stored in `ActiveHub::hub_data`.
 pub struct MatterHubData {
     /// Shared transport for all controller, commissioning, and probe paths.
@@ -40,6 +229,8 @@ pub struct MatterHubData {
     /// Endpoints whose successful command acknowledgement did not produce the
     /// intended reported state. The app reads this through Audition status.
     pub needs_audition: Arc<Mutex<HashSet<(u64, u16)>>>,
+    /// Shared latest-command tracker and single delayed readback worker.
+    pub(crate) readback: Arc<MatterReadbackCoordinator>,
     /// Local audition inputs cached for startup, pairing, discovery, and
     /// on-demand probes so all metadata paths use one resolver.
     pub local_overrides: Mutex<crate::local_quirks::LocalMatterOverrides>,
@@ -64,6 +255,34 @@ impl MatterHubData {
     /// Reserve the next node ID.
     pub fn reserve_node_id(&self) -> u64 {
         self.next_node_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    pub(crate) fn set_needs_audition(&self, node_id: u64, endpoint: u16, value: bool) {
+        persist_needs_audition_change(
+            self.needs_audition.as_ref(),
+            self.readback.store_path(),
+            (node_id, endpoint),
+            value,
+        );
+    }
+
+    pub(crate) fn observed_current_level(&self, node_id: u64, endpoint: u16) -> Option<u8> {
+        self.attribute_report_history
+            .lock()
+            .ok()?
+            .iter()
+            .rev()
+            .find_map(|report| {
+                (report.node_id == node_id
+                    && report.endpoint == endpoint
+                    && report.cluster == 0x0008
+                    && report.attr_id == 0x0000)
+                    .then(|| match &report.value {
+                        MatterAttributeValue::U8(value) => Some(*value),
+                        _ => None,
+                    })
+                    .flatten()
+            })
     }
 
     /// Upsert a newly commissioned device into the in-memory fabric cache.
@@ -119,8 +338,20 @@ impl MatterHubData {
         if let Ok(mut pending) = self.pending_turn_on_plans.lock() {
             pending.retain(|_, plan| plan.node_id != node_id);
         }
-        if let Ok(mut needs_audition) = self.needs_audition.lock() {
-            needs_audition.retain(|(observed_node_id, _)| *observed_node_id != node_id);
+        let audition_endpoints = self
+            .needs_audition
+            .lock()
+            .map(|needs_audition| {
+                needs_audition
+                    .iter()
+                    .filter_map(|(observed_node_id, endpoint)| {
+                        (*observed_node_id == node_id).then_some(*endpoint)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for endpoint in audition_endpoints {
+            self.set_needs_audition(node_id, endpoint, false);
         }
         if let Ok(mut observations) = self.on_off_observations.lock() {
             observations.retain(|(observed_node_id, _), _| *observed_node_id != node_id);
@@ -274,6 +505,8 @@ impl MatterHubData {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::SpyTransport;
+    use crate::transport::MatterCommandStep;
 
     fn commissioned_device(
         node_id: u64,
@@ -308,6 +541,7 @@ mod tests {
             device_profiles: Mutex::new(HashMap::new()),
             pending_turn_on_plans: Arc::new(Mutex::new(HashMap::new())),
             needs_audition: Arc::new(Mutex::new(HashSet::new())),
+            readback: Arc::new(MatterReadbackCoordinator::default()),
             local_overrides: Mutex::new(crate::local_quirks::LocalMatterOverrides::default()),
             cloud_profiles: Mutex::new(CloudMatterProfileCatalog::default()),
             decommissioning: Mutex::new(HashSet::new()),
@@ -317,6 +551,95 @@ mod tests {
             attribute_report_history: Arc::new(Mutex::new(VecDeque::new())),
             event_tx,
         }
+    }
+
+    fn level_plan(command_id: u64, level: u8) -> MatterEndpointCommandPlan {
+        MatterEndpointCommandPlan {
+            command_id,
+            node_id: 42,
+            endpoint: 1,
+            steps: vec![MatterCommandStep::SetBrightness {
+                level,
+                transition_ms: None,
+            }],
+            inter_step_delay_ms: None,
+        }
+    }
+
+    fn wait_for_reads(transport: &SpyTransport, expected: usize) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while transport.light_state_read_count() < expected && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(transport.light_state_read_count(), expected);
+    }
+
+    #[test]
+    fn superseded_readback_ignores_the_older_completed_plan() {
+        let coordinator = MatterReadbackCoordinator::default();
+        let transport = Arc::new(SpyTransport::default());
+        transport.set_light_state(
+            42,
+            1,
+            serde_json::json!({
+                "onoff": {"ok": true, "value": true},
+                "current_level": {"ok": true, "value": 203}
+            }),
+        );
+        let needs_audition = Arc::new(Mutex::new(HashSet::new()));
+        let plan_a = level_plan(1, 76);
+        let plan_b = level_plan(2, 203);
+
+        coordinator.record_submitted(std::slice::from_ref(&plan_a));
+        coordinator.schedule(
+            transport.clone(),
+            plan_a,
+            needs_audition.clone(),
+            Duration::from_millis(20),
+        );
+        coordinator.record_submitted(std::slice::from_ref(&plan_b));
+        coordinator.schedule(
+            transport.clone(),
+            plan_b,
+            needs_audition.clone(),
+            Duration::ZERO,
+        );
+
+        wait_for_reads(transport.as_ref(), 1);
+        std::thread::sleep(Duration::from_millis(30));
+        assert_eq!(transport.light_state_read_count(), 1);
+        assert!(needs_audition.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn matching_readback_clears_needs_audition() {
+        let coordinator = MatterReadbackCoordinator::default();
+        let transport = Arc::new(SpyTransport::default());
+        transport.set_light_state(
+            42,
+            1,
+            serde_json::json!({
+                "onoff": {"ok": true, "value": true},
+                "current_level": {"ok": true, "value": 203}
+            }),
+        );
+        let needs_audition = Arc::new(Mutex::new(HashSet::from([(42, 1)])));
+        let plan = level_plan(2, 203);
+
+        coordinator.record_submitted(std::slice::from_ref(&plan));
+        coordinator.schedule(
+            transport.clone(),
+            plan,
+            needs_audition.clone(),
+            Duration::ZERO,
+        );
+
+        wait_for_reads(transport.as_ref(), 1);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !needs_audition.lock().unwrap().is_empty() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(needs_audition.lock().unwrap().is_empty());
     }
 
     #[test]

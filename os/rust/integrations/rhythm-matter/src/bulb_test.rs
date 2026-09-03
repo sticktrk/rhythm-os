@@ -1986,6 +1986,7 @@ mod tests {
             device_profiles: Mutex::new(HashMap::new()),
             pending_turn_on_plans: Arc::new(Mutex::new(HashMap::new())),
             needs_audition: Arc::new(Mutex::new(HashSet::new())),
+            readback: Arc::new(crate::hub_state::MatterReadbackCoordinator::default()),
             local_overrides: Mutex::new(crate::local_quirks::LocalMatterOverrides::default()),
             cloud_profiles: Mutex::new(CloudMatterProfileCatalog::default()),
             decommissioning: Mutex::new(HashSet::new()),
