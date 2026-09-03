@@ -675,49 +675,20 @@ fn readback_snapshot(transport: &Arc<dyn MatterTransport>, node_id: u64, endpoin
 
 fn detect_ack_without_effect(
     plans: &[MatterEndpointCommandPlan],
-    before: &Value,
+    _before: &Value,
     after: &Value,
 ) -> Option<&'static str> {
-    let final_steps = plans.last()?.steps.as_slice();
-    for step in final_steps.iter().rev() {
-        match step {
-            MatterCommandStep::SetOnOff { on } => {
-                if state_bool(after, "onoff") != Some(*on) {
-                    return Some("on_off");
-                }
-            }
-            MatterCommandStep::SetBrightness { level, .. }
-            | MatterCommandStep::RunLevel {
-                level_or_step: level,
-                ..
-            } => {
-                if let Some(actual) = state_u64(after, "current_level") {
-                    if actual.abs_diff(u64::from(*level)) > 8 {
-                        return Some("level");
-                    }
-                }
-            }
-            MatterCommandStep::SetColorTemperature { .. }
-            | MatterCommandStep::SetXy { .. }
-            | MatterCommandStep::SetHueSaturation { .. } => {
-                let keys = [
-                    "color_temperature_mireds",
-                    "current_x",
-                    "current_y",
-                    "current_hue",
-                    "current_saturation",
-                ];
-                if keys
-                    .iter()
-                    .all(|key| state_value(before, key) == state_value(after, key))
-                {
-                    return Some("color");
-                }
-            }
-            MatterCommandStep::Identify { .. } => {}
-        }
+    let plan = plans.last()?;
+    if plan.steps.iter().rev().find_map(|step| match step {
+        MatterCommandStep::SetOnOff { on } => Some(*on),
+        _ => None,
+    }) == Some(false)
+        && state_bool(after, "onoff") == Some(true)
+    {
+        return Some("on_off");
     }
-    None
+
+    crate::controller::turn_on_readback_mismatch(plan, after)
 }
 
 fn state_value<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
@@ -729,10 +700,6 @@ fn state_value<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
 
 fn state_bool(value: &Value, key: &str) -> Option<bool> {
     state_value(value, key).and_then(Value::as_bool)
-}
-
-fn state_u64(value: &Value, key: &str) -> Option<u64> {
-    state_value(value, key).and_then(Value::as_u64)
 }
 
 fn apply_try_with_override(profile: &mut MatterControlProfile, value: &Value) -> Result<()> {
@@ -891,6 +858,74 @@ mod tests {
         assert_eq!(
             detect_ack_without_effect(&[plan], &state, &state),
             Some("color")
+        );
+    }
+
+    #[test]
+    fn unchanged_color_that_already_matches_target_is_not_a_mismatch() {
+        let plan = MatterEndpointCommandPlan {
+            command_id: 1,
+            node_id: 7,
+            endpoint: 1,
+            steps: vec![
+                MatterCommandStep::SetColorTemperature {
+                    kelvin: 4_000,
+                    transition_ms: None,
+                },
+                MatterCommandStep::SetBrightness {
+                    level: 152,
+                    transition_ms: None,
+                },
+            ],
+            inter_step_delay_ms: None,
+        };
+        let state = json!({
+            "onoff": {"ok": true, "value": true},
+            "current_level": {"ok": true, "value": 152},
+            "color_temperature_mireds": {"ok": true, "value": 250},
+        });
+
+        assert_eq!(detect_ack_without_effect(&[plan], &state, &state), None);
+    }
+
+    #[test]
+    fn unavailable_readback_is_not_a_mismatch() {
+        let plan = MatterEndpointCommandPlan {
+            command_id: 1,
+            node_id: 7,
+            endpoint: 1,
+            steps: vec![MatterCommandStep::SetColorTemperature {
+                kelvin: 4_000,
+                transition_ms: None,
+            }],
+            inter_step_delay_ms: None,
+        };
+
+        assert_eq!(
+            detect_ack_without_effect(
+                &[plan],
+                &json!({"status": "unavailable"}),
+                &json!({"status": "unavailable"}),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn off_plan_reporting_on_is_a_mismatch() {
+        let plan = MatterEndpointCommandPlan {
+            command_id: 1,
+            node_id: 7,
+            endpoint: 1,
+            steps: vec![MatterCommandStep::SetOnOff { on: false }],
+            inter_step_delay_ms: None,
+        };
+        let before = json!({"onoff": {"ok": true, "value": true}});
+        let after = json!({"onoff": {"ok": true, "value": true}});
+
+        assert_eq!(
+            detect_ack_without_effect(&[plan], &before, &after),
+            Some("on_off")
         );
     }
 
