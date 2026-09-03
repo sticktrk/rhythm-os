@@ -391,8 +391,9 @@ impl CommandDispatcher {
     /// it: a light that comes on at the wrong color beats a light that stays
     /// dark. The plan still succeeds, and the color failure travels in the
     /// outcome detail so it is visible. When no later step succeeds there is
-    /// nothing to salvage and the plan fails. Any other step failure aborts
-    /// the plan as before.
+    /// nothing to salvage and the plan fails. A color step that fails because
+    /// the node is unreachable, and any other step failure, still aborts the
+    /// plan immediately.
     fn execute(&self, plan: &MatterEndpointCommandPlan) -> Result<Option<String>> {
         let mut color_failure: Option<anyhow::Error> = None;
         let mut succeeded_after_color_failure = false;
@@ -410,10 +411,17 @@ impl CommandDispatcher {
                         succeeded_after_color_failure = true;
                     }
                 }
-                Err(error) if is_color_step(step) => {
+                Err(error) if is_color_step(step) && !is_connectivity_failure(&error) => {
                     color_failure.get_or_insert(error);
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    return Err(match color_failure.take() {
+                        Some(color_error) => {
+                            error.context(format!("after rejected color step: {color_error:#}"))
+                        }
+                        None => error,
+                    });
+                }
             }
 
             if index + 1 < plan.steps.len() {
@@ -478,6 +486,20 @@ fn is_color_step(step: &MatterCommandStep) -> bool {
             | MatterCommandStep::SetXy { .. }
             | MatterCommandStep::SetHueSaturation { .. }
     )
+}
+
+/// A failure that says the node could not be reached, as opposed to a
+/// cluster rejecting the command. Mirrors
+/// `MatterLightController::looks_like_connectivity_timeout` in rhythm-matter.
+fn is_connectivity_failure(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let lower = cause.to_string().to_ascii_lowercase();
+        lower.contains("timeout")
+            || lower.contains("timed out")
+            || lower.contains("chip error 0x00000032")
+            || lower.contains("operational discovery failed")
+            || lower.contains("failed to connect")
+    })
 }
 
 fn execute_step(
@@ -551,6 +573,8 @@ mod tests {
         second_endpoint_ran: AtomicBool,
         failed_nodes: Mutex<HashSet<u64>>,
         fail_color: AtomicBool,
+        fail_color_with_timeout: AtomicBool,
+        fail_level: AtomicBool,
         level_calls: AtomicUsize,
     }
 
@@ -564,6 +588,11 @@ mod tests {
         }
 
         fn fail_if_color_rejected(&self) -> Result<()> {
+            if self.state.fail_color_with_timeout.load(Ordering::SeqCst) {
+                anyhow::bail!(
+                    "setting Matter color temperature: native/chip_bridge.cc:540: CHIP Error 0x00000032: Timeout"
+                );
+            }
             if self.state.fail_color.load(Ordering::SeqCst) {
                 anyhow::bail!("synthetic UNSUPPORTED_COMMAND for color step");
             }
@@ -650,6 +679,9 @@ mod tests {
         }
         fn set_brightness(&self, _: u64, _: u16, _: u8, _: Option<u32>) -> Result<()> {
             self.state.level_calls.fetch_add(1, Ordering::SeqCst);
+            if self.state.fail_level.load(Ordering::SeqCst) {
+                anyhow::bail!("synthetic level failure");
+            }
             Ok(())
         }
         fn run_level_command(
@@ -825,6 +857,52 @@ mod tests {
         let outcomes = wait_for_outcomes(&broker, &[21]);
         assert_eq!(outcomes, vec![(21, MatterCommandOutcomeStatus::Failed)]);
         assert_eq!(blocking.level_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn color_step_connectivity_failure_aborts_the_plan() {
+        let blocking = Arc::new(BlockingState::default());
+        blocking.release_first.store(true, Ordering::SeqCst);
+        blocking
+            .fail_color_with_timeout
+            .store(true, Ordering::SeqCst);
+        let backend = Arc::new(RwLock::new(
+            Box::new(BlockingBackend::new(blocking.clone())) as Box<dyn ChipControllerBackend>,
+        ));
+        let broker = Arc::new(ControllerEventBroker::new());
+        let dispatcher = CommandDispatcher::new(backend, broker.clone());
+
+        dispatcher
+            .submit(vec![color_then_level_plan(22, true)])
+            .unwrap();
+
+        let outcomes = wait_for_outcomes(&broker, &[22]);
+        assert_eq!(outcomes, vec![(22, MatterCommandOutcomeStatus::Failed)]);
+        assert_eq!(blocking.level_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn later_step_failure_keeps_rejected_color_step_in_detail() {
+        let blocking = Arc::new(BlockingState::default());
+        blocking.release_first.store(true, Ordering::SeqCst);
+        blocking.fail_color.store(true, Ordering::SeqCst);
+        blocking.fail_level.store(true, Ordering::SeqCst);
+        let backend = Arc::new(RwLock::new(
+            Box::new(BlockingBackend::new(blocking)) as Box<dyn ChipControllerBackend>
+        ));
+        let broker = Arc::new(ControllerEventBroker::new());
+        let dispatcher = CommandDispatcher::new(backend, broker.clone());
+
+        dispatcher
+            .submit(vec![color_then_level_plan(23, true)])
+            .unwrap();
+
+        let outcomes = wait_for_outcome_details(&broker, &[23]);
+        let (_, status, detail) = &outcomes[0];
+        assert_eq!(*status, MatterCommandOutcomeStatus::Failed);
+        let detail = detail.as_deref().unwrap_or_default();
+        assert!(detail.contains("synthetic UNSUPPORTED_COMMAND"));
+        assert!(detail.contains("after rejected color step"));
     }
 
     #[test]

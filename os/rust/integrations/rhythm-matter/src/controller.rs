@@ -36,7 +36,8 @@ const MATTER_GROUP_CONTROL_PREFIX: &str = "matter-group-";
 const MATTER_GROUP_FANOUT_ONLY_ENV: &str = "RHYTHM_MATTER_GROUP_FANOUT_ONLY";
 /// Gap between the steps of one endpoint plan when no profile measured a
 /// throttle. Cheap bulbs drop a command that arrives on the heels of the
-/// previous one; the tester's rapid-command thresholds start at 50 ms.
+/// previous one; the tester's rapid-command thresholds start at 50 ms. A
+/// profiled zero explicitly disables the gap.
 const DEFAULT_INTER_STEP_DELAY_MS: u64 = 100;
 const MATTER_GROUP_SAFETY_FANOUT_ENV: &str = "RHYTHM_MATTER_GROUP_SAFETY_FANOUT";
 
@@ -209,18 +210,21 @@ impl MatterLightController {
                 command,
                 Self::color_preference(&quirks),
             );
-            // Color staged while the light is observed off is invisible until
-            // the level step turns it on. Give it no transition: a fade that
-            // starts in the dark would otherwise finish in view, sweeping from
-            // the light's restored color to the target after it comes on.
-            let observed_off = self.hub_data.observed_on_off(node_id, endpoint) == Some(false);
+            let needs_explicit_on = adapted.on && Self::needs_explicit_on(&quirks);
+            // When color is the first step the bulb receives while dark, it is
+            // invisible until the level step turns the bulb on. Give that color
+            // step no transition: a fade that starts in the dark would otherwise
+            // finish in view, sweeping from the restored color to the target.
+            let observed_off = !needs_explicit_on
+                && self
+                    .hub_data
+                    .observed_off_since_last_turn_on(node_id, endpoint);
             let color_transition_ms = if observed_off {
                 None
             } else {
                 adapted.transition_ms
             };
             let mut steps = Vec::new();
-            let needs_explicit_on = adapted.on && Self::needs_explicit_on(&quirks);
             if needs_explicit_on {
                 steps.push(MatterCommandStep::SetOnOff { on: true });
             }
@@ -262,12 +266,15 @@ impl MatterLightController {
                     quirks
                         .iter()
                         .find_map(|quirk| match quirk {
-                            DeviceQuirk::CommandThrottleMs(ms) if *ms > 0 => Some(u64::from(*ms)),
+                            DeviceQuirk::CommandThrottleMs(ms) => Some(u64::from(*ms)),
                             _ => None,
                         })
                         .unwrap_or(DEFAULT_INTER_STEP_DELAY_MS),
                 ),
             });
+            if adapted.on {
+                self.hub_data.record_turn_on_dispatch(node_id, endpoint);
+            }
         }
         if plans.is_empty() && !device_ids.is_empty() {
             return Err(LightControlError::CommandFailed(
@@ -467,6 +474,14 @@ impl MatterLightController {
                     crate::lifecycle::format_device_id(device.node_id, device.light_endpoint);
 
                 self.cache_device_metadata(device_id, &probed_id, &caps, &quirks);
+                let _ = self
+                    .hub_data
+                    .event_tx
+                    .send(rhythm_os::hub::HubEvent::TopologyChanged {
+                        hub_key: None,
+                        resource_id: device_id.to_string(),
+                        resource_type: "light".to_string(),
+                    });
                 if let Err(error) = crate::capture::persist_device_capture(
                     &self.hub_data,
                     &device,
@@ -522,6 +537,11 @@ impl MatterLightController {
             if requested_id != probed_id {
                 device_quirks.insert(probed_id.to_string(), quirks.to_vec());
             }
+        }
+
+        if let Ok(mut fallback_caps) = self.hub_data.fallback_caps.lock() {
+            fallback_caps.remove(requested_id);
+            fallback_caps.remove(probed_id);
         }
     }
 
@@ -1066,6 +1086,16 @@ mod tests {
         Arc<SpyTransport>,
         Arc<Mutex<MatterDeviceRegistry>>,
     ) {
+        let (controller, spy, registry, _event_rx) = make_controller_with_event_receiver();
+        (controller, spy, registry)
+    }
+
+    fn make_controller_with_event_receiver() -> (
+        MatterLightController,
+        Arc<SpyTransport>,
+        Arc<Mutex<MatterDeviceRegistry>>,
+        std::sync::mpsc::Receiver<rhythm_os::hub::HubEvent>,
+    ) {
         let spy = Arc::new(SpyTransport::new());
         let registry = Arc::new(Mutex::new(MatterDeviceRegistry::with_options(true)));
 
@@ -1080,7 +1110,7 @@ mod tests {
             vec!["matter-42".to_string(), "matter-43".to_string()],
         );
 
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
         let hub_data = Arc::new(crate::hub_state::MatterHubData {
             transport: std::sync::OnceLock::new(),
             capture_dir: std::sync::OnceLock::new(),
@@ -1089,6 +1119,7 @@ mod tests {
             commissioned: std::sync::Mutex::new(Vec::new()),
             next_node_id: std::sync::atomic::AtomicU64::new(100),
             device_caps: std::sync::Mutex::new(std::collections::HashMap::new()),
+            fallback_caps: std::sync::Mutex::new(std::collections::HashSet::new()),
             device_quirks: std::sync::Mutex::new(std::collections::HashMap::new()),
             cloud_profiles: std::sync::Mutex::new(
                 crate::cloud_profiles::CloudMatterProfileCatalog::default(),
@@ -1097,11 +1128,12 @@ mod tests {
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             on_off_observations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            last_turn_on_dispatch: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });
 
         let controller = MatterLightController::new(spy.clone(), hub_data);
-        (controller, spy, registry)
+        (controller, spy, registry, rx)
     }
 
     fn set_kitchen_group(registry: &Arc<Mutex<MatterDeviceRegistry>>, group_id: u16) {
@@ -1222,6 +1254,7 @@ mod tests {
                 "matter-42".to_string(),
                 LightCapabilities::defaults_for(LightType::ExtendedColor),
             )])),
+            fallback_caps: std::sync::Mutex::new(std::collections::HashSet::new()),
             device_quirks: std::sync::Mutex::new(std::collections::HashMap::new()),
             cloud_profiles: std::sync::Mutex::new(
                 crate::cloud_profiles::CloudMatterProfileCatalog::default(),
@@ -1230,6 +1263,7 @@ mod tests {
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             on_off_observations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            last_turn_on_dispatch: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
@@ -1363,9 +1397,96 @@ mod tests {
     }
 
     #[test]
+    fn turn_on_keeps_color_transition_when_explicit_on_precedes_color() {
+        let (controller, spy, registry) = make_controller();
+        registry
+            .lock()
+            .unwrap()
+            .set_area_lights("kitchen", vec!["matter-42".to_string()]);
+        set_device_capabilities(
+            &controller,
+            42,
+            LightCapabilities::defaults_for(LightType::ColorTemperature),
+        );
+        controller
+            .hub_data
+            .device_quirks
+            .lock()
+            .unwrap()
+            .insert("matter-42".to_string(), vec![DeviceQuirk::NeedsExplicitOn]);
+        controller.hub_data.record_on_off_observation(42, 1, false);
+
+        block_on(controller.turn_on("kitchen", LightingCommand::with_transition(80, 4000, 500)))
+            .unwrap();
+
+        assert_eq!(
+            operations_for_node(&spy.operations(), 42),
+            vec![
+                RecordedOperation::SetOnOff {
+                    node_id: 42,
+                    endpoint: 1,
+                    on: true,
+                },
+                RecordedOperation::SetColorTemperature {
+                    node_id: 42,
+                    endpoint: 1,
+                    kelvin: 4000,
+                    transition_ms: Some(500),
+                },
+                RecordedOperation::SetBrightness {
+                    node_id: 42,
+                    endpoint: 1,
+                    level: clusters::brightness_to_level(80),
+                    transition_ms: Some(500),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn turn_on_ignores_off_observation_older_than_last_turn_on() {
+        let (controller, spy, registry) = make_controller();
+        registry
+            .lock()
+            .unwrap()
+            .set_area_lights("kitchen", vec!["matter-42".to_string()]);
+        set_device_capabilities(
+            &controller,
+            42,
+            LightCapabilities::defaults_for(LightType::ColorTemperature),
+        );
+        controller.hub_data.record_on_off_observation(42, 1, false);
+        let command = LightingCommand::with_transition(80, 4000, 500);
+
+        block_on(controller.turn_on("kitchen", command.clone())).unwrap();
+        block_on(controller.turn_on("kitchen", command.clone())).unwrap();
+
+        let operations = operations_for_node(&spy.operations(), 42);
+        assert!(matches!(
+            operations[2],
+            RecordedOperation::SetColorTemperature {
+                transition_ms: Some(500),
+                ..
+            }
+        ));
+
+        controller.hub_data.record_on_off_observation(42, 1, false);
+        block_on(controller.turn_on("kitchen", command)).unwrap();
+
+        let operations = operations_for_node(&spy.operations(), 42);
+        assert!(matches!(
+            operations[4],
+            RecordedOperation::SetColorTemperature {
+                transition_ms: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn turn_on_plans_default_step_gap_unless_a_throttle_is_profiled() {
         let (controller, _, _) = make_controller();
-        for node_id in [42, 43] {
+        for node_id in [42, 43, 44] {
             set_device_capabilities(
                 &controller,
                 node_id,
@@ -1376,10 +1497,18 @@ mod tests {
             "matter-43".to_string(),
             vec![DeviceQuirk::CommandThrottleMs(250)],
         );
+        controller.hub_data.device_quirks.lock().unwrap().insert(
+            "matter-44".to_string(),
+            vec![DeviceQuirk::CommandThrottleMs(0)],
+        );
 
         let plans = controller
             .turn_on_plans(
-                &["matter-42".to_string(), "matter-43".to_string()],
+                &[
+                    "matter-42".to_string(),
+                    "matter-43".to_string(),
+                    "matter-44".to_string(),
+                ],
                 &LightingCommand::new(80, 4000),
             )
             .unwrap();
@@ -1389,6 +1518,41 @@ mod tests {
             Some(DEFAULT_INTER_STEP_DELAY_MS)
         );
         assert_eq!(plans[1].inter_step_delay_ms, Some(250));
+        assert_eq!(plans[2].inter_step_delay_ms, Some(0));
+    }
+
+    #[test]
+    fn on_demand_probe_success_emits_light_topology_change() {
+        let (controller, spy, _, event_rx) = make_controller_with_event_receiver();
+        spy.set_probe_device(profiled_color_bulb(42, "Acme", "Color Lamp"));
+        set_device_capabilities(
+            &controller,
+            43,
+            LightCapabilities::defaults_for(LightType::ColorTemperature),
+        );
+        controller
+            .hub_data
+            .fallback_caps
+            .lock()
+            .unwrap()
+            .insert("matter-42".to_string());
+
+        block_on(controller.turn_on("kitchen", LightingCommand::new(80, 4000))).unwrap();
+
+        assert!(!controller
+            .hub_data
+            .fallback_caps
+            .lock()
+            .unwrap()
+            .contains("matter-42"));
+        assert!(event_rx.try_iter().any(|event| matches!(
+            event,
+            rhythm_os::hub::HubEvent::TopologyChanged {
+                resource_id,
+                resource_type,
+                ..
+            } if resource_id == "matter-42" && resource_type == "light"
+        )));
     }
 
     #[test]
@@ -2621,6 +2785,7 @@ mod tests {
             commissioned: std::sync::Mutex::new(Vec::new()),
             next_node_id: std::sync::atomic::AtomicU64::new(100),
             device_caps: std::sync::Mutex::new(std::collections::HashMap::new()),
+            fallback_caps: std::sync::Mutex::new(std::collections::HashSet::new()),
             device_quirks: std::sync::Mutex::new(std::collections::HashMap::new()),
             cloud_profiles: std::sync::Mutex::new(
                 crate::cloud_profiles::CloudMatterProfileCatalog::default(),
@@ -2629,6 +2794,7 @@ mod tests {
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             on_off_observations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            last_turn_on_dispatch: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });
 
@@ -2759,6 +2925,7 @@ mod tests {
                     ..LightCapabilities::defaults_for(LightType::ExtendedColor)
                 },
             )])),
+            fallback_caps: std::sync::Mutex::new(std::collections::HashSet::new()),
             device_quirks: std::sync::Mutex::new(std::collections::HashMap::from([(
                 "matter-42".to_string(),
                 vec![DeviceQuirk::NeedsXyNotCt],
@@ -2770,6 +2937,7 @@ mod tests {
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             on_off_observations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            last_turn_on_dispatch: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
@@ -2876,6 +3044,7 @@ mod tests {
                     ..LightCapabilities::defaults_for(LightType::ExtendedColor)
                 },
             )])),
+            fallback_caps: std::sync::Mutex::new(std::collections::HashSet::new()),
             device_quirks: std::sync::Mutex::new(std::collections::HashMap::from([(
                 "matter-42".to_string(),
                 Vec::new(),
@@ -2887,6 +3056,7 @@ mod tests {
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             on_off_observations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            last_turn_on_dispatch: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
@@ -2984,6 +3154,7 @@ mod tests {
                 "matter-42".to_string(),
                 LightCapabilities::defaults_for(LightType::Dimmable),
             )])),
+            fallback_caps: std::sync::Mutex::new(std::collections::HashSet::new()),
             device_quirks: std::sync::Mutex::new(std::collections::HashMap::from([(
                 "matter-42".to_string(),
                 vec![DeviceQuirk::NeedsExplicitOn],
@@ -2995,6 +3166,7 @@ mod tests {
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             on_off_observations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            last_turn_on_dispatch: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
@@ -3194,6 +3366,7 @@ mod tests {
                 "matter-42".to_string(),
                 LightCapabilities::defaults_for(LightType::ExtendedColor),
             )])),
+            fallback_caps: std::sync::Mutex::new(std::collections::HashSet::new()),
             device_quirks: std::sync::Mutex::new(std::collections::HashMap::from([(
                 "matter-42".to_string(),
                 vec![DeviceQuirk::NeedsXyNotCt],
@@ -3205,6 +3378,7 @@ mod tests {
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             on_off_observations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            last_turn_on_dispatch: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });
         let controller = MatterLightController::new(transport.clone(), hub_data);
@@ -3388,6 +3562,7 @@ mod tests {
                 "matter-42".to_string(),
                 LightCapabilities::defaults_for(LightType::ExtendedColor),
             )])),
+            fallback_caps: std::sync::Mutex::new(std::collections::HashSet::new()),
             device_quirks: std::sync::Mutex::new(std::collections::HashMap::from([(
                 "matter-42".to_string(),
                 vec![DeviceQuirk::NeedsXyNotCt],
@@ -3399,6 +3574,7 @@ mod tests {
             recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
             node_proof_of_life: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             on_off_observations: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            last_turn_on_dispatch: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });
         let controller = MatterLightController::new(transport.clone(), hub_data);

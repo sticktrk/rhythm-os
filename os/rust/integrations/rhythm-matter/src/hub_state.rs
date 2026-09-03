@@ -30,6 +30,8 @@ pub struct MatterHubData {
     pub next_node_id: AtomicU64,
     /// Per-device capabilities keyed by device ID (for example `matter-42`).
     pub device_caps: Mutex<HashMap<String, LightCapabilities>>,
+    /// Device IDs whose cached capabilities are a fallback rather than a probe result.
+    pub fallback_caps: Mutex<HashSet<String>>,
     /// Per-device Matter quirks from `rhythm-devices`.
     pub device_quirks: Mutex<HashMap<String, Vec<DeviceQuirk>>>,
     /// Approved cloud profile overlay catalog cached at hub startup.
@@ -42,6 +44,8 @@ pub struct MatterHubData {
     pub node_proof_of_life: Arc<Mutex<HashMap<u64, Instant>>>,
     /// Latest authoritative On/Off subscription report by node and endpoint.
     pub on_off_observations: Arc<Mutex<HashMap<(u64, u16), (bool, Instant)>>>,
+    /// Last time Rhythm dispatched a turn-on plan by node and endpoint.
+    pub last_turn_on_dispatch: Mutex<HashMap<(u64, u16), Instant>>,
     /// Event channel sender kept alive by the hub data.
     pub event_tx: std::sync::mpsc::Sender<HubEvent>,
 }
@@ -153,6 +157,37 @@ impl MatterHubData {
             .ok()
             .and_then(|observations| observations.get(&(node_id, endpoint)).copied())
             .map(|(lights_on, _)| lights_on)
+    }
+
+    /// Latest On/Off observation with the instant it was received.
+    pub fn observed_on_off_at(&self, node_id: u64, endpoint: u16) -> Option<(bool, Instant)> {
+        self.on_off_observations
+            .lock()
+            .ok()
+            .and_then(|observations| observations.get(&(node_id, endpoint)).copied())
+    }
+
+    /// Remember that Rhythm dispatched a turn-on to this endpoint, so an
+    /// off observation received before it is no longer trusted for plan
+    /// shaping until the subscription reports again.
+    pub fn record_turn_on_dispatch(&self, node_id: u64, endpoint: u16) {
+        if let Ok(mut sent) = self.last_turn_on_dispatch.lock() {
+            sent.insert((node_id, endpoint), Instant::now());
+        }
+    }
+
+    /// True when the newest observation says off and nothing we sent since
+    /// could have turned the light on.
+    pub fn observed_off_since_last_turn_on(&self, node_id: u64, endpoint: u16) -> bool {
+        let Some((false, seen_at)) = self.observed_on_off_at(node_id, endpoint) else {
+            return false;
+        };
+        let last_sent = self
+            .last_turn_on_dispatch
+            .lock()
+            .ok()
+            .and_then(|sent| sent.get(&(node_id, endpoint)).copied());
+        last_sent.is_none_or(|sent| seen_at > sent)
     }
 
     /// Upsert basic cached Matter device info without treating it as a live
@@ -278,12 +313,14 @@ mod tests {
             commissioned: Mutex::new(Vec::new()),
             next_node_id: AtomicU64::new(100),
             device_caps: Mutex::new(HashMap::new()),
+            fallback_caps: Mutex::new(HashSet::new()),
             device_quirks: Mutex::new(HashMap::new()),
             cloud_profiles: Mutex::new(CloudMatterProfileCatalog::default()),
             decommissioning: Mutex::new(HashSet::new()),
             recently_decommissioned: Mutex::new(HashMap::new()),
             node_proof_of_life: Arc::new(Mutex::new(HashMap::new())),
             on_off_observations: Arc::new(Mutex::new(HashMap::new())),
+            last_turn_on_dispatch: Mutex::new(HashMap::new()),
             event_tx,
         }
     }
@@ -332,5 +369,24 @@ mod tests {
 
         hub_data.record_commissioned_device(&commissioned_device(101, "Vendor", "Lamp"));
         assert!(!hub_data.is_decommission_suppressed(101));
+    }
+
+    #[test]
+    fn observed_off_since_last_turn_on_tracks_observation_order() {
+        let hub_data = hub_data();
+
+        assert!(!hub_data.observed_off_since_last_turn_on(42, 1));
+
+        hub_data.record_on_off_observation(42, 1, false);
+        assert!(hub_data.observed_off_since_last_turn_on(42, 1));
+
+        hub_data.record_turn_on_dispatch(42, 1);
+        assert!(!hub_data.observed_off_since_last_turn_on(42, 1));
+
+        hub_data.record_on_off_observation(42, 1, false);
+        assert!(hub_data.observed_off_since_last_turn_on(42, 1));
+
+        hub_data.record_on_off_observation(42, 1, true);
+        assert!(!hub_data.observed_off_since_last_turn_on(42, 1));
     }
 }
