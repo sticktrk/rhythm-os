@@ -868,12 +868,14 @@ mod tests {
             commissioned: Mutex::new(Vec::new()),
             next_node_id: AtomicU64::new(10),
             device_caps: Mutex::new(HashMap::new()),
+            fallback_caps: Mutex::new(HashSet::new()),
             device_quirks: Mutex::new(HashMap::new()),
             cloud_profiles: Mutex::new(CloudMatterProfileCatalog::default()),
             decommissioning: Mutex::new(HashSet::new()),
             recently_decommissioned: Mutex::new(HashMap::new()),
             node_proof_of_life: Arc::new(Mutex::new(HashMap::new())),
             on_off_observations: Arc::new(Mutex::new(HashMap::new())),
+            last_turn_on_dispatch: Mutex::new(HashMap::new()),
             event_tx,
         })
     }
