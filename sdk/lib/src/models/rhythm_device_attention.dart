@@ -120,29 +120,4 @@ class RhythmDeviceAttention {
       guidance: json['guidance'] as String? ?? '',
     );
   }
-
-  Map<String, dynamic> toJson() => {
-        'id': id,
-        'journey_id': journeyId,
-        'kind': kind,
-        'status': status.wireValue,
-        'device': {
-          'name': device.name,
-          'native_id': device.nativeId,
-          'hub_type': device.hubType,
-          'hub_address': device.hubAddress,
-          'device_type': device.deviceType,
-        },
-        'evidence': {
-          'last_proof_at': evidence.lastProofAt,
-          'first_failure_at': evidence.firstFailureAt,
-          'last_failure_at': evidence.lastFailureAt,
-          'failure_count': evidence.failureCount,
-          'failure_classes': evidence.failureClasses,
-          'created_at': evidence.createdAt,
-          if (evidence.snoozedUntil != null)
-            'snoozed_until': evidence.snoozedUntil,
-        },
-        'guidance': guidance,
-      };
 }

@@ -357,15 +357,6 @@ Map<String, dynamic> _unreachableDeviceEntry({
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  test('triage request fence rejects an older refresh response', () {
-    final fence = TriageRequestFence();
-    final older = fence.begin();
-    final newer = fence.begin();
-
-    expect(fence.isCurrent(older), isFalse);
-    expect(fence.isCurrent(newer), isTrue);
-  });
-
   group('TriageScreen actions', () {
     late RoomProvider roomProvider;
     late _TestHomeProvider homeProvider;
@@ -835,7 +826,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(api.getDeviceAttentionEntriesCalls, 0);
-      expect(find.text("Haven't heard from Hall Lamp"), findsNothing);
+      expect(find.text('Is Hall Lamp still installed?'), findsNothing);
     });
 
     testWidgets('guides recovery and waits for fresh device proof',
@@ -853,7 +844,7 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await _scrollTo(tester, find.text("Haven't heard from Hall Lamp"));
+      await _scrollTo(tester, find.text('Is Hall Lamp still installed?'));
       expect(find.byKey(const ValueKey('unreachable-device-card')),
           findsOneWidget);
       expect(find.text('Last heard from 3 days ago'), findsOneWidget);
@@ -908,6 +899,53 @@ void main() {
       );
     });
 
+    testWidgets('recovery polling survives a failed poll and stops once clear',
+        (tester) async {
+      api.triageEntries = [];
+      api.deviceAttentionEntries = [
+        _unreachableDeviceEntry(status: 'awaiting_recovery'),
+      ];
+      serverSyncProvider.matterUnreachableTriageSupportedForTest = true;
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          connection: connection,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Waiting for Hall Lamp'), findsOneWidget);
+
+      // A transient failure keeps the card and keeps polling.
+      api.deviceAttentionUnavailable = true;
+      await tester.pump(const Duration(seconds: 16));
+      await tester.pump();
+      expect(find.text('Waiting for Hall Lamp'), findsOneWidget);
+      expect(find.text('Not connected to server'), findsNothing);
+
+      // Fresh proof removes the entry server-side; the card clears and the
+      // poll stops.
+      api.deviceAttentionUnavailable = false;
+      api.deviceAttentionEntries = [];
+      await tester.pump(const Duration(seconds: 15));
+      await tester.pump();
+      expect(find.text('Waiting for Hall Lamp'), findsNothing);
+      expect(
+        analyticsBackend.events.where(
+          (event) =>
+              event.name == 'unreachable_device_attention' &&
+              event.properties['action'] == 'no_longer_listed',
+        ),
+        hasLength(1),
+      );
+
+      final callsAfterClear = api.getDeviceAttentionEntriesCalls;
+      await tester.pump(const Duration(seconds: 45));
+      await tester.pump();
+      expect(api.getDeviceAttentionEntriesCalls, callsAfterClear);
+    });
+
     testWidgets('keeps legacy review entries when attention loading fails',
         (tester) async {
       api.triageEntries = [_roomBindingEntry()];
@@ -952,7 +990,9 @@ void main() {
               child: Padding(
                 padding: const EdgeInsets.all(20),
                 child: UnreachableDeviceAttentionCard(
-                  entry: _unreachableDeviceEntry(),
+                  entry: RhythmDeviceAttention.fromJson(
+                    _unreachableDeviceEntry(),
+                  ),
                   busy: false,
                   onStillInstalled: () {},
                   onRemoved: () {},
@@ -978,7 +1018,7 @@ void main() {
       }
     });
 
-    testWidgets('durably snoozes the same unreachable-device entry',
+    testWidgets('snoozes an unreachable-device entry with its review journey',
         (tester) async {
       api.triageEntries = [];
       api.deviceAttentionEntries = [_unreachableDeviceEntry()];
@@ -993,11 +1033,11 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await _tapVisible(tester, find.text('Not Now'));
+      await _tapVisible(tester, find.text('Remind Me Later'));
 
       expect(api.snoozeDeviceAttentionCalls, 1);
       expect(api.attentionCorrelationIds, ['unreachable-device-review-1']);
-      expect(find.text("Haven't heard from Hall Lamp"), findsNothing);
+      expect(find.text('Is Hall Lamp still installed?'), findsNothing);
     });
 
     testWidgets('uses graceful Matter removal before local-only cleanup',
@@ -1016,9 +1056,9 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await _tapVisible(tester, find.text('I Removed It'));
-      expect(find.text('Remove Device'), findsOneWidget);
-      await tester.tap(find.text('Remove Device'));
+      await _tapVisible(tester, find.text('Remove Light'));
+      expect(find.text('Remove'), findsOneWidget);
+      await tester.tap(find.text('Remove'));
       await tester.pumpAndSettle();
 
       expect(api.unpairForces, [false]);
@@ -1041,7 +1081,7 @@ void main() {
         ['unreachable-device-review-1', 'unreachable-device-review-1'],
       );
       expect(connection.reconnectCalls, 1);
-      expect(find.text("Haven't heard from Hall Lamp"), findsNothing);
+      expect(find.text('Is Hall Lamp still installed?'), findsNothing);
     });
 
     testWidgets('cancelling graceful removal preserves the review journey',
@@ -1060,14 +1100,14 @@ void main() {
       );
       await tester.pumpAndSettle();
 
-      await _tapVisible(tester, find.text('I Removed It'));
-      await tester.tap(find.text('Remove Device'));
+      await _tapVisible(tester, find.text('Remove Light'));
+      await tester.tap(find.text('Remove'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Keep Device'));
       await tester.pumpAndSettle();
 
       api.attentionCorrelationIds.clear();
-      await _tapVisible(tester, find.text('Not Now'));
+      await _tapVisible(tester, find.text('Remind Me Later'));
 
       expect(api.snoozeDeviceAttentionCalls, 1);
       expect(
