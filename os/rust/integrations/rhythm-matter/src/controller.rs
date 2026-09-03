@@ -1636,6 +1636,11 @@ mod tests {
         h7056.max_kelvin = None;
         let caps = crate::commissioning::build_device_capabilities(&h7056);
         let quirks = crate::commissioning::build_device_quirks(&h7056);
+        let expected_adaptive = rhythm_os::controller_helpers::adapt_lighting_command(
+            &caps,
+            &LightingCommand::new(100, 1800),
+            ColorPreference::PreferHueSaturation,
+        );
         controller
             .hub_data
             .device_caps
@@ -1659,7 +1664,7 @@ mod tests {
             ),
         ))
         .unwrap();
-        block_on(controller.turn_on("kitchen", LightingCommand::new(100, 4000))).unwrap();
+        block_on(controller.turn_on("kitchen", LightingCommand::new(100, 1800))).unwrap();
 
         let operations = operations_for_node(&spy.operations(), 42);
         assert_eq!(
@@ -1668,6 +1673,17 @@ mod tests {
                 .filter(|operation| matches!(operation, RecordedOperation::SetHueSaturation { .. }))
                 .count(),
             2
+        );
+        let (expected_hue, expected_saturation) = expected_adaptive.hue_saturation.unwrap();
+        assert_eq!(
+            operations[2],
+            RecordedOperation::SetHueSaturation {
+                node_id: 42,
+                endpoint: 1,
+                hue: expected_hue,
+                saturation: expected_saturation,
+                transition_ms: None,
+            }
         );
         assert!(!operations
             .iter()
