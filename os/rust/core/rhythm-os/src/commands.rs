@@ -6182,6 +6182,10 @@ fn clear_factory_reset_ephemeral_state(state: &SharedState) -> Result<()> {
     s.room_observed_power.clear();
     s.light_usage.disable_shutdown_flush();
     s.light_usage = crate::light_usage::LightUsageLedger::default();
+    // The on-disk ledger is removed with the data directory; the in-memory
+    // copy must go too or the next reconcile writes pre-reset endpoint
+    // evidence back under a fresh installation.
+    s.device_health = crate::device_health::DeviceHealthLedger::default();
     s.motion_snapshots.clear();
     s.room_mode_transitions.clear();
     s.last_check_hour = None;
@@ -12050,6 +12054,11 @@ pub fn do_backup_restore(state: &SharedState, bundle: BackupBundle) -> Result<St
     // outer lease is released.
     request_restored_hub_bootstrap(state, should_bootstrap)?;
 
+    // Portable backups exclude the device-health ledger, so whatever this
+    // appliance was tracking must be re-matched against the imported
+    // topology before any entry can be shown again.
+    reconcile_device_health(state);
+
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
 
     build_backup_bundle(state, false)
@@ -17785,7 +17794,6 @@ fn persist_device_health_locked(
 
 fn record_device_attention_activity(
     state: &SharedState,
-    _entry_id: &str,
     action_id: &str,
     correlation_id: Option<&str>,
 ) {
@@ -17811,7 +17819,7 @@ fn finish_device_health_update(
         let correlation_id = state
             .lock()
             .ok()
-            .and_then(|s| s.device_health.recovery_correlation_for_entry(&entry_id));
+            .and_then(|s| s.device_health.review_correlation_for_entry(&entry_id));
         let action = match transition {
             crate::device_health::DeviceHealthTransition::Admitted => {
                 info!(target: "triage", "Admitted one unreachable-device attention entry");
@@ -17822,7 +17830,7 @@ fn finish_device_health_update(
             }
             crate::device_health::DeviceHealthTransition::Removed => "unreachable_device_removed",
         };
-        record_device_attention_activity(state, &entry_id, action, correlation_id.as_deref());
+        record_device_attention_activity(state, action, correlation_id.as_deref());
     }
     if visibility_changed {
         emit_triage_changed(state);
@@ -17958,7 +17966,7 @@ pub fn build_device_attention(state: &SharedState) -> Result<String> {
         .as_secs();
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let mut entries = Vec::new();
-    for record in s.device_health.visible_records(now) {
+    for record in s.device_health.visible_records() {
         let Some(device) = s.canonical_registry.get(&record.canonical_id) else {
             continue;
         };
@@ -18050,7 +18058,7 @@ fn mutate_device_attention(
         }
         persist_device_health_locked(&mut s, before).map_err(DeviceAttentionError::Persist)?;
     }
-    record_device_attention_activity(state, entry_id, action_id, Some(correlation_id));
+    record_device_attention_activity(state, action_id, Some(correlation_id));
     emit_triage_changed(state);
     Ok(format!(r#"{{"status":"{}"}}"#, action_id))
 }
@@ -18079,7 +18087,7 @@ pub fn do_device_attention_still_installed(
         entry_id,
         "unreachable_device_still_installed",
         correlation_id,
-        |health, _| health.await_recovery(entry_id, correlation_id),
+        |health, _| health.await_recovery(entry_id),
     )
 }
 
@@ -18093,7 +18101,9 @@ pub fn do_device_attention_removal_selected(
         entry_id,
         "unreachable_device_removal_selected",
         correlation_id,
-        |health, _| health.mark_removal_selected(entry_id, correlation_id),
+        // Removal itself is the existing guarded unpair; this only records
+        // the user's explicit choice on the journey's activity trail.
+        |health, _| health.is_actionable(entry_id),
     )
 }
 
@@ -18535,10 +18545,10 @@ pub fn do_triage_bind_room_to(
 }
 
 /// Build JSON with triage count summary.
-fn pending_device_attention_count(state: &crate::state::AppState, now: u64) -> usize {
+fn pending_device_attention_count(state: &crate::state::AppState) -> usize {
     state
         .device_health
-        .visible_records(now)
+        .visible_records()
         .into_iter()
         .filter(|record| {
             state
@@ -18559,11 +18569,7 @@ fn pending_device_attention_count(state: &crate::state::AppState, now: u64) -> u
 pub fn build_triage_count(state: &SharedState) -> Result<String> {
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let triage = s.canonical_registry.triage();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let pending_unreachable = pending_device_attention_count(&s, now);
+    let pending_unreachable = pending_device_attention_count(&s);
     let json = format!(
         r#"{{"devices":{},"rooms":{},"unassigned":{},"hub_configured":{},"unreachable":{},"total":{}}}"#,
         triage.pending_device_count(),
@@ -18581,17 +18587,13 @@ pub fn emit_triage_changed(state: &SharedState) {
     // Read counts under lock, then drop before emitting (emit_server_event locks too)
     let counts = state.lock().ok().map(|s| {
         let triage = s.canonical_registry.triage();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
         (
             triage.pending_count(),
             triage.pending_device_count(),
             triage.pending_room_count(),
             triage.pending_unassigned_count(),
             triage.pending_hub_configured_count(),
-            pending_device_attention_count(&s, now),
+            pending_device_attention_count(&s),
         )
     });
     if let Some((total, devices, rooms, unassigned, hub_configured, unreachable)) = counts {
@@ -25700,7 +25702,7 @@ mod tests {
     }
 
     #[test]
-    fn device_health_transition_rolls_back_when_persistence_fails() {
+    fn device_health_proof_is_not_kept_in_memory_when_persistence_fails() {
         let (state, _runtime) = setup_state(Vec::new());
         let storage = TestStorage::default();
         storage.inner.lock().unwrap().fail_save_device_health = true;
@@ -25825,7 +25827,7 @@ mod tests {
             .lock()
             .unwrap()
             .device_health
-            .visible_records(admitted_at)
+            .visible_records()
             .is_empty());
     }
 

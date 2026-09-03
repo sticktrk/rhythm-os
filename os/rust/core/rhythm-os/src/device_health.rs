@@ -90,10 +90,6 @@ pub struct DeviceHealthRecord {
     pub snoozed_until: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_at: Option<u64>,
-    /// Opaque app journey used only to correlate a later authoritative
-    /// recovery with the user's power-cycle action.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub recovery_correlation_id: Option<String>,
 }
 
 impl DeviceHealthRecord {
@@ -232,8 +228,13 @@ impl DeviceHealthLedger {
             if record.failure_count == 0 {
                 record.reset_failure_window();
             }
-            if record.status.is_attention() && record.review_correlation_id.is_none() {
-                record.review_correlation_id = Some(generate_review_correlation_id());
+            if record.status.is_attention() {
+                // An attention record is only actionable with both ids; the
+                // count and the list must agree on what exists.
+                record.entry_id.get_or_insert_with(generate_entry_id);
+                record
+                    .review_correlation_id
+                    .get_or_insert_with(generate_review_correlation_id);
             }
         }
         while self.records.len() > MAX_DEVICE_HEALTH_RECORDS {
@@ -309,7 +310,7 @@ impl DeviceHealthLedger {
         let fabric_identity_fingerprint = fabric_fingerprint(fabric_id);
         let controller_stream_fingerprint = controller_stream_id
             .filter(|value| !value.is_empty())
-            .map(crate::device_health::fabric_fingerprint);
+            .map(fabric_fingerprint);
         let key = DeviceHealthRecord::key(hub_key, native_id);
         let identity_changed = self.records.get(&key).is_some_and(|record| {
             record.canonical_id != canonical_id
@@ -340,7 +341,6 @@ impl DeviceHealthLedger {
                 created_at: None,
                 snoozed_until: None,
                 resolved_at: None,
-                recovery_correlation_id: None,
             });
         let was_attention = record.status.is_attention();
         record.last_proof_at = record.last_proof_at.max(now);
@@ -353,10 +353,11 @@ impl DeviceHealthLedger {
             record.status = DeviceHealthStatus::Recovered;
             record.resolved_at = Some(now);
             record.snoozed_until = None;
-            update.transitions.push((
-                record.entry_id.clone().unwrap_or_else(|| key.clone()),
-                DeviceHealthTransition::Recovered,
-            ));
+            if let Some(entry_id) = record.entry_id.clone() {
+                update
+                    .transitions
+                    .push((entry_id, DeviceHealthTransition::Recovered));
+            }
             update.persist = true;
         } else if record.status == DeviceHealthStatus::Monitoring {
             record.reset_failure_window();
@@ -388,7 +389,7 @@ impl DeviceHealthLedger {
         let fabric_identity_fingerprint = fabric_fingerprint(fabric_id);
         let controller_stream_fingerprint = controller_stream_id
             .filter(|value| !value.is_empty())
-            .map(crate::device_health::fabric_fingerprint);
+            .map(fabric_fingerprint);
         let Some(record) = self.records.get(&key) else {
             // Prior proof on this exact fabric is an admission prerequisite.
             return DeviceHealthUpdate::default();
@@ -425,7 +426,6 @@ impl DeviceHealthLedger {
             record.created_at = None;
             record.resolved_at = None;
             record.snoozed_until = None;
-            record.recovery_correlation_id = None;
             record.reset_failure_window();
         }
 
@@ -524,22 +524,14 @@ impl DeviceHealthLedger {
     ) -> DeviceHealthUpdate {
         let mut update = DeviceHealthUpdate::default();
         for record in self.records.values_mut() {
-            let identity = ActiveDeviceHealthIdentity {
-                canonical_id: record.canonical_id.clone(),
-                hub_key: record.hub_key.clone(),
-                native_id: record.native_id.clone(),
-                fabric_fingerprint: None,
-            };
             let is_active = active.iter().any(|candidate| {
-                candidate.canonical_id == identity.canonical_id
-                    && candidate.hub_key == identity.hub_key
-                    && candidate.native_id == identity.native_id
+                candidate.canonical_id == record.canonical_id
+                    && candidate.hub_key == record.hub_key
+                    && candidate.native_id == record.native_id
                     && candidate
                         .fabric_fingerprint
                         .as_ref()
-                        .map_or(true, |fingerprint| {
-                            fingerprint == &record.fabric_fingerprint
-                        })
+                        .is_none_or(|fingerprint| fingerprint == &record.fabric_fingerprint)
             });
             if is_active || record.status == DeviceHealthStatus::Removed {
                 continue;
@@ -568,14 +560,17 @@ impl DeviceHealthLedger {
         update
     }
 
-    pub fn visible_records(&self, _now: u64) -> Vec<&DeviceHealthRecord> {
+    /// Entries the app should render. Snoozed entries stay durable but hidden
+    /// until `evaluate` re-admits them after the snooze elapses.
+    pub fn visible_records(&self) -> Vec<&DeviceHealthRecord> {
         let mut records: Vec<_> = self
             .records
             .values()
-            .filter(|record| match record.status {
-                DeviceHealthStatus::Pending | DeviceHealthStatus::AwaitingRecovery => true,
-                DeviceHealthStatus::Snoozed => false,
-                _ => false,
+            .filter(|record| {
+                matches!(
+                    record.status,
+                    DeviceHealthStatus::Pending | DeviceHealthStatus::AwaitingRecovery
+                )
             })
             .collect();
         records.sort_by(|left, right| {
@@ -602,7 +597,9 @@ impl DeviceHealthLedger {
         true
     }
 
-    pub fn await_recovery(&mut self, entry_id: &str, correlation_id: Option<&str>) -> bool {
+    /// The user says the light is still installed and will power-cycle it.
+    /// Nothing but fresh proof from the exact endpoint resolves the entry.
+    pub fn await_recovery(&mut self, entry_id: &str) -> bool {
         let Some(record) = self
             .records
             .values_mut()
@@ -615,22 +612,6 @@ impl DeviceHealthLedger {
         }
         record.status = DeviceHealthStatus::AwaitingRecovery;
         record.snoozed_until = None;
-        record.recovery_correlation_id = correlation_id.map(str::to_string);
-        true
-    }
-
-    pub fn mark_removal_selected(&mut self, entry_id: &str, correlation_id: Option<&str>) -> bool {
-        let Some(record) = self
-            .records
-            .values_mut()
-            .find(|record| record.entry_id.as_deref() == Some(entry_id))
-        else {
-            return false;
-        };
-        if !record.status.is_attention() {
-            return false;
-        }
-        record.recovery_correlation_id = correlation_id.map(str::to_string);
         true
     }
 
@@ -646,14 +627,6 @@ impl DeviceHealthLedger {
             .find(|record| record.entry_id.as_deref() == Some(entry_id))
             .and_then(|record| record.review_correlation_id.clone())
     }
-
-    pub fn recovery_correlation_for_entry(&self, entry_id: &str) -> Option<String> {
-        self.records
-            .values()
-            .find(|record| record.entry_id.as_deref() == Some(entry_id))
-            .and_then(|record| record.recovery_correlation_id.clone())
-            .or_else(|| self.review_correlation_for_entry(entry_id))
-    }
 }
 
 impl Default for DeviceHealthLedger {
@@ -662,36 +635,31 @@ impl Default for DeviceHealthLedger {
     }
 }
 
-fn generate_entry_id() -> String {
-    let mut bytes = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    let mut value = String::with_capacity(32);
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut encoded = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
-        use std::fmt::Write;
-        let _ = write!(value, "{byte:02x}");
-    }
-    format!("unreachable-{value}")
-}
-
-fn generate_review_correlation_id() -> String {
-    let mut bytes = [0u8; 16];
-    rand::thread_rng().fill_bytes(&mut bytes);
-    let mut value = String::with_capacity(32);
-    for byte in bytes {
-        use std::fmt::Write;
-        let _ = write!(value, "{byte:02x}");
-    }
-    format!("unreachable-device-{value}")
-}
-
-pub(crate) fn fabric_fingerprint(value: &str) -> String {
-    let digest = Sha256::digest(value.as_bytes());
-    let mut encoded = String::with_capacity(24);
-    for byte in digest.iter().take(12) {
-        use std::fmt::Write;
         let _ = write!(encoded, "{byte:02x}");
     }
     encoded
+}
+
+fn random_token() -> String {
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    hex_encode(&bytes)
+}
+
+fn generate_entry_id() -> String {
+    format!("unreachable-{}", random_token())
+}
+
+fn generate_review_correlation_id() -> String {
+    format!("unreachable-device-{}", random_token())
+}
+
+pub(crate) fn fabric_fingerprint(value: &str) -> String {
+    hex_encode(&Sha256::digest(value.as_bytes())[..12])
 }
 
 #[cfg(test)]
@@ -760,10 +728,7 @@ mod tests {
             admitted_at,
         );
         ledger.evaluate(admitted_at);
-        let entry_id = ledger.visible_records(admitted_at)[0]
-            .entry_id
-            .clone()
-            .unwrap();
+        let entry_id = ledger.visible_records()[0].entry_id.clone().unwrap();
         (ledger, entry_id, admitted_at)
     }
 
@@ -959,9 +924,9 @@ mod tests {
 
         let first = ledger.evaluate(admitted_at);
         assert_eq!(first.transitions.len(), 1);
-        assert_eq!(ledger.visible_records(u64::MAX).len(), 1);
+        assert_eq!(ledger.visible_records().len(), 1);
         assert!(ledger.evaluate(u64::MAX).transitions.is_empty());
-        assert_eq!(ledger.visible_records(u64::MAX).len(), 1);
+        assert_eq!(ledger.visible_records().len(), 1);
     }
 
     #[test]
@@ -1037,13 +1002,10 @@ mod tests {
             admitted_at,
         );
         ledger.evaluate(admitted_at);
-        let entry_id = ledger.visible_records(u64::MAX)[0]
-            .entry_id
-            .clone()
-            .unwrap();
+        let entry_id = ledger.visible_records()[0].entry_id.clone().unwrap();
         assert!(ledger.snooze(&entry_id, admitted_at + 1));
-        assert!(ledger.visible_records(admitted_at + 2).is_empty());
-        assert!(ledger.await_recovery(&entry_id, Some("unreachable-device-test")));
+        assert!(ledger.visible_records().is_empty());
+        assert!(ledger.await_recovery(&entry_id));
 
         let update = ledger.note_proof(
             "canonical-matter-1-1",
@@ -1057,7 +1019,7 @@ mod tests {
             update.transitions,
             vec![(entry_id, DeviceHealthTransition::Recovered)]
         );
-        assert!(ledger.visible_records(u64::MAX).is_empty());
+        assert!(ledger.visible_records().is_empty());
     }
 
     #[test]
@@ -1075,13 +1037,13 @@ mod tests {
 
         assert!(update.transitions.is_empty());
         assert!(ledger.is_actionable(&entry_id));
-        assert_eq!(ledger.visible_records(u64::MAX).len(), 1);
+        assert_eq!(ledger.visible_records().len(), 1);
     }
 
     #[test]
     fn persistence_fingerprints_fabric_and_stream_and_restart_requires_live_controller() {
         let (ledger, entry_id, admitted_at) = ledger_with_entry();
-        let review_journey = ledger.visible_records(admitted_at)[0]
+        let review_journey = ledger.visible_records()[0]
             .review_correlation_id
             .clone()
             .unwrap();
@@ -1096,9 +1058,9 @@ mod tests {
 
         let mut restarted: DeviceHealthLedger = serde_json::from_str(&json).unwrap();
         restarted = restarted.normalized();
-        assert_eq!(restarted.visible_records(admitted_at).len(), 1);
+        assert_eq!(restarted.visible_records().len(), 1);
         assert_eq!(
-            restarted.visible_records(admitted_at)[0]
+            restarted.visible_records()[0]
                 .review_correlation_id
                 .as_deref(),
             Some(review_journey.as_str()),
@@ -1107,10 +1069,7 @@ mod tests {
         // A restart never restores ephemeral controller health. Even an
         // expired snooze cannot re-admit until a current controller stream
         // completes its grace period.
-        let entry_id = restarted.visible_records(admitted_at)[0]
-            .entry_id
-            .clone()
-            .unwrap();
+        let entry_id = restarted.visible_records()[0].entry_id.clone().unwrap();
         assert!(restarted.snooze(&entry_id, admitted_at));
         let after_snooze = admitted_at + UNREACHABLE_SNOOZE_SECS + 1;
         assert!(restarted.evaluate(after_snooze).transitions.is_empty());
@@ -1125,13 +1084,11 @@ mod tests {
     fn snooze_expiry_resurfaces_the_same_entry_without_duplication() {
         let (mut ledger, entry_id, admitted_at) = ledger_with_entry();
         assert!(ledger.snooze(&entry_id, admitted_at));
-        assert!(ledger
-            .visible_records(admitted_at + UNREACHABLE_SNOOZE_SECS - 1)
-            .is_empty());
+        assert!(ledger.visible_records().is_empty());
 
         let resurfaced_at = admitted_at + UNREACHABLE_SNOOZE_SECS;
         assert!(ledger.evaluate(resurfaced_at).transitions.is_empty());
-        assert!(ledger.visible_records(resurfaced_at).is_empty());
+        assert!(ledger.visible_records().is_empty());
         ledger.note_proof(
             "canonical-matter-2-1",
             &key(),
@@ -1145,7 +1102,7 @@ mod tests {
             update.transitions,
             vec![(entry_id.clone(), DeviceHealthTransition::Admitted)]
         );
-        let visible = ledger.visible_records(resurfaced_at);
+        let visible = ledger.visible_records();
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].entry_id.as_deref(), Some(entry_id.as_str()));
         assert_eq!(visible[0].status, DeviceHealthStatus::Pending);
@@ -1167,7 +1124,7 @@ mod tests {
         assert!(update.persist);
         assert!(update.transitions.is_empty());
         assert!(!ledger.is_actionable(&entry_id));
-        assert!(ledger.visible_records(u64::MAX).is_empty());
+        assert!(ledger.visible_records().is_empty());
 
         let ignored = ledger.note_failure(
             "canonical-matter-1-1",
@@ -1198,24 +1155,22 @@ mod tests {
             vec![(entry_id.clone(), DeviceHealthTransition::Removed)]
         );
         assert!(!ledger.is_actionable(&entry_id));
-        assert!(ledger.visible_records(u64::MAX).is_empty());
+        assert!(ledger.visible_records().is_empty());
     }
 
     #[test]
-    fn topology_removal_resolves_with_the_saved_journey_correlation() {
+    fn topology_removal_keeps_the_review_journey_for_the_removed_outcome() {
         let (mut ledger, entry_id, admitted_at) = ledger_with_entry();
-        assert!(ledger.mark_removal_selected(&entry_id, Some("journey-1")));
+        let journey = ledger.review_correlation_for_entry(&entry_id);
+        assert!(journey.is_some());
         let update = ledger.reconcile_active(&HashSet::new(), admitted_at + 1);
 
         assert_eq!(
             update.transitions,
             vec![(entry_id.clone(), DeviceHealthTransition::Removed)]
         );
-        assert_eq!(
-            ledger.recovery_correlation_for_entry(&entry_id).as_deref(),
-            Some("journey-1")
-        );
-        assert!(ledger.visible_records(u64::MAX).is_empty());
+        assert_eq!(ledger.review_correlation_for_entry(&entry_id), journey);
+        assert!(ledger.visible_records().is_empty());
     }
 
     #[test]

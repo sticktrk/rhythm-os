@@ -726,10 +726,15 @@ fn start_controller_event_stream(
                                     controller_stream_id: Some(event_stream_id.clone()),
                                     evidence: rhythm_os::hub::DeviceReachabilityEvidence::Proof,
                                 });
-                            } else if matches!(
-                                outcome.status,
-                                crate::transport::MatterCommandOutcomeStatus::Failed
-                            ) {
+                            } else if outcome.status
+                                == crate::transport::MatterCommandOutcomeStatus::Failed
+                                && outcome.failure_class
+                                    == Some(crate::transport::MatterCommandFailureClass::Connectivity)
+                            {
+                                // Only a sidecar-classified connectivity failure is
+                                // unreachability evidence. A cluster rejecting a step,
+                                // a controller-side failure, or an older sidecar that
+                                // sends no class is neither proof nor failure.
                                 let _ = event_tx.send(HubEvent::DeviceReachability {
                                     hub_key: None,
                                     device_id: format_device_id(
@@ -2900,15 +2905,31 @@ mod tests {
             Vec::new(),
             vec![commissioned_device(94, 1)],
         ));
-        transport.queue_controller_event(MatterControllerEvent::CommandOutcome(
-            crate::transport::MatterCommandOutcome {
-                command_id: 7,
-                node_id: 94,
-                endpoint: 1,
-                status: crate::transport::MatterCommandOutcomeStatus::Failed,
-                detail: Some("an arbitrary future transport failure".to_string()),
-                completed_at_unix_ms: None,
-            },
+        let failed =
+            |command_id: u64,
+             failure_class: Option<crate::transport::MatterCommandFailureClass>| {
+                MatterControllerEvent::CommandOutcome(crate::transport::MatterCommandOutcome {
+                    command_id,
+                    node_id: 94,
+                    endpoint: 1,
+                    status: crate::transport::MatterCommandOutcomeStatus::Failed,
+                    // Text that would trip a substring heuristic must not matter.
+                    detail: Some("operational discovery failed: timeout".to_string()),
+                    completed_at_unix_ms: None,
+                    failure_class,
+                })
+            };
+        // A rejected step and an unclassified (older sidecar) failure are
+        // neither proof nor failure evidence; only the structured
+        // connectivity class reaches the ledger.
+        transport.queue_controller_event(failed(
+            5,
+            Some(crate::transport::MatterCommandFailureClass::Other),
+        ));
+        transport.queue_controller_event(failed(6, None));
+        transport.queue_controller_event(failed(
+            7,
+            Some(crate::transport::MatterCommandFailureClass::Connectivity),
         ));
         let shutdown = Arc::new(AtomicBool::new(false));
         let (event_tx, event_rx) = std::sync::mpsc::channel();
@@ -2926,16 +2947,27 @@ mod tests {
             Arc::new(Mutex::new(VecDeque::new())),
         );
 
-        assert!(matches!(
-            event_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            HubEvent::DeviceReachability {
-                device_id,
-                evidence: rhythm_os::hub::DeviceReachabilityEvidence::Failure(
-                    rhythm_os::hub::DeviceReachabilityFailureClass::Command,
-                ),
-                ..
-            } if device_id == format_device_id(94, 1)
-        ));
+        // Every outcome also translates to an ordinary CommandOutcome hub
+        // event; only the reachability evidence is under test here.
+        let mut reachability = Vec::new();
+        while let Ok(event) = event_rx.recv_timeout(Duration::from_millis(300)) {
+            if matches!(event, HubEvent::DeviceReachability { .. }) {
+                reachability.push(event);
+            }
+        }
+        assert!(
+            matches!(
+                reachability.as_slice(),
+                [HubEvent::DeviceReachability {
+                    device_id,
+                    evidence: rhythm_os::hub::DeviceReachabilityEvidence::Failure(
+                        rhythm_os::hub::DeviceReachabilityFailureClass::Command,
+                    ),
+                    ..
+                }] if device_id == &format_device_id(94, 1)
+            ),
+            "only the connectivity-classified outcome may emit evidence: {reachability:?}"
+        );
 
         shutdown.store(true, Ordering::SeqCst);
     }

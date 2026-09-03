@@ -78,7 +78,8 @@ pub enum HubEvent {
     ///
     /// This is intentionally separate from power state: an off light remains
     /// healthy when it reports or responds, and command intent is never proof.
-    /// Failed command outcomes use the bounded `Command` class; only structured
+    /// Failed command outcomes use the bounded `Command` class, and only when
+    /// the sidecar classified the failure as connectivity; only structured
     /// subscription termination metadata may identify address resolution.
     DeviceReachability {
         hub_key: Option<HubKey>,

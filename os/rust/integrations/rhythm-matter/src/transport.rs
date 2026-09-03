@@ -112,6 +112,23 @@ pub struct MatterCommandOutcome {
     pub completed_at_unix_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// Structured reason for a `Failed` outcome so consumers never classify
+    /// from `detail` text. Older sidecars omit it; consumers must then treat
+    /// the failure as unclassified rather than as reachability evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_class: Option<MatterCommandFailureClass>,
+}
+
+/// Why a command plan failed, as judged by the sidecar that ran it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MatterCommandFailureClass {
+    /// The node could not be reached: discovery, CASE, or interaction timeout.
+    /// This is the only class that counts as unreachability evidence.
+    Connectivity,
+    /// Anything else: the cluster rejected a step, or the controller itself
+    /// could not run the plan. Not evidence about the light either way.
+    Other,
 }
 
 /// Privacy-bounded class of a terminal subscription or connection failure.
