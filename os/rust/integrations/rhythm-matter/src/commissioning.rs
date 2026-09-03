@@ -712,14 +712,14 @@ pub(crate) fn store_device_metadata(
     }
 }
 
+/// Capabilities for a light that could not be probed and matches no profile.
+///
+/// Color temperature is the only color route every tunable Matter light
+/// accepts, so a guessed capability set never places a hue/saturation or XY
+/// step in front of the level command that turns the light on. A successful
+/// probe replaces this with what the device actually advertises.
 pub(crate) fn fallback_device_capabilities() -> rhythm_devices::LightCapabilities {
-    rhythm_devices::LightCapabilities {
-        color_modes: vec![
-            rhythm_devices::ColorMode::HueSaturation,
-            rhythm_devices::ColorMode::ColorTemperature,
-        ],
-        ..rhythm_devices::LightCapabilities::defaults_for(rhythm_devices::LightType::ExtendedColor)
-    }
+    rhythm_devices::LightCapabilities::defaults_for(rhythm_devices::LightType::ColorTemperature)
 }
 
 pub(crate) fn store_fallback_device_metadata(hub_data: &Arc<MatterHubData>, device_id: &str) {

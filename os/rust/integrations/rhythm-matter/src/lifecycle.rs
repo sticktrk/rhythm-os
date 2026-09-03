@@ -663,6 +663,16 @@ fn start_controller_event_stream(
                                 if let Ok(mut proof) = node_proof_of_life.lock() {
                                     proof.insert(outcome.node_id, std::time::Instant::now());
                                 }
+                                if let Some(detail) = outcome.detail.as_deref() {
+                                    log::warn!(
+                                        target: "cmd",
+                                        "Matter: command {} for node {} endpoint {} completed with a rejected color step: {}",
+                                        outcome.command_id,
+                                        outcome.node_id,
+                                        outcome.endpoint,
+                                        detail
+                                    );
+                                }
                                 let _ = subscription_refresh.send(
                                     MatterSubscriptionRefresh::EndpointProof {
                                         target: MatterSubscriptionTarget {

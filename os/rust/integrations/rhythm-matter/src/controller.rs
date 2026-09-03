@@ -34,6 +34,10 @@ const DISPATCH_WARN_MS: u128 = 1000;
 const MATTER_IDENTIFY_DURATION_SECS: u16 = 1;
 const MATTER_GROUP_CONTROL_PREFIX: &str = "matter-group-";
 const MATTER_GROUP_FANOUT_ONLY_ENV: &str = "RHYTHM_MATTER_GROUP_FANOUT_ONLY";
+/// Gap between the steps of one endpoint plan when no profile measured a
+/// throttle. Cheap bulbs drop a command that arrives on the heels of the
+/// previous one; the tester's rapid-command thresholds start at 50 ms.
+const DEFAULT_INTER_STEP_DELAY_MS: u64 = 100;
 const MATTER_GROUP_SAFETY_FANOUT_ENV: &str = "RHYTHM_MATTER_GROUP_SAFETY_FANOUT";
 
 fn env_flag_enabled(name: &str, default: bool) -> bool {
@@ -205,6 +209,16 @@ impl MatterLightController {
                 command,
                 Self::color_preference(&quirks),
             );
+            // Color staged while the light is observed off is invisible until
+            // the level step turns it on. Give it no transition: a fade that
+            // starts in the dark would otherwise finish in view, sweeping from
+            // the light's restored color to the target after it comes on.
+            let observed_off = self.hub_data.observed_on_off(node_id, endpoint) == Some(false);
+            let color_transition_ms = if observed_off {
+                None
+            } else {
+                adapted.transition_ms
+            };
             let mut steps = Vec::new();
             let needs_explicit_on = adapted.on && Self::needs_explicit_on(&quirks);
             if needs_explicit_on {
@@ -214,18 +228,18 @@ impl MatterLightController {
                 steps.push(MatterCommandStep::SetHueSaturation {
                     hue,
                     saturation,
-                    transition_ms: adapted.transition_ms,
+                    transition_ms: color_transition_ms,
                 });
             } else if let Some((x, y)) = adapted.xy {
                 steps.push(MatterCommandStep::SetXy {
                     x,
                     y,
-                    transition_ms: adapted.transition_ms,
+                    transition_ms: color_transition_ms,
                 });
             } else if let Some(kelvin) = adapted.kelvin {
                 steps.push(MatterCommandStep::SetColorTemperature {
                     kelvin,
-                    transition_ms: adapted.transition_ms,
+                    transition_ms: color_transition_ms,
                 });
             }
             if let Some(brightness) = adapted.brightness {
@@ -244,10 +258,15 @@ impl MatterLightController {
                 node_id,
                 endpoint,
                 steps,
-                inter_step_delay_ms: quirks.iter().find_map(|quirk| match quirk {
-                    DeviceQuirk::CommandThrottleMs(ms) if *ms > 0 => Some(u64::from(*ms)),
-                    _ => None,
-                }),
+                inter_step_delay_ms: Some(
+                    quirks
+                        .iter()
+                        .find_map(|quirk| match quirk {
+                            DeviceQuirk::CommandThrottleMs(ms) if *ms > 0 => Some(u64::from(*ms)),
+                            _ => None,
+                        })
+                        .unwrap_or(DEFAULT_INTER_STEP_DELAY_MS),
+                ),
             });
         }
         if plans.is_empty() && !device_ids.is_empty() {
@@ -471,7 +490,7 @@ impl MatterLightController {
             Err(error) => {
                 warn!(
                     target: "cmd",
-                    "Matter: failed to probe metadata for {} (node {}): {}; using extended-color fallback",
+                    "Matter: failed to probe metadata for {} (node {}): {}; using color-temperature fallback",
                     device_id,
                     node_id,
                     error
@@ -507,9 +526,12 @@ impl MatterLightController {
     }
 
     /// Exact built-in, cloud, and saved tester profiles are authoritative.
-    /// Unprofiled Matter bulbs default to Hue/Saturation because it is the
-    /// safest cross-vendor color path; capability adaptation still falls back
-    /// when the device does not advertise it.
+    /// Unprofiled Matter bulbs render whites through color temperature, then
+    /// XY, then hue/saturation. Color temperature is the one route every
+    /// tunable bulb renders as white. Hue/saturation whites are an sRGB
+    /// approximation of the Kelvin target that many bulbs render as
+    /// saturated orange, so that route is used only when a profile asks for
+    /// it or the device advertises nothing else.
     fn color_preference(quirks: &[DeviceQuirk]) -> ColorPreference {
         if quirks.iter().any(|quirk| {
             matches!(
@@ -529,7 +551,7 @@ impl MatterLightController {
         {
             ColorPreference::PreferXy
         } else {
-            ColorPreference::PreferHueSaturation
+            ColorPreference::PreferColorTemperature
         }
     }
 
@@ -1225,7 +1247,7 @@ mod tests {
 
         assert!(spy.operations().iter().any(|operation| matches!(
             operation,
-            RecordedOperation::SetHueSaturation { node_id: 42, .. }
+            RecordedOperation::SetColorTemperature { node_id: 42, .. }
         )));
         assert!(spy.operations().iter().any(|operation| matches!(
             operation,
@@ -1266,7 +1288,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_on_sends_brightness_and_hue_saturation_commands_by_default() {
+    fn turn_on_sends_color_temperature_then_brightness_by_default() {
         let (controller, spy, _) = make_controller();
         let command = LightingCommand::new(80, 4000);
 
@@ -1279,7 +1301,7 @@ mod tests {
             let node_operations = operations_for_node(&operations, node_id);
             assert!(matches!(
                 node_operations[0],
-                RecordedOperation::SetHueSaturation { endpoint: 1, .. }
+                RecordedOperation::SetColorTemperature { endpoint: 1, .. }
             ));
             assert_eq!(
                 node_operations[1],
@@ -1291,6 +1313,82 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn turn_on_stages_color_without_transition_when_light_observed_off() {
+        let (controller, spy, _) = make_controller();
+        for node_id in [42, 43] {
+            set_device_capabilities(
+                &controller,
+                node_id,
+                LightCapabilities::defaults_for(LightType::ColorTemperature),
+            );
+        }
+        controller.hub_data.record_on_off_observation(42, 1, false);
+        controller.hub_data.record_on_off_observation(43, 1, true);
+
+        block_on(controller.turn_on("kitchen", LightingCommand::with_transition(80, 4000, 500)))
+            .unwrap();
+
+        let operations = spy.operations();
+        assert_eq!(
+            operations_for_node(&operations, 42),
+            vec![
+                RecordedOperation::SetColorTemperature {
+                    node_id: 42,
+                    endpoint: 1,
+                    kelvin: 4000,
+                    transition_ms: None,
+                },
+                RecordedOperation::SetBrightness {
+                    node_id: 42,
+                    endpoint: 1,
+                    level: clusters::brightness_to_level(80),
+                    transition_ms: Some(500),
+                },
+            ],
+            "color staged while off is invisible, so it must not carry a fade that finishes in view"
+        );
+        assert!(operations_for_node(&operations, 43)
+            .iter()
+            .any(|operation| matches!(
+                operation,
+                RecordedOperation::SetColorTemperature {
+                    node_id: 43,
+                    transition_ms: Some(500),
+                    ..
+                }
+            )));
+    }
+
+    #[test]
+    fn turn_on_plans_default_step_gap_unless_a_throttle_is_profiled() {
+        let (controller, _, _) = make_controller();
+        for node_id in [42, 43] {
+            set_device_capabilities(
+                &controller,
+                node_id,
+                LightCapabilities::defaults_for(LightType::ColorTemperature),
+            );
+        }
+        controller.hub_data.device_quirks.lock().unwrap().insert(
+            "matter-43".to_string(),
+            vec![DeviceQuirk::CommandThrottleMs(250)],
+        );
+
+        let plans = controller
+            .turn_on_plans(
+                &["matter-42".to_string(), "matter-43".to_string()],
+                &LightingCommand::new(80, 4000),
+            )
+            .unwrap();
+
+        assert_eq!(
+            plans[0].inter_step_delay_ms,
+            Some(DEFAULT_INTER_STEP_DELAY_MS)
+        );
+        assert_eq!(plans[1].inter_step_delay_ms, Some(250));
     }
 
     #[test]
@@ -1398,11 +1496,10 @@ mod tests {
             assert_eq!(
                 operations_for_node(&operations, node_id),
                 vec![
-                    RecordedOperation::SetHueSaturation {
+                    RecordedOperation::SetColorTemperature {
                         node_id,
                         endpoint: 1,
-                        hue: 22,
-                        saturation: 90,
+                        kelvin: 4000,
                         transition_ms: None,
                     },
                     RecordedOperation::SetBrightness {
@@ -1764,11 +1861,10 @@ mod tests {
             assert_eq!(
                 operations_for_node(&operations, node_id),
                 vec![
-                    RecordedOperation::SetHueSaturation {
+                    RecordedOperation::SetColorTemperature {
                         node_id,
                         endpoint: 1,
-                        hue: 22,
-                        saturation: 90,
+                        kelvin: 4000,
                         transition_ms: None,
                     },
                     RecordedOperation::SetBrightness {
@@ -1910,7 +2006,7 @@ mod tests {
         let operations = spy.operations();
         assert!(operations.iter().any(|operation| matches!(
             operation,
-            RecordedOperation::SetHueSaturation { node_id: 42, .. }
+            RecordedOperation::SetColorTemperature { node_id: 42, .. }
         )));
         assert!(operations.iter().any(|operation| matches!(
             operation,
@@ -2442,7 +2538,7 @@ mod tests {
         )));
         assert!(operations.iter().any(|operation| matches!(
             operation,
-            RecordedOperation::SetHueSaturation { node_id: 42, .. }
+            RecordedOperation::SetColorTemperature { node_id: 42, .. }
         )));
         assert!(operations.iter().any(|operation| matches!(
             operation,
@@ -2450,7 +2546,7 @@ mod tests {
         )));
         assert!(operations.iter().any(|operation| matches!(
             operation,
-            RecordedOperation::SetHueSaturation { node_id: 43, .. }
+            RecordedOperation::SetColorTemperature { node_id: 43, .. }
         )));
         assert!(operations.iter().any(|operation| matches!(
             operation,
@@ -2602,7 +2698,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_on_direct_color_uses_hue_saturation_when_probe_falls_back() {
+    fn turn_on_direct_color_plans_level_only_when_probe_falls_back() {
         let (controller, spy, _) = make_controller();
 
         block_on(controller.turn_on_target(
@@ -2618,20 +2714,17 @@ mod tests {
         ))
         .unwrap();
 
-        assert!(spy.operations().iter().any(|operation| matches!(
-            operation,
-            RecordedOperation::SetHueSaturation {
+        let operations = operations_for_node(&spy.operations(), 42);
+        assert_eq!(
+            operations,
+            vec![RecordedOperation::SetBrightness {
                 node_id: 42,
                 endpoint: 1,
-                hue: 0,
-                saturation: 254,
+                level: clusters::brightness_to_level(50),
                 transition_ms: Some(400),
-            }
-        )));
-        assert!(!spy
-            .operations()
-            .iter()
-            .any(|operation| matches!(operation, RecordedOperation::SetXy { node_id: 42, .. })));
+            }],
+            "an unprobed light must never receive a guessed color command"
+        );
     }
 
     #[test]
@@ -2752,7 +2845,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_on_unprofiled_device_prefers_hue_saturation_when_supported() {
+    fn turn_on_unprofiled_device_uses_hue_saturation_for_color_and_color_temperature_for_whites() {
         let spy = Arc::new(SpyTransport::new());
         let registry = Arc::new(Mutex::new(MatterDeviceRegistry::with_options(true)));
         registry
@@ -2813,14 +2906,23 @@ mod tests {
                 .iter()
                 .filter(|operation| matches!(operation, RecordedOperation::SetHueSaturation { .. }))
                 .count(),
-            2
+            1,
+            "direct color goes through hue/saturation"
+        );
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|operation| matches!(
+                    operation,
+                    RecordedOperation::SetColorTemperature { kelvin: 3000, .. }
+                ))
+                .count(),
+            1,
+            "adaptive white goes through color temperature, never an sRGB hue/saturation guess"
         );
         assert!(!operations
             .iter()
             .any(|operation| matches!(operation, RecordedOperation::SetXy { node_id: 42, .. })));
-        assert!(!operations
-            .iter()
-            .any(|operation| matches!(operation, RecordedOperation::SetColorTemperature { .. })));
     }
 
     #[test]
