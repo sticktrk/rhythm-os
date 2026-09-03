@@ -691,14 +691,20 @@ pub(crate) fn store_device_metadata(
     device: &CommissionedDevice,
     device_id: &str,
 ) {
-    let mut caps = build_device_capabilities(device);
-    let mut quirks = build_device_quirks(device);
-    if let Ok(cloud_profiles) = hub_data.cloud_profiles.lock() {
-        cloud_profiles.apply_to_device(device, &mut caps, &mut quirks);
-    }
+    let cloud_profiles = hub_data
+        .cloud_profiles
+        .lock()
+        .map(|profiles| profiles.clone())
+        .unwrap_or_default();
+    let local_overrides = hub_data
+        .local_overrides
+        .lock()
+        .map(|overrides| overrides.clone())
+        .unwrap_or_default();
+    let resolved = resolve_device_metadata(device, device_id, &cloud_profiles, &local_overrides);
 
     if let Ok(mut device_caps) = hub_data.device_caps.lock() {
-        device_caps.insert(device_id.to_string(), caps);
+        device_caps.insert(device_id.to_string(), resolved.capabilities);
         info!(
             target: "sys",
             "Matter: stored caps for {} ({} devices tracked)",
@@ -708,10 +714,79 @@ pub(crate) fn store_device_metadata(
     }
 
     if let Ok(mut device_quirks) = hub_data.device_quirks.lock() {
-        device_quirks.insert(device_id.to_string(), quirks);
+        device_quirks.insert(device_id.to_string(), resolved.quirks);
     }
+    if let Ok(mut device_profiles) = hub_data.device_profiles.lock() {
+        device_profiles.insert(device_id.to_string(), resolved.control_profile);
+    }
+    // A successful probe replaces any guessed capability set.
     if let Ok(mut fallback_caps) = hub_data.fallback_caps.lock() {
         fallback_caps.remove(device_id);
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedMatterDeviceMetadata {
+    pub capabilities: rhythm_devices::LightCapabilities,
+    pub quirks: Vec<rhythm_devices::DeviceQuirk>,
+    pub control_profile: crate::control_profile::MatterControlProfile,
+}
+
+/// The single metadata/profile resolver used by startup, pairing, discovery,
+/// on-demand probes, and Bulb Audition.
+pub(crate) fn resolve_device_metadata(
+    device: &CommissionedDevice,
+    device_id: &str,
+    cloud_profiles: &crate::cloud_profiles::CloudMatterProfileCatalog,
+    local_overrides: &crate::local_quirks::LocalMatterOverrides,
+) -> ResolvedMatterDeviceMetadata {
+    let builtin_capabilities = build_device_capabilities(device);
+    let builtin_quirks = build_device_quirks(device);
+    let mut capabilities = builtin_capabilities.clone();
+    let mut quirks = builtin_quirks.clone();
+
+    cloud_profiles.apply_to_device(device, &mut capabilities, &mut quirks);
+
+    if let Some(override_caps) = local_overrides.capabilities.get(device_id) {
+        crate::local_quirks::apply_capability_override(&mut capabilities, override_caps);
+    }
+    if let Some(local_quirks) = local_overrides.quirks.get(device_id) {
+        quirks = crate::local_quirks::apply_quirk_override(&quirks, local_quirks);
+    }
+    let cloud_profile = cloud_profiles.control_profile_for_device(device);
+    let legacy_local_profile = if local_overrides.capabilities.contains_key(device_id)
+        || local_overrides.quirks.contains_key(device_id)
+    {
+        let local_capabilities = local_overrides.capabilities.get(device_id);
+        Some(crate::control_profile::profile_overlay_from_legacy_local(
+            local_overrides
+                .quirks
+                .get(device_id)
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+            local_capabilities.and_then(|value| value.min_brightness),
+            local_capabilities.and_then(|value| value.supports_transition),
+        ))
+    } else {
+        None
+    };
+    let mut control_profile = crate::control_profile::resolve_control_profile(
+        &builtin_capabilities,
+        &builtin_quirks,
+        cloud_profile.as_ref(),
+        legacy_local_profile.as_ref(),
+    );
+    if let Some(typed_local_profile) = local_overrides.control_profiles.get(device_id) {
+        crate::control_profile::overlay_sourced_audition_profile(
+            &mut control_profile,
+            typed_local_profile,
+        );
+    }
+
+    ResolvedMatterDeviceMetadata {
+        capabilities,
+        quirks,
+        control_profile,
     }
 }
 
@@ -745,6 +820,17 @@ pub(crate) fn store_fallback_device_metadata(hub_data: &Arc<MatterHubData>, devi
 
     if let Ok(mut device_quirks) = hub_data.device_quirks.lock() {
         device_quirks.entry(device_id.to_string()).or_default();
+    }
+    if let Ok(mut device_profiles) = hub_data.device_profiles.lock() {
+        device_profiles
+            .entry(device_id.to_string())
+            .or_insert_with(|| {
+                crate::control_profile::profile_from_legacy(
+                    &fallback_device_capabilities(),
+                    &[],
+                    crate::control_profile::MatterProfileSource::SafeDefault,
+                )
+            });
     }
     if inserted_fallback {
         if let Ok(mut fallback_caps) = hub_data.fallback_caps.lock() {
@@ -1092,11 +1178,17 @@ mod tests {
                 device_caps: Mutex::new(HashMap::new()),
                 fallback_caps: Mutex::new(HashSet::new()),
                 device_quirks: Mutex::new(HashMap::new()),
+                device_profiles: Mutex::new(HashMap::new()),
+                pending_turn_on_plans: Arc::new(Mutex::new(HashMap::new())),
+                needs_audition: Arc::new(Mutex::new(HashSet::new())),
+                readback: Arc::new(crate::hub_state::MatterReadbackCoordinator::default()),
+                local_overrides: Mutex::new(crate::local_quirks::LocalMatterOverrides::default()),
                 cloud_profiles: Mutex::new(CloudMatterProfileCatalog::default()),
                 decommissioning: Mutex::new(HashSet::new()),
                 recently_decommissioned: Mutex::new(HashMap::new()),
                 node_proof_of_life: Arc::new(Mutex::new(HashMap::new())),
                 on_off_observations: Arc::new(Mutex::new(HashMap::new())),
+                attribute_report_history: Arc::new(Mutex::new(std::collections::VecDeque::new())),
                 last_turn_on_dispatch: Mutex::new(HashMap::new()),
                 event_tx,
             }),

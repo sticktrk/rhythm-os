@@ -501,7 +501,7 @@ pub fn handle_get_matter_capture(state: &SharedState, id: &str) -> ApiResponse {
     ApiResponse::json_ok(body)
 }
 
-pub fn handle_matter_bulb_test_run(state: &SharedState, body: &Value) -> ApiResponse {
+pub fn handle_matter_audition_run(state: &SharedState, body: &Value) -> ApiResponse {
     let run_test = {
         let Ok(s) = state.lock() else {
             return ApiResponse::server_error("lock");
@@ -522,7 +522,11 @@ pub fn handle_matter_bulb_test_run(state: &SharedState, body: &Value) -> ApiResp
     }
 }
 
-pub fn handle_matter_bulb_test_report(state: &SharedState, body: &Value) -> ApiResponse {
+pub fn handle_matter_bulb_test_run(state: &SharedState, body: &Value) -> ApiResponse {
+    handle_matter_audition_run(state, body)
+}
+
+pub fn handle_matter_audition_report(state: &SharedState, body: &Value) -> ApiResponse {
     let save_report = {
         let Ok(s) = state.lock() else {
             return ApiResponse::server_error("lock");
@@ -541,6 +545,10 @@ pub fn handle_matter_bulb_test_report(state: &SharedState, body: &Value) -> ApiR
         },
         Err(err) => ApiResponse::server_error(err),
     }
+}
+
+pub fn handle_matter_bulb_test_report(state: &SharedState, body: &Value) -> ApiResponse {
+    handle_matter_audition_report(state, body)
 }
 
 pub fn handle_get_matter_setup_code(state: &SharedState, device_id: &str) -> ApiResponse {

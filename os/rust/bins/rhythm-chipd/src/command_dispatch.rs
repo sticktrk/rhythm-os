@@ -451,6 +451,10 @@ impl CommandDispatcher {
                 node_id: plan.node_id,
                 endpoint: plan.endpoint,
                 status,
+                completed_at_unix_ms: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .ok()
+                    .map(|duration| duration.as_millis() as u64),
                 detail,
             },
         ));
@@ -1047,6 +1051,7 @@ mod tests {
                     node_id: 1,
                     endpoint: 1,
                     status: MatterCommandOutcomeStatus::Succeeded,
+                    completed_at_unix_ms: None,
                     detail: None,
                 },
             ));

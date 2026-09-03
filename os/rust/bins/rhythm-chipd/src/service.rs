@@ -345,10 +345,24 @@ impl ChipControllerService {
                 let value = self.backend().read_light_state(node_id, endpoint)?;
                 Ok(serde_json::to_value(ChipRpcJsonValueResponse { value })?)
             }
+            ChipRpcRequest::WriteColorControlOptions {
+                node_id,
+                endpoint,
+                execute_if_off,
+            } => {
+                self.require_initialized()?;
+                self.backend().write_color_control_execute_if_off(
+                    node_id,
+                    endpoint,
+                    execute_if_off,
+                )?;
+                Ok(serde_json::to_value(ChipRpcEmpty::new())?)
+            }
             ChipRpcRequest::SubscribeOnOff {
                 targets,
                 min_interval_secs,
                 max_interval_secs,
+                replace_existing,
             } => {
                 self.require_initialized()?;
                 // No lifecycle lock: subscribing is ordinary controller work,
@@ -358,8 +372,19 @@ impl ChipControllerService {
                 // commission/decommission and turned into a false-failure
                 // cascade. The shared work budget is the only bound.
                 let _permit = self.controller_work_budget.acquire();
-                self.backend()
-                    .subscribe_on_off(&targets, min_interval_secs, max_interval_secs)?;
+                if replace_existing {
+                    self.backend().replace_on_off_subscription(
+                        &targets,
+                        min_interval_secs,
+                        max_interval_secs,
+                    )?;
+                } else {
+                    self.backend().subscribe_on_off(
+                        &targets,
+                        min_interval_secs,
+                        max_interval_secs,
+                    )?;
+                }
                 Ok(serde_json::to_value(ChipRpcEmpty::new())?)
             }
             ChipRpcRequest::DrainAttributeReports => {
@@ -1048,6 +1073,7 @@ mod tests {
                     }],
                     min_interval_secs: 1,
                     max_interval_secs: 60,
+                    replace_existing: false,
                 })
                 .unwrap(),
         )

@@ -1,6 +1,6 @@
 //! Matter hub lifecycle — connect, disconnect, runtime creation.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -17,8 +17,9 @@ use rhythm_os::state::SharedState;
 
 use crate::hub_state::MatterHubData;
 use crate::transport::{
-    CommissionedDevice, MatterAttributeValue, MatterControllerEvent, MatterControllerEventCursor,
-    MatterDeviceInfo, MatterSubscriptionFailureClass, MatterSubscriptionTarget, MatterTransport,
+    CommissionedDevice, MatterAttributeReport, MatterAttributeValue, MatterControllerEvent,
+    MatterControllerEventCursor, MatterDeviceInfo, MatterEndpointCommandPlan,
+    MatterSubscriptionFailureClass, MatterSubscriptionTarget, MatterTransport,
     DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS, DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
 };
 
@@ -54,6 +55,23 @@ const MATTER_SUBSCRIPTION_UNKNOWN_KEY_REFRESH_DEBOUNCE: Duration = Duration::fro
 
 /// Endpoint -> (last observed on/off value, when it was observed).
 type OnOffObservations = HashMap<(u64, u16), (bool, std::time::Instant)>;
+const MATTER_ATTRIBUTE_REPORT_HISTORY_LIMIT: usize = 2_048;
+
+fn now_unix_ms() -> u64 {
+    chrono::Utc::now().timestamp_millis().max(0) as u64
+}
+
+fn record_attribute_report_history(
+    report: &MatterAttributeReport,
+    history: &Mutex<VecDeque<MatterAttributeReport>>,
+) {
+    if let Ok(mut reports) = history.lock() {
+        reports.push_back(report.clone());
+        while reports.len() > MATTER_ATTRIBUTE_REPORT_HISTORY_LIMIT {
+            reports.pop_front();
+        }
+    }
+}
 
 fn next_controller_event_retry_delay(current: Duration) -> Duration {
     current.saturating_mul(2).min(MATTER_EVENT_RETRY_MAX)
@@ -412,7 +430,7 @@ impl MatterSubscriptionWorkerState {
                 continue;
             }
 
-            match transport.subscribe_on_off(
+            match transport.subscribe_light_state(
                 std::slice::from_ref(&target),
                 DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
                 DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS,
@@ -553,7 +571,9 @@ fn cache_on_off_observation(
         return;
     }
 
-    let MatterAttributeValue::Bool(lights_on) = &report.value;
+    let MatterAttributeValue::Bool(lights_on) = &report.value else {
+        return;
+    };
     if let Ok(mut observations) = observations.lock() {
         observations.insert(
             (report.node_id, report.endpoint),
@@ -583,6 +603,10 @@ fn start_controller_event_stream(
     shutdown: Arc<std::sync::atomic::AtomicBool>,
     node_proof_of_life: Arc<Mutex<HashMap<u64, std::time::Instant>>>,
     on_off_observations: Arc<Mutex<OnOffObservations>>,
+    pending_turn_on_plans: Arc<Mutex<HashMap<u64, MatterEndpointCommandPlan>>>,
+    needs_audition: Arc<Mutex<HashSet<(u64, u16)>>>,
+    readback: Arc<crate::hub_state::MatterReadbackCoordinator>,
+    attribute_report_history: Arc<Mutex<VecDeque<MatterAttributeReport>>>,
 ) {
     let subscription_refresh =
         start_observed_state_subscription_worker(transport.clone(), shutdown.clone());
@@ -656,10 +680,22 @@ fn start_controller_event_stream(
                     last_sequence = last_sequence.max(envelope.sequence);
                     let event = match envelope.event {
                         MatterControllerEvent::CommandOutcome(outcome) => {
+                            let pending_plan = pending_turn_on_plans
+                                .lock()
+                                .ok()
+                                .and_then(|mut pending| pending.remove(&outcome.command_id));
                             if matches!(
                                 outcome.status,
                                 crate::transport::MatterCommandOutcomeStatus::Succeeded
                             ) {
+                                if let Some(plan) = pending_plan {
+                                    crate::controller::schedule_turn_on_readback(
+                                        transport.clone(),
+                                        plan,
+                                        needs_audition.clone(),
+                                        readback.clone(),
+                                    );
+                                }
                                 if let Ok(mut proof) = node_proof_of_life.lock() {
                                     proof.insert(outcome.node_id, std::time::Instant::now());
                                 }
@@ -689,6 +725,10 @@ fn start_controller_event_stream(
                             ))
                         }
                         MatterControllerEvent::AttributeReport(report) => {
+                            record_attribute_report_history(
+                                &report,
+                                attribute_report_history.as_ref(),
+                            );
                             cache_on_off_observation(&report, on_off_observations.as_ref());
                             if let Ok(mut proof) = node_proof_of_life.lock() {
                                 proof.insert(report.node_id, std::time::Instant::now());
@@ -722,6 +762,17 @@ fn start_controller_event_stream(
                             forget_on_off_observation(
                                 (termination.node_id, termination.endpoint),
                                 on_off_observations.as_ref(),
+                            );
+                            record_attribute_report_history(
+                                &MatterAttributeReport {
+                                    received_at_unix_ms: now_unix_ms(),
+                                    node_id: termination.node_id,
+                                    endpoint: termination.endpoint,
+                                    cluster: 0,
+                                    attr_id: 0,
+                                    value: MatterAttributeValue::SubscriptionTerminated,
+                                },
+                                attribute_report_history.as_ref(),
                             );
                             let _ = subscription_refresh.send(
                                 MatterSubscriptionRefresh::SubscriptionTerminated {
@@ -786,11 +837,13 @@ pub fn connect_matter(
             .collect()
     };
     let cloud_profiles = crate::cloud_profiles::load_or_sync_for_state(state);
+    let local_overrides = crate::local_quirks::load_overrides_for_state(state);
     let initial_metadata = initial_device_metadata(
         state,
         &commissioned,
         &persisted_devices,
         &cloud_profiles,
+        &local_overrides,
         &hub_key,
     );
     publish_endpoint_capabilities(
@@ -821,12 +874,33 @@ pub fn connect_matter(
     let transport_for_closure = transport.clone();
     let fabric_id_for_closure = fabric_id.clone();
     let cloud_profiles_for_hub_data = cloud_profiles.clone();
+    let local_overrides_for_hub_data = local_overrides.clone();
     let node_proof_of_life = Arc::new(Mutex::new(HashMap::new()));
     let node_proof_of_life_for_closure = node_proof_of_life.clone();
     let node_proof_of_life_for_events = node_proof_of_life.clone();
     let on_off_observations = Arc::new(Mutex::new(HashMap::new()));
     let on_off_observations_for_closure = on_off_observations.clone();
     let on_off_observations_for_events = on_off_observations.clone();
+    let pending_turn_on_plans = Arc::new(Mutex::new(HashMap::new()));
+    let pending_turn_on_plans_for_closure = pending_turn_on_plans.clone();
+    let pending_turn_on_plans_for_events = pending_turn_on_plans.clone();
+    let needs_audition = Arc::new(Mutex::new(
+        local_overrides
+            .needs_audition
+            .iter()
+            .filter_map(|device_id| crate::lifecycle::parse_device_id(device_id))
+            .collect::<HashSet<_>>(),
+    ));
+    let needs_audition_for_closure = needs_audition.clone();
+    let needs_audition_for_events = needs_audition.clone();
+    let readback = Arc::new(crate::hub_state::MatterReadbackCoordinator::new(
+        crate::local_quirks::store_path(state),
+    ));
+    let readback_for_closure = readback.clone();
+    let readback_for_events = readback.clone();
+    let attribute_report_history = Arc::new(Mutex::new(VecDeque::new()));
+    let attribute_report_history_for_closure = attribute_report_history.clone();
+    let attribute_report_history_for_events = attribute_report_history.clone();
 
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let hub_data_event_tx = event_tx.clone();
@@ -855,11 +929,17 @@ pub fn connect_matter(
                 device_caps: std::sync::Mutex::new(initial_metadata.device_caps.clone()),
                 fallback_caps: std::sync::Mutex::new(initial_metadata.fallback_caps.clone()),
                 device_quirks: std::sync::Mutex::new(initial_metadata.device_quirks.clone()),
+                device_profiles: std::sync::Mutex::new(initial_metadata.device_profiles.clone()),
+                pending_turn_on_plans: pending_turn_on_plans_for_closure.clone(),
+                needs_audition: needs_audition_for_closure.clone(),
+                readback: readback_for_closure.clone(),
+                local_overrides: std::sync::Mutex::new(local_overrides_for_hub_data.clone()),
                 cloud_profiles: std::sync::Mutex::new(cloud_profiles_for_hub_data.clone()),
                 decommissioning: std::sync::Mutex::new(std::collections::HashSet::new()),
                 recently_decommissioned: std::sync::Mutex::new(std::collections::HashMap::new()),
                 node_proof_of_life: node_proof_of_life_for_closure.clone(),
                 on_off_observations: on_off_observations_for_closure.clone(),
+                attribute_report_history: attribute_report_history_for_closure.clone(),
                 last_turn_on_dispatch: std::sync::Mutex::new(std::collections::HashMap::new()),
                 event_tx: hub_data_event_tx,
             }))
@@ -871,6 +951,10 @@ pub fn connect_matter(
                 shutdown,
                 node_proof_of_life_for_events,
                 on_off_observations_for_events,
+                pending_turn_on_plans_for_events,
+                needs_audition_for_events,
+                readback_for_events,
+                attribute_report_history_for_events,
             );
             event_rx
         },
@@ -914,6 +998,7 @@ struct InitialDeviceMetadata {
     device_caps: HashMap<String, LightCapabilities>,
     fallback_caps: HashSet<String>,
     device_quirks: HashMap<String, Vec<DeviceQuirk>>,
+    device_profiles: HashMap<String, crate::control_profile::MatterControlProfile>,
 }
 
 pub(crate) fn normalized_endpoint_capabilities(
@@ -1033,6 +1118,7 @@ fn fallback_initial_device_metadata(
     let mut device_caps = HashMap::new();
     let mut fallback_caps = HashSet::new();
     let mut device_quirks = HashMap::new();
+    let mut device_profiles = HashMap::new();
     let commissioned_nodes = commissioned
         .iter()
         .map(|info| info.node_id)
@@ -1045,9 +1131,15 @@ fn fallback_initial_device_metadata(
                 Vec::new(),
             )
         });
+        let profile = crate::control_profile::profile_from_legacy(
+            &caps,
+            &quirks,
+            crate::control_profile::MatterProfileSource::Builtin,
+        );
         device_caps.entry(device_id.clone()).or_insert(caps);
         fallback_caps.insert(device_id.clone());
-        device_quirks.entry(device_id).or_insert(quirks);
+        device_quirks.entry(device_id.clone()).or_insert(quirks);
+        device_profiles.entry(device_id).or_insert(profile);
     };
 
     for info in commissioned {
@@ -1075,6 +1167,7 @@ fn fallback_initial_device_metadata(
         device_caps,
         fallback_caps,
         device_quirks,
+        device_profiles,
     }
 }
 
@@ -1083,10 +1176,10 @@ fn initial_device_metadata(
     commissioned: &[MatterDeviceInfo],
     persisted_devices: &[CommissionedDevice],
     cloud_profiles: &crate::cloud_profiles::CloudMatterProfileCatalog,
+    local_overrides: &crate::local_quirks::LocalMatterOverrides,
     hub_key: &HubKey,
 ) -> InitialDeviceMetadata {
     let mut metadata = fallback_initial_device_metadata(state, commissioned, hub_key);
-    let local_overrides = crate::local_quirks::load_overrides_for_state(state);
     let aliases_by_node = state
         .lock()
         .ok()
@@ -1111,26 +1204,32 @@ fn initial_device_metadata(
         .unwrap_or_default();
     for device in persisted_devices {
         let device_id = format_device_id(device.node_id, device.light_endpoint);
-        let mut caps = crate::commissioning::build_device_capabilities(device);
-        let mut quirks = crate::commissioning::build_device_quirks(device);
-        cloud_profiles.apply_to_device(device, &mut caps, &mut quirks);
-        if let Some(override_caps) = local_overrides.capabilities.get(&device_id) {
-            crate::local_quirks::apply_capability_override(&mut caps, override_caps);
-        }
-        if let Some(local_quirks) = local_overrides.quirks.get(&device_id) {
-            quirks = crate::local_quirks::apply_quirk_override(&quirks, local_quirks);
-        }
+        let resolved = crate::commissioning::resolve_device_metadata(
+            device,
+            &device_id,
+            cloud_profiles,
+            local_overrides,
+        );
+        let caps = resolved.capabilities;
+        let quirks = resolved.quirks;
+        let profile = resolved.control_profile;
 
         metadata.device_caps.insert(device_id.clone(), caps.clone());
         metadata.fallback_caps.remove(&device_id);
         metadata
             .device_quirks
             .insert(device_id.clone(), quirks.clone());
+        metadata
+            .device_profiles
+            .insert(device_id.clone(), profile.clone());
         if let Some(aliases) = aliases_by_node.get(&device.node_id) {
             for alias in aliases {
                 metadata.device_caps.insert(alias.clone(), caps.clone());
                 metadata.fallback_caps.remove(alias);
                 metadata.device_quirks.insert(alias.clone(), quirks.clone());
+                metadata
+                    .device_profiles
+                    .insert(alias.clone(), profile.clone());
             }
         }
     }
@@ -1786,6 +1885,7 @@ mod tests {
             &[device_info_from_record(&device)],
             &[device],
             &crate::cloud_profiles::CloudMatterProfileCatalog::default(),
+            &crate::local_quirks::load_overrides_for_state(&state),
             &key,
         );
 
@@ -1799,7 +1899,55 @@ mod tests {
     }
 
     #[test]
-    fn persisted_moes_metadata_replaces_stale_hs_preference_with_curated_ct() {
+    fn typed_profile_keeps_legacy_local_transition_evidence() {
+        let state = shared_state("persisted-legacy-and-typed-profile");
+        let key = HubKey::new(HubType::new("matter"), "local");
+        let device = commissioned_device(108, 1);
+        crate::local_quirks::save_device_profile_override(
+            &state,
+            "matter-108",
+            None,
+            Some(crate::local_quirks::LocalCapabilityOverride {
+                min_brightness: None,
+                supports_transition: Some(false),
+            }),
+            Some("legacy-report".to_string()),
+        )
+        .unwrap();
+        crate::local_quirks::save_device_control_profile(
+            &state,
+            "matter-108",
+            crate::control_profile::MatterControlProfile {
+                supports_transition: true,
+                source: crate::control_profile::MatterControlProfileSources {
+                    supports_transition: crate::control_profile::MatterProfileSource::Builtin,
+                    ..crate::control_profile::MatterControlProfileSources::default()
+                },
+                ..crate::control_profile::MatterControlProfile::default()
+            },
+            Some("typed-report".to_string()),
+        )
+        .unwrap();
+
+        let metadata = initial_device_metadata(
+            &state,
+            &[device_info_from_record(&device)],
+            &[device],
+            &crate::cloud_profiles::CloudMatterProfileCatalog::default(),
+            &crate::local_quirks::load_overrides_for_state(&state),
+            &key,
+        );
+
+        let profile = metadata.device_profiles.get("matter-108").unwrap();
+        assert!(!profile.supports_transition);
+        assert_eq!(
+            profile.source.supports_transition,
+            crate::control_profile::MatterProfileSource::Audition
+        );
+    }
+
+    #[test]
+    fn legacy_projection_keeps_curated_ct_while_runtime_honours_local_audition() {
         let state = shared_state("persisted-moes-color-preference");
         let key = HubKey::new(HubType::new("matter"), "local");
         let device = moes_matter_light(112);
@@ -1820,6 +1968,7 @@ mod tests {
             &[device_info_from_record(&device)],
             &[device],
             &crate::cloud_profiles::CloudMatterProfileCatalog::default(),
+            &crate::local_quirks::load_overrides_for_state(&state),
             &key,
         );
 
@@ -1832,6 +1981,16 @@ mod tests {
                 ),
             ])
         );
+        let profile = metadata.device_profiles.get("matter-112").unwrap();
+        assert_eq!(
+            profile.color_route,
+            crate::control_profile::MatterColorRoute::HueSaturation
+        );
+        assert_eq!(
+            profile.source.color_route,
+            crate::control_profile::MatterProfileSource::Audition
+        );
+        assert_eq!(profile.command_spacing_ms.value_ms, 250);
     }
 
     #[test]
@@ -1845,6 +2004,7 @@ mod tests {
             &[device_info_from_record(&device)],
             &[device],
             &crate::cloud_profiles::CloudMatterProfileCatalog::default(),
+            &crate::local_quirks::load_overrides_for_state(&state),
             &key,
         );
 
@@ -1871,6 +2031,7 @@ mod tests {
             &[device_info_from_record(&device)],
             &[device],
             &crate::cloud_profiles::CloudMatterProfileCatalog::default(),
+            &crate::local_quirks::load_overrides_for_state(&state),
             &key,
         );
 
@@ -2609,6 +2770,7 @@ mod tests {
             ((93, 1), (true, std::time::Instant::now())),
             ((94, 1), (true, std::time::Instant::now())),
         ])));
+        let report_history = Arc::new(Mutex::new(VecDeque::new()));
 
         start_controller_event_stream(
             transport.clone(),
@@ -2616,6 +2778,10 @@ mod tests {
             shutdown.clone(),
             Arc::new(Mutex::new(HashMap::new())),
             observations.clone(),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashSet::new())),
+            Arc::new(crate::hub_state::MatterReadbackCoordinator::default()),
+            report_history.clone(),
         );
 
         assert!(matches!(
@@ -2641,6 +2807,11 @@ mod tests {
         // than attempted inline: the termination must not start a retry storm.
         wait_for_atomic_at_least(&transport.subscribe_calls, 1);
         assert_eq!(transport.subscribe_calls.load(Ordering::SeqCst), 1);
+        assert!(report_history.lock().unwrap().iter().any(|report| {
+            report.node_id == 93
+                && report.endpoint == 1
+                && matches!(&report.value, MatterAttributeValue::SubscriptionTerminated)
+        }));
 
         shutdown.store(true, Ordering::SeqCst);
     }
@@ -2660,6 +2831,10 @@ mod tests {
             shutdown.clone(),
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashSet::new())),
+            Arc::new(crate::hub_state::MatterReadbackCoordinator::default()),
+            Arc::new(Mutex::new(VecDeque::new())),
         );
 
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
@@ -2685,6 +2860,7 @@ mod tests {
     fn on_off_subscription_reports_update_periodic_observation_cache() {
         let observations = Mutex::new(HashMap::new());
         let report = crate::transport::MatterAttributeReport {
+            received_at_unix_ms: 0,
             node_id: 42,
             endpoint: 2,
             cluster: crate::clusters::CLUSTER_ON_OFF_U32,
@@ -2702,6 +2878,23 @@ mod tests {
                 .map(|(lights_on, _)| *lights_on),
             Some(true)
         );
+    }
+
+    #[test]
+    fn controller_report_history_preserves_audition_evidence_without_native_redrain() {
+        let history = Mutex::new(VecDeque::new());
+        let report = crate::transport::MatterAttributeReport {
+            received_at_unix_ms: 1234,
+            node_id: 42,
+            endpoint: 2,
+            cluster: crate::clusters::CLUSTER_ON_OFF_U32,
+            attr_id: crate::clusters::ATTR_ON_OFF_U32,
+            value: MatterAttributeValue::Bool(true),
+        };
+
+        record_attribute_report_history(&report, &history);
+
+        assert_eq!(history.lock().unwrap().front(), Some(&report));
     }
 
     #[test]

@@ -787,9 +787,13 @@ pub fn save_bulb_test_report(state: &SharedState, report: &Value) -> Result<Valu
     let capability_hints = report
         .get("capability_hints")
         .or_else(|| report.get("capabilities"));
+    let control_profile = report
+        .get("control_profile")
+        .or_else(|| report.get("profile"));
     let mut applied_local = false;
     let mut applied_quirks = Value::Array(Vec::new());
     let mut applied_capabilities = Value::Object(Map::new());
+    let mut applied_control_profile = Value::Null;
 
     if apply_local {
         let mut quirks = match inferred_quirks {
@@ -836,6 +840,22 @@ pub fn save_bulb_test_report(state: &SharedState, report: &Value) -> Result<Valu
             }
             applied_local = true;
         }
+        if let Some(value) = control_profile {
+            let profile: crate::control_profile::MatterControlProfile =
+                serde_json::from_value(value.clone()).context("invalid Matter control profile")?;
+            if profile.command_spacing_ms.value_ms > 10_000 {
+                anyhow::bail!("Matter control profile command spacing exceeds 10000 ms");
+            }
+            crate::local_quirks::save_device_control_profile(
+                state,
+                &native_id,
+                profile.clone(),
+                Some(report_id.clone()),
+            )?;
+            apply_runtime_control_profile(state, &native_id, profile.clone())?;
+            applied_control_profile = serde_json::to_value(profile)?;
+            applied_local = true;
+        }
     };
 
     Ok(json!({
@@ -846,6 +866,7 @@ pub fn save_bulb_test_report(state: &SharedState, report: &Value) -> Result<Valu
         "applied_local": applied_local,
         "applied_quirks": applied_quirks,
         "applied_capabilities": applied_capabilities,
+        "applied_control_profile": applied_control_profile,
     }))
 }
 
@@ -946,6 +967,26 @@ fn apply_runtime_quirks(
         .lock()
         .map_err(|_| anyhow::anyhow!("Matter quirk cache lock"))?;
     device_quirks.insert(device_id.to_string(), quirks);
+    Ok(())
+}
+
+fn apply_runtime_control_profile(
+    state: &SharedState,
+    device_id: &str,
+    profile: crate::control_profile::MatterControlProfile,
+) -> Result<()> {
+    let hub_data = get_hub_data(state)?;
+    hub_data
+        .device_profiles
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Matter control profile cache lock"))?
+        .insert(device_id.to_string(), profile.clone());
+    hub_data
+        .local_overrides
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Matter local profile cache lock"))?
+        .control_profiles
+        .insert(device_id.to_string(), profile);
     Ok(())
 }
 
@@ -1943,11 +1984,17 @@ mod tests {
             device_caps: Mutex::new(device_caps),
             fallback_caps: Mutex::new(HashSet::new()),
             device_quirks: Mutex::new(HashMap::new()),
+            device_profiles: Mutex::new(HashMap::new()),
+            pending_turn_on_plans: Arc::new(Mutex::new(HashMap::new())),
+            needs_audition: Arc::new(Mutex::new(HashSet::new())),
+            readback: Arc::new(crate::hub_state::MatterReadbackCoordinator::default()),
+            local_overrides: Mutex::new(crate::local_quirks::LocalMatterOverrides::default()),
             cloud_profiles: Mutex::new(CloudMatterProfileCatalog::default()),
             decommissioning: Mutex::new(HashSet::new()),
             recently_decommissioned: Mutex::new(HashMap::new()),
             node_proof_of_life: Arc::new(Mutex::new(HashMap::new())),
             on_off_observations: Arc::new(Mutex::new(HashMap::new())),
+            attribute_report_history: Arc::new(Mutex::new(std::collections::VecDeque::new())),
             last_turn_on_dispatch: Mutex::new(HashMap::new()),
             event_tx,
         });

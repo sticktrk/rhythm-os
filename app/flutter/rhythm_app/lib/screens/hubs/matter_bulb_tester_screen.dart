@@ -6,8 +6,8 @@ import 'package:uuid/uuid.dart';
 
 import '../../providers/server_sync_provider.dart';
 import '../../services/analytics_service.dart';
-import '../../services/matter_bulb_test_plan.dart';
-import '../../services/matter_bulb_tester_service.dart';
+import '../../services/bulb_audition_script.dart';
+import '../../services/bulb_audition_service.dart';
 import '../../widgets/solar_orbit.dart';
 
 @visibleForTesting
@@ -30,10 +30,13 @@ class MatterBulbTesterScreen extends StatefulWidget {
     super.key,
     required this.device,
     required this.nativeDeviceId,
+    this.reportService,
   });
 
   final RhythmDevice device;
   final String nativeDeviceId;
+  @visibleForTesting
+  final BulbAuditionReportService? reportService;
 
   @override
   State<MatterBulbTesterScreen> createState() => _MatterBulbTesterScreenState();
@@ -41,21 +44,25 @@ class MatterBulbTesterScreen extends StatefulWidget {
 
 class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
   static const _uuid = Uuid();
-  static const _lowDimMinBrightnessHint = 10;
 
   final _notesController = TextEditingController();
-  final String _journeyId = 'matter-bulb-test-${_uuid.v4()}';
+  final String _journeyId = 'bulb-audition-${_uuid.v4()}';
 
   final Map<String, _StepObservation> _observations = {};
   int _currentStep = 0;
   bool _running = false;
   bool _saving = false;
   String? _status;
+  final Map<String, Object> _acceptedOverrides = {};
+  Map<String, dynamic>? _latestProfileUsed;
+  Map<String, dynamic>? _pendingTryWithProfile;
+  String? _pendingTryWithScenario;
+  _TryWithChoice? _pendingTryWithChoice;
 
   @override
   void initState() {
     super.initState();
-    AnalyticsService().logMatterBulbTesterStarted(
+    AnalyticsService().logBulbAuditionStarted(
       journeyId: _journeyId,
       source: 'device_detail',
       plannedTestCount: matterBulbTestSteps.length,
@@ -72,6 +79,117 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
 
   List<MatterBulbTestStep> _activeSteps() =>
       activeMatterBulbTestSteps(xyFailed: _xyFailed);
+
+  List<_TryWithChoice> _tryWithChoices(MatterBulbTestStep step) =>
+      switch (step.id) {
+        'turn_on_from_off' ||
+        'off_then_on_restore' ||
+        'power_cycle_then_tick' =>
+          const [
+            _TryWithChoice(
+              label: 'Explicit On first',
+              field: 'turn_on',
+              value: 'explicit_on_first',
+            ),
+            _TryWithChoice(
+              label: 'Level then colour',
+              field: 'turn_on',
+              value: 'level_with_on_off_then_color',
+            ),
+            _TryWithChoice(
+              label: '100 ms command spacing',
+              field: 'command_spacing_ms',
+              value: 100,
+            ),
+          ],
+        'tick_while_on' || 'color_to_white_and_back' => const [
+            _TryWithChoice(
+              label: 'Hue and saturation',
+              field: 'color_route',
+              value: 'hue_saturation',
+            ),
+            _TryWithChoice(
+              label: 'XY colour',
+              field: 'color_route',
+              value: 'xy',
+            ),
+            _TryWithChoice(
+              label: 'Colour temperature',
+              field: 'color_route',
+              value: 'color_temperature',
+            ),
+            _TryWithChoice(
+              label: '100 ms command spacing',
+              field: 'command_spacing_ms',
+              value: 100,
+            ),
+          ],
+        'adaptive_white_route' => const [
+            _TryWithChoice(
+              label: 'Hue and saturation route',
+              field: 'color_route',
+              value: 'hue_saturation',
+            ),
+            _TryWithChoice(
+              label: 'XY route',
+              field: 'color_route',
+              value: 'xy',
+            ),
+            _TryWithChoice(
+              label: 'Colour temperature route',
+              field: 'color_route',
+              value: 'color_temperature',
+            ),
+            _TryWithChoice(
+              label: 'Balanced HS white curve',
+              field: 'hs_white_curve',
+              value: [
+                {'kelvin': 2200, 'hue': 21, 'saturation': 127},
+                {'kelvin': 2700, 'hue': 21, 'saturation': 89},
+                {'kelvin': 4000, 'hue': 22, 'saturation': 38},
+                {'kelvin': 6500, 'hue': 219, 'saturation': 5},
+              ],
+            ),
+            _TryWithChoice(
+              label: 'Low-saturation HS white curve',
+              field: 'hs_white_curve',
+              value: [
+                {'kelvin': 2200, 'hue': 21, 'saturation': 89},
+                {'kelvin': 2700, 'hue': 21, 'saturation': 51},
+                {'kelvin': 4000, 'hue': 22, 'saturation': 20},
+                {'kelvin': 6500, 'hue': 219, 'saturation': 0},
+              ],
+            ),
+          ],
+        'dim_floor' || 'dim_ramp' || 'brightness_range' => const [
+            _TryWithChoice(
+              label: 'Move To Level with On/Off',
+              field: 'level_command',
+              value: 'move_to_level_with_on_off',
+            ),
+            _TryWithChoice(
+              label: 'Move To Level',
+              field: 'level_command',
+              value: 'move_to_level',
+            ),
+            _TryWithChoice(
+              label: 'Step with On/Off',
+              field: 'level_command',
+              value: 'step_with_on_off',
+            ),
+            _TryWithChoice(
+              label: 'No transition',
+              field: 'supports_transition',
+              value: false,
+            ),
+            _TryWithChoice(
+              label: '100 ms command spacing',
+              field: 'command_spacing_ms',
+              value: 100,
+            ),
+          ],
+        _ => const [],
+      };
 
   List<String> get _skippedXyTestIds => skippedMatterBulbTestIds(
         xyFailed: _xyFailed,
@@ -158,7 +276,7 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
           ),
           const Expanded(
             child: Text(
-              'Matter Bulb Tester',
+              'Bulb Audition',
               textAlign: TextAlign.center,
               style: TextStyle(
                 color: CelestialColors.textPrimary,
@@ -303,6 +421,10 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
               height: 1.3,
             ),
           ),
+          if (observation?.serverResult != null) ...[
+            const SizedBox(height: 12),
+            _buildEvidenceColumns(observation!),
+          ],
           const SizedBox(height: 14),
           SizedBox(
             height: 46,
@@ -325,28 +447,89 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
               ),
             ),
           ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: _AnswerButton(
-                  label: 'Yes',
-                  selected: observation?.worked == true,
-                  onTap: () => _recordObservation(step, true),
+          if (_tryWithChoices(step).isNotEmpty) ...[
+            const SizedBox(height: 8),
+            PopupMenuButton<_TryWithChoice>(
+              key: const ValueKey('bulb-audition-try-with'),
+              enabled: !_running,
+              onSelected: (choice) => _runTryWith(step, choice),
+              itemBuilder: (context) => [
+                for (final choice in _tryWithChoices(step))
+                  PopupMenuItem(value: choice, child: Text(choice.label)),
+              ],
+              child: Container(
+                height: 42,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: CelestialColors.accentBlue.withValues(alpha: 0.7),
+                  ),
+                ),
+                child: const Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      Icons.tune_rounded,
+                      size: 17,
+                      color: CelestialColors.accentBlue,
+                    ),
+                    SizedBox(width: 7),
+                    Text(
+                      'Try with…',
+                      style: TextStyle(
+                        color: CelestialColors.accentBlue,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
                 ),
               ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _AnswerButton(
-                  label: 'No',
-                  selected: observation?.worked == false,
-                  onTap: () => _recordObservation(step, false),
+            ),
+          ],
+          if (step.operatorAnswer) ...[
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                Expanded(
+                  child: _AnswerButton(
+                    label: 'Yes',
+                    selected: observation?.worked == true,
+                    onTap: () => _recordObservation(step, true),
+                  ),
                 ),
-              ),
-            ],
-          ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: _AnswerButton(
+                    label: 'No',
+                    selected: observation?.worked == false,
+                    onTap: () => _recordObservation(step, false),
+                  ),
+                ),
+              ],
+            ),
+          ],
         ],
       ),
+    );
+  }
+
+  Widget _buildEvidenceColumns(_StepObservation observation) {
+    final reportedLabel = _reportedStateLabel(observation.serverResult);
+    final observedLabel = !observation.answered
+        ? 'Awaiting operator'
+        : observation.worked == true
+            ? 'Matched'
+            : 'Did not match';
+    return Row(
+      key: const ValueKey('bulb-audition-evidence-columns'),
+      children: [
+        Expanded(
+            child: _EvidenceColumn(label: 'Reported', value: reportedLabel)),
+        const SizedBox(width: 8),
+        Expanded(
+            child: _EvidenceColumn(label: 'Observed', value: observedLabel)),
+      ],
     );
   }
 
@@ -490,32 +673,126 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
     });
     HapticFeedback.mediumImpact();
 
-    final result =
-        await context.read<ServerSyncProvider>().api.runMatterBulbTest(
-              deviceId: widget.device.id,
-              test: step.id,
-            );
+    final result = await context.read<ServerSyncProvider>().api.runBulbAudition(
+          deviceId: widget.device.id,
+          scenario: step.id,
+          journeyId: _journeyId,
+          profileOverride: _acceptedOverrides.isEmpty
+              ? null
+              : Map<String, dynamic>.from(_acceptedOverrides),
+          legacyTest: step.legacyTest,
+        );
 
     if (!mounted) return;
     final existing = _observations[step.id];
+    final autoComplete = !step.operatorAnswer && result != null;
+    final profile = result?['profile_used'];
     setState(() {
       _observations[step.id] = _StepObservation(
-        worked: existing?.worked,
-        answered: existing?.answered ?? false,
+        worked:
+            autoComplete ? result['needs_audition'] != true : existing?.worked,
+        answered: autoComplete || (existing?.answered ?? false),
         serverResult: result,
         recordedAt: existing?.recordedAt ?? DateTime.now(),
       );
+      if (profile is Map) {
+        _latestProfileUsed = Map<String, dynamic>.from(profile);
+      }
+      if (autoComplete) {
+        final activeSteps = _activeSteps();
+        final currentIndex =
+            activeSteps.indexWhere((candidate) => candidate.id == step.id);
+        if (currentIndex >= 0 && currentIndex < activeSteps.length - 1) {
+          _currentStep = currentIndex + 1;
+        }
+      }
       _running = false;
       if (result == null) {
         _status = 'The server did not return a result for ${step.title}.';
+      } else if (result['status'] == 'unsupported') {
+        _status = 'This Light Box needs a newer version for Bulb Audition.';
+      } else if (result['needs_audition'] == true) {
+        _status = 'Needs audition: the reported state did not match the plan.';
       }
     });
+    AnalyticsService().logBulbAuditionScenarioCompleted(
+      journeyId: _journeyId,
+      scenario: step.id,
+      outcome: result?['status']?.toString() ?? 'failed',
+      failureStage: result?['mismatch_field']?.toString(),
+    );
+  }
+
+  Future<void> _runTryWith(
+    MatterBulbTestStep step,
+    _TryWithChoice choice,
+  ) async {
+    setState(() {
+      _running = true;
+      _status = 'Rehearsing ${step.title} with ${choice.label.toLowerCase()}.';
+    });
+    HapticFeedback.mediumImpact();
+
+    final result = await context.read<ServerSyncProvider>().api.runBulbAudition(
+      deviceId: widget.device.id,
+      scenario: 'try_with',
+      journeyId: _journeyId,
+      baseScenario: step.id,
+      profileOverride: {
+        ..._acceptedOverrides,
+        choice.field: choice.value,
+      },
+    );
+
+    if (!mounted) return;
+    final profile = result?['profile_used'];
+    setState(() {
+      _observations[step.id] = _StepObservation(
+        worked: null,
+        answered: false,
+        serverResult: result,
+        recordedAt: DateTime.now(),
+      );
+      _pendingTryWithProfile =
+          profile is Map ? Map<String, dynamic>.from(profile) : null;
+      _pendingTryWithScenario = _pendingTryWithProfile == null ? null : step.id;
+      _pendingTryWithChoice = _pendingTryWithProfile == null ? null : choice;
+      _running = false;
+      _status = switch (result?['status']) {
+        'unsupported' =>
+          'This Light Box needs a newer version for Try with… rehearsals.',
+        null => 'The server did not return a Try with… result.',
+        _ when result?['needs_audition'] == true =>
+          'The alternative was acknowledged but did not change the reported state.',
+        _ => 'Alternative rehearsed. Confirm what the bulb visibly did.',
+      };
+    });
+    AnalyticsService().logBulbAuditionScenarioCompleted(
+      journeyId: _journeyId,
+      scenario: 'try_with',
+      outcome: result?['status']?.toString() ?? 'failed',
+      failureStage: result?['mismatch_field']?.toString(),
+    );
   }
 
   void _recordObservation(MatterBulbTestStep step, bool worked) {
     HapticFeedback.selectionClick();
     final existing = _observations[step.id];
     setState(() {
+      if (_pendingTryWithScenario == step.id) {
+        if (worked &&
+            _pendingTryWithProfile != null &&
+            _pendingTryWithChoice != null) {
+          _acceptedOverrides[_pendingTryWithChoice!.field] =
+              _pendingTryWithChoice!.value;
+          _latestProfileUsed = Map<String, dynamic>.from(
+            _pendingTryWithProfile!,
+          );
+        }
+        _pendingTryWithProfile = null;
+        _pendingTryWithScenario = null;
+        _pendingTryWithChoice = null;
+      }
       _observations[step.id] = _StepObservation(
         worked: worked,
         answered: true,
@@ -542,13 +819,24 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
 
     final sync = context.read<ServerSyncProvider>();
     final report = _buildReport();
-    final service = MatterBulbTesterService.instance;
+    final profile = Map<String, dynamic>.from(
+      report['control_profile'] as Map,
+    );
+    final answered = _observations.values.where(
+      (observation) => observation.answered,
+    );
+    final applyLocal = controlProfileHasAuditionEvidence(profile) ||
+        answered.every((observation) => observation.worked == true);
+    final service = widget.reportService ?? BulbAuditionService.instance;
     await service.saveLocalReport({
       ...report,
       'local_status': 'pending',
     });
 
-    final serverResult = await sync.api.saveMatterBulbTestReport(report);
+    final serverResult = await sync.api.saveBulbAuditionReport(
+      report,
+      applyLocal: applyLocal,
+    );
     final cloudResult = await service.submitCloudReport(
       report: {
         ...report,
@@ -585,18 +873,12 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
         (false, _, false) => 'Saved locally. Server save failed.',
       };
     });
-    AnalyticsService().logMatterBulbTesterSaveCompleted(
+    AnalyticsService().logBulbAuditionSaveCompleted(
       journeyId: _journeyId,
       outcome: serverSaved && cloudResult.uploaded ? 'succeeded' : 'partial',
       answeredTestCount: _observations.values
           .where((observation) => observation.answered)
           .length,
-      skippedXyTestCount: _skippedXyTestIds.length,
-      xyOutcome: switch (_observations['xy_red']?.worked) {
-        true => 'succeeded',
-        false => 'failed',
-        null => 'not_tested',
-      },
       serverOutcome: serverSaved ? 'saved' : 'failed',
       cloudOutcome: cloudResult.uploaded ? 'uploaded' : 'not_uploaded',
     );
@@ -610,8 +892,9 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
     final rawCapabilitySnapshot = _firstServerMap('raw_capability_snapshot');
     final operatorNotes = _notesController.text.trim();
     return {
-      'schema_version': 2,
+      'schema_version': 3,
       'report_id': _uuid.v4(),
+      'journey_id': _journeyId,
       'device_id': widget.nativeDeviceId,
       'canonical_device_id': widget.device.id,
       'created_at': DateTime.now().toUtc().toIso8601String(),
@@ -620,8 +903,8 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
         'active_test_count': _activeSteps().length,
         'single_color_sample': 'red',
         'assume_green_blue_if_red_succeeds': true,
-        'rapid_cycling_assumed_unsupported': true,
-        'assumed_command_spacing_ms': defaultMatterBulbCommandSpacingMs,
+        'plan_owner': 'runtime_turn_on_plans',
+        'command_spacing': _commandSpacing(),
         'skipped_tests': [
           for (final testId in _skippedXyTestIds)
             {
@@ -659,9 +942,39 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
                 'server_result': _observations[step.id]!.serverResult,
             },
       ],
+      'scenarios': [
+        for (final step in matterBulbTestSteps)
+          if (_observations[step.id] != null)
+            {
+              'scenario': step.id,
+              'plan_submitted':
+                  _observations[step.id]!.serverResult?['plan_submitted'],
+              'acknowledgements':
+                  _observations[step.id]!.serverResult?['acknowledgements'],
+              'reported': _observations[step.id]!.serverResult?['reported'],
+              'plan_observations':
+                  _observations[step.id]!.serverResult?['plan_observations'],
+              'subscription_reports':
+                  _observations[step.id]!.serverResult?['subscription_reports'],
+              if (_observations[step.id]!.serverResult?['adaptive_white'] !=
+                  null)
+                'adaptive_white':
+                    _observations[step.id]!.serverResult?['adaptive_white'],
+              'observed': {
+                'required': step.operatorAnswer,
+                'answered':
+                    step.operatorAnswer && _observations[step.id]!.answered,
+                'worked':
+                    step.operatorAnswer ? _observations[step.id]!.worked : null,
+              },
+              'profile_used':
+                  _observations[step.id]!.serverResult?['profile_used'],
+            },
+      ],
       'inferred_quirks': _inferredQuirks(),
       'inferred_behavioral_quirks': _inferredBehavioralQuirks(),
       'recommended_control_strategy': _recommendedControlStrategy(),
+      'control_profile': _controlProfile(),
       if (capabilityHints.isNotEmpty) 'capability_hints': capabilityHints,
       'dimming': {
         'low_dim_test_percent': 3,
@@ -698,6 +1011,81 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
       }
     }
     return null;
+  }
+
+  Map<String, dynamic>? _lastServerMap(String key) {
+    for (final step in matterBulbTestSteps.reversed) {
+      final value = _observations[step.id]?.serverResult?[key];
+      if (value is Map) {
+        return Map<String, dynamic>.from(value);
+      }
+    }
+    return null;
+  }
+
+  String _reportedStateLabel(Map<String, dynamic>? serverResult) {
+    dynamic fieldValue(Map<dynamic, dynamic> state, String field) {
+      final value = state[field];
+      if (value is Map) {
+        if (value['ok'] == false) return null;
+        return value['value'];
+      }
+      return value;
+    }
+
+    final reported = serverResult?['reported'];
+    final after = reported is Map ? reported['after_1500ms'] : null;
+    final parts = <String>[];
+    if (after is Map) {
+      final on = fieldValue(after, 'onoff');
+      if (on == false) {
+        parts.add('Off');
+      } else {
+        if (on == true) parts.add('On');
+        final level = fieldValue(after, 'current_level');
+        if (level is num) {
+          parts.add('${(level * 100 / 254).round().clamp(0, 100)} %');
+        }
+        final mireds = fieldValue(after, 'color_temperature_mireds');
+        if (mireds is num && mireds > 0) {
+          parts.add('${(1000000 / mireds).round()} K');
+        } else {
+          final hue = fieldValue(after, 'current_hue');
+          final saturation = fieldValue(after, 'current_saturation');
+          if (hue is num && saturation is num) {
+            parts.add('hue ${hue.round()} sat ${saturation.round()}');
+          }
+        }
+      }
+    }
+    final mismatch = serverResult?['mismatch_field']?.toString();
+    if (mismatch != null && mismatch.isNotEmpty) {
+      parts.add('${mismatch.replaceAll('_', ' ')} mismatch');
+    }
+    if (parts.isNotEmpty) return parts.join(' · ');
+    if (serverResult?['needs_audition'] == true) return 'Mismatch detected';
+    return reported == null ? 'Not available' : 'State captured';
+  }
+
+  bool _hasTrustedReportedField(Iterable<String> fieldNames) {
+    for (final observation in _observations.values) {
+      if (!observation.answered ||
+          observation.worked != true ||
+          observation.serverResult?['needs_audition'] == true) {
+        continue;
+      }
+      final reported = observation.serverResult?['reported'];
+      if (reported is! Map) continue;
+      final after = reported['after_1500ms'];
+      if (after is! Map) continue;
+      for (final fieldName in fieldNames) {
+        final field = after[fieldName];
+        if (field is Map && field['ok'] == true && field.containsKey('value')) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   Map<String, dynamic> _commandResults() {
@@ -838,9 +1226,193 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
       'color_command': _preferredColorCommand(),
       'min_brightness': minBrightness,
       'transition_behavior': _transitionBehavior(),
-      'recommended_command_spacing_ms': defaultMatterBulbCommandSpacingMs,
+      'recommended_command_spacing_ms': _commandSpacing()['value_ms'],
       'on_restores_previous_level': _observations['on_level_restore']?.worked,
       'power_on_behavior': _powerOnBehavior(),
+    };
+  }
+
+  Map<String, dynamic> _controlProfile() {
+    final fromServer = _latestProfileUsed ?? _lastServerMap('profile_used');
+    if (fromServer != null) {
+      final profile = Map<String, dynamic>.from(fromServer);
+      final measuredSpacing = _observations['command_spacing']
+          ?.serverResult?['command_spacing_measurement'];
+      if (measuredSpacing is Map) {
+        profile['command_spacing_ms'] = Map<String, dynamic>.from(
+          measuredSpacing,
+        );
+      }
+      final sources = profile['source'] is Map
+          ? Map<String, dynamic>.from(profile['source'] as Map)
+          : <String, dynamic>{};
+      final onOffReadback = _hasTrustedReportedField(const ['onoff']);
+      final levelReadback = _hasTrustedReportedField(const ['current_level']);
+      final colorReadback = _hasTrustedReportedField(const [
+        'current_hue',
+        'current_saturation',
+        'current_x',
+        'current_y',
+        'color_temperature_mireds',
+      ]);
+      if (onOffReadback || levelReadback || colorReadback) {
+        final existing = profile['readback_trust'] is Map
+            ? Map<String, dynamic>.from(profile['readback_trust'] as Map)
+            : <String, dynamic>{};
+        profile['readback_trust'] = {
+          'on_off': onOffReadback || existing['on_off'] == true,
+          'level': levelReadback || existing['level'] == true,
+          'color': colorReadback || existing['color'] == true,
+        };
+        sources['readback_trust'] = 'audition';
+      }
+      final establishSubscription = _subscriptionFor(
+        'subscription_establish',
+      );
+      final externalSubscription = _subscriptionFor(
+        'subscription_external_change',
+      );
+      final livenessSubscription = _subscriptionFor(
+        'subscription_liveness',
+      );
+      final powerCycleSubscription = _subscriptionFor(
+        'power_cycle_then_tick',
+      );
+      if (establishSubscription != null ||
+          externalSubscription != null ||
+          livenessSubscription != null ||
+          powerCycleSubscription != null) {
+        final latency = [
+          establishSubscription,
+          externalSubscription,
+          livenessSubscription,
+          powerCycleSubscription,
+        ]
+            .whereType<Map<String, dynamic>>()
+            .map(
+              (value) =>
+                  value['report_latency_ms'] ??
+                  value['establish_rpc_ms'] ??
+                  value['establish_latency_ms'],
+            )
+            .whereType<num>()
+            .firstOrNull;
+        final truthMatchesDirectRead = [
+          establishSubscription,
+          externalSubscription,
+          livenessSubscription,
+          powerCycleSubscription,
+        ]
+            .whereType<Map<String, dynamic>>()
+            .map((value) => value['truth_matches_direct_read'])
+            .whereType<bool>()
+            .firstOrNull;
+        profile['subscription'] = {
+          'works': establishSubscription?['works'] == true,
+          if (latency != null) 'latency_ms': latency,
+          if (truthMatchesDirectRead != null)
+            'truth_matches_direct_read': truthMatchesDirectRead,
+          'subscription_survived':
+              powerCycleSubscription?['subscription_survived'] == true,
+          'resubscribe_after_power_cycle':
+              powerCycleSubscription?['resubscribe_after_power_cycle'] == true,
+          'reports_external_changes':
+              externalSubscription?['reports_external_changes'] == true,
+          'liveness_interval_s': livenessSubscription?['liveness_interval_s'] ??
+              establishSubscription?['liveness_interval_s'],
+        };
+        sources['subscription'] = 'audition';
+      }
+      profile['source'] = sources;
+      return applyBulbAuditionAnswersToControlProfile(
+        profile,
+        _profileAnswers(),
+        acceptedOverrideFields: _acceptedOverrides.keys.toSet(),
+      );
+    }
+    // Mirrors `MatterControlProfile::default()` on the appliance.
+    final fallback = <String, dynamic>{
+      'schema_version': 1,
+      'color_route': 'color_temperature',
+      'hs_white_curve': const [],
+      'turn_on': 'stage_color_then_level_with_on_off',
+      'level_command': 'move_to_level_with_on_off',
+      'command_spacing_ms': {
+        'value_ms': bulbAuditionDefaultAssumedCommandSpacingMs,
+        'basis': 'assumed',
+        'source': 'safe_default',
+      },
+      'execute_if_off_honoured': true,
+      'on_restores_previous': false,
+      'power_on_behavior': 'unknown',
+      'supports_transition': true,
+      'readback_trust': {
+        'on_off': false,
+        'level': false,
+        'color': false,
+      },
+      'subscription': {
+        'works': false,
+        'truth_matches_direct_read': null,
+        'subscription_survived': false,
+        'resubscribe_after_power_cycle': false,
+        'reports_external_changes': false,
+      },
+      'source': {
+        'color_route': 'safe_default',
+        'hs_white_curve': 'safe_default',
+        'turn_on': 'safe_default',
+        'level_command': 'safe_default',
+        'execute_if_off_honoured': 'safe_default',
+        'on_restores_previous': 'safe_default',
+        'power_on_behavior': 'safe_default',
+        'kelvin_range': 'safe_default',
+        'min_brightness': 'safe_default',
+        'supports_transition': 'safe_default',
+        'readback_trust': 'safe_default',
+        'subscription': 'safe_default',
+      },
+    };
+    return applyBulbAuditionAnswersToControlProfile(
+      fallback,
+      _profileAnswers(),
+      acceptedOverrideFields: _acceptedOverrides.keys.toSet(),
+    );
+  }
+
+  Map<String, bool?> _profileAnswers() => {
+        for (final scenario in const [
+          'dim_ramp',
+          'dim_floor',
+          'turn_on_from_off',
+          'power_cycle_then_tick',
+          'off_then_on_restore',
+        ])
+          scenario: _observations[scenario]?.answered == true
+              ? _observations[scenario]?.worked
+              : null,
+      };
+
+  Map<String, dynamic>? _subscriptionFor(String scenario) {
+    final value = _observations[scenario]?.serverResult?['subscription'];
+    return value is Map ? Map<String, dynamic>.from(value) : null;
+  }
+
+  Map<String, dynamic> _commandSpacing() {
+    final measured = _observations['command_spacing']
+        ?.serverResult?['command_spacing_measurement'];
+    if (measured is Map && measured['value_ms'] is num) {
+      return Map<String, dynamic>.from(measured);
+    }
+    final profile = _firstServerMap('profile_used');
+    final spacing = profile?['command_spacing_ms'];
+    if (spacing is Map && spacing['value_ms'] is num) {
+      return Map<String, dynamic>.from(spacing);
+    }
+    return const {
+      'value_ms': bulbAuditionDefaultAssumedCommandSpacingMs,
+      'basis': 'assumed',
+      'source': 'safe_default',
     };
   }
 
@@ -937,50 +1509,20 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
   }
 
   String _turnOnSequence() {
-    final brightnessWithoutOn = _observations['brightness_without_on']?.worked;
-    final brightnessWithOn = _observations['brightness_with_on']?.worked;
-    final moveToLevelWithOnOff =
-        _observations['level_move_to_level_with_onoff']?.worked;
-    if (brightnessWithoutOn == true) return 'level_command_turns_on';
-    if (brightnessWithoutOn == false &&
-        (brightnessWithOn == true || moveToLevelWithOnOff == true)) {
-      return 'explicit_on_then_level';
-    }
-    if (brightnessWithoutOn == false && brightnessWithOn == false) {
-      return 'explicit_on_then_level_unreliable';
-    }
+    final fromOff = _observations['turn_on_from_off']?.worked;
+    if (fromOff == true) return 'stage_color_then_level_with_on_off';
+    if (fromOff == false) return 'explicit_on_first';
     return 'unknown';
   }
 
   String _preferredLevelCommand() {
-    if (_observations['level_move_to_level_with_onoff']?.worked == true) {
-      return 'move_to_level_with_onoff';
-    }
-    if (_observations['brightness_with_on']?.worked == true) {
-      return 'move_to_level_with_onoff';
-    }
-    if (_observations['level_move_to_level']?.worked == true) {
-      return 'move_to_level';
-    }
-    if (_observations['level_step_with_onoff']?.worked == true) {
-      return 'step_with_onoff';
-    }
-    if (_observations['level_step']?.worked == true) {
-      return 'step';
-    }
-    return 'move_to_level_with_onoff';
+    return _firstServerMap('profile_used')?['level_command']?.toString() ??
+        'move_to_level_with_onoff';
   }
 
   String _preferredColorCommand() {
-    final colorTemperatureWorked = [
-      _observations['color_temperature_warm']?.worked,
-      _observations['color_temperature_cool']?.worked,
-    ].any((worked) => worked == true);
-    return preferredMatterColorCommand(
-      colorTemperatureWorked: colorTemperatureWorked,
-      hueSaturationWorked: _observations['hue_sat_red']?.worked == true,
-      xyWorked: _observations['xy_red']?.worked == true,
-    );
+    return _firstServerMap('profile_used')?['color_route']?.toString() ??
+        'hue_saturation';
   }
 
   String _transitionBehavior() {
@@ -991,7 +1533,7 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
   }
 
   String _powerOnBehavior() {
-    final worked = _observations['power_on_behavior']?.worked;
+    final worked = _observations['power_cycle_then_tick']?.worked;
     if (worked == true) return 'restore_previous';
     if (worked == false) return 'not_restore_previous';
     return 'unknown';
@@ -999,29 +1541,19 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
 
   List<dynamic> _inferredQuirks() {
     final quirks = <dynamic>[];
-    final brightnessWithoutOn = _observations['brightness_without_on']?.worked;
-    final brightnessWithOn = _observations['brightness_with_on']?.worked;
-    if (brightnessWithoutOn == false && brightnessWithOn != false) {
+    if (_observations['turn_on_from_off']?.worked == false) {
       quirks.add('needs_explicit_on');
     }
-
-    final colorTemperatureResults = [
-      _observations['color_temperature_warm']?.worked,
-      _observations['color_temperature_cool']?.worked,
-    ];
-    final colorTemperatureFailed =
-        colorTemperatureResults.any((worked) => worked == false);
-    if (colorTemperatureFailed && _observations['xy_red']?.worked == true) {
-      quirks.add('needs_xy_not_ct');
+    if (_observations['color_to_white_and_back']?.worked == false) {
+      quirks.add('color_mode_switch_requires_audition');
     }
-    quirks.add({'command_throttle_ms': defaultMatterBulbCommandSpacingMs});
     return quirks;
   }
 
   Map<String, dynamic> _capabilityHints() {
     final hints = <String, dynamic>{};
-    if (_observations['dim_low']?.worked == false) {
-      hints['min_brightness'] = _lowDimMinBrightnessHint;
+    if (_observations['dim_floor']?.worked == false) {
+      hints['min_brightness'] = bulbAuditionLowDimMinBrightnessHint;
     }
     if (_observations['dim_ramp']?.worked == false) {
       hints['supports_transition'] = false;
@@ -1074,6 +1606,57 @@ class _StepObservation {
   final bool answered;
   final Map<String, dynamic>? serverResult;
   final DateTime recordedAt;
+}
+
+class _TryWithChoice {
+  const _TryWithChoice({
+    required this.label,
+    required this.field,
+    required this.value,
+  });
+
+  final String label;
+  final String field;
+  final Object value;
+}
+
+class _EvidenceColumn extends StatelessWidget {
+  const _EvidenceColumn({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: CelestialColors.backgroundDark.withValues(alpha: 0.32),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(
+              color: CelestialColors.textSecondary,
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 3),
+          Text(
+            value,
+            style: const TextStyle(
+              color: CelestialColors.textPrimary,
+              fontSize: 12,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _AnswerButton extends StatelessWidget {

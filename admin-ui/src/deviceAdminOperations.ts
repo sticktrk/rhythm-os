@@ -870,22 +870,22 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     path: 'api/matter/captures/{capture_id}'
   },
   {
-    id: 'matter-bulb-test',
+    id: 'bulb-audition',
     category: 'Devices & Topology',
-    label: 'Run Matter bulb test',
-    description: 'Run a raw Matter bulb tester command.',
+    label: 'Run Bulb Audition scenario',
+    description: 'Run a controlled scenario through the runtime Matter plan.',
     method: 'POST',
-    path: 'api/matter/bulb-test/run',
-    body: { device_id: '{device_id}', test: 'on_off' }
+    path: 'api/matter/audition/run',
+    body: { device_id: '{device_id}', scenario: 'preflight' }
   },
   {
-    id: 'matter-bulb-report',
+    id: 'bulb-audition-report',
     category: 'Devices & Topology',
-    label: 'Save Matter bulb report',
-    description: 'Save and optionally apply a Matter bulb tester report.',
+    label: 'Save Bulb Audition report',
+    description: 'Save and optionally apply a typed schema-v3 control profile.',
     method: 'POST',
-    path: 'api/matter/bulb-test/report',
-    body: { device_id: '{device_id}', apply_local: true }
+    path: 'api/matter/audition/report',
+    body: { schema_version: 3, device_id: '{device_id}', apply_local: true }
   },
   {
     id: 'hub-credentials',
