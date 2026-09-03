@@ -266,11 +266,11 @@ fn execute_scenario(
     profile: &MatterControlProfile,
 ) -> Result<Value> {
     let started_at_unix_ms = now_unix_ms();
+    let mut cursor = seed_controller_cursor(transport);
     let subscription = subscription_snapshot(transport, node_id, endpoint, scenario);
     let readback_before = readback_snapshot(transport, node_id, endpoint);
     let mut submissions = Vec::new();
     let mut outcomes = Vec::new();
-    let mut cursor = None;
     let mut acknowledged_at_unix_ms = started_at_unix_ms;
     let mut acknowledgement_times = vec![started_at_unix_ms];
     let mut readback_after_immediate = readback_before.clone();
@@ -580,6 +580,23 @@ fn wait_for_plan_outcome(
     None
 }
 
+fn seed_controller_cursor(
+    transport: &Arc<dyn MatterTransport>,
+) -> Option<MatterControllerEventCursor> {
+    let batch = transport
+        .wait_controller_events(None, Duration::ZERO)
+        .ok()?;
+    let sequence = batch
+        .events
+        .last()
+        .map(|event| event.sequence)
+        .unwrap_or_else(|| batch.oldest_sequence.saturating_sub(1));
+    Some(MatterControllerEventCursor {
+        stream_id: batch.stream_id,
+        sequence,
+    })
+}
+
 fn preflight_execute_if_off_options_write(
     transport: &Arc<dyn MatterTransport>,
     node_id: u64,
@@ -668,8 +685,9 @@ fn subscription_snapshot(
         )
     };
     json!({
-        "works": result.is_ok(),
-        "establish_latency_ms": started.elapsed().as_millis() as u64,
+        "rpc_accepted": result.is_ok(),
+        "establish_rpc_ms": started.elapsed().as_millis() as u64,
+        "works": false,
         "attributes": [
             "on_off",
             "current_level",
@@ -694,6 +712,13 @@ fn merge_subscription_evidence(
     scenario: &str,
 ) -> Value {
     if let Some(subscription) = subscription.as_object_mut() {
+        subscription.insert(
+            "works".to_string(),
+            json!(reports.iter().any(|report| !matches!(
+                &report.value,
+                MatterAttributeValue::SubscriptionTerminated
+            ))),
+        );
         subscription.insert("report_latency_ms".to_string(), json!(report_latency_ms));
         subscription.insert(
             "truth_matches_direct_read".to_string(),
@@ -1107,7 +1132,7 @@ mod tests {
     fn power_cycle_evidence_distinguishes_survival_from_resubscription() {
         let readback = json!({"onoff": {"ok": true, "value": true}});
         let resubscribed = merge_subscription_evidence(
-            json!({"works": true}),
+            json!({"rpc_accepted": true, "works": false}),
             None,
             None,
             &[],
@@ -1120,6 +1145,7 @@ mod tests {
         );
         assert_eq!(resubscribed["resubscribe_after_power_cycle"], json!(true));
         assert_eq!(resubscribed["subscription_survived"], json!(false));
+        assert_eq!(resubscribed["works"], json!(true));
 
         let survived = merge_subscription_evidence(
             json!({"works": true}),
@@ -1132,6 +1158,23 @@ mod tests {
         );
         assert_eq!(survived["resubscribe_after_power_cycle"], json!(false));
         assert_eq!(survived["subscription_survived"], json!(true));
+        assert_eq!(survived["works"], json!(true));
+    }
+
+    #[test]
+    fn subscription_acceptance_without_report_is_not_evidence_that_it_works() {
+        let evidence = merge_subscription_evidence(
+            json!({"rpc_accepted": true, "works": false}),
+            None,
+            None,
+            &[],
+            &[],
+            &Value::Null,
+            "subscription_establish",
+        );
+
+        assert_eq!(evidence["rpc_accepted"], json!(true));
+        assert_eq!(evidence["works"], json!(false));
     }
 
     #[test]

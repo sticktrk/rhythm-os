@@ -131,24 +131,6 @@ impl CloudMatterProfileCatalog {
         );
     }
 
-    /// Apply only fields explicitly present in the approved cloud profile to
-    /// the typed runtime strategy. This keeps source precedence per-field
-    /// instead of turning a sparse cloud row into a complete replacement.
-    pub fn apply_to_control_profile(
-        &self,
-        device: &CommissionedDevice,
-        profile: &mut crate::control_profile::MatterControlProfile,
-    ) {
-        let Some(cloud) = self
-            .profiles
-            .iter()
-            .find(|candidate| candidate.matches(device))
-        else {
-            return;
-        };
-        cloud.apply_to_control_profile(profile);
-    }
-
     /// Build a sparse typed overlay for the matching approved profile. Source
     /// metadata identifies the fields that are truly present in legacy feeds.
     pub fn control_profile_for_device(

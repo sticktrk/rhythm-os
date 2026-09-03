@@ -349,6 +349,7 @@ impl MatterLightController {
                 profile.level_command,
                 MatterLevelCommand::MoveToLevelWithOnOff | MatterLevelCommand::StepWithOnOff
             );
+            let explicit_on = adapted.on && (level_step.is_none() || !level_turns_on);
             match turn_on {
                 MatterTurnOnStrategy::ExplicitOnFirst => {
                     if adapted.on {
@@ -362,13 +363,11 @@ impl MatterLightController {
                     }
                 }
                 MatterTurnOnStrategy::LevelWithOnOffThenColor => {
-                    if adapted.on && !level_turns_on {
+                    if explicit_on {
                         steps.push(MatterCommandStep::SetOnOff { on: true });
                     }
                     if let Some(step) = level_step {
                         steps.push(step);
-                    } else if adapted.on {
-                        steps.push(MatterCommandStep::SetOnOff { on: true });
                     }
                     if let Some(step) = color_step {
                         steps.push(step);
@@ -378,13 +377,11 @@ impl MatterLightController {
                     if let Some(step) = color_step {
                         steps.push(step);
                     }
-                    if adapted.on && !level_turns_on {
+                    if explicit_on {
                         steps.push(MatterCommandStep::SetOnOff { on: true });
                     }
                     if let Some(step) = level_step {
                         steps.push(step);
-                    } else if adapted.on {
-                        steps.push(MatterCommandStep::SetOnOff { on: true });
                     }
                 }
             }
@@ -1537,6 +1534,44 @@ mod tests {
             assert_eq!(runtime.endpoint, audition.endpoint);
             assert_eq!(runtime.steps, audition.steps);
             assert_eq!(runtime.inter_step_delay_ms, audition.inter_step_delay_ms);
+        }
+    }
+
+    #[test]
+    fn profiles_without_a_level_step_emit_one_explicit_on() {
+        let (controller, _, _) = make_controller();
+        set_device_capabilities(
+            &controller,
+            42,
+            LightCapabilities::defaults_for(LightType::OnOff),
+        );
+        for turn_on in [
+            MatterTurnOnStrategy::LevelWithOnOffThenColor,
+            MatterTurnOnStrategy::StageColorThenLevelWithOnOff,
+        ] {
+            let profile = MatterControlProfile {
+                level_command: MatterLevelCommand::MoveToLevel,
+                turn_on,
+                ..MatterControlProfile::default()
+            };
+
+            let plans = controller
+                .audition_turn_on_plans(
+                    &["matter-42".to_string()],
+                    &LightingCommand::new(60, 2_700),
+                    &profile,
+                )
+                .unwrap();
+
+            assert_eq!(
+                plans[0]
+                    .steps
+                    .iter()
+                    .filter(|step| matches!(step, MatterCommandStep::SetOnOff { on: true }))
+                    .count(),
+                1,
+                "{turn_on:?}"
+            );
         }
     }
 

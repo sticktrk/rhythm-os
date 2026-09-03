@@ -1291,7 +1291,9 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
             .whereType<Map<String, dynamic>>()
             .map(
               (value) =>
-                  value['report_latency_ms'] ?? value['establish_latency_ms'],
+                  value['report_latency_ms'] ??
+                  value['establish_rpc_ms'] ??
+                  value['establish_latency_ms'],
             )
             .whereType<num>()
             .firstOrNull;
