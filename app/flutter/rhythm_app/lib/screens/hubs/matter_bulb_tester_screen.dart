@@ -1330,14 +1330,15 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
         acceptedOverrideFields: _acceptedOverrides.keys.toSet(),
       );
     }
+    // Mirrors `MatterControlProfile::default()` on the appliance.
     final fallback = <String, dynamic>{
       'schema_version': 1,
-      'color_route': 'hue_saturation',
+      'color_route': 'color_temperature',
       'hs_white_curve': const [],
       'turn_on': 'stage_color_then_level_with_on_off',
       'level_command': 'move_to_level_with_on_off',
       'command_spacing_ms': {
-        'value_ms': 0,
+        'value_ms': bulbAuditionDefaultAssumedCommandSpacingMs,
         'basis': 'assumed',
         'source': 'safe_default',
       },
@@ -1409,7 +1410,7 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
       return Map<String, dynamic>.from(spacing);
     }
     return const {
-      'value_ms': 0,
+      'value_ms': bulbAuditionDefaultAssumedCommandSpacingMs,
       'basis': 'assumed',
       'source': 'safe_default',
     };

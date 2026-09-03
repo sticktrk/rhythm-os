@@ -20,6 +20,10 @@ class BulbAuditionScenario {
 
 const bulbAuditionLowDimMinBrightnessHint = 10;
 
+/// Appliance default gap between plan steps when nothing measured one.
+/// Mirrors `DEFAULT_ASSUMED_COMMAND_SPACING_MS` in `rhythm-matter`.
+const bulbAuditionDefaultAssumedCommandSpacingMs = 100;
+
 /// Applies operator answers to the typed profile that runtime planning reads.
 ///
 /// The server-supplied profile remains authoritative for fields the operator

@@ -719,6 +719,10 @@ pub(crate) fn store_device_metadata(
     if let Ok(mut device_profiles) = hub_data.device_profiles.lock() {
         device_profiles.insert(device_id.to_string(), resolved.control_profile);
     }
+    // A successful probe replaces any guessed capability set.
+    if let Ok(mut fallback_caps) = hub_data.fallback_caps.lock() {
+        fallback_caps.remove(device_id);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -786,18 +790,18 @@ pub(crate) fn resolve_device_metadata(
     }
 }
 
+/// Capabilities for a light that could not be probed and matches no profile.
+///
+/// Color temperature is the only color route every tunable Matter light
+/// accepts, so a guessed capability set never places a hue/saturation or XY
+/// step in front of the level command that turns the light on. A successful
+/// probe replaces this with what the device actually advertises.
 pub(crate) fn fallback_device_capabilities() -> rhythm_devices::LightCapabilities {
-    rhythm_devices::LightCapabilities {
-        color_modes: vec![
-            rhythm_devices::ColorMode::HueSaturation,
-            rhythm_devices::ColorMode::ColorTemperature,
-        ],
-        ..rhythm_devices::LightCapabilities::defaults_for(rhythm_devices::LightType::ExtendedColor)
-    }
+    rhythm_devices::LightCapabilities::defaults_for(rhythm_devices::LightType::ColorTemperature)
 }
 
 pub(crate) fn store_fallback_device_metadata(hub_data: &Arc<MatterHubData>, device_id: &str) {
-    if let Ok(mut device_caps) = hub_data.device_caps.lock() {
+    let inserted_fallback = if let Ok(mut device_caps) = hub_data.device_caps.lock() {
         if !device_caps.contains_key(device_id) {
             device_caps.insert(device_id.to_string(), fallback_device_capabilities());
             info!(
@@ -806,8 +810,13 @@ pub(crate) fn store_fallback_device_metadata(hub_data: &Arc<MatterHubData>, devi
                 device_id,
                 device_caps.len()
             );
+            true
+        } else {
+            false
         }
-    }
+    } else {
+        false
+    };
 
     if let Ok(mut device_quirks) = hub_data.device_quirks.lock() {
         device_quirks.entry(device_id.to_string()).or_default();
@@ -822,6 +831,11 @@ pub(crate) fn store_fallback_device_metadata(hub_data: &Arc<MatterHubData>, devi
                     crate::control_profile::MatterProfileSource::SafeDefault,
                 )
             });
+    }
+    if inserted_fallback {
+        if let Ok(mut fallback_caps) = hub_data.fallback_caps.lock() {
+            fallback_caps.insert(device_id.to_string());
+        }
     }
 }
 
@@ -867,9 +881,10 @@ fn register_canonical_identity(
         .find_by_native_id(hub_key, device_id)
         .map(|device| device.id.clone())
         .ok_or_else(|| anyhow::anyhow!("Canonical Matter endpoint was not registered"))?;
-    if let Some(normalized) =
-        crate::lifecycle::normalized_endpoint_capabilities(&build_device_capabilities(device))
-    {
+    if let Some(normalized) = crate::lifecycle::normalized_endpoint_capabilities(
+        &build_device_capabilities(device),
+        false,
+    ) {
         let endpoint = state
             .canonical_registry
             .get_mut(&canonical_id)
@@ -1161,6 +1176,7 @@ mod tests {
                 commissioned: Mutex::new(Vec::new()),
                 next_node_id: AtomicU64::new(10),
                 device_caps: Mutex::new(HashMap::new()),
+                fallback_caps: Mutex::new(HashSet::new()),
                 device_quirks: Mutex::new(HashMap::new()),
                 device_profiles: Mutex::new(HashMap::new()),
                 pending_turn_on_plans: Arc::new(Mutex::new(HashMap::new())),
@@ -1173,6 +1189,7 @@ mod tests {
                 node_proof_of_life: Arc::new(Mutex::new(HashMap::new())),
                 on_off_observations: Arc::new(Mutex::new(HashMap::new())),
                 attribute_report_history: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+                last_turn_on_dispatch: Mutex::new(HashMap::new()),
                 event_tx,
             }),
             event_rx,

@@ -6,10 +6,14 @@
 //! decide behavior through check order.
 
 use rhythm_devices::quirks::PREFER_COLOR_TEMPERATURE_QUIRK;
-use rhythm_devices::{ColorMode, DeviceQuirk, LightCapabilities};
+use rhythm_devices::{DeviceQuirk, LightCapabilities};
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_ASSUMED_COMMAND_SPACING_MS: u32 = 0;
+/// Gap between the steps of one endpoint plan when no source measured a
+/// throttle. Cheap bulbs drop a command that arrives on the heels of the
+/// previous one; the tester's rapid-command thresholds start at 50 ms. A
+/// profiled zero explicitly disables the gap.
+pub const DEFAULT_ASSUMED_COMMAND_SPACING_MS: u32 = 100;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -186,7 +190,10 @@ impl Default for MatterControlProfile {
     fn default() -> Self {
         Self {
             schema_version: profile_schema_version(),
-            color_route: MatterColorRoute::HueSaturation,
+            // Color temperature is the one route every tunable bulb renders
+            // as white; hue/saturation whites are an sRGB approximation many
+            // bulbs render as saturated orange. See `profile_from_legacy`.
+            color_route: MatterColorRoute::ColorTemperature,
             hs_white_curve: Vec::new(),
             turn_on: MatterTurnOnStrategy::StageColorThenLevelWithOnOff,
             level_command: MatterLevelCommand::MoveToLevelWithOnOff,
@@ -243,15 +250,18 @@ pub fn profile_from_legacy(
         MatterColorRoute::ColorTemperature
     } else if quirks
         .iter()
+        .any(|quirk| matches!(quirk, DeviceQuirk::NeedsHueSaturationNotCt))
+    {
+        MatterColorRoute::HueSaturation
+    } else if quirks
+        .iter()
         .any(|quirk| matches!(quirk, DeviceQuirk::NeedsXyNotCt))
     {
         MatterColorRoute::Xy
-    } else if caps.color_modes.contains(&ColorMode::HueSaturation) {
-        MatterColorRoute::HueSaturation
-    } else if caps.color_modes.contains(&ColorMode::ColorTemperature) {
-        MatterColorRoute::ColorTemperature
     } else {
-        MatterColorRoute::Xy
+        // Unprofiled bulbs render whites through color temperature, then XY,
+        // then hue/saturation; command adaptation falls back per capability.
+        MatterColorRoute::ColorTemperature
     };
     profile.turn_on = if quirks
         .iter()
@@ -262,7 +272,7 @@ pub fn profile_from_legacy(
         MatterTurnOnStrategy::StageColorThenLevelWithOnOff
     };
     if let Some(spacing_ms) = quirks.iter().find_map(|quirk| match quirk {
-        DeviceQuirk::CommandThrottleMs(value) if *value > 0 => Some(*value),
+        DeviceQuirk::CommandThrottleMs(value) => Some(*value),
         _ => None,
     }) {
         profile.command_spacing_ms = MatterCommandSpacing {
@@ -322,7 +332,7 @@ pub fn profile_overlay_from_legacy_local(
         profile.source.turn_on = source;
     }
     if let Some(value_ms) = quirks.iter().find_map(|quirk| match quirk {
-        DeviceQuirk::CommandThrottleMs(value) if *value > 0 => Some(*value),
+        DeviceQuirk::CommandThrottleMs(value) => Some(*value),
         _ => None,
     }) {
         profile.command_spacing_ms = MatterCommandSpacing {

@@ -191,6 +191,7 @@ mod tests {
             commissioned: Mutex::new(Vec::<MatterDeviceInfo>::new()),
             next_node_id: AtomicU64::new(100),
             device_caps: Mutex::new(HashMap::new()),
+            fallback_caps: Mutex::new(HashSet::new()),
             device_quirks: Mutex::new(HashMap::new()),
             device_profiles: Mutex::new(HashMap::new()),
             pending_turn_on_plans: Arc::new(Mutex::new(HashMap::new())),
@@ -203,6 +204,7 @@ mod tests {
             node_proof_of_life: Arc::new(Mutex::new(HashMap::new())),
             on_off_observations: Arc::new(Mutex::new(HashMap::new())),
             attribute_report_history: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+            last_turn_on_dispatch: Mutex::new(HashMap::new()),
             event_tx,
         }
     }

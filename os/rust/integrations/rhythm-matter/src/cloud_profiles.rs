@@ -211,11 +211,7 @@ impl CloudMatterDeviceProfile {
                 DeviceQuirk::Other(PREFER_COLOR_TEMPERATURE_QUIRK.to_string()),
             );
         }
-        if let Some(ms) = self
-            .quirks
-            .recommended_command_spacing_ms
-            .filter(|ms| *ms > 0)
-        {
+        if let Some(ms) = self.quirks.recommended_command_spacing_ms {
             push_unique_quirk(quirks, DeviceQuirk::CommandThrottleMs(ms));
         }
 
@@ -272,11 +268,7 @@ impl CloudMatterDeviceProfile {
             profile.level_command = level_command;
             profile.source.level_command = source;
         }
-        if let Some(value_ms) = self
-            .quirks
-            .recommended_command_spacing_ms
-            .filter(|value| *value > 0)
-        {
+        if let Some(value_ms) = self.quirks.recommended_command_spacing_ms {
             profile.command_spacing_ms = MatterCommandSpacing {
                 value_ms,
                 // The v2 cloud schema did not carry measurement provenance.
@@ -620,7 +612,48 @@ mod tests {
         );
         assert!(quirks.contains(&DeviceQuirk::NeedsXyNotCt));
         assert!(quirks.contains(&DeviceQuirk::NeedsHueSaturationNotCt));
+        assert!(quirks.contains(&DeviceQuirk::CommandThrottleMs(0)));
         assert!(quirks.contains(&DeviceQuirk::CommandThrottleMs(125)));
+    }
+
+    #[test]
+    fn zero_command_spacing_disables_the_gap_while_none_uses_the_default() {
+        let matching = CloudMatterProfileMatch {
+            matter_vendor_id: Some(1),
+            matter_product_id: Some(2),
+            ..Default::default()
+        };
+        let catalog = CloudMatterProfileCatalog {
+            profiles: vec![CloudMatterDeviceProfile {
+                profile_key: "zero-spacing".to_string(),
+                match_data: matching.clone(),
+                quirks: CloudMatterProfileQuirks {
+                    recommended_command_spacing_ms: Some(0),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut caps = crate::capabilities::capabilities_from_commissioned(&device());
+        let mut quirks = Vec::new();
+        catalog.apply_to_device(&device(), &mut caps, &mut quirks);
+        assert_eq!(quirks, vec![DeviceQuirk::CommandThrottleMs(0)]);
+
+        let catalog = CloudMatterProfileCatalog {
+            profiles: vec![CloudMatterDeviceProfile {
+                profile_key: "default-spacing".to_string(),
+                match_data: matching,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut caps = crate::capabilities::capabilities_from_commissioned(&device());
+        let mut quirks = Vec::new();
+        catalog.apply_to_device(&device(), &mut caps, &mut quirks);
+        assert!(!quirks
+            .iter()
+            .any(|quirk| matches!(quirk, DeviceQuirk::CommandThrottleMs(_))));
     }
 
     #[test]

@@ -699,6 +699,16 @@ fn start_controller_event_stream(
                                 if let Ok(mut proof) = node_proof_of_life.lock() {
                                     proof.insert(outcome.node_id, std::time::Instant::now());
                                 }
+                                if let Some(detail) = outcome.detail.as_deref() {
+                                    log::warn!(
+                                        target: "cmd",
+                                        "Matter: command {} for node {} endpoint {} completed with a rejected color step: {}",
+                                        outcome.command_id,
+                                        outcome.node_id,
+                                        outcome.endpoint,
+                                        detail
+                                    );
+                                }
                                 let _ = subscription_refresh.send(
                                     MatterSubscriptionRefresh::EndpointProof {
                                         target: MatterSubscriptionTarget {
@@ -836,7 +846,12 @@ pub fn connect_matter(
         &local_overrides,
         &hub_key,
     );
-    publish_endpoint_capabilities(state, &hub_key, &initial_metadata.device_caps)?;
+    publish_endpoint_capabilities(
+        state,
+        &hub_key,
+        &initial_metadata.device_caps,
+        &initial_metadata.fallback_caps,
+    )?;
     let next_node_id = next_node_id_seed(&commissioned);
     let fabric_id = configured_fabric_id(state, &hub_key);
 
@@ -912,6 +927,7 @@ pub fn connect_matter(
                 commissioned: std::sync::Mutex::new(commissioned_for_closure.clone()),
                 next_node_id: std::sync::atomic::AtomicU64::new(next_node_id),
                 device_caps: std::sync::Mutex::new(initial_metadata.device_caps.clone()),
+                fallback_caps: std::sync::Mutex::new(initial_metadata.fallback_caps.clone()),
                 device_quirks: std::sync::Mutex::new(initial_metadata.device_quirks.clone()),
                 device_profiles: std::sync::Mutex::new(initial_metadata.device_profiles.clone()),
                 pending_turn_on_plans: pending_turn_on_plans_for_closure.clone(),
@@ -924,6 +940,7 @@ pub fn connect_matter(
                 node_proof_of_life: node_proof_of_life_for_closure.clone(),
                 on_off_observations: on_off_observations_for_closure.clone(),
                 attribute_report_history: attribute_report_history_for_closure.clone(),
+                last_turn_on_dispatch: std::sync::Mutex::new(std::collections::HashMap::new()),
                 event_tx: hub_data_event_tx,
             }))
         },
@@ -979,12 +996,14 @@ fn next_node_id_seed(commissioned: &[MatterDeviceInfo]) -> u64 {
 #[derive(Clone)]
 struct InitialDeviceMetadata {
     device_caps: HashMap<String, LightCapabilities>,
+    fallback_caps: HashSet<String>,
     device_quirks: HashMap<String, Vec<DeviceQuirk>>,
     device_profiles: HashMap<String, crate::control_profile::MatterControlProfile>,
 }
 
 pub(crate) fn normalized_endpoint_capabilities(
     capabilities: &LightCapabilities,
+    is_fallback: bool,
 ) -> Option<serde_json::Value> {
     let color_temperature = if capabilities.supports_color_temp() {
         let min_kelvin = capabilities.min_kelvin?;
@@ -1000,25 +1019,29 @@ pub(crate) fn normalized_endpoint_capabilities(
         None
     };
 
-    Some(serde_json::json!({
+    let mut normalized = serde_json::json!({
         "light_capabilities": LightCapabilitiesDto {
             color_temperature,
             individual_profile_overrides: None,
         },
-        "automatic_naming": {
+    });
+    if !is_fallback {
+        normalized["automatic_naming"] = serde_json::json!({
             "color_kind": if capabilities.light_type == rhythm_devices::LightType::ExtendedColor {
                 "color"
             } else {
                 "white"
             }
-        },
-    }))
+        });
+    }
+    Some(normalized)
 }
 
 fn publish_endpoint_capabilities(
     state: &SharedState,
     hub_key: &HubKey,
     device_capabilities: &HashMap<String, LightCapabilities>,
+    fallback_caps: &HashSet<String>,
 ) -> Result<()> {
     let mut state = state
         .lock()
@@ -1041,7 +1064,10 @@ fn publish_endpoint_capabilities(
             let Some(capabilities) = device_capabilities.get(&endpoint.native_id) else {
                 continue;
             };
-            let Some(normalized) = normalized_endpoint_capabilities(capabilities) else {
+            let Some(normalized) = normalized_endpoint_capabilities(
+                capabilities,
+                fallback_caps.contains(&endpoint.native_id),
+            ) else {
                 continue;
             };
             if endpoint.capabilities.as_ref() != Some(&normalized) {
@@ -1062,7 +1088,8 @@ fn publish_endpoint_capabilities(
 /// `list_devices` is backed by chipd's persisted device store, so its vendor
 /// and product names survive a temporary connectivity failure. Preserve any
 /// matching built-in profile here instead of replacing it with an anonymous
-/// extended-color fallback. In particular, command quirks such as
+/// colour-temperature fallback from `fallback_device_capabilities`. In
+/// particular, command quirks such as
 /// `NeedsExplicitOn` remain necessary while the device is unreachable to
 /// probes but reachable again by the time a light command is dispatched.
 fn fallback_device_metadata(info: &MatterDeviceInfo) -> (LightCapabilities, Vec<DeviceQuirk>) {
@@ -1089,6 +1116,7 @@ fn fallback_initial_device_metadata(
     hub_key: &HubKey,
 ) -> InitialDeviceMetadata {
     let mut device_caps = HashMap::new();
+    let mut fallback_caps = HashSet::new();
     let mut device_quirks = HashMap::new();
     let mut device_profiles = HashMap::new();
     let commissioned_nodes = commissioned
@@ -1109,6 +1137,7 @@ fn fallback_initial_device_metadata(
             crate::control_profile::MatterProfileSource::Builtin,
         );
         device_caps.entry(device_id.clone()).or_insert(caps);
+        fallback_caps.insert(device_id.clone());
         device_quirks.entry(device_id.clone()).or_insert(quirks);
         device_profiles.entry(device_id).or_insert(profile);
     };
@@ -1136,6 +1165,7 @@ fn fallback_initial_device_metadata(
 
     InitialDeviceMetadata {
         device_caps,
+        fallback_caps,
         device_quirks,
         device_profiles,
     }
@@ -1185,6 +1215,7 @@ fn initial_device_metadata(
         let profile = resolved.control_profile;
 
         metadata.device_caps.insert(device_id.clone(), caps.clone());
+        metadata.fallback_caps.remove(&device_id);
         metadata
             .device_quirks
             .insert(device_id.clone(), quirks.clone());
@@ -1194,6 +1225,7 @@ fn initial_device_metadata(
         if let Some(aliases) = aliases_by_node.get(&device.node_id) {
             for alias in aliases {
                 metadata.device_caps.insert(alias.clone(), caps.clone());
+                metadata.fallback_caps.remove(alias);
                 metadata.device_quirks.insert(alias.clone(), quirks.clone());
                 metadata
                     .device_profiles
@@ -1674,6 +1706,24 @@ mod tests {
 
         assert!(metadata.device_caps.contains_key("matter-12"));
         assert!(metadata.device_caps.contains_key("matter-12-2"));
+        assert!(metadata.fallback_caps.contains("matter-12"));
+        assert!(metadata.fallback_caps.contains("matter-12-2"));
+    }
+
+    #[test]
+    fn normalized_endpoint_capabilities_omits_naming_hint_for_fallback_caps() {
+        let capabilities =
+            LightCapabilities::defaults_for(rhythm_devices::LightType::ColorTemperature);
+
+        let fallback = normalized_endpoint_capabilities(&capabilities, true).unwrap();
+        assert!(fallback.get("light_capabilities").is_some());
+        assert!(fallback.get("automatic_naming").is_none());
+
+        let probed = normalized_endpoint_capabilities(&capabilities, false).unwrap();
+        assert_eq!(
+            probed.pointer("/automatic_naming/color_kind"),
+            Some(&serde_json::json!("white"))
+        );
     }
 
     #[test]
@@ -1695,20 +1745,42 @@ mod tests {
             .unwrap()
             .canonical_registry
             .resolve(&identity, &key, 100);
-        let capabilities = HashMap::from([(
-            "matter-101".to_string(),
-            LightCapabilities {
-                color_modes: vec![
-                    rhythm_devices::ColorMode::HueSaturation,
-                    rhythm_devices::ColorMode::ColorTemperature,
-                ],
-                min_kelvin: Some(2702),
-                max_kelvin: Some(6535),
-                ..LightCapabilities::defaults_for(rhythm_devices::LightType::ExtendedColor)
-            },
-        )]);
+        let fallback_identity = DiscoveredIdentity {
+            native_id: "matter-102".to_string(),
+            room_id: None,
+            room_name: None,
+            name: "Unprobed bulb".to_string(),
+            device_type: DeviceType::Light,
+            hardware_ids: vec![HardwareId::matter("102")],
+            manufacturer: None,
+            model: None,
+        };
+        state
+            .lock()
+            .unwrap()
+            .canonical_registry
+            .resolve(&fallback_identity, &key, 100);
+        let capabilities = HashMap::from([
+            (
+                "matter-101".to_string(),
+                LightCapabilities {
+                    color_modes: vec![
+                        rhythm_devices::ColorMode::HueSaturation,
+                        rhythm_devices::ColorMode::ColorTemperature,
+                    ],
+                    min_kelvin: Some(2702),
+                    max_kelvin: Some(6535),
+                    ..LightCapabilities::defaults_for(rhythm_devices::LightType::ExtendedColor)
+                },
+            ),
+            (
+                "matter-102".to_string(),
+                LightCapabilities::defaults_for(rhythm_devices::LightType::ColorTemperature),
+            ),
+        ]);
+        let fallback_caps = HashSet::from(["matter-102".to_string()]);
 
-        publish_endpoint_capabilities(&state, &key, &capabilities).unwrap();
+        publish_endpoint_capabilities(&state, &key, &capabilities, &fallback_caps).unwrap();
 
         let state = state.lock().unwrap();
         let endpoint = state
@@ -1726,6 +1798,19 @@ mod tests {
                 "max_kelvin": 6535,
             }))
         );
+        let fallback_endpoint = state
+            .canonical_registry
+            .find_by_native_id(&key, "matter-102")
+            .and_then(|device| device.endpoint_by_native_id("matter-102"))
+            .unwrap();
+        assert!(fallback_endpoint
+            .capabilities
+            .as_ref()
+            .is_some_and(|value| value.get("light_capabilities").is_some()));
+        assert!(fallback_endpoint
+            .capabilities
+            .as_ref()
+            .is_some_and(|value| value.get("automatic_naming").is_none()));
     }
 
     #[test]
@@ -1954,7 +2039,7 @@ mod tests {
         assert_eq!(caps.min_kelvin, Some(3080));
         assert_eq!(caps.max_kelvin, Some(6120));
         assert_eq!(
-            normalized_endpoint_capabilities(caps).and_then(|value| {
+            normalized_endpoint_capabilities(caps, false).and_then(|value| {
                 value
                     .pointer("/light_capabilities/color_temperature")
                     .cloned()

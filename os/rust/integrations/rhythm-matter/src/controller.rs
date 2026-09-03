@@ -279,22 +279,42 @@ impl MatterLightController {
                     adapted.hue_saturation = Some(calibrated);
                 }
             }
+            let turn_on = if !profile.execute_if_off_honoured
+                && profile.turn_on == MatterTurnOnStrategy::StageColorThenLevelWithOnOff
+            {
+                MatterTurnOnStrategy::ExplicitOnFirst
+            } else {
+                profile.turn_on
+            };
+            // When color is the first step the bulb receives while dark, it is
+            // invisible until the level step turns the bulb on. Give that color
+            // step no transition: a fade that starts in the dark would otherwise
+            // finish in view, sweeping from the restored color to the target.
+            let observed_off = turn_on == MatterTurnOnStrategy::StageColorThenLevelWithOnOff
+                && self
+                    .hub_data
+                    .observed_off_since_last_turn_on(node_id, endpoint);
+            let color_transition_ms = if observed_off {
+                None
+            } else {
+                adapted.transition_ms
+            };
             let color_step = if let Some((hue, saturation)) = adapted.hue_saturation {
                 Some(MatterCommandStep::SetHueSaturation {
                     hue,
                     saturation,
-                    transition_ms: adapted.transition_ms,
+                    transition_ms: color_transition_ms,
                 })
             } else if let Some((x, y)) = adapted.xy {
                 Some(MatterCommandStep::SetXy {
                     x,
                     y,
-                    transition_ms: adapted.transition_ms,
+                    transition_ms: color_transition_ms,
                 })
             } else if let Some(kelvin) = adapted.kelvin {
                 Some(MatterCommandStep::SetColorTemperature {
                     kelvin,
-                    transition_ms: adapted.transition_ms,
+                    transition_ms: color_transition_ms,
                 })
             } else {
                 None
@@ -338,13 +358,6 @@ impl MatterLightController {
                 }
             });
             let mut steps = Vec::new();
-            let turn_on = if !profile.execute_if_off_honoured
-                && profile.turn_on == MatterTurnOnStrategy::StageColorThenLevelWithOnOff
-            {
-                MatterTurnOnStrategy::ExplicitOnFirst
-            } else {
-                profile.turn_on
-            };
             let level_turns_on = matches!(
                 profile.level_command,
                 MatterLevelCommand::MoveToLevelWithOnOff | MatterLevelCommand::StepWithOnOff
@@ -393,9 +406,11 @@ impl MatterLightController {
                 node_id,
                 endpoint,
                 steps,
-                inter_step_delay_ms: (profile.command_spacing_ms.value_ms > 0)
-                    .then_some(u64::from(profile.command_spacing_ms.value_ms)),
+                inter_step_delay_ms: Some(u64::from(profile.command_spacing_ms.value_ms)),
             });
+            if adapted.on {
+                self.hub_data.record_turn_on_dispatch(node_id, endpoint);
+            }
         }
         if plans.is_empty() && !device_ids.is_empty() {
             return Err(LightControlError::CommandFailed(
@@ -627,6 +642,14 @@ impl MatterLightController {
                 let profile = resolved.control_profile;
 
                 self.cache_device_metadata(device_id, &probed_id, &caps, &quirks, &profile);
+                let _ = self
+                    .hub_data
+                    .event_tx
+                    .send(rhythm_os::hub::HubEvent::TopologyChanged {
+                        hub_key: None,
+                        resource_id: device_id.to_string(),
+                        resource_type: "light".to_string(),
+                    });
                 if let Err(error) = crate::capture::persist_device_capture(
                     &self.hub_data,
                     &device,
@@ -650,7 +673,7 @@ impl MatterLightController {
             Err(error) => {
                 warn!(
                     target: "cmd",
-                    "Matter: failed to probe metadata for {} (node {}): {}; using extended-color fallback",
+                    "Matter: failed to probe metadata for {} (node {}): {}; using color-temperature fallback",
                     device_id,
                     node_id,
                     error
@@ -693,6 +716,11 @@ impl MatterLightController {
             if requested_id != probed_id {
                 device_profiles.insert(probed_id.to_string(), profile.clone());
             }
+        }
+
+        if let Ok(mut fallback_caps) = self.hub_data.fallback_caps.lock() {
+            fallback_caps.remove(requested_id);
+            fallback_caps.remove(probed_id);
         }
     }
 
@@ -1399,14 +1427,36 @@ mod tests {
         Arc<SpyTransport>,
         Arc<Mutex<MatterDeviceRegistry>>,
     ) {
-        let spy = Arc::new(SpyTransport::new());
-        let (controller, registry) = make_controller_with_transport(spy.clone());
+        let (controller, spy, registry, _event_rx) = make_controller_with_event_receiver();
         (controller, spy, registry)
+    }
+
+    fn make_controller_with_event_receiver() -> (
+        MatterLightController,
+        Arc<SpyTransport>,
+        Arc<Mutex<MatterDeviceRegistry>>,
+        std::sync::mpsc::Receiver<rhythm_os::hub::HubEvent>,
+    ) {
+        let spy = Arc::new(SpyTransport::new());
+        let (controller, registry, rx) = make_controller_with_transport_and_receiver(spy.clone());
+        (controller, spy, registry, rx)
     }
 
     fn make_controller_with_transport(
         transport: Arc<dyn MatterTransport>,
     ) -> (MatterLightController, Arc<Mutex<MatterDeviceRegistry>>) {
+        let (controller, registry, _event_rx) =
+            make_controller_with_transport_and_receiver(transport);
+        (controller, registry)
+    }
+
+    fn make_controller_with_transport_and_receiver(
+        transport: Arc<dyn MatterTransport>,
+    ) -> (
+        MatterLightController,
+        Arc<Mutex<MatterDeviceRegistry>>,
+        std::sync::mpsc::Receiver<rhythm_os::hub::HubEvent>,
+    ) {
         let registry = Arc::new(Mutex::new(MatterDeviceRegistry::with_options(true)));
 
         registry.lock().unwrap().upsert_room(
@@ -1420,7 +1470,7 @@ mod tests {
             vec!["matter-42".to_string(), "matter-43".to_string()],
         );
 
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
         let hub_data = Arc::new(crate::hub_state::MatterHubData {
             transport: std::sync::OnceLock::new(),
             capture_dir: std::sync::OnceLock::new(),
@@ -1429,6 +1479,7 @@ mod tests {
             commissioned: std::sync::Mutex::new(Vec::new()),
             next_node_id: std::sync::atomic::AtomicU64::new(100),
             device_caps: std::sync::Mutex::new(std::collections::HashMap::new()),
+            fallback_caps: std::sync::Mutex::new(std::collections::HashSet::new()),
             device_quirks: std::sync::Mutex::new(std::collections::HashMap::new()),
             device_profiles: std::sync::Mutex::new(std::collections::HashMap::new()),
             pending_turn_on_plans: Arc::new(
@@ -1449,11 +1500,12 @@ mod tests {
             attribute_report_history: Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
+            last_turn_on_dispatch: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });
 
         let controller = MatterLightController::new(transport, hub_data);
-        (controller, registry)
+        (controller, registry, rx)
     }
 
     fn set_kitchen_group(registry: &Arc<Mutex<MatterDeviceRegistry>>, group_id: u16) {
@@ -1948,6 +2000,7 @@ mod tests {
                 "matter-42".to_string(),
                 LightCapabilities::defaults_for(LightType::ExtendedColor),
             )])),
+            fallback_caps: std::sync::Mutex::new(std::collections::HashSet::new()),
             device_quirks: std::sync::Mutex::new(std::collections::HashMap::new()),
             device_profiles: std::sync::Mutex::new(std::collections::HashMap::new()),
             pending_turn_on_plans: Arc::new(
@@ -1968,6 +2021,7 @@ mod tests {
             attribute_report_history: Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
+            last_turn_on_dispatch: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
@@ -1985,7 +2039,7 @@ mod tests {
 
         assert!(spy.operations().iter().any(|operation| matches!(
             operation,
-            RecordedOperation::SetHueSaturation { node_id: 42, .. }
+            RecordedOperation::SetColorTemperature { node_id: 42, .. }
         )));
         assert!(spy.operations().iter().any(|operation| matches!(
             operation,
@@ -2026,7 +2080,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_on_sends_brightness_and_hue_saturation_commands_by_default() {
+    fn turn_on_sends_color_temperature_then_brightness_by_default() {
         let (controller, spy, _) = make_controller();
         let command = LightingCommand::new(80, 4000);
 
@@ -2039,7 +2093,7 @@ mod tests {
             let node_operations = operations_for_node(&operations, node_id);
             assert!(matches!(
                 node_operations[0],
-                RecordedOperation::SetHueSaturation { endpoint: 1, .. }
+                RecordedOperation::SetColorTemperature { endpoint: 1, .. }
             ));
             assert_eq!(
                 node_operations[1],
@@ -2051,6 +2105,214 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn turn_on_stages_color_without_transition_when_light_observed_off() {
+        let (controller, spy, _) = make_controller();
+        for node_id in [42, 43] {
+            set_device_capabilities(
+                &controller,
+                node_id,
+                LightCapabilities::defaults_for(LightType::ColorTemperature),
+            );
+        }
+        controller.hub_data.record_on_off_observation(42, 1, false);
+        controller.hub_data.record_on_off_observation(43, 1, true);
+
+        block_on(controller.turn_on("kitchen", LightingCommand::with_transition(80, 4000, 500)))
+            .unwrap();
+
+        let operations = spy.operations();
+        assert_eq!(
+            operations_for_node(&operations, 42),
+            vec![
+                RecordedOperation::SetColorTemperature {
+                    node_id: 42,
+                    endpoint: 1,
+                    kelvin: 4000,
+                    transition_ms: None,
+                },
+                RecordedOperation::SetBrightness {
+                    node_id: 42,
+                    endpoint: 1,
+                    level: clusters::brightness_to_level(80),
+                    transition_ms: Some(500),
+                },
+            ],
+            "color staged while off is invisible, so it must not carry a fade that finishes in view"
+        );
+        assert!(operations_for_node(&operations, 43)
+            .iter()
+            .any(|operation| matches!(
+                operation,
+                RecordedOperation::SetColorTemperature {
+                    node_id: 43,
+                    transition_ms: Some(500),
+                    ..
+                }
+            )));
+    }
+
+    #[test]
+    fn turn_on_keeps_color_transition_when_explicit_on_precedes_color() {
+        let (controller, spy, registry) = make_controller();
+        registry
+            .lock()
+            .unwrap()
+            .set_area_lights("kitchen", vec!["matter-42".to_string()]);
+        set_device_capabilities(
+            &controller,
+            42,
+            LightCapabilities::defaults_for(LightType::ColorTemperature),
+        );
+        controller
+            .hub_data
+            .device_quirks
+            .lock()
+            .unwrap()
+            .insert("matter-42".to_string(), vec![DeviceQuirk::NeedsExplicitOn]);
+        controller.hub_data.record_on_off_observation(42, 1, false);
+
+        block_on(controller.turn_on("kitchen", LightingCommand::with_transition(80, 4000, 500)))
+            .unwrap();
+
+        assert_eq!(
+            operations_for_node(&spy.operations(), 42),
+            vec![
+                RecordedOperation::SetOnOff {
+                    node_id: 42,
+                    endpoint: 1,
+                    on: true,
+                },
+                RecordedOperation::SetColorTemperature {
+                    node_id: 42,
+                    endpoint: 1,
+                    kelvin: 4000,
+                    transition_ms: Some(500),
+                },
+                RecordedOperation::SetBrightness {
+                    node_id: 42,
+                    endpoint: 1,
+                    level: clusters::brightness_to_level(80),
+                    transition_ms: Some(500),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn turn_on_ignores_off_observation_older_than_last_turn_on() {
+        let (controller, spy, registry) = make_controller();
+        registry
+            .lock()
+            .unwrap()
+            .set_area_lights("kitchen", vec!["matter-42".to_string()]);
+        set_device_capabilities(
+            &controller,
+            42,
+            LightCapabilities::defaults_for(LightType::ColorTemperature),
+        );
+        controller.hub_data.record_on_off_observation(42, 1, false);
+        let command = LightingCommand::with_transition(80, 4000, 500);
+
+        block_on(controller.turn_on("kitchen", command.clone())).unwrap();
+        block_on(controller.turn_on("kitchen", command.clone())).unwrap();
+
+        let operations = operations_for_node(&spy.operations(), 42);
+        assert!(matches!(
+            operations[2],
+            RecordedOperation::SetColorTemperature {
+                transition_ms: Some(500),
+                ..
+            }
+        ));
+
+        controller.hub_data.record_on_off_observation(42, 1, false);
+        block_on(controller.turn_on("kitchen", command)).unwrap();
+
+        let operations = operations_for_node(&spy.operations(), 42);
+        assert!(matches!(
+            operations[4],
+            RecordedOperation::SetColorTemperature {
+                transition_ms: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn turn_on_plans_default_step_gap_unless_a_throttle_is_profiled() {
+        let (controller, _, _) = make_controller();
+        for node_id in [42, 43, 44] {
+            set_device_capabilities(
+                &controller,
+                node_id,
+                LightCapabilities::defaults_for(LightType::ColorTemperature),
+            );
+        }
+        controller.hub_data.device_quirks.lock().unwrap().insert(
+            "matter-43".to_string(),
+            vec![DeviceQuirk::CommandThrottleMs(250)],
+        );
+        controller.hub_data.device_quirks.lock().unwrap().insert(
+            "matter-44".to_string(),
+            vec![DeviceQuirk::CommandThrottleMs(0)],
+        );
+
+        let plans = controller
+            .turn_on_plans(
+                &[
+                    "matter-42".to_string(),
+                    "matter-43".to_string(),
+                    "matter-44".to_string(),
+                ],
+                &LightingCommand::new(80, 4000),
+            )
+            .unwrap();
+
+        assert_eq!(
+            plans[0].inter_step_delay_ms,
+            Some(u64::from(
+                crate::control_profile::DEFAULT_ASSUMED_COMMAND_SPACING_MS
+            ))
+        );
+        assert_eq!(plans[1].inter_step_delay_ms, Some(250));
+        assert_eq!(plans[2].inter_step_delay_ms, Some(0));
+    }
+
+    #[test]
+    fn on_demand_probe_success_emits_light_topology_change() {
+        let (controller, spy, _, event_rx) = make_controller_with_event_receiver();
+        spy.set_probe_device(profiled_color_bulb(42, "Acme", "Color Lamp"));
+        set_device_capabilities(
+            &controller,
+            43,
+            LightCapabilities::defaults_for(LightType::ColorTemperature),
+        );
+        controller
+            .hub_data
+            .fallback_caps
+            .lock()
+            .unwrap()
+            .insert("matter-42".to_string());
+
+        block_on(controller.turn_on("kitchen", LightingCommand::new(80, 4000))).unwrap();
+
+        assert!(!controller
+            .hub_data
+            .fallback_caps
+            .lock()
+            .unwrap()
+            .contains("matter-42"));
+        assert!(event_rx.try_iter().any(|event| matches!(
+            event,
+            rhythm_os::hub::HubEvent::TopologyChanged {
+                resource_id,
+                resource_type,
+                ..
+            } if resource_id == "matter-42" && resource_type == "light"
+        )));
     }
 
     #[test]
@@ -2158,11 +2420,10 @@ mod tests {
             assert_eq!(
                 operations_for_node(&operations, node_id),
                 vec![
-                    RecordedOperation::SetHueSaturation {
+                    RecordedOperation::SetColorTemperature {
                         node_id,
                         endpoint: 1,
-                        hue: 22,
-                        saturation: 90,
+                        kelvin: 4000,
                         transition_ms: None,
                     },
                     RecordedOperation::SetBrightness {
@@ -2524,11 +2785,10 @@ mod tests {
             assert_eq!(
                 operations_for_node(&operations, node_id),
                 vec![
-                    RecordedOperation::SetHueSaturation {
+                    RecordedOperation::SetColorTemperature {
                         node_id,
                         endpoint: 1,
-                        hue: 22,
-                        saturation: 90,
+                        kelvin: 4000,
                         transition_ms: None,
                     },
                     RecordedOperation::SetBrightness {
@@ -2670,7 +2930,7 @@ mod tests {
         let operations = spy.operations();
         assert!(operations.iter().any(|operation| matches!(
             operation,
-            RecordedOperation::SetHueSaturation { node_id: 42, .. }
+            RecordedOperation::SetColorTemperature { node_id: 42, .. }
         )));
         assert!(operations.iter().any(|operation| matches!(
             operation,
@@ -3202,7 +3462,7 @@ mod tests {
         )));
         assert!(operations.iter().any(|operation| matches!(
             operation,
-            RecordedOperation::SetHueSaturation { node_id: 42, .. }
+            RecordedOperation::SetColorTemperature { node_id: 42, .. }
         )));
         assert!(operations.iter().any(|operation| matches!(
             operation,
@@ -3210,7 +3470,7 @@ mod tests {
         )));
         assert!(operations.iter().any(|operation| matches!(
             operation,
-            RecordedOperation::SetHueSaturation { node_id: 43, .. }
+            RecordedOperation::SetColorTemperature { node_id: 43, .. }
         )));
         assert!(operations.iter().any(|operation| matches!(
             operation,
@@ -3285,6 +3545,7 @@ mod tests {
             commissioned: std::sync::Mutex::new(Vec::new()),
             next_node_id: std::sync::atomic::AtomicU64::new(100),
             device_caps: std::sync::Mutex::new(std::collections::HashMap::new()),
+            fallback_caps: std::sync::Mutex::new(std::collections::HashSet::new()),
             device_quirks: std::sync::Mutex::new(std::collections::HashMap::new()),
             device_profiles: std::sync::Mutex::new(std::collections::HashMap::new()),
             pending_turn_on_plans: Arc::new(
@@ -3305,6 +3566,7 @@ mod tests {
             attribute_report_history: Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
+            last_turn_on_dispatch: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });
 
@@ -3410,7 +3672,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_on_direct_color_uses_hue_saturation_when_probe_falls_back() {
+    fn turn_on_direct_color_plans_level_only_when_probe_falls_back() {
         let (controller, spy, _) = make_controller();
 
         block_on(controller.turn_on_target(
@@ -3426,20 +3688,17 @@ mod tests {
         ))
         .unwrap();
 
-        assert!(spy.operations().iter().any(|operation| matches!(
-            operation,
-            RecordedOperation::SetHueSaturation {
+        let operations = operations_for_node(&spy.operations(), 42);
+        assert_eq!(
+            operations,
+            vec![RecordedOperation::SetBrightness {
                 node_id: 42,
                 endpoint: 1,
-                hue: 0,
-                saturation: 254,
+                level: clusters::brightness_to_level(50),
                 transition_ms: Some(400),
-            }
-        )));
-        assert!(!spy
-            .operations()
-            .iter()
-            .any(|operation| matches!(operation, RecordedOperation::SetXy { node_id: 42, .. })));
+            }],
+            "an unprobed light must never receive a guessed color command"
+        );
     }
 
     #[test]
@@ -3474,6 +3733,7 @@ mod tests {
                     ..LightCapabilities::defaults_for(LightType::ExtendedColor)
                 },
             )])),
+            fallback_caps: std::sync::Mutex::new(std::collections::HashSet::new()),
             device_quirks: std::sync::Mutex::new(std::collections::HashMap::from([(
                 "matter-42".to_string(),
                 vec![DeviceQuirk::NeedsXyNotCt],
@@ -3497,6 +3757,7 @@ mod tests {
             attribute_report_history: Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
+            last_turn_on_dispatch: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
@@ -3572,7 +3833,7 @@ mod tests {
     }
 
     #[test]
-    fn turn_on_unprofiled_device_prefers_hue_saturation_when_supported() {
+    fn turn_on_unprofiled_device_uses_hue_saturation_for_color_and_color_temperature_for_whites() {
         let spy = Arc::new(SpyTransport::new());
         let registry = Arc::new(Mutex::new(MatterDeviceRegistry::with_options(true)));
         registry
@@ -3603,6 +3864,7 @@ mod tests {
                     ..LightCapabilities::defaults_for(LightType::ExtendedColor)
                 },
             )])),
+            fallback_caps: std::sync::Mutex::new(std::collections::HashSet::new()),
             device_quirks: std::sync::Mutex::new(std::collections::HashMap::from([(
                 "matter-42".to_string(),
                 Vec::new(),
@@ -3626,6 +3888,7 @@ mod tests {
             attribute_report_history: Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
+            last_turn_on_dispatch: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
@@ -3645,14 +3908,23 @@ mod tests {
                 .iter()
                 .filter(|operation| matches!(operation, RecordedOperation::SetHueSaturation { .. }))
                 .count(),
-            2
+            1,
+            "direct color goes through hue/saturation"
+        );
+        assert_eq!(
+            operations
+                .iter()
+                .filter(|operation| matches!(
+                    operation,
+                    RecordedOperation::SetColorTemperature { kelvin: 3000, .. }
+                ))
+                .count(),
+            1,
+            "adaptive white goes through color temperature, never an sRGB hue/saturation guess"
         );
         assert!(!operations
             .iter()
             .any(|operation| matches!(operation, RecordedOperation::SetXy { node_id: 42, .. })));
-        assert!(!operations
-            .iter()
-            .any(|operation| matches!(operation, RecordedOperation::SetColorTemperature { .. })));
     }
 
     #[test]
@@ -3714,6 +3986,7 @@ mod tests {
                 "matter-42".to_string(),
                 LightCapabilities::defaults_for(LightType::Dimmable),
             )])),
+            fallback_caps: std::sync::Mutex::new(std::collections::HashSet::new()),
             device_quirks: std::sync::Mutex::new(std::collections::HashMap::from([(
                 "matter-42".to_string(),
                 vec![DeviceQuirk::NeedsExplicitOn],
@@ -3737,6 +4010,7 @@ mod tests {
             attribute_report_history: Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
+            last_turn_on_dispatch: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });
         let controller = MatterLightController::new(spy.clone(), hub_data);
@@ -3936,6 +4210,7 @@ mod tests {
                 "matter-42".to_string(),
                 LightCapabilities::defaults_for(LightType::ExtendedColor),
             )])),
+            fallback_caps: std::sync::Mutex::new(std::collections::HashSet::new()),
             device_quirks: std::sync::Mutex::new(std::collections::HashMap::from([(
                 "matter-42".to_string(),
                 vec![DeviceQuirk::NeedsXyNotCt],
@@ -3959,6 +4234,7 @@ mod tests {
             attribute_report_history: Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
+            last_turn_on_dispatch: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });
         let controller = MatterLightController::new(transport.clone(), hub_data);
@@ -4142,6 +4418,7 @@ mod tests {
                 "matter-42".to_string(),
                 LightCapabilities::defaults_for(LightType::ExtendedColor),
             )])),
+            fallback_caps: std::sync::Mutex::new(std::collections::HashSet::new()),
             device_quirks: std::sync::Mutex::new(std::collections::HashMap::from([(
                 "matter-42".to_string(),
                 vec![DeviceQuirk::NeedsXyNotCt],
@@ -4165,6 +4442,7 @@ mod tests {
             attribute_report_history: Arc::new(std::sync::Mutex::new(
                 std::collections::VecDeque::new(),
             )),
+            last_turn_on_dispatch: std::sync::Mutex::new(std::collections::HashMap::new()),
             event_tx: tx,
         });
         let controller = MatterLightController::new(transport.clone(), hub_data);
