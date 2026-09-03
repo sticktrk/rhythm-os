@@ -257,10 +257,14 @@ impl MatterLightController {
                 caps.min_kelvin = None;
                 caps.max_kelvin = None;
             }
-            if let Some(min_brightness) = profile.min_brightness {
-                caps.min_brightness = Some(min_brightness);
+            if profile.source.min_brightness != MatterProfileSource::SafeDefault {
+                if let Some(min_brightness) = profile.min_brightness {
+                    caps.min_brightness = Some(min_brightness);
+                }
             }
-            caps.supports_transition = profile.supports_transition;
+            if profile.source.supports_transition != MatterProfileSource::SafeDefault {
+                caps.supports_transition = profile.supports_transition;
+            }
             let mut adapted = rhythm_os::controller_helpers::adapt_lighting_command(
                 &caps,
                 command,
@@ -3062,6 +3066,42 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[test]
+    fn safe_default_profile_does_not_override_cached_transition_capability() {
+        let (controller, _, _) = make_controller();
+        set_device_capabilities(
+            &controller,
+            42,
+            LightCapabilities {
+                supports_transition: false,
+                ..LightCapabilities::defaults_for(LightType::ExtendedColor)
+            },
+        );
+        let profile = MatterControlProfile {
+            supports_transition: true,
+            ..MatterControlProfile::default()
+        };
+        let plans = controller
+            .audition_turn_on_plans(
+                &["matter-42".to_string()],
+                &LightingCommand::with_transition(50, 3_000, 1_200),
+                &profile,
+            )
+            .unwrap();
+
+        assert_eq!(plans.len(), 1);
+        assert!(plans[0].steps.iter().all(|step| match step {
+            MatterCommandStep::SetBrightness { transition_ms, .. }
+            | MatterCommandStep::RunLevel { transition_ms, .. }
+            | MatterCommandStep::SetColorTemperature { transition_ms, .. }
+            | MatterCommandStep::SetXy { transition_ms, .. }
+            | MatterCommandStep::SetHueSaturation { transition_ms, .. } => {
+                transition_ms.is_none()
+            }
+            MatterCommandStep::SetOnOff { .. } | MatterCommandStep::Identify { .. } => true,
+        }));
     }
 
     #[test]

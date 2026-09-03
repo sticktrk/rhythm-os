@@ -1784,6 +1784,54 @@ mod tests {
     }
 
     #[test]
+    fn typed_profile_keeps_legacy_local_transition_evidence() {
+        let state = shared_state("persisted-legacy-and-typed-profile");
+        let key = HubKey::new(HubType::new("matter"), "local");
+        let device = commissioned_device(108, 1);
+        crate::local_quirks::save_device_profile_override(
+            &state,
+            "matter-108",
+            None,
+            Some(crate::local_quirks::LocalCapabilityOverride {
+                min_brightness: None,
+                supports_transition: Some(false),
+            }),
+            Some("legacy-report".to_string()),
+        )
+        .unwrap();
+        crate::local_quirks::save_device_control_profile(
+            &state,
+            "matter-108",
+            crate::control_profile::MatterControlProfile {
+                supports_transition: true,
+                source: crate::control_profile::MatterControlProfileSources {
+                    supports_transition: crate::control_profile::MatterProfileSource::Builtin,
+                    ..crate::control_profile::MatterControlProfileSources::default()
+                },
+                ..crate::control_profile::MatterControlProfile::default()
+            },
+            Some("typed-report".to_string()),
+        )
+        .unwrap();
+
+        let metadata = initial_device_metadata(
+            &state,
+            &[device_info_from_record(&device)],
+            &[device],
+            &crate::cloud_profiles::CloudMatterProfileCatalog::default(),
+            &crate::local_quirks::load_overrides_for_state(&state),
+            &key,
+        );
+
+        let profile = metadata.device_profiles.get("matter-108").unwrap();
+        assert!(!profile.supports_transition);
+        assert_eq!(
+            profile.source.supports_transition,
+            crate::control_profile::MatterProfileSource::Audition
+        );
+    }
+
+    #[test]
     fn legacy_projection_keeps_curated_ct_while_runtime_honours_local_audition() {
         let state = shared_state("persisted-moes-color-preference");
         let key = HubKey::new(HubType::new("matter"), "local");

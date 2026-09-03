@@ -750,14 +750,11 @@ pub(crate) fn resolve_device_metadata(
         quirks = crate::local_quirks::apply_quirk_override(&quirks, local_quirks);
     }
     let cloud_profile = cloud_profiles.control_profile_for_device(device);
-    let legacy_local_profile;
-    let local_profile = if let Some(profile) = local_overrides.control_profiles.get(device_id) {
-        Some(profile)
-    } else if local_overrides.capabilities.contains_key(device_id)
+    let legacy_local_profile = if local_overrides.capabilities.contains_key(device_id)
         || local_overrides.quirks.contains_key(device_id)
     {
         let local_capabilities = local_overrides.capabilities.get(device_id);
-        legacy_local_profile = crate::control_profile::profile_overlay_from_legacy_local(
+        Some(crate::control_profile::profile_overlay_from_legacy_local(
             local_overrides
                 .quirks
                 .get(device_id)
@@ -765,17 +762,22 @@ pub(crate) fn resolve_device_metadata(
                 .unwrap_or_default(),
             local_capabilities.and_then(|value| value.min_brightness),
             local_capabilities.and_then(|value| value.supports_transition),
-        );
-        Some(&legacy_local_profile)
+        ))
     } else {
         None
     };
-    let control_profile = crate::control_profile::resolve_control_profile(
+    let mut control_profile = crate::control_profile::resolve_control_profile(
         &builtin_capabilities,
         &builtin_quirks,
         cloud_profile.as_ref(),
-        local_profile,
+        legacy_local_profile.as_ref(),
     );
+    if let Some(typed_local_profile) = local_overrides.control_profiles.get(device_id) {
+        crate::control_profile::overlay_sourced_audition_profile(
+            &mut control_profile,
+            typed_local_profile,
+        );
+    }
 
     ResolvedMatterDeviceMetadata {
         capabilities,
