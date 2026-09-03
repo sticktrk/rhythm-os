@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 import { matterProfileCandidateIngestionPlan } from './matter_profile_candidate_contract.ts'
@@ -47,4 +48,30 @@ test('candidate versions advance beside multiple reports awaiting review', () =>
   )
 
   assert.equal(plan.candidateInsert.candidate_version, 10)
+})
+
+test('the admin approval RPC atomically promotes pending candidate evidence', () => {
+  const migration = readFileSync(
+    new URL(
+      '../../migrations/20260903000000_add_matter_device_profile_candidates.sql',
+      import.meta.url,
+    ),
+    'utf8',
+  )
+
+  assert.match(
+    migration,
+    /FUNCTION public\.approve_matter_profile_candidate\(candidate_id UUID\)/,
+  )
+  assert.match(migration, /SECURITY DEFINER/)
+  assert.match(migration, /IF NOT public\.is_rhythm_admin\(\)/)
+  assert.match(migration, /ON CONFLICT \(profile_key\) DO UPDATE/)
+  assert.match(migration, /profile_version = EXCLUDED\.profile_version/)
+  assert.match(migration, /approved_by = EXCLUDED\.approved_by/)
+  assert.match(migration, /status = 'approved'/)
+  assert.match(migration, /reviewed_by = reviewer_id/)
+  assert.match(
+    migration,
+    /GRANT EXECUTE ON FUNCTION public\.approve_matter_profile_candidate\(UUID\) TO authenticated/,
+  )
 })
