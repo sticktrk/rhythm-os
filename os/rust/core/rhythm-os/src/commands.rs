@@ -24423,15 +24423,28 @@ mod tests {
             }],
         )
         .unwrap();
-        do_light_schedule_assignment_set(&state, "porch", Some("outdoor"), false).unwrap();
+        // Assign at a fixed time inside the Day interval. The wall-clock
+        // variant derives the schedule's active mode from `Utc::now()`, so
+        // between 18:00 and 06:00 UTC the schedule would enter Sleep and the
+        // Day -> Sleep trigger below would be refused.
+        let assigned_utc = chrono::NaiveDate::from_ymd_opt(2026, 8, 31)
+            .unwrap()
+            .and_hms_opt(12, 0, 0)
+            .unwrap();
+        do_light_schedule_assignment_set_with_correlation_at(
+            &state,
+            "porch",
+            Some("outdoor"),
+            None,
+            false,
+            assigned_utc,
+        )
+        .unwrap();
         do_trigger_light_schedule_transition_for_node(&state, "porch", "outdoor", "sleep_start")
             .unwrap();
         assert!(!runtime.engine_node_snapshot("porch").unwrap().hard_off);
 
-        let current_utc = chrono::NaiveDate::from_ymd_opt(2026, 8, 31)
-            .unwrap()
-            .and_hms_opt(20, 0, 0)
-            .unwrap();
+        let current_utc = assigned_utc + chrono::Duration::hours(8);
         do_light_schedule_override_set_at(
             &state,
             "porch",
