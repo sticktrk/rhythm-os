@@ -187,6 +187,8 @@ bool rhythm_chip_bridge_read_light_capability_snapshot(uint64_t node_id, uint16_
                                                        size_t error_message_size);
 bool rhythm_chip_bridge_read_light_state(uint64_t node_id, uint16_t endpoint, char * out_json, size_t json_size,
                                          size_t * out_json_len, char * error_message, size_t error_message_size);
+bool rhythm_chip_bridge_write_color_control_options(uint64_t node_id, uint16_t endpoint, bool execute_if_off,
+                                                    char * error_message, size_t error_message_size);
 bool rhythm_chip_bridge_subscribe_on_off(const struct rhythm_chip_bridge_subscription_target * targets, size_t target_count,
                                          uint16_t min_interval_secs, uint16_t max_interval_secs, bool replace_existing,
                                          char * error_message, size_t error_message_size);

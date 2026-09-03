@@ -589,6 +589,17 @@ pub trait MatterTransport: Send + Sync {
         anyhow::bail!("Matter light state snapshots are not supported by this transport")
     }
 
+    /// Toggle ExecuteIfOff in ColorControl Options while preserving other bits.
+    fn write_color_control_execute_if_off(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+        execute_if_off: bool,
+    ) -> Result<()> {
+        let _ = (node_id, endpoint, execute_if_off);
+        anyhow::bail!("Matter ColorControl Options writes are not supported by this transport")
+    }
+
     /// Subscribe to the light-state attributes used by runtime verification:
     /// OnOff, CurrentLevel, and the current ColorControl attributes.
     fn subscribe_light_state(
@@ -662,6 +673,8 @@ pub enum MatterAttributeValue {
     U16(u16),
     /// A possibly-empty ReportData proved the peer and subscription alive.
     SubscriptionAlive,
+    /// The runtime subscription ended and must be established again.
+    SubscriptionTerminated,
 }
 
 /// A raw attribute report from a Matter subscription.

@@ -140,7 +140,8 @@ const bulbAuditionScenarios = <BulbAuditionScenario>[
     title: 'Power Cycle → Tick',
     prompt: 'After physically power-cycling it, did it recover to the target?',
     runLabel: 'Run recovery tick',
-    preparation: 'Physically power-cycle the bulb before running.',
+    preparation:
+        'Start this check, then physically power-cycle the bulb while Rhythm observes the subscription.',
     legacyTest: 'power_on_behavior',
   ),
   BulbAuditionScenario(
@@ -154,13 +155,24 @@ const bulbAuditionScenarios = <BulbAuditionScenario>[
     title: 'External Change',
     prompt: 'After changing it from another controller, was a report received?',
     runLabel: 'Observe change',
-    preparation: 'For a multi-admin bulb, change it from its other app.',
+    preparation:
+        'Start this check, then change the multi-admin bulb from its other app while Rhythm waits.',
   ),
   BulbAuditionScenario(
     id: 'subscription_liveness',
     title: 'Subscription Liveness',
     prompt: 'Did subscription reporting remain live?',
     runLabel: 'Check liveness',
+  ),
+  BulbAuditionScenario(
+    id: 'command_spacing',
+    title: 'Command Spacing',
+    prompt:
+        'Did the bulb keep reaching the requested state as the gap narrowed?',
+    runLabel: 'Measure command spacing',
+    preparation:
+        'Rhythm rehearses the same runtime plan at 250, 100, 50, and 0 ms and saves the smallest verified gap.',
+    operatorAnswer: false,
   ),
   BulbAuditionScenario(
     id: 'dim_floor',

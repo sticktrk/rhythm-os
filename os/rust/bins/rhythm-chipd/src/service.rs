@@ -345,6 +345,19 @@ impl ChipControllerService {
                 let value = self.backend().read_light_state(node_id, endpoint)?;
                 Ok(serde_json::to_value(ChipRpcJsonValueResponse { value })?)
             }
+            ChipRpcRequest::WriteColorControlOptions {
+                node_id,
+                endpoint,
+                execute_if_off,
+            } => {
+                self.require_initialized()?;
+                self.backend().write_color_control_execute_if_off(
+                    node_id,
+                    endpoint,
+                    execute_if_off,
+                )?;
+                Ok(serde_json::to_value(ChipRpcEmpty::new())?)
+            }
             ChipRpcRequest::SubscribeOnOff {
                 targets,
                 min_interval_secs,

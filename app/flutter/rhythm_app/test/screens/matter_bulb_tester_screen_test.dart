@@ -81,6 +81,12 @@ class _FakeRhythmServerApi extends RhythmServerApi {
       'status': 'ok',
       'needs_audition': false,
       'profile_used': profile,
+      if (scenario == 'command_spacing')
+        'command_spacing_measurement': {
+          'value_ms': 50,
+          'basis': 'measured',
+          'source': 'audition',
+        },
       'reported': {
         'after_1500ms': {
           'onoff': {'ok': true, 'value': true},
@@ -248,11 +254,11 @@ void main() {
     });
   });
 
-  testWidgets('shows the 15-scenario audition and skips answers for preflight',
+  testWidgets('shows the 16-scenario audition and skips answers for preflight',
       (tester) async {
     await pumpTester(tester);
 
-    expect(find.text('1/15'), findsOneWidget);
+    expect(find.text('1/16'), findsOneWidget);
     expect(find.text('Preflight'), findsAtLeastNWidgets(1));
     expect(find.text('Yes'), findsNothing);
     expect(find.text('No'), findsNothing);
@@ -271,7 +277,7 @@ void main() {
         .jumpTo(0);
     await tester.pumpAndSettle();
 
-    expect(find.text('3/15'), findsOneWidget);
+    expect(find.text('3/16'), findsOneWidget);
     expect(find.text('Yes'), findsOneWidget);
     expect(find.text('No'), findsOneWidget);
     expect(
@@ -377,5 +383,39 @@ void main() {
 
     expect(find.text('Reported'), findsOneWidget);
     expect(find.text('On · 30 % · 4000 K'), findsOneWidget);
+  });
+
+  testWidgets('measured command spacing survives later scenario results',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(430, 1000));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final harness = _BulbAuditionHarness();
+    addTearDown(harness.dispose);
+    await harness.pump(tester, device);
+
+    await selectStep(tester, 'command_spacing');
+    await tester.tap(find.text('Measure command spacing'));
+    await tester.pumpAndSettle();
+    await selectStep(tester, 'preflight');
+    await tester.tap(find.text('Read attributes'));
+    await tester.pumpAndSettle();
+
+    final save = find.text('Save Results');
+    await tester.scrollUntilVisible(
+      save,
+      500,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(save);
+    await tester.pumpAndSettle();
+
+    expect(
+      harness.api.savedReport!['control_profile']['command_spacing_ms'],
+      {
+        'value_ms': 50,
+        'basis': 'measured',
+        'source': 'audition',
+      },
+    );
   });
 }

@@ -394,6 +394,24 @@ impl ChipFfiController {
         }
     }
 
+    pub fn write_color_control_execute_if_off(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+        execute_if_off: bool,
+    ) -> Result<()> {
+        #[cfg(rhythm_chipd_chip_ffi)]
+        {
+            ffi_probe::write_color_control_execute_if_off(node_id, endpoint, execute_if_off)
+        }
+
+        #[cfg(not(rhythm_chipd_chip_ffi))]
+        {
+            let _ = (node_id, endpoint, execute_if_off);
+            Err(self.unsupported("write_color_control_execute_if_off"))
+        }
+    }
+
     pub fn subscribe_on_off(
         &self,
         targets: &[MatterSubscriptionTarget],
@@ -918,6 +936,13 @@ mod ffi_probe {
             out_json: *mut c_char,
             json_size: usize,
             out_json_len: *mut usize,
+            error_message: *mut c_char,
+            error_message_size: usize,
+        ) -> bool;
+        fn rhythm_chip_bridge_write_color_control_options(
+            node_id: u64,
+            endpoint: c_ushort,
+            execute_if_off: bool,
             error_message: *mut c_char,
             error_message_size: usize,
         ) -> bool;
@@ -1485,6 +1510,28 @@ mod ffi_probe {
                 error_buffer.len(),
             )
         })
+    }
+
+    pub fn write_color_control_execute_if_off(
+        node_id: u64,
+        endpoint: u16,
+        execute_if_off: bool,
+    ) -> Result<()> {
+        let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];
+        let success = unsafe {
+            rhythm_chip_bridge_write_color_control_options(
+                node_id,
+                endpoint,
+                execute_if_off,
+                error_buffer.as_mut_ptr(),
+                error_buffer.len(),
+            )
+        };
+        if success {
+            Ok(())
+        } else {
+            Err(read_error_buffer(&error_buffer))
+        }
     }
 
     pub fn subscribe_on_off(

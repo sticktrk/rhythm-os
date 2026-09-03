@@ -256,6 +256,7 @@ pub struct SpyTransport {
     on_off_state: Mutex<HashMap<u64, bool>>,
     light_state: Mutex<HashMap<(u64, u16), Value>>,
     light_state_reads: AtomicUsize,
+    color_control_options: Mutex<HashMap<(u64, u16), u8>>,
     groups: Mutex<HashMap<u16, MatterGroup>>,
     failing_nodes: Mutex<HashSet<u64>>,
     failing_read_nodes: Mutex<HashSet<u64>>,
@@ -280,6 +281,7 @@ impl SpyTransport {
             on_off_state: Mutex::new(HashMap::new()),
             light_state: Mutex::new(HashMap::new()),
             light_state_reads: AtomicUsize::new(0),
+            color_control_options: Mutex::new(HashMap::new()),
             groups: Mutex::new(HashMap::new()),
             failing_nodes: Mutex::new(HashSet::new()),
             failing_read_nodes: Mutex::new(HashSet::new()),
@@ -342,6 +344,13 @@ impl SpyTransport {
 
     pub fn light_state_read_count(&self) -> usize {
         self.light_state_reads.load(Ordering::SeqCst)
+    }
+
+    pub fn set_color_control_options(&self, node_id: u64, endpoint: u16, options: u8) {
+        self.color_control_options
+            .lock()
+            .unwrap()
+            .insert((node_id, endpoint), options);
     }
 
     pub fn fail_node(&self, node_id: u64) {
@@ -789,6 +798,33 @@ impl MatterTransport for SpyTransport {
             .ok_or_else(|| {
                 anyhow::anyhow!("light state for {node_id}/{endpoint} is not configured")
             })
+    }
+
+    fn read_light_capability_snapshot(&self, node_id: u64, endpoint: u16) -> Result<Value> {
+        let options = self
+            .color_control_options
+            .lock()
+            .unwrap()
+            .get(&(node_id, endpoint))
+            .copied()
+            .unwrap_or(0);
+        Ok(serde_json::json!({"color_control": {"options": options}}))
+    }
+
+    fn write_color_control_execute_if_off(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+        execute_if_off: bool,
+    ) -> Result<()> {
+        let mut options = self.color_control_options.lock().unwrap();
+        let value = options.entry((node_id, endpoint)).or_default();
+        if execute_if_off {
+            *value |= 0x01;
+        } else {
+            *value &= !0x01;
+        }
+        Ok(())
     }
 }
 

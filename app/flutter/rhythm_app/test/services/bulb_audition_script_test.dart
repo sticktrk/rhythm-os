@@ -5,7 +5,7 @@ void main() {
   test('audition is scenario-based and covers runtime and subscriptions', () {
     final ids = bulbAuditionScenarios.map((scenario) => scenario.id).toList();
 
-    expect(ids, hasLength(15));
+    expect(ids, hasLength(16));
     expect(ids, [
       'preflight',
       'identify',
@@ -19,6 +19,7 @@ void main() {
       'subscription_establish',
       'subscription_external_change',
       'subscription_liveness',
+      'command_spacing',
       'dim_floor',
       'dim_ramp',
       'brightness_range',
@@ -30,6 +31,13 @@ void main() {
           .firstWhere((scenario) => scenario.id == 'turn_on_from_off')
           .runLabel,
       'Run real plan',
+    );
+    expect(
+      bulbAuditionScenarios
+          .firstWhere(
+              (scenario) => scenario.id == 'subscription_external_change')
+          .preparation,
+      startsWith('Start this check'),
     );
   });
 

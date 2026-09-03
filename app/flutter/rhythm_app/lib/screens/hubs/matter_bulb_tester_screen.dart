@@ -1236,6 +1236,13 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
     final fromServer = _latestProfileUsed ?? _lastServerMap('profile_used');
     if (fromServer != null) {
       final profile = Map<String, dynamic>.from(fromServer);
+      final measuredSpacing = _observations['command_spacing']
+          ?.serverResult?['command_spacing_measurement'];
+      if (measuredSpacing is Map) {
+        profile['command_spacing_ms'] = Map<String, dynamic>.from(
+          measuredSpacing,
+        );
+      }
       final sources = profile['source'] is Map
           ? Map<String, dynamic>.from(profile['source'] as Map)
           : <String, dynamic>{};
@@ -1303,6 +1310,8 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
           if (latency != null) 'latency_ms': latency,
           if (truthMatchesDirectRead != null)
             'truth_matches_direct_read': truthMatchesDirectRead,
+          'subscription_survived':
+              powerCycleSubscription?['subscription_survived'] == true,
           'resubscribe_after_power_cycle':
               powerCycleSubscription?['resubscribe_after_power_cycle'] == true,
           'reports_external_changes':
@@ -1342,6 +1351,7 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
       'subscription': {
         'works': false,
         'truth_matches_direct_read': null,
+        'subscription_survived': false,
         'resubscribe_after_power_cycle': false,
         'reports_external_changes': false,
       },
@@ -1386,6 +1396,11 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
   }
 
   Map<String, dynamic> _commandSpacing() {
+    final measured = _observations['command_spacing']
+        ?.serverResult?['command_spacing_measurement'];
+    if (measured is Map && measured['value_ms'] is num) {
+      return Map<String, dynamic>.from(measured);
+    }
     final profile = _firstServerMap('profile_used');
     final spacing = profile?['command_spacing_ms'];
     if (spacing is Map && spacing['value_ms'] is num) {

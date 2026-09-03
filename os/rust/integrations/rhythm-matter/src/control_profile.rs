@@ -102,12 +102,14 @@ impl Default for MatterReadbackTrust {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct MatterSubscriptionProfile {
     pub works: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub truth_matches_direct_read: Option<bool>,
+    pub subscription_survived: bool,
     pub resubscribe_after_power_cycle: bool,
     pub reports_external_changes: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]

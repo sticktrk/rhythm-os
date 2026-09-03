@@ -105,6 +105,15 @@ pub trait ChipControllerBackend: Send + Sync {
         endpoint: u16,
     ) -> Result<serde_json::Value>;
     fn read_light_state(&self, node_id: u64, endpoint: u16) -> Result<serde_json::Value>;
+    fn write_color_control_execute_if_off(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+        execute_if_off: bool,
+    ) -> Result<()> {
+        let _ = (node_id, endpoint, execute_if_off);
+        anyhow::bail!("ColorControl Options writes are not supported by this backend")
+    }
     fn subscribe_on_off(
         &self,
         targets: &[MatterSubscriptionTarget],
@@ -329,6 +338,16 @@ impl ChipControllerBackend for NativeChipBackend {
         self.controller_ref()?.read_light_state(node_id, endpoint)
     }
 
+    fn write_color_control_execute_if_off(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+        execute_if_off: bool,
+    ) -> Result<()> {
+        self.controller_ref()?
+            .write_color_control_execute_if_off(node_id, endpoint, execute_if_off)
+    }
+
     fn subscribe_on_off(
         &self,
         targets: &[MatterSubscriptionTarget],
@@ -366,6 +385,7 @@ struct FakeChipState {
     state: Option<CommissioningState>,
     devices: BTreeMap<u64, CommissionedDevice>,
     on_off: HashMap<(u64, u16), bool>,
+    color_control_options: HashMap<(u64, u16), u8>,
     groups: BTreeMap<u16, MatterGroup>,
 }
 
@@ -700,6 +720,7 @@ impl ChipControllerBackend for FakeChipBackend {
                 "current_y": 0,
                 "current_hue": 0,
                 "current_saturation": 0,
+                "options": inner.color_control_options.get(&(node_id, endpoint)).copied().unwrap_or(0),
             },
             "raw_attribute_reads_available": true,
         }))
@@ -715,6 +736,26 @@ impl ChipControllerBackend for FakeChipBackend {
             "current_hue": {"ok": true, "value": 0},
             "current_saturation": {"ok": true, "value": 0},
         }))
+    }
+
+    fn write_color_control_execute_if_off(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+        execute_if_off: bool,
+    ) -> Result<()> {
+        let mut inner = self.lock();
+        inner.require_device(node_id)?;
+        let options = inner
+            .color_control_options
+            .entry((node_id, endpoint))
+            .or_default();
+        if execute_if_off {
+            *options |= 0x01;
+        } else {
+            *options &= !0x01;
+        }
+        Ok(())
     }
 
     fn subscribe_on_off(

@@ -108,7 +108,8 @@ fn rpc_timeout_for_request(request: &ChipRpcRequest) -> Duration {
         | ChipRpcRequest::SetXy { .. }
         | ChipRpcRequest::SetHueSaturation { .. }
         | ChipRpcRequest::ReadOnOff { .. }
-        | ChipRpcRequest::ReadLightState { .. } => RPC_CONTROL_TIMEOUT,
+        | ChipRpcRequest::ReadLightState { .. }
+        | ChipRpcRequest::WriteColorControlOptions { .. } => RPC_CONTROL_TIMEOUT,
         // Subscribing is not a control step: the server no longer holds the
         // lifecycle lock for it and the native operation is bounded by the SDK
         // (address resolve ~45s plus CASE). An 8s client deadline turned an
@@ -2034,6 +2035,21 @@ impl MatterTransport for ChipTransport {
         Ok(response.value)
     }
 
+    fn write_color_control_execute_if_off(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+        execute_if_off: bool,
+    ) -> Result<()> {
+        let _: crate::chip_rpc::ChipRpcEmpty =
+            self.call(ChipRpcRequest::WriteColorControlOptions {
+                node_id,
+                endpoint,
+                execute_if_off,
+            })?;
+        Ok(())
+    }
+
     fn subscribe_light_state(
         &self,
         targets: &[MatterSubscriptionTarget],
@@ -2756,6 +2772,30 @@ mod tests {
 
         let transport = ChipTransport::for_test(socket_path.clone());
         transport.identify_light(7, 1, 1).unwrap();
+
+        server.join().unwrap();
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn color_control_options_write_uses_rpc_contract() {
+        let socket_path = temp_socket_path("write-color-control-options");
+        let server = spawn_fake_server(socket_path.clone(), |request| {
+            assert!(matches!(
+                request.request,
+                ChipRpcRequest::WriteColorControlOptions {
+                    node_id: 7,
+                    endpoint: 2,
+                    execute_if_off: true,
+                }
+            ));
+            ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new())
+        });
+
+        let transport = ChipTransport::for_test(socket_path.clone());
+        transport
+            .write_color_control_execute_if_off(7, 2, true)
+            .unwrap();
 
         server.join().unwrap();
         let _ = fs::remove_file(socket_path);

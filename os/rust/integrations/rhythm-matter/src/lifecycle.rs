@@ -57,6 +57,10 @@ const MATTER_SUBSCRIPTION_UNKNOWN_KEY_REFRESH_DEBOUNCE: Duration = Duration::fro
 type OnOffObservations = HashMap<(u64, u16), (bool, std::time::Instant)>;
 const MATTER_ATTRIBUTE_REPORT_HISTORY_LIMIT: usize = 2_048;
 
+fn now_unix_ms() -> u64 {
+    chrono::Utc::now().timestamp_millis().max(0) as u64
+}
+
 fn record_attribute_report_history(
     report: &MatterAttributeReport,
     history: &Mutex<VecDeque<MatterAttributeReport>>,
@@ -748,6 +752,17 @@ fn start_controller_event_stream(
                             forget_on_off_observation(
                                 (termination.node_id, termination.endpoint),
                                 on_off_observations.as_ref(),
+                            );
+                            record_attribute_report_history(
+                                &MatterAttributeReport {
+                                    received_at_unix_ms: now_unix_ms(),
+                                    node_id: termination.node_id,
+                                    endpoint: termination.endpoint,
+                                    cluster: 0,
+                                    attr_id: 0,
+                                    value: MatterAttributeValue::SubscriptionTerminated,
+                                },
+                                attribute_report_history.as_ref(),
                             );
                             let _ = subscription_refresh.send(
                                 MatterSubscriptionRefresh::SubscriptionTerminated {
@@ -2670,6 +2685,7 @@ mod tests {
             ((93, 1), (true, std::time::Instant::now())),
             ((94, 1), (true, std::time::Instant::now())),
         ])));
+        let report_history = Arc::new(Mutex::new(VecDeque::new()));
 
         start_controller_event_stream(
             transport.clone(),
@@ -2680,7 +2696,7 @@ mod tests {
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(HashSet::new())),
             Arc::new(crate::hub_state::MatterReadbackCoordinator::default()),
-            Arc::new(Mutex::new(VecDeque::new())),
+            report_history.clone(),
         );
 
         assert!(matches!(
@@ -2706,6 +2722,11 @@ mod tests {
         // than attempted inline: the termination must not start a retry storm.
         wait_for_atomic_at_least(&transport.subscribe_calls, 1);
         assert_eq!(transport.subscribe_calls.load(Ordering::SeqCst), 1);
+        assert!(report_history.lock().unwrap().iter().any(|report| {
+            report.node_id == 93
+                && report.endpoint == 1
+                && matches!(&report.value, MatterAttributeValue::SubscriptionTerminated)
+        }));
 
         shutdown.store(true, Ordering::SeqCst);
     }

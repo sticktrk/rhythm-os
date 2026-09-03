@@ -154,6 +154,12 @@ pub enum ChipRpcRequest {
         node_id: u64,
         endpoint: u16,
     },
+    WriteColorControlOptions {
+        node_id: u64,
+        endpoint: u16,
+        execute_if_off: bool,
+    },
+    // Rename this wire method to SubscribeLightState in the next protocol release.
     SubscribeOnOff {
         targets: Vec<MatterSubscriptionTarget>,
         min_interval_secs: u16,

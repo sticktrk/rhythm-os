@@ -1761,6 +1761,22 @@ public:
         return InvokeCommand(nodeId, endpoint, request);
     }
 
+    CHIP_ERROR WriteColorControlOptions(NodeId nodeId, EndpointId endpoint, bool executeIfOff)
+    {
+        chip::BitMask<ColorControl::OptionsBitmap> options;
+        ReturnErrorOnFailure(
+            ReadValueAttribute<ColorControl::Attributes::Options::TypeInfo>(nodeId, endpoint, options));
+        if (executeIfOff)
+        {
+            options.Set(ColorControl::OptionsBitmap::kExecuteIfOff);
+        }
+        else
+        {
+            options.Clear(ColorControl::OptionsBitmap::kExecuteIfOff);
+        }
+        return WriteAttribute<ColorControl::Attributes::Options::TypeInfo>(nodeId, endpoint, options);
+    }
+
     CHIP_ERROR ReadOnOff(NodeId nodeId, EndpointId endpoint, bool & on)
     {
         return ReadValueAttribute<OnOff::Attributes::OnOff::TypeInfo>(nodeId, endpoint, on);
@@ -1812,6 +1828,7 @@ public:
         std::vector<AttributeId> colorAttributes;
         uint32_t colorFeatureMap = 0;
         chip::BitMask<ColorControl::ColorCapabilitiesBitmap> colorCapabilities;
+        chip::BitMask<ColorControl::OptionsBitmap> colorOptions;
         uint16_t minMireds = 0;
         uint16_t maxMireds = 0;
         uint16_t currentX = 0;
@@ -1825,6 +1842,8 @@ public:
         (void) ReadValueAttribute<ColorControl::Attributes::FeatureMap::TypeInfo>(nodeId, endpoint, colorFeatureMap);
         CHIP_ERROR colorCapabilitiesErr =
             ReadValueAttribute<ColorControl::Attributes::ColorCapabilities::TypeInfo>(nodeId, endpoint, colorCapabilities);
+        CHIP_ERROR colorOptionsErr =
+            ReadValueAttribute<ColorControl::Attributes::Options::TypeInfo>(nodeId, endpoint, colorOptions);
         CHIP_ERROR minMiredsErr =
             ReadValueAttribute<ColorControl::Attributes::ColorTempPhysicalMinMireds::TypeInfo>(nodeId, endpoint, minMireds);
         CHIP_ERROR maxMiredsErr =
@@ -1908,6 +1927,15 @@ public:
         AppendReadValue(json, "current_y", currentYErr, currentY);
         AppendReadValue(json, "current_hue", currentHueErr, currentHue);
         AppendReadValue(json, "current_saturation", currentSaturationErr, currentSaturation);
+        json << ",\"options\":";
+        if (colorOptionsErr == CHIP_NO_ERROR)
+        {
+            json << static_cast<unsigned>(colorOptions.Raw());
+        }
+        else
+        {
+            json << "null";
+        }
         json << '}';
         json << '}';
         out = json.str();
@@ -3085,6 +3113,13 @@ bool rhythm_chip_bridge_read_light_state(uint64_t node_id, uint16_t endpoint, ch
         return HandleBridgeResult(err, error_message, error_message_size, "reading Matter light state");
     }
     return WriteJsonOutput(json, out_json, json_size, out_json_len, error_message, error_message_size);
+}
+
+bool rhythm_chip_bridge_write_color_control_options(uint64_t node_id, uint16_t endpoint, bool execute_if_off,
+                                                    char * error_message, size_t error_message_size)
+{
+    return HandleBridgeResult(gContext.WriteColorControlOptions(node_id, endpoint, execute_if_off), error_message,
+                              error_message_size, "writing Matter ColorControl Options");
 }
 
 bool rhythm_chip_bridge_subscribe_on_off(const struct rhythm_chip_bridge_subscription_target * targets, size_t target_count,

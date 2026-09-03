@@ -29,8 +29,9 @@ use crate::transport::{
 };
 
 const OUTCOME_WAIT_MS: u64 = 2_000;
-const SUBSCRIPTION_EVIDENCE_LOOKBACK_MS: u64 = 30_000;
+const OPERATOR_EVIDENCE_WAIT_MS: u64 = 15_000;
 const AUDITION_LIVENESS_MAX_INTERVAL_SECS: u16 = 2;
+const COMMAND_SPACING_GAPS_MS: [u64; 4] = [250, 100, 50, 0];
 
 pub fn run_audition(state: &SharedState, params: &Value) -> Result<Value> {
     let device_id = params
@@ -94,19 +95,14 @@ pub fn run_audition(state: &SharedState, params: &Value) -> Result<Value> {
         .read_light_capability_snapshot(node_id, endpoint)
         .unwrap_or_else(|_| Value::Null);
     if scenario == "preflight" {
-        return Ok(json!({
-            "schema_version": 3,
-            "status": "ok",
-            "scenario": scenario,
-            "device_id": native_id,
-            "node_id": node_id,
-            "endpoint": endpoint,
-            "claimed_capabilities": capability_snapshot,
-            "reported": readback_snapshot(&transport, node_id, endpoint),
-            "observed": Value::Null,
-            "profile_used": profile,
-            "subscription": subscription_snapshot(&transport, node_id, endpoint, scenario),
-        }));
+        return Ok(preflight_result(
+            &transport,
+            &native_id,
+            node_id,
+            endpoint,
+            capability_snapshot,
+            &profile,
+        ));
     }
 
     if scenario == "identify" {
@@ -134,6 +130,11 @@ pub fn run_audition(state: &SharedState, params: &Value) -> Result<Value> {
         }
         .map_err(|error| anyhow::anyhow!(error.to_string()))?;
         all_plans.extend(plans);
+    }
+    if scenario == "command_spacing" {
+        for (plan, spacing_ms) in all_plans.iter_mut().zip(COMMAND_SPACING_GAPS_MS) {
+            plan.inter_step_delay_ms = (spacing_ms > 0).then_some(spacing_ms);
+        }
     }
 
     let result = execute_scenario(
@@ -194,6 +195,7 @@ fn is_audition_scenario(value: &str) -> bool {
             | "subscription_establish"
             | "subscription_external_change"
             | "subscription_liveness"
+            | "command_spacing"
             | "try_with"
     )
 }
@@ -236,6 +238,10 @@ fn scenario_actions(scenario: &str, params: &Value) -> Result<Vec<AuditionAction
         "subscription_establish" | "subscription_external_change" | "subscription_liveness" => {
             Vec::new()
         }
+        "command_spacing" => COMMAND_SPACING_GAPS_MS
+            .iter()
+            .map(|_| AuditionAction::On(cool()))
+            .collect(),
         "try_with" => {
             let base = params
                 .get("base_scenario")
@@ -272,6 +278,7 @@ fn execute_scenario(
     let mut readback_after_1500ms = readback_before.clone();
     let mut plan_observations = Vec::new();
     let mut mismatch = None;
+    let mut measured_command_spacing_ms = None;
     // chipd intentionally coalesces multiple pending desired states for one
     // endpoint. Audition is a rehearsal, so preserve scenario order by
     // admitting and awaiting each runtime-built plan separately.
@@ -319,7 +326,14 @@ fn execute_scenario(
                 )
             })
             .flatten();
-        if let Some(field) = plan_mismatch {
+        if scenario == "command_spacing" && succeeded && plan_mismatch.is_none() {
+            measured_command_spacing_ms = Some(
+                measured_command_spacing_ms
+                    .map(|current: u64| current.min(plan.inter_step_delay_ms.unwrap_or(0)))
+                    .unwrap_or_else(|| plan.inter_step_delay_ms.unwrap_or(0)),
+            );
+        }
+        if let Some(field) = plan_mismatch.filter(|_| scenario != "command_spacing") {
             mismatch.get_or_insert(field);
             tracing::warn!(
                 target: "cmd",
@@ -361,6 +375,17 @@ fn execute_scenario(
             sleep_ms(u64::from(AUDITION_LIVENESS_MAX_INTERVAL_SECS) * 1_000);
         }
     }
+    if matches!(
+        scenario,
+        "subscription_external_change" | "power_cycle_then_tick"
+    ) {
+        let elapsed_ms = now_unix_ms().saturating_sub(started_at_unix_ms);
+        sleep_ms(OPERATOR_EVIDENCE_WAIT_MS.saturating_sub(elapsed_ms));
+        readback_after_1500ms = readback_snapshot(transport, node_id, endpoint);
+    }
+    if scenario == "command_spacing" && measured_command_spacing_ms.is_none() {
+        mismatch = Some("command_spacing");
+    }
     // chipd owns the native drain and publishes reports into the controller
     // event stream. Reading the shared lifecycle history keeps Audition on
     // that exact runtime path and avoids racing the background event loop.
@@ -369,9 +394,7 @@ fn execute_scenario(
         // latest retained values remain useful truth evidence when a duplicate
         // subscribe is correctly coalesced by the controller.
         "subscription_establish" => 0,
-        "subscription_external_change" | "power_cycle_then_tick" => {
-            started_at_unix_ms.saturating_sub(SUBSCRIPTION_EVIDENCE_LOOKBACK_MS)
-        }
+        "subscription_external_change" | "power_cycle_then_tick" => started_at_unix_ms,
         // A liveness rehearsal replaces the long-lived runtime subscription.
         // Only activity from that replacement can prove the negotiated short
         // maximum interval; retained activity from the old subscription must
@@ -395,7 +418,13 @@ fn execute_scenario(
         .unwrap_or_default();
     let report_latency_ms = raw_reports
         .iter()
-        .filter(|report| !matches!(&report.value, MatterAttributeValue::SubscriptionAlive))
+        .filter(|report| {
+            !matches!(
+                &report.value,
+                MatterAttributeValue::SubscriptionAlive
+                    | MatterAttributeValue::SubscriptionTerminated
+            )
+        })
         .filter_map(|report| {
             acknowledgement_times
                 .iter()
@@ -423,7 +452,7 @@ fn execute_scenario(
     let subscription_truth_matches_direct_read =
         (!truth_results.is_empty()).then(|| truth_results.iter().all(|value| *value));
     let reports = raw_reports
-        .into_iter()
+        .iter()
         .map(|report| {
             let received_at_unix_ms = if report.received_at_unix_ms == 0 {
                 now_unix_ms()
@@ -439,7 +468,7 @@ fn execute_scenario(
             json!({
                 "received_at_unix_ms": received_at_unix_ms,
                 "latency_from_ack_ms": latency_from_ack_ms,
-                "matches_direct_read": report_matches_direct_read(&report, &readback_after_1500ms),
+                "matches_direct_read": report_matches_direct_read(report, &readback_after_1500ms),
                 "report": report,
             })
         })
@@ -449,6 +478,8 @@ fn execute_scenario(
         report_latency_ms,
         subscription_truth_matches_direct_read,
         &subscription_activity_times,
+        &raw_reports,
+        &readback_before,
         scenario,
     );
     if scenario == "subscription_liveness" {
@@ -462,6 +493,13 @@ fn execute_scenario(
         if let Some(subscription) = subscription_evidence.as_object_mut() {
             subscription.insert("runtime_interval_restored".to_string(), json!(restored));
         }
+    }
+
+    let mut profile_used = profile.clone();
+    if let Some(value_ms) = measured_command_spacing_ms {
+        profile_used.command_spacing_ms.value_ms = value_ms as u32;
+        profile_used.command_spacing_ms.basis = MatterMeasurementBasis::Measured;
+        profile_used.command_spacing_ms.source = MatterProfileSource::Audition;
     }
 
     Ok(json!({
@@ -488,7 +526,12 @@ fn execute_scenario(
         "observed": Value::Null,
         "subscription_reports": reports,
         "subscription": subscription_evidence,
-        "profile_used": profile,
+        "profile_used": profile_used,
+        "command_spacing_measurement": measured_command_spacing_ms.map(|value_ms| json!({
+            "value_ms": value_ms,
+            "basis": MatterMeasurementBasis::Measured,
+            "source": MatterProfileSource::Audition,
+        })),
         "adaptive_white": if scenario == "adaptive_white_route" {
             json!({
                 "kelvin_targets": [2200, 2700, 4000, 6500],
@@ -535,6 +578,66 @@ fn wait_for_plan_outcome(
         }
     }
     None
+}
+
+fn preflight_execute_if_off_options_write(
+    transport: &Arc<dyn MatterTransport>,
+    node_id: u64,
+    endpoint: u16,
+    capability_snapshot: &Value,
+) -> bool {
+    let Some(original_options) = color_control_options(capability_snapshot) else {
+        return false;
+    };
+    if transport
+        .write_color_control_execute_if_off(node_id, endpoint, true)
+        .is_err()
+    {
+        return false;
+    }
+    let accepted = transport
+        .read_light_capability_snapshot(node_id, endpoint)
+        .ok()
+        .and_then(|snapshot| color_control_options(&snapshot))
+        .is_some_and(|options| options & 0x01 != 0);
+    let restored = transport
+        .write_color_control_execute_if_off(node_id, endpoint, original_options & 0x01 != 0)
+        .is_ok();
+    accepted && restored
+}
+
+fn preflight_result(
+    transport: &Arc<dyn MatterTransport>,
+    device_id: &str,
+    node_id: u64,
+    endpoint: u16,
+    capability_snapshot: Value,
+    profile: &MatterControlProfile,
+) -> Value {
+    let execute_if_off_options_writable =
+        preflight_execute_if_off_options_write(transport, node_id, endpoint, &capability_snapshot);
+    json!({
+        "schema_version": 3,
+        "status": "ok",
+        "scenario": "preflight",
+        "device_id": device_id,
+        "node_id": node_id,
+        "endpoint": endpoint,
+        "claimed_capabilities": capability_snapshot,
+        "execute_if_off_options_writable": execute_if_off_options_writable,
+        "reported": readback_snapshot(transport, node_id, endpoint),
+        "observed": Value::Null,
+        "profile_used": profile,
+        "subscription": subscription_snapshot(transport, node_id, endpoint, "preflight"),
+    })
+}
+
+fn color_control_options(snapshot: &Value) -> Option<u8> {
+    let options = snapshot.pointer("/color_control/options")?;
+    options
+        .as_u64()
+        .or_else(|| options.get("value").and_then(Value::as_u64))
+        .and_then(|value| u8::try_from(value).ok())
 }
 
 fn subscription_snapshot(
@@ -586,6 +689,8 @@ fn merge_subscription_evidence(
     report_latency_ms: Option<u64>,
     truth_matches_direct_read: Option<bool>,
     activity_times: &[u64],
+    reports: &[MatterAttributeReport],
+    readback_before: &Value,
     scenario: &str,
 ) -> Value {
     if let Some(subscription) = subscription.as_object_mut() {
@@ -603,15 +708,38 @@ fn merge_subscription_evidence(
             json!(activity_times.len()),
         );
         if scenario == "power_cycle_then_tick" {
+            let terminated_at = reports
+                .iter()
+                .filter(|report| {
+                    matches!(&report.value, MatterAttributeValue::SubscriptionTerminated)
+                })
+                .map(|report| report.received_at_unix_ms)
+                .max();
+            let report_after_termination = terminated_at.is_some_and(|terminated_at| {
+                reports.iter().any(|report| {
+                    report.received_at_unix_ms > terminated_at
+                        && !matches!(&report.value, MatterAttributeValue::SubscriptionTerminated)
+                })
+            });
+            let report_without_termination = terminated_at.is_none()
+                && reports.iter().any(|report| {
+                    !matches!(&report.value, MatterAttributeValue::SubscriptionTerminated)
+                });
             subscription.insert(
                 "resubscribe_after_power_cycle".to_string(),
-                json!(truth_matches_direct_read.is_some()),
+                json!(terminated_at.is_some() && report_after_termination),
+            );
+            subscription.insert(
+                "subscription_survived".to_string(),
+                json!(report_without_termination),
             );
         }
         if scenario == "subscription_external_change" {
             subscription.insert(
                 "reports_external_changes".to_string(),
-                json!(truth_matches_direct_read.is_some()),
+                json!(reports
+                    .iter()
+                    .any(|report| { report_differs_from_direct_read(report, readback_before) })),
             );
         }
         if scenario == "subscription_liveness" {
@@ -652,8 +780,14 @@ fn report_matches_direct_read(report: &MatterAttributeReport, state: &Value) -> 
         MatterAttributeValue::Bool(value) => direct.as_bool() == Some(*value),
         MatterAttributeValue::U8(value) => direct.as_u64() == Some(u64::from(*value)),
         MatterAttributeValue::U16(value) => direct.as_u64() == Some(u64::from(*value)),
-        MatterAttributeValue::SubscriptionAlive => return None,
+        MatterAttributeValue::SubscriptionAlive | MatterAttributeValue::SubscriptionTerminated => {
+            return None
+        }
     })
+}
+
+fn report_differs_from_direct_read(report: &MatterAttributeReport, state: &Value) -> bool {
+    report_matches_direct_read(report, state).is_some_and(|matches| !matches)
 }
 
 fn readback_snapshot(transport: &Arc<dyn MatterTransport>, node_id: u64, endpoint: u16) -> Value {
@@ -745,7 +879,7 @@ fn apply_try_with_override(profile: &mut MatterControlProfile, value: &Value) ->
                     anyhow::bail!("command spacing exceeds 10000 ms");
                 }
                 profile.command_spacing_ms.value_ms = value_ms as u32;
-                profile.command_spacing_ms.basis = MatterMeasurementBasis::Measured;
+                profile.command_spacing_ms.basis = MatterMeasurementBasis::Assumed;
                 profile.command_spacing_ms.source = MatterProfileSource::TryWith;
             }
             "execute_if_off_honoured" => {
@@ -818,6 +952,7 @@ fn now_unix_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{RecordedOperation, SpyTransport};
 
     #[test]
     fn try_with_accepts_multiple_accepted_overrides() {
@@ -853,6 +988,176 @@ mod tests {
         assert!(
             apply_try_with_override(&mut profile, &json!({"command_spacing_ms": 10_001})).is_err()
         );
+    }
+
+    #[test]
+    fn try_with_spacing_is_assumed_not_measured() {
+        let mut profile = MatterControlProfile::default();
+
+        apply_try_with_override(&mut profile, &json!({"command_spacing_ms": 100})).unwrap();
+
+        assert_eq!(profile.command_spacing_ms.value_ms, 100);
+        assert_eq!(
+            profile.command_spacing_ms.basis,
+            MatterMeasurementBasis::Assumed
+        );
+        assert_eq!(
+            profile.command_spacing_ms.source,
+            MatterProfileSource::TryWith
+        );
+    }
+
+    #[test]
+    fn command_spacing_submits_four_plans_in_descending_gap_order() {
+        let spy = Arc::new(SpyTransport::default());
+        spy.set_light_state(
+            7,
+            1,
+            json!({
+                "onoff": {"ok": true, "value": true},
+                "current_level": {"ok": true, "value": 152}
+            }),
+        );
+        let transport: Arc<dyn MatterTransport> = spy.clone();
+        let plans = COMMAND_SPACING_GAPS_MS
+            .iter()
+            .enumerate()
+            .map(|(index, spacing_ms)| MatterEndpointCommandPlan {
+                command_id: index as u64 + 1,
+                node_id: 7,
+                endpoint: 1,
+                steps: vec![MatterCommandStep::SetBrightness {
+                    level: 152,
+                    transition_ms: None,
+                }],
+                inter_step_delay_ms: (*spacing_ms > 0).then_some(*spacing_ms),
+            })
+            .collect();
+
+        let result = execute_scenario(
+            &transport,
+            &Arc::new(Mutex::new(VecDeque::new())),
+            "command_spacing",
+            7,
+            1,
+            plans,
+            &MatterControlProfile::default(),
+        )
+        .unwrap();
+
+        let gaps = result["plan_submitted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|plan| plan["inter_step_delay_ms"].as_u64().unwrap_or(0))
+            .collect::<Vec<_>>();
+        assert_eq!(gaps, COMMAND_SPACING_GAPS_MS);
+        assert_eq!(
+            result.pointer("/profile_used/command_spacing_ms/value_ms"),
+            Some(&json!(0))
+        );
+        assert_eq!(
+            result.pointer("/profile_used/command_spacing_ms/basis"),
+            Some(&json!("measured"))
+        );
+        assert_eq!(
+            spy.operations()
+                .iter()
+                .filter(|operation| matches!(operation, RecordedOperation::SetBrightness { .. }))
+                .count(),
+            4
+        );
+    }
+
+    #[test]
+    fn preflight_options_write_sets_reads_and_restores_execute_if_off() {
+        let spy = Arc::new(SpyTransport::default());
+        spy.set_color_control_options(7, 1, 0b0000_0100);
+        let transport: Arc<dyn MatterTransport> = spy.clone();
+        let before = transport.read_light_capability_snapshot(7, 1).unwrap();
+
+        let result = preflight_result(
+            &transport,
+            "matter-7",
+            7,
+            1,
+            before,
+            &MatterControlProfile::default(),
+        );
+
+        assert_eq!(result["execute_if_off_options_writable"], json!(true));
+        assert_eq!(
+            color_control_options(&transport.read_light_capability_snapshot(7, 1).unwrap()),
+            Some(0b0000_0100)
+        );
+    }
+
+    fn report(received_at_unix_ms: u64, value: MatterAttributeValue) -> MatterAttributeReport {
+        MatterAttributeReport {
+            received_at_unix_ms,
+            node_id: 7,
+            endpoint: 1,
+            cluster: crate::clusters::CLUSTER_ON_OFF_U32,
+            attr_id: crate::clusters::ATTR_ON_OFF_U32,
+            value,
+        }
+    }
+
+    #[test]
+    fn power_cycle_evidence_distinguishes_survival_from_resubscription() {
+        let readback = json!({"onoff": {"ok": true, "value": true}});
+        let resubscribed = merge_subscription_evidence(
+            json!({"works": true}),
+            None,
+            None,
+            &[],
+            &[
+                report(1_000, MatterAttributeValue::SubscriptionTerminated),
+                report(1_100, MatterAttributeValue::SubscriptionAlive),
+            ],
+            &readback,
+            "power_cycle_then_tick",
+        );
+        assert_eq!(resubscribed["resubscribe_after_power_cycle"], json!(true));
+        assert_eq!(resubscribed["subscription_survived"], json!(false));
+
+        let survived = merge_subscription_evidence(
+            json!({"works": true}),
+            None,
+            Some(true),
+            &[],
+            &[report(1_100, MatterAttributeValue::Bool(true))],
+            &readback,
+            "power_cycle_then_tick",
+        );
+        assert_eq!(survived["resubscribe_after_power_cycle"], json!(false));
+        assert_eq!(survived["subscription_survived"], json!(true));
+    }
+
+    #[test]
+    fn external_change_requires_a_report_that_differs_from_the_start_state() {
+        let readback = json!({"onoff": {"ok": true, "value": false}});
+        let unchanged = merge_subscription_evidence(
+            json!({"works": true}),
+            None,
+            Some(true),
+            &[],
+            &[report(1_100, MatterAttributeValue::Bool(false))],
+            &readback,
+            "subscription_external_change",
+        );
+        assert_eq!(unchanged["reports_external_changes"], json!(false));
+
+        let changed = merge_subscription_evidence(
+            json!({"works": true}),
+            None,
+            Some(false),
+            &[],
+            &[report(1_100, MatterAttributeValue::Bool(true))],
+            &readback,
+            "subscription_external_change",
+        );
+        assert_eq!(changed["reports_external_changes"], json!(true));
     }
 
     #[test]
@@ -953,6 +1258,8 @@ mod tests {
             None,
             None,
             &[1_000, 3_000],
+            &[],
+            &Value::Null,
             "subscription_liveness",
         );
         assert_eq!(evidence["max_activity_gap_ms"], json!(2_000));
@@ -964,6 +1271,8 @@ mod tests {
             None,
             None,
             &[1_000, 5_000],
+            &[],
+            &Value::Null,
             "subscription_liveness",
         );
         assert_eq!(quiet["liveness_observed"], json!(false));
