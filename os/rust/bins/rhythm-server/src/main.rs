@@ -182,6 +182,7 @@ fn main() -> Result<()> {
             rhythm_os::remote_access::child_process_controller_from_env(),
         ));
     }
+    rhythm_os::commands::reconcile_device_health(&state);
     if let Err(error) = rhythm_os::remote_access::reconcile_remote_access_runtime(&state) {
         warn!(
             target: "sys",

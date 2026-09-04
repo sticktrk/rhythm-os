@@ -953,6 +953,42 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     body: { hub_type: 'hue', address: '{bridge_address}' }
   },
   {
+    id: 'device-attention-get',
+    category: 'Devices & Topology',
+    label: 'Read device attention',
+    description: 'Fetch durable device-health attention entries.',
+    method: 'GET',
+    path: 'api/device-attention'
+  },
+  {
+    id: 'device-attention-snooze',
+    category: 'Devices & Topology',
+    label: 'Snooze device attention',
+    description: 'Hide an attention entry for the appliance-defined snooze window.',
+    method: 'PUT',
+    path: 'api/device-attention/{entry_id}/snooze',
+    body: { correlation_id: '{correlation_id}' }
+  },
+  {
+    id: 'device-attention-still-installed',
+    category: 'Devices & Topology',
+    label: 'Confirm device is installed',
+    description: 'Begin a bounded recovery-observation period for an attention entry.',
+    method: 'PUT',
+    path: 'api/device-attention/{entry_id}/still-installed',
+    body: { correlation_id: '{correlation_id}' }
+  },
+  {
+    id: 'device-attention-removal-selected',
+    category: 'Devices & Topology',
+    label: 'Select device removal',
+    description: 'Record the explicit removal branch before topology mutation.',
+    method: 'PUT',
+    path: 'api/device-attention/{entry_id}/removal-selected',
+    body: { correlation_id: '{correlation_id}' },
+    danger: true
+  },
+  {
     id: 'triage-get',
     category: 'Devices & Topology',
     label: 'Read triage entries',

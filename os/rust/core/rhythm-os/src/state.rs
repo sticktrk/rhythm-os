@@ -508,6 +508,9 @@ pub struct AppState {
     // ---- Canonical device registry + topology ----
     /// Canonical device registry (cross-hub device identity and dedup).
     pub canonical_registry: CanonicalRegistry,
+    /// Derived endpoint liveness evidence, persisted separately from canonical
+    /// topology so previous binaries and portable backups cannot own it.
+    pub device_health: crate::device_health::DeviceHealthLedger,
     /// Room topology store (Rhythm's own room hierarchy).
     pub topology: RoomTopologyStore,
     /// Background topology-group sync worker is currently running.
@@ -1047,6 +1050,7 @@ impl Default for AppState {
             pairing_in_progress: HashSet::new(),
             pairing_resource_activity_fn: None,
             canonical_registry: CanonicalRegistry::new(),
+            device_health: crate::device_health::DeviceHealthLedger::default(),
             topology: RoomTopologyStore::new(),
             topology_group_sync_in_progress: false,
             topology_group_sync_pending: false,

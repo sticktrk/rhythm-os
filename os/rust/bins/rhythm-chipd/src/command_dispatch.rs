@@ -6,9 +6,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::Result;
 
 use rhythm_matter::transport::{
-    MatterCommandOutcome, MatterCommandOutcomeStatus, MatterCommandStep, MatterCommandSubmission,
-    MatterControllerEvent, MatterControllerEventBatch, MatterControllerEventCursor,
-    MatterControllerEventEnvelope, MatterEndpointCommandPlan,
+    MatterCommandFailureClass, MatterCommandOutcome, MatterCommandOutcomeStatus, MatterCommandStep,
+    MatterCommandSubmission, MatterControllerEvent, MatterControllerEventBatch,
+    MatterControllerEventCursor, MatterControllerEventEnvelope, MatterEndpointCommandPlan,
 };
 
 use crate::backend::ChipControllerBackend;
@@ -274,7 +274,7 @@ impl CommandDispatcher {
         }
 
         for plan in superseded {
-            self.publish_outcome(&plan, MatterCommandOutcomeStatus::Superseded, None);
+            self.publish_outcome(&plan, MatterCommandOutcomeStatus::Superseded, None, None);
         }
         self.start_ready_lanes();
         Ok(submissions)
@@ -328,6 +328,7 @@ impl CommandDispatcher {
                     &plan,
                     MatterCommandOutcomeStatus::Failed,
                     Some(format!("starting endpoint worker: {error:#}")),
+                    Some(MatterCommandFailureClass::Other),
                 );
                 self.release_lane_state(&plan);
                 continue;
@@ -346,13 +347,21 @@ impl CommandDispatcher {
         let result = self.execute(&plan);
         match result {
             Ok(detail) => {
-                self.publish_outcome(&plan, MatterCommandOutcomeStatus::Succeeded, detail)
+                self.publish_outcome(&plan, MatterCommandOutcomeStatus::Succeeded, detail, None)
             }
-            Err(error) => self.publish_outcome(
-                &plan,
-                MatterCommandOutcomeStatus::Failed,
-                Some(format!("{error:#}")),
-            ),
+            Err(error) => {
+                let failure_class = if is_connectivity_failure(&error) {
+                    MatterCommandFailureClass::Connectivity
+                } else {
+                    MatterCommandFailureClass::Other
+                };
+                self.publish_outcome(
+                    &plan,
+                    MatterCommandOutcomeStatus::Failed,
+                    Some(format!("{error:#}")),
+                    Some(failure_class),
+                )
+            }
         }
         self.finish_lane(&plan);
     }
@@ -444,6 +453,7 @@ impl CommandDispatcher {
         plan: &MatterEndpointCommandPlan,
         status: MatterCommandOutcomeStatus,
         detail: Option<String>,
+        failure_class: Option<MatterCommandFailureClass>,
     ) {
         self.broker.publish(MatterControllerEvent::CommandOutcome(
             MatterCommandOutcome {
@@ -456,6 +466,7 @@ impl CommandDispatcher {
                     .ok()
                     .map(|duration| duration.as_millis() as u64),
                 detail,
+                failure_class,
             },
         ));
     }
@@ -1053,6 +1064,7 @@ mod tests {
                     status: MatterCommandOutcomeStatus::Succeeded,
                     completed_at_unix_ms: None,
                     detail: None,
+                    failure_class: None,
                 },
             ));
         }

@@ -601,6 +601,7 @@ fn start_controller_event_stream(
     transport: Arc<dyn MatterTransport>,
     event_tx: std::sync::mpsc::Sender<HubEvent>,
     shutdown: Arc<std::sync::atomic::AtomicBool>,
+    fabric_id: String,
     node_proof_of_life: Arc<Mutex<HashMap<u64, std::time::Instant>>>,
     on_off_observations: Arc<Mutex<OnOffObservations>>,
     pending_turn_on_plans: Arc<Mutex<HashMap<u64, MatterEndpointCommandPlan>>>,
@@ -718,6 +719,34 @@ fn start_controller_event_stream(
                                         subscription_active: false,
                                     },
                                 );
+                                let _ = event_tx.send(HubEvent::DeviceReachability {
+                                    hub_key: None,
+                                    device_id: format_device_id(outcome.node_id, outcome.endpoint),
+                                    fabric_id: fabric_id.clone(),
+                                    controller_stream_id: Some(event_stream_id.clone()),
+                                    evidence: rhythm_os::hub::DeviceReachabilityEvidence::Proof,
+                                });
+                            } else if outcome.status
+                                == crate::transport::MatterCommandOutcomeStatus::Failed
+                                && outcome.failure_class
+                                    == Some(crate::transport::MatterCommandFailureClass::Connectivity)
+                            {
+                                // Only a sidecar-classified connectivity failure is
+                                // unreachability evidence. A cluster rejecting a step,
+                                // a controller-side failure, or an older sidecar that
+                                // sends no class is neither proof nor failure.
+                                let _ = event_tx.send(HubEvent::DeviceReachability {
+                                    hub_key: None,
+                                    device_id: format_device_id(
+                                        outcome.node_id,
+                                        outcome.endpoint,
+                                    ),
+                                    fabric_id: fabric_id.clone(),
+                                    controller_stream_id: Some(event_stream_id.clone()),
+                                    evidence: rhythm_os::hub::DeviceReachabilityEvidence::Failure(
+                                        rhythm_os::hub::DeviceReachabilityFailureClass::Command,
+                                    ),
+                                });
                             }
                             Some(crate::events::translate_command_outcome(
                                 event_stream_id.clone(),
@@ -742,6 +771,13 @@ fn start_controller_event_stream(
                                     subscription_active: true,
                                 },
                             );
+                            let _ = event_tx.send(HubEvent::DeviceReachability {
+                                hub_key: None,
+                                device_id: format_device_id(report.node_id, report.endpoint),
+                                fabric_id: fabric_id.clone(),
+                                controller_stream_id: Some(event_stream_id.clone()),
+                                evidence: rhythm_os::hub::DeviceReachabilityEvidence::Proof,
+                            });
                             crate::events::translate_report(&report)
                         }
                         MatterControllerEvent::SubscriptionTerminated(termination) => {
@@ -755,10 +791,8 @@ fn start_controller_event_stream(
                             // permanently fresh for a subscription that is no
                             // longer reporting. rhythm-os has no event to
                             // translate for a subscription lifecycle change, so
-                            // the recovery schedule is the only other effect.
-                            // TODO(#368): once DeviceReachability lands, also
-                            // emit Failure(Subscription) here — its `None =>`
-                            // arm depends on this eviction.
+                            // the recovery schedule and reachability evidence
+                            // are the only other effects.
                             forget_on_off_observation(
                                 (termination.node_id, termination.endpoint),
                                 on_off_observations.as_ref(),
@@ -774,6 +808,21 @@ fn start_controller_event_stream(
                                 },
                                 attribute_report_history.as_ref(),
                             );
+                            let reachability_class = subscription_reachability_failure_class(
+                                termination.failure_class,
+                            );
+                            let _ = event_tx.send(HubEvent::DeviceReachability {
+                                hub_key: None,
+                                device_id: format_device_id(
+                                    termination.node_id,
+                                    termination.endpoint,
+                                ),
+                                fabric_id: fabric_id.clone(),
+                                controller_stream_id: Some(event_stream_id.clone()),
+                                evidence: rhythm_os::hub::DeviceReachabilityEvidence::Failure(
+                                    reachability_class,
+                                ),
+                            });
                             let _ = subscription_refresh.send(
                                 MatterSubscriptionRefresh::SubscriptionTerminated {
                                     target: MatterSubscriptionTarget {
@@ -818,6 +867,17 @@ fn start_controller_event_stream(
         });
     if let Err(error) = spawn_result {
         warn!(target: "evt", "Failed to start Matter controller event stream: {error}");
+    }
+}
+
+fn subscription_reachability_failure_class(
+    class: MatterSubscriptionFailureClass,
+) -> rhythm_os::hub::DeviceReachabilityFailureClass {
+    match class {
+        MatterSubscriptionFailureClass::AddressResolution => {
+            rhythm_os::hub::DeviceReachabilityFailureClass::AddressResolution
+        }
+        _ => rhythm_os::hub::DeviceReachabilityFailureClass::Subscription,
     }
 }
 
@@ -873,6 +933,7 @@ pub fn connect_matter(
     let commissioned_for_closure = commissioned.clone();
     let transport_for_closure = transport.clone();
     let fabric_id_for_closure = fabric_id.clone();
+    let fabric_id_for_events = fabric_id.clone();
     let cloud_profiles_for_hub_data = cloud_profiles.clone();
     let local_overrides_for_hub_data = local_overrides.clone();
     let node_proof_of_life = Arc::new(Mutex::new(HashMap::new()));
@@ -949,6 +1010,7 @@ pub fn connect_matter(
                 event_transport,
                 event_tx,
                 shutdown,
+                fabric_id_for_events,
                 node_proof_of_life_for_events,
                 on_off_observations_for_events,
                 pending_turn_on_plans_for_events,
@@ -2749,7 +2811,7 @@ mod tests {
     }
 
     #[test]
-    fn terminated_subscription_is_scheduled_for_recovery_and_not_forwarded_to_the_hub() {
+    fn terminated_subscription_schedules_recovery_and_forwards_exact_endpoint_failure() {
         let transport = Arc::new(FakeMatterTransport::new(
             Vec::new(),
             vec![commissioned_device(93, 1)],
@@ -2776,6 +2838,7 @@ mod tests {
             transport.clone(),
             event_tx,
             shutdown.clone(),
+            "fabric-test".to_string(),
             Arc::new(Mutex::new(HashMap::new())),
             observations.clone(),
             Arc::new(Mutex::new(HashMap::new())),
@@ -2784,6 +2847,26 @@ mod tests {
             report_history.clone(),
         );
 
+        match event_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
+            HubEvent::DeviceReachability {
+                device_id,
+                fabric_id,
+                controller_stream_id,
+                evidence,
+                ..
+            } => {
+                assert_eq!(device_id, format_device_id(93, 1));
+                assert_eq!(fabric_id, "fabric-test");
+                assert!(controller_stream_id.is_some());
+                assert_eq!(
+                    evidence,
+                    rhythm_os::hub::DeviceReachabilityEvidence::Failure(
+                        rhythm_os::hub::DeviceReachabilityFailureClass::Subscription,
+                    )
+                );
+            }
+            other => panic!("expected reachability failure, got {other:?}"),
+        }
         assert!(matches!(
             event_rx.recv_timeout(Duration::from_secs(1)).unwrap(),
             HubEvent::Connected { .. }
@@ -2801,7 +2884,7 @@ mod tests {
         }
         assert!(
             event_rx.recv_timeout(Duration::from_millis(50)).is_err(),
-            "a subscription lifecycle change is not a hub event"
+            "one termination must emit only one reachability event"
         );
         // The default worker backoff is 30s, so recovery is scheduled rather
         // than attempted inline: the termination must not start a retry storm.
@@ -2817,6 +2900,101 @@ mod tests {
     }
 
     #[test]
+    fn failed_command_outcome_is_bounded_command_evidence_without_text_parsing() {
+        let transport = Arc::new(FakeMatterTransport::new(
+            Vec::new(),
+            vec![commissioned_device(94, 1)],
+        ));
+        let failed =
+            |command_id: u64,
+             failure_class: Option<crate::transport::MatterCommandFailureClass>| {
+                MatterControllerEvent::CommandOutcome(crate::transport::MatterCommandOutcome {
+                    command_id,
+                    node_id: 94,
+                    endpoint: 1,
+                    status: crate::transport::MatterCommandOutcomeStatus::Failed,
+                    // Text that would trip a substring heuristic must not matter.
+                    detail: Some("operational discovery failed: timeout".to_string()),
+                    completed_at_unix_ms: None,
+                    failure_class,
+                })
+            };
+        // A rejected step and an unclassified (older sidecar) failure are
+        // neither proof nor failure evidence; only the structured
+        // connectivity class reaches the ledger.
+        transport.queue_controller_event(failed(
+            5,
+            Some(crate::transport::MatterCommandFailureClass::Other),
+        ));
+        transport.queue_controller_event(failed(6, None));
+        transport.queue_controller_event(failed(
+            7,
+            Some(crate::transport::MatterCommandFailureClass::Connectivity),
+        ));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+
+        start_controller_event_stream(
+            transport,
+            event_tx,
+            shutdown.clone(),
+            "fabric-test".to_string(),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashSet::new())),
+            Arc::new(crate::hub_state::MatterReadbackCoordinator::default()),
+            Arc::new(Mutex::new(VecDeque::new())),
+        );
+
+        // Every outcome also translates to an ordinary CommandOutcome hub
+        // event; only the reachability evidence is under test here.
+        let mut reachability = Vec::new();
+        while let Ok(event) = event_rx.recv_timeout(Duration::from_millis(300)) {
+            if matches!(event, HubEvent::DeviceReachability { .. }) {
+                reachability.push(event);
+            }
+        }
+        assert!(
+            matches!(
+                reachability.as_slice(),
+                [HubEvent::DeviceReachability {
+                    device_id,
+                    evidence: rhythm_os::hub::DeviceReachabilityEvidence::Failure(
+                        rhythm_os::hub::DeviceReachabilityFailureClass::Command,
+                    ),
+                    ..
+                }] if device_id == &format_device_id(94, 1)
+            ),
+            "only the connectivity-classified outcome may emit evidence: {reachability:?}"
+        );
+
+        shutdown.store(true, Ordering::SeqCst);
+    }
+
+    #[test]
+    fn structured_subscription_failure_classes_map_without_parsing_logs() {
+        assert_eq!(
+            subscription_reachability_failure_class(
+                MatterSubscriptionFailureClass::AddressResolution,
+            ),
+            rhythm_os::hub::DeviceReachabilityFailureClass::AddressResolution,
+        );
+        for class in [
+            MatterSubscriptionFailureClass::CaseSession,
+            MatterSubscriptionFailureClass::ResourceBusy,
+            MatterSubscriptionFailureClass::Timeout,
+            MatterSubscriptionFailureClass::PeerClosed,
+            MatterSubscriptionFailureClass::Other,
+        ] {
+            assert_eq!(
+                subscription_reachability_failure_class(class),
+                rhythm_os::hub::DeviceReachabilityFailureClass::Subscription,
+            );
+        }
+    }
+
+    #[test]
     fn controller_stream_identity_is_known_before_connected_is_emitted() {
         let transport = Arc::new(FakeMatterTransport::new(Vec::new(), Vec::new()));
         transport
@@ -2829,6 +3007,7 @@ mod tests {
             transport.clone(),
             event_tx,
             shutdown.clone(),
+            "fabric-test".to_string(),
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(Mutex::new(HashMap::new())),

@@ -6182,6 +6182,10 @@ fn clear_factory_reset_ephemeral_state(state: &SharedState) -> Result<()> {
     s.room_observed_power.clear();
     s.light_usage.disable_shutdown_flush();
     s.light_usage = crate::light_usage::LightUsageLedger::default();
+    // The on-disk ledger is removed with the data directory; the in-memory
+    // copy must go too or the next reconcile writes pre-reset endpoint
+    // evidence back under a fresh installation.
+    s.device_health = crate::device_health::DeviceHealthLedger::default();
     s.motion_snapshots.clear();
     s.room_mode_transitions.clear();
     s.last_check_hour = None;
@@ -12050,6 +12054,11 @@ pub fn do_backup_restore(state: &SharedState, bundle: BackupBundle) -> Result<St
     // outer lease is released.
     request_restored_hub_bootstrap(state, should_bootstrap)?;
 
+    // Portable backups exclude the device-health ledger, so whatever this
+    // appliance was tracking must be re-matched against the imported
+    // topology before any entry can be shown again.
+    reconcile_device_health(state);
+
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::ConfigChanged);
 
     build_backup_bundle(state, false)
@@ -13301,6 +13310,7 @@ pub fn do_device_remove(state: &SharedState, device_id: &str, hub_key: &HubKey) 
         .remove_device(device_id);
 
     persist_state(state);
+    reconcile_device_health(state);
     Ok(())
 }
 
@@ -13664,6 +13674,7 @@ fn do_device_remove_with_retention(
         reconcile_automatic_light_names_best_effort(state, name_scope);
     }
     reconcile_runtime_from_state(state)?;
+    reconcile_device_health(state);
 
     {
         emit_triage_changed(state);
@@ -13843,6 +13854,7 @@ pub fn do_device_endpoint_remove(
 
     persist_registry(state);
     reconcile_runtime_from_state(state)?;
+    reconcile_device_health(state);
     emit_triage_changed(state);
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
     Ok(())
@@ -17739,6 +17751,362 @@ pub fn do_canonical_set_preferred(
 // Triage commands
 // ============================================================================
 
+fn active_device_health_identities(
+    state: &crate::state::AppState,
+) -> HashSet<crate::device_health::ActiveDeviceHealthIdentity> {
+    state
+        .canonical_registry
+        .devices()
+        .filter(|device| !device.is_removed() && device.device_type == DeviceType::Light)
+        .flat_map(|device| {
+            device
+                .active_endpoints()
+                .filter(|endpoint| endpoint.hub_key.hub_type.as_str() == HubType::MATTER)
+                .map(
+                    |endpoint| crate::device_health::ActiveDeviceHealthIdentity {
+                        canonical_id: device.id.clone(),
+                        hub_key: endpoint.hub_key.clone(),
+                        native_id: endpoint.native_id.clone(),
+                        fabric_fingerprint: state
+                            .hub_credentials
+                            .get(&endpoint.hub_key)
+                            .and_then(|credentials| credentials.get_str("fabric_id"))
+                            .filter(|fabric_id| !fabric_id.is_empty())
+                            .map(crate::device_health::fabric_fingerprint),
+                    },
+                )
+        })
+        .collect()
+}
+
+fn persist_device_health_locked(
+    state: &mut crate::state::AppState,
+    before: crate::device_health::DeviceHealthLedger,
+) -> Result<()> {
+    if let Some(storage) = state.storage.clone() {
+        if let Err(error) = storage.save_device_health(&state.device_health) {
+            state.device_health = before;
+            return Err(error).context("Failed to persist device health ledger");
+        }
+    }
+    Ok(())
+}
+
+fn record_device_attention_activity(
+    state: &SharedState,
+    action_id: &str,
+    correlation_id: Option<&str>,
+) {
+    let Some(correlation_id) = correlation_id.filter(|value| !value.is_empty()) else {
+        warn!(target: "triage", "Skipped device-attention activity without a review journey id");
+        return;
+    };
+    let mut record = crate::activity::LightActivityRecord::app("device_attention", action_id);
+    record.source_kind = "device_attention".to_string();
+    record.source_raw = "triage".to_string();
+    record.marks_touched = false;
+    record.correlation_id = Some(correlation_id.to_string());
+    record.payload = Some(serde_json::json!({"outcome": action_id}));
+    crate::activity::record_light_activity(state, record);
+}
+
+fn finish_device_health_update(
+    state: &SharedState,
+    update: crate::device_health::DeviceHealthUpdate,
+) {
+    let visibility_changed = !update.transitions.is_empty();
+    for (entry_id, transition) in update.transitions {
+        let correlation_id = state
+            .lock()
+            .ok()
+            .and_then(|s| s.device_health.review_correlation_for_entry(&entry_id));
+        let action = match transition {
+            crate::device_health::DeviceHealthTransition::Admitted => {
+                info!(target: "triage", "Admitted one unreachable-device attention entry");
+                continue;
+            }
+            crate::device_health::DeviceHealthTransition::Recovered => {
+                "unreachable_device_recovery_verified"
+            }
+            crate::device_health::DeviceHealthTransition::Removed => "unreachable_device_removed",
+        };
+        record_device_attention_activity(state, action, correlation_id.as_deref());
+    }
+    if visibility_changed {
+        emit_triage_changed(state);
+    }
+}
+
+pub fn note_device_reachability(
+    state: &SharedState,
+    hub_key: &HubKey,
+    native_id: &str,
+    fabric_id: &str,
+    controller_stream_id: Option<&str>,
+    evidence: crate::hub::DeviceReachabilityEvidence,
+) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let update = {
+        let Ok(mut s) = state.lock() else { return };
+        let Some(device) = s
+            .canonical_registry
+            .find_by_native_id(hub_key, native_id)
+            .filter(|device| {
+                !device.is_removed()
+                    && device.device_type == DeviceType::Light
+                    && device.endpoints.iter().any(|endpoint| {
+                        endpoint.active
+                            && endpoint.hub_key == *hub_key
+                            && endpoint.native_id == native_id
+                    })
+            })
+        else {
+            return;
+        };
+        let canonical_id = device.id.clone();
+        let should_evaluate =
+            matches!(evidence, crate::hub::DeviceReachabilityEvidence::Failure(_));
+        let mut next = s.device_health.clone();
+        let mut update = match evidence {
+            crate::hub::DeviceReachabilityEvidence::Proof => next.note_proof(
+                &canonical_id,
+                hub_key,
+                native_id,
+                fabric_id,
+                controller_stream_id,
+                now,
+            ),
+            crate::hub::DeviceReachabilityEvidence::Failure(class) => next.note_failure(
+                &canonical_id,
+                hub_key,
+                native_id,
+                fabric_id,
+                controller_stream_id,
+                class,
+                now,
+            ),
+        };
+        if should_evaluate {
+            let evaluated = next.evaluate(now);
+            update.persist |= evaluated.persist;
+            update.transitions.extend(evaluated.transitions);
+        }
+        if update.persist {
+            let before = std::mem::replace(&mut s.device_health, next);
+            if let Err(error) = persist_device_health_locked(&mut s, before) {
+                warn!(target: "triage", "Could not persist device health evidence: {error:#}");
+                return;
+            }
+        } else {
+            s.device_health = next;
+        }
+        update
+    };
+    finish_device_health_update(state, update);
+}
+
+pub fn note_device_health_controller_connected(state: &SharedState, hub_key: &HubKey) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if let Ok(mut s) = state.lock() {
+        s.device_health.note_controller_connected(hub_key, now);
+    }
+}
+
+pub fn note_device_health_controller_disconnected(state: &SharedState, hub_key: &HubKey) {
+    if let Ok(mut s) = state.lock() {
+        s.device_health.note_controller_disconnected(hub_key);
+    }
+}
+
+pub fn note_device_health_controller_stream_reset(state: &SharedState, hub_key: &HubKey) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    if let Ok(mut s) = state.lock() {
+        s.device_health.note_controller_stream_reset(hub_key, now);
+    }
+}
+
+pub fn reconcile_device_health(state: &SharedState) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let update = {
+        let Ok(mut s) = state.lock() else { return };
+        let before = s.device_health.clone();
+        let active = active_device_health_identities(&s);
+        let mut update = s.device_health.reconcile_active(&active, now);
+        let evaluated = s.device_health.evaluate(now);
+        update.persist |= evaluated.persist;
+        update.transitions.extend(evaluated.transitions);
+        if update.persist {
+            if let Err(error) = persist_device_health_locked(&mut s, before) {
+                warn!(target: "triage", "Could not persist device health reconciliation: {error:#}");
+                return;
+            }
+        }
+        update
+    };
+    finish_device_health_update(state, update);
+}
+
+pub fn build_device_attention(state: &SharedState) -> Result<String> {
+    reconcile_device_health(state);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let mut entries = Vec::new();
+    for record in s.device_health.visible_records() {
+        let Some(device) = s.canonical_registry.get(&record.canonical_id) else {
+            continue;
+        };
+        let Some(entry_id) = record.entry_id.clone() else {
+            continue;
+        };
+        entries.push(crate::device_health::DeviceAttentionEntryDto {
+            id: entry_id,
+            journey_id: record.review_correlation_id.clone().unwrap_or_default(),
+            kind: "unreachable_device",
+            status: record.status.as_str(),
+            device: crate::device_health::DeviceAttentionDeviceDto {
+                name: device.name.clone(),
+                native_id: record.native_id.clone(),
+                hub_type: record.hub_key.hub_type.as_str().to_string(),
+                hub_address: record.hub_key.address.clone(),
+                device_type: device.device_type.clone(),
+            },
+            evidence: crate::device_health::DeviceAttentionEvidenceDto {
+                last_proof_at: record.last_proof_at,
+                first_failure_at: record.first_failure_at.unwrap_or(record.last_proof_at),
+                last_failure_at: record.last_failure_at.unwrap_or(record.last_proof_at),
+                failure_count: record.failure_count,
+                failure_classes: record.failure_classes.iter().copied().collect(),
+                created_at: record.created_at.unwrap_or(now),
+                snoozed_until: record.snoozed_until,
+            },
+            guidance: if record.status == crate::device_health::DeviceHealthStatus::AwaitingRecovery {
+                "Turn mains power off for about 10 seconds, turn it back on, then wait for Rhythm to verify a fresh report or read."
+            } else {
+                "We haven't heard from this light for a while. Is it still installed and powered?"
+            },
+        });
+    }
+    serde_json::to_string(&entries).map_err(Into::into)
+}
+
+#[derive(Debug)]
+pub enum DeviceAttentionError {
+    NotFound,
+    JourneyMismatch,
+    Persist(anyhow::Error),
+    Lock,
+}
+
+impl std::fmt::Display for DeviceAttentionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => {
+                formatter.write_str("Device attention entry not found or no longer actionable")
+            }
+            Self::JourneyMismatch => {
+                formatter.write_str("Device attention review journey does not match the entry")
+            }
+            Self::Persist(error) => std::fmt::Display::fmt(error, formatter),
+            Self::Lock => formatter.write_str("lock"),
+        }
+    }
+}
+
+impl std::error::Error for DeviceAttentionError {}
+
+fn mutate_device_attention(
+    state: &SharedState,
+    entry_id: &str,
+    action_id: &str,
+    correlation_id: Option<&str>,
+    mutate: impl FnOnce(&mut crate::device_health::DeviceHealthLedger, u64) -> bool,
+) -> std::result::Result<String, DeviceAttentionError> {
+    let correlation_id = correlation_id
+        .filter(|value| !value.is_empty())
+        .ok_or(DeviceAttentionError::JourneyMismatch)?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    {
+        let mut s = state.lock().map_err(|_| DeviceAttentionError::Lock)?;
+        let before = s.device_health.clone();
+        let expected_correlation = s
+            .device_health
+            .review_correlation_for_entry(entry_id)
+            .ok_or(DeviceAttentionError::NotFound)?;
+        if expected_correlation != correlation_id {
+            return Err(DeviceAttentionError::JourneyMismatch);
+        }
+        if !mutate(&mut s.device_health, now) {
+            return Err(DeviceAttentionError::NotFound);
+        }
+        persist_device_health_locked(&mut s, before).map_err(DeviceAttentionError::Persist)?;
+    }
+    record_device_attention_activity(state, action_id, Some(correlation_id));
+    emit_triage_changed(state);
+    Ok(format!(r#"{{"status":"{}"}}"#, action_id))
+}
+
+pub fn do_device_attention_snooze(
+    state: &SharedState,
+    entry_id: &str,
+    correlation_id: Option<&str>,
+) -> std::result::Result<String, DeviceAttentionError> {
+    mutate_device_attention(
+        state,
+        entry_id,
+        "unreachable_device_snoozed",
+        correlation_id,
+        |health, now| health.snooze(entry_id, now),
+    )
+}
+
+pub fn do_device_attention_still_installed(
+    state: &SharedState,
+    entry_id: &str,
+    correlation_id: Option<&str>,
+) -> std::result::Result<String, DeviceAttentionError> {
+    mutate_device_attention(
+        state,
+        entry_id,
+        "unreachable_device_still_installed",
+        correlation_id,
+        |health, _| health.await_recovery(entry_id),
+    )
+}
+
+pub fn do_device_attention_removal_selected(
+    state: &SharedState,
+    entry_id: &str,
+    correlation_id: Option<&str>,
+) -> std::result::Result<String, DeviceAttentionError> {
+    mutate_device_attention(
+        state,
+        entry_id,
+        "unreachable_device_removal_selected",
+        correlation_id,
+        // Removal itself is the existing guarded unpair; this only records
+        // the user's explicit choice on the journey's activity trail.
+        |health, _| health.is_actionable(entry_id),
+    )
+}
+
 /// Build JSON for the triage queue (pending entries).
 pub fn build_triage_queue(state: &SharedState) -> Result<String> {
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -18177,15 +18545,38 @@ pub fn do_triage_bind_room_to(
 }
 
 /// Build JSON with triage count summary.
+fn pending_device_attention_count(state: &crate::state::AppState) -> usize {
+    state
+        .device_health
+        .visible_records()
+        .into_iter()
+        .filter(|record| {
+            state
+                .canonical_registry
+                .get(&record.canonical_id)
+                .is_some_and(|device| {
+                    !device.is_removed()
+                        && device.endpoints.iter().any(|endpoint| {
+                            endpoint.active
+                                && endpoint.hub_key == record.hub_key
+                                && endpoint.native_id == record.native_id
+                        })
+                })
+        })
+        .count()
+}
+
 pub fn build_triage_count(state: &SharedState) -> Result<String> {
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let triage = s.canonical_registry.triage();
+    let pending_unreachable = pending_device_attention_count(&s);
     let json = format!(
-        r#"{{"devices":{},"rooms":{},"unassigned":{},"hub_configured":{},"total":{}}}"#,
+        r#"{{"devices":{},"rooms":{},"unassigned":{},"hub_configured":{},"unreachable":{},"total":{}}}"#,
         triage.pending_device_count(),
         triage.pending_room_count(),
         triage.pending_unassigned_count(),
         triage.pending_hub_configured_count(),
+        pending_unreachable,
         triage.pending_count(),
     );
     Ok(json)
@@ -18202,9 +18593,10 @@ pub fn emit_triage_changed(state: &SharedState) {
             triage.pending_room_count(),
             triage.pending_unassigned_count(),
             triage.pending_hub_configured_count(),
+            pending_device_attention_count(&s),
         )
     });
-    if let Some((total, devices, rooms, unassigned, hub_configured)) = counts {
+    if let Some((total, devices, rooms, unassigned, hub_configured, unreachable)) = counts {
         crate::state::emit_server_event(
             state,
             crate::server_event::ServerEvent::TriageChanged {
@@ -18213,6 +18605,7 @@ pub fn emit_triage_changed(state: &SharedState) {
                 pending_rooms: rooms,
                 pending_unassigned: unassigned,
                 pending_hub_configured: hub_configured,
+                pending_unreachable: unreachable,
             },
         );
     }
@@ -25088,6 +25481,7 @@ mod tests {
         fail_save_hub_credentials: bool,
         fail_save_hub_credentials_on_call: Option<usize>,
         fail_save_authority_state: bool,
+        fail_save_device_health: bool,
         hub_credential_save_calls: usize,
         lifecycle_events: Vec<String>,
         restore_integration_files_calls: usize,
@@ -25259,6 +25653,16 @@ mod tests {
             Ok(())
         }
 
+        fn save_device_health(
+            &self,
+            _health: &crate::device_health::DeviceHealthLedger,
+        ) -> Result<()> {
+            if self.inner.lock().unwrap().fail_save_device_health {
+                anyhow::bail!("injected device-health persistence failure");
+            }
+            Ok(())
+        }
+
         fn load_commissioning_wifi_credentials(
             &self,
         ) -> Result<Option<crate::provisioning::WifiCredentials>> {
@@ -25295,6 +25699,136 @@ mod tests {
             inner.integration_files.clear();
             Ok(())
         }
+    }
+
+    #[test]
+    fn device_health_proof_is_not_kept_in_memory_when_persistence_fails() {
+        let (state, _runtime) = setup_state(Vec::new());
+        let storage = TestStorage::default();
+        storage.inner.lock().unwrap().fail_save_device_health = true;
+        let matter_key = HubKey::new(HubType::new(HubType::MATTER), "local");
+        insert_canonical_device(
+            &state,
+            matter_key.clone(),
+            "matter-1-1",
+            "Matter Lamp",
+            "",
+            "",
+        );
+        state.lock().unwrap().storage = Some(Arc::new(storage));
+
+        note_device_reachability(
+            &state,
+            &matter_key,
+            "matter-1-1",
+            "fabric-a",
+            Some("stream-a"),
+            crate::hub::DeviceReachabilityEvidence::Proof,
+        );
+
+        assert_eq!(state.lock().unwrap().device_health.records().count(), 0);
+    }
+
+    #[test]
+    fn triage_count_drops_unreachable_entry_after_registry_device_removal() {
+        let (state, _runtime) = setup_state(Vec::new());
+        let matter_key = HubKey::new(HubType::new(HubType::MATTER), "local");
+        let registry: Arc<Mutex<dyn HubRegistry>> =
+            Arc::new(Mutex::new(crate::registry::HubDeviceRegistry::new()));
+        state.lock().unwrap().hubs.insert(
+            matter_key.clone(),
+            ActiveHub {
+                hub_type: matter_key.hub_type.clone(),
+                hub_key: matter_key.clone(),
+                runtime: None,
+                hub_data: Box::new(()),
+                registry: Some(registry),
+                discovery: None,
+                shutdown: Default::default(),
+            },
+        );
+        let device_id = insert_canonical_device(
+            &state,
+            matter_key.clone(),
+            "matter-1-1",
+            "Matter Lamp",
+            "",
+            "",
+        );
+        let peer_id = insert_canonical_device(
+            &state,
+            matter_key.clone(),
+            "matter-2-1",
+            "Matter Peer",
+            "",
+            "",
+        );
+        let first = crate::device_health::CONTROLLER_RESTART_GRACE_SECS + 2;
+        let second = first + crate::device_health::UNREACHABLE_FAILURE_SEPARATION_SECS;
+        let admitted_at = first + crate::device_health::UNREACHABLE_FAILURE_SPAN_SECS;
+        {
+            let mut app = state.lock().unwrap();
+            app.device_health.note_controller_connected(&matter_key, 1);
+            app.device_health.note_proof(
+                &device_id,
+                &matter_key,
+                "matter-1-1",
+                "fabric-a",
+                Some("stream-a"),
+                1,
+            );
+            app.device_health.note_proof(
+                &peer_id,
+                &matter_key,
+                "matter-2-1",
+                "fabric-a",
+                Some("stream-a"),
+                1,
+            );
+            for (class, at) in [
+                (
+                    crate::hub::DeviceReachabilityFailureClass::Subscription,
+                    first,
+                ),
+                (crate::hub::DeviceReachabilityFailureClass::Read, second),
+                (
+                    crate::hub::DeviceReachabilityFailureClass::Command,
+                    admitted_at,
+                ),
+            ] {
+                app.device_health.note_failure(
+                    &device_id,
+                    &matter_key,
+                    "matter-1-1",
+                    "fabric-a",
+                    Some("stream-a"),
+                    class,
+                    at,
+                );
+            }
+            app.device_health.note_proof(
+                &peer_id,
+                &matter_key,
+                "matter-2-1",
+                "fabric-a",
+                Some("stream-a"),
+                admitted_at,
+            );
+            assert_eq!(app.device_health.evaluate(admitted_at).transitions.len(), 1);
+            app.canonical_registry
+                .deactivate_missing_endpoints_for_hub(&matter_key, &HashSet::new());
+        }
+
+        do_device_remove(&state, "matter-1-1", &matter_key).unwrap();
+
+        let count: Value = serde_json::from_str(&build_triage_count(&state).unwrap()).unwrap();
+        assert_eq!(count["unreachable"], 0);
+        assert!(state
+            .lock()
+            .unwrap()
+            .device_health
+            .visible_records()
+            .is_empty());
     }
 
     struct MockBackupHubProvider;

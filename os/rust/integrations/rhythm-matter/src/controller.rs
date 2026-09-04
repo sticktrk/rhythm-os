@@ -19,6 +19,7 @@ use rhythm_devices::quirks::PREFER_COLOR_TEMPERATURE_QUIRK;
 #[cfg(test)]
 use rhythm_devices::LightType;
 use rhythm_devices::{ColorPreference, DeviceQuirk, LightCapabilities};
+use rhythm_os::hub::DeviceReachabilityFailureClass;
 
 use crate::clusters;
 use crate::control_profile::{
@@ -144,7 +145,11 @@ impl MatterLightController {
                 remove_pending_plans(&self.hub_data.pending_turn_on_plans, &expected_ids);
                 if Self::looks_like_connectivity_timeout(&error) {
                     for plan in &plans {
-                        self.mark_connectivity_failed(plan.node_id, plan.endpoint);
+                        self.mark_connectivity_failed(
+                            plan.node_id,
+                            plan.endpoint,
+                            DeviceReachabilityFailureClass::Command,
+                        );
                     }
                 }
                 return Err(LightControlError::CommandFailed(format!(
@@ -736,15 +741,23 @@ impl MatterLightController {
         if let Ok(mut backoff) = self.on_off_read_backoff.lock() {
             backoff.remove(&(node_id, endpoint));
         }
-        self.hub_data.record_node_proof_of_life(node_id);
+        self.hub_data
+            .record_endpoint_proof_of_life(node_id, endpoint);
     }
 
-    fn mark_connectivity_failed(&self, node_id: u64, endpoint: u16) {
+    fn mark_connectivity_failed(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+        class: DeviceReachabilityFailureClass,
+    ) {
         let marked_at = Instant::now();
         if let Ok(mut backoff) = self.on_off_read_backoff.lock() {
             backoff.insert((node_id, endpoint), MatterOnOffReadBackoff { marked_at });
         }
         self.hub_data.mark_node_reachable(node_id, false);
+        self.hub_data
+            .record_endpoint_failure(node_id, endpoint, class);
     }
 
     fn read_backoff_active(&self, node_id: u64, endpoint: u16) -> bool {
@@ -768,10 +781,11 @@ impl MatterLightController {
         node_id: u64,
         endpoint: u16,
         error: &anyhow::Error,
+        class: DeviceReachabilityFailureClass,
     ) -> bool {
         let connectivity_timeout = Self::looks_like_connectivity_timeout(error);
         if connectivity_timeout {
-            self.mark_connectivity_failed(node_id, endpoint);
+            self.mark_connectivity_failed(node_id, endpoint, class);
         }
         connectivity_timeout
     }
@@ -791,7 +805,12 @@ impl MatterLightController {
                 Ok(MatterOnOffRead::Off)
             }
             Err(e) => {
-                self.note_connectivity_failure(node_id, endpoint, &e);
+                self.note_connectivity_failure(
+                    node_id,
+                    endpoint,
+                    &e,
+                    DeviceReachabilityFailureClass::Read,
+                );
                 Err(e)
             }
         }
@@ -840,7 +859,12 @@ impl MatterLightController {
                     e
                 );
                 failed_devices += 1;
-                self.note_connectivity_failure(node_id, endpoint, &e);
+                self.note_connectivity_failure(
+                    node_id,
+                    endpoint,
+                    &e,
+                    DeviceReachabilityFailureClass::Command,
+                );
             } else {
                 successful_devices += 1;
                 self.clear_connectivity_backoff(node_id, endpoint);
@@ -1137,7 +1161,9 @@ impl HubLightController for MatterLightController {
             match self.hub_data.observed_on_off(node_id, endpoint) {
                 Some(true) => return Ok(true),
                 Some(false) => {}
-                None => indeterminate_count += 1,
+                None => {
+                    indeterminate_count += 1;
+                }
             }
         }
 
@@ -2056,6 +2082,23 @@ mod tests {
         assert_eq!(
             MatterLightController::parse_device_id("matter-42"),
             Some((42, 1))
+        );
+    }
+
+    #[test]
+    fn missing_periodic_observation_is_indeterminate_without_failure_evidence() {
+        let (controller, _spy, _registry, event_rx) = make_controller_with_event_receiver();
+
+        let result = block_on(controller.any_lights_on_target_for_periodic(
+            &HubDispatchTarget::Devices {
+                native_ids: vec!["matter-42".to_string()],
+            },
+        ));
+
+        assert!(matches!(result, Err(LightControlError::ConnectionError(_))));
+        assert!(
+            event_rx.try_recv().is_err(),
+            "absence of a cached report must not manufacture reachability failure evidence"
         );
     }
 

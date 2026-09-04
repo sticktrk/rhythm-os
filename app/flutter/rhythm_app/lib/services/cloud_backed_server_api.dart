@@ -625,6 +625,40 @@ class CloudBackedServerApi {
     return _delegate.getTriageEntries();
   }
 
+  Future<List<RhythmDeviceAttention>?> getDeviceAttentionEntries() {
+    return _delegate.getDeviceAttentionEntries();
+  }
+
+  Future<bool> snoozeDeviceAttention(
+    String entryId, {
+    required String correlationId,
+  }) {
+    return _delegate.snoozeDeviceAttention(
+      entryId,
+      correlationId: correlationId,
+    );
+  }
+
+  Future<bool> markDeviceAttentionStillInstalled(
+    String entryId, {
+    required String correlationId,
+  }) {
+    return _delegate.markDeviceAttentionStillInstalled(
+      entryId,
+      correlationId: correlationId,
+    );
+  }
+
+  Future<bool> markDeviceAttentionRemovalSelected(
+    String entryId, {
+    required String correlationId,
+  }) {
+    return _delegate.markDeviceAttentionRemovalSelected(
+      entryId,
+      correlationId: correlationId,
+    );
+  }
+
   Future<Map<String, dynamic>?> getTriageCount() {
     return _delegate.getTriageCount();
   }

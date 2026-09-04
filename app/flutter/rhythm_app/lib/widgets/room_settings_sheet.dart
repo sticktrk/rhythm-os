@@ -378,7 +378,7 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
               key: const ValueKey('room-settings-add-bulb'),
               label: 'Add Bulb',
               icon: Icons.add_circle_outline_rounded,
-              color: const Color(0xFFFFB74D),
+              color: CelestialColors.warning,
               deviceType: RhythmDeviceType.light,
               analyticsSource: 'room_settings_light',
             ),
@@ -1110,7 +1110,7 @@ class _DeviceRowState extends State<_DeviceRow> {
                   height: 16,
                   child: CircularProgressIndicator(
                     strokeWidth: 1.8,
-                    color: Color(0xFFFFB74D),
+                    color: CelestialColors.warning,
                   ),
                 )
               else ...[
@@ -1156,7 +1156,7 @@ class _DeviceRowState extends State<_DeviceRow> {
   (IconData, Color) _iconForType(RhythmDeviceType type) => switch (type) {
         RhythmDeviceType.light => (
             Icons.lightbulb_outline,
-            const Color(0xFFFFB74D)
+            CelestialColors.warning,
           ),
         RhythmDeviceType.button => (
             Icons.touch_app_outlined,
@@ -1168,7 +1168,7 @@ class _DeviceRowState extends State<_DeviceRow> {
           ),
         RhythmDeviceType.contact => (
             Icons.sensor_door_outlined,
-            const Color(0xFFFFB74D)
+            CelestialColors.warning,
           ),
       };
 }

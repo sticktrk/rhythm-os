@@ -74,6 +74,20 @@ pub enum HubEvent {
         resource_id: String,
         resource_type: String,
     },
+    /// Integration-authoritative liveness evidence for one physical endpoint.
+    ///
+    /// This is intentionally separate from power state: an off light remains
+    /// healthy when it reports or responds, and command intent is never proof.
+    /// Failed command outcomes use the bounded `Command` class, and only when
+    /// the sidecar classified the failure as connectivity; only structured
+    /// subscription termination metadata may identify address resolution.
+    DeviceReachability {
+        hub_key: Option<HubKey>,
+        device_id: String,
+        fabric_id: String,
+        controller_stream_id: Option<String>,
+        evidence: DeviceReachabilityEvidence,
+    },
     /// Terminal outcome for controller-owned asynchronous physical work.
     CommandOutcome {
         hub_key: Option<HubKey>,
@@ -128,6 +142,21 @@ pub enum HubCommandOutcomeStatus {
     Superseded,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceReachabilityEvidence {
+    Proof,
+    Failure(DeviceReachabilityFailureClass),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceReachabilityFailureClass {
+    AddressResolution,
+    Read,
+    Command,
+    Subscription,
+}
+
 impl HubCommandOutcomeStatus {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -148,6 +177,7 @@ impl HubEvent {
             HubEvent::Contact { hub_key, .. } => hub_key.as_ref(),
             HubEvent::LightPower { hub_key, .. } => hub_key.as_ref(),
             HubEvent::TopologyChanged { hub_key, .. } => hub_key.as_ref(),
+            HubEvent::DeviceReachability { hub_key, .. } => hub_key.as_ref(),
             HubEvent::CommandOutcome { hub_key, .. } => hub_key.as_ref(),
             HubEvent::CommandStreamReset { hub_key, .. } => hub_key.as_ref(),
             HubEvent::Heartbeat { hub_key } => hub_key.as_ref(),
@@ -166,6 +196,7 @@ impl HubEvent {
             HubEvent::Contact { hub_key, .. } => *hub_key = Some(key),
             HubEvent::LightPower { hub_key, .. } => *hub_key = Some(key),
             HubEvent::TopologyChanged { hub_key, .. } => *hub_key = Some(key),
+            HubEvent::DeviceReachability { hub_key, .. } => *hub_key = Some(key),
             HubEvent::CommandOutcome { hub_key, .. } => *hub_key = Some(key),
             HubEvent::CommandStreamReset { hub_key, .. } => *hub_key = Some(key),
             HubEvent::Heartbeat { hub_key } => *hub_key = Some(key),

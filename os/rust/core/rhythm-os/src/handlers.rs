@@ -55,6 +55,11 @@ fn correlation_id_from_body(body: &Value) -> Option<String> {
     (!correlation_id.is_empty() && correlation_id.len() <= 128).then(|| correlation_id.to_string())
 }
 
+fn required_correlation_id_from_body(body: &Value) -> Result<String, &'static str> {
+    correlation_id_from_body(body)
+        .ok_or("correlation_id must be a non-empty string of at most 128 bytes")
+}
+
 fn dispatch_spacing_from_body(body: &Value) -> Result<Duration, String> {
     let Some(value) = body.get("dispatch_spacing_ms") else {
         return Ok(commands::default_http_batch_dispatch_spacing());
@@ -880,6 +885,7 @@ fn perform_unpair_device(
                 );
                 return Err(error);
             }
+            commands::reconcile_device_health(state);
         }
     }
 
@@ -4730,6 +4736,69 @@ pub fn handle_get_triage_count(state: &SharedState) -> ApiResponse {
     }
 }
 
+pub fn handle_get_device_attention(state: &SharedState) -> ApiResponse {
+    match commands::build_device_attention(state) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(error) => ApiResponse::server_error(error),
+    }
+}
+
+fn device_attention_error_response(error: commands::DeviceAttentionError) -> ApiResponse {
+    let message = error.to_string();
+    match error {
+        commands::DeviceAttentionError::NotFound => ApiResponse::not_found(&message),
+        commands::DeviceAttentionError::JourneyMismatch => ApiResponse::bad_request(&message),
+        commands::DeviceAttentionError::Persist(_) | commands::DeviceAttentionError::Lock => {
+            ApiResponse::server_error(message)
+        }
+    }
+}
+
+pub fn handle_put_device_attention_snooze(
+    state: &SharedState,
+    entry_id: &str,
+    body: &Value,
+) -> ApiResponse {
+    let correlation_id = match required_correlation_id_from_body(body) {
+        Ok(value) => value,
+        Err(error) => return ApiResponse::bad_request(error),
+    };
+    match commands::do_device_attention_snooze(state, entry_id, Some(&correlation_id)) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(error) => device_attention_error_response(error),
+    }
+}
+
+pub fn handle_put_device_attention_still_installed(
+    state: &SharedState,
+    entry_id: &str,
+    body: &Value,
+) -> ApiResponse {
+    let correlation_id = match required_correlation_id_from_body(body) {
+        Ok(value) => value,
+        Err(error) => return ApiResponse::bad_request(error),
+    };
+    match commands::do_device_attention_still_installed(state, entry_id, Some(&correlation_id)) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(error) => device_attention_error_response(error),
+    }
+}
+
+pub fn handle_put_device_attention_removal_selected(
+    state: &SharedState,
+    entry_id: &str,
+    body: &Value,
+) -> ApiResponse {
+    let correlation_id = match required_correlation_id_from_body(body) {
+        Ok(value) => value,
+        Err(error) => return ApiResponse::bad_request(error),
+    };
+    match commands::do_device_attention_removal_selected(state, entry_id, Some(&correlation_id)) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(error) => device_attention_error_response(error),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Topology handlers
 // ---------------------------------------------------------------------------
@@ -5169,6 +5238,58 @@ mod tests {
         let r = ApiResponse::bad_request("err");
         assert_eq!(r.status, 400);
         assert_eq!(r.body, "err");
+    }
+
+    #[test]
+    fn device_attention_mutations_require_bounded_review_correlation() {
+        let state = test_state();
+        for body in [
+            json!({}),
+            json!({"correlation_id": ""}),
+            json!({
+                "correlation_id": "x".repeat(129),
+            }),
+        ] {
+            for response in [
+                handle_put_device_attention_snooze(&state, "entry", &body),
+                handle_put_device_attention_still_installed(&state, "entry", &body),
+                handle_put_device_attention_removal_selected(&state, "entry", &body),
+            ] {
+                assert_eq!(response.status, 400);
+                assert!(response.body.contains("correlation_id"));
+            }
+        }
+    }
+
+    #[test]
+    fn device_attention_mutations_use_specific_http_error_classes() {
+        let state = test_state();
+        let body = json!({"correlation_id": "unreachable-device-review-1"});
+        for response in [
+            handle_put_device_attention_snooze(&state, "missing", &body),
+            handle_put_device_attention_still_installed(&state, "missing", &body),
+            handle_put_device_attention_removal_selected(&state, "missing", &body),
+        ] {
+            assert_eq!(response.status, 404);
+            assert!(response.body.contains("not found or no longer actionable"));
+        }
+
+        let mismatch =
+            device_attention_error_response(commands::DeviceAttentionError::JourneyMismatch);
+        assert_eq!(mismatch.status, 400);
+        assert!(mismatch
+            .body
+            .contains("review journey does not match the entry"));
+
+        let persist = device_attention_error_response(commands::DeviceAttentionError::Persist(
+            anyhow::anyhow!("disk unavailable"),
+        ));
+        assert_eq!(persist.status, 500);
+        assert!(persist.body.contains("disk unavailable"));
+        assert_eq!(
+            device_attention_error_response(commands::DeviceAttentionError::Lock).status,
+            500,
+        );
     }
 
     #[test]

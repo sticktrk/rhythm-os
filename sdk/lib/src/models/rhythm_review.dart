@@ -62,6 +62,7 @@ class RhythmReviewCounts {
   final int rooms;
   final int unassigned;
   final int hubConfigured;
+  final int unreachable;
   final int total;
 
   const RhythmReviewCounts({
@@ -69,6 +70,7 @@ class RhythmReviewCounts {
     this.rooms = 0,
     this.unassigned = 0,
     this.hubConfigured = 0,
+    this.unreachable = 0,
     this.total = 0,
   });
 
@@ -83,6 +85,9 @@ class RhythmReviewCounts {
             preferredKeys: const ['hub_configured'],
           ) ??
           0,
+      unreachable:
+          jsonInt(json['unreachable'], preferredKeys: const ['unreachable']) ??
+              0,
       total: jsonInt(json['total'], preferredKeys: const ['total']) ?? 0,
     );
   }

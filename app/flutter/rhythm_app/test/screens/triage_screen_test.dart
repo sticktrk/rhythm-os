@@ -1,15 +1,22 @@
+import 'dart:io';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
+import 'package:rhythm_app/backend/backend.dart';
 import 'package:rhythm_app/providers/home_provider.dart';
 import 'package:rhythm_app/providers/room_provider.dart';
 import 'package:rhythm_app/providers/server_sync_provider.dart';
 import 'package:rhythm_app/screens/triage_screen.dart';
+import 'package:rhythm_app/services/analytics_service.dart';
 import 'package:rhythm_app/services/hue_ble_auto_discovery_service.dart';
 import 'package:rhythm_app/widgets/settings_row.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
+
+import '../helpers/capturing_analytics_backend.dart';
 
 class _TestHomeProvider extends HomeProvider {
   @override
@@ -22,7 +29,18 @@ class _FakeTriageServerApi extends RhythmServerApi {
   }) : super(Dio());
 
   List<Map<String, dynamic>> triageEntries;
+  List<Map<String, dynamic>> deviceAttentionEntries = [];
+  bool deviceAttentionUnavailable = false;
   int getTriageEntriesCalls = 0;
+  int getDeviceAttentionEntriesCalls = 0;
+  int snoozeDeviceAttentionCalls = 0;
+  int stillInstalledCalls = 0;
+  int removalSelectedCalls = 0;
+  final List<String> attentionCorrelationIds = [];
+  final List<String?> unpairCorrelationIds = [];
+  final List<bool> unpairForces = [];
+  Map<String, dynamic>? unpairResult = {'status': 'complete'};
+  Map<String, dynamic>? forceUnpairResult = {'status': 'complete'};
   int resolveTriageBindCalls = 0;
   int resolveTriageNewCalls = 0;
   int resolveTriageRoomCalls = 0;
@@ -33,6 +51,68 @@ class _FakeTriageServerApi extends RhythmServerApi {
   Future<List<Map<String, dynamic>>?> getTriageEntries() async {
     getTriageEntriesCalls++;
     return triageEntries;
+  }
+
+  @override
+  Future<List<RhythmDeviceAttention>?> getDeviceAttentionEntries() async {
+    getDeviceAttentionEntriesCalls++;
+    if (deviceAttentionUnavailable) return null;
+    return deviceAttentionEntries
+        .map(RhythmDeviceAttention.fromJson)
+        .toList(growable: false);
+  }
+
+  @override
+  Future<bool> snoozeDeviceAttention(
+    String entryId, {
+    required String correlationId,
+  }) async {
+    snoozeDeviceAttentionCalls++;
+    attentionCorrelationIds.add(correlationId);
+    deviceAttentionEntries = [];
+    return true;
+  }
+
+  @override
+  Future<bool> markDeviceAttentionStillInstalled(
+    String entryId, {
+    required String correlationId,
+  }) async {
+    stillInstalledCalls++;
+    attentionCorrelationIds.add(correlationId);
+    deviceAttentionEntries = [
+      for (final entry in deviceAttentionEntries)
+        {...entry, 'status': 'awaiting_recovery'},
+    ];
+    return true;
+  }
+
+  @override
+  Future<bool> markDeviceAttentionRemovalSelected(
+    String entryId, {
+    required String correlationId,
+  }) async {
+    removalSelectedCalls++;
+    attentionCorrelationIds.add(correlationId);
+    return true;
+  }
+
+  @override
+  Future<Map<String, dynamic>?> unpairDevice({
+    required String hubType,
+    required String deviceId,
+    String? hubAddress,
+    String? deviceType,
+    String? correlationId,
+    bool force = false,
+    bool archive = false,
+    Duration receiveTimeout = const Duration(seconds: 90),
+  }) async {
+    unpairForces.add(force);
+    unpairCorrelationIds.add(correlationId);
+    final result = force ? forceUnpairResult : unpairResult;
+    if (result?['status'] == 'complete') deviceAttentionEntries = [];
+    return result;
   }
 
   @override
@@ -118,6 +198,7 @@ class _TestServerSyncProvider extends ServerSyncProvider {
   bool matterPairingEnabled = false;
   bool hueBlePairingEnabled = false;
   bool hueAuthorityConsentSupportedForTest = false;
+  bool matterUnreachableTriageSupportedForTest = false;
   RhythmHueAuthority? hueAuthorityForTest;
   int hueAuthorityFetches = 0;
   List<Map<String, dynamic>> hubs = const [];
@@ -139,6 +220,10 @@ class _TestServerSyncProvider extends ServerSyncProvider {
   @override
   bool get hueRoomAuthorityConsentSupported =>
       hueAuthorityConsentSupportedForTest;
+
+  @override
+  bool get matterUnreachableDeviceTriageSupported =>
+      matterUnreachableTriageSupportedForTest;
 
   @override
   Future<RhythmHueAuthority?> fetchHueAuthority() async {
@@ -186,6 +271,29 @@ Future<void> _tapVisible(WidgetTester tester, Finder finder) async {
   await tester.pumpAndSettle();
 }
 
+Future<void> _loadEvidenceFonts() async {
+  final dartExecutable = File(Platform.resolvedExecutable);
+  var flutterCache = dartExecutable.parent;
+  while (!flutterCache.path.endsWith('${Platform.pathSeparator}cache')) {
+    final parent = flutterCache.parent;
+    if (parent.path == flutterCache.path) {
+      throw StateError('Could not locate the Flutter cache for visual proof');
+    }
+    flutterCache = parent;
+  }
+  Future<void> load(String family, String fileName) async {
+    final bytes = await File(
+      '${flutterCache.path}/artifacts/material_fonts/$fileName',
+    ).readAsBytes();
+    await (FontLoader(family)
+          ..addFont(Future.value(ByteData.sublistView(bytes))))
+        .load();
+  }
+
+  await load('Roboto', 'Roboto-Regular.ttf');
+  await load('MaterialIcons', 'MaterialIcons-Regular.otf');
+}
+
 Map<String, dynamic> _roomBindingEntry() {
   return {
     'id': 'room-entry-1',
@@ -217,6 +325,35 @@ Map<String, dynamic> _unassignedDeviceEntry() {
   };
 }
 
+Map<String, dynamic> _unreachableDeviceEntry({
+  String status = 'pending',
+}) {
+  final threeDaysAgo = DateTime.now().millisecondsSinceEpoch ~/ 1000 -
+      3 * Duration.secondsPerDay;
+  return {
+    'id': 'unreachable-opaque-1',
+    'journey_id': 'unreachable-device-review-1',
+    'kind': 'unreachable_device',
+    'status': status,
+    'device': {
+      'name': 'Hall Lamp',
+      'native_id': 'matter-42-1',
+      'hub_type': 'matter',
+      'hub_address': 'local',
+      'device_type': 'light',
+    },
+    'evidence': {
+      'failure_count': 3,
+      'last_proof_at': threeDaysAgo,
+      'first_failure_at': 200,
+      'last_failure_at': 90000,
+      'created_at': 90000,
+    },
+    'guidance':
+        'Turn mains power off for about 10 seconds, turn it back on, then wait for Rhythm to verify a fresh report or read.',
+  };
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
@@ -226,8 +363,19 @@ void main() {
     late _FakeTriageServerApi api;
     late _FakeRhythmConnection connection;
     late _TestServerSyncProvider serverSyncProvider;
+    late CapturingAnalyticsBackend analyticsBackend;
+    late AnalyticsService analytics;
 
     setUp(() async {
+      analyticsBackend = CapturingAnalyticsBackend();
+      await analyticsBackend.initialize();
+      BackendProvider.setInstanceForTesting(
+        auth: OfflineAuthBackend(),
+        analytics: analyticsBackend,
+      );
+      analytics = AnalyticsService();
+      analytics.resetForTesting();
+      await analytics.initialize();
       roomProvider = RoomProvider();
       await roomProvider.addRoom(const RoomDto(
         id: 'room-kitchen',
@@ -251,6 +399,8 @@ void main() {
     });
 
     tearDown(() {
+      analytics.resetForTesting();
+      BackendProvider.resetForTesting();
       serverSyncProvider.dispose();
       roomProvider.dispose();
       connection.dispose();
@@ -658,6 +808,311 @@ void main() {
       expect(
         find.text('No devices need your attention right now.'),
         findsOneWidget,
+      );
+    });
+
+    testWidgets('does not request device health without the server capability',
+        (tester) async {
+      api.triageEntries = [];
+      api.deviceAttentionEntries = [_unreachableDeviceEntry()];
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          connection: connection,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(api.getDeviceAttentionEntriesCalls, 0);
+      expect(find.text('Is Hall Lamp still installed?'), findsNothing);
+    });
+
+    testWidgets('guides recovery and waits for fresh device proof',
+        (tester) async {
+      api.triageEntries = [];
+      api.deviceAttentionEntries = [_unreachableDeviceEntry()];
+      serverSyncProvider.matterUnreachableTriageSupportedForTest = true;
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          connection: connection,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await _scrollTo(tester, find.text('Is Hall Lamp still installed?'));
+      expect(find.byKey(const ValueKey('unreachable-device-card')),
+          findsOneWidget);
+      expect(find.text('Last heard from 3 days ago'), findsOneWidget);
+
+      await _tapVisible(tester, find.text("It's Still Installed"));
+
+      expect(api.stillInstalledCalls, 1);
+      expect(api.attentionCorrelationIds, ['unreachable-device-review-1']);
+      expect(find.text('Waiting for Hall Lamp'), findsOneWidget);
+      expect(
+        find.textContaining('Turn mains power off for about 10 seconds'),
+        findsOneWidget,
+      );
+      expect(
+        find.text('This clears on its own once the light reports in.'),
+        findsOneWidget,
+      );
+      expect(find.text('Check Again'), findsNothing);
+    });
+
+    testWidgets('recovery polling does not log repeated review views',
+        (tester) async {
+      api.triageEntries = [];
+      api.deviceAttentionEntries = [
+        _unreachableDeviceEntry(status: 'awaiting_recovery'),
+      ];
+      serverSyncProvider.matterUnreachableTriageSupportedForTest = true;
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          connection: connection,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final callsAfterInitialLoad = api.getDeviceAttentionEntriesCalls;
+      await tester.pump(const Duration(seconds: 16));
+      await tester.pump();
+      await tester.pump(const Duration(seconds: 15));
+      await tester.pump();
+
+      expect(
+        api.getDeviceAttentionEntriesCalls,
+        greaterThanOrEqualTo(callsAfterInitialLoad + 2),
+      );
+      expect(
+        analyticsBackend.events
+            .where((event) => event.name == 'device_review_loaded'),
+        hasLength(1),
+      );
+    });
+
+    testWidgets('recovery polling survives a failed poll and stops once clear',
+        (tester) async {
+      api.triageEntries = [];
+      api.deviceAttentionEntries = [
+        _unreachableDeviceEntry(status: 'awaiting_recovery'),
+      ];
+      serverSyncProvider.matterUnreachableTriageSupportedForTest = true;
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          connection: connection,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Waiting for Hall Lamp'), findsOneWidget);
+
+      // A transient failure keeps the card and keeps polling.
+      api.deviceAttentionUnavailable = true;
+      await tester.pump(const Duration(seconds: 16));
+      await tester.pump();
+      expect(find.text('Waiting for Hall Lamp'), findsOneWidget);
+      expect(find.text('Not connected to server'), findsNothing);
+
+      // Fresh proof removes the entry server-side; the card clears and the
+      // poll stops.
+      api.deviceAttentionUnavailable = false;
+      api.deviceAttentionEntries = [];
+      await tester.pump(const Duration(seconds: 15));
+      await tester.pump();
+      expect(find.text('Waiting for Hall Lamp'), findsNothing);
+      expect(
+        analyticsBackend.events.where(
+          (event) =>
+              event.name == 'unreachable_device_attention' &&
+              event.properties['action'] == 'no_longer_listed',
+        ),
+        hasLength(1),
+      );
+
+      final callsAfterClear = api.getDeviceAttentionEntriesCalls;
+      await tester.pump(const Duration(seconds: 45));
+      await tester.pump();
+      expect(api.getDeviceAttentionEntriesCalls, callsAfterClear);
+    });
+
+    testWidgets('keeps legacy review entries when attention loading fails',
+        (tester) async {
+      api.triageEntries = [_roomBindingEntry()];
+      api.deviceAttentionUnavailable = true;
+      serverSyncProvider.matterUnreachableTriageSupportedForTest = true;
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          connection: connection,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('Merge Rooms'), findsOneWidget);
+      expect(find.text('Not connected to server'), findsNothing);
+    });
+
+    testWidgets('renders deterministic unreachable-device review evidence',
+        (tester) async {
+      final compileTimeOutputDir = const String.fromEnvironment(
+        'RHYTHM_UI_EVIDENCE_DIR',
+      );
+      final outputDir = compileTimeOutputDir.isNotEmpty
+          ? compileTimeOutputDir
+          : Platform.environment['RHYTHM_UI_EVIDENCE_DIR'] ?? '';
+      if (outputDir.isNotEmpty) {
+        await tester.runAsync(_loadEvidenceFonts);
+      }
+      await tester.binding.setSurfaceSize(const Size(430, 430));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: outputDir.isEmpty ? null : ThemeData(fontFamily: 'Roboto'),
+          home: Scaffold(
+            key: const ValueKey('unreachable-device-evidence-surface'),
+            backgroundColor: const Color(0xFF11151C),
+            body: Align(
+              alignment: Alignment.topCenter,
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: UnreachableDeviceAttentionCard(
+                  entry: RhythmDeviceAttention.fromJson(
+                    _unreachableDeviceEntry(),
+                  ),
+                  busy: false,
+                  onStillInstalled: () {},
+                  onRemoved: () {},
+                  onSnooze: () {},
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      final screenshotFinder =
+          find.byKey(const ValueKey('unreachable-device-card'));
+      expect(screenshotFinder, findsOneWidget);
+
+      if (outputDir.isNotEmpty) {
+        await expectLater(
+          screenshotFinder,
+          matchesGoldenFile(
+            Uri.file('$outputDir/unreachable-device-pending.png'),
+          ),
+        );
+      }
+    });
+
+    testWidgets('snoozes an unreachable-device entry with its review journey',
+        (tester) async {
+      api.triageEntries = [];
+      api.deviceAttentionEntries = [_unreachableDeviceEntry()];
+      serverSyncProvider.matterUnreachableTriageSupportedForTest = true;
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          connection: connection,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await _tapVisible(tester, find.text('Remind Me Later'));
+
+      expect(api.snoozeDeviceAttentionCalls, 1);
+      expect(api.attentionCorrelationIds, ['unreachable-device-review-1']);
+      expect(find.text('Is Hall Lamp still installed?'), findsNothing);
+    });
+
+    testWidgets('uses graceful Matter removal before local-only cleanup',
+        (tester) async {
+      api.triageEntries = [];
+      api.deviceAttentionEntries = [_unreachableDeviceEntry()];
+      api.unpairResult = {'status': 'failed', 'error': 'Light is offline'};
+      serverSyncProvider.matterUnreachableTriageSupportedForTest = true;
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          connection: connection,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await _tapVisible(tester, find.text('Remove Light'));
+      expect(find.text('Remove'), findsOneWidget);
+      await tester.tap(find.text('Remove'));
+      await tester.pumpAndSettle();
+
+      expect(api.unpairForces, [false]);
+      expect(find.text('Remove Locally Only'), findsOneWidget);
+      expect(
+        find.textContaining('cannot remove the Matter fabric credentials'),
+        findsOneWidget,
+      );
+
+      await tester.tap(find.text('Remove Locally Only'));
+      await tester.pumpAndSettle();
+
+      expect(api.unpairForces, [false, true]);
+      expect(
+        api.attentionCorrelationIds,
+        ['unreachable-device-review-1'],
+      );
+      expect(
+        api.unpairCorrelationIds,
+        ['unreachable-device-review-1', 'unreachable-device-review-1'],
+      );
+      expect(connection.reconnectCalls, 1);
+      expect(find.text('Is Hall Lamp still installed?'), findsNothing);
+    });
+
+    testWidgets('cancelling graceful removal preserves the review journey',
+        (tester) async {
+      api.triageEntries = [];
+      api.deviceAttentionEntries = [_unreachableDeviceEntry()];
+      api.unpairResult = {'status': 'failed', 'error': 'offline'};
+      serverSyncProvider.matterUnreachableTriageSupportedForTest = true;
+
+      await tester.pumpWidget(
+        _buildTestApp(
+          roomProvider: roomProvider,
+          connection: connection,
+          serverSyncProvider: serverSyncProvider,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await _tapVisible(tester, find.text('Remove Light'));
+      await tester.tap(find.text('Remove'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Keep Device'));
+      await tester.pumpAndSettle();
+
+      api.attentionCorrelationIds.clear();
+      await _tapVisible(tester, find.text('Remind Me Later'));
+
+      expect(api.snoozeDeviceAttentionCalls, 1);
+      expect(
+        api.attentionCorrelationIds,
+        ['unreachable-device-review-1'],
       );
     });
   });

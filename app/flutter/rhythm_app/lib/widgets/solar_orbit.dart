@@ -14,6 +14,7 @@ class CelestialColors {
   static const accentBlue = Color(0xFF58A6FF);
   static const sunWarm = Color(0xFFF9A825);
   static const sunCool = Color(0xFFBBDEFB);
+  static const warning = Color(0xFFFFB74D);
   static const textPrimary = Color(0xFFE6EDF3);
   static const textSecondary = Color(0xFF8B949E);
 }

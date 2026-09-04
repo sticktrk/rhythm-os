@@ -7,7 +7,7 @@ use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use rhythm_devices::{DeviceQuirk, LightCapabilities};
-use rhythm_os::hub::HubEvent;
+use rhythm_os::hub::{DeviceReachabilityEvidence, DeviceReachabilityFailureClass, HubEvent};
 
 use crate::cloud_profiles::CloudMatterProfileCatalog;
 use crate::controller::MatterDeviceRegistry;
@@ -382,6 +382,36 @@ impl MatterHubData {
         self.mark_node_reachable(node_id, true);
     }
 
+    /// Record endpoint-scoped physical proof and publish it to the shared
+    /// durable health tracker. Command intent never calls this method.
+    pub fn record_endpoint_proof_of_life(&self, node_id: u64, endpoint: u16) {
+        self.record_node_proof_of_life(node_id);
+        let _ = self.event_tx.send(HubEvent::DeviceReachability {
+            hub_key: None,
+            device_id: crate::lifecycle::format_device_id(node_id, endpoint),
+            fabric_id: self.fabric_id.clone(),
+            controller_stream_id: None,
+            evidence: DeviceReachabilityEvidence::Proof,
+        });
+    }
+
+    /// Publish a bounded connectivity failure class without retaining the raw
+    /// transport error, address, or fabric credentials.
+    pub fn record_endpoint_failure(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+        class: DeviceReachabilityFailureClass,
+    ) {
+        let _ = self.event_tx.send(HubEvent::DeviceReachability {
+            hub_key: None,
+            device_id: crate::lifecycle::format_device_id(node_id, endpoint),
+            fabric_id: self.fabric_id.clone(),
+            controller_stream_id: None,
+            evidence: DeviceReachabilityEvidence::Failure(class),
+        });
+    }
+
     /// Whether a node has proven alive after a specific failure/cooldown mark.
     pub fn has_node_proof_of_life_after(&self, node_id: u64, marked_at: Instant) -> bool {
         self.node_proof_of_life
@@ -396,7 +426,7 @@ impl MatterHubData {
         if let Ok(mut observations) = self.on_off_observations.lock() {
             observations.insert((node_id, endpoint), (lights_on, Instant::now()));
         }
-        self.record_node_proof_of_life(node_id);
+        self.record_endpoint_proof_of_life(node_id, endpoint);
     }
 
     /// Return the authoritative On/Off value from the current controller

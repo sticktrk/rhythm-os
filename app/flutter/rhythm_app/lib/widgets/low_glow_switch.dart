@@ -241,7 +241,7 @@ class LightProfileOverrideBadge extends StatelessWidget {
             color: const Color(0xE61C1813),
             borderRadius: BorderRadius.circular(99),
             border: Border.all(
-              color: const Color(0xFFFFB74D).withValues(alpha: 0.7),
+              color: CelestialColors.warning.withValues(alpha: 0.7),
             ),
           ),
           child: Row(

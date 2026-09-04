@@ -124,6 +124,11 @@ void main() {
       hubType: 'matter',
       outcome: 'succeeded',
     );
+    await analytics.logUnreachableDeviceAttention(
+      journeyId: 'unreachable-device-journey-123',
+      action: 'still_installed',
+      state: 'awaiting_recovery',
+    );
 
     expect(
       backend.events.map((event) => event.name),
@@ -147,6 +152,7 @@ void main() {
         'removed_bulbs_opened',
         'removed_bulb_retry_completed',
         'removed_bulb_purge_completed',
+        'unreachable_device_attention',
       ],
     );
     expect(backend.events.first.properties, {
@@ -235,6 +241,18 @@ void main() {
       'source': 'removed_bulbs',
       'outcome': 'failed',
       'failure_stage': 'recovery_unavailable',
+    });
+    expect(backend.events[18].properties, {
+      'journey_id': 'removed-bulb-purge-123',
+      'hub_type': 'matter',
+      'source': 'removed_bulbs',
+      'outcome': 'succeeded',
+    });
+    expect(backend.events[19].properties, {
+      'journey_id': 'unreachable-device-journey-123',
+      'action': 'still_installed',
+      'state': 'awaiting_recovery',
+      'source': 'add_review',
     });
 
     final serialized = backend.events
@@ -852,6 +870,28 @@ void main() {
         failureStage: 'offline',
       ),
       completes,
+    );
+  });
+
+  test('unreachable-device attention analytics excludes device identity',
+      () async {
+    await analytics.logUnreachableDeviceAttention(
+      journeyId: 'unreachable-device-random-1',
+      action: 'still_installed',
+      state: 'pending',
+    );
+
+    final event = backend.events.single;
+    expect(event.name, 'unreachable_device_attention');
+    expect(event.properties, {
+      'journey_id': 'unreachable-device-random-1',
+      'action': 'still_installed',
+      'state': 'pending',
+      'source': 'add_review',
+    });
+    expect(
+      event.properties.keys,
+      isNot(containsAll(['device_id', 'native_id', 'hub_address', 'name'])),
     );
   });
 }
