@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 
 import '../backend/backend.dart';
 import '../config/app_orientation_policy.dart';
@@ -161,11 +162,26 @@ class AnalyticsService {
     });
   }
 
+  /// Stage durations and bounded dimensions supplied by AppStartupPerformance.
+  Future<void> logControlReadiness(Map<String, Object> properties) async {
+    final event = Map<String, Object>.of(properties);
+    try {
+      final info = await PackageInfo.fromPlatform();
+      event['app_version'] = info.version;
+      event['app_build'] = info.buildNumber;
+    } catch (_) {
+      // Diagnostics are optional on platforms without package metadata.
+    }
+    await _logOrQueueStartupEvent('app_control_readiness', event);
+  }
+
   Future<void> _logOrQueueStartupEvent(
     String name,
     Map<String, Object> properties,
   ) async {
     if (!_initialized || _analytics == null) {
+      // Resumes can recur while analytics is disabled or unavailable.
+      if (_pendingStartupEvents.length >= 32) _pendingStartupEvents.removeAt(0);
       _pendingStartupEvents.add((name: name, properties: properties));
       return;
     }

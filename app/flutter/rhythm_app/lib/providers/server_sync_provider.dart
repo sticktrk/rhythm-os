@@ -8,6 +8,7 @@
 /// - Location pushes from app → server
 library;
 
+import '../services/app_startup_performance.dart';
 import 'dart:async';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
@@ -2454,7 +2455,9 @@ class ServerSyncProvider extends ChangeNotifier {
     required bool clearTransientState,
     bool assumeLanReachable = false,
     bool assumeSavedAuth = false,
+    bool authoritative = false,
   }) async {
+    final endpointTimer = Stopwatch()..start();
     // Saved endpoints are the fastest usable candidates. Refreshing the same
     // hub through Supabase before every connection adds two cloud reads and
     // prevents an otherwise reachable LAN/tunnel endpoint from starting. The
@@ -2496,11 +2499,14 @@ class ServerSyncProvider extends ChangeNotifier {
       _lastServerInstanceId = null;
     }
     _activeConnectionEndpoint = endpoint;
+    AppStartupPerformance.instance.recordPhase(
+        AppStartupPhase.endpoint, endpointTimer.elapsedMilliseconds);
     await _connection.connect(
       endpoint.host,
       port: endpoint.port,
       useSsl: endpoint.useSsl,
       authToken: auth.authToken,
+      authoritative: authoritative,
     );
     notifyListeners();
   }
@@ -2559,10 +2565,8 @@ class ServerSyncProvider extends ChangeNotifier {
       clearTransientState: false,
       assumeLanReachable: assumeLanReachable,
       assumeSavedAuth: assumeSavedAuth,
+      authoritative: authoritative,
     );
-    if (authoritative) {
-      await _connection.reconnect(authoritative: true);
-    }
   }
 
   Future<void> _syncLocalServerProcessForHub(Hub hub) async {
@@ -3055,16 +3059,33 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Handle hello from server — accept rooms and reconcile config.
   void _onHello(RhythmHello hello) {
+    final applyTimer = Stopwatch()..start();
+    final performance = AppStartupPerformance.instance;
+    final timing = _connection.lastHelloPerformance;
+    if (timing != null) {
+      performance.recordPhase(AppStartupPhase.request, timing.requestMs);
+      performance.recordPhase(AppStartupPhase.decode, timing.decodeMs);
+      performance.recordPhase(AppStartupPhase.models, timing.modelMs);
+    }
+    performance.recordServer(
+        nodes: hello.nodes.length,
+        devices: hello.nodes
+            .where((node) => node.kind == RhythmNodeKind.lightDevice)
+            .length,
+        version: hello.version,
+        responseBytes: timing?.responseBytes,
+        transport: _activeConnectionEndpoint == null
+            ? null
+            : _sameEndpoint(
+                    _activeConnectionEndpoint, _serverHub?.remoteEndpoint)
+                ? 'tunnel'
+                : 'lan');
     _authoritativeNodeSnapshotGeneration++;
     final helloNodes = _mergeOptimisticStandbyEnabled(hello.nodes);
     debugPrint(
         'ServerSync: Hello received with ${helloNodes.length} nodes, version=${hello.version}');
     debugPrint('ServerSync: Server active profile: ${hello.activeProfile}');
     debugPrint('ServerSync: Server location: ${hello.location}');
-    for (final r in helloNodes) {
-      debugPrint(
-          'ServerSync: Server node "${r.name}" kind=${r.kind.name} rhythm=${r.rhythmEnabled} offset=${r.timeOffset} state=${r.state.wireValue} transitioning=${r.transitioning}');
-    }
     _lastServerInstanceId = hello.serverInstanceId;
     _firmwareVersion = hello.version;
     _serverPlatformType = hello.platformType;
@@ -3129,19 +3150,14 @@ class ServerSyncProvider extends ChangeNotifier {
     }
 
     _isProcessingHello = true;
-    // Only suppress the next source-change event if we're actually going to
-    // add rooms (which triggers addRoomsFromSource → onSourceRoomsChanged).
-    // If the server has 0 rooms, no event fires, and a stale suppress flag
-    // would eat the next real event (e.g. Hue pairing).
-    _suppressNextSourceSync = helloNodes.isNotEmpty;
+    // Snapshot reconciliation emits one provider update, no source-change event.
+    _suppressNextSourceSync = false;
     try {
       // 1. Accept server nodes as authoritative.
-      _acceptServerNodes(helloNodes);
-
-      // 2. Reconcile motion sensors — mark rooms that have sensors,
-      //    unmark rooms that lost their sensors since last hello
-      _roomProvider.setMotionSensorNodes(_sensorTargetNodeIds());
-      _syncHelloMotionState(helloNodes);
+      _acceptServerNodes(helloNodes, afterApply: () {
+        _roomProvider.setMotionSensorNodes(_sensorTargetNodeIds());
+        _syncHelloMotionState(helloNodes);
+      });
 
       // 3. Accept server config as authoritative, then reconcile location.
       _acceptServerConfig(hello.activeProfile);
@@ -3175,6 +3191,8 @@ class ServerSyncProvider extends ChangeNotifier {
       homeEntryCompleter.complete();
     }
 
+    performance.recordPhase(
+        AppStartupPhase.apply, applyTimer.elapsedMilliseconds);
     notifyListeners();
   }
 
@@ -3242,51 +3260,17 @@ class ServerSyncProvider extends ChangeNotifier {
   /// The backend now exposes both rooms and individual bulbs as nodes. The UI
   /// only materializes light-addressable nodes into cards, so buttons and
   /// sensors remain in topology metadata but do not become room cards.
-  void _acceptServerNodes(List<RhythmRoom> serverNodes) {
+  void _acceptServerNodes(List<RhythmRoom> serverNodes,
+      {void Function()? afterApply}) {
     final validNodes = serverNodes
         .where((node) => node.id.isNotEmpty && node.kind.isLightAddressable)
         .toList();
-    if (validNodes.isEmpty) {
-      debugPrint(
-          'ServerSync: Server has no light-addressable nodes — clearing local rooms');
-      _roomProvider.clearAllRooms();
-      return;
-    }
-
-    // Group nodes by a canonical source derived from their own hub types.
-    final grouped = <RoomSourceDto, List<RhythmRoom>>{};
-    for (final sr in validNodes) {
-      final source = _canonicalSourceForNode(sr);
-      (grouped[source] ??= []).add(sr);
-    }
-    debugPrint(
-        'ServerSync: Accepting ${validNodes.length} light nodes across ${grouped.length} source(s): ${grouped.entries.map((e) => '${e.key}=${e.value.length}').join(', ')}');
-
-    final serverRoomIds = validNodes.map((r) => r.id).toSet();
-    for (final otherSource in RoomSourceDto.values) {
-      if (grouped.containsKey(otherSource)) continue;
-      final stale = _roomProvider
-          .getRoomsBySource(otherSource)
-          .where((r) => !serverRoomIds.contains(r.id))
-          .toList();
-      if (stale.isNotEmpty) {
-        debugPrint(
-            'ServerSync: Removing ${stale.length} stale room(s) from source=$otherSource');
-        for (final room in stale) {
-          _roomProvider.removeRoom(room.id);
-        }
-      }
-    }
-
-    // Add each source group atomically while preserving user-owned runtime state.
-    for (final entry in grouped.entries) {
-      final source = entry.key;
-      final rooms = <RoomDto>[];
-      for (final sr in entry.value) {
-        rooms.add(RoomDto(
+    final rooms = [
+      for (final sr in validNodes)
+        RoomDto(
           id: sr.id,
           name: sr.name,
-          source: source,
+          source: _canonicalSourceForNode(sr),
           kind: _roomNodeKindFromSdk(sr.kind),
           parentId: sr.parentId,
           placement: _roomNodePlacementFromSdk(sr.placement),
@@ -3301,16 +3285,12 @@ class ServerSyncProvider extends ChangeNotifier {
           lightsOn: sr.lightsOn ?? false,
           timeOffsetMinutes: sr.timeOffset,
           brightnessOffset: sr.brightnessOffset,
-        ));
-      }
-      _roomProvider.addRoomsFromSource(source, rooms);
-    }
-
-    // Apply runtime state from server atomically — single save + notify per node.
+        ),
+    ];
     _receivingFromServer = true;
     try {
-      for (final sr in validNodes) {
-        if (_roomProvider.getNode(sr.id) != null) {
+      _roomProvider.applyServerSnapshot(rooms, () {
+        for (final sr in validNodes) {
           _roomProvider.applyServerNodeState(
             sr.id,
             rhythmEnabled: sr.rhythmEnabled,
@@ -3326,11 +3306,12 @@ class ServerSyncProvider extends ChangeNotifier {
             moodActive: sr.moodActive,
           );
         }
-      }
+        _syncServerMoodProfiles(validNodes);
+        afterApply?.call();
+      });
     } finally {
       _receivingFromServer = false;
     }
-    _syncServerMoodProfiles(validNodes);
   }
 
   /// Handle source rooms changed (Hue pairing, re-sync, disconnect).

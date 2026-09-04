@@ -283,7 +283,10 @@ class _TestRhythmConnection extends RhythmConnection {
     bool useSsl = false,
     String? webBaseUrl,
     String? authToken,
-  }) async {}
+    bool authoritative = false,
+  }) async {
+    if (authoritative) await reconnect(authoritative: true);
+  }
 
   @override
   Future<void> reconnect({bool authoritative = false}) async {

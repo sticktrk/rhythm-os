@@ -607,11 +607,24 @@ fn compute_room_display_values_for_settings_from_parts(
         lighting.mode_configs,
         lighting.mode,
     );
+    compute_room_display_values_with_context(lighting, room, &ctx, &registry)
+}
+
+fn compute_room_display_values_with_context(
+    lighting: RoomLightingContext<'_>,
+    room: RoomLightingInput<'_>,
+    ctx: &rhythm_core::CurveContext,
+    registry: &LightProfileRegistry,
+) -> (u8, u16) {
+    let render_state = render_state_for_display(room.room_state);
+    if render_state == RoomModeState::HardOff {
+        return (0, 0);
+    }
     let values = registry.calculate_room_values(
         lighting.mode,
         render_state,
         Some(room.settings),
-        &ctx,
+        ctx,
         room.time_offset_minutes,
     );
     let adjusted_brightness =
@@ -2133,7 +2146,55 @@ fn light_capabilities_for_node(
     })
 }
 
+struct SnapshotDisplayContext {
+    curve: rhythm_core::CurveContext,
+    registries: BTreeMap<RhythmMode, LightProfileRegistry>,
+}
+
+impl SnapshotDisplayContext {
+    fn new(lighting: RoomLightingContext<'_>) -> Self {
+        Self {
+            curve: rhythm_core::curve_context_for_local_datetime(
+                lighting.solar_noon,
+                lighting.latitude,
+                lighting.longitude,
+                lighting.timezone_name,
+                current_local_datetime(lighting.utc_offset),
+            ),
+            registries: RhythmMode::ALL
+                .into_iter()
+                .map(|mode| {
+                    (
+                        mode,
+                        light_profile_registry_from_parts(
+                            lighting.light_profile_configs,
+                            lighting.mode_configs,
+                            mode,
+                        ),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn display_values(
+        &self,
+        lighting: RoomLightingContext<'_>,
+        room: RoomLightingInput<'_>,
+    ) -> (u8, u16) {
+        let effective =
+            effective_room_lighting_context(lighting, room.settings, self.curve.current_hour);
+        compute_room_display_values_with_context(
+            effective,
+            room,
+            &self.curve,
+            &self.registries[&effective.mode],
+        )
+    }
+}
+
 struct NodeStateDtoBuildContext<'a> {
+    display_context: Option<&'a SnapshotDisplayContext>,
     state: &'a AppState,
     light_profile_configs: &'a BTreeMap<String, LightProfileConfig>,
     mode_configs: &'a [ModeConfig],
@@ -2320,7 +2381,11 @@ fn build_node_state_dto_from_snapshot_parts(
             snap.soft_off,
         ),
     );
-    let (mut brightness, mut kelvin) = compute_room_display_values_for_settings_from_parts(
+    let compute_display = |lighting, room| match ctx.display_context {
+        Some(display) => display.display_values(lighting, room),
+        None => compute_room_display_values_for_settings_from_parts(lighting, room),
+    };
+    let (mut brightness, mut kelvin) = compute_display(
         RoomLightingContext {
             light_profile_configs: ctx.light_profile_configs,
             mode_configs: ctx.mode_configs,
@@ -3169,6 +3234,9 @@ pub fn refresh_observed_power_authoritatively_and_emit(state: &SharedState) -> R
 /// Two-phase lock: collects metadata from state (brief lock), then queries
 /// engine snapshots (engine read lock) to prevent cascading lock contention.
 pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
+    let started = Instant::now();
+    let mut lock_wait = Duration::ZERO;
+    let mut lock_hold = Duration::ZERO;
     let (
         runtime,
         hubs_dto,
@@ -3208,7 +3276,10 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         review_dto,
         pending_dispatch_nodes,
     ) = {
+        let waiting = Instant::now();
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        lock_wait += waiting.elapsed();
+        let holding = Instant::now();
 
         let runtime = s.hub_runtime();
         let hubs_dto: Vec<HubDto> = s
@@ -3329,7 +3400,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         };
 
         let now = std::time::Instant::now();
-        (
+        let captured = (
             runtime,
             hubs_dto,
             capabilities_dto,
@@ -3367,7 +3438,9 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
             s.power_save,
             build_review_summary_dto(&s),
             pending_dispatch_node_ids(&s),
-        )
+        );
+        lock_hold += holding.elapsed();
+        captured
     };
 
     let mut node_snapshots: Vec<rhythm_core::NodeSnapshot> = if let Some(ref runtime) = runtime {
@@ -3377,6 +3450,17 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
     };
     node_snapshots.retain(|snap| !crate::topology::is_internal_light_node_id(&snap.id));
     node_snapshots.sort_by(|left, right| left.id.cmp(&right.id));
+
+    let display_context = SnapshotDisplayContext::new(RoomLightingContext {
+        light_profile_configs: &light_profile_configs,
+        mode_configs: &mode_configs,
+        mode: active_mode,
+        solar_noon,
+        latitude,
+        longitude,
+        timezone_name: timezone_name.as_deref(),
+        utc_offset,
+    });
 
     active_profile_effective.rhythm_interval_secs = crate::periodic::effective_cycle_duration(
         &profile_registry,
@@ -3388,8 +3472,12 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
     .as_secs();
 
     let nodes = {
+        let waiting = Instant::now();
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        lock_wait += waiting.elapsed();
+        let holding = Instant::now();
         let dto_ctx = NodeStateDtoBuildContext {
+            display_context: Some(&display_context),
             state: &s,
             light_profile_configs: &light_profile_configs,
             mode_configs: &mode_configs,
@@ -3425,6 +3513,7 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
                 .cmp(&right.parent_id)
                 .then_with(|| left.id.cmp(&right.id))
         });
+        lock_hold += holding.elapsed();
         nodes
     };
 
@@ -3452,7 +3541,10 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         review: review_dto,
         nodes,
     };
-    serde_json::to_string(&snapshot).map_err(|e| anyhow::anyhow!("serialize: {}", e))
+    let json = serde_json::to_string(&snapshot).map_err(|e| anyhow::anyhow!("serialize: {}", e))?;
+    info!(target: "startup", "state_snapshot duration_us={} lock_wait_us={} lock_hold_us={} nodes={} response_bytes={}",
+        started.elapsed().as_micros(), lock_wait.as_micros(), lock_hold.as_micros(), snapshot.nodes.len(), json.len());
+    Ok(json)
 }
 
 fn build_review_summary_dto(s: &AppState) -> ReviewSummaryDto {
@@ -3677,6 +3769,7 @@ pub fn build_node_state(state: &SharedState, node_id: &str) -> Result<NodeStateD
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let mode_configs = s.mode_configs();
     let dto_ctx = NodeStateDtoBuildContext {
+        display_context: None,
         state: &s,
         light_profile_configs: &s.light_profile_configs,
         mode_configs: &mode_configs,
@@ -3756,8 +3849,20 @@ pub fn build_nodes_state(state: &SharedState) -> Result<String> {
     };
     node_snapshots.sort_by(|left, right| left.id.cmp(&right.id));
 
+    let display_context = SnapshotDisplayContext::new(RoomLightingContext {
+        light_profile_configs: &light_profile_configs,
+        mode_configs: &mode_configs,
+        mode: active_mode,
+        solar_noon,
+        latitude,
+        longitude,
+        timezone_name: timezone_name.as_deref(),
+        utc_offset,
+    });
+
     let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
     let dto_ctx = NodeStateDtoBuildContext {
+        display_context: Some(&display_context),
         state: &s,
         light_profile_configs: &light_profile_configs,
         mode_configs: &mode_configs,
@@ -31300,6 +31405,65 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("No runtime available"));
+    }
+
+    #[test]
+    fn large_state_snapshots_preserve_per_node_display_and_legacy_contract() {
+        for count in [10, 50, 100, 200, 500] {
+            let snapshots = (0..count)
+                .map(|i| {
+                    let mut node = make_snapshot(&format!("node-{i}"), false, i % 4 == 0);
+                    node.hard_off = i % 7 == 0;
+                    node.brightness_offset = (i % 10) as f32;
+                    node
+                })
+                .collect();
+            let (state, _runtime) = setup_state_with_registry(snapshots);
+            {
+                let mut s = state.lock().unwrap();
+                s.latitude = Some(35.0);
+                s.longitude = Some(-97.0);
+                s.timezone_name = Some("America/Chicago".into());
+                // Constant envelopes keep comparison independent of wall time.
+                for config in s.light_profile_configs.values_mut() {
+                    config.min_brightness = 42;
+                    config.max_brightness = 42;
+                    config.min_color_temp = 3200;
+                    config.max_color_temp = 3200;
+                }
+            }
+            let started = Instant::now();
+            let encoded = build_state_snapshot(&state).unwrap();
+            eprintln!(
+                "SNAPSHOT nodes={count} duration_us={} bytes={}",
+                started.elapsed().as_micros(),
+                encoded.len()
+            );
+            let hello: Value = serde_json::from_str(&encoded).unwrap();
+            let poll: Value = serde_json::from_str(&build_nodes_state(&state).unwrap()).unwrap();
+            assert_eq!(hello["nodes"].as_array().unwrap().len(), count);
+            assert_eq!(hello["nodes"], poll["nodes"]);
+            for i in [0, count / 2, count - 1] {
+                let id = format!("node-{i}");
+                let single = serde_json::to_value(build_node_state(&state, &id).unwrap()).unwrap();
+                let bulk = hello["nodes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|n| n["id"] == id)
+                    .unwrap();
+                for field in [
+                    "state",
+                    "brightness",
+                    "kelvin",
+                    "profile_settings",
+                    "room_profile",
+                    "pending_dispatch",
+                ] {
+                    assert_eq!(bulk[field], single[field], "{id}: {field}");
+                }
+            }
+        }
     }
 
     #[test]

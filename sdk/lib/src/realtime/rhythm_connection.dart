@@ -122,6 +122,14 @@ class RhythmConnection {
   int _port = 80;
   Dio? _dio;
 
+  /// Bounded diagnostics for the most recently accepted hello on this transport.
+  ({
+    int requestMs,
+    int decodeMs,
+    int modelMs,
+    int responseBytes
+  })? lastHelloPerformance;
+
   // Polling.
   Timer? _pollTimer;
   int _consecutivePollFailures = 0;
@@ -293,12 +301,14 @@ class RhythmConnection {
     bool useSsl = false,
     String? webBaseUrl,
     String? authToken,
+    bool authoritative = false,
   }) async {
     if (_connectionState == RhythmConnectionState.connected &&
         _host == host &&
         _port == port &&
         _useSsl == useSsl &&
         _authToken == authToken) {
+      if (authoritative) await reconnect(authoritative: true);
       return;
     }
 
@@ -346,7 +356,7 @@ class RhythmConnection {
         RhythmRuntimeApi(_dio!, onStatesReceived: _updateCacheFromStates);
 
     _log.config('Connecting to $host:$port');
-    await _connectInternal(supersede: true);
+    await _connectInternal(supersede: true, authoritative: authoritative);
   }
 
   /// Force a full reconnect.
@@ -524,12 +534,21 @@ class RhythmConnection {
         : RhythmConnectionState.connecting);
 
     try {
-      final data = await _getHelloPayload(
-        dio,
-        authoritative: authoritative,
-      );
+      final payload = await _getHelloPayload(dio, authoritative: authoritative);
       if (!_isCurrentTransport(transportGeneration, dio)) return;
-      final hello = RhythmHello.fromJson(data);
+      final modelTimer = Stopwatch()..start();
+      final hello = RhythmHello.fromJson(payload.data);
+      lastHelloPerformance = (
+        requestMs: payload.requestMs,
+        decodeMs: payload.decodeMs,
+        modelMs: modelTimer.elapsedMilliseconds,
+        responseBytes: payload.responseBytes,
+      );
+      _log.info(
+        'hello_performance request_ms=${payload.requestMs} '
+        'decode_ms=${payload.decodeMs} model_ms=${modelTimer.elapsedMilliseconds} '
+        'response_bytes=${payload.responseBytes} nodes=${hello.nodes.length}',
+      );
       _log.fine('hello last_tick_epoch_ms=${hello.lastTickEpochMs}');
       _serverPlatformContext = hello.platformContext;
       _listenPort = hello.listenPort;
@@ -592,15 +611,39 @@ class RhythmConnection {
     }
   }
 
-  Future<Map<String, dynamic>> _getHelloPayload(
-    Dio dio, {
-    bool authoritative = false,
-  }) async {
-    final response = await dio.get(
+  Future<
+      ({
+        Map<String, dynamic> data,
+        int requestMs,
+        int decodeMs,
+        int responseBytes,
+      })> _getHelloPayload(Dio dio, {bool authoritative = false}) async {
+    final timer = Stopwatch()..start();
+    final response = await dio.get<List<int>>(
       'api/state',
+      options: Options(responseType: ResponseType.bytes),
       queryParameters: authoritative ? const {'authoritative': 'true'} : null,
     );
-    return Map<String, dynamic>.from(response.data as Map<String, dynamic>);
+    final requestMs = timer.elapsedMilliseconds;
+    final body = response.data!;
+    timer.reset();
+    // Keep Dio's fused decoder and large-response isolate offload. Asking for
+    // a String and calling jsonDecode here would regress large-hub UI latency.
+    final data = await dio.transformer.transformResponse(
+      response.requestOptions.copyWith(responseType: ResponseType.json),
+      ResponseBody.fromBytes(body, response.statusCode ?? 200, headers: {
+        ...response.headers.map,
+        Headers.contentTypeHeader: ['application/json'],
+        Headers.contentLengthHeader: ['${body.length}'],
+      }),
+    ) as Map<String, dynamic>;
+    final decodeMs = timer.elapsedMilliseconds;
+    return (
+      data: data,
+      requestMs: requestMs,
+      decodeMs: decodeMs,
+      responseBytes: body.length,
+    );
   }
 
   bool _isCurrentTransport(int generation, Dio dio) =>

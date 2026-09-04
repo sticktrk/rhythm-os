@@ -161,6 +161,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
         return;
       }
 
+      AppStartupPerformance.instance.start(resumed: true);
       unawaited(
         serverSync
             .retryActiveServerConnection(
@@ -900,10 +901,14 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
     final visibleRooms =
         enabledRooms.where(showsInAllRooms).toList(growable: false);
 
+    final startupGeneration = AppStartupPerformance.instance.generation;
     // Reconcile page assignments after frame to avoid notifying during build.
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       context.read<RoomPageProvider>().reconcileRooms(visibleRooms);
+      if (startupGeneration != AppStartupPerformance.instance.generation) {
+        return;
+      }
       AppStartupPerformance.instance.markAllRoomsVisible(
         fromCache: fromCache,
         roomCount: visibleRooms.length,
