@@ -1877,7 +1877,10 @@ mod tests {
     fn pairing_deadline_is_rechecked_at_the_rename_commit_boundary() {
         let root = temporary_dir("deadline-before-rename");
         let store = Arc::new(LocalBleDeviceStore::load(&root).unwrap());
-        let deadline = Instant::now() + std::time::Duration::from_millis(40);
+        // Leave enough time for the writer to reach its fsync boundary even
+        // when the full workspace test suite is creating files in parallel.
+        // The hook below still makes the deadline expiration deterministic.
+        let deadline = Instant::now() + std::time::Duration::from_secs(1);
         let (reached_tx, reached_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         store.set_before_rename_hook(move || {
@@ -1889,7 +1892,9 @@ mod tests {
             let store = store.clone();
             std::thread::spawn(move || store.upsert_until(device(Some(0x10), false), deadline))
         };
-        reached_rx.recv().unwrap();
+        reached_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("writer should reach the rename boundary");
         std::thread::sleep(
             deadline
                 .saturating_duration_since(Instant::now())
