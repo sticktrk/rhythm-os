@@ -1526,6 +1526,20 @@ pub struct RoomProfileSettings {
     )]
     pub mood_scene_id: Option<String>,
 
+    /// Palette slot at which `mood_scene_id` starts rendering on this node.
+    ///
+    /// A whole-home scene apply spreads a multi-colour palette across the
+    /// house by giving each room a different starting slot. Persisting the slot
+    /// next to the binding lets a later re-apply of the bound scene (entering
+    /// Mood again, cancelling a preview, editing a light) reproduce the same
+    /// colours instead of restarting every room at the first palette entry.
+    /// `None` means the palette starts at slot 0.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub mood_scene_palette_offset: Option<u32>,
+
     /// Optional per-room fade override.
     #[cfg_attr(
         feature = "serde",
@@ -1596,6 +1610,7 @@ impl RoomProfileSettings {
             && self.mood_enabled.is_none()
             && self.mood_profile_id.is_none()
             && self.mood_scene_id.is_none()
+            && self.mood_scene_palette_offset.is_none()
             && self.fade_ms.is_none()
             && self.motion_timeout_secs.is_none()
             && self.motion_activation_enabled.is_none()
@@ -1705,6 +1720,12 @@ impl RoomProfileSettings {
                 .mood_scene_id
                 .clone()
                 .or_else(|| parent.mood_scene_id.clone()),
+            // The palette offset belongs to whichever scene binding wins.
+            mood_scene_palette_offset: if self.mood_scene_id.is_some() {
+                self.mood_scene_palette_offset
+            } else {
+                parent.mood_scene_palette_offset
+            },
             fade_ms: self.fade_ms.clone().or_else(|| parent.fade_ms.clone()),
             motion_timeout_secs: self
                 .motion_timeout_secs
@@ -2347,6 +2368,7 @@ mod tests {
             mood_enabled: None,
             mood_profile_id: None,
             mood_scene_id: None,
+            mood_scene_palette_offset: None,
             fade_ms: Some(TimerSetting::Fixed { value: 250 }),
             motion_timeout_secs: Some(TimerSetting::Fixed { value: 42 }),
             motion_activation_enabled: Some(false),

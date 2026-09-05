@@ -1802,6 +1802,120 @@ void main() {
           )).called(1);
     });
 
+    test('applyHomeScene posts the whole-home body and parses targets',
+        () async {
+      when(() => dio.post(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions:
+                    RequestOptions(path: 'api/scenes/halloween/apply-home'),
+                statusCode: 200,
+                data: {
+                  'scene_id': 'halloween',
+                  'targets': [
+                    {
+                      'target_id': 'room1',
+                      'affected_node_ids': ['light-node-1', 'light-node-2'],
+                      'unresolved_node_ids': const [],
+                    },
+                    {
+                      'target_id': 'room2',
+                      'affected_node_ids': const [],
+                      'error': 'hub is offline',
+                    },
+                  ],
+                  'applied_target_count': 1,
+                  'skipped_target_count': 2,
+                  'queued': true,
+                  'dispatch_count': 2,
+                  'dispatch_spacing_ms': 120,
+                  'estimated_dispatch_ms': 240,
+                },
+              ));
+
+      final result = await api.applyHomeScene(
+        sceneId: 'halloween',
+        transitionMs: 1200,
+        dispatchSpacingMs: 120,
+        correlationId: 'home-scene-123',
+      );
+
+      expect(result?.sceneId, 'halloween');
+      expect(result?.targets, hasLength(2));
+      expect(result?.appliedTargetCount, 1);
+      expect(result?.skippedTargetCount, 2);
+      expect(result?.attemptedTargetCount, 2);
+      expect(result?.queued, isTrue);
+      expect(result?.dispatchCount, 2);
+      expect(result?.dispatchSpacingMs, 120);
+      expect(result?.estimatedDispatchMs, 240);
+      expect(result?.appliedTargets.single.targetId, 'room1');
+      expect(
+        result?.appliedTargets.single.affectedNodeIds,
+        ['light-node-1', 'light-node-2'],
+      );
+      expect(result?.failedTargets.single.targetId, 'room2');
+      expect(result?.failedTargets.single.error, 'hub is offline');
+      verify(() => dio.post(
+            'api/scenes/halloween/apply-home',
+            data: {
+              'transition_ms': 1200,
+              'dispatch_spacing_ms': 120,
+              'correlation_id': 'home-scene-123',
+            },
+          )).called(1);
+    });
+
+    test('applyHomeScene omits optional fields and tolerates a sparse response',
+        () async {
+      when(() => dio.post(any(), data: any(named: 'data')))
+          .thenAnswer((_) async => Response(
+                requestOptions:
+                    RequestOptions(path: 'api/scenes/halloween/apply-home'),
+                statusCode: 200,
+                data: {
+                  'scene_id': 'halloween',
+                  'targets': [
+                    {'target_id': 'room1'},
+                  ],
+                },
+              ));
+
+      final result = await api.applyHomeScene(sceneId: 'halloween');
+
+      expect(result?.sceneId, 'halloween');
+      // A previous-server payload without the counters still reports the
+      // applied targets it did return.
+      expect(result?.appliedTargetCount, 1);
+      expect(result?.skippedTargetCount, 0);
+      expect(result?.queued, isFalse);
+      expect(result?.dispatchCount, 0);
+      expect(result?.targets.single.affectedNodeIds, isEmpty);
+      expect(result?.targets.single.succeeded, isTrue);
+      verify(() => dio.post(
+            'api/scenes/halloween/apply-home',
+            data: const <String, dynamic>{},
+          )).called(1);
+    });
+
+    test('applyHomeScene returns null when the server rejects the call',
+        () async {
+      when(() => dio.post(any(), data: any(named: 'data'))).thenThrow(
+        DioException(
+          requestOptions:
+              RequestOptions(path: 'api/scenes/halloween/apply-home'),
+          response: Response(
+            requestOptions:
+                RequestOptions(path: 'api/scenes/halloween/apply-home'),
+            statusCode: 404,
+          ),
+        ),
+      );
+
+      final result = await api.applyHomeScene(sceneId: 'halloween');
+
+      expect(result, isNull);
+    });
+
     test('previewScene posts duration and returns preview id', () async {
       when(() => dio.post(any(), data: any(named: 'data')))
           .thenAnswer((_) async => Response(

@@ -634,6 +634,101 @@ class RhythmSceneActionResult {
   bool get hasPreviewId => previewId != null && previewId!.isNotEmpty;
 }
 
+/// One target's outcome inside a whole-home scene apply.
+class RhythmHomeSceneTargetResult {
+  final String targetId;
+  final List<String> affectedNodeIds;
+  final List<String> unresolvedNodeIds;
+  final String? error;
+
+  const RhythmHomeSceneTargetResult({
+    required this.targetId,
+    this.affectedNodeIds = const [],
+    this.unresolvedNodeIds = const [],
+    this.error,
+  });
+
+  factory RhythmHomeSceneTargetResult.fromJson(Map<String, dynamic> json) {
+    final error = json['error'] as String?;
+    return RhythmHomeSceneTargetResult(
+      targetId: json['target_id'] as String? ?? '',
+      affectedNodeIds: _stringList(json['affected_node_ids']),
+      unresolvedNodeIds: _stringList(json['unresolved_node_ids']),
+      error: (error != null && error.isNotEmpty) ? error : null,
+    );
+  }
+
+  bool get succeeded => error == null;
+}
+
+/// Result of applying one stored scene to the whole home.
+///
+/// The server owns the fan-out: it enumerates the rooms, paces dispatch and
+/// binds the mood scene, so the client makes exactly one call and renders this.
+class RhythmHomeSceneActionResult {
+  final String sceneId;
+  final List<RhythmHomeSceneTargetResult> targets;
+  final int appliedTargetCount;
+  final int skippedTargetCount;
+  final bool queued;
+  final int dispatchCount;
+  final int dispatchSpacingMs;
+  final int estimatedDispatchMs;
+  final Map<String, dynamic> raw;
+
+  const RhythmHomeSceneActionResult({
+    required this.sceneId,
+    this.targets = const [],
+    this.appliedTargetCount = 0,
+    this.skippedTargetCount = 0,
+    this.queued = false,
+    this.dispatchCount = 0,
+    this.dispatchSpacingMs = 0,
+    this.estimatedDispatchMs = 0,
+    this.raw = const <String, dynamic>{},
+  });
+
+  factory RhythmHomeSceneActionResult.fromJson(Map<String, dynamic> json) {
+    final raw = Map<String, dynamic>.from(json)
+      ..remove('scene_id')
+      ..remove('targets')
+      ..remove('applied_target_count')
+      ..remove('skipped_target_count')
+      ..remove('queued')
+      ..remove('dispatch_count')
+      ..remove('dispatch_spacing_ms')
+      ..remove('estimated_dispatch_ms');
+    final targets = ((json['targets'] as List<dynamic>?) ?? const <dynamic>[])
+        .map(jsonMap)
+        .nonNulls
+        .map(RhythmHomeSceneTargetResult.fromJson)
+        .toList();
+    return RhythmHomeSceneActionResult(
+      sceneId: json['scene_id'] as String? ?? '',
+      targets: targets,
+      appliedTargetCount: jsonInt(json['applied_target_count']) ??
+          targets.where((target) => target.succeeded).length,
+      skippedTargetCount: jsonInt(json['skipped_target_count']) ?? 0,
+      queued: json['queued'] == true,
+      dispatchCount: jsonInt(json['dispatch_count']) ?? 0,
+      dispatchSpacingMs: jsonInt(json['dispatch_spacing_ms']) ?? 0,
+      estimatedDispatchMs: jsonInt(json['estimated_dispatch_ms']) ?? 0,
+      raw: raw,
+    );
+  }
+
+  /// Targets the server actually applied the scene to.
+  List<RhythmHomeSceneTargetResult> get appliedTargets =>
+      targets.where((target) => target.succeeded).toList();
+
+  /// Targets the server attempted but could not apply.
+  List<RhythmHomeSceneTargetResult> get failedTargets =>
+      targets.where((target) => !target.succeeded).toList();
+
+  /// Targets the server attempted, i.e. excluding deliberately skipped ones.
+  int get attemptedTargetCount => targets.length;
+}
+
 List<String> _stringList(dynamic value) {
   return ((value as List<dynamic>?) ?? const <dynamic>[])
       .whereType<String>()

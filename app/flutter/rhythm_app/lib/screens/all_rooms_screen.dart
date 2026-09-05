@@ -6,7 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show RhythmDispatchResult, RhythmMode, RoomModeState;
+    show RhythmDispatchResult, RhythmMode, RhythmSceneDefinition, RoomModeState;
 import 'package:uuid/uuid.dart';
 import '../providers/room_page_provider.dart';
 import '../providers/room_provider.dart';
@@ -15,6 +15,7 @@ import '../services/analytics_service.dart';
 import '../widgets/editable_room_card.dart';
 import '../widgets/room_card.dart';
 import '../widgets/hub_connection_banner.dart';
+import '../widgets/mood_sheet.dart' show rhythmSceneRgb, rhythmSceneSwatch;
 import '../widgets/solar_orbit.dart'; // For CelestialColors
 import 'sun_position_screen.dart';
 
@@ -91,6 +92,9 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
   static const _headerControlHeight = 38.0;
   bool _globalActionPending = false;
   bool _globalSliderExpanded = false;
+  bool _globalScenePanelExpanded = false;
+  bool _globalSceneFetchInFlight = false;
+  String? _globalAppliedSceneId;
   double? _globalSliderValue;
   List<_GlobalRoomBrightness>? _globalUndoSnapshot;
 
@@ -911,7 +915,12 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
                     padding: const EdgeInsets.only(top: 8),
                     child: _buildGlobalBrightnessPanel(),
                   )
-                : const SizedBox.shrink(),
+                : _globalScenePanelExpanded
+                    ? Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: _buildGlobalScenePanel(),
+                      )
+                    : const SizedBox.shrink(),
           ),
         ],
       ),
@@ -933,8 +942,7 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
           state == RoomModeState.wake ||
           state == RoomModeState.warning ||
           (includeLowGlow &&
-              (state == RoomModeState.standby ||
-                  state == RoomModeState.idle));
+              (state == RoomModeState.standby || state == RoomModeState.idle));
       if (!isLightNode ||
           room.disabled ||
           !room.rhythmEnabled ||
@@ -1011,14 +1019,16 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     required int completed,
     required int eligible,
     bool offerUndo = true,
+    String? connector,
   }) {
     final messenger = ScaffoldMessenger.of(context);
     messenger.hideCurrentSnackBar();
+    final joined = connector == null ? '' : ' $connector';
     messenger.showSnackBar(
       SnackBar(
         duration: const Duration(seconds: 8),
         persist: false,
-        content: Text('$verb $completed of $eligible rooms.'),
+        content: Text('$verb$joined $completed of $eligible rooms.'),
         action: offerUndo && completed > 0 && _globalUndoSnapshot != null
             ? SnackBarAction(
                 key: const ValueKey('global-room-action-undo'),
@@ -1280,12 +1290,128 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     HapticFeedback.selectionClick();
     setState(() {
       _globalSliderExpanded = !_globalSliderExpanded;
+      if (_globalSliderExpanded) _globalScenePanelExpanded = false;
       if (!_globalSliderExpanded) _globalSliderValue = null;
     });
   }
 
+  void _toggleGlobalScenePanel() {
+    if (_globalActionPending) return;
+    HapticFeedback.selectionClick();
+    final opening = !_globalScenePanelExpanded;
+    setState(() {
+      _globalScenePanelExpanded = opening;
+      // Only one header panel is open at a time.
+      if (opening) {
+        _globalSliderExpanded = false;
+        _globalSliderValue = null;
+      }
+    });
+    if (opening) _refreshGlobalScenes();
+  }
+
+  Future<void> _refreshGlobalScenes() async {
+    if (_globalSceneFetchInFlight) return;
+    final serverSync = context.read<ServerSyncProvider>();
+    setState(() => _globalSceneFetchInFlight = true);
+    try {
+      await serverSync.fetchScenes();
+    } finally {
+      if (mounted) setState(() => _globalSceneFetchInFlight = false);
+    }
+  }
+
+  /// Scenes offered for the whole home.
+  ///
+  /// Hue-imported scenes are excluded: they are recalled against one bridge
+  /// room and cannot address the rest of the house.
+  List<RhythmSceneDefinition> _globalSceneChoices(
+    ServerSyncProvider serverSync,
+  ) =>
+      serverSync.scenes
+          .where((scene) => !scene.isImportedHueScene)
+          .toList(growable: false);
+
+  Future<void> _applyGlobalScene(RhythmSceneDefinition scene) async {
+    if (_globalActionPending || !widget.interactionsEnabled) return;
+    final serverSync = context.read<ServerSyncProvider>();
+    final journeyId = 'global-room-${_uuid.v4()}';
+
+    HapticFeedback.lightImpact();
+    setState(() => _globalActionPending = true);
+    _showGlobalProgress('Setting ${scene.name} across the home…');
+
+    // No request-level transition: that would override every palette output's
+    // own transition_ms. The server already falls back to the scene layer's
+    // default when the request omits it.
+    final result = await serverSync.applyHomeScene(
+      scene.id,
+      color: rhythmSceneRgb(scene),
+      correlationId: journeyId,
+    );
+    if (!mounted) return;
+
+    setState(() {
+      _globalActionPending = false;
+      // The server owns this fan-out; there is nothing local to undo. The
+      // tile only reads as active when at least one room actually took it.
+      _globalUndoSnapshot = null;
+      _globalAppliedSceneId =
+          result != null && result.appliedTargetCount > 0 ? scene.id : null;
+    });
+
+    if (result == null) {
+      final messenger = ScaffoldMessenger.of(context);
+      messenger.hideCurrentSnackBar();
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            "Couldn't set ${scene.name}. Check the hub connection.",
+          ),
+        ),
+      );
+      AnalyticsService().logGlobalRoomActionCompleted(
+        journeyId: journeyId,
+        action: 'scene',
+        eligibleCount: 0,
+        attemptedCount: 0,
+        completedCount: 0,
+        outcome: 'failed',
+      );
+      return;
+    }
+
+    // Skipped targets (disabled rooms, rooms with no lights) are excluded from
+    // the denominator; the user only sees rooms the server actually attempted.
+    final attempted = result.attemptedTargetCount;
+    final completed = result.appliedTargetCount;
+    _showGlobalResult(
+      verb: 'Set ${scene.name}',
+      connector: 'in',
+      completed: completed,
+      eligible: attempted,
+      offerUndo: false,
+    );
+    AnalyticsService().logGlobalRoomActionCompleted(
+      journeyId: journeyId,
+      action: 'scene',
+      eligibleCount: attempted,
+      attemptedCount: attempted,
+      completedCount: completed,
+      outcome: _globalRoomActionOutcome(
+        eligibleCount: attempted,
+        attemptedCount: attempted,
+        completedCount: completed,
+      ),
+    );
+  }
+
   Widget _buildGlobalActionDock() {
     final enabled = widget.interactionsEnabled && !_globalActionPending;
+    // Previous-floor appliances do not own the whole-home apply, so the
+    // affordance is hidden rather than offered and failing.
+    final sceneSupported =
+        context.watch<ServerSyncProvider>().supportsHomeSceneApply;
     return Container(
       key: const ValueKey('global-room-action-dock'),
       height: _headerControlHeight,
@@ -1335,6 +1461,19 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
               onTap: () => _runGlobalRoomAction(_GlobalRoomAction.reset),
             ),
           ),
+          if (sceneSupported) ...[
+            const _GlobalActionDivider(),
+            Expanded(
+              child: _GlobalActionButton(
+                key: const ValueKey('global-room-action-scene'),
+                icon: Icons.auto_awesome_rounded,
+                label: 'Scene',
+                enabled: enabled,
+                selected: _globalScenePanelExpanded,
+                onTap: _toggleGlobalScenePanel,
+              ),
+            ),
+          ],
           const _GlobalActionDivider(),
           SizedBox(
             width: 36,
@@ -1426,6 +1565,176 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildGlobalScenePanel() {
+    final serverSync = context.watch<ServerSyncProvider>();
+    final scenes = _globalSceneChoices(serverSync);
+    final enabled = widget.interactionsEnabled && !_globalActionPending;
+
+    Widget body;
+    if (scenes.isEmpty) {
+      body = Align(
+        alignment: Alignment.centerLeft,
+        child: Text(
+          _globalSceneFetchInFlight
+              ? 'Loading scenes…'
+              : 'No whole-home scenes yet.',
+          key: const ValueKey('global-room-scene-placeholder'),
+          style: TextStyle(
+            color: CelestialColors.textSecondary.withValues(alpha: 0.85),
+            fontSize: 12,
+          ),
+        ),
+      );
+    } else {
+      body = ListView.separated(
+        key: const ValueKey('global-room-scene-list'),
+        scrollDirection: Axis.horizontal,
+        padding: EdgeInsets.zero,
+        itemCount: scenes.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (context, index) {
+          final scene = scenes[index];
+          return _GlobalSceneTile(
+            key: ValueKey('global-room-scene-${scene.id}'),
+            scene: scene,
+            enabled: enabled,
+            selected: _globalAppliedSceneId == scene.id,
+            onTap: () => _applyGlobalScene(scene),
+          );
+        },
+      );
+    }
+
+    return Container(
+      key: const ValueKey('global-room-scene-panel'),
+      padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
+      decoration: BoxDecoration(
+        color: CelestialColors.backgroundCard.withValues(alpha: 0.92),
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(
+          color: CelestialColors.accentBlue.withValues(alpha: 0.26),
+        ),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Text(
+                'Whole home scene',
+                style: TextStyle(
+                  color: CelestialColors.textPrimary,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Applies to every room',
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: CelestialColors.textSecondary.withValues(alpha: 0.8),
+                    fontSize: 11,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          SizedBox(height: 46, child: body),
+        ],
+      ),
+    );
+  }
+}
+
+/// One whole-home scene choice in the All Rooms header panel.
+class _GlobalSceneTile extends StatelessWidget {
+  const _GlobalSceneTile({
+    super.key,
+    required this.scene,
+    required this.enabled,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final RhythmSceneDefinition scene;
+  final bool enabled;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final swatch = rhythmSceneSwatch(scene);
+    final gradient = swatch.length == 1
+        ? [swatch.first, swatch.first]
+        : swatch.take(3).toList(growable: false);
+    return Semantics(
+      button: true,
+      enabled: enabled,
+      label: 'Set ${scene.name} across the home',
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: enabled ? onTap : null,
+          borderRadius: BorderRadius.circular(14),
+          child: Opacity(
+            opacity: enabled ? 1 : 0.5,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(14),
+                color: selected
+                    ? CelestialColors.accentBlue.withValues(alpha: 0.16)
+                    : CelestialColors.orbitRing.withValues(alpha: 0.22),
+                border: Border.all(
+                  color: selected
+                      ? CelestialColors.accentBlue.withValues(alpha: 0.75)
+                      : CelestialColors.orbitRing.withValues(alpha: 0.5),
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 20,
+                    height: 20,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: LinearGradient(
+                        begin: Alignment.topLeft,
+                        end: Alignment.bottomRight,
+                        colors: gradient,
+                      ),
+                      border: Border.all(
+                        color: Colors.white.withValues(alpha: 0.22),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 120),
+                    child: Text(
+                      scene.name,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: CelestialColors.textPrimary,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

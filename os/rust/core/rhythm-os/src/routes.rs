@@ -239,6 +239,10 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["POST"],
     },
     SharedRoute {
+        path: "/api/scenes/:id/apply-home",
+        methods: &["POST"],
+    },
+    SharedRoute {
         path: "/api/scenes/:id/preview",
         methods: &["POST"],
     },

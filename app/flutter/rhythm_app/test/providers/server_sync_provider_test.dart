@@ -202,8 +202,8 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   String? lastDeletedInputBindingId;
   List<RhythmModeTransitionConfig> transitions = const [];
   List<RhythmLightScheduleConfig> lightSchedules = const [];
-  final List<List<RhythmLightScheduleConfig>> lightScheduleExpectedRegistryCalls =
-      [];
+  final List<List<RhythmLightScheduleConfig>>
+      lightScheduleExpectedRegistryCalls = [];
   final List<String?> lightScheduleRegistryCorrelationIds = [];
   List<RhythmLightScheduleConfig>? lightSchedulesAfterFailedWrite;
   final List<
@@ -212,8 +212,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
         String? scheduleId,
         bool legacy,
         String? correlationId,
-      })>
-      lightScheduleAssignmentCalls = [];
+      })> lightScheduleAssignmentCalls = [];
   final List<String> lightScheduleOperationCalls = [];
   final List<
       ({
@@ -275,6 +274,13 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   final Set<String> partialNativeDiscoveryFailureTargets = {};
   bool applySceneSucceeds = true;
   Completer<RhythmSceneActionResult?>? applySceneCompleter;
+  RhythmHomeSceneActionResult? applyHomeSceneResult;
+  final List<
+      ({
+        String sceneId,
+        int? transitionMs,
+        String? correlationId,
+      })> applyHomeSceneCalls = [];
   final List<
       ({
         String sceneId,
@@ -707,6 +713,21 @@ class _FakeRhythmServerApi extends RhythmServerApi {
       targetId: targetId,
       affectedNodeIds: [targetId],
     );
+  }
+
+  @override
+  Future<RhythmHomeSceneActionResult?> applyHomeScene({
+    required String sceneId,
+    int? transitionMs,
+    int? dispatchSpacingMs,
+    String? correlationId,
+  }) async {
+    applyHomeSceneCalls.add((
+      sceneId: sceneId,
+      transitionMs: transitionMs,
+      correlationId: correlationId,
+    ));
+    return applyHomeSceneResult;
   }
 
   @override
@@ -2104,7 +2125,8 @@ void main() {
         (tester) async {
       final result = await pumpLegacyMigration(tester);
 
-      expect(result.api.lightScheduleOperationCalls, ['override', 'assignment']);
+      expect(
+          result.api.lightScheduleOperationCalls, ['override', 'assignment']);
       final overrideCall = result.api.lightScheduleOverrideCalls.single;
       final assignmentCall = result.api.lightScheduleAssignmentCalls.single;
       expect(overrideCall.correlationId, assignmentCall.correlationId);
@@ -2161,7 +2183,11 @@ void main() {
       expect(result.api.lightScheduleOperationCalls, ['override']);
       expect(result.api.lightScheduleAssignmentCalls, isEmpty);
       expect(
-        result.provider.nodeById('room-1')?.profileSettings?.roomSchedule?.source,
+        result.provider
+            .nodeById('room-1')
+            ?.profileSettings
+            ?.roomSchedule
+            ?.source,
         RhythmRoomScheduleSource.followTime,
       );
     });
@@ -2173,13 +2199,18 @@ void main() {
         assignmentSucceeds: false,
       );
 
-      expect(result.api.lightScheduleOperationCalls, ['override', 'assignment']);
+      expect(
+          result.api.lightScheduleOperationCalls, ['override', 'assignment']);
       expect(
         result.api.lightScheduleOverrideCalls.single.correlationId,
         result.api.lightScheduleAssignmentCalls.single.correlationId,
       );
       expect(
-        result.provider.nodeById('room-1')?.profileSettings?.roomSchedule?.source,
+        result.provider
+            .nodeById('room-1')
+            ?.profileSettings
+            ?.roomSchedule
+            ?.source,
         RhythmRoomScheduleSource.followTime,
       );
     });
@@ -2898,7 +2929,8 @@ void main() {
       expect(api.lightScheduleOverrideCalls.single.scheduleOverride, isNull);
     });
 
-    testWidgets('override retry reuses the original journey id', (tester) async {
+    testWidgets('override retry reuses the original journey id',
+        (tester) async {
       final roomProvider = RoomProvider();
       final api = _FakeRhythmServerApi()
         ..lightSchedules = [fixedSchedule]
@@ -5889,6 +5921,68 @@ void main() {
       expect(provider.moodSceneIdForRoom('room-1'), 'evening-glow');
       expect(roomProvider.getMoodColor('room-1'), (240, 80, 24));
       expect(roomProvider.getMoodBrightness('room-1'), 55);
+    });
+
+    test('whole-home apply binds Mood on every applied room only', () async {
+      api.scenes = [_testPaletteScene('halloween')];
+      await provider.fetchScenes();
+      api.applyHomeSceneResult = const RhythmHomeSceneActionResult(
+        sceneId: 'halloween',
+        targets: [
+          RhythmHomeSceneTargetResult(
+            targetId: 'room-1',
+            affectedNodeIds: ['bulb-1'],
+          ),
+          RhythmHomeSceneTargetResult(
+            targetId: 'room-2',
+            error: 'hub is offline',
+          ),
+        ],
+        appliedTargetCount: 1,
+        skippedTargetCount: 2,
+      );
+
+      final result = await provider.applyHomeScene(
+        'halloween',
+        color: (255, 104, 0),
+        transitionMs: 1200,
+        correlationId: 'global-room-123',
+      );
+
+      expect(result, isNotNull);
+      expect(result!.appliedTargetCount, 1);
+      expect(result.skippedTargetCount, 2);
+      expect(api.applyHomeSceneCalls, hasLength(1));
+      expect(api.applyHomeSceneCalls.single.sceneId, 'halloween');
+      expect(api.applyHomeSceneCalls.single.transitionMs, 1200);
+      expect(api.applyHomeSceneCalls.single.correlationId, 'global-room-123');
+      // Only one server call: the app must never fan out per room itself.
+      expect(api.applySceneCalls, isEmpty);
+
+      expect(provider.moodSceneIdForRoom('room-1'), 'halloween');
+      expect(roomProvider.getMoodColor('room-1'), (255, 104, 0));
+      expect(roomProvider.getMoodBrightness('room-1'), 42);
+      expect(
+        provider.moodSceneIdForRoom('room-2'),
+        isNot('halloween'),
+        reason: 'an errored target must not be presented as applied',
+      );
+    });
+
+    test('whole-home apply returns null and binds nothing when rejected',
+        () async {
+      api.scenes = [_testPaletteScene('halloween')];
+      await provider.fetchScenes();
+      api.applyHomeSceneResult = null;
+
+      final result = await provider.applyHomeScene(
+        'halloween',
+        color: (255, 104, 0),
+      );
+
+      expect(result, isNull);
+      expect(provider.moodSceneIdForRoom('room-1'), isNot('halloween'));
+      expect(roomProvider.getMoodColor('room-1'), isNot((255, 104, 0)));
     });
 
     test('uses palette scenes for representative mood brightness', () async {

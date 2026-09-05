@@ -5,7 +5,7 @@
 //! for factory metadata, power-save, and transition configuration, then injects
 //! the core built-in profiles for runtime, storage, and API exports.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 use anyhow::{anyhow, Context, Result};
@@ -78,9 +78,9 @@ fn parse_factory_default_profile_bundle() -> Result<ProfileBundle> {
         }
     }
 
-    if bundle.profile.scenes.len() > 3 {
+    if bundle.profile.scenes.len() > 5 {
         return Err(anyhow!(
-            "factory-default profile bundle must define at most 3 sample scenes"
+            "factory-default profile bundle must define at most 5 sample scenes"
         ));
     }
 
@@ -188,6 +188,21 @@ pub fn factory_default_scene_map() -> BTreeMap<String, SceneDefinition> {
     factory_default_scene_map_ref().clone()
 }
 
+/// Factory-default scene IDs that shipped before the seed marker existed.
+///
+/// A persisted `scenes.json` written by an older build carries no
+/// `seeded_factory_scene_ids`, so on first load we assume it was already
+/// offered exactly these scenes. Anything newer than this list is then seeded
+/// into the existing install once. Never extend this list: new factory scenes
+/// must go through the one-time seed instead.
+pub const FACTORY_SCENE_IDS_SEEDED_BEFORE_TRACKING: &[&str] =
+    &["color-carnival", "electric-lagoon", "berry-pop"];
+
+/// Every factory-default scene ID, sorted.
+pub fn factory_default_scene_ids() -> BTreeSet<String> {
+    factory_default_scene_map_ref().keys().cloned().collect()
+}
+
 pub fn factory_default_mode_config_map() -> BTreeMap<RhythmMode, ModeConfig> {
     factory_default_mode_config_map_ref().clone()
 }
@@ -239,13 +254,15 @@ mod tests {
 
         let bundle = factory_default_profile_bundle();
         assert_eq!(bundle.name.as_deref(), Some("Factory Default"));
-        assert_eq!(bundle.profile.scenes.len(), 3);
+        assert_eq!(bundle.profile.scenes.len(), 5);
 
         let scenes = factory_default_scene_map();
-        assert_eq!(scenes.len(), 3);
+        assert_eq!(scenes.len(), 5);
         assert!(scenes.contains_key("color-carnival"));
         assert!(scenes.contains_key("electric-lagoon"));
         assert!(scenes.contains_key("berry-pop"));
+        assert!(scenes.contains_key("halloween"));
+        assert!(scenes.contains_key("dark-fantasy"));
         let carnival = scenes.get("color-carnival").unwrap();
         assert_eq!(carnival.name, "Color Carnival");
         let palette = &carnival.light.as_ref().unwrap().palette;
@@ -258,6 +275,32 @@ mod tests {
             })
             .collect();
         assert_eq!(unique_palette_colors.len(), 6);
+
+        let halloween = scenes.get("halloween").unwrap();
+        assert_eq!(halloween.name, "Halloween");
+        let halloween_palette = &halloween.light.as_ref().unwrap().palette;
+        assert_eq!(halloween_palette.len(), 5);
+        let unique_halloween_colors: std::collections::HashSet<_> = halloween_palette
+            .iter()
+            .map(|output| match output.color {
+                Some(crate::scenes::LightSceneColor::Rgb { rgb }) => (rgb.r, rgb.g, rgb.b),
+                other => panic!("expected rgb palette color, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(unique_halloween_colors.len(), 5);
+
+        let dark_fantasy = scenes.get("dark-fantasy").unwrap();
+        assert_eq!(dark_fantasy.name, "Dark Fantasy");
+        let dark_fantasy_palette = &dark_fantasy.light.as_ref().unwrap().palette;
+        assert_eq!(dark_fantasy_palette.len(), 5);
+        let unique_dark_fantasy_colors: std::collections::HashSet<_> = dark_fantasy_palette
+            .iter()
+            .map(|output| match output.color {
+                Some(crate::scenes::LightSceneColor::Rgb { rgb }) => (rgb.r, rgb.g, rgb.b),
+                other => panic!("expected rgb palette color, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(unique_dark_fantasy_colors.len(), 5);
 
         let profiles = factory_default_light_profile_config_map();
         assert_eq!(profiles.len(), 4);

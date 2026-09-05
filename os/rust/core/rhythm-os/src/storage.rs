@@ -14,10 +14,13 @@ use rhythm_core::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use crate::canonical::identity::HubKey;
+use crate::factory_default_config::{
+    factory_default_scene_ids, factory_default_scene_map, FACTORY_SCENE_IDS_SEEDED_BEFORE_TRACKING,
+};
 use crate::hub::HubCredentials;
 use crate::scenes::{is_native_scene_id, StoredScenes};
 
@@ -2231,6 +2234,60 @@ fn decode_authority_state(
 ///
 /// Loads config, location, settings, and hub credentials from the
 /// configured [`Storage`] backend. Safe to call on any platform.
+/// Outcome of the one-time factory-default scene seed.
+pub(crate) struct FactorySceneSeedOutcome {
+    /// How many factory-default scenes this load added to the install.
+    pub(crate) seeded_count: usize,
+    /// Whether the persisted seed marker needs to be rewritten.
+    pub(crate) marker_changed: bool,
+}
+
+/// Seed factory-default scenes that this install has never been offered.
+///
+/// A factory-default scene introduced by a later release would otherwise only
+/// ever reach fresh installs, because the persisted scene file replaces
+/// `AppState::scenes` wholesale on startup. Seeding is additive and happens
+/// exactly once per scene ID: the marker written back to `scenes.json` records
+/// every factory ID the install has seen, so a factory scene the user deletes
+/// stays deleted across restarts, backup restores, and bundle imports.
+///
+/// Backup restore calls this with the marker carried by the backup so the
+/// restored scene set is brought up to date the same way a startup load is.
+pub(crate) fn seed_new_factory_default_scenes(
+    s: &mut crate::state::AppState,
+    persisted_marker: BTreeSet<String>,
+) -> FactorySceneSeedOutcome {
+    // An empty marker means the file predates seed tracking. Those installs
+    // were already offered exactly the scenes that shipped before tracking.
+    let mut seeded: BTreeSet<String> = if persisted_marker.is_empty() {
+        FACTORY_SCENE_IDS_SEEDED_BEFORE_TRACKING
+            .iter()
+            .map(|id| (*id).to_string())
+            .collect()
+    } else {
+        persisted_marker.clone()
+    };
+
+    let mut seeded_count = 0usize;
+    for (scene_id, mut scene) in factory_default_scene_map() {
+        if seeded.contains(&scene_id) || s.scenes.contains_key(&scene_id) {
+            continue;
+        }
+        scene.normalize();
+        s.scenes.insert(scene_id, scene);
+        seeded_count += 1;
+    }
+
+    seeded.extend(factory_default_scene_ids());
+    let marker_changed = seeded != persisted_marker;
+    s.seeded_factory_scene_ids = seeded;
+
+    FactorySceneSeedOutcome {
+        seeded_count,
+        marker_changed,
+    }
+}
+
 pub fn load_persisted_state(s: &mut crate::state::AppState) {
     if s.storage.is_none() {
         return;
@@ -2444,7 +2501,7 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
         s.light_usage.configure_shutdown_flush(storage);
     }
 
-    if let Some(storage) = s.storage.as_ref() {
+    if let Some(storage) = s.storage.clone() {
         match storage.load_scenes() {
             Ok(Some(stored)) => {
                 s.scenes.clear();
@@ -2462,14 +2519,25 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
                     }
                     s.scenes.insert(scene.id.clone(), scene);
                 }
-                if removed_native_definitions > 0 {
+                let seed = seed_new_factory_default_scenes(
+                    s,
+                    stored.seeded_factory_scene_ids.into_iter().collect(),
+                );
+                if removed_native_definitions > 0 || seed.marker_changed {
                     if let Err(error) = storage.save_scenes(&s.stored_scenes()) {
                         warn!(
                             target: "sys",
-                            "Failed to repair persisted native scene definitions: {}",
+                            "Failed to persist repaired or seeded scene definitions: {}",
                             error
                         );
                     }
+                }
+                if seed.seeded_count > 0 {
+                    info!(
+                        target: "sys",
+                        "Seeded {} new factory-default scene(s) into this install",
+                        seed.seeded_count
+                    );
                 }
                 info!(target: "sys", "Loaded scenes: {}", s.scenes.len());
             }
@@ -4177,6 +4245,7 @@ mod tests {
                     light: None,
                     extensions: std::collections::BTreeMap::new(),
                 }],
+                seeded_factory_scene_ids: Vec::new(),
             };
 
             storage.save_scenes(&stored).unwrap();
@@ -4206,6 +4275,7 @@ mod tests {
                         light: None,
                         extensions: std::collections::BTreeMap::new(),
                     }],
+                    seeded_factory_scene_ids: Vec::new(),
                 })
                 .unwrap();
 
@@ -4247,6 +4317,10 @@ mod tests {
                             extensions: std::collections::BTreeMap::new(),
                         },
                     ],
+                    seeded_factory_scene_ids:
+                        crate::factory_default_config::factory_default_scene_ids()
+                            .into_iter()
+                            .collect(),
                 })
                 .unwrap();
 
@@ -4263,6 +4337,130 @@ mod tests {
             assert_eq!(repaired.scenes.len(), 1);
             assert_eq!(repaired.scenes[0].id, "icy-glow");
             cleanup(&path);
+        }
+
+        fn stored_scene(id: &str) -> crate::scenes::SceneDefinition {
+            crate::scenes::SceneDefinition {
+                id: id.into(),
+                name: id.into(),
+                description: None,
+                source: crate::scenes::SceneSource::User,
+                light: None,
+                extensions: std::collections::BTreeMap::new(),
+            }
+        }
+
+        fn state_for_storage(storage: Arc<FileStorage>) -> crate::state::AppState {
+            crate::state::AppState {
+                storage: Some(storage),
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn load_persisted_state_seeds_new_factory_scenes_into_a_legacy_install() {
+            let (storage, path) = temp_storage();
+            let storage = Arc::new(storage);
+            // A file written before seed tracking: berry-pop was deleted by the
+            // user and there is no marker at all.
+            storage
+                .save_scenes(&crate::scenes::StoredScenes {
+                    schema_version: crate::scenes::LIGHT_SCENE_SCHEMA_VERSION,
+                    scenes: vec![
+                        stored_scene("color-carnival"),
+                        stored_scene("electric-lagoon"),
+                    ],
+                    seeded_factory_scene_ids: Vec::new(),
+                })
+                .unwrap();
+
+            let mut state = state_for_storage(storage.clone());
+            load_persisted_state(&mut state);
+
+            assert!(
+                !state.scenes.contains_key("berry-pop"),
+                "a factory scene deleted before tracking must stay deleted"
+            );
+            assert!(
+                state.scenes.contains_key("halloween"),
+                "the new factory scene reaches the existing install"
+            );
+            let persisted = storage.load_scenes().unwrap().unwrap();
+            assert_eq!(
+                persisted
+                    .seeded_factory_scene_ids
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+                factory_default_scene_ids(),
+                "every factory scene id is recorded as offered"
+            );
+            assert!(persisted.scenes.iter().any(|scene| scene.id == "halloween"));
+            cleanup(&path);
+        }
+
+        #[test]
+        fn load_persisted_state_does_not_reseed_an_already_offered_factory_scene() {
+            let (storage, path) = temp_storage();
+            let storage = Arc::new(storage);
+            storage
+                .save_scenes(&crate::scenes::StoredScenes {
+                    schema_version: crate::scenes::LIGHT_SCENE_SCHEMA_VERSION,
+                    scenes: vec![stored_scene("color-carnival")],
+                    seeded_factory_scene_ids: factory_default_scene_ids().into_iter().collect(),
+                })
+                .unwrap();
+
+            let mut state = state_for_storage(storage.clone());
+            load_persisted_state(&mut state);
+
+            assert!(
+                !state.scenes.contains_key("halloween"),
+                "an already-offered factory scene must not come back"
+            );
+            assert_eq!(state.scenes.len(), 1);
+            cleanup(&path);
+        }
+
+        #[test]
+        fn deleting_a_seeded_factory_scene_survives_a_reload() {
+            let (storage, path) = temp_storage();
+            let storage = Arc::new(storage);
+            let state = Arc::new(std::sync::Mutex::new(state_for_storage(storage.clone())));
+            {
+                let s = state.lock().unwrap();
+                assert!(s.scenes.contains_key("halloween"));
+                storage.save_scenes(&s.stored_scenes()).unwrap();
+            }
+
+            crate::commands::do_scene_delete(&state, "halloween").unwrap();
+
+            let mut reloaded = state_for_storage(storage.clone());
+            load_persisted_state(&mut reloaded);
+
+            assert!(
+                !reloaded.scenes.contains_key("halloween"),
+                "a deleted factory scene must not be re-seeded on restart"
+            );
+            cleanup(&path);
+        }
+
+        #[test]
+        fn a_fresh_install_starts_with_every_factory_scene_marked_as_seeded() {
+            let state = crate::state::AppState::default();
+            let factory_ids = factory_default_scene_ids();
+
+            for scene_id in &factory_ids {
+                assert!(state.scenes.contains_key(scene_id), "{scene_id} is missing");
+            }
+            assert_eq!(state.seeded_factory_scene_ids, factory_ids);
+            assert_eq!(
+                state
+                    .stored_scenes()
+                    .seeded_factory_scene_ids
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+                factory_ids
+            );
         }
 
         #[test]

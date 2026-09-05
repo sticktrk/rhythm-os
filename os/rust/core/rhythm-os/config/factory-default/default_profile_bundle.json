@@ -122,6 +122,138 @@
           },
           "entries": []
         }
+      },
+      {
+        "id": "halloween",
+        "name": "Halloween",
+        "description": "Pumpkin orange, witchy purple and ghoulish green spread across every light.",
+        "light": {
+          "default_transition_ms": 1200,
+          "palette": [
+            {
+              "brightness": 80,
+              "color": {
+                "kind": "rgb",
+                "rgb": {
+                  "r": 255,
+                  "g": 104,
+                  "b": 0
+                }
+              }
+            },
+            {
+              "brightness": 70,
+              "color": {
+                "kind": "rgb",
+                "rgb": {
+                  "r": 122,
+                  "g": 0,
+                  "b": 214
+                }
+              }
+            },
+            {
+              "brightness": 72,
+              "color": {
+                "kind": "rgb",
+                "rgb": {
+                  "r": 66,
+                  "g": 232,
+                  "b": 40
+                }
+              }
+            },
+            {
+              "brightness": 78,
+              "color": {
+                "kind": "rgb",
+                "rgb": {
+                  "r": 255,
+                  "g": 150,
+                  "b": 10
+                }
+              }
+            },
+            {
+              "brightness": 66,
+              "color": {
+                "kind": "rgb",
+                "rgb": {
+                  "r": 176,
+                  "g": 0,
+                  "b": 255
+                }
+              }
+            }
+          ],
+          "entries": []
+        }
+      },
+      {
+        "id": "dark-fantasy",
+        "name": "Dark Fantasy",
+        "description": "Midnight indigo, enchanted forest, torchlight amber, blood crimson and arcane violet across every light.",
+        "light": {
+          "default_transition_ms": 1500,
+          "palette": [
+            {
+              "brightness": 55,
+              "color": {
+                "kind": "rgb",
+                "rgb": {
+                  "r": 38,
+                  "g": 20,
+                  "b": 110
+                }
+              }
+            },
+            {
+              "brightness": 58,
+              "color": {
+                "kind": "rgb",
+                "rgb": {
+                  "r": 10,
+                  "g": 92,
+                  "b": 60
+                }
+              }
+            },
+            {
+              "brightness": 70,
+              "color": {
+                "kind": "rgb",
+                "rgb": {
+                  "r": 255,
+                  "g": 120,
+                  "b": 20
+                }
+              }
+            },
+            {
+              "brightness": 52,
+              "color": {
+                "kind": "rgb",
+                "rgb": {
+                  "r": 150,
+                  "g": 8,
+                  "b": 30
+                }
+              }
+            },
+            {
+              "brightness": 60,
+              "color": {
+                "kind": "rgb",
+                "rgb": {
+                  "r": 130,
+                  "g": 40,
+                  "b": 200
+                }
+              }
+            }
+          ],
+          "entries": []
+        }
       }
     ],
     "mode_transitions": [],

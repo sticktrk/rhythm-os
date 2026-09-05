@@ -29,11 +29,37 @@ class _FakeRhythmServerApi extends RhythmServerApi {
 
   final List<List<({String nodeId, String action})>> actionBatches = [];
   final List<List<({String nodeId, int brightness})>> brightnessBatches = [];
+  final List<String> homeSceneApplies = [];
+  final List<int?> homeSceneTransitionMs = [];
   Completer<RhythmDispatchResult>? actionBatchCompleter;
   int? nextDispatchCount;
+  List<RhythmSceneDefinition> sceneCatalog = const [];
+  RhythmHomeSceneActionResult? homeSceneResult;
 
   @override
   Future<Map<String, dynamic>?> getTriageCount() async => null;
+
+  // Hello handling refreshes topology; keep it off the network so the widget
+  // tests never leave a real Dio timer pending.
+  @override
+  Future<List<RhythmTopologyNode>> getTopologyNodes() async => const [];
+
+  @override
+  Future<RhythmSceneCatalogResult?> getSceneCatalog({String? targetId}) async {
+    return RhythmSceneCatalogResult(scenes: sceneCatalog);
+  }
+
+  @override
+  Future<RhythmHomeSceneActionResult?> applyHomeScene({
+    required String sceneId,
+    int? transitionMs,
+    int? dispatchSpacingMs,
+    String? correlationId,
+  }) async {
+    homeSceneApplies.add(sceneId);
+    homeSceneTransitionMs.add(transitionMs);
+    return homeSceneResult;
+  }
 
   @override
   Future<RhythmDispatchResult> nodeActionBatchResult(
@@ -87,8 +113,12 @@ class _TestRhythmConnection extends RhythmConnection {
       ? RhythmConnectionState.connected
       : RhythmConnectionState.disconnected;
 
+  final _helloController = StreamController<RhythmHello>.broadcast();
+
+  void emitHello(RhythmHello hello) => _helloController.add(hello);
+
   @override
-  Stream<RhythmHello> get helloEvents => const Stream<RhythmHello>.empty();
+  Stream<RhythmHello> get helloEvents => _helloController.stream;
 
   @override
   Stream<RhythmRoomState> get rhythmStateEvents =>
@@ -123,6 +153,12 @@ class _TestRhythmConnection extends RhythmConnection {
 
   @override
   void disconnect() {}
+
+  @override
+  void dispose() {
+    _helloController.close();
+    super.dispose();
+  }
 }
 
 class _MemoryRoomPageLayoutStore implements RoomPageLayoutStore {
@@ -243,6 +279,7 @@ class _AllRoomsHarness {
     required this.api,
     required this.connection,
     required this.pageController,
+    required this.serverSync,
   });
 
   final RoomPageProvider roomPageProvider;
@@ -250,6 +287,44 @@ class _AllRoomsHarness {
   final _FakeRhythmServerApi api;
   final _TestRhythmConnection connection;
   final PageController pageController;
+  final ServerSyncProvider serverSync;
+}
+
+RhythmHello _helloWithFeatures(List<String> features) => RhythmHello.fromJson({
+      'version': '0.6.635-beta',
+      'capabilities': {
+        'api_schema_version': 2,
+        'features': features,
+        'hubs': const <dynamic>[],
+      },
+      'nodes': const <dynamic>[],
+    });
+
+RhythmSceneDefinition _paletteScene({
+  required String id,
+  required String name,
+  List<(int, int, int)> colors = const [(255, 104, 0), (122, 0, 214)],
+  RhythmSceneSource source = const RhythmSceneSource(
+    kind: RhythmSceneSourceKind.user,
+  ),
+}) {
+  return RhythmSceneDefinition(
+    id: id,
+    name: name,
+    source: source,
+    light: RhythmLightScene(
+      defaultTransitionMs: 1200,
+      palette: [
+        for (final color in colors)
+          RhythmLightSceneOutput.on(
+            brightness: 80,
+            color: RhythmLightColor.rgb(
+              RhythmSceneRgbColor(r: color.$1, g: color.$2, b: color.$3),
+            ),
+          ),
+      ],
+    ),
+  );
 }
 
 Future<_AllRoomsHarness> _pumpAllRooms(
@@ -314,6 +389,7 @@ Future<_AllRoomsHarness> _pumpAllRooms(
     api: connection.api,
     connection: connection,
     pageController: pageController,
+    serverSync: serverSync,
   );
 }
 
@@ -375,6 +451,214 @@ void main() {
     );
   });
 
+  Future<_AllRoomsHarness> pumpWithHomeScenes(
+    WidgetTester tester, {
+    bool supported = true,
+    List<RhythmSceneDefinition>? scenes,
+    RhythmHomeSceneActionResult? result,
+  }) async {
+    final harness = await _pumpAllRooms(
+      tester,
+      rooms: const [_room1, _bedroom],
+    );
+    harness.api.sceneCatalog = scenes ??
+        [
+          _paletteScene(id: 'halloween', name: 'Halloween'),
+          _paletteScene(id: 'berry-pop', name: 'Berry Pop'),
+        ];
+    harness.api.homeSceneResult = result ??
+        const RhythmHomeSceneActionResult(
+          sceneId: 'halloween',
+          targets: [
+            RhythmHomeSceneTargetResult(
+              targetId: 'room-1',
+              affectedNodeIds: ['bulb-1'],
+            ),
+            RhythmHomeSceneTargetResult(
+              targetId: 'bedroom',
+              affectedNodeIds: ['bulb-2'],
+            ),
+          ],
+          appliedTargetCount: 2,
+        );
+    harness.connection.emitHello(
+      _helloWithFeatures(supported ? [RhythmFeature.homeSceneApply] : const []),
+    );
+    await tester.pump();
+    return harness;
+  }
+
+  Future<void> openScenePanel(WidgetTester tester) async {
+    await tester.tap(find.byKey(const ValueKey('global-room-action-scene')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+  }
+
+  testWidgets('Scene sits right of Reset and is hidden without the capability',
+      (tester) async {
+    final harness = await pumpWithHomeScenes(tester, supported: false);
+
+    expect(
+      find.byKey(const ValueKey('global-room-action-scene')),
+      findsNothing,
+      reason: 'a previous-floor appliance must not offer the whole-home apply',
+    );
+
+    harness.connection.emitHello(
+      _helloWithFeatures(const [RhythmFeature.homeSceneApply]),
+    );
+    await tester.pump();
+
+    final scene = find.byKey(const ValueKey('global-room-action-scene'));
+    expect(scene, findsOneWidget);
+    final resetX = tester
+        .getCenter(find.byKey(const ValueKey('global-room-action-reset')))
+        .dx;
+    final sceneX = tester.getCenter(scene).dx;
+    final tuneX = tester
+        .getCenter(find.byKey(const ValueKey('global-room-action-expand')))
+        .dx;
+    expect(sceneX, greaterThan(resetX));
+    expect(sceneX, lessThan(tuneX));
+  });
+
+  testWidgets(
+      'Scene panel opens, collapses the brightness panel and hides '
+      'Hue-imported scenes', (tester) async {
+    await pumpWithHomeScenes(
+      tester,
+      scenes: [
+        _paletteScene(id: 'halloween', name: 'Halloween'),
+        _paletteScene(
+          id: 'native-hue-abc',
+          name: 'Hue Savanna',
+          source: const RhythmSceneSource.imported(
+            provider: 'hue',
+            externalId: 'abc',
+          ),
+        ),
+      ],
+    );
+
+    await tester.tap(find.byKey(const ValueKey('global-room-action-expand')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(
+      find.byKey(const ValueKey('global-room-slider-panel')),
+      findsOneWidget,
+    );
+
+    await openScenePanel(tester);
+
+    expect(
+      find.byKey(const ValueKey('global-room-scene-panel')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('global-room-slider-panel')),
+      findsNothing,
+      reason: 'only one header panel may be open at a time',
+    );
+    expect(find.text('Whole home scene'), findsOneWidget);
+    expect(find.text('Applies to every room'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('global-room-scene-halloween')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('global-room-scene-native-hue-abc')),
+      findsNothing,
+      reason: 'Hue-imported scenes are room-bound and cannot cover the home',
+    );
+
+    await tester.tap(find.byKey(const ValueKey('global-room-action-scene')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(
+      find.byKey(const ValueKey('global-room-scene-panel')),
+      findsNothing,
+    );
+  });
+
+  testWidgets(
+      'tapping a whole-home scene calls the server once and reports '
+      'the applied rooms', (tester) async {
+    final harness = await pumpWithHomeScenes(tester);
+    await openScenePanel(tester);
+
+    await tester.tap(find.byKey(const ValueKey('global-room-scene-halloween')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(harness.api.homeSceneApplies, ['halloween']);
+    expect(
+      harness.api.homeSceneTransitionMs,
+      [null],
+      reason: 'a request-level transition would override each palette '
+          "output's own transition_ms",
+    );
+    expect(find.text('Set Halloween in 2 of 2 rooms.'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('global-room-action-undo')),
+      findsNothing,
+      reason: 'the server owns this fan-out; there is nothing local to undo',
+    );
+    expect(
+      find.byKey(const ValueKey('global-room-scene-panel')),
+      findsOneWidget,
+      reason: 'the panel stays open so another scene can be tried',
+    );
+  });
+
+  testWidgets('an errored target is excluded from the applied room count',
+      (tester) async {
+    await pumpWithHomeScenes(
+      tester,
+      result: const RhythmHomeSceneActionResult(
+        sceneId: 'halloween',
+        targets: [
+          RhythmHomeSceneTargetResult(
+            targetId: 'room-1',
+            affectedNodeIds: ['bulb-1'],
+          ),
+          RhythmHomeSceneTargetResult(
+            targetId: 'bedroom',
+            error: 'hub is offline',
+          ),
+        ],
+        appliedTargetCount: 1,
+        skippedTargetCount: 3,
+      ),
+    );
+    await openScenePanel(tester);
+
+    await tester.tap(find.byKey(const ValueKey('global-room-scene-halloween')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(
+      find.text('Set Halloween in 1 of 2 rooms.'),
+      findsOneWidget,
+      reason: 'skipped targets are excluded from the denominator',
+    );
+  });
+
+  testWidgets('a rejected whole-home scene shows the failure snackbar',
+      (tester) async {
+    final harness = await pumpWithHomeScenes(tester);
+    harness.api.homeSceneResult = null;
+    await openScenePanel(tester);
+
+    await tester.tap(find.byKey(const ValueKey('global-room-scene-halloween')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(
+      find.text("Couldn't set Halloween. Check the hub connection."),
+      findsOneWidget,
+    );
+  });
+
   testWidgets('authoritative refresh preserves the visible room grouping',
       (tester) async {
     final harness = await _pumpAllRooms(
@@ -425,8 +709,7 @@ void main() {
     expect(garage.top, lessThan(kitchen.top));
   });
 
-  testWidgets(
-      'global soften skips Low glow nodes and collapses child bulbs',
+  testWidgets('global soften skips Low glow nodes and collapses child bulbs',
       (tester) async {
     final harness = await _pumpAllRooms(
       tester,
@@ -459,8 +742,7 @@ void main() {
     );
   });
 
-  testWidgets(
-      'global boost skips legacy Low glow and locks duplicate taps',
+  testWidgets('global boost skips legacy Low glow and locks duplicate taps',
       (tester) async {
     final harness = await _pumpAllRooms(
       tester,

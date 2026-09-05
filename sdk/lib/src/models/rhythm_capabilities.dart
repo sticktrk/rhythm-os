@@ -64,6 +64,10 @@ abstract final class RhythmFeature {
   static const String resetToModeDefault = 'reset_to_mode_default_v1';
   static const String matterUnreachableDeviceTriage =
       'matter_unreachable_device_triage_v1';
+
+  /// The server can apply one stored scene to every eligible room in a single
+  /// call (`POST api/scenes/<id>/apply-home`).
+  static const String homeSceneApply = 'home_scene_apply_v1';
 }
 
 /// Host capabilities advertised by the Rhythm server.

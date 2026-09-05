@@ -594,6 +594,16 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     body: { target_id: '{node_id}', transition_ms: 500 }
   },
   {
+    id: 'scene-apply-home',
+    category: 'Scenes',
+    label: 'Apply scene to whole home',
+    description:
+      'Apply a saved scene to every eligible room in one server-owned operation.',
+    method: 'POST',
+    path: 'api/scenes/{scene_id}/apply-home',
+    body: { transition_ms: 1200, dispatch_spacing_ms: 120 }
+  },
+  {
     id: 'scene-preview',
     category: 'Scenes',
     label: 'Preview scene',
