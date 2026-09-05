@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
@@ -606,6 +607,8 @@ void main() {
 
   testWidgets('global reset restores mode defaults on capable servers',
       (tester) async {
+    final screenshotPath =
+        Platform.environment['RHYTHM_GLOBAL_RESET_SCREENSHOT'];
     final harness = await _pumpAllRooms(
       tester,
       rooms: const [_room1, _bedroom],
@@ -670,6 +673,12 @@ void main() {
       (nodeId: 'room-1', action: 'reset_to_mode_default'),
       (nodeId: 'bedroom', action: 'reset_to_mode_default'),
     ]);
+    if (screenshotPath != null && screenshotPath.isNotEmpty) {
+      await expectLater(
+        find.byType(AllRoomsScreen),
+        matchesGoldenFile(Uri.file(screenshotPath)),
+      );
+    }
   });
 
   testWidgets('expanded slider applies one exact batch to adaptive-on rooms',
