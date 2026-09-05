@@ -21,16 +21,92 @@ use crate::transport::HueTransport;
 const HUE_VENDOR_MIN_MIREK: u32 = 50;
 const HUE_VENDOR_MAX_MIREK: u32 = 1000;
 
+/// Bridge inventories reused across the managed projections of one batch.
+///
+/// A whole-home apply projects many rooms back to back on the same bridge, and
+/// every projection needs the current scene inventory plus the device→light
+/// service map. Fetching those once per batch instead of once per room keeps
+/// the bridge round trips per room down to the mutation (when the scene
+/// changed) and the recall. Every mutation is followed by the read-back that
+/// verification already requires, and that read-back refreshes the cache, so
+/// it cannot go stale within a batch.
+#[derive(Debug, Default)]
+pub struct ManagedSceneBridgeCache {
+    scenes: Option<Vec<Value>>,
+    light_services: Option<BTreeMap<String, Vec<String>>>,
+}
+
+/// Bridge reads for one managed-scene operation, optionally memoized in a
+/// batch cache.
+struct BridgeReads<'a, H: HueTransport + ?Sized> {
+    transport: &'a H,
+    username: &'a str,
+    cache: Option<&'a mut ManagedSceneBridgeCache>,
+}
+
+impl<'a, H: HueTransport + ?Sized> BridgeReads<'a, H> {
+    fn new(
+        transport: &'a H,
+        username: &'a str,
+        cache: Option<&'a mut ManagedSceneBridgeCache>,
+    ) -> Self {
+        Self {
+            transport,
+            username,
+            cache,
+        }
+    }
+
+    /// The scene inventory, from the batch cache when one holds it.
+    fn scenes(&mut self) -> Result<Vec<Value>> {
+        if let Some(scenes) = self
+            .cache
+            .as_deref()
+            .and_then(|cache| cache.scenes.as_ref())
+        {
+            return Ok(scenes.clone());
+        }
+        self.refresh_scenes()
+    }
+
+    /// Read the scene inventory from the bridge and remember it. Every
+    /// mutation is followed by this read so the cache reflects the bridge.
+    fn refresh_scenes(&mut self) -> Result<Vec<Value>> {
+        let scenes = data_array(
+            "scene",
+            &self.transport.get_resources(self.username, "scene")?,
+        )?
+        .to_vec();
+        if let Some(cache) = self.cache.as_deref_mut() {
+            cache.scenes = Some(scenes.clone());
+        }
+        Ok(scenes)
+    }
+
+    /// Native device ID → light service IDs, from the batch cache when one
+    /// holds it. Device services do not change while scenes are projected.
+    fn light_services(&mut self) -> Result<BTreeMap<String, Vec<String>>> {
+        if let Some(services) = self
+            .cache
+            .as_deref()
+            .and_then(|cache| cache.light_services.as_ref())
+        {
+            return Ok(services.clone());
+        }
+        let services = light_services_by_device(self.transport, self.username)?;
+        if let Some(cache) = self.cache.as_deref_mut() {
+            cache.light_services = Some(services.clone());
+        }
+        Ok(services)
+    }
+}
+
 fn data_array<'a>(resource_type: &str, value: &'a Value) -> Result<&'a [Value]> {
     value
         .get("data")
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .ok_or_else(|| anyhow::anyhow!("Hue {resource_type} response has no data array"))
-}
-
-fn scene_resources<H: HueTransport + ?Sized>(transport: &H, username: &str) -> Result<Vec<Value>> {
-    Ok(data_array("scene", &transport.get_resources(username, "scene")?)?.to_vec())
 }
 
 fn light_services_by_device<H: HueTransport + ?Sized>(
@@ -103,14 +179,13 @@ fn fingerprint(value: &Value) -> Result<String> {
 }
 
 fn desired_scene_body<H: HueTransport + ?Sized>(
-    transport: &H,
-    username: &str,
+    reads: &mut BridgeReads<'_, H>,
     projection: &ManagedSceneProjection,
 ) -> Result<(Value, String)> {
     if projection.targets.is_empty() {
         anyhow::bail!("A managed Hue scene must contain at least one light action");
     }
-    let services = light_services_by_device(transport, username)?;
+    let services = reads.light_services()?;
     let mut native_ids = BTreeSet::new();
     let mut actions_by_light = BTreeMap::new();
     for target in &projection.targets {
@@ -189,17 +264,19 @@ fn verified_scene<'a>(scenes: &'a [Value], scene_id: &str, desired: &Value) -> R
 fn delete_mapping<H: HueTransport + ?Sized>(
     storage: &dyn Storage,
     state: &mut HueControllerOwnership,
-    transport: &H,
-    username: &str,
+    reads: &mut BridgeReads<'_, H>,
     mapping: &HueManagedScene,
 ) -> Result<()> {
-    let scenes = scene_resources(transport, username)?;
+    let scenes = reads.scenes()?;
     if scenes
         .iter()
         .any(|scene| scene.get("id").and_then(Value::as_str) == Some(&mapping.hue_scene_id))
     {
-        transport.delete_resource(username, "scene", &mapping.hue_scene_id)?;
-        if scene_resources(transport, username)?
+        reads
+            .transport
+            .delete_resource(reads.username, "scene", &mapping.hue_scene_id)?;
+        if reads
+            .refresh_scenes()?
             .iter()
             .any(|scene| scene.get("id").and_then(Value::as_str) == Some(&mapping.hue_scene_id))
         {
@@ -213,8 +290,7 @@ fn delete_mapping<H: HueTransport + ?Sized>(
 fn cleanup_ephemeral_mappings<H: HueTransport + ?Sized>(
     storage: &dyn Storage,
     state: &mut HueControllerOwnership,
-    transport: &H,
-    username: &str,
+    reads: &mut BridgeReads<'_, H>,
 ) -> Result<()> {
     let mappings = state
         .managed_scenes()
@@ -223,7 +299,7 @@ fn cleanup_ephemeral_mappings<H: HueTransport + ?Sized>(
         .cloned()
         .collect::<Vec<_>>();
     for mapping in mappings {
-        delete_mapping(storage, state, transport, username, &mapping)?;
+        delete_mapping(storage, state, reads, &mapping)?;
     }
     Ok(())
 }
@@ -231,22 +307,19 @@ fn cleanup_ephemeral_mappings<H: HueTransport + ?Sized>(
 fn apply_ephemeral_scene<H: HueTransport + ?Sized>(
     storage: &dyn Storage,
     state: &mut HueControllerOwnership,
-    transport: &H,
-    username: &str,
+    reads: &mut BridgeReads<'_, H>,
     projection: &ManagedSceneProjection,
     body: &Value,
     fingerprint: &str,
     transition_ms: Option<u32>,
 ) -> Result<()> {
-    let created = transport.create_resource(username, "scene", body)?;
+    let created = reads
+        .transport
+        .create_resource(reads.username, "scene", body)?;
     if created.resource_type != "scene" {
         anyhow::bail!("Hue returned the wrong resource type for a scene create");
     }
-    verified_scene(
-        &scene_resources(transport, username)?,
-        &created.resource_id,
-        body,
-    )?;
+    verified_scene(&reads.refresh_scenes()?, &created.resource_id, body)?;
     let mapping = HueManagedScene {
         rhythm_room_id: projection.rhythm_room_id.clone(),
         rhythm_scene_id: format!("__preview__{fingerprint}"),
@@ -258,8 +331,11 @@ fn apply_ephemeral_scene<H: HueTransport + ?Sized>(
     state.record_managed_scene(mapping.clone())?;
     persist_controller_ownership(storage, state)?;
 
-    let recall_result = transport.recall_scene(username, &mapping.hue_scene_id, transition_ms);
-    let cleanup_result = delete_mapping(storage, state, transport, username, &mapping);
+    let recall_result =
+        reads
+            .transport
+            .recall_scene(reads.username, &mapping.hue_scene_id, transition_ms);
+    let cleanup_result = delete_mapping(storage, state, reads, &mapping);
     match (recall_result, cleanup_result) {
         (Ok(()), Ok(())) => Ok(()),
         (Err(_), Ok(())) => anyhow::bail!("Managed Hue scene preview recall failed"),
@@ -271,6 +347,11 @@ fn apply_ephemeral_scene<H: HueTransport + ?Sized>(
 }
 
 /// Create/update/adopt, verify, and recall one Rhythm scene projection.
+///
+/// `cache` memoizes the bridge's scene and device inventories across the
+/// projections of one batch (a whole-home apply); pass `None` for a
+/// standalone projection.
+#[allow(clippy::too_many_arguments)]
 pub fn apply_managed_scene<H: HueTransport + ?Sized>(
     storage: &dyn Storage,
     state: &mut HueControllerOwnership,
@@ -279,11 +360,13 @@ pub fn apply_managed_scene<H: HueTransport + ?Sized>(
     projection: &ManagedSceneProjection,
     transition_ms: Option<u32>,
     ephemeral: bool,
+    cache: Option<&mut ManagedSceneBridgeCache>,
 ) -> Result<()> {
     if state.phase != HueOwnershipPhase::Active {
         anyhow::bail!("Hue controller authority is not active");
     }
-    cleanup_ephemeral_mappings(storage, state, transport, username)?;
+    let mut reads = BridgeReads::new(transport, username, cache);
+    cleanup_ephemeral_mappings(storage, state, &mut reads)?;
     let room = state
         .managed_rooms()
         .get(&projection.rhythm_room_id)
@@ -299,17 +382,16 @@ pub fn apply_managed_scene<H: HueTransport + ?Sized>(
             .managed_scene(&projection.rhythm_room_id, &projection.scene_id)
             .cloned()
         {
-            delete_mapping(storage, state, transport, username, &mapping)?;
+            delete_mapping(storage, state, &mut reads, &mapping)?;
         }
         return Ok(());
     }
-    let (body, fingerprint) = desired_scene_body(transport, username, projection)?;
+    let (body, fingerprint) = desired_scene_body(&mut reads, projection)?;
     if ephemeral {
         return apply_ephemeral_scene(
             storage,
             state,
-            transport,
-            username,
+            &mut reads,
             projection,
             &body,
             &fingerprint,
@@ -320,7 +402,7 @@ pub fn apply_managed_scene<H: HueTransport + ?Sized>(
     let mut mapping = state
         .managed_scene(&projection.rhythm_room_id, &projection.scene_id)
         .cloned();
-    let scenes = scene_resources(transport, username)?;
+    let scenes = reads.scenes()?;
     if let Some(existing) = mapping.as_mut() {
         if existing.hue_room_id != projection.hub_room_id || existing.ephemeral {
             anyhow::bail!("Rhythm scene ownership mapping is inconsistent");
@@ -331,12 +413,13 @@ pub fn apply_managed_scene<H: HueTransport + ?Sized>(
         {
             Some(observed) if scene_matches(&body, observed) => {}
             Some(_) => {
-                transport.update_resource(username, "scene", &existing.hue_scene_id, &body)?;
-                verified_scene(
-                    &scene_resources(transport, username)?,
+                reads.transport.update_resource(
+                    reads.username,
+                    "scene",
                     &existing.hue_scene_id,
                     &body,
                 )?;
+                verified_scene(&reads.refresh_scenes()?, &existing.hue_scene_id, &body)?;
             }
             None => mapping = None,
         }
@@ -353,15 +436,13 @@ pub fn apply_managed_scene<H: HueTransport + ?Sized>(
         equivalent.dedup();
         let hue_scene_id = match equivalent.as_slice() {
             [] => {
-                let created = transport.create_resource(username, "scene", &body)?;
+                let created = reads
+                    .transport
+                    .create_resource(reads.username, "scene", &body)?;
                 if created.resource_type != "scene" {
                     anyhow::bail!("Hue returned the wrong resource type for a scene create");
                 }
-                verified_scene(
-                    &scene_resources(transport, username)?,
-                    &created.resource_id,
-                    &body,
-                )?;
+                verified_scene(&reads.refresh_scenes()?, &created.resource_id, &body)?;
                 created.resource_id
             }
             [scene_id] => scene_id.clone(),
@@ -397,7 +478,8 @@ pub fn delete_managed_scene<H: HueTransport + ?Sized>(
     if state.phase != HueOwnershipPhase::Active {
         anyhow::bail!("Hue controller authority is not active");
     }
-    cleanup_ephemeral_mappings(storage, state, transport, username)?;
+    let mut reads = BridgeReads::new(transport, username, None);
+    cleanup_ephemeral_mappings(storage, state, &mut reads)?;
     let mappings = state
         .managed_scenes()
         .values()
@@ -405,7 +487,7 @@ pub fn delete_managed_scene<H: HueTransport + ?Sized>(
         .cloned()
         .collect::<Vec<_>>();
     for mapping in mappings {
-        delete_mapping(storage, state, transport, username, &mapping)?;
+        delete_mapping(storage, state, &mut reads, &mapping)?;
     }
     Ok(())
 }
@@ -423,7 +505,8 @@ pub fn delete_managed_scenes_for_room<H: HueTransport + ?Sized>(
     if state.phase != HueOwnershipPhase::Active {
         anyhow::bail!("Hue controller authority is not active");
     }
-    cleanup_ephemeral_mappings(storage, state, transport, username)?;
+    let mut reads = BridgeReads::new(transport, username, None);
+    cleanup_ephemeral_mappings(storage, state, &mut reads)?;
     let mappings = state
         .managed_scenes()
         .values()
@@ -431,7 +514,7 @@ pub fn delete_managed_scenes_for_room<H: HueTransport + ?Sized>(
         .cloned()
         .collect::<Vec<_>>();
     for mapping in mappings {
-        delete_mapping(storage, state, transport, username, &mapping)?;
+        delete_mapping(storage, state, &mut reads, &mapping)?;
     }
     Ok(())
 }
@@ -543,6 +626,7 @@ mod tests {
             &projection(55),
             Some(400),
             false,
+            None,
         )
         .unwrap();
         assert_eq!(state.managed_scenes().len(), 1);
@@ -563,6 +647,7 @@ mod tests {
             &projection(55),
             None,
             false,
+            None,
         )
         .unwrap();
         assert!(!spy.calls().iter().any(|call| matches!(
@@ -581,6 +666,7 @@ mod tests {
             &projection(70),
             None,
             false,
+            None,
         )
         .unwrap();
         assert!(spy.calls().iter().any(|call| matches!(
@@ -612,6 +698,7 @@ mod tests {
             &projection(45),
             Some(250),
             true,
+            None,
         )
         .unwrap();
 
@@ -626,5 +713,98 @@ mod tests {
             .position(|call| matches!(call, HueTransportCall::DeleteResource { resource_type, .. } if resource_type == "scene"))
             .unwrap();
         assert!(recall < delete);
+    }
+
+    #[test]
+    fn a_batch_cache_reads_the_bridge_inventories_once_across_projections() {
+        let temp = TempStorage::new("batch-cache");
+        let spy = SpyHueTransport::new();
+        let mut state = active_state(&spy, &temp.storage);
+        let mut cache = ManagedSceneBridgeCache::default();
+        let inventory_reads = |spy: &SpyHueTransport| {
+            spy.calls()
+                .iter()
+                .filter(|call| {
+                    matches!(
+                        call,
+                        HueTransportCall::GetResources { resource_type }
+                            if resource_type == "scene" || resource_type == "device"
+                    )
+                })
+                .count()
+        };
+
+        // First projection in the batch: one device read, one scene read,
+        // then the create and its verifying read-back.
+        spy.reset();
+        apply_managed_scene(
+            &temp.storage,
+            &mut state,
+            &spy,
+            "user",
+            &projection(55),
+            Some(400),
+            false,
+            Some(&mut cache),
+        )
+        .unwrap();
+        assert_eq!(inventory_reads(&spy), 3);
+
+        // An unchanged projection later in the same batch touches the bridge
+        // only to recall: every inventory comes from the cache.
+        spy.reset();
+        apply_managed_scene(
+            &temp.storage,
+            &mut state,
+            &spy,
+            "user",
+            &projection(55),
+            None,
+            false,
+            Some(&mut cache),
+        )
+        .unwrap();
+        assert_eq!(inventory_reads(&spy), 0);
+        assert_eq!(
+            spy.calls()
+                .iter()
+                .filter(|call| matches!(call, HueTransportCall::RecallScene { .. }))
+                .count(),
+            1
+        );
+
+        // A changed projection updates the scene; the verifying read-back is
+        // the only inventory read and it refreshes the cache.
+        spy.reset();
+        apply_managed_scene(
+            &temp.storage,
+            &mut state,
+            &spy,
+            "user",
+            &projection(70),
+            None,
+            false,
+            Some(&mut cache),
+        )
+        .unwrap();
+        assert_eq!(inventory_reads(&spy), 1);
+        assert!(spy.calls().iter().any(|call| matches!(
+            call,
+            HueTransportCall::UpdateResource { resource_type, .. } if resource_type == "scene"
+        )));
+
+        spy.reset();
+        apply_managed_scene(
+            &temp.storage,
+            &mut state,
+            &spy,
+            "user",
+            &projection(70),
+            None,
+            false,
+            Some(&mut cache),
+        )
+        .unwrap();
+        assert_eq!(inventory_reads(&spy), 0, "the refreshed cache is reused");
     }
 }

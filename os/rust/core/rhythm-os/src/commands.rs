@@ -5346,13 +5346,25 @@ fn plan_scene_target_locked(
 
 /// Hand every managed (grouped) projection to its owning integration and
 /// reconcile the projected node states.
+///
+/// Projections are hub commands too (a Hue scene recall is a group command),
+/// so they are paced with `spacing` like every other dispatch: `projected_any`
+/// carries the "something was already sent" state across the targets of one
+/// whole-home apply so the first projection never waits and every later one
+/// does. Single-target callers pass a zero spacing.
 fn apply_managed_scene_dispatches(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
     managed_dispatches: &[ManagedSceneDispatch],
     ephemeral_projection: bool,
+    spacing: Duration,
+    projected_any: &mut bool,
 ) -> Result<()> {
     for managed in managed_dispatches {
+        if *projected_any && !spacing.is_zero() {
+            std::thread::sleep(spacing);
+        }
+        *projected_any = true;
         let handled = managed.discovery.apply_managed_scene_projection(
             &managed.projection,
             managed.transition_ms,
@@ -5374,6 +5386,7 @@ fn apply_managed_scene_dispatches(
 /// `palette_offset` is the palette slot the target starts at. User-initiated
 /// applies pass 0; re-applies of a node's bound mood scene pass the offset the
 /// binding was persisted with so a whole-home layout survives re-entry.
+#[allow(clippy::too_many_arguments)]
 fn do_scene_apply_definition_inner(
     state: &SharedState,
     source: SceneApplySource,
@@ -5430,7 +5443,14 @@ fn do_scene_apply_definition_inner(
         managed_dispatches,
     } = planned;
 
-    apply_managed_scene_dispatches(state, &runtime, &managed_dispatches, ephemeral_projection)?;
+    apply_managed_scene_dispatches(
+        state,
+        &runtime,
+        &managed_dispatches,
+        ephemeral_projection,
+        Duration::ZERO,
+        &mut false,
+    )?;
     if plan.affected_node_ids.is_empty() {
         anyhow::bail!(
             "Scene '{}' has no routable light entries for target '{}'",
@@ -5846,6 +5866,38 @@ fn home_scene_work_item(
     }
 }
 
+/// The hubs taking part in one whole-home apply's managed projections, each
+/// told once that a batch starts and, on drop, that it ended.
+struct ManagedSceneBatch {
+    discoveries: Vec<Arc<dyn HubDiscovery>>,
+}
+
+impl ManagedSceneBatch {
+    fn begin<'a>(dispatches: impl Iterator<Item = &'a [ManagedSceneDispatch]>) -> Self {
+        let mut discoveries: Vec<Arc<dyn HubDiscovery>> = Vec::new();
+        for managed in dispatches.flatten() {
+            if !discoveries
+                .iter()
+                .any(|known| Arc::ptr_eq(known, &managed.discovery))
+            {
+                discoveries.push(managed.discovery.clone());
+            }
+        }
+        for discovery in &discoveries {
+            discovery.begin_managed_scene_batch();
+        }
+        Self { discoveries }
+    }
+}
+
+impl Drop for ManagedSceneBatch {
+    fn drop(&mut self) {
+        for discovery in &self.discoveries {
+            discovery.end_managed_scene_batch();
+        }
+    }
+}
+
 /// Apply one stored scene to every eligible target in the home.
 ///
 /// This is a first-class server operation: the server enumerates the targets,
@@ -5930,6 +5982,15 @@ pub fn do_home_scene_apply(
         anyhow::bail!("No rooms with lights are available for a whole-home scene");
     }
 
+    // Every hub that will receive managed projections sees one batch, so it
+    // can read its inventories once instead of once per room.
+    let managed_batch = ManagedSceneBatch::begin(planned.iter().filter_map(|(_, _, result)| {
+        result
+            .as_ref()
+            .ok()
+            .map(|target| target.managed_dispatches.as_slice())
+    }));
+    let mut projected_any = false;
     let mut results: Vec<HomeSceneTargetResult> = Vec::with_capacity(planned.len());
     let mut applied: Vec<(String, usize, SceneApplicationPlan)> = Vec::new();
     for (target_id, palette_offset, planned_target) in planned {
@@ -5954,10 +6015,15 @@ pub fn do_home_scene_apply(
             continue;
         }
         // Managed projections stay under the topology guard, exactly like the
-        // single-target apply.
-        if let Err(error) =
-            apply_managed_scene_dispatches(state, &runtime, &target.managed_dispatches, false)
-        {
+        // single-target apply, and are paced like every other hub command.
+        if let Err(error) = apply_managed_scene_dispatches(
+            state,
+            &runtime,
+            &target.managed_dispatches,
+            false,
+            dispatch_spacing,
+            &mut projected_any,
+        ) {
             results.push(failure(error.to_string()));
             continue;
         }
@@ -5970,6 +6036,7 @@ pub fn do_home_scene_apply(
         applied.push((target_id, palette_offset, target.plan));
     }
 
+    drop(managed_batch);
     // External controllers take this same lock around their own dispatch, so it
     // must be released before per-node light commands run.
     drop(transaction);
@@ -21192,6 +21259,7 @@ mod tests {
         projection: crate::discovery::ManagedSceneProjection,
         transition_ms: Option<u32>,
         ephemeral: bool,
+        at: std::time::Instant,
     }
 
     struct RecordingManagedSceneDiscovery {
@@ -21201,6 +21269,7 @@ mod tests {
         fail_delete: Arc<AtomicBool>,
         transaction_lock: Arc<Mutex<()>>,
         projection_was_serialized: Arc<AtomicBool>,
+        batch_events: Arc<Mutex<Vec<&'static str>>>,
     }
 
     impl crate::discovery::HubDiscovery for RecordingManagedSceneDiscovery {
@@ -21234,6 +21303,7 @@ mod tests {
                 projection: projection.clone(),
                 transition_ms,
                 ephemeral,
+                at: std::time::Instant::now(),
             });
             Ok(true)
         }
@@ -21244,6 +21314,14 @@ mod tests {
             }
             self.deletes.lock().unwrap().push(scene_id.to_string());
             Ok(true)
+        }
+
+        fn begin_managed_scene_batch(&self) {
+            self.batch_events.lock().unwrap().push("begin");
+        }
+
+        fn end_managed_scene_batch(&self) {
+            self.batch_events.lock().unwrap().push("end");
         }
     }
 
@@ -21258,6 +21336,7 @@ mod tests {
         fail_apply: Arc<AtomicBool>,
         fail_delete: Arc<AtomicBool>,
         projection_was_serialized: Arc<AtomicBool>,
+        batch_events: Arc<Mutex<Vec<&'static str>>>,
     }
 
     fn setup_managed_hue_scene_room(with_companion: bool) -> ManagedSceneTestHarness {
@@ -21292,6 +21371,7 @@ mod tests {
             .external_topology_transaction_lock
             .clone();
         let projection_was_serialized = Arc::new(AtomicBool::new(false));
+        let batch_events = Arc::new(Mutex::new(Vec::new()));
         let discovery = Arc::new(RecordingManagedSceneDiscovery {
             calls: calls.clone(),
             deletes: deletes.clone(),
@@ -21299,6 +21379,7 @@ mod tests {
             fail_delete: fail_delete.clone(),
             transaction_lock,
             projection_was_serialized: projection_was_serialized.clone(),
+            batch_events: batch_events.clone(),
         });
 
         {
@@ -21360,7 +21441,41 @@ mod tests {
             fail_apply,
             fail_delete,
             projection_was_serialized,
+            batch_events,
         }
+    }
+
+    /// Add a second managed Hue room to the harness so a whole-home apply
+    /// projects two rooms through the same bridge.
+    fn add_second_managed_hue_room(harness: &ManagedSceneTestHarness) -> String {
+        let device_id = insert_canonical_device(
+            &harness.state,
+            harness.hub_key.clone(),
+            "hue-light-2",
+            "Hue Lamp Two",
+            "hue-room-2",
+            "Room 2",
+        );
+        {
+            let mut s = harness.state.lock().unwrap();
+            s.topology
+                .insert_room(crate::topology::TopologyRoom::new("room2", "Room 2"));
+            assert!(s.topology.attach_device_user_override("room2", &device_id));
+            assert!(s.topology.upsert_managed_room_binding(
+                "room2",
+                crate::topology::HubRoomBinding {
+                    hub_key: harness.hub_key.clone(),
+                    hub_room_id: "hue-room-2".into(),
+                    control_id: "hue-group-2".into(),
+                    light_device_ids: vec!["hue-light-2".into()],
+                },
+            ));
+        }
+        harness.runtime.snapshots.lock().unwrap().extend([
+            make_snapshot("room2", false, false),
+            make_light_child_snapshot(&device_id, "room2"),
+        ]);
+        device_id
     }
 
     impl crate::discovery::HubDiscovery for NativeSceneDiscovery {
@@ -24760,6 +24875,56 @@ mod tests {
         .unwrap_err();
 
         assert!(error.to_string().contains("not found"), "{error}");
+    }
+
+    #[test]
+    fn home_scene_apply_paces_managed_hue_projections_and_batches_bridge_reads() {
+        let harness = setup_managed_hue_scene_room(false);
+        let second_device = add_second_managed_hue_room(&harness);
+        do_scene_upsert(
+            &harness.state,
+            scene_with_palette("halloween", &halloween_palette()),
+        )
+        .unwrap();
+        let spacing = std::time::Duration::from_millis(40);
+
+        let response = do_home_scene_apply(
+            &harness.state,
+            "halloween",
+            HomeSceneApplyRequest {
+                transition_ms: None,
+            },
+            spacing,
+        )
+        .unwrap();
+
+        assert_eq!(response.applied_target_count, 2, "{:?}", response.targets);
+        let calls = harness.calls.lock().unwrap();
+        assert_eq!(calls.len(), 2, "one projection per managed room");
+        assert_eq!(calls[0].projection.rhythm_room_id, "room1");
+        assert_eq!(calls[1].projection.rhythm_room_id, "room2");
+        assert_eq!(
+            calls[1].projection.targets[0].native_device_id,
+            "hue-light-2"
+        );
+        assert!(
+            calls[1].at.duration_since(calls[0].at) >= spacing,
+            "a Hue scene recall is a group command and must be paced like one"
+        );
+        assert!(harness.projection_was_serialized.load(Ordering::SeqCst));
+        assert_eq!(
+            *harness.batch_events.lock().unwrap(),
+            vec!["begin", "end"],
+            "the bridge is told once that a batch starts and once that it ended"
+        );
+        assert!(
+            harness
+                .runtime
+                .engine_room_snapshot("room2")
+                .unwrap()
+                .mood_active
+        );
+        let _ = second_device;
     }
 
     #[test]
