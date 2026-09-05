@@ -1,0 +1,311 @@
+import 'dart:async';
+import 'package:dio/dio.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:provider/provider.dart';
+import 'package:rhythm_app/data/local_data_source.dart';
+import 'package:rhythm_app/providers/home_provider.dart';
+import 'package:rhythm_app/providers/room_provider.dart';
+import 'package:rhythm_app/providers/server_sync_provider.dart';
+import 'package:rhythm_app/services/settings_service.dart';
+import 'package:rhythm_app/widgets/device_details_loader.dart';
+import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart';
+
+class _Store implements LocalDataSource {
+  AppSettings current = AppSettings.defaults();
+  @override
+  bool get isInitialized => true;
+  @override
+  bool isMigrationComplete() => true;
+  @override
+  AppSettings getSettings() => current;
+  @override
+  Future<void> saveSettings(AppSettings settings) async {
+    current = settings;
+  }
+
+  @override
+  Future<void> clearSettings() async {
+    current = AppSettings.defaults();
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+Map<String, dynamic> _node(String id,
+        {String kind = 'room', String? parent, int brightness = 50}) =>
+    {
+      'id': id,
+      'name': id,
+      'kind': kind,
+      if (parent != null) 'parent_id': parent,
+      'rhythm_enabled': true,
+      'lights_on': true,
+      'state': 'active',
+      'brightness': brightness,
+      if (kind == 'room') 'device_counts': {'light': 1},
+    };
+
+RhythmHello _hello(
+        {String server = 'server-a',
+        bool details = false,
+        bool empty = false}) =>
+    RhythmHello.fromJson({
+      'active_profile': {},
+      'location': {},
+      'mode': {},
+      'review': {},
+      'transitions': [],
+      'profiles': [],
+      'scenes': [],
+      'input_bindings': [],
+      'server_instance_id': server,
+      'version': '0.6.634-beta',
+      'state_scope': {
+        'schema_version': 1,
+        'included': [
+          'base',
+          if (details) 'nodes' else ...['controls', 'configuration']
+        ],
+        'nodes': details ? 'all' : 'controls'
+      },
+      'nodes': [
+        if (!empty) _node('room'),
+        if (details && !empty)
+          _node('bulb', kind: 'light_device', parent: 'room', brightness: 20)
+      ],
+    });
+
+class _RuntimeApi extends RhythmRuntimeApi {
+  _RuntimeApi() : super(Dio());
+  int reads = 0;
+  Future<RhythmHello> Function() reply = () async => _hello(details: true);
+  @override
+  Future<RhythmHello> getState(
+      {Set<RhythmStateInclude> include = const {RhythmStateInclude.base},
+      bool authoritative = false}) {
+    expect(include, {RhythmStateInclude.nodes});
+    reads++;
+    return reply();
+  }
+}
+
+class _ServerApi extends RhythmServerApi {
+  _ServerApi() : super(Dio());
+  int reads = 0;
+  bool fail = false;
+  bool empty = false;
+  @override
+  Future<Map<String, dynamic>?> getTriageCount() async => null;
+  @override
+  Future<List<RhythmTopologyNode>> getTopologyNodesOrThrow() async {
+    reads++;
+    if (fail) throw StateError('simulated transport failure');
+    return empty
+        ? []
+        : [_node('room'), _node('bulb', kind: 'light_device', parent: 'room')]
+            .map(RhythmTopologyNode.fromJson)
+            .toList();
+  }
+
+  @override
+  Future<List<RhythmTopologyNode>> getTopologyNodes() =>
+      getTopologyNodesOrThrow();
+}
+
+class _Connection extends RhythmConnection {
+  final hellos = StreamController<RhythmHello>.broadcast();
+  final states = StreamController<RhythmRoomState>.broadcast();
+  final motion = StreamController<RhythmMotionTimer>.broadcast();
+  final _runtime = _RuntimeApi();
+  final _server = _ServerApi();
+  @override
+  bool get connected => true;
+  @override
+  Stream<RhythmHello> get helloEvents => hellos.stream;
+  @override
+  Stream<RhythmRoomState> get rhythmStateEvents => states.stream;
+  @override
+  Stream<RhythmMotionTimer> get motionTimerEvents => motion.stream;
+  @override
+  RhythmRuntimeApi get runtimeApi => _runtime;
+  @override
+  RhythmServerApi get api => _server;
+  @override
+  void dispose() {
+    hellos.close();
+    states.close();
+    motion.close();
+    super.dispose();
+  }
+}
+
+Future<void> _drain() async {
+  for (var i = 0; i < 6; i++) {
+    await Future<void>.delayed(Duration.zero);
+  }
+}
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  late _Connection connection;
+  late RoomProvider rooms;
+  late HomeProvider home;
+  late ServerSyncProvider sync;
+  setUpAll(
+      () => SettingsService.instance.initialize(localDataSource: _Store()));
+  setUp(() async {
+    await SettingsService.instance.clearRunnerState();
+    rooms = RoomProvider();
+    await rooms.initialize();
+    home = HomeProvider();
+    connection = _Connection();
+    sync = ServerSyncProvider(
+        connection: connection,
+        roomProvider: rooms,
+        homeProvider: home,
+        activityCloudCanProvision: () => false,
+        authStateChanges: const Stream.empty());
+    connection.hellos.add(_hello());
+    await _drain();
+  });
+  tearDown(() {
+    sync.dispose();
+    connection.dispose();
+    rooms.dispose();
+    home.dispose();
+  });
+
+  test(
+      'startup only uses controls; explicit details load and omission preserves them',
+      () async {
+    expect(connection._server.reads, 0);
+    expect(connection._runtime.reads, 0);
+    expect(rooms.roomCount, 1);
+    expect(sync.lightCountForRoom('room'), 1);
+    expect(await sync.ensureDeviceDetails(), isTrue);
+    expect(rooms.roomCount, 2);
+    expect(sync.devicesForRoom('room').single.id, 'bulb');
+    connection.hellos.add(_hello());
+    await _drain();
+    expect(rooms.getNode('bulb'), isNotNull);
+    expect(connection._server.reads, 1,
+        reason: 'resume does not silently fetch details');
+    connection.hellos.add(RhythmHello.fromJson({
+      'state_scope': {
+        'schema_version': 1,
+        'included': ['base'],
+        'nodes': 'none'
+      }
+    }));
+    await _drain();
+    expect(rooms.roomCount, 2);
+    connection.hellos.add(_hello(empty: true));
+    await _drain();
+    expect(rooms.roomCount, 0);
+    expect(sync.helloRooms, isEmpty,
+        reason: 'cached topology cannot resurrect a removed room');
+  });
+
+  test('detail requests coalesce and a newer live event wins over the reply',
+      () async {
+    final pending = Completer<RhythmHello>();
+    connection._runtime.reply = () => pending.future;
+    final first = sync.ensureDeviceDetails();
+    final second = sync.ensureDeviceDetails();
+    expect(identical(first, second), isTrue);
+    connection.states.add(RhythmRoomState.fromJson({
+      ..._node('bulb', kind: 'light_device', parent: 'room', brightness: 77),
+      'node_id': 'bulb'
+    }));
+    connection.states.add(RhythmRoomState.fromJson(
+        {'node_id': 'bulb', 'state': 'active', 'rhythm_enabled': true}));
+    await _drain();
+    pending.complete(_hello(details: true));
+    expect(await first, isTrue);
+    expect(rooms.getBrightness('bulb'), 77);
+    expect(connection._runtime.reads, 1);
+  });
+
+  test('detail replay preserves the order between motion and state events',
+      () async {
+    final pending = Completer<RhythmHello>();
+    connection._runtime.reply = () => pending.future;
+    final request = sync.ensureDeviceDetails();
+    connection.motion.add(const RhythmMotionTimer.node(
+        nodeId: 'room',
+        motionActive: true,
+        motionOwned: true,
+        timeoutSecs: 120,
+        remainingSecs: 100));
+    connection.states.add(RhythmRoomState.fromJson({
+      ..._node('room'),
+      'node_id': 'room',
+      'motion_active': false,
+      'motion_owned': false,
+      'timeout_secs': 0
+    }));
+    await _drain();
+    pending.complete(_hello(details: true));
+    expect(await request, isTrue);
+    expect(sync.nodeById('room')!.motionActive, isFalse);
+  });
+
+  test(
+      'wrong identity in a detail response fails visibly and preserves controls',
+      () async {
+    connection._runtime.reply =
+        () async => _hello(server: 'wrong-server', details: true);
+    expect(await sync.ensureDeviceDetails(), isFalse);
+    expect(sync.deviceDetailsFailed, isTrue);
+    expect(rooms.roomCount, 1);
+  });
+
+  test('a reply from the previous hub cannot overwrite a newer hello',
+      () async {
+    final pending = Completer<RhythmHello>();
+    connection._runtime.reply = () => pending.future;
+    final first = sync.ensureDeviceDetails();
+    connection.hellos.add(_hello(server: 'server-b'));
+    await _drain();
+    pending.complete(_hello(details: true));
+    expect(await first, isFalse);
+    expect(rooms.getNode('bulb'), isNull);
+    expect(rooms.roomCount, 1);
+  });
+
+  test('failed topology preserves cache; a successful empty detail clears it',
+      () async {
+    connection._server.fail = true;
+    expect(await sync.ensureDeviceDetails(), isFalse);
+    expect(rooms.roomCount, 1);
+    expect(sync.deviceDetailsFailed, isTrue);
+    connection._server.fail = false;
+    connection._server.empty = true;
+    connection._runtime.reply = () async => _hello(details: true, empty: true);
+    expect(await sync.ensureDeviceDetails(), isTrue);
+    expect(rooms.roomCount, 0);
+    expect(sync.topologyNodes, isEmpty);
+  });
+
+  testWidgets(
+      'device surface reports failure and retries without an empty-list lie',
+      (tester) async {
+    connection._server.fail = true;
+    await tester.pumpWidget(ChangeNotifierProvider.value(
+        value: sync,
+        child: const MaterialApp(
+            home: Scaffold(
+                body: DeviceDetailsLoader(child: Text('Device controls'))))));
+    await tester.pumpAndSettle();
+    expect(find.text('Could not load devices.'), findsOneWidget);
+    expect(find.text('Device controls'), findsNothing);
+    connection._server.fail = false;
+    await tester.tap(find.text('Try again'));
+    await tester.pumpAndSettle();
+    expect(find.text('Device controls'), findsOneWidget);
+    expect(connection._runtime.reads, 2);
+  });
+}

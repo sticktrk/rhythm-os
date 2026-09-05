@@ -7,9 +7,11 @@ import 'rhythm_review.dart';
 import 'rhythm_room.dart';
 import 'rhythm_scene.dart';
 import 'rhythm_settings.dart';
+import 'rhythm_state_scope.dart';
 
-/// Full state from the Rhythm server on connect (GET /api/state).
+/// State from GET /api/state; [stateScope] distinguishes selected from full data.
 class RhythmHello {
+  final RhythmStateScope? stateScope;
   final String version;
   final String? serverInstanceId;
   final String platformType;
@@ -42,6 +44,7 @@ class RhythmHello {
   final int? effectiveMotionTimeoutSecs;
 
   const RhythmHello({
+    this.stateScope,
     required this.version,
     this.serverInstanceId,
     required this.platformType,
@@ -72,7 +75,40 @@ class RhythmHello {
 
   List<RhythmRoom> get rooms => nodes;
 
+  bool get includesConfiguration =>
+      stateScope == null ||
+      stateScope!.included.contains(RhythmStateInclude.configuration);
+
+  List<RhythmRoom> mergeNodes(List<RhythmRoom> previous) =>
+      stateScope?.mergeNodes(previous, nodes) ?? List.of(nodes);
+
   factory RhythmHello.fromJson(Map<String, dynamic> json) {
+    final scopeJson = jsonMap(json['state_scope']);
+    final scope =
+        scopeJson == null ? null : RhythmStateScope.fromJson(scopeJson);
+    if (json.containsKey('state_scope') && scopeJson == null) {
+      throw const FormatException('Invalid state scope');
+    }
+    if (scope != null && scope.nodes != 'none' && json['nodes'] is! List) {
+      throw const FormatException('Selected state is missing nodes');
+    }
+    if (scope?.included.contains(RhythmStateInclude.configuration) == true) {
+      for (final key in ['active_profile', 'location', 'mode', 'review']) {
+        if (json[key] is! Map) {
+          throw FormatException('Missing configuration: $key');
+        }
+      }
+      for (final key in [
+        'transitions',
+        'profiles',
+        'scenes',
+        'input_bindings'
+      ]) {
+        if (json[key] is! List) {
+          throw FormatException('Missing configuration: $key');
+        }
+      }
+    }
     final settingsJson = jsonMap(json['settings']);
     final lightBreakerJson = jsonMap(json['light_breaker']);
     final rawHub = jsonMap(json['hub']) ?? const <String, dynamic>{};
@@ -119,21 +155,35 @@ class RhythmHello {
     final lightRuntime = runtimeId == null
         ? (modeResource?.lightRuntime ?? RhythmLightRuntime.rhythmAdaptive)
         : RhythmLightRuntime.fromId(runtimeId);
+    final rawNodes = (json['nodes'] as List<dynamic>?) ??
+        (json['rooms'] as List<dynamic>?) ??
+        const [];
+    final nodes = rawNodes
+        .map(jsonMap)
+        .nonNulls
+        .map(RhythmRoom.fromJson)
+        .where((node) => node.id.isNotEmpty)
+        .toList();
+    if (scope != null &&
+        (nodes.length != rawNodes.length ||
+            nodes.map((node) => node.id).toSet().length != nodes.length ||
+            (scope.nodes == 'none' && json.containsKey('nodes')))) {
+      throw const FormatException('Malformed selected nodes');
+    }
+    if (scope?.nodes == 'controls' &&
+        nodes.any((node) => !RhythmStateScope.isControl(node))) {
+      throw const FormatException(
+          'Controls response contains non-control nodes');
+    }
     return RhythmHello(
+      stateScope: scope,
       version: json['version'] as String? ?? '0.0.0',
       serverInstanceId: json['server_instance_id'] as String?,
       platformType: json['platform'] as String? ?? 'desktop',
       platformContext: json['context'] as String? ?? 'server',
       listenPort:
           jsonInt(json['listen_port'], preferredKeys: const ['listen_port']),
-      nodes: ((json['nodes'] as List<dynamic>?) ??
-              (json['rooms'] as List<dynamic>?) ??
-              const [])
-          .map(jsonMap)
-          .nonNulls
-          .map(RhythmRoom.fromJson)
-          .where((r) => r.id.isNotEmpty)
-          .toList(),
+      nodes: nodes,
       hub: hub,
       hubs: hubs,
       hubInfos: hubInfos,

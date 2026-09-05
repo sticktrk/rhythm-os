@@ -383,7 +383,16 @@ async fn get_state(
         .get("authoritative")
         .and_then(|value| value.parse::<bool>().ok())
         .unwrap_or(false);
-    run_blocking(move || handlers::handle_get_state_with_options(&state, authoritative)).await
+    let selection = match crate::state_selection::StateSelection::parse(
+        params.get("include").map(String::as_str),
+    ) {
+        Ok(selection) => selection,
+        Err(error) => return ApiResponse::bad_request(error),
+    };
+    run_blocking(move || {
+        handlers::handle_get_state_with_selection(&state, authoritative, selection.as_ref())
+    })
+    .await
 }
 
 async fn get_profile_bundle(State(state): State<SharedState>) -> ApiResponse {
@@ -424,8 +433,22 @@ async fn put_backup(State(state): State<SharedState>, Json(body): Json<Value>) -
     run_blocking(move || handlers::handle_put_backup(&state, &body)).await
 }
 
-async fn get_nodes_state(State(state): State<SharedState>) -> ApiResponse {
-    handlers::handle_get_nodes_state(&state)
+async fn get_nodes_state(
+    State(state): State<SharedState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> ApiResponse {
+    let scope = match params.get("scope").map(String::as_str) {
+        None | Some("all") => crate::state_selection::StateNodes::All,
+        Some("controls") => crate::state_selection::StateNodes::Controls,
+        _ => return ApiResponse::bad_request("unknown node state scope"),
+    };
+    run_blocking(
+        move || match crate::commands::build_nodes_state_for_scope(&state, scope) {
+            Ok(json) => ApiResponse::json_ok(json),
+            Err(error) => ApiResponse::server_error(error),
+        },
+    )
+    .await
 }
 
 async fn get_history(

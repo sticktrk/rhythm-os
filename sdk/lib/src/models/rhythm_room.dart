@@ -796,6 +796,7 @@ class RhythmRoom {
   final RhythmLightCapabilities? lightCapabilities;
   final List<String> deviceIds;
   final List<RhythmDevice> devices;
+  final Map<String, int>? deviceCounts;
   final RhythmNodeProfileSettings? profileSettings;
 
   /// Node-local settings before parent inheritance is applied.
@@ -834,6 +835,7 @@ class RhythmRoom {
     this.lightCapabilities,
     this.deviceIds = const [],
     this.devices = const [],
+    this.deviceCounts,
     RhythmNodeProfileSettings? profileSettings,
     RhythmNodeProfileSettings? roomProfile,
     this.localProfileSettings,
@@ -856,6 +858,9 @@ class RhythmRoom {
 
   bool get hasMotionSensor =>
       kind == RhythmNodeKind.motionSensor ||
+      motionActive != null ||
+      motionOwned != null ||
+      timeoutSecs != null ||
       devices.any((d) => d.type == RhythmDeviceType.motion);
 
   String? get hubType => hubTypes.isEmpty ? null : hubTypes.first;
@@ -885,6 +890,7 @@ class RhythmRoom {
       devices.where((d) => d.type == RhythmDeviceType.contact).toList();
 
   int get lightCount {
+    if (deviceCounts != null) return deviceCounts!['light'] ?? 0;
     final typed = lights.length;
     if (typed > 0) return typed;
     if (kind == RhythmNodeKind.lightDevice) return 1;
@@ -892,17 +898,22 @@ class RhythmRoom {
     return inferred > 0 ? inferred : 0;
   }
 
-  int get deviceCount => devices.length;
+  int get deviceCount =>
+      deviceCounts?.values.fold<int>(0, (a, b) => a + b) ?? devices.length;
 
   bool get softOff =>
       state == RoomModeState.standby || state == RoomModeState.idle;
 
   String get deviceSummary {
     final parts = <String>[];
-    final l = lights.length;
-    final b = buttons.length;
-    final m = motionSensors.length;
-    final c = contactSensors.length;
+    final l =
+        deviceCounts?['light'] ?? (deviceCounts == null ? lights.length : 0);
+    final b =
+        deviceCounts?['button'] ?? (deviceCounts == null ? buttons.length : 0);
+    final m = deviceCounts?['motion'] ??
+        (deviceCounts == null ? motionSensors.length : 0);
+    final c = deviceCounts?['contact'] ??
+        (deviceCounts == null ? contactSensors.length : 0);
     if (l > 0) parts.add('$l light${l > 1 ? 's' : ''}');
     if (b > 0) parts.add('$b button${b > 1 ? 's' : ''}');
     if (m > 0) parts.add('$m sensor${m > 1 ? 's' : ''}');
@@ -940,6 +951,8 @@ class RhythmRoom {
     final state = RoomModeState.fromJson(json);
     return RhythmRoom(
       id: json['id'] as String? ?? json['node_id'] as String? ?? '',
+      deviceCounts: jsonMap(json['device_counts'])?.map(
+          (key, value) => MapEntry(key, value is num ? value.toInt() : 0)),
       name: json['name'] as String? ?? '',
       kind: RhythmNodeKind.fromString(json['kind'] as String?),
       parentId: json['parent_id'] as String?,

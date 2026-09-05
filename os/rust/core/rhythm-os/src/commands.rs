@@ -3234,6 +3234,167 @@ pub fn refresh_observed_power_authoritatively_and_emit(state: &SharedState) -> R
 /// Two-phase lock: collects metadata from state (brief lock), then queries
 /// engine snapshots (engine read lock) to prevent cascading lock contention.
 pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
+    build_state_snapshot_for_nodes(state, crate::state_selection::StateNodes::All)
+}
+
+/// Skip unrequested DTOs and lighting-display work; retain global configuration calculations.
+pub fn build_selected_state_snapshot(
+    state: &SharedState,
+    selection: &crate::state_selection::StateSelection,
+) -> Result<String> {
+    let started = Instant::now();
+    let mut value: serde_json::Value = if selection.configuration() {
+        serde_json::from_str(&build_state_snapshot_for_nodes(state, selection.nodes)?)?
+    } else {
+        let mut base = {
+            let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            let hubs: Vec<_> = s
+                .hub_credentials
+                .iter()
+                .map(|(key, creds)| HubDto {
+                    hub_type: creds
+                        .hub_type
+                        .as_ref()
+                        .map(|t| t.as_str().to_string())
+                        .unwrap_or_else(|| "none".to_string()),
+                    address: Some(creds.address.clone()),
+                    connected: s.hub_is_connected(key),
+                    startup_retry: s.hub_startup_retry(key).map(build_hub_startup_retry_dto),
+                })
+                .collect();
+            let capabilities = ApiCapabilitiesDto {
+                hubs: s
+                    .hub_capabilities
+                    .iter()
+                    .map(|c| HubCapabilityDto {
+                        hub_type: c.hub_type.clone(),
+                        configurable: c.configurable,
+                        device_onboarding_methods: c.device_onboarding_methods.clone(),
+                        device_profiles: c.device_profiles.clone(),
+                        supports_unpairing: c.supports_unpairing,
+                        unpairable_device_types: c.unpairable_device_types.clone(),
+                        supports_roomless_devices: c.supports_roomless_devices,
+                        blocks_room_readiness: c.blocks_room_readiness,
+                    })
+                    .collect(),
+            };
+            serde_json::json!({
+                "version": s.firmware_version.to_string(), "server_instance_id": s.server_instance_id,
+                "platform": s.platform_type.to_string(), "context": s.platform_context.to_string(),
+                "listen_port": s.listen_port, "last_tick_epoch_ms": s.last_tick_epoch_ms,
+                "hubs": hubs, "capabilities": capabilities,
+                "settings": build_settings_dto_inner(&s), "light_breaker": build_light_breaker_dto_inner(&s),
+                "mode": { "active": s.active_mode },
+            })
+        };
+        if selection.nodes != crate::state_selection::StateNodes::None {
+            let poll: serde_json::Value =
+                serde_json::from_str(&build_nodes_state_for_scope(state, selection.nodes)?)?;
+            base["nodes"] = poll["nodes"].clone();
+        }
+        base
+    };
+    if selection.nodes == crate::state_selection::StateNodes::None {
+        value.as_object_mut().unwrap().remove("nodes");
+    }
+    if selection.nodes == crate::state_selection::StateNodes::Controls {
+        // Counts keep the room overview useful without materializing child DTOs.
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let mut counts: HashMap<String, BTreeMap<&str, usize>> = HashMap::new();
+        for node in s.topology.device_nodes() {
+            let Some(parent) = node.parent_id.as_ref() else {
+                continue;
+            };
+            let Some(device) = s.canonical_registry.get(&node.canonical_device_id) else {
+                continue;
+            };
+            if device.is_removed() {
+                continue;
+            }
+            let kind = match device.device_type {
+                DeviceType::Light => "light",
+                DeviceType::Button => "button",
+                DeviceType::Motion => "motion",
+                DeviceType::Contact => "contact",
+            };
+            *counts
+                .entry(parent.clone())
+                .or_default()
+                .entry(kind)
+                .or_default() += 1;
+        }
+        if let Some(nodes) = value["nodes"].as_array_mut() {
+            for node in nodes {
+                if node["kind"] == "room" {
+                    let counts = node["id"]
+                        .as_str()
+                        .and_then(|id| counts.get(id))
+                        .cloned()
+                        .unwrap_or_default();
+                    node["device_counts"] = serde_json::to_value(counts)?;
+                }
+            }
+        }
+    }
+    value["state_scope"] = serde_json::to_value(selection)?;
+    let json = serde_json::to_string(&value)?;
+    info!(target: "startup", "selected_state nodes_scope={:?} duration_us={} response_bytes={}", selection.nodes, started.elapsed().as_micros(), json.len());
+    Ok(json)
+}
+
+fn retain_state_nodes(
+    state: &SharedState,
+    nodes: &mut Vec<rhythm_core::NodeSnapshot>,
+    scope: crate::state_selection::StateNodes,
+) {
+    use crate::state_selection::StateNodes;
+    match scope {
+        StateNodes::None => nodes.clear(),
+        StateNodes::All => {}
+        StateNodes::Controls => {
+            let s = state.lock().expect("state lock");
+            nodes.retain(|node| {
+                node.kind.is_room()
+                    || (node.kind == rhythm_core::LightNodeKind::LightDevice
+                        && s.topology
+                            .get_device_node(&node.id)
+                            .map(|placement| placement.parent_id.as_ref())
+                            .unwrap_or(node.parent_id.as_ref())
+                            .is_none())
+            });
+        }
+    }
+}
+
+fn state_node_snapshots(
+    state: &SharedState,
+    runtime: Option<&Arc<dyn RuntimeHandle>>,
+    scope: crate::state_selection::StateNodes,
+) -> Vec<rhythm_core::NodeSnapshot> {
+    use crate::state_selection::StateNodes;
+    match (runtime, scope) {
+        (_, StateNodes::None) => Vec::new(),
+        (Some(runtime), StateNodes::All) => runtime.engine_all_effective_node_snapshots(),
+        (Some(runtime), StateNodes::Controls) => {
+            let mut nodes = runtime.engine_all_node_snapshots();
+            retain_state_nodes(state, &mut nodes, scope);
+            nodes
+                .into_iter()
+                .filter_map(|node| runtime.engine_effective_node_snapshot(&node.id))
+                .collect()
+        }
+        (None, _) => {
+            let mut nodes = bootstrap_node_snapshots_from_state(state);
+            retain_state_nodes(state, &mut nodes, scope);
+            nodes
+        }
+    }
+}
+
+fn build_state_snapshot_for_nodes(
+    state: &SharedState,
+    scope: crate::state_selection::StateNodes,
+) -> Result<String> {
     let started = Instant::now();
     let mut lock_wait = Duration::ZERO;
     let mut lock_hold = Duration::ZERO;
@@ -3443,11 +3604,11 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         captured
     };
 
-    let mut node_snapshots: Vec<rhythm_core::NodeSnapshot> = if let Some(ref runtime) = runtime {
-        runtime.engine_all_effective_node_snapshots()
-    } else {
-        bootstrap_node_snapshots_from_state(state)
-    };
+    let mut node_snapshots = state_node_snapshots(
+        state,
+        runtime.as_ref(),
+        crate::state_selection::StateNodes::All,
+    );
     node_snapshots.retain(|snap| !crate::topology::is_internal_light_node_id(&snap.id));
     node_snapshots.sort_by(|left, right| left.id.cmp(&right.id));
 
@@ -3470,6 +3631,9 @@ pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
         power_save,
     )
     .as_secs();
+
+    // Child overrides still influence the global interval, but do not need DTOs.
+    retain_state_nodes(state, &mut node_snapshots, scope);
 
     let nodes = {
         let waiting = Instant::now();
@@ -3805,6 +3969,13 @@ pub fn build_node_state(state: &SharedState, node_id: &str) -> Result<NodeStateD
 
 /// Build a lightweight node-state snapshot for polling.
 pub fn build_nodes_state(state: &SharedState) -> Result<String> {
+    build_nodes_state_for_scope(state, crate::state_selection::StateNodes::All)
+}
+
+pub fn build_nodes_state_for_scope(
+    state: &SharedState,
+    scope: crate::state_selection::StateNodes,
+) -> Result<String> {
     let (
         hub_connected,
         runtime,
@@ -3842,11 +4013,7 @@ pub fn build_nodes_state(state: &SharedState) -> Result<String> {
         )
     };
 
-    let mut node_snapshots: Vec<rhythm_core::NodeSnapshot> = if let Some(ref runtime) = runtime {
-        runtime.engine_all_effective_node_snapshots()
-    } else {
-        bootstrap_node_snapshots_from_state(state)
-    };
+    let mut node_snapshots = state_node_snapshots(state, runtime.as_ref(), scope);
     node_snapshots.sort_by(|left, right| left.id.cmp(&right.id));
 
     let display_context = SnapshotDisplayContext::new(RoomLightingContext {

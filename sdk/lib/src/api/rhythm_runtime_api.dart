@@ -4,6 +4,8 @@ import 'package:logging/logging.dart';
 import '../api_auth.dart';
 import '../json_parsing.dart';
 import '../models/rhythm_room.dart';
+import '../models/rhythm_hello.dart';
+import '../models/rhythm_state_scope.dart';
 import '../models/rhythm_runtime.dart';
 import '../rhythm_log_interceptor.dart';
 import 'rhythm_server_api.dart';
@@ -41,9 +43,42 @@ class RhythmRuntimeApi {
     _dio.interceptors.add(RhythmLogInterceptor(_log));
   }
 
-  Future<RhythmNodesPollResponse> getNodesState() async {
+  /// Errors propagate so callers can preserve cache instead of treating failure
+  /// as a successful empty response. Legacy servers may return their full state.
+  Future<RhythmHello> getState({
+    Set<RhythmStateInclude> include = const {RhythmStateInclude.base},
+    bool authoritative = false,
+  }) async {
+    if (include.contains(RhythmStateInclude.controls) &&
+        include.contains(RhythmStateInclude.nodes)) {
+      throw ArgumentError('controls and nodes are mutually exclusive');
+    }
+    final response = await _dio.get('api/state', queryParameters: {
+      'include':
+          include.isEmpty ? 'base' : include.map((v) => v.name).join(','),
+      if (authoritative) 'authoritative': 'true',
+    });
+    final data = jsonMap(response.data);
+    if (data == null) throw const FormatException('Invalid state response');
+    final hello = RhythmHello.fromJson(data);
+    if (hello.stateScope case final scope?) {
+      if (!scope.included.containsAll(include)) {
+        throw const FormatException(
+            'State response omitted requested sections');
+      }
+    } else if (data['nodes'] is! List && data['rooms'] is! List) {
+      throw const FormatException('Incomplete legacy state response');
+    }
+    return hello;
+  }
+
+  Future<RhythmNodesPollResponse> getNodesState(
+      {bool controlsOnly = false}) async {
     try {
-      final response = await _dio.get('api/nodes/state');
+      final response = controlsOnly
+          ? await _dio.get('api/nodes/state',
+              queryParameters: const {'scope': 'controls'})
+          : await _dio.get('api/nodes/state');
       final data = jsonMap(response.data);
       if (data == null) return const RhythmNodesPollResponse.empty();
       final result = RhythmNodesPollResponse.fromJson(data);
@@ -54,7 +89,6 @@ class RhythmRuntimeApi {
     }
     return const RhythmNodesPollResponse.empty();
   }
-
 
   Future<RhythmHistory> getHistory({
     int? limit,
@@ -116,9 +150,6 @@ class RhythmRuntimeApi {
     }
     return null;
   }
-
-
-
 
   void _cacheStates(List<RhythmRoomState> states) {
     if (states.isNotEmpty) {

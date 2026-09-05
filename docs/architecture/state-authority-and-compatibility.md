@@ -1,5 +1,8 @@
 # State Authority and Compatibility
 
+Selective read scopes, omission/empty cache semantics and mixed-version behavior
+are specified in [Selective state reads](selective-state.md).
+
 This document captures recurring distributed-state rules for the app, SDK, server, appliance, and integrations.
 
 ## Authority ladder

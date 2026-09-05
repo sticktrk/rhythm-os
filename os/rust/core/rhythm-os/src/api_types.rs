@@ -276,6 +276,7 @@ pub struct HubStartupRetryDto {
 
 /// API capability metadata in state snapshot.
 pub const API_SCHEMA_VERSION: u32 = 2;
+pub const FEATURE_STATE_INCLUDES_V1: &str = "state_includes_v1";
 pub const FEATURE_ASYNC_DEBUG_BUNDLE_UPLOAD: &str = "async_debug_bundle_upload";
 pub const FEATURE_MOTION_ACTIVATION_TOGGLE: &str = "motion_activation_toggle";
 pub const FEATURE_ROOM_SCHEDULE_V1: &str = "room_schedule_v1";
@@ -312,6 +313,7 @@ impl Serialize for ApiCapabilitiesDto {
         state.serialize_field(
             "features",
             &[
+                FEATURE_STATE_INCLUDES_V1,
                 FEATURE_ASYNC_DEBUG_BUNDLE_UPLOAD,
                 FEATURE_MOTION_ACTIVATION_TOGGLE,
                 FEATURE_ROOM_SCHEDULE_V1,

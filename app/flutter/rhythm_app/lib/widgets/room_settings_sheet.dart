@@ -17,6 +17,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
 import '../screens/hubs/room_device_add_flow.dart';
 import '../utils/app_color_temperature.dart';
 import 'device_detail_sheet.dart';
+import 'device_details_loader.dart';
 import 'light_delivery_warning_signal.dart';
 import 'low_glow_switch.dart' show LightProfileOverrideBadge;
 import 'segmented_tab_bar.dart';
@@ -179,9 +180,12 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
                   child: AnimatedSwitcher(
                     duration: const Duration(milliseconds: 200),
                     child: switch (_selectedTab) {
-                      _SheetTab.bulbs => _buildBulbsContent(context),
-                      _SheetTab.motion => _buildMotionContent(context),
-                      _SheetTab.buttons => _buildButtonsContent(context),
+                      _SheetTab.bulbs =>
+                        DeviceDetailsLoader(child: _buildBulbsContent(context)),
+                      _SheetTab.motion => DeviceDetailsLoader(
+                          child: _buildMotionContent(context)),
+                      _SheetTab.buttons => DeviceDetailsLoader(
+                          child: _buildButtonsContent(context)),
                       _SheetTab.lighting => RoomScheduleTab(
                           roomId: room.id,
                           roomName: _roomName,
