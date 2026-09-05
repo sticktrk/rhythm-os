@@ -162,6 +162,13 @@ pub struct BackupConfiguration {
     pub light_schedules: Vec<rhythm_core::LightScheduleConfig>,
     #[serde(default)]
     pub scenes: Vec<SceneDefinition>,
+    /// Factory-default scene IDs the backed-up install had already been
+    /// offered. Restoring adopts this marker and then seeds any factory scene
+    /// newer than it, so a backup from a previous release does not silently
+    /// drop scenes the restoring install was seeded with. An empty list means
+    /// the backup predates seed tracking.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub seeded_factory_scene_ids: Vec<String>,
     #[serde(default)]
     pub rooms: Vec<BackupConfigurationRoom>,
 }
@@ -181,6 +188,7 @@ impl Default for BackupConfiguration {
             mode_transitions: Vec::new(),
             light_schedules: Vec::new(),
             scenes: Vec::new(),
+            seeded_factory_scene_ids: Vec::new(),
             rooms: Vec::new(),
         }
     }

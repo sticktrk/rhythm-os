@@ -2235,11 +2235,11 @@ fn decode_authority_state(
 /// Loads config, location, settings, and hub credentials from the
 /// configured [`Storage`] backend. Safe to call on any platform.
 /// Outcome of the one-time factory-default scene seed.
-struct FactorySceneSeedOutcome {
+pub(crate) struct FactorySceneSeedOutcome {
     /// How many factory-default scenes this load added to the install.
-    seeded_count: usize,
+    pub(crate) seeded_count: usize,
     /// Whether the persisted seed marker needs to be rewritten.
-    marker_changed: bool,
+    pub(crate) marker_changed: bool,
 }
 
 /// Seed factory-default scenes that this install has never been offered.
@@ -2250,7 +2250,10 @@ struct FactorySceneSeedOutcome {
 /// exactly once per scene ID: the marker written back to `scenes.json` records
 /// every factory ID the install has seen, so a factory scene the user deletes
 /// stays deleted across restarts, backup restores, and bundle imports.
-fn seed_new_factory_default_scenes(
+///
+/// Backup restore calls this with the marker carried by the backup so the
+/// restored scene set is brought up to date the same way a startup load is.
+pub(crate) fn seed_new_factory_default_scenes(
     s: &mut crate::state::AppState,
     persisted_marker: BTreeSet<String>,
 ) -> FactorySceneSeedOutcome {

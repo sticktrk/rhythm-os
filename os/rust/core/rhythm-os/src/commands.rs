@@ -1156,6 +1156,11 @@ impl RoomProfileSettingsPatch {
             settings.mood_profile_id = mood_profile_id.clone();
         }
         if let Some(mood_scene_id) = &self.mood_scene_id {
+            if settings.mood_scene_id != *mood_scene_id {
+                // A new binding starts its palette from the first slot; the
+                // offset only ever describes the scene it was written with.
+                settings.mood_scene_palette_offset = None;
+            }
             settings.mood_scene_id = mood_scene_id.clone();
         }
         if let Some(fade_ms) = &self.fade_ms {
@@ -4622,6 +4627,11 @@ struct SceneApplicationPlan {
     commands: Vec<SceneLightCommand>,
     affected_node_ids: Vec<String>,
     unresolved_node_ids: Vec<String>,
+    /// How many palette slots this plan consumed. A whole-home apply advances
+    /// the next target's starting slot by this amount so a multi-colour
+    /// palette keeps rotating across rooms. A room rendered with one grouped
+    /// command consumes one slot even when it owns several lights.
+    palette_slots_consumed: usize,
 }
 
 #[derive(Clone)]
@@ -4794,6 +4804,7 @@ fn build_scene_application_plan_locked(
             s.topology
                 .light_node_uses_device_dispatch(node_id, &s.canonical_registry)
         });
+    let mut palette_slots_consumed = 0usize;
     let room_default_dispatched = if s.topology.get(target_id).is_some()
         && explicit_node_ids.is_empty()
         && !direct_palette_room
@@ -4801,6 +4812,7 @@ fn build_scene_application_plan_locked(
         let room_output = if layer.palette.is_empty() {
             layer.default_output.as_ref()
         } else {
+            palette_slots_consumed = 1;
             layer.palette.get(palette_offset % layer.palette.len())
         };
         if let Some(room_output) = room_output {
@@ -4823,6 +4835,7 @@ fn build_scene_application_plan_locked(
 
     if !room_default_dispatched {
         if !layer.palette.is_empty() {
+            palette_slots_consumed = implicit_node_ids.len();
             for (index, node_id) in implicit_node_ids.iter().enumerate() {
                 let output =
                     &layer.palette[palette_offset.wrapping_add(index) % layer.palette.len()];
@@ -4870,20 +4883,16 @@ fn build_scene_application_plan_locked(
         commands,
         affected_node_ids,
         unresolved_node_ids,
+        palette_slots_consumed,
     })
 }
 
-/// Rendered scene lights for one target plus the palette slots the target
-/// consumed.
-///
-/// `palette_advance` is how many implicit palette assignments this target used.
-/// Single-target applies ignore it; the whole-home apply threads it forward so a
-/// multi-colour palette keeps rotating across rooms instead of restarting on
-/// the same colour in every room.
+/// Rendered scene lights for one target plus the palette slots the render
+/// consumed (one per implicit light when the scene has a palette).
 struct RenderedSceneTarget {
     scope_node_ids: BTreeSet<String>,
     lights: Vec<RenderedSceneLight>,
-    palette_advance: usize,
+    palette_slots_consumed: usize,
 }
 
 fn render_scene_lights_locked(
@@ -4912,9 +4921,9 @@ fn render_scene_lights_locked(
         .filter(|node_id| !outputs.contains_key(*node_id))
         .cloned()
         .collect::<Vec<_>>();
-    let mut palette_advance = 0usize;
+    let mut palette_slots_consumed = 0usize;
     if !layer.palette.is_empty() {
-        palette_advance = implicit_node_ids.len();
+        palette_slots_consumed = implicit_node_ids.len();
         for (index, node_id) in implicit_node_ids.into_iter().enumerate() {
             outputs.insert(
                 node_id,
@@ -4942,7 +4951,7 @@ fn render_scene_lights_locked(
     Ok(RenderedSceneTarget {
         scope_node_ids,
         lights: rendered,
-        palette_advance,
+        palette_slots_consumed,
     })
 }
 
@@ -5117,6 +5126,7 @@ fn companion_scene_plan_locked(
     s: &AppState,
     rendered: &[RenderedSceneLight],
     managed: &[ManagedSceneDispatch],
+    palette_slots_consumed: usize,
 ) -> Result<SceneApplicationPlan> {
     let projected_node_ids = managed
         .iter()
@@ -5166,7 +5176,18 @@ fn companion_scene_plan_locked(
         commands,
         affected_node_ids,
         unresolved_node_ids,
+        palette_slots_consumed,
     })
+}
+
+/// The palette slot a node's bound mood scene starts at, as persisted by the
+/// apply that bound it. Nodes bound by a single-target apply start at 0.
+fn stored_mood_palette_offset(runtime: &Arc<dyn RuntimeHandle>, node_id: &str) -> usize {
+    runtime
+        .engine_effective_node_snapshot(node_id)
+        .and_then(|snap| snap.profile_settings.mood_scene_palette_offset)
+        .map(|offset| offset as usize)
+        .unwrap_or(0)
 }
 
 fn set_scene_committed_state(
@@ -5175,6 +5196,7 @@ fn set_scene_committed_state(
     scene_id: &str,
     target_id: &str,
     affected_node_ids: &[String],
+    palette_offset: usize,
 ) {
     let mut state_node_ids: BTreeSet<String> = BTreeSet::new();
     if runtime
@@ -5192,6 +5214,9 @@ fn set_scene_committed_state(
         };
         let mut profile_settings = snap.profile_settings.clone();
         profile_settings.mood_scene_id = Some(scene_id.to_string());
+        profile_settings.mood_scene_palette_offset = u32::try_from(palette_offset)
+            .ok()
+            .filter(|offset| *offset > 0);
         runtime.restore_node_state(
             &node_id,
             RestoredNodeState {
@@ -5226,40 +5251,50 @@ fn clear_scene_preview_sessions_locked(
     });
 }
 
+/// Dispatch one planned scene light command synchronously and reconcile the
+/// lights-on cache and node state event for it.
+fn dispatch_scene_light_command(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    command: &SceneLightCommand,
+) -> Result<()> {
+    let lights_on = match &command.dispatch {
+        SceneLightDispatch::On(lighting_command) => {
+            log_room_command_dispatch(
+                runtime.as_ref(),
+                &command.dispatch_node_id,
+                lighting_command,
+            );
+            runtime.apply_room_command(&command.dispatch_node_id, lighting_command.clone())?;
+            true
+        }
+        SceneLightDispatch::Off(transition_ms) => {
+            runtime.lights_off_room(&command.dispatch_node_id, *transition_ms)?;
+            false
+        }
+    };
+    update_lights_on_cache_for_runtime_node(state, runtime, &command.public_node_id, lights_on);
+    emit_node_state_event_after_apply(state, runtime, &command.public_node_id);
+    Ok(())
+}
+
 fn dispatch_scene_plan(
     state: &SharedState,
     runtime: &Arc<dyn RuntimeHandle>,
     plan: &SceneApplicationPlan,
 ) -> Result<()> {
     for command in &plan.commands {
-        let lights_on = match &command.dispatch {
-            SceneLightDispatch::On(lighting_command) => {
-                log_room_command_dispatch(
-                    runtime.as_ref(),
-                    &command.dispatch_node_id,
-                    lighting_command,
-                );
-                runtime.apply_room_command(&command.dispatch_node_id, lighting_command.clone())?;
-                true
-            }
-            SceneLightDispatch::Off(transition_ms) => {
-                runtime.lights_off_room(&command.dispatch_node_id, *transition_ms)?;
-                false
-            }
-        };
-        update_lights_on_cache_for_runtime_node(state, runtime, &command.public_node_id, lights_on);
-        emit_node_state_event_after_apply(state, runtime, &command.public_node_id);
+        dispatch_scene_light_command(state, runtime, command)?;
     }
     Ok(())
 }
 
-/// One target's planned scene dispatch: the light command plan, any managed
-/// (grouped) projections that must be applied by their owning integration, and
-/// how many palette slots the target consumed.
+/// One target's planned scene dispatch: the light command plan and any managed
+/// (grouped) projections that must be applied by their owning integration.
+/// The plan itself records how many palette slots the target consumed.
 struct PlannedSceneTarget {
     plan: SceneApplicationPlan,
     managed_dispatches: Vec<ManagedSceneDispatch>,
-    palette_advance: usize,
 }
 
 /// Plan a single scene target from one serialized state snapshot.
@@ -5296,12 +5331,16 @@ fn plan_scene_target_locked(
             palette_offset,
         )?
     } else {
-        companion_scene_plan_locked(s, &rendered.lights, &managed_dispatches)?
+        companion_scene_plan_locked(
+            s,
+            &rendered.lights,
+            &managed_dispatches,
+            rendered.palette_slots_consumed,
+        )?
     };
     Ok(PlannedSceneTarget {
         plan,
         managed_dispatches,
-        palette_advance: rendered.palette_advance,
     })
 }
 
@@ -5330,6 +5369,11 @@ fn apply_managed_scene_dispatches(
     Ok(())
 }
 
+/// Apply one scene definition to one target.
+///
+/// `palette_offset` is the palette slot the target starts at. User-initiated
+/// applies pass 0; re-applies of a node's bound mood scene pass the offset the
+/// binding was persisted with so a whole-home layout survives re-entry.
 fn do_scene_apply_definition_inner(
     state: &SharedState,
     source: SceneApplySource,
@@ -5338,6 +5382,7 @@ fn do_scene_apply_definition_inner(
     persist_state: bool,
     preview_id: Option<String>,
     ephemeral_projection: bool,
+    palette_offset: usize,
 ) -> Result<SceneApplyResponse> {
     let scene_transaction_lock = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -5370,14 +5415,19 @@ fn do_scene_apply_definition_inner(
         let runtime = s
             .hub_runtime()
             .ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
-        let planned =
-            plan_scene_target_locked(&s, &runtime, &scene, &target_id, request.transition_ms, 0)?;
+        let planned = plan_scene_target_locked(
+            &s,
+            &runtime,
+            &scene,
+            &target_id,
+            request.transition_ms,
+            palette_offset,
+        )?;
         (runtime, planned)
     };
     let PlannedSceneTarget {
         plan,
         managed_dispatches,
-        palette_advance: _,
     } = planned;
 
     apply_managed_scene_dispatches(state, &runtime, &managed_dispatches, ephemeral_projection)?;
@@ -5404,6 +5454,7 @@ fn do_scene_apply_definition_inner(
             &scene.id,
             &target_id,
             &plan.affected_node_ids,
+            palette_offset,
         );
         if let Ok(mut s) = state.lock() {
             clear_scene_preview_sessions_locked(&mut s, &target_id, &plan.affected_node_ids);
@@ -5429,6 +5480,7 @@ fn do_scene_apply_inner(
     commit_state: bool,
     persist_state: bool,
     preview_id: Option<String>,
+    palette_offset: usize,
 ) -> Result<SceneApplyResponse> {
     do_scene_apply_definition_inner(
         state,
@@ -5438,6 +5490,7 @@ fn do_scene_apply_inner(
         persist_state,
         preview_id,
         false,
+        palette_offset,
     )
 }
 
@@ -5672,7 +5725,8 @@ pub fn do_scene_apply(
     scene_id: &str,
     request: SceneApplyRequest,
 ) -> Result<String> {
-    let response = do_scene_apply_response(state, scene_id, request, true)?;
+    // A user-initiated single-target apply always starts the palette at slot 0.
+    let response = do_scene_apply_response(state, scene_id, request, true, 0)?;
     serde_json::to_string(&response).map_err(|e| anyhow::anyhow!("serialize scene apply: {}", e))
 }
 
@@ -5681,13 +5735,22 @@ fn do_scene_apply_response(
     scene_id: &str,
     request: SceneApplyRequest,
     persist_state: bool,
+    palette_offset: usize,
 ) -> Result<SceneApplyResponse> {
     let is_stored = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.scenes.contains_key(scene_id)
     };
     if is_stored {
-        return do_scene_apply_inner(state, scene_id, request, true, persist_state, None);
+        return do_scene_apply_inner(
+            state,
+            scene_id,
+            request,
+            true,
+            persist_state,
+            None,
+            palette_offset,
+        );
     }
     if is_native_scene_id(scene_id) {
         return do_native_scene_apply(state, scene_id, request, persist_state);
@@ -5753,6 +5816,13 @@ fn home_scene_targets_locked(s: &AppState, runtime: &Arc<dyn RuntimeHandle>) -> 
     }
 }
 
+/// Translate one planned scene light command into the work item the paced
+/// dispatcher hands to the node dispatch worker.
+///
+/// Pacing is producer-side (see [`spawn_paced_node_dispatcher`]), exactly as
+/// the active-mode apply paces its `ApplyNodeCommand` items. `LightsOffRoom`
+/// would otherwise also reserve the periodic dispatch slot on the worker, so it
+/// carries a zero consumer-side spacing to avoid pacing the same command twice.
 fn home_scene_work_item(
     command: &SceneLightCommand,
     dispatch_spacing: Duration,
@@ -5770,7 +5840,7 @@ fn home_scene_work_item(
             command_id: crate::logging::next_command_id("home-scene-apply"),
             node_id: command.dispatch_node_id.clone(),
             transition_ms: *transition_ms,
-            dispatch_spacing,
+            dispatch_spacing: Duration::ZERO,
             dispatch_generation,
         },
     }
@@ -5786,7 +5856,8 @@ fn home_scene_work_item(
 ///
 /// A failure on one target is reported in that target's `error` and does not
 /// abort the rest. The whole request only fails when the scene is missing, the
-/// scene is a room-bound native scene, or no target is eligible.
+/// scene is a room-bound native scene, no target is eligible, or every eligible
+/// target failed.
 pub fn do_home_scene_apply(
     state: &SharedState,
     scene_id: &str,
@@ -5845,10 +5916,11 @@ pub fn do_home_scene_apply(
                 request.transition_ms,
                 palette_offset,
             );
+            let target_offset = palette_offset;
             if let Ok(target) = &result {
-                palette_offset = palette_offset.wrapping_add(target.palette_advance);
+                palette_offset = palette_offset.wrapping_add(target.plan.palette_slots_consumed);
             }
-            planned.push((target_id.clone(), result));
+            planned.push((target_id.clone(), target_offset, result));
         }
         (runtime, targets, planned)
     };
@@ -5859,8 +5931,8 @@ pub fn do_home_scene_apply(
     }
 
     let mut results: Vec<HomeSceneTargetResult> = Vec::with_capacity(planned.len());
-    let mut applied: Vec<(String, SceneApplicationPlan)> = Vec::new();
-    for (target_id, planned_target) in planned {
+    let mut applied: Vec<(String, usize, SceneApplicationPlan)> = Vec::new();
+    for (target_id, palette_offset, planned_target) in planned {
         let failure = |error: String| HomeSceneTargetResult {
             target_id: target_id.clone(),
             affected_node_ids: Vec::new(),
@@ -5895,57 +5967,77 @@ pub fn do_home_scene_apply(
             unresolved_node_ids: target.plan.unresolved_node_ids.clone(),
             error: None,
         });
-        applied.push((target_id, target.plan));
+        applied.push((target_id, palette_offset, target.plan));
     }
 
     // External controllers take this same lock around their own dispatch, so it
     // must be released before per-node light commands run.
     drop(transaction);
 
-    let dispatch_generation = {
+    let (dispatch_generation, light_breaker_enabled, work_tx) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.light_dispatch_generation
+        (
+            s.light_dispatch_generation,
+            s.light_breaker_enabled,
+            s.work_tx.clone(),
+        )
     };
-    let work_items: Vec<WorkItem> = applied
-        .iter()
-        .flat_map(|(_, plan)| plan.commands.iter())
-        .map(|command| home_scene_work_item(command, dispatch_spacing, dispatch_generation))
-        .collect();
-    let dispatch_count = work_items.len();
-    let queued = if work_items.is_empty() {
-        false
-    } else {
-        match queue_node_dispatch_work_items(
-            state,
-            "home_scene_apply",
-            work_items,
-            dispatch_spacing,
-        ) {
-            Ok(queued) => queued,
-            Err(error) => {
-                warn!(
-                    target: "cmd",
-                    "home_scene_apply: failed to queue node dispatches: {}",
-                    error
-                );
-                false
+    let dispatch_count: usize = applied.iter().map(|(_, _, plan)| plan.commands.len()).sum();
+
+    // Per-node commands go through the same producer-paced dispatcher the
+    // active-mode apply uses: one thread hands the work items to the node
+    // dispatch worker `dispatch_spacing` apart and stops when the dispatch
+    // generation moves on. That worker drops generated light output while the
+    // light breaker is off, but a scene apply is explicit user intent (the
+    // single-target apply never consults the breaker), so with the breaker off
+    // the same commands run synchronously and paced instead of being lost.
+    let mut queued = false;
+    if dispatch_count > 0 && light_breaker_enabled {
+        if let Some(tx) = work_tx {
+            let work_items: Vec<WorkItem> = applied
+                .iter()
+                .flat_map(|(_, _, plan)| plan.commands.iter())
+                .map(|command| home_scene_work_item(command, dispatch_spacing, dispatch_generation))
+                .collect();
+            match spawn_paced_node_dispatcher(
+                state,
+                tx,
+                "home_scene_apply",
+                work_items,
+                dispatch_spacing,
+                dispatch_generation,
+            ) {
+                Ok(()) => queued = true,
+                Err(error) => {
+                    warn!(
+                        target: "cmd",
+                        "home_scene_apply: failed to queue node dispatches: {}",
+                        error
+                    );
+                }
             }
         }
-    };
+    }
 
     if !queued {
-        // No dispatch worker (tests, CLI, or a runtime without a work queue):
-        // fall back to the synchronous per-target dispatch.
+        // No dispatch worker (tests, CLI, a runtime without a work queue) or
+        // the light breaker is off: dispatch synchronously with the same
+        // spacing between hub commands.
         let mut dispatch_failures: Vec<(String, String)> = Vec::new();
-        applied.retain(
-            |(target_id, plan)| match dispatch_scene_plan(state, &runtime, plan) {
-                Ok(()) => true,
-                Err(error) => {
-                    dispatch_failures.push((target_id.clone(), error.to_string()));
-                    false
+        let mut dispatched_any = false;
+        applied.retain(|(target_id, _, plan)| {
+            for command in &plan.commands {
+                if dispatched_any && !dispatch_spacing.is_zero() {
+                    std::thread::sleep(dispatch_spacing);
                 }
-            },
-        );
+                dispatched_any = true;
+                if let Err(error) = dispatch_scene_light_command(state, &runtime, command) {
+                    dispatch_failures.push((target_id.clone(), error.to_string()));
+                    return false;
+                }
+            }
+            true
+        });
         for (target_id, error) in dispatch_failures {
             if let Some(result) = results
                 .iter_mut()
@@ -5958,15 +6050,32 @@ pub fn do_home_scene_apply(
         }
     }
 
+    if applied.is_empty() {
+        // Nothing was applied anywhere: report that as the request failing,
+        // exactly like a single-target apply does, instead of a success with
+        // zero rooms. The first per-target error is the most useful detail.
+        let detail = results
+            .iter()
+            .find_map(|result| result.error.clone())
+            .unwrap_or_default();
+        anyhow::bail!(
+            "Scene '{}' could not be applied to any room: {}",
+            scene.id,
+            detail
+        );
+    }
+
     // Mood binding is committed synchronously so the app sees the scene on every
-    // room immediately, regardless of dispatch pacing.
-    for (target_id, plan) in &applied {
+    // room immediately, regardless of dispatch pacing. Each target keeps the
+    // palette slot it started at so re-entering Mood reproduces this layout.
+    for (target_id, palette_offset, plan) in &applied {
         set_scene_committed_state(
             state,
             &runtime,
             &scene.id,
             target_id,
             &plan.affected_node_ids,
+            *palette_offset,
         );
         if let Ok(mut s) = state.lock() {
             clear_scene_preview_sessions_locked(&mut s, target_id, &plan.affected_node_ids);
@@ -6073,7 +6182,7 @@ fn do_native_scene_apply(
             unresolved_node_ids = plan.unresolved_node_ids;
         }
 
-        set_scene_committed_state(state, &runtime, scene_id, &target_id, &affected_node_ids);
+        set_scene_committed_state(state, &runtime, scene_id, &target_id, &affected_node_ids, 0);
         if let Ok(mut s) = state.lock() {
             clear_scene_preview_sessions_locked(&mut s, &target_id, &affected_node_ids);
         }
@@ -6173,6 +6282,7 @@ fn build_native_scene_companion_plan_locked(
             .collect(),
         commands,
         unresolved_node_ids,
+        palette_slots_consumed: 0,
     }))
 }
 
@@ -6230,6 +6340,7 @@ pub fn do_scene_preview(
         false,
         false,
         Some(preview_id.clone()),
+        0,
     )?;
     record_scene_preview_session(
         state,
@@ -6263,6 +6374,7 @@ pub fn do_scene_draft_preview(
         false,
         Some(preview_id.clone()),
         true,
+        0,
     )?;
     record_scene_preview_session(
         state,
@@ -6314,6 +6426,14 @@ pub fn do_scene_preview_cancel(state: &SharedState, preview_id: &str) -> Result<
             .ok()
             .is_some_and(|s| s.scenes.contains_key(&previous_scene_id))
         {
+            // Restore the previous binding exactly as it was rendered, including
+            // the palette slot a whole-home apply gave this target.
+            let palette_offset = state
+                .lock()
+                .ok()
+                .and_then(|s| s.hub_runtime())
+                .map(|runtime| stored_mood_palette_offset(&runtime, &preview.target_node_id))
+                .unwrap_or(0);
             let _ = do_scene_apply_inner(
                 state,
                 &previous_scene_id,
@@ -6324,6 +6444,7 @@ pub fn do_scene_preview_cancel(state: &SharedState, preview_id: &str) -> Result<
                 false,
                 false,
                 None,
+                palette_offset,
             );
         }
     } else if let Some(runtime) = state.lock().ok().and_then(|s| s.hub_runtime()) {
@@ -6371,6 +6492,10 @@ fn apply_mood_scene_or_tick(
     persist_state: bool,
 ) -> Result<()> {
     if let Some(scene_id) = mood_scene_id {
+        // Re-entering Mood re-renders the bound scene from the palette slot it
+        // was bound with, so a whole-home layout survives leaving and
+        // re-entering Mood.
+        let palette_offset = stored_mood_palette_offset(runtime, node_id);
         do_scene_apply_response(
             state,
             scene_id,
@@ -6379,6 +6504,7 @@ fn apply_mood_scene_or_tick(
                 transition_ms: None,
             },
             persist_state,
+            palette_offset,
         )?;
         return Ok(());
     }
@@ -6678,6 +6804,7 @@ fn backup_configuration_from_parts(
         mode_transitions: s.mode_transition_configs(),
         light_schedules: s.light_schedule_configs(),
         scenes: s.scenes.values().cloned().collect(),
+        seeded_factory_scene_ids: s.seeded_factory_scene_ids.iter().cloned().collect(),
         rooms,
     }
 }
@@ -6873,6 +7000,9 @@ fn factory_default_backup_configuration() -> BackupConfiguration {
         mode_transitions: factory_default_mode_transition_configs(),
         light_schedules: Vec::new(),
         scenes: factory_default_scene_map().into_values().collect(),
+        seeded_factory_scene_ids: crate::factory_default_config::factory_default_scene_ids()
+            .into_iter()
+            .collect(),
         rooms: Vec::new(),
     }
 }
@@ -9044,6 +9174,9 @@ fn update_node_mood_scene_color(
     update: MoodSceneColorUpdate,
 ) -> Result<()> {
     let node_scene_id = node_mood_scene_id(node_id);
+    // Editing one light re-renders the node's bound scene from the palette
+    // slot it was bound with so the untouched lights keep their colours.
+    let palette_offset = stored_mood_palette_offset(runtime, node_id);
     let (scene_id, seed_scene, current_scene_is_node_scene) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let current_scene_id = snapshot
@@ -9189,6 +9322,7 @@ fn update_node_mood_scene_color(
         true,
         false,
         None,
+        palette_offset,
     )?;
     update_lights_on_cache_for_runtime_node(state, runtime, node_id, true);
     emit_node_state_event_after_apply(state, runtime, node_id);
@@ -9213,6 +9347,7 @@ fn update_node_mood_scene_brightness(
         .mood_scene_id
         .clone()
         .ok_or_else(|| anyhow::anyhow!("Node '{}' has no mood scene", node_id))?;
+    let palette_offset = stored_mood_palette_offset(runtime, node_id);
     let node_scene_id = node_mood_scene_id(node_id);
     let updates_generated_scene = bound_scene_id == node_scene_id;
     let scope_node_ids = {
@@ -9282,6 +9417,7 @@ fn update_node_mood_scene_brightness(
         true,
         false,
         None,
+        palette_offset,
     )?;
     update_lights_on_cache_for_runtime_node(state, runtime, node_id, true);
     emit_node_state_event_after_apply(state, runtime, node_id);
@@ -9394,49 +9530,27 @@ fn dispatch_room_commands(
         return;
     };
 
-    let room_count = room_commands.len();
     let fallback_commands = room_commands.clone();
-    let dispatcher_state = state.clone();
-    if let Err(e) = std::thread::Builder::new()
-        .name("room-dispatch".to_string())
-        .spawn(move || {
-            for (idx, (node_id, command)) in room_commands.into_iter().enumerate() {
-                if !crate::periodic::light_dispatch_generation_current(
-                    &dispatcher_state,
-                    dispatch_generation,
-                ) {
-                    tracing::debug!(
-                        target: "cmd",
-                        event = "apply_node_command_skipped",
-                        node_id = %node_id,
-                        dispatch_generation,
-                        reason = "stale_dispatch_generation",
-                        "Stopping stale room dispatcher"
-                    );
-                    return;
-                }
-                if send_work_item_with_pending(
-                    &dispatcher_state,
-                    &tx,
-                    crate::state::WorkItem::ApplyNodeCommand {
-                        command_id: crate::logging::next_command_id("apply-node-command"),
-                        node_id,
-                        command,
-                        dispatch_spacing: phase_gap,
-                        dispatch_generation,
-                    },
-                )
-                .is_err()
-                {
-                    warn!(target: "cmd", "active_mode_apply: room dispatcher disconnected");
-                    return;
-                }
-                if idx + 1 < room_count && !phase_gap.is_zero() {
-                    std::thread::sleep(phase_gap);
-                }
-            }
-        })
-    {
+    let work_items = room_commands
+        .into_iter()
+        .map(
+            |(node_id, command)| crate::state::WorkItem::ApplyNodeCommand {
+                command_id: crate::logging::next_command_id("apply-node-command"),
+                node_id,
+                command,
+                dispatch_spacing: phase_gap,
+                dispatch_generation,
+            },
+        )
+        .collect();
+    if let Err(e) = spawn_paced_node_dispatcher(
+        state,
+        tx,
+        "active_mode_apply",
+        work_items,
+        phase_gap,
+        dispatch_generation,
+    ) {
         warn!(
             target: "cmd",
             "active_mode_apply: failed to spawn room dispatcher thread: {}",
@@ -9450,6 +9564,55 @@ fn dispatch_room_commands(
             dispatch_generation,
         );
     }
+}
+
+/// Hand work items to the node dispatch worker from a dedicated thread, one
+/// every `spacing`, stopping as soon as the light dispatch generation moves on.
+///
+/// This is the producer-side pacing shared by the active-mode apply and the
+/// whole-home scene apply. The worker applies `ApplyNodeCommand` items the
+/// moment they arrive (it deliberately does not wait on the periodic dispatch
+/// slot), so the spacing between sends is the spacing between hub commands.
+fn spawn_paced_node_dispatcher(
+    state: &SharedState,
+    tx: std::sync::mpsc::SyncSender<crate::state::WorkItem>,
+    label: &'static str,
+    work_items: Vec<crate::state::WorkItem>,
+    spacing: Duration,
+    dispatch_generation: u64,
+) -> Result<()> {
+    let item_count = work_items.len();
+    let dispatcher_state = state.clone();
+    std::thread::Builder::new()
+        .name("room-dispatch".to_string())
+        .spawn(move || {
+            for (idx, item) in work_items.into_iter().enumerate() {
+                if !crate::periodic::light_dispatch_generation_current(
+                    &dispatcher_state,
+                    dispatch_generation,
+                ) {
+                    tracing::debug!(
+                        target: "cmd",
+                        event = "apply_node_command_skipped",
+                        node_id = item.pending_node_id().unwrap_or_default(),
+                        dispatch_generation,
+                        reason = "stale_dispatch_generation",
+                        "Stopping stale {} dispatcher",
+                        label
+                    );
+                    return;
+                }
+                if send_work_item_with_pending(&dispatcher_state, &tx, item).is_err() {
+                    warn!(target: "cmd", "{}: node dispatcher disconnected", label);
+                    return;
+                }
+                if idx + 1 < item_count && !spacing.is_zero() {
+                    std::thread::sleep(spacing);
+                }
+            }
+        })
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("{}: failed to spawn node dispatcher: {}", label, e))
 }
 
 fn build_room_command_from_values(
@@ -12538,12 +12701,26 @@ fn apply_backup_configuration(
     let imported_mode_transitions = configuration.mode_transitions;
     let imported_light_schedules = configuration.light_schedules;
     let imported_scenes = normalized_scene_map(configuration.scenes)?;
+    let imported_seed_marker: BTreeSet<String> =
+        configuration.seeded_factory_scene_ids.into_iter().collect();
     let imported_rooms = configuration.rooms;
 
     let (profiles_to_apply, runtimes) = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.replace_light_profile_configs(imported_profiles);
         s.scenes = imported_scenes;
+        // The restored install adopts the backup's view of which factory scenes
+        // it was offered, then receives anything newer exactly once, the same
+        // way a startup load does. A backup written before seed tracking is
+        // treated as having been offered only the scenes that shipped then.
+        let seed = crate::storage::seed_new_factory_default_scenes(&mut s, imported_seed_marker);
+        if seed.seeded_count > 0 {
+            info!(
+                target: "cmd",
+                "backup_configuration_import: seeded {} factory-default scene(s) newer than the backup",
+                seed.seeded_count
+            );
+        }
         persist_light_profiles_locked(&s);
         persist_scenes_locked(&s);
         (
@@ -22149,6 +22326,7 @@ mod tests {
             mood_enabled: Some(true),
             mood_profile_id: Some("mood".to_string()),
             mood_scene_id: Some("scene".to_string()),
+            mood_scene_palette_offset: None,
             fade_ms: Some(TimerSetting::Fixed { value: 100 }),
             motion_timeout_secs: Some(TimerSetting::Fixed { value: 20 }),
             motion_activation_enabled: Some(false),
@@ -24280,7 +24458,7 @@ mod tests {
             HomeSceneApplyRequest {
                 transition_ms: None,
             },
-            default_http_batch_dispatch_spacing(),
+            std::time::Duration::ZERO,
         )
         .unwrap();
 
@@ -24329,7 +24507,7 @@ mod tests {
             HomeSceneApplyRequest {
                 transition_ms: None,
             },
-            default_http_batch_dispatch_spacing(),
+            std::time::Duration::ZERO,
         )
         .unwrap();
 
@@ -24381,7 +24559,7 @@ mod tests {
             HomeSceneApplyRequest {
                 transition_ms: None,
             },
-            default_http_batch_dispatch_spacing(),
+            std::time::Duration::ZERO,
         )
         .unwrap();
 
@@ -24413,7 +24591,7 @@ mod tests {
             HomeSceneApplyRequest {
                 transition_ms: None,
             },
-            default_http_batch_dispatch_spacing(),
+            std::time::Duration::ZERO,
         )
         .unwrap();
 
@@ -24481,7 +24659,7 @@ mod tests {
             HomeSceneApplyRequest {
                 transition_ms: None,
             },
-            default_http_batch_dispatch_spacing(),
+            std::time::Duration::ZERO,
         )
         .unwrap();
 
@@ -24509,7 +24687,7 @@ mod tests {
             HomeSceneApplyRequest {
                 transition_ms: None,
             },
-            default_http_batch_dispatch_spacing(),
+            std::time::Duration::ZERO,
         )
         .unwrap_err();
 
@@ -24543,7 +24721,7 @@ mod tests {
             HomeSceneApplyRequest {
                 transition_ms: None,
             },
-            default_http_batch_dispatch_spacing(),
+            std::time::Duration::ZERO,
         )
         .unwrap();
 
@@ -24577,11 +24755,208 @@ mod tests {
             HomeSceneApplyRequest {
                 transition_ms: None,
             },
-            default_http_batch_dispatch_spacing(),
+            std::time::Duration::ZERO,
         )
         .unwrap_err();
 
         assert!(error.to_string().contains("not found"), "{error}");
+    }
+
+    #[test]
+    fn home_scene_apply_fails_when_every_target_fails() {
+        // A composite controller makes unroutable nodes fail to plan, and the
+        // only room in the house is a ghost room whose light is unknown to the
+        // topology.
+        let (state, runtime) = setup_state(vec![make_snapshot("room-z", false, false)]);
+        state.lock().unwrap().composite_controller =
+            Some(Arc::new(rhythm_core::CompositeController::new()));
+        runtime
+            .snapshots
+            .lock()
+            .unwrap()
+            .push(make_light_child_snapshot("ghost-light", "room-z"));
+        do_scene_upsert(
+            &state,
+            scene_with_palette("halloween", &halloween_palette()),
+        )
+        .unwrap();
+
+        let error = do_home_scene_apply(
+            &state,
+            "halloween",
+            HomeSceneApplyRequest {
+                transition_ms: None,
+            },
+            std::time::Duration::ZERO,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("could not be applied to any room"),
+            "unexpected error: {error}"
+        );
+        assert!(runtime.applied_commands().is_empty());
+        let room = runtime.engine_room_snapshot("room-z").unwrap();
+        assert_eq!(
+            room.profile_settings.mood_scene_id, None,
+            "a request that applied nothing must bind nothing"
+        );
+    }
+
+    #[test]
+    fn home_scene_apply_synchronous_fallback_paces_with_the_requested_spacing() {
+        let harness = setup_home_scene_rooms();
+        do_scene_upsert(
+            &harness.state,
+            scene_with_palette("halloween", &halloween_palette()),
+        )
+        .unwrap();
+        let spacing = std::time::Duration::from_millis(40);
+
+        let started = std::time::Instant::now();
+        let response = do_home_scene_apply(
+            &harness.state,
+            "halloween",
+            HomeSceneApplyRequest {
+                transition_ms: None,
+            },
+            spacing,
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+
+        assert!(!response.queued);
+        assert_eq!(response.dispatch_count, 3);
+        assert_eq!(response.dispatch_spacing_ms, 40);
+        assert_eq!(response.estimated_dispatch_ms, 80);
+        assert!(
+            elapsed >= spacing * 2,
+            "three commands must be spaced twice: elapsed {elapsed:?}"
+        );
+        assert_eq!(harness.runtime.applied_commands().len(), 3);
+    }
+
+    #[test]
+    fn home_scene_apply_persists_each_rooms_palette_slot_for_mood_reentry() {
+        let harness = setup_home_scene_rooms();
+        let palette = halloween_palette();
+        do_scene_upsert(&harness.state, scene_with_palette("halloween", &palette)).unwrap();
+
+        do_home_scene_apply(
+            &harness.state,
+            "halloween",
+            HomeSceneApplyRequest {
+                transition_ms: None,
+            },
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+
+        let room_a = harness.runtime.engine_room_snapshot("room-a").unwrap();
+        let room_b = harness.runtime.engine_room_snapshot("room-b").unwrap();
+        assert_eq!(
+            room_a.profile_settings.mood_scene_palette_offset, None,
+            "the first room starts at slot 0, stored as the default"
+        );
+        assert_eq!(
+            room_b.profile_settings.mood_scene_palette_offset,
+            Some(2),
+            "the second room remembers that it started after room A's two lights"
+        );
+
+        // Leaving and re-entering Mood re-applies the bound scene; room B must
+        // come back with the colour the whole-home apply gave it.
+        let before = harness.runtime.applied_commands().len();
+        let runtime: Arc<dyn RuntimeHandle> = harness.runtime.clone();
+        apply_mood_scene_or_tick(&harness.state, &runtime, "room-b", Some("halloween"), false)
+            .unwrap();
+        let calls = harness.runtime.applied_commands();
+        let (node_id, command) = &calls[before..][0];
+        assert_eq!(node_id, &harness.room_b_lights[0]);
+        assert_eq!(
+            (command.rgb.r, command.rgb.g, command.rgb.b),
+            (palette[2].r, palette[2].g, palette[2].b),
+            "re-entering Mood must not restart the palette at slot 0"
+        );
+
+        // An explicit single-room apply is a fresh start and resets the slot.
+        let before = harness.runtime.applied_commands().len();
+        do_scene_apply(
+            &harness.state,
+            "halloween",
+            SceneApplyRequest {
+                target_id: "room-b".to_string(),
+                transition_ms: None,
+            },
+        )
+        .unwrap();
+        let calls = harness.runtime.applied_commands();
+        let (_, command) = &calls[before..][0];
+        assert_eq!(
+            (command.rgb.r, command.rgb.g, command.rgb.b),
+            (palette[0].r, palette[0].g, palette[0].b)
+        );
+        let room_b = harness.runtime.engine_room_snapshot("room-b").unwrap();
+        assert_eq!(room_b.profile_settings.mood_scene_palette_offset, None);
+    }
+
+    #[test]
+    fn a_room_rendered_with_one_grouped_command_consumes_one_palette_slot() {
+        // A Hue room dispatched as a group gets a single room-level command
+        // carrying palette[offset]; it must advance the next room by one slot,
+        // not by its light count.
+        let (state, runtime, device_id) = setup_attached_hue_light_with_group_dispatch();
+        let hub_key = HubKey::new(HubType::new("hue"), "bridge");
+        let second = insert_canonical_device(
+            &state,
+            hub_key,
+            "hue-light-2",
+            "Floor Lamp",
+            "hue-room-1",
+            "Room 1",
+        );
+        {
+            let mut s = state.lock().unwrap();
+            assert!(s.topology.attach_device_user_override("room1", &second));
+            // The bridge room now covers both lights, so the room is an exact
+            // grouped dispatch target instead of two device dispatches.
+            s.topology
+                .get_mut("room1")
+                .unwrap()
+                .upsert_hub_room_binding(crate::topology::HubRoomBinding {
+                    hub_key: HubKey::new(HubType::new("hue"), "bridge"),
+                    hub_room_id: "hue-room-1".into(),
+                    control_id: "gl-room1".into(),
+                    light_device_ids: vec!["hue-light-1".into(), "hue-light-2".into()],
+                });
+        }
+        runtime
+            .snapshots
+            .lock()
+            .unwrap()
+            .push(make_light_child_snapshot(&second, "room1"));
+        let mut scene = scene_with_palette("halloween", &halloween_palette());
+        scene.normalize();
+
+        let s = state.lock().unwrap();
+        let runtime: Arc<dyn RuntimeHandle> = runtime.clone();
+        let plan =
+            build_scene_application_plan_locked(&s, &runtime, &scene, "room1", None, 0).unwrap();
+
+        assert_eq!(
+            plan.commands.len(),
+            1,
+            "the room is one grouped dispatch: {:?}",
+            plan.affected_node_ids
+        );
+        assert_eq!(plan.commands[0].dispatch_node_id, "room1");
+        assert_eq!(plan.palette_slots_consumed, 1);
+        assert_ne!(
+            plan.affected_node_ids,
+            vec![device_id.clone(), second.clone()]
+        );
     }
 
     #[test]
@@ -26306,6 +26681,61 @@ mod tests {
             target.seeded_factory_scene_ids,
             crate::factory_default_config::factory_default_scene_ids(),
             "a backup restore must not clear the factory-scene seed marker"
+        );
+    }
+
+    #[test]
+    fn backup_restore_seeds_factory_scenes_newer_than_the_backup() {
+        let (source_state, _source_runtime, device_id) =
+            setup_attached_hue_light_with_group_dispatch();
+        do_scene_upsert(&source_state, scene_for_light("icy-glow", &device_id)).unwrap();
+        let mut bundle = build_backup_bundle_dto(&source_state, false).unwrap();
+        // Rewrite the backup as a previous release would have written it: no
+        // seed marker, and berry-pop deleted by the user before tracking.
+        bundle
+            .configuration
+            .scenes
+            .retain(|scene| scene.id != "halloween" && scene.id != "berry-pop");
+        bundle.configuration.seeded_factory_scene_ids.clear();
+
+        let (target_state, _target_runtime) = setup_state(vec![]);
+        do_backup_restore(&target_state, bundle).unwrap();
+
+        let target = target_state.lock().unwrap();
+        assert!(target.scenes.contains_key("icy-glow"));
+        assert!(
+            target.scenes.contains_key("halloween"),
+            "a factory scene newer than the backup must be seeded, not lost"
+        );
+        assert!(
+            !target.scenes.contains_key("berry-pop"),
+            "a factory scene deleted before tracking stays deleted"
+        );
+        assert_eq!(
+            target.seeded_factory_scene_ids,
+            crate::factory_default_config::factory_default_scene_ids()
+        );
+    }
+
+    #[test]
+    fn backup_restore_keeps_a_factory_scene_the_backup_had_deleted() {
+        let (source_state, _source_runtime, _device_id) =
+            setup_attached_hue_light_with_group_dispatch();
+        do_scene_delete(&source_state, "halloween").unwrap();
+        let bundle = build_backup_bundle_dto(&source_state, false).unwrap();
+        assert!(bundle
+            .configuration
+            .seeded_factory_scene_ids
+            .iter()
+            .any(|id| id == "halloween"));
+
+        let (target_state, _target_runtime) = setup_state(vec![]);
+        do_backup_restore(&target_state, bundle).unwrap();
+
+        let target = target_state.lock().unwrap();
+        assert!(
+            !target.scenes.contains_key("halloween"),
+            "the backup had already been offered halloween and deleted it"
         );
     }
 
@@ -29702,6 +30132,7 @@ mod tests {
                 mode_transitions: vec![transition.clone()],
                 light_schedules: Vec::new(),
                 scenes: vec![],
+                seeded_factory_scene_ids: Vec::new(),
                 rooms: vec![],
             },
             installation: BackupInstallation {
@@ -29869,6 +30300,7 @@ mod tests {
                 mode_transitions: Vec::new(),
                 light_schedules: Vec::new(),
                 scenes: Vec::new(),
+                seeded_factory_scene_ids: Vec::new(),
                 rooms: Vec::new(),
             },
             installation: BackupInstallation {
@@ -30380,6 +30812,7 @@ mod tests {
                 mode_transitions: vec![],
                 light_schedules: Vec::new(),
                 scenes: vec![],
+                seeded_factory_scene_ids: Vec::new(),
                 rooms: vec![],
             },
             installation: BackupInstallation {
@@ -30483,6 +30916,7 @@ mod tests {
                     mode_transitions: vec![],
                     light_schedules: Vec::new(),
                     scenes: vec![],
+                    seeded_factory_scene_ids: Vec::new(),
                     rooms: vec![],
                 },
                 installation: BackupInstallation {

@@ -1353,9 +1353,11 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
 
     setState(() {
       _globalActionPending = false;
-      // The server owns this fan-out; there is nothing local to undo.
+      // The server owns this fan-out; there is nothing local to undo. The
+      // tile only reads as active when at least one room actually took it.
       _globalUndoSnapshot = null;
-      _globalAppliedSceneId = result == null ? null : scene.id;
+      _globalAppliedSceneId =
+          result != null && result.appliedTargetCount > 0 ? scene.id : null;
     });
 
     if (result == null) {

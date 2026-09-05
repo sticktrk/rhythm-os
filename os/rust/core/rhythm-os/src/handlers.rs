@@ -7299,6 +7299,31 @@ mod tests {
     }
 
     #[test]
+    fn home_scene_apply_with_the_breaker_off_dispatches_synchronously() {
+        // The node dispatch worker drops generated light output while the
+        // breaker is off, but a scene apply is explicit user intent: nothing
+        // may be queued into that worker and silently lost.
+        let state = handler_state_with_runtime();
+        let rx = attach_work_queue(&state);
+        state.lock().unwrap().light_breaker_enabled = false;
+        upsert_home_palette_scene(&state, "halloween");
+
+        let response =
+            handle_post_home_scene_apply(&state, "halloween", &json!({"dispatch_spacing_ms": 0}));
+
+        assert_eq!(response.status, 200, "{}", response.body);
+        let parsed: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(parsed["queued"], false);
+        assert_eq!(parsed["dispatch_count"], 3);
+        assert_eq!(parsed["applied_target_count"], 3);
+        assert!(
+            rx.try_recv().is_err(),
+            "no work item may be handed to a worker that would drop it"
+        );
+        assert_eq!(state.lock().unwrap().light_activity.len(), 3);
+    }
+
+    #[test]
     fn home_scene_apply_queues_dispatch_and_records_fanout_activity() {
         let state = handler_state_with_runtime();
         let rx = attach_work_queue(&state);
