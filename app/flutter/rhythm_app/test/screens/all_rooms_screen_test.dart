@@ -30,6 +30,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   final List<List<({String nodeId, String action})>> actionBatches = [];
   final List<List<({String nodeId, int brightness})>> brightnessBatches = [];
   final List<String> homeSceneApplies = [];
+  final List<int?> homeSceneTransitionMs = [];
   Completer<RhythmDispatchResult>? actionBatchCompleter;
   int? nextDispatchCount;
   List<RhythmSceneDefinition> sceneCatalog = const [];
@@ -56,6 +57,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     String? correlationId,
   }) async {
     homeSceneApplies.add(sceneId);
+    homeSceneTransitionMs.add(transitionMs);
     return homeSceneResult;
   }
 
@@ -589,6 +591,12 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
 
     expect(harness.api.homeSceneApplies, ['halloween']);
+    expect(
+      harness.api.homeSceneTransitionMs,
+      [null],
+      reason: 'a request-level transition would override each palette '
+          "output's own transition_ms",
+    );
     expect(find.text('Set Halloween in 2 of 2 rooms.'), findsOneWidget);
     expect(
       find.byKey(const ValueKey('global-room-action-undo')),

@@ -1341,10 +1341,12 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     setState(() => _globalActionPending = true);
     _showGlobalProgress('Setting ${scene.name} across the home…');
 
+    // No request-level transition: that would override every palette output's
+    // own transition_ms. The server already falls back to the scene layer's
+    // default when the request omits it.
     final result = await serverSync.applyHomeScene(
       scene.id,
       color: rhythmSceneRgb(scene),
-      transitionMs: scene.light.defaultTransitionMs,
       correlationId: journeyId,
     );
     if (!mounted) return;
