@@ -20,6 +20,7 @@ export 'src/models/rhythm_device_attention.dart';
 export 'src/models/rhythm_firmware.dart';
 export 'src/models/rhythm_capabilities.dart';
 export 'src/models/rhythm_hello.dart';
+export 'src/models/rhythm_state_scope.dart';
 export 'src/models/rhythm_hub_info.dart';
 export 'src/models/rhythm_hue_authority.dart';
 export 'src/models/rhythm_input_binding.dart';

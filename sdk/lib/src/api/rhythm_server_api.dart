@@ -2392,28 +2392,28 @@ class RhythmServerApi {
     return false;
   }
 
-  /// Fetch the node topology graph.
+  /// Fetch topology, preserving failure separately from a successful empty list.
+  Future<List<RhythmTopologyNode>> getTopologyNodesOrThrow() async {
+    final response = await _dio.get('api/topology/nodes');
+    final data = response.data;
+    final Object? nodes =
+        data is List ? data : (data is Map ? data['nodes'] : null);
+    if (nodes is! List || nodes.any((node) => node is! Map<String, dynamic>)) {
+      throw const FormatException('Invalid topology response');
+    }
+    return nodes
+        .cast<Map<String, dynamic>>()
+        .map(RhythmTopologyNode.fromJson)
+        .toList();
+  }
+
   Future<List<RhythmTopologyNode>> getTopologyNodes() async {
     try {
-      final response = await _dio.get('api/topology/nodes');
-      final data = response.data;
-      if (data is List<dynamic>) {
-        return data
-            .whereType<Map<String, dynamic>>()
-            .map((node) => RhythmTopologyNode.fromJson(node))
-            .toList();
-      }
-      if (data is Map<String, dynamic>) {
-        final nodes = data['nodes'] as List<dynamic>? ?? const [];
-        return nodes
-            .whereType<Map<String, dynamic>>()
-            .map((node) => RhythmTopologyNode.fromJson(node))
-            .toList();
-      }
+      return await getTopologyNodesOrThrow();
     } catch (e) {
       _log.warning('getTopologyNodes failed', e);
+      return const [];
     }
-    return const [];
   }
 
   /// Set or clear an explicit topology control target for a node.

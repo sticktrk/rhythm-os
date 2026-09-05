@@ -663,6 +663,10 @@ class CloudBackedServerApi {
     return _delegate.getTriageCount();
   }
 
+  Future<List<RhythmTopologyNode>> getTopologyNodesOrThrow() {
+    return _delegate.getTopologyNodesOrThrow();
+  }
+
   Future<List<RhythmTopologyNode>> getTopologyNodes() {
     return _delegate.getTopologyNodes();
   }

@@ -38,6 +38,7 @@ pub mod room_sync;
 pub mod routes;
 pub mod scenes;
 pub mod state;
+pub mod state_selection;
 pub mod storage;
 pub mod topology;
 

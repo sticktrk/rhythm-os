@@ -27,6 +27,8 @@ import '../models/rhythm_pairing.dart';
 import '../models/rhythm_room.dart';
 import '../models/rhythm_runtime.dart';
 import '../models/rhythm_settings.dart';
+import '../models/rhythm_state_scope.dart';
+import '../models/rhythm_capabilities.dart';
 import '../rhythm_log_interceptor.dart';
 
 /// Cached node state for diff detection.
@@ -169,6 +171,20 @@ class RhythmConnection {
 
   // Cached node states for diff detection.
   final Map<String, _CachedNodeState> _cachedNodeStates = {};
+  bool _controlsOnly = false;
+  Set<String> _controlNodeIds = {};
+  Set<String>? _requestedDeviceNodeIds;
+  bool get _pollControlsOnly =>
+      _controlsOnly && _requestedDeviceNodeIds == null;
+
+  /// A visible device surface opts into full fallback polling after loading its
+  /// catalog. Null releases that demand and restores controls-only polling.
+  void setDeviceDetailsNodes(Iterable<String>? nodeIds) {
+    _requestedDeviceNodeIds = nodeIds?.toSet();
+    // A poll for the previous scope must not apply after the demand changes.
+    _pollEpoch++;
+  }
+
   final Map<String, bool> _cachedHubConnected = {};
   final Set<String> _reHelloSuppressedNodeIds = {};
   DateTime _lastFreshStateAt = DateTime.fromMillisecondsSinceEpoch(0);
@@ -538,6 +554,23 @@ class RhythmConnection {
       if (!_isCurrentTransport(transportGeneration, dio)) return;
       final modelTimer = Stopwatch()..start();
       final hello = RhythmHello.fromJson(payload.data);
+      if (!hello.includesConfiguration ||
+          (hello.stateScope != null && hello.stateScope!.nodes != 'controls')) {
+        throw const FormatException(
+            'Hello omitted requested controls/configuration');
+      }
+      _controlsOnly = hello.stateScope?.nodes == 'controls' &&
+          hello.capabilities?.features
+                  .contains(RhythmFeature.stateIncludesV1) ==
+              true;
+      if (hello.stateScope != null && !_controlsOnly) {
+        throw const FormatException('Selected hello lacks its capability');
+      }
+      _requestedDeviceNodeIds = null;
+      _controlNodeIds = hello.nodes
+          .where(RhythmStateScope.isControl)
+          .map((n) => n.id)
+          .toSet();
       lastHelloPerformance = (
         requestMs: payload.requestMs,
         decodeMs: payload.decodeMs,
@@ -622,7 +655,10 @@ class RhythmConnection {
     final response = await dio.get<List<int>>(
       'api/state',
       options: Options(responseType: ResponseType.bytes),
-      queryParameters: authoritative ? const {'authoritative': 'true'} : null,
+      queryParameters: {
+        'include': 'controls,configuration',
+        if (authoritative) 'authoritative': 'true',
+      },
     );
     final requestMs = timer.elapsedMilliseconds;
     final body = response.data!;
@@ -680,7 +716,10 @@ class RhythmConnection {
     final pollEpoch = _pollEpoch;
     final sseGeneration = _sseApplyGeneration;
     try {
-      final response = await dio.get('api/nodes/state');
+      final response = _pollControlsOnly
+          ? await dio.get('api/nodes/state',
+              queryParameters: const {'scope': 'controls'})
+          : await dio.get('api/nodes/state');
       // Discard stale responses: if SSE applied fresher state or the poller
       // was stopped or the transport changed while this request was in flight,
       // applying the response would revert newer state (the poll diffs against
@@ -697,7 +736,10 @@ class RhythmConnection {
       // Poll doesn't carry per-hub status — skip hub event emission.
       // The hello (which runs on reconnect) provides authoritative per-hub state.
 
-      final previousNodeIds = _cachedNodeStates.keys.toSet();
+      final previousNodeIds = {
+        ..._cachedNodeStates.keys,
+        ...?_requestedDeviceNodeIds
+      };
       final nodes = data['nodes'] as List<dynamic>? ??
           data['rooms'] as List<dynamic>? ??
           [];
@@ -810,7 +852,8 @@ class RhythmConnection {
 
       // Clear motion for removed nodes.
       for (final entry in _cachedNodeStates.entries.toList()) {
-        if (!seenNodeIds.contains(entry.key) &&
+        if ((!_pollControlsOnly || _controlNodeIds.contains(entry.key)) &&
+            !seenNodeIds.contains(entry.key) &&
             entry.value.motionActive != null) {
           _motionTimerController.add(RhythmMotionTimer.cleared(entry.key));
           _cachedNodeStates[entry.key] = _CachedNodeState(

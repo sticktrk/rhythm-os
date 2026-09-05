@@ -1,3 +1,4 @@
+import 'device_details_loader.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -713,11 +714,13 @@ class DeviceDetailSheet extends StatefulWidget {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (context) => DeviceDetailSheet(
+      builder: (context) => DeviceDetailsLoader(
+          showCloseButton: true,
+          child: DeviceDetailSheet(
         device: device,
         roomId: roomId,
         parentRoomId: parentRoomId,
-      ),
+      )),
     );
   }
 

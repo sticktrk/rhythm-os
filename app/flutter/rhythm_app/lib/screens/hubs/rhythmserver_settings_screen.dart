@@ -20,6 +20,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RoomModeState;
 import 'package:uuid/uuid.dart';
 import '../../widgets/solar_orbit.dart';
+import '../../widgets/device_details_loader.dart';
 import '../../providers/server_sync_provider.dart';
 import '../../providers/home_provider.dart';
 import '../../providers/room_provider.dart';
@@ -4172,7 +4173,10 @@ class _HubDetailScreen extends StatefulWidget {
         opaque: false,
         barrierColor: Colors.black54,
         pageBuilder: (context, animation, secondaryAnimation) {
-          return _HubDetailScreen(hubInfo: hubInfo);
+          return DeviceDetailsLoader(
+            showCloseButton: true,
+            child: _HubDetailScreen(hubInfo: hubInfo),
+          );
         },
         transitionsBuilder: (context, animation, secondaryAnimation, child) {
           final curve = CurvedAnimation(

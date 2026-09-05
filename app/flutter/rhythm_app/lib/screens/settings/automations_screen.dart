@@ -9,6 +9,7 @@ import '../../widgets/rhythm_clock/rhythm_clock_visuals.dart';
 import '../../widgets/header_close_button.dart';
 import '../../widgets/mode_room_behavior_section.dart';
 import '../../widgets/settings_row.dart';
+import '../../widgets/device_details_loader.dart';
 import '../../widgets/solar_orbit.dart' show CelestialColors;
 import 'default_transition_editor_screen.dart';
 import 'light_schedules_screen.dart';
@@ -174,9 +175,12 @@ class AutomationsScreen extends StatelessWidget {
       trailing: _StatusPill(enabled: enabled),
       onTap: () => _pushDetail(
         context,
-        DefaultTransitionEditorScreen(
-          detail: AutomationDetail.button,
-          profileColors: profileColors,
+        DeviceDetailsLoader(
+          showCloseButton: true,
+          child: DefaultTransitionEditorScreen(
+            detail: AutomationDetail.button,
+            profileColors: profileColors,
+          ),
         ),
       ),
     );

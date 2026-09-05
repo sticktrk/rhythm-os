@@ -583,13 +583,25 @@ pub fn handle_health() -> ApiResponse {
 }
 
 pub fn handle_get_state_with_options(state: &SharedState, authoritative: bool) -> ApiResponse {
+    handle_get_state_with_selection(state, authoritative, None)
+}
+
+pub fn handle_get_state_with_selection(
+    state: &SharedState,
+    authoritative: bool,
+    selection: Option<&crate::state_selection::StateSelection>,
+) -> ApiResponse {
     if authoritative {
         if let Err(e) = commands::refresh_observed_power_authoritatively(state) {
             return ApiResponse::server_error(e);
         }
     }
 
-    match commands::build_state_snapshot(state) {
+    let snapshot = match selection {
+        Some(selection) => commands::build_selected_state_snapshot(state, selection),
+        None => commands::build_state_snapshot(state),
+    };
+    match snapshot {
         Ok(json) => ApiResponse::json_ok(json),
         Err(e) => ApiResponse::server_error(e),
     }

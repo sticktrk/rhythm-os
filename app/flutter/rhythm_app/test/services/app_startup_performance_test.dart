@@ -33,7 +33,8 @@ void main() {
         devices: 190,
         version: '0.6.632',
         responseBytes: 100000,
-        transport: 'lan');
+        transport: 'lan',
+        stateScope: 'controls');
     perf.markAllRoomsVisible(fromCache: true, roomCount: 11);
     perf.markAllRoomsInteractive(roomCount: 11);
     perf.markAllRoomsInteractive(roomCount: 11);
@@ -41,6 +42,18 @@ void main() {
     final cold =
         backend.events.where((e) => e.name == 'app_control_readiness').single;
     expect(cold.properties, containsPair('settings_ms', 12));
+    expect(cold.properties, containsPair('state_scope', 'controls'));
+    for (final key in [
+      'node_id',
+      'hub_id',
+      'name',
+      'payload',
+      'url',
+      'token',
+      'email'
+    ]) {
+      expect(cold.properties.containsKey(key), isFalse);
+    }
     expect(cold.properties, containsPair('node_count_bucket', '201_plus'));
     expect(cold.properties, containsPair('device_count_bucket', '101_200'));
     expect(cold.properties, containsPair('room_count_bucket', '11_50'));

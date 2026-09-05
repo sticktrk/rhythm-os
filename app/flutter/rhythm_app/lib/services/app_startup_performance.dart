@@ -72,11 +72,13 @@ class AppStartupPerformance {
       required int devices,
       required String version,
       int? responseBytes,
+      String? stateScope,
       String? transport}) {
     if (_interactiveRecorded) return;
     _details['node_count_bucket'] = countBucket(nodes);
     _details['device_count_bucket'] = countBucket(devices);
     _details['appliance_version'] = version;
+    if (stateScope != null) _details['state_scope'] = stateScope;
     if (transport != null) _details['transport'] = transport;
     if (responseBytes != null) {
       _details['payload_size_bucket'] = responseBytes < 16 * 1024

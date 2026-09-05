@@ -222,8 +222,144 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Cooldown: last time a hub disconnect triggered a state refresh.
   DateTime? _lastHubDisconnectRefreshTime;
 
-  /// Full node-state snapshot from the last server hello.
+  /// Latest merged node state from server hello, detail reads and live events.
   List<RhythmRoom> _helloNodes = [];
+  // Cache ownership survives reconnects; _lastServerInstanceId only proves the
+  // current connection's identity and is cleared as soon as reconnect starts.
+  String? _cachedNodesServerInstanceId;
+  int _deviceDetailsOwnerGeneration = 0;
+  bool _selectiveState = false;
+  bool _deviceDetailsLoaded = false;
+  int _deviceDetailConsumers = 0;
+  bool _deviceDetailsLoading = false;
+  bool _deviceDetailsFailed = false;
+  int _deviceDetailsGeneration = 0;
+  // Preserve sparse event patches in arrival order; fail the read on overflow
+  // instead of applying a snapshot that could overwrite uncaptured live state.
+  List<VoidCallback>? _detailReadEvents;
+  bool _detailReadOverflow = false;
+  Future<bool>? _deviceDetailsRequest;
+
+  bool get needsDeviceDetails => _selectiveState && !_deviceDetailsLoaded;
+  bool get deviceDetailsLoading => _deviceDetailsLoading;
+  bool get deviceDetailsFailed => _deviceDetailsFailed;
+  int get deviceDetailsGeneration => _deviceDetailsGeneration;
+
+  /// Changes when cached devices can no longer belong to the same server.
+  /// Unlike detail freshness, this remains stable during same-server refreshes.
+  int get deviceDetailsOwnerGeneration => _deviceDetailsOwnerGeneration;
+
+  void acquireDeviceDetails() {
+    _deviceDetailConsumers++;
+    if (_selectiveState && _deviceDetailsLoaded) {
+      _connection.setDeviceDetailsNodes(_helloNodes.map((node) => node.id));
+    }
+  }
+
+  void releaseDeviceDetails() {
+    if (_deviceDetailConsumers > 0) _deviceDetailConsumers--;
+    if (_deviceDetailConsumers == 0) _connection.setDeviceDetailsNodes(null);
+  }
+
+  /// Explicit detail demand; never called by the selective startup path.
+  Future<bool> ensureDeviceDetails({bool force = false}) {
+    if (!_selectiveState || (_deviceDetailsLoaded && !force)) {
+      return Future.value(true);
+    }
+    if (_deviceDetailsRequest case final request?) return request;
+    if (!_connection.connected) {
+      _deviceDetailsFailed = true;
+      notifyListeners();
+      return Future.value(false);
+    }
+    late final Future<bool> request;
+    request = _loadDeviceDetails().whenComplete(() {
+      if (identical(_deviceDetailsRequest, request)) {
+        _deviceDetailsRequest = null;
+      }
+    });
+    _deviceDetailsRequest = request;
+    return request;
+  }
+
+  Future<bool> _loadDeviceDetails() async {
+    final generation = _deviceDetailsGeneration;
+    final eventsDuringRead = <VoidCallback>[];
+    _detailReadEvents = eventsDuringRead;
+    _detailReadOverflow = false;
+    final serverId = _lastServerInstanceId;
+    final runtimeApi = _connection.runtimeApi;
+    final serverApi = api;
+    _deviceDetailsLoading = true;
+    _deviceDetailsFailed = false;
+    notifyListeners();
+    try {
+      final results = await Future.wait<Object>([
+        runtimeApi.getState(include: const {RhythmStateInclude.nodes}),
+        serverApi.getTopologyNodesOrThrow(),
+      ]);
+      final snapshot = results[0] as RhythmHello;
+      if (generation != _deviceDetailsGeneration) return false;
+      if (_detailReadOverflow ||
+          !_connection.connected ||
+          !identical(runtimeApi, _connection.runtimeApi) ||
+          serverId == null ||
+          serverId != snapshot.serverInstanceId ||
+          serverId != _lastServerInstanceId) {
+        _deviceDetailsFailed = true;
+        return false;
+      }
+      _detailReadEvents = null;
+      _authoritativeNodeSnapshotGeneration++;
+      _helloNodes =
+          _mergeOptimisticStandbyEnabled(snapshot.mergeNodes(_helloNodes));
+      _topologyNodes = results[1] as List<RhythmTopologyNode>;
+      _helloRooms = _buildRoomSummaries();
+      _acceptServerNodes(_helloNodes, afterApply: () {
+        _roomProvider.setMotionSensorNodes(_sensorTargetNodeIds());
+        _syncHelloMotionState(_helloNodes);
+      });
+      // Events received after the read started outrank the HTTP snapshot,
+      // including events for a device that was not materialized until now.
+      for (final replay in eventsDuringRead) {
+        replay();
+      }
+      _deviceDetailsLoaded = true;
+      if (_deviceDetailConsumers > 0) {
+        _connection.setDeviceDetailsNodes(_helloNodes.map((node) => node.id));
+      }
+      return true;
+    } catch (_) {
+      if (generation == _deviceDetailsGeneration) _deviceDetailsFailed = true;
+      return false;
+    } finally {
+      if (generation == _deviceDetailsGeneration) {
+        _detailReadEvents = null;
+        _deviceDetailsLoading = false;
+        notifyListeners();
+      }
+    }
+  }
+
+  void _bufferDetailEvent(VoidCallback replay) {
+    final events = _detailReadEvents;
+    if (events == null) return;
+    if (events.length >= 4096) {
+      _detailReadOverflow = true;
+    } else {
+      events.add(replay);
+    }
+  }
+
+  void _invalidateDeviceDetails() {
+    _connection.setDeviceDetailsNodes(null);
+    _deviceDetailsGeneration++;
+    _detailReadEvents = null;
+    _deviceDetailsLoaded = false;
+    _deviceDetailsLoading = false;
+    _deviceDetailsFailed = false;
+    _deviceDetailsRequest = null;
+  }
 
   /// Cached room summaries derived from hello/topology for room-centric UI.
   List<RhythmRoom> _helloRooms = [];
@@ -1676,6 +1812,7 @@ class ServerSyncProvider extends ChangeNotifier {
       lightCapabilities: previous.lightCapabilities,
       deviceIds: previous.deviceIds,
       devices: previous.devices,
+      deviceCounts: previous.deviceCounts,
       profileSettings: profileSettings,
       localProfileSettings: previous.localProfileSettings,
       observedPower: previous.observedPower,
@@ -1745,6 +1882,7 @@ class ServerSyncProvider extends ChangeNotifier {
       lightCapabilities: previous.lightCapabilities,
       deviceIds: previous.deviceIds,
       devices: previous.devices,
+      deviceCounts: previous.deviceCounts,
       profileSettings: updatedSettings,
       localProfileSettings: previous.localProfileSettings,
       observedPower: previous.observedPower,
@@ -1909,6 +2047,7 @@ class ServerSyncProvider extends ChangeNotifier {
       lightCapabilities: previous.lightCapabilities,
       deviceIds: previous.deviceIds,
       devices: previous.devices,
+      deviceCounts: previous.deviceCounts,
       profileSettings: previous.profileSettings,
       localProfileSettings: previous.localProfileSettings,
       observedPower: previous.observedPower,
@@ -2150,8 +2289,18 @@ class ServerSyncProvider extends ChangeNotifier {
 
   RhythmDevice? deviceForNode(String nodeId) {
     final topologyNode = topologyNodeById(nodeId);
-    if (topologyNode == null || !topologyNode.isDevice) return null;
-    return RhythmDevice.fromTopologyNode(topologyNode);
+    if (topologyNode?.isDevice == true) {
+      return RhythmDevice.fromTopologyNode(topologyNode!);
+    }
+    final node = nodeById(nodeId);
+    final type = node == null ? null : RhythmDeviceType.fromNodeKind(node.kind);
+    if (node == null || type == null) return null;
+    return RhythmDevice(
+        id: node.id,
+        name: node.name,
+        type: type,
+        manufacturer: node.manufacturer,
+        model: node.model);
   }
 
   /// Number of typed lights for a room (0 until lights are typed in the backend).
@@ -3008,7 +3157,9 @@ class ServerSyncProvider extends ChangeNotifier {
     await _connection.reconnect(authoritative: true);
     if (!_connection.connected) return false;
     await Future<void>.delayed(Duration.zero);
-    return _refreshTopologyNodesWithResult();
+    return _selectiveState
+        ? ensureDeviceDetails(force: true)
+        : _refreshTopologyNodesWithResult();
   }
 
   /// Trigger an immediate lightweight poll (rooms/state only).
@@ -3059,6 +3210,8 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Handle hello from server — accept rooms and reconcile config.
   void _onHello(RhythmHello hello) {
+    // Base/detail API responses cannot establish global control readiness.
+    if (!hello.includesConfiguration) return;
     final applyTimer = Stopwatch()..start();
     final performance = AppStartupPerformance.instance;
     final timing = _connection.lastHelloPerformance;
@@ -3074,6 +3227,7 @@ class ServerSyncProvider extends ChangeNotifier {
             .length,
         version: hello.version,
         responseBytes: timing?.responseBytes,
+        stateScope: hello.stateScope?.nodes ?? 'legacy',
         transport: _activeConnectionEndpoint == null
             ? null
             : _sameEndpoint(
@@ -3081,7 +3235,17 @@ class ServerSyncProvider extends ChangeNotifier {
                 ? 'tunnel'
                 : 'lan');
     _authoritativeNodeSnapshotGeneration++;
-    final helloNodes = _mergeOptimisticStandbyEnabled(hello.nodes);
+    if (_cachedNodesServerInstanceId == null ||
+        _cachedNodesServerInstanceId != hello.serverInstanceId) {
+      _deviceDetailsOwnerGeneration++;
+      _helloNodes = [];
+      _topologyNodes = [];
+    }
+    _cachedNodesServerInstanceId = hello.serverInstanceId;
+    _selectiveState = hello.stateScope != null;
+    _invalidateDeviceDetails();
+    final helloNodes =
+        _mergeOptimisticStandbyEnabled(hello.mergeNodes(_helloNodes));
     debugPrint(
         'ServerSync: Hello received with ${helloNodes.length} nodes, version=${hello.version}');
     debugPrint('ServerSync: Server active profile: ${hello.activeProfile}');
@@ -3178,7 +3342,7 @@ class ServerSyncProvider extends ChangeNotifier {
         if (data != null) _onTriageChanged(data);
       });
     }
-    unawaited(_refreshTopologyNodes());
+    if (!_selectiveState) unawaited(_refreshTopologyNodes());
 
     final homeEntryCompleter = _homeEntryRefreshHelloCompleter;
     if (_homeEntryRefreshAwaitingHello &&
@@ -3340,6 +3504,8 @@ class ServerSyncProvider extends ChangeNotifier {
   void _onRhythmState(RhythmRoomState state,
       {bool fromActionResponse = false}) {
     _receivingFromServer = true;
+    _bufferDetailEvent(
+        () => _onRhythmState(state, fromActionResponse: fromActionResponse));
     var helloChanged = false;
     var moodSceneOverrideCleared = false;
     try {
@@ -3522,6 +3688,9 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Handle motion timer updates from server.
   void _onMotionTimer(RhythmMotionTimer event) {
+    _bufferDetailEvent(() {
+      if (_roomProvider.getNode(event.nodeId) != null) _onMotionTimer(event);
+    });
     // Any motion event (even clearing) means this node has a sensor.
     _roomProvider.markNodeHasSensor(event.nodeId);
     _applyMotionTimerState(
@@ -3587,6 +3756,7 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Handle new nodes detected in poll — trigger a full re-hello.
   void _onNewNodesDetected(void _) {
+    _invalidateDeviceDetails();
     debugPrint('ServerSync: New nodes detected in poll — triggering re-hello');
     _beginRoomReadinessRefresh();
     _connection.reconnect();
@@ -3691,6 +3861,8 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   void _resetConnectionMetadata() {
+    _invalidateDeviceDetails();
+    _selectiveState = false;
     _firmwareVersion = '0.0.0';
     _lastServerInstanceId = null;
     _serverPlatformType = 'desktop';
@@ -3712,6 +3884,8 @@ class ServerSyncProvider extends ChangeNotifier {
     _optimisticMoodSceneIds.clear();
     _moodSceneApplyGenerations.clear();
     _helloNodes = [];
+    _cachedNodesServerInstanceId = null;
+    _deviceDetailsOwnerGeneration++;
     _helloRooms = [];
     _clearStandbyEnabledOptimisticStates();
     _topologyNodes = [];
@@ -5566,6 +5740,7 @@ class ServerSyncProvider extends ChangeNotifier {
       lightCapabilities: state.lightCapabilities ?? previous.lightCapabilities,
       deviceIds: previous.deviceIds,
       devices: previous.devices,
+      deviceCounts: previous.deviceCounts,
       profileSettings: state.profileSettings ?? previous.profileSettings,
       localProfileSettings:
           state.localProfileSettings ?? previous.localProfileSettings,
@@ -5617,6 +5792,7 @@ class ServerSyncProvider extends ChangeNotifier {
       lightCapabilities: previous.lightCapabilities,
       deviceIds: previous.deviceIds,
       devices: previous.devices,
+      deviceCounts: previous.deviceCounts,
       profileSettings: previous.profileSettings,
       localProfileSettings: previous.localProfileSettings,
       moodEnabled: previous.moodEnabled,
@@ -5715,6 +5891,7 @@ class ServerSyncProvider extends ChangeNotifier {
     final rooms = <RhythmRoom>[];
     for (final topologyRoom in _topologyNodes.where((node) => node.isRoom)) {
       final state = nodeStateById[topologyRoom.id];
+      if (_selectiveState && state == null) continue;
       final devices = (roomChildren[topologyRoom.id] ?? const [])
           .map(RhythmDevice.fromTopologyNode)
           .toList()
@@ -5755,6 +5932,7 @@ class ServerSyncProvider extends ChangeNotifier {
             .map((device) => device.id)
             .toList(),
         devices: devices,
+        deviceCounts: state?.deviceCounts,
         profileSettings: state?.profileSettings,
         localProfileSettings: state?.localProfileSettings,
         moodEnabled: state?.moodEnabled ?? false,
@@ -5772,6 +5950,9 @@ class ServerSyncProvider extends ChangeNotifier {
       ));
     }
 
+    final roomIds = rooms.map((room) => room.id).toSet();
+    rooms.addAll(_helloNodes
+        .where((node) => node.kind.isRoom && !roomIds.contains(node.id)));
     rooms.sort((left, right) => left.name.compareTo(right.name));
     return rooms;
   }
@@ -5887,6 +6068,7 @@ class ServerSyncProvider extends ChangeNotifier {
 
   @override
   void dispose() {
+    _invalidateDeviceDetails();
     _roomModeDefaultsSaveDebounce?.cancel();
     _roomReadinessGraceTimer?.cancel();
     _helloSub?.cancel();
