@@ -1050,7 +1050,8 @@ class RhythmServerApi {
   ///
   /// The server owns the fan-out: it enumerates the rooms, plans them with
   /// palette continuity, paces dispatch and binds the mood scene per room. The
-  /// client makes exactly one call. Requires
+  /// client makes exactly one call. [targetMode] selects rooms (the server
+  /// default) or per-device dispatch with one paced lane per hub. Requires
   /// [RhythmFeature.homeSceneApply]; older servers return 404 and this
   /// resolves to `null`.
   Future<RhythmHomeSceneActionResult?> applyHomeScene({
@@ -1058,6 +1059,7 @@ class RhythmServerApi {
     int? transitionMs,
     int? dispatchSpacingMs,
     String? correlationId,
+    RhythmHomeSceneTargetMode? targetMode,
   }) async {
     try {
       final response = await _dio.post(
@@ -1067,6 +1069,7 @@ class RhythmServerApi {
           if (dispatchSpacingMs != null)
             'dispatch_spacing_ms': dispatchSpacingMs,
           if (correlationId != null) 'correlation_id': correlationId,
+          if (targetMode != null) 'target_mode': targetMode.wireValue,
         },
       );
       final responseJson = jsonMap(response.data);

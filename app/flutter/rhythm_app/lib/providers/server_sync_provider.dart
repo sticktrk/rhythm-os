@@ -917,6 +917,7 @@ class ServerSyncProvider extends ChangeNotifier {
     (int, int, int)? color,
     int? transitionMs,
     String? correlationId,
+    RhythmHomeSceneTargetMode? targetMode,
   }) async {
     if (!HueServiceLocator.isDemoMode && !_connection.connected) return null;
     final scene = sceneById(sceneId);
@@ -929,6 +930,7 @@ class ServerSyncProvider extends ChangeNotifier {
               sceneId: sceneId,
               transitionMs: transitionMs,
               correlationId: correlationId,
+              targetMode: targetMode,
             );
     } catch (_) {
       result = null;
@@ -2268,6 +2270,12 @@ class ServerSyncProvider extends ChangeNotifier {
       if (moodColor != null) {
         _roomProvider.setMoodColorFromServer(node.id, moodColor);
       }
+      // Same rule for brightness: a scene-backed mood carries its brightness on
+      // the live node state (the server folds the scene output in), and this
+      // sync runs right after that state was applied. Clearing it here left
+      // every room card on a whole-home scene reading 1%.
+      final moodSceneId = node.profileSettings?.moodSceneId;
+      if (moodSceneId != null && moodSceneId.isNotEmpty) continue;
       _roomProvider.setMoodBrightnessFromServer(
         node.id,
         _moodBrightnessForNode(node),

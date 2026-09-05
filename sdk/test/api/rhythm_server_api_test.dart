@@ -1829,6 +1829,11 @@ void main() {
                   'dispatch_count': 2,
                   'dispatch_spacing_ms': 120,
                   'estimated_dispatch_ms': 240,
+                  'target_mode': 'devices',
+                  'dispatch_lanes': [
+                    {'hub': 'hue:bridge', 'dispatch_count': 1},
+                    {'hub': 'matter:local', 'dispatch_count': 1},
+                  ],
                 },
               ));
 
@@ -1837,6 +1842,7 @@ void main() {
         transitionMs: 1200,
         dispatchSpacingMs: 120,
         correlationId: 'home-scene-123',
+        targetMode: RhythmHomeSceneTargetMode.devices,
       );
 
       expect(result?.sceneId, 'halloween');
@@ -1848,6 +1854,10 @@ void main() {
       expect(result?.dispatchCount, 2);
       expect(result?.dispatchSpacingMs, 120);
       expect(result?.estimatedDispatchMs, 240);
+      expect(result?.targetMode, RhythmHomeSceneTargetMode.devices);
+      expect(result?.dispatchLanes.map((lane) => lane.hub),
+          ['hue:bridge', 'matter:local']);
+      expect(result?.dispatchLanes.first.dispatchCount, 1);
       expect(result?.appliedTargets.single.targetId, 'room1');
       expect(
         result?.appliedTargets.single.affectedNodeIds,
@@ -1861,6 +1871,7 @@ void main() {
               'transition_ms': 1200,
               'dispatch_spacing_ms': 120,
               'correlation_id': 'home-scene-123',
+              'target_mode': 'devices',
             },
           )).called(1);
     });
@@ -1891,6 +1902,8 @@ void main() {
       expect(result?.dispatchCount, 0);
       expect(result?.targets.single.affectedNodeIds, isEmpty);
       expect(result?.targets.single.succeeded, isTrue);
+      expect(result?.targetMode, RhythmHomeSceneTargetMode.rooms);
+      expect(result?.dispatchLanes, isEmpty);
       verify(() => dio.post(
             'api/scenes/halloween/apply-home',
             data: const <String, dynamic>{},

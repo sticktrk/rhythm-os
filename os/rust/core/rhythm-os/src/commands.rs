@@ -54,11 +54,11 @@ use crate::factory_default_config::{
 use crate::hub::HubType;
 use crate::light_runtime::LightRuntimeKind;
 use crate::scenes::{
-    is_native_scene_id, HomeSceneApplyRequest, HomeSceneApplyResponse, HomeSceneTargetResult,
-    LightSceneColor, LightSceneEntry, LightSceneLayer, LightSceneOutput, LightScenePower,
-    LightScenePreviewSession, LightSceneTargetRef, SceneApplyRequest, SceneApplyResponse,
-    SceneDefinition, SceneDraftPreviewRequest, ScenePreviewRequest, SceneSource,
-    DEFAULT_LIGHT_SCENE_PREVIEW_MS,
+    is_native_scene_id, HomeSceneApplyRequest, HomeSceneApplyResponse, HomeSceneDispatchLane,
+    HomeSceneTargetMode, HomeSceneTargetResult, LightSceneColor, LightSceneEntry, LightSceneLayer,
+    LightSceneOutput, LightScenePower, LightScenePreviewSession, LightSceneTargetRef,
+    SceneApplyRequest, SceneApplyResponse, SceneDefinition, SceneDraftPreviewRequest,
+    ScenePreviewRequest, SceneSource, DEFAULT_LIGHT_SCENE_PREVIEW_MS,
 };
 use crate::state::{
     current_epoch_ms, rooms_from_engine, AppState, ObservedPowerSource, ObservedPowerState,
@@ -5940,6 +5940,10 @@ pub fn do_home_scene_apply(
     };
     scene.normalize();
 
+    if request.target_mode == HomeSceneTargetMode::Devices {
+        return home_scene_apply_to_devices(state, scene, &request, dispatch_spacing);
+    }
+
     let transaction_lock = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.external_topology_transaction_lock.clone()
@@ -6069,7 +6073,7 @@ pub fn do_home_scene_apply(
             match spawn_paced_node_dispatcher(
                 state,
                 tx,
-                "home_scene_apply",
+                "home_scene_apply".to_string(),
                 work_items,
                 dispatch_spacing,
                 dispatch_generation,
@@ -6173,6 +6177,456 @@ pub fn do_home_scene_apply(
         dispatch_spacing_ms: dispatch_spacing.as_millis() as u64,
         estimated_dispatch_ms: estimated_dispatch_duration(dispatch_count, dispatch_spacing)
             .as_millis() as u64,
+        target_mode: HomeSceneTargetMode::Rooms,
+        dispatch_lanes: Vec::new(),
+    })
+}
+
+/// Lane key for lights the engine dispatches itself (no composite controller
+/// or a legacy engine-only room).
+const HOME_SCENE_ENGINE_LANE: &str = "engine";
+
+/// One light the device-mode whole-home apply addresses.
+struct HomeSceneDeviceTarget {
+    /// Public node id: a light device node, or a legacy engine-only room that
+    /// is its own dispatch unit.
+    node_id: String,
+    /// Routing identity the command is sent to. Attached lights use the
+    /// direct-device alias so a grouped room cannot swallow the command.
+    dispatch_node_id: String,
+    /// Topology room the light belongs to, if any.
+    room_id: Option<String>,
+    /// Hub lane the command is paced in.
+    hub: String,
+}
+
+struct HomeSceneDeviceTargets {
+    eligible: Vec<HomeSceneDeviceTarget>,
+    skipped: usize,
+}
+
+/// Enumerate every light in the house as its own target, from one serialized
+/// state snapshot.
+///
+/// Every enabled light device counts, whatever its room is doing. Lights whose
+/// room is disabled, and lights the composite controller cannot route, are
+/// skipped. A legacy engine-only room (not in the topology, no light children)
+/// is the dispatch unit for its lights and joins as one target. Order is
+/// room-major (room name, room id, then device id) with roomless lights last,
+/// so the palette runs through the house one room after another, neighbouring
+/// lights take neighbouring colours, and the order is stable between requests.
+fn home_scene_device_targets_locked(
+    s: &AppState,
+    runtime: &Arc<dyn RuntimeHandle>,
+) -> HomeSceneDeviceTargets {
+    let snapshots = runtime.engine_all_effective_node_snapshots();
+    let rooms: HashMap<&str, (&str, bool)> = snapshots
+        .iter()
+        .filter(|snap| snap.kind.is_room())
+        .map(|snap| (snap.id.as_str(), (snap.name.as_str(), snap.disabled)))
+        .collect();
+    let room_disabled = |room_id: Option<&str>| {
+        room_id.is_some_and(|room_id| rooms.get(room_id).is_some_and(|(_, disabled)| *disabled))
+    };
+
+    let mut eligible: Vec<((bool, String, String, String), HomeSceneDeviceTarget)> = Vec::new();
+    let mut skipped = 0usize;
+    for snap in &snapshots {
+        if crate::topology::is_internal_light_node_id(&snap.id) {
+            continue;
+        }
+        if snap.kind.is_room() {
+            // Topology rooms are covered by their lights. A legacy engine-only
+            // room whose only scope entry is itself is the dispatch unit.
+            if s.topology.get(&snap.id).is_some() {
+                continue;
+            }
+            let scope = light_scene_target_scope_node_ids(s, runtime, &snap.id);
+            if scope.len() != 1 || !scope.contains(&snap.id) {
+                continue;
+            }
+            if snap.disabled {
+                skipped += 1;
+                continue;
+            }
+            eligible.push((
+                (false, snap.name.clone(), snap.id.clone(), snap.id.clone()),
+                HomeSceneDeviceTarget {
+                    node_id: snap.id.clone(),
+                    dispatch_node_id: snap.id.clone(),
+                    room_id: None,
+                    hub: HOME_SCENE_ENGINE_LANE.to_string(),
+                },
+            ));
+            continue;
+        }
+        if !snap.kind.is_light_addressable() {
+            continue;
+        }
+        let target = if let Some(node) = s.topology.get_device_node(&snap.id) {
+            let Some(device) = s.canonical_registry.get(&node.canonical_device_id) else {
+                skipped += 1;
+                continue;
+            };
+            if device.device_type != DeviceType::Light {
+                continue;
+            }
+            let Some(endpoint) = device.preferred_endpoint() else {
+                skipped += 1;
+                continue;
+            };
+            let dispatch_node_id = if node.parent_id.is_some() {
+                crate::topology::device_light_node_id(&node.id)
+            } else {
+                node.id.clone()
+            };
+            HomeSceneDeviceTarget {
+                node_id: node.id.clone(),
+                dispatch_node_id,
+                room_id: node.parent_id.clone(),
+                hub: endpoint.hub_key.to_string(),
+            }
+        } else if s.composite_controller.is_none() {
+            HomeSceneDeviceTarget {
+                node_id: snap.id.clone(),
+                dispatch_node_id: snap.id.clone(),
+                room_id: snap.parent_id.clone(),
+                hub: HOME_SCENE_ENGINE_LANE.to_string(),
+            }
+        } else {
+            skipped += 1;
+            continue;
+        };
+        if snap.disabled || room_disabled(target.room_id.as_deref()) {
+            skipped += 1;
+            continue;
+        }
+        let room_name = target
+            .room_id
+            .as_deref()
+            .and_then(|room_id| rooms.get(room_id))
+            .map(|(name, _)| (*name).to_string())
+            .unwrap_or_default();
+        let key = (
+            target.room_id.is_none(),
+            room_name,
+            target.room_id.clone().unwrap_or_default(),
+            snap.id.clone(),
+        );
+        eligible.push((key, target));
+    }
+    eligible.sort_by(|left, right| left.0.cmp(&right.0));
+    HomeSceneDeviceTargets {
+        eligible: eligible.into_iter().map(|(_, target)| target).collect(),
+        skipped,
+    }
+}
+
+/// Render one device's scene output into a dispatchable command.
+///
+/// An explicit scene entry for the device wins and consumes no palette slot;
+/// otherwise the device takes `palette[slot]` and consumes one; otherwise the
+/// layer default applies. Returns the command and the slots consumed.
+fn plan_home_scene_device(
+    scene: &SceneDefinition,
+    target: &HomeSceneDeviceTarget,
+    request_transition_ms: Option<u32>,
+    palette_slot: usize,
+) -> Result<(SceneLightCommand, usize)> {
+    let layer = scene
+        .light
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("Scene '{}' has no light layer", scene.id))?;
+    let (output, consumed) = if let Some(entry) = layer
+        .entries
+        .iter()
+        .find(|entry| entry.target.node_id() == target.node_id)
+    {
+        (entry.output.clone(), 0)
+    } else if !layer.palette.is_empty() {
+        (layer.palette[palette_slot % layer.palette.len()].clone(), 1)
+    } else if let Some(default_output) = &layer.default_output {
+        (default_output.clone(), 0)
+    } else {
+        anyhow::bail!(
+            "Scene '{}' has no output for light '{}'",
+            scene.id,
+            target.node_id
+        );
+    };
+    let mut output = output;
+    if let Some(transition_ms) = request_transition_ms {
+        output.transition_ms = Some(transition_ms);
+    }
+    let dispatch = match output
+        .to_command(layer.default_transition_ms)
+        .map_err(|e| {
+            anyhow::anyhow!("Invalid light scene output for '{}': {}", target.node_id, e)
+        })? {
+        Some(command) => SceneLightDispatch::On(command),
+        None => SceneLightDispatch::Off(output.transition_ms(layer.default_transition_ms)),
+    };
+    Ok((
+        SceneLightCommand {
+            public_node_id: target.node_id.clone(),
+            dispatch_node_id: target.dispatch_node_id.clone(),
+            dispatch,
+        },
+        consumed,
+    ))
+}
+
+/// Apply one stored scene to every light in the house individually.
+///
+/// Rooms are ignored as dispatch units: every light gets its own command
+/// through the direct-device route, the palette rotates across the whole house
+/// in one continuous order, and the commands are handed to the node dispatch
+/// worker as one paced lane per hub so hubs proceed concurrently (Hue 1, 2, 3
+/// while Matter 1, 2, 3). Mood is still bound per room (with the room's first
+/// palette slot) so periodic output and motion stay out of the way until the
+/// house is reset, exactly as in room mode.
+fn home_scene_apply_to_devices(
+    state: &SharedState,
+    scene: SceneDefinition,
+    request: &HomeSceneApplyRequest,
+    dispatch_spacing: Duration,
+) -> Result<HomeSceneApplyResponse> {
+    // Enumerate and plan from one serialized topology snapshot so the palette
+    // order cannot observe a half-applied house.
+    let transaction_lock = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.external_topology_transaction_lock.clone()
+    };
+    let (runtime, skipped, planned) = {
+        let _transaction = transaction_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Failed to lock external topology transaction"))?;
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let runtime = s
+            .hub_runtime()
+            .ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+        let targets = home_scene_device_targets_locked(&s, &runtime);
+        let mut palette_slot = 0usize;
+        let mut planned = Vec::with_capacity(targets.eligible.len());
+        for target in targets.eligible {
+            let result =
+                plan_home_scene_device(&scene, &target, request.transition_ms, palette_slot);
+            let start_slot = palette_slot;
+            let result = result.map(|(command, consumed)| {
+                palette_slot = palette_slot.wrapping_add(consumed);
+                command
+            });
+            planned.push((target, start_slot, result));
+        }
+        (runtime, targets.skipped, planned)
+    };
+
+    if planned.is_empty() {
+        anyhow::bail!("No lights are available for a whole-home scene");
+    }
+
+    let mut results: Vec<HomeSceneTargetResult> = Vec::with_capacity(planned.len());
+    let mut applied: Vec<(HomeSceneDeviceTarget, usize, SceneLightCommand)> = Vec::new();
+    for (target, slot, planned_command) in planned {
+        match planned_command {
+            Ok(command) => {
+                results.push(HomeSceneTargetResult {
+                    target_id: target.node_id.clone(),
+                    affected_node_ids: vec![target.node_id.clone()],
+                    unresolved_node_ids: Vec::new(),
+                    error: None,
+                });
+                applied.push((target, slot, command));
+            }
+            Err(error) => results.push(HomeSceneTargetResult {
+                target_id: target.node_id.clone(),
+                affected_node_ids: Vec::new(),
+                unresolved_node_ids: Vec::new(),
+                error: Some(error.to_string()),
+            }),
+        }
+    }
+
+    // One lane per hub, in first-seen order, each paced independently.
+    let mut lanes: Vec<(String, Vec<usize>)> = Vec::new();
+    for (index, (target, _, _)) in applied.iter().enumerate() {
+        match lanes.iter_mut().find(|(hub, _)| *hub == target.hub) {
+            Some((_, members)) => members.push(index),
+            None => lanes.push((target.hub.clone(), vec![index])),
+        }
+    }
+    let dispatch_count = applied.len();
+
+    let (dispatch_generation, light_breaker_enabled, work_tx) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        (
+            s.light_dispatch_generation,
+            s.light_breaker_enabled,
+            s.work_tx.clone(),
+        )
+    };
+
+    // Same rules as room mode: the paced dispatcher when a worker exists and
+    // the breaker is on, otherwise synchronous and paced. Lanes that could not
+    // be handed off run synchronously so no light is dispatched twice.
+    let mut queued_lanes = 0usize;
+    let mut synchronous_lanes: Vec<&(String, Vec<usize>)> = Vec::new();
+    for lane in &lanes {
+        let (hub, members) = lane;
+        let tx = match &work_tx {
+            Some(tx) if light_breaker_enabled => tx.clone(),
+            _ => {
+                synchronous_lanes.push(lane);
+                continue;
+            }
+        };
+        let work_items: Vec<WorkItem> = members
+            .iter()
+            .map(|index| {
+                home_scene_work_item(&applied[*index].2, dispatch_spacing, dispatch_generation)
+            })
+            .collect();
+        match spawn_paced_node_dispatcher(
+            state,
+            tx,
+            format!("home_scene_apply:{hub}"),
+            work_items,
+            dispatch_spacing,
+            dispatch_generation,
+        ) {
+            Ok(()) => queued_lanes += 1,
+            Err(error) => {
+                warn!(
+                    target: "cmd",
+                    "home_scene_apply: failed to queue the {} lane: {}",
+                    hub,
+                    error
+                );
+                synchronous_lanes.push(lane);
+            }
+        }
+    }
+    let queued = queued_lanes > 0 && synchronous_lanes.is_empty();
+
+    let mut dispatch_failures: Vec<(String, String)> = Vec::new();
+    for (_, members) in synchronous_lanes {
+        let mut dispatched_any = false;
+        for index in members {
+            if dispatched_any && !dispatch_spacing.is_zero() {
+                std::thread::sleep(dispatch_spacing);
+            }
+            dispatched_any = true;
+            let (target, _, command) = &applied[*index];
+            if let Err(error) = dispatch_scene_light_command(state, &runtime, command) {
+                dispatch_failures.push((target.node_id.clone(), error.to_string()));
+            }
+        }
+    }
+    if !dispatch_failures.is_empty() {
+        applied.retain(|(target, _, _)| {
+            !dispatch_failures
+                .iter()
+                .any(|(node_id, _)| *node_id == target.node_id)
+        });
+        for (node_id, error) in dispatch_failures {
+            if let Some(result) = results
+                .iter_mut()
+                .find(|result| result.target_id == node_id)
+            {
+                result.affected_node_ids.clear();
+                result.error = Some(error);
+            }
+        }
+    }
+
+    if applied.is_empty() {
+        let detail = results
+            .iter()
+            .find_map(|result| result.error.clone())
+            .unwrap_or_default();
+        anyhow::bail!(
+            "Scene '{}' could not be applied to any light: {}",
+            scene.id,
+            detail
+        );
+    }
+
+    // Bind Mood per room so periodic output and motion stay suppressed until a
+    // reset; the room remembers the slot its first light started at so a
+    // re-entry renders the same colours. Roomless lights bind themselves.
+    let mut rooms: Vec<(String, usize, Vec<String>)> = Vec::new();
+    for (target, slot, _) in &applied {
+        match &target.room_id {
+            Some(room_id) => match rooms.iter_mut().find(|(id, _, _)| id == room_id) {
+                Some((_, first_slot, members)) => {
+                    *first_slot = (*first_slot).min(*slot);
+                    members.push(target.node_id.clone());
+                }
+                None => rooms.push((room_id.clone(), *slot, vec![target.node_id.clone()])),
+            },
+            None => {
+                let affected = vec![target.node_id.clone()];
+                set_scene_committed_state(
+                    state,
+                    &runtime,
+                    &scene.id,
+                    &target.node_id,
+                    &affected,
+                    *slot,
+                );
+                if let Ok(mut s) = state.lock() {
+                    clear_scene_preview_sessions_locked(&mut s, &target.node_id, &affected);
+                }
+                emit_node_state_event_after_apply(state, &runtime, &target.node_id);
+            }
+        }
+    }
+    for (room_id, first_slot, members) in &rooms {
+        set_scene_committed_state(state, &runtime, &scene.id, room_id, members, *first_slot);
+        if let Ok(mut s) = state.lock() {
+            clear_scene_preview_sessions_locked(&mut s, room_id, members);
+        }
+        emit_node_state_event_after_apply(state, &runtime, room_id);
+    }
+    persist_rooms(state);
+
+    let dispatch_lanes: Vec<HomeSceneDispatchLane> = lanes
+        .iter()
+        .map(|(hub, members)| HomeSceneDispatchLane {
+            hub: hub.clone(),
+            dispatch_count: members.len(),
+        })
+        .collect();
+    let estimated_dispatch_ms = dispatch_lanes
+        .iter()
+        .map(|lane| estimated_dispatch_duration(lane.dispatch_count, dispatch_spacing))
+        .max()
+        .unwrap_or(Duration::ZERO)
+        .as_millis() as u64;
+    let applied_target_count = applied.len();
+    info!(
+        target: "cmd",
+        "home_scene_apply: scene={} mode=devices applied={} failed={} skipped={} queued={} lanes={} dispatch_count={}",
+        scene.id,
+        applied_target_count,
+        results.len() - applied_target_count,
+        skipped,
+        queued,
+        dispatch_lanes.len(),
+        dispatch_count,
+    );
+
+    Ok(HomeSceneApplyResponse {
+        scene_id: scene.id,
+        targets: results,
+        applied_target_count,
+        skipped_target_count: skipped,
+        queued,
+        dispatch_count,
+        dispatch_spacing_ms: dispatch_spacing.as_millis() as u64,
+        estimated_dispatch_ms,
+        target_mode: HomeSceneTargetMode::Devices,
+        dispatch_lanes,
     })
 }
 
@@ -9613,7 +10067,7 @@ fn dispatch_room_commands(
     if let Err(e) = spawn_paced_node_dispatcher(
         state,
         tx,
-        "active_mode_apply",
+        "active_mode_apply".to_string(),
         work_items,
         phase_gap,
         dispatch_generation,
@@ -9643,13 +10097,14 @@ fn dispatch_room_commands(
 fn spawn_paced_node_dispatcher(
     state: &SharedState,
     tx: std::sync::mpsc::SyncSender<crate::state::WorkItem>,
-    label: &'static str,
+    label: String,
     work_items: Vec<crate::state::WorkItem>,
     spacing: Duration,
     dispatch_generation: u64,
 ) -> Result<()> {
     let item_count = work_items.len();
     let dispatcher_state = state.clone();
+    let error_label = label.clone();
     std::thread::Builder::new()
         .name("room-dispatch".to_string())
         .spawn(move || {
@@ -9679,7 +10134,7 @@ fn spawn_paced_node_dispatcher(
             }
         })
         .map(|_| ())
-        .map_err(|e| anyhow::anyhow!("{}: failed to spawn node dispatcher: {}", label, e))
+        .map_err(|e| anyhow::anyhow!("{}: failed to spawn node dispatcher: {}", error_label, e))
 }
 
 fn build_room_command_from_values(
@@ -24572,6 +25027,7 @@ mod tests {
             "halloween",
             HomeSceneApplyRequest {
                 transition_ms: None,
+                ..Default::default()
             },
             std::time::Duration::ZERO,
         )
@@ -24621,6 +25077,7 @@ mod tests {
             "halloween",
             HomeSceneApplyRequest {
                 transition_ms: None,
+                ..Default::default()
             },
             std::time::Duration::ZERO,
         )
@@ -24673,6 +25130,7 @@ mod tests {
             "halloween",
             HomeSceneApplyRequest {
                 transition_ms: None,
+                ..Default::default()
             },
             std::time::Duration::ZERO,
         )
@@ -24705,6 +25163,7 @@ mod tests {
             "halloween",
             HomeSceneApplyRequest {
                 transition_ms: None,
+                ..Default::default()
             },
             std::time::Duration::ZERO,
         )
@@ -24773,6 +25232,7 @@ mod tests {
             "halloween",
             HomeSceneApplyRequest {
                 transition_ms: None,
+                ..Default::default()
             },
             std::time::Duration::ZERO,
         )
@@ -24801,6 +25261,7 @@ mod tests {
             &crate::scenes::native_scene_id("Hue", "abc-123"),
             HomeSceneApplyRequest {
                 transition_ms: None,
+                ..Default::default()
             },
             std::time::Duration::ZERO,
         )
@@ -24835,6 +25296,7 @@ mod tests {
             "halloween",
             HomeSceneApplyRequest {
                 transition_ms: None,
+                ..Default::default()
             },
             std::time::Duration::ZERO,
         )
@@ -24869,6 +25331,7 @@ mod tests {
             "not-a-scene",
             HomeSceneApplyRequest {
                 transition_ms: None,
+                ..Default::default()
             },
             std::time::Duration::ZERO,
         )
@@ -24893,6 +25356,7 @@ mod tests {
             "halloween",
             HomeSceneApplyRequest {
                 transition_ms: None,
+                ..Default::default()
             },
             spacing,
         )
@@ -24928,6 +25392,277 @@ mod tests {
     }
 
     #[test]
+    fn home_scene_apply_overrides_off_and_standby_rooms_and_suppresses_motion() {
+        let harness = setup_home_scene_rooms();
+        {
+            let mut snapshots = harness.runtime.snapshots.lock().unwrap();
+            for snapshot in snapshots.iter_mut() {
+                match snapshot.id.as_str() {
+                    "room-a" => snapshot.hard_off = true,
+                    "room-b" => snapshot.soft_off = true,
+                    _ => {}
+                }
+            }
+        }
+        do_scene_upsert(
+            &harness.state,
+            scene_with_palette("halloween", &halloween_palette()),
+        )
+        .unwrap();
+
+        let response = do_home_scene_apply(
+            &harness.state,
+            "halloween",
+            HomeSceneApplyRequest {
+                transition_ms: None,
+                ..Default::default()
+            },
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+
+        assert_eq!(response.applied_target_count, 2, "{:?}", response.targets);
+        for room_id in ["room-a", "room-b"] {
+            let room = harness.runtime.engine_room_snapshot(room_id).unwrap();
+            assert!(!room.hard_off, "{room_id} must leave hard off");
+            assert!(!room.soft_off, "{room_id} must leave standby");
+            assert!(room.rhythm_enabled);
+            // `mood_active` with a bound stored scene is exactly the condition
+            // the motion path reports as `active_scene`, so motion stays out
+            // of the way until the house is reset.
+            assert!(room.mood_active, "{room_id} should be in Mood");
+            assert_eq!(
+                room.profile_settings.mood_scene_id.as_deref(),
+                Some("halloween")
+            );
+        }
+        assert_eq!(harness.runtime.applied_commands().len(), 3);
+    }
+
+    #[test]
+    fn home_scene_apply_in_device_mode_addresses_every_light_with_one_continuous_palette() {
+        let harness = setup_home_scene_rooms();
+        let palette = halloween_palette();
+        do_scene_upsert(&harness.state, scene_with_palette("halloween", &palette)).unwrap();
+
+        let response = do_home_scene_apply(
+            &harness.state,
+            "halloween",
+            HomeSceneApplyRequest {
+                transition_ms: None,
+                target_mode: HomeSceneTargetMode::Devices,
+            },
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+
+        assert_eq!(response.target_mode, HomeSceneTargetMode::Devices);
+        assert_eq!(response.applied_target_count, 3, "{:?}", response.targets);
+        assert_eq!(
+            response.skipped_target_count, 1,
+            "the disabled room's light is skipped"
+        );
+        assert_eq!(
+            response
+                .targets
+                .iter()
+                .map(|target| target.target_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                harness.room_a_lights[0].as_str(),
+                harness.room_a_lights[1].as_str(),
+                harness.room_b_lights[0].as_str(),
+            ],
+            "targets are the lights themselves, room-major and stable"
+        );
+        assert_eq!(response.dispatch_count, 3);
+        assert_eq!(response.dispatch_lanes.len(), 1, "one Matter hub, one lane");
+        assert_eq!(response.dispatch_lanes[0].dispatch_count, 3);
+
+        // Every light is addressed directly through its device alias, never
+        // through its room, and the palette runs straight through the house.
+        let calls = harness.runtime.applied_commands();
+        assert_eq!(calls.len(), 3, "{calls:?}");
+        let expected = [
+            (&harness.room_a_lights[0], palette[0]),
+            (&harness.room_a_lights[1], palette[1]),
+            (&harness.room_b_lights[0], palette[2]),
+        ];
+        for (light, rgb) in expected {
+            let alias = crate::topology::device_light_node_id(light);
+            let (_, command) = calls
+                .iter()
+                .find(|(node_id, _)| *node_id == alias)
+                .unwrap_or_else(|| panic!("no direct command for {light}: {calls:?}"));
+            assert_eq!(
+                (command.rgb.r, command.rgb.g, command.rgb.b),
+                (rgb.r, rgb.g, rgb.b)
+            );
+        }
+        assert!(
+            !calls
+                .iter()
+                .any(|(node_id, _)| node_id == "room-a" || node_id == "room-b"),
+            "device mode never dispatches to a room node"
+        );
+
+        // Mood is still bound per room so periodic output and motion stay
+        // suppressed, and each room remembers where its palette started.
+        let room_a = harness.runtime.engine_room_snapshot("room-a").unwrap();
+        let room_b = harness.runtime.engine_room_snapshot("room-b").unwrap();
+        assert!(room_a.mood_active && room_b.mood_active);
+        assert_eq!(
+            room_a.profile_settings.mood_scene_id.as_deref(),
+            Some("halloween")
+        );
+        assert_eq!(room_a.profile_settings.mood_scene_palette_offset, None);
+        assert_eq!(room_b.profile_settings.mood_scene_palette_offset, Some(2));
+        assert!(
+            !harness
+                .runtime
+                .engine_room_snapshot("room-c")
+                .unwrap()
+                .mood_active
+        );
+    }
+
+    #[test]
+    fn home_scene_apply_in_device_mode_honours_explicit_per_device_entries() {
+        let harness = setup_home_scene_rooms();
+        let palette = halloween_palette();
+        let mut scene = scene_with_palette("halloween", &palette);
+        // One light is pinned to its own colour; it must not consume a slot.
+        scene
+            .light
+            .as_mut()
+            .unwrap()
+            .entries
+            .push(crate::scenes::LightSceneEntry {
+                target: crate::scenes::LightSceneTargetRef::Node {
+                    node_id: harness.room_a_lights[1].clone(),
+                },
+                output: crate::scenes::LightSceneOutput {
+                    power: LightScenePower::On,
+                    brightness: 33,
+                    color: Some(crate::scenes::LightSceneColor::Rgb {
+                        rgb: Rgb::new(1, 2, 3),
+                    }),
+                    transition_ms: None,
+                },
+            });
+        do_scene_upsert(&harness.state, scene).unwrap();
+
+        do_home_scene_apply(
+            &harness.state,
+            "halloween",
+            HomeSceneApplyRequest {
+                transition_ms: None,
+                target_mode: HomeSceneTargetMode::Devices,
+            },
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+
+        let calls = harness.runtime.applied_commands();
+        let rgb_for = |light: &str| {
+            let alias = crate::topology::device_light_node_id(light);
+            let (_, command) = calls.iter().find(|(id, _)| *id == alias).unwrap();
+            (command.rgb.r, command.rgb.g, command.rgb.b)
+        };
+        assert_eq!(
+            rgb_for(&harness.room_a_lights[0]),
+            (palette[0].r, palette[0].g, palette[0].b)
+        );
+        assert_eq!(rgb_for(&harness.room_a_lights[1]), (1, 2, 3));
+        assert_eq!(
+            rgb_for(&harness.room_b_lights[0]),
+            (palette[1].r, palette[1].g, palette[1].b),
+            "the pinned light consumed no palette slot"
+        );
+    }
+
+    #[test]
+    fn home_scene_apply_in_device_mode_runs_one_paced_lane_per_hub() {
+        let harness = setup_home_scene_rooms();
+        // A Hue light joins room B so the house spans two hubs.
+        let hue_key = HubKey::new(HubType::new("hue"), "bridge");
+        let hue_light = insert_canonical_device(
+            &harness.state,
+            hue_key,
+            "hue-light-1",
+            "Hue Lamp",
+            "hue-room-b",
+            "Room B",
+        );
+        {
+            let mut s = harness.state.lock().unwrap();
+            assert!(s.topology.attach_device_user_override("room-b", &hue_light));
+        }
+        harness
+            .runtime
+            .snapshots
+            .lock()
+            .unwrap()
+            .push(make_light_child_snapshot(&hue_light, "room-b"));
+        do_scene_upsert(
+            &harness.state,
+            scene_with_palette("halloween", &halloween_palette()),
+        )
+        .unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel(16);
+        harness.state.lock().unwrap().work_tx = Some(tx);
+        let spacing = std::time::Duration::from_millis(100);
+
+        let response = do_home_scene_apply(
+            &harness.state,
+            "halloween",
+            HomeSceneApplyRequest {
+                transition_ms: None,
+                target_mode: HomeSceneTargetMode::Devices,
+            },
+            spacing,
+        )
+        .unwrap();
+
+        assert!(response.queued);
+        assert_eq!(response.dispatch_count, 4);
+        assert_eq!(
+            response.dispatch_lanes.len(),
+            2,
+            "{:?}",
+            response.dispatch_lanes
+        );
+        assert_eq!(
+            response.estimated_dispatch_ms, 200,
+            "the estimate is the longest lane (three Matter lights), not the sum"
+        );
+
+        let mut arrivals = Vec::new();
+        for _ in 0..4 {
+            let item = rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("every lane hands its items to the worker");
+            assert!(matches!(item, WorkItem::ApplyNodeCommand { .. }));
+            arrivals.push(std::time::Instant::now());
+        }
+        let first = arrivals[0];
+        let within_first_slot = arrivals
+            .iter()
+            .filter(|at| at.duration_since(first) < spacing / 2)
+            .count();
+        assert_eq!(
+            within_first_slot, 2,
+            "each hub's first command goes out immediately: the lanes run \
+             concurrently instead of one queue paced end to end"
+        );
+        let last = *arrivals.last().unwrap();
+        assert!(
+            last.duration_since(first) >= spacing * 2,
+            "the Matter lane still paces its own three commands"
+        );
+    }
+
+    #[test]
     fn home_scene_apply_fails_when_every_target_fails() {
         // A composite controller makes unroutable nodes fail to plan, and the
         // only room in the house is a ghost room whose light is unknown to the
@@ -24951,6 +25686,7 @@ mod tests {
             "halloween",
             HomeSceneApplyRequest {
                 transition_ms: None,
+                ..Default::default()
             },
             std::time::Duration::ZERO,
         )
@@ -24986,6 +25722,7 @@ mod tests {
             "halloween",
             HomeSceneApplyRequest {
                 transition_ms: None,
+                ..Default::default()
             },
             spacing,
         )
@@ -25014,6 +25751,7 @@ mod tests {
             "halloween",
             HomeSceneApplyRequest {
                 transition_ms: None,
+                ..Default::default()
             },
             std::time::Duration::ZERO,
         )

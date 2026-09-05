@@ -423,6 +423,16 @@ fn group_light_node_id(room_id: &str, hub_key: &HubKey, hub_room_id: &str) -> St
     )
 }
 
+/// Internal routing identity that addresses one attached light device
+/// directly, bypassing whatever grouped dispatch its room prefers.
+///
+/// The device-mode whole-home scene apply dispatches through this so every
+/// light in the house receives its own command. It is never a schedulable node
+/// and never appears in the public topology.
+pub fn device_light_node_id(node_id: &str) -> String {
+    format!("{INTERNAL_LIGHT_NODE_PREFIX}|device={node_id}|kind=device")
+}
+
 impl TopologyRoom {
     /// Create a new empty room.
     pub fn new(id: impl Into<String>, name: impl Into<String>) -> Self {
@@ -3303,6 +3313,17 @@ impl RoomTopologyStore {
             {
                 table.insert(node.id.clone(), vec![(hub_key.to_string(), target)]);
             }
+            // The direct-device alias always resolves to the light itself, so
+            // a device-mode scene apply can address it even when the public
+            // node dispatches as part of a group.
+            if let Some((hub_key, target)) =
+                self.light_device_endpoint_route(node, canonical_registry)
+            {
+                table.insert(
+                    device_light_node_id(&node.id),
+                    vec![(hub_key.to_string(), target)],
+                );
+            }
         }
         let mut standalone_node_ids: Vec<_> = self
             .device_nodes
@@ -4146,6 +4167,62 @@ mod tests {
             }]
         );
         assert!(store.light_node_uses_device_dispatch(&light_id, &registry));
+    }
+
+    #[test]
+    fn composite_routing_exposes_a_direct_device_alias_for_grouped_lights() {
+        let mut store = RoomTopologyStore::new();
+        let room_id = store.create_room("Studio");
+        let mut registry = CanonicalRegistry::new();
+        let light_id = register_identity(
+            &mut registry,
+            &hue_key(),
+            make_identity(
+                "hue-light-1",
+                "hue-room-1",
+                "Studio",
+                "Lamp",
+                DeviceType::Light,
+            ),
+        );
+        assert!(store.attach_device_user_override(&room_id, &light_id));
+        store.set_grouped_room_control_required(&hue_key(), true);
+        assert!(store.upsert_managed_room_binding(
+            &room_id,
+            HubRoomBinding {
+                hub_key: hue_key(),
+                hub_room_id: "hue-room-1".into(),
+                control_id: "grouped-1".into(),
+                light_device_ids: vec!["hue-light-1".into()],
+            },
+        ));
+
+        let routing = store.composite_routing(&registry);
+
+        // The public node still dispatches as the authoritative group ...
+        assert!(matches!(
+            routing.get(&light_id).map(|routes| &routes[0].1),
+            Some(HubDispatchTarget::Group { .. })
+        ));
+        // ... while the alias reaches the bulb directly.
+        let alias = device_light_node_id(&light_id);
+        assert!(is_internal_light_node_id(&alias));
+        assert_eq!(
+            routing.get(&alias),
+            Some(&vec![(
+                hue_key().to_string(),
+                HubDispatchTarget::Devices {
+                    native_ids: vec!["hue-light-1".to_string()],
+                },
+            )])
+        );
+        assert!(
+            !store
+                .periodic_light_nodes(&registry)
+                .iter()
+                .any(|node| node.id == alias),
+            "the alias must never become a scheduled node"
+        );
     }
 
     #[test]

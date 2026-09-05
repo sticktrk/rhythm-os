@@ -721,6 +721,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     int? transitionMs,
     int? dispatchSpacingMs,
     String? correlationId,
+    RhythmHomeSceneTargetMode? targetMode,
   }) async {
     applyHomeSceneCalls.add((
       sceneId: sceneId,
@@ -5967,6 +5968,41 @@ void main() {
         isNot('halloween'),
         reason: 'an errored target must not be presented as applied',
       );
+    });
+
+    test('a hello refresh keeps the scene-backed mood brightness on the card',
+        () async {
+      // The server folds the bound scene's brightness into the node state, and
+      // the mood-profile sync that runs right after must not clear it: a
+      // scene-backed mood has no mood profile, and without this guard every
+      // room card on a whole-home scene dropped to 1%.
+      connection.emitHello(RhythmHello.fromJson({
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': const <dynamic>[],
+          'hubs': const <dynamic>[],
+        },
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'hub_types': ['hue'],
+            'state': 'mood',
+            'mood_active': true,
+            'rhythm_enabled': true,
+            'disabled': false,
+            'lights_on': true,
+            'brightness': 80,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'profile_settings': {'mood_scene_id': 'halloween'},
+          },
+        ],
+      }));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(roomProvider.getMoodBrightness('room-1'), 80);
     });
 
     test('whole-home apply returns null and binds nothing when rejected',

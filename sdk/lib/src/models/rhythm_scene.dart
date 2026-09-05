@@ -661,9 +661,51 @@ class RhythmHomeSceneTargetResult {
   bool get succeeded => error == null;
 }
 
+/// How a whole-home scene apply carves the house into targets.
+enum RhythmHomeSceneTargetMode {
+  /// Every eligible room (and roomless light) is one target; a grouped room
+  /// gets one projection or one group command and the palette rotates room by
+  /// room. The server default.
+  rooms('rooms'),
+
+  /// Every light device is its own target regardless of room: each gets its
+  /// own command, the palette runs through the whole house in one continuous
+  /// order, and dispatch runs as one paced lane per hub concurrently. The path
+  /// for scenes authored per device so the house reads as one theme.
+  devices('devices');
+
+  const RhythmHomeSceneTargetMode(this.wireValue);
+
+  /// The value carried in `target_mode` on the wire.
+  final String wireValue;
+
+  static RhythmHomeSceneTargetMode fromWire(String? value) =>
+      values.firstWhere(
+        (mode) => mode.wireValue == value,
+        orElse: () => RhythmHomeSceneTargetMode.rooms,
+      );
+}
+
+/// One hub's share of a device-mode whole-home dispatch.
+class RhythmHomeSceneDispatchLane {
+  final String hub;
+  final int dispatchCount;
+
+  const RhythmHomeSceneDispatchLane({
+    required this.hub,
+    this.dispatchCount = 0,
+  });
+
+  factory RhythmHomeSceneDispatchLane.fromJson(Map<String, dynamic> json) =>
+      RhythmHomeSceneDispatchLane(
+        hub: json['hub'] as String? ?? '',
+        dispatchCount: jsonInt(json['dispatch_count']) ?? 0,
+      );
+}
+
 /// Result of applying one stored scene to the whole home.
 ///
-/// The server owns the fan-out: it enumerates the rooms, paces dispatch and
+/// The server owns the fan-out: it enumerates the targets, paces dispatch and
 /// binds the mood scene, so the client makes exactly one call and renders this.
 class RhythmHomeSceneActionResult {
   final String sceneId;
@@ -674,6 +716,8 @@ class RhythmHomeSceneActionResult {
   final int dispatchCount;
   final int dispatchSpacingMs;
   final int estimatedDispatchMs;
+  final RhythmHomeSceneTargetMode targetMode;
+  final List<RhythmHomeSceneDispatchLane> dispatchLanes;
   final Map<String, dynamic> raw;
 
   const RhythmHomeSceneActionResult({
@@ -685,6 +729,8 @@ class RhythmHomeSceneActionResult {
     this.dispatchCount = 0,
     this.dispatchSpacingMs = 0,
     this.estimatedDispatchMs = 0,
+    this.targetMode = RhythmHomeSceneTargetMode.rooms,
+    this.dispatchLanes = const [],
     this.raw = const <String, dynamic>{},
   });
 
@@ -697,12 +743,20 @@ class RhythmHomeSceneActionResult {
       ..remove('queued')
       ..remove('dispatch_count')
       ..remove('dispatch_spacing_ms')
-      ..remove('estimated_dispatch_ms');
+      ..remove('estimated_dispatch_ms')
+      ..remove('target_mode')
+      ..remove('dispatch_lanes');
     final targets = ((json['targets'] as List<dynamic>?) ?? const <dynamic>[])
         .map(jsonMap)
         .nonNulls
         .map(RhythmHomeSceneTargetResult.fromJson)
         .toList();
+    final lanes =
+        ((json['dispatch_lanes'] as List<dynamic>?) ?? const <dynamic>[])
+            .map(jsonMap)
+            .nonNulls
+            .map(RhythmHomeSceneDispatchLane.fromJson)
+            .toList();
     return RhythmHomeSceneActionResult(
       sceneId: json['scene_id'] as String? ?? '',
       targets: targets,
@@ -713,6 +767,9 @@ class RhythmHomeSceneActionResult {
       dispatchCount: jsonInt(json['dispatch_count']) ?? 0,
       dispatchSpacingMs: jsonInt(json['dispatch_spacing_ms']) ?? 0,
       estimatedDispatchMs: jsonInt(json['estimated_dispatch_ms']) ?? 0,
+      targetMode:
+          RhythmHomeSceneTargetMode.fromWire(json['target_mode'] as String?),
+      dispatchLanes: lanes,
       raw: raw,
     );
   }

@@ -604,6 +604,16 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     body: { transition_ms: 1200, dispatch_spacing_ms: 120 }
   },
   {
+    id: 'scene-apply-home-devices',
+    category: 'Scenes',
+    label: 'Apply scene to whole home (per device)',
+    description:
+      'Apply a saved scene to every light individually, ignoring rooms: one continuous palette across the house and one paced dispatch lane per hub.',
+    method: 'POST',
+    path: 'api/scenes/{scene_id}/apply-home',
+    body: { target_mode: 'devices', transition_ms: 1200, dispatch_spacing_ms: 120 }
+  },
+  {
     id: 'scene-preview',
     category: 'Scenes',
     label: 'Preview scene',
