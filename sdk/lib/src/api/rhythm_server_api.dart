@@ -1046,6 +1046,38 @@ class RhythmServerApi {
     );
   }
 
+  /// Apply a saved scene to every eligible room in the home.
+  ///
+  /// The server owns the fan-out: it enumerates the rooms, plans them with
+  /// palette continuity, paces dispatch and binds the mood scene per room. The
+  /// client makes exactly one call. Requires
+  /// [RhythmFeature.homeSceneApply]; older servers return 404 and this
+  /// resolves to `null`.
+  Future<RhythmHomeSceneActionResult?> applyHomeScene({
+    required String sceneId,
+    int? transitionMs,
+    int? dispatchSpacingMs,
+    String? correlationId,
+  }) async {
+    try {
+      final response = await _dio.post(
+        'api/scenes/${Uri.encodeComponent(sceneId)}/apply-home',
+        data: {
+          if (transitionMs != null) 'transition_ms': transitionMs,
+          if (dispatchSpacingMs != null)
+            'dispatch_spacing_ms': dispatchSpacingMs,
+          if (correlationId != null) 'correlation_id': correlationId,
+        },
+      );
+      final responseJson = jsonMap(response.data);
+      if (responseJson == null) return null;
+      return RhythmHomeSceneActionResult.fromJson(responseJson);
+    } catch (e) {
+      _log.warning('applyHomeScene failed', e);
+    }
+    return null;
+  }
+
   /// Preview a saved scene temporarily.
   Future<RhythmSceneActionResult?> previewScene({
     required String sceneId,
