@@ -2,7 +2,7 @@
 //!
 //! Platform-agnostic `AppState` with `dyn Storage` instead of NVS.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -21,7 +21,8 @@ use crate::canonical::registry::CanonicalRegistry;
 use crate::factory_default_config::{
     factory_default_active_mode, factory_default_auto_update,
     factory_default_light_profile_config_map, factory_default_mode_config_map,
-    factory_default_mode_transition_configs, factory_default_power_save, factory_default_scene_map,
+    factory_default_mode_transition_configs, factory_default_power_save, factory_default_scene_ids,
+    factory_default_scene_map,
 };
 use crate::hub::{ActiveHub, HubCredentials, HubEvent, HubType};
 use crate::light_runtime::{LightRuntimeKind, LightRuntimeRegistry, SharedLightRuntime};
@@ -410,6 +411,13 @@ pub struct AppState {
     pub light_schedule_write_lock: Arc<Mutex<()>>,
     /// Stored scene definitions keyed by scene ID.
     pub scenes: BTreeMap<String, crate::scenes::SceneDefinition>,
+    /// Factory-default scene IDs this install has already been offered.
+    ///
+    /// A factory-default scene added in a later release is seeded into an
+    /// existing install exactly once; the marker keeps a scene the user deleted
+    /// from returning on the next restart. Backup restore and profile-bundle
+    /// import replace `scenes` but deliberately leave this alone.
+    pub seeded_factory_scene_ids: BTreeSet<String>,
     /// Ephemeral light scene previews keyed by preview ID.
     pub light_scene_previews: HashMap<String, crate::scenes::LightScenePreviewSession>,
     /// Serializes stored-scene definition changes with projection, dispatch,
@@ -1020,6 +1028,7 @@ impl Default for AppState {
             light_schedules: BTreeMap::new(),
             light_schedule_write_lock: Arc::new(Mutex::new(())),
             scenes: default_scene_map(),
+            seeded_factory_scene_ids: factory_default_scene_ids(),
             light_scene_previews: HashMap::new(),
             scene_lifecycle_transaction_lock: Arc::new(Mutex::new(())),
             active_mode: factory_default_active_mode(),
@@ -1181,6 +1190,7 @@ impl AppState {
         crate::scenes::StoredScenes {
             schema_version: crate::scenes::LIGHT_SCENE_SCHEMA_VERSION,
             scenes: self.scenes.values().cloned().collect(),
+            seeded_factory_scene_ids: self.seeded_factory_scene_ids.iter().cloned().collect(),
         }
     }
 

@@ -26302,6 +26302,11 @@ mod tests {
         let target = target_state.lock().unwrap();
         assert!(target.scenes.contains_key("icy-glow"));
         assert_eq!(target.scenes["icy-glow"].name, "Icy Glow");
+        assert_eq!(
+            target.seeded_factory_scene_ids,
+            crate::factory_default_config::factory_default_scene_ids(),
+            "a backup restore must not clear the factory-scene seed marker"
+        );
     }
 
     #[test]
@@ -26326,7 +26331,13 @@ mod tests {
 
         assert_eq!(exported.profile.scenes.len(), 1);
         assert_eq!(exported.profile.scenes[0].id, "icy-glow");
-        assert!(state.lock().unwrap().scenes.contains_key("icy-glow"));
+        let s = state.lock().unwrap();
+        assert!(s.scenes.contains_key("icy-glow"));
+        assert_eq!(
+            s.seeded_factory_scene_ids,
+            crate::factory_default_config::factory_default_scene_ids(),
+            "a profile-bundle import must not clear the factory-scene seed marker"
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! for factory metadata, power-save, and transition configuration, then injects
 //! the core built-in profiles for runtime, storage, and API exports.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 use anyhow::{anyhow, Context, Result};
@@ -186,6 +186,21 @@ pub fn factory_default_light_profile_config(id: &str) -> Option<LightProfileConf
 
 pub fn factory_default_scene_map() -> BTreeMap<String, SceneDefinition> {
     factory_default_scene_map_ref().clone()
+}
+
+/// Factory-default scene IDs that shipped before the seed marker existed.
+///
+/// A persisted `scenes.json` written by an older build carries no
+/// `seeded_factory_scene_ids`, so on first load we assume it was already
+/// offered exactly these scenes. Anything newer than this list is then seeded
+/// into the existing install once. Never extend this list: new factory scenes
+/// must go through the one-time seed instead.
+pub const FACTORY_SCENE_IDS_SEEDED_BEFORE_TRACKING: &[&str] =
+    &["color-carnival", "electric-lagoon", "berry-pop"];
+
+/// Every factory-default scene ID, sorted.
+pub fn factory_default_scene_ids() -> BTreeSet<String> {
+    factory_default_scene_map_ref().keys().cloned().collect()
 }
 
 pub fn factory_default_mode_config_map() -> BTreeMap<RhythmMode, ModeConfig> {

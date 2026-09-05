@@ -252,6 +252,14 @@ pub struct StoredScenes {
     pub schema_version: u32,
     #[serde(default)]
     pub scenes: Vec<SceneDefinition>,
+    /// Factory-default scene IDs this install has already been offered.
+    ///
+    /// A new factory-default scene is seeded into an existing install exactly
+    /// once. Recording the IDs that were seeded keeps a scene the user deleted
+    /// from reappearing on the next restart. An empty list means the file was
+    /// written before tracking existed.
+    #[serde(default)]
+    pub seeded_factory_scene_ids: Vec<String>,
 }
 
 /// Ephemeral preview session. Preview sessions are not persisted.
