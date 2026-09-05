@@ -209,4 +209,66 @@ void main() {
     expect(SettingsService.instance.getRunnerState(), isNull);
     expect(store.current.runnerStateJson, isNull);
   });
+
+  for (final initialCount in [0, 10]) {
+    test(
+        'latest hello returning to $initialCount cached nodes wins over an in-flight save',
+        () async {
+      await SettingsService.instance.clearRunnerState();
+      final rooms = RoomProvider();
+      final connection = SnapshotConnection();
+      final home = HomeProvider();
+      final sync = ServerSyncProvider(
+          connection: connection,
+          roomProvider: rooms,
+          homeProvider: home,
+          activityCloudCanProvision: () => false,
+          authStateChanges: const Stream.empty());
+      addTearDown(() {
+        sync.dispose();
+        rooms.dispose();
+        home.dispose();
+      });
+
+      // An empty initial provider does not itself need to save an empty hello.
+      connection.hellos.add(snapshot(initialCount));
+      await drain();
+      await SettingsService.instance.saveRunnerState(rooms.state);
+      final expectedCache = store.current.runnerStateJson;
+      store.writes = 0;
+      final blockedWrite = Completer<void>();
+      store.blocker = blockedWrite;
+      addTearDown(() {
+        store.blocker = null;
+        if (!blockedWrite.isCompleted) blockedWrite.complete();
+      });
+
+      connection.hellos.add(snapshot(20));
+      await drain();
+      expect(store.writes, 1);
+      expect(rooms.roomCount, 20);
+
+      connection.hellos.add(snapshot(initialCount));
+      await drain();
+      expect(rooms.roomCount, initialCount);
+      expect(SettingsService.instance.getRunnerState(), rooms.state,
+          reason: 'the cache owner must expose the newest in-memory snapshot');
+
+      store.blocker = null;
+      blockedWrite.complete();
+      await drain();
+      expect(store.current.runnerStateJson, expectedCache,
+          reason: 'the earlier in-flight snapshot must not win on disk');
+      expect(store.writes, 2);
+      final reopened = RoomProvider();
+      addTearDown(reopened.dispose);
+      await reopened.initialize();
+      expect(reopened.state, rooms.state);
+
+      store.writes = 0;
+      await SettingsService.instance.saveRunnerState(rooms.state);
+      expect(store.writes, 0,
+          reason: 'an unchanged cache still avoids a redundant write');
+    });
+  }
 }

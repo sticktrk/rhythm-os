@@ -679,12 +679,10 @@ class SettingsService {
     await Future<void>.value();
     if (generation != _runnerSaveGeneration) return;
     final json = runner_json.runnerStateToJson(state);
-    if (json == _persistedRunnerJson && !_runnerSaveFailed) return;
     _settings = _settings.copyWith(runnerStateJson: json);
     try {
       await _save(runnerGeneration: generation);
       if (generation == _runnerSaveGeneration) {
-        _persistedRunnerJson = json;
         _runnerSaveFailed = false;
       }
     } catch (_) {
@@ -699,7 +697,6 @@ class SettingsService {
     _runnerSaveFailed = false;
     _settings = _settings.clearField(clearRunnerStateJson: true);
     await _save();
-    _persistedRunnerJson = null;
   }
 
   /// Device-local Home selection restored on app startup.
@@ -1233,7 +1230,15 @@ class SettingsService {
       if (runnerGeneration != null && runnerGeneration != _runnerSaveGeneration) {
         return;
       }
+      // Compare only after earlier writes finish: an in-flight snapshot may
+      // replace the persisted value even when the newest state returns to it.
+      if (runnerGeneration != null &&
+          settings.runnerStateJson == _persistedRunnerJson &&
+          !_runnerSaveFailed) {
+        return;
+      }
       await source.saveSettings(settings);
+      _persistedRunnerJson = settings.runnerStateJson;
     });
   }
 
@@ -1250,7 +1255,6 @@ class SettingsService {
     _runnerSaveFailed = false;
     _settings = AppSettings.defaults();
     await _save();
-    _persistedRunnerJson = null;
   }
 
   /// Clear all settings (for sign out / account deletion).
@@ -1260,6 +1264,7 @@ class SettingsService {
     _settings = AppSettings.defaults();
     await _enqueueSettingsWrite(() async {
       if (_localDataSource != null) await _localDataSource!.clearSettings();
+      _persistedRunnerJson = null;
     });
     // Clear SharedPreferences to prevent re-migration of stale data
     try {
@@ -1267,7 +1272,6 @@ class SettingsService {
       await prefs.clear();
     } catch (_) {}
     _settings = AppSettings.defaults();
-    _persistedRunnerJson = null;
     _initialized = false;
   }
 }
