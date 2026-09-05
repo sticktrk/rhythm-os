@@ -227,6 +227,7 @@ class ServerSyncProvider extends ChangeNotifier {
   // Cache ownership survives reconnects; _lastServerInstanceId only proves the
   // current connection's identity and is cleared as soon as reconnect starts.
   String? _cachedNodesServerInstanceId;
+  int _deviceDetailsOwnerGeneration = 0;
   bool _selectiveState = false;
   bool _deviceDetailsLoaded = false;
   int _deviceDetailConsumers = 0;
@@ -243,6 +244,10 @@ class ServerSyncProvider extends ChangeNotifier {
   bool get deviceDetailsLoading => _deviceDetailsLoading;
   bool get deviceDetailsFailed => _deviceDetailsFailed;
   int get deviceDetailsGeneration => _deviceDetailsGeneration;
+
+  /// Changes when cached devices can no longer belong to the same server.
+  /// Unlike detail freshness, this remains stable during same-server refreshes.
+  int get deviceDetailsOwnerGeneration => _deviceDetailsOwnerGeneration;
 
   void acquireDeviceDetails() {
     _deviceDetailConsumers++;
@@ -3232,6 +3237,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _authoritativeNodeSnapshotGeneration++;
     if (_cachedNodesServerInstanceId == null ||
         _cachedNodesServerInstanceId != hello.serverInstanceId) {
+      _deviceDetailsOwnerGeneration++;
       _helloNodes = [];
       _topologyNodes = [];
     }
@@ -3879,6 +3885,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _moodSceneApplyGenerations.clear();
     _helloNodes = [];
     _cachedNodesServerInstanceId = null;
+    _deviceDetailsOwnerGeneration++;
     _helloRooms = [];
     _clearStandbyEnabledOptimisticStates();
     _topologyNodes = [];

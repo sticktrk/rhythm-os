@@ -10,6 +10,8 @@ import 'package:rhythm_app/providers/room_provider.dart';
 import 'package:rhythm_app/providers/server_sync_provider.dart';
 import 'package:rhythm_app/services/settings_service.dart';
 import 'package:rhythm_app/widgets/device_details_loader.dart';
+import 'package:rhythm_app/widgets/device_detail_sheet.dart';
+import 'package:rhythm_app/widgets/header_close_button.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
@@ -52,7 +54,8 @@ Map<String, dynamic> _node(String id,
 RhythmHello _hello(
         {String? server = 'server-a',
         bool details = false,
-        bool empty = false}) =>
+        bool empty = false,
+        List<Map<String, dynamic>>? nodes}) =>
     RhythmHello.fromJson({
       'active_profile': {},
       'location': {},
@@ -72,11 +75,13 @@ RhythmHello _hello(
         ],
         'nodes': details ? 'all' : 'controls'
       },
-      'nodes': [
-        if (!empty) _node('room'),
-        if (details && !empty)
-          _node('bulb', kind: 'light_device', parent: 'room', brightness: 20)
-      ],
+      'nodes': nodes ??
+          [
+            if (!empty) _node('room'),
+            if (details && !empty)
+              _node('bulb',
+                  kind: 'light_device', parent: 'room', brightness: 20)
+          ],
     });
 
 class _RuntimeApi extends RhythmRuntimeApi {
@@ -98,6 +103,16 @@ class _ServerApi extends RhythmServerApi {
   int reads = 0;
   bool fail = false;
   bool empty = false;
+  String? assignedDeviceId;
+  String? assignedParentId;
+  @override
+  Future<RhythmDeviceRoomAssignmentResult?> assignDeviceParentResult(
+      String deviceId, String? parentId) async {
+    assignedDeviceId = deviceId;
+    assignedParentId = parentId;
+    return const RhythmDeviceRoomAssignmentResult.legacyCommitted();
+  }
+
   @override
   Future<Map<String, dynamic>?> getTriageCount() async => null;
   @override
@@ -106,9 +121,13 @@ class _ServerApi extends RhythmServerApi {
     if (fail) throw StateError('simulated transport failure');
     return empty
         ? []
-        : [_node('room'), _node('bulb', kind: 'light_device', parent: 'room')]
-            .map(RhythmTopologyNode.fromJson)
-            .toList();
+        : [
+            _node('room'),
+            _node('bulb', kind: 'light_device', parent: 'room'),
+            if (assignedDeviceId != null)
+              _node(assignedDeviceId!,
+                  kind: 'light_device', parent: assignedParentId),
+          ].map(RhythmTopologyNode.fromJson).toList();
   }
 
   @override
@@ -126,6 +145,11 @@ class _Connection extends RhythmConnection {
   final motion = StreamController<RhythmMotionTimer>.broadcast();
   final _runtime = _RuntimeApi();
   final _server = _ServerApi();
+  @override
+  Future<void> reconnect({bool authoritative = false}) async {
+    hellos.add(_hello());
+  }
+
   @override
   bool get connected => true;
   @override
@@ -152,6 +176,17 @@ Future<void> _drain() async {
   for (var i = 0; i < 6; i++) {
     await Future<void>.delayed(Duration.zero);
   }
+}
+
+void _registerWidgetCleanup(WidgetTester tester) {
+  addTearDown(() async {
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+    // Finish queued snapshot writes before this widget test's clock is gone.
+    final cleared = SettingsService.instance.clearRunnerState();
+    await tester.pump();
+    await cleared;
+  });
 }
 
 void main() {
@@ -317,6 +352,7 @@ void main() {
 
   testWidgets('standalone device route exposes readable loading failure',
       (tester) async {
+    _registerWidgetCleanup(tester);
     connection._server.fail = true;
     await tester.pumpWidget(ChangeNotifierProvider.value(
       value: sync,
@@ -349,4 +385,199 @@ void main() {
     expect(find.text('Device controls'), findsOneWidget);
     expect(connection._runtime.reads, 2);
   });
+
+  testWidgets('detail refresh preserves assignment completion context',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final result = Completer<bool>();
+    await tester.pumpWidget(ChangeNotifierProvider.value(
+      value: sync,
+      child: MaterialApp(
+        home: DeviceDetailsLoader(
+          child: Scaffold(body: Builder(builder: (context) {
+            return TextButton(
+              onPressed: () async {
+                result.complete(await showDeviceNodeAssignmentFlow(
+                  context,
+                  device: const RhythmDevice(
+                      id: 'unassigned-bulb',
+                      type: RhythmDeviceType.light,
+                      name: 'New bulb'),
+                  currentParentNodeId: '',
+                ));
+              },
+              child: const Text('Assign device'),
+            );
+          })),
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    final pendingDetails = Completer<RhythmHello>();
+    connection._runtime.reply = () => pendingDetails.future;
+    await tester.tap(find.text('Assign device'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('room'));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pump(const Duration(milliseconds: 300));
+    pendingDetails.complete(_hello(details: true, nodes: [
+      _node('room'),
+      _node('bulb', kind: 'light_device', parent: 'room'),
+      _node('unassigned-bulb', kind: 'light_device', parent: 'room'),
+    ]));
+    await tester.pumpAndSettle();
+    expect(await result.future, isTrue,
+        reason: 'a committed assignment must retain its completion context');
+    expect(find.text('Assigned New bulb to room'), findsOneWidget);
+    expect(sync.devicesForRoom('room').map((device) => device.id),
+        contains('unassigned-bulb'));
+  });
+
+  testWidgets('same-server refresh preserves edits through failure and retry',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    var actions = 0;
+    await tester.pumpWidget(ChangeNotifierProvider.value(
+      value: sync,
+      child: MaterialApp(
+        home: DeviceDetailsLoader(
+          child: Scaffold(
+            body: Column(children: [
+              const TextField(),
+              TextButton(
+                onPressed: () => actions++,
+                child: const Text('Device action'),
+              ),
+            ]),
+          ),
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'Unsaved device name');
+    final editingState = tester.state(find.byType(TextField));
+    final actionPosition = tester.getCenter(find.text('Device action'));
+    final pendingDetails = Completer<RhythmHello>();
+    connection._runtime.reply = () => pendingDetails.future;
+    connection.connectionStates.add(RhythmConnectionState.reconnecting);
+    await tester.pump();
+    connection.connectionStates.add(RhythmConnectionState.connected);
+    connection.hellos.add(_hello());
+    await tester.pump();
+    await tester.pump();
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(tester.state(find.byType(TextField)), same(editingState));
+    await tester.tapAt(actionPosition);
+    expect(actions, 0, reason: 'stale device controls must be covered');
+    pendingDetails.completeError(StateError('simulated detail read failure'));
+    await tester.pumpAndSettle();
+    expect(find.text('Could not load devices.'), findsOneWidget);
+    expect(tester.state(find.byType(TextField)), same(editingState));
+    connection._runtime.reply = () async => _hello(details: true);
+    await tester.tap(find.text('Try again'));
+    await tester.pumpAndSettle();
+    expect(find.text('Unsaved device name'), findsOneWidget);
+    expect(tester.state(find.byType(TextField)), same(editingState));
+    await tester.tap(find.text('Device action'));
+    expect(actions, 1);
+  });
+
+  for (final nextServer in ['server-b', null]) {
+    testWidgets(
+        'a new or unknown server discards the open device state: $nextServer',
+        (tester) async {
+      _registerWidgetCleanup(tester);
+      await tester.pumpWidget(ChangeNotifierProvider.value(
+        value: sync,
+        child: const MaterialApp(
+          home: DeviceDetailsLoader(child: Scaffold(body: TextField())),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'Old server draft');
+      final pendingDetails = Completer<RhythmHello>();
+      connection._runtime.reply = () => pendingDetails.future;
+      connection.connectionStates.add(RhythmConnectionState.reconnecting);
+      await tester.pump();
+      connection.connectionStates.add(RhythmConnectionState.connected);
+      connection.hellos.add(_hello(server: nextServer));
+      await tester.pump();
+      await tester.pump();
+      expect(find.byType(TextField), findsNothing);
+      pendingDetails.complete(_hello(server: nextServer, details: true));
+      await tester.pumpAndSettle();
+      expect(find.text('Old server draft'), findsNothing);
+      if (nextServer != null) {
+        expect(find.byType(TextField), findsOneWidget);
+        expect(
+            tester
+                .widget<EditableText>(find.byType(EditableText))
+                .controller
+                .text,
+            isEmpty);
+      } else {
+        expect(find.text('Could not load devices.'), findsOneWidget);
+        expect(find.byType(TextField), findsNothing);
+      }
+    });
+  }
+
+  for (final fails in [false, true]) {
+    testWidgets('hub route can close during ${fails ? 'failure' : 'loading'}',
+        (tester) async {
+      _registerWidgetCleanup(tester);
+      final pendingDetails = Completer<RhythmHello>();
+      connection._runtime.reply = () => pendingDetails.future;
+      await tester.pumpWidget(ChangeNotifierProvider.value(
+        value: sync,
+        child: MaterialApp(
+          theme: ThemeData.dark().copyWith(platform: TargetPlatform.iOS),
+          home: Scaffold(body: Builder(builder: (context) {
+            return TextButton(
+              onPressed: () =>
+                  Navigator.of(context).push(PageRouteBuilder<void>(
+                opaque: false,
+                barrierColor: Colors.black54,
+                pageBuilder: (_, animation, secondaryAnimation) =>
+                    const RepaintBoundary(
+                  key: ValueKey('dismissible-detail-route'),
+                  child: DeviceDetailsLoader(
+                    showCloseButton: true,
+                    child: Scaffold(body: Text('Hub devices')),
+                  ),
+                ),
+              )),
+              child: const Text('Open hub'),
+            );
+          })),
+        ),
+      ));
+      await tester.tap(find.text('Open hub'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.byType(CircularProgressIndicator), findsOneWidget);
+      if (fails) {
+        pendingDetails.completeError(StateError('simulated transport failure'));
+        await tester.pumpAndSettle();
+        expect(find.text('Could not load devices.'), findsOneWidget);
+        final screenshotPath =
+            Platform.environment['RHYTHM_DISMISSIBLE_DETAIL_SCREENSHOT'];
+        if (screenshotPath != null) {
+          await expectLater(
+              find.byKey(const ValueKey('dismissible-detail-route')),
+              matchesGoldenFile(screenshotPath));
+        }
+      }
+      expect(find.text('Hub devices'), findsNothing);
+      await tester.tap(find.byType(HeaderCloseButton));
+      await tester.pumpAndSettle();
+      expect(find.byType(DeviceDetailsLoader), findsNothing);
+      expect(find.text('Open hub'), findsOneWidget);
+      if (!fails) {
+        pendingDetails.complete(_hello(details: true));
+        await tester.pumpAndSettle();
+      }
+      expect(tester.takeException(), isNull);
+    });
+  }
 }

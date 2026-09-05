@@ -715,6 +715,7 @@ class DeviceDetailSheet extends StatefulWidget {
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (context) => DeviceDetailsLoader(
+          showCloseButton: true,
           child: DeviceDetailSheet(
         device: device,
         roomId: roomId,

@@ -176,6 +176,7 @@ class AutomationsScreen extends StatelessWidget {
       onTap: () => _pushDetail(
         context,
         DeviceDetailsLoader(
+          showCloseButton: true,
           child: DefaultTransitionEditorScreen(
             detail: AutomationDetail.button,
             profileColors: profileColors,

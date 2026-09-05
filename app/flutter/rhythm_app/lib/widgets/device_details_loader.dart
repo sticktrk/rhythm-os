@@ -2,11 +2,19 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/server_sync_provider.dart';
+import 'header_close_button.dart';
 
 /// Loads the device catalog only while a surface that uses it is visible.
 class DeviceDetailsLoader extends StatefulWidget {
   final Widget child;
-  const DeviceDetailsLoader({super.key, required this.child});
+
+  /// Full routes and device sheets need navigation before their child loads.
+  final bool showCloseButton;
+  const DeviceDetailsLoader({
+    super.key,
+    required this.child,
+    this.showCloseButton = false,
+  });
 
   @override
   State<DeviceDetailsLoader> createState() => _DeviceDetailsLoaderState();
@@ -14,6 +22,7 @@ class DeviceDetailsLoader extends StatefulWidget {
 
 class _DeviceDetailsLoaderState extends State<DeviceDetailsLoader> {
   int? _requestedGeneration;
+  int? _loadedOwnerGeneration;
   ServerSyncProvider? _sync;
 
   @override
@@ -24,6 +33,7 @@ class _DeviceDetailsLoaderState extends State<DeviceDetailsLoader> {
       _sync?.releaseDeviceDetails();
       _sync = sync;
       _requestedGeneration = null;
+      _loadedOwnerGeneration = null;
       sync.acquireDeviceDetails();
     }
   }
@@ -44,25 +54,69 @@ class _DeviceDetailsLoaderState extends State<DeviceDetailsLoader> {
   @override
   Widget build(BuildContext context) {
     final sync = context.watch<ServerSyncProvider>();
-    if (!sync.needsDeviceDetails) return widget.child;
-    if (_requestedGeneration != sync.deviceDetailsGeneration) _load(sync);
-    if (sync.deviceDetailsFailed) {
-      return Material(
-        type: MaterialType.transparency,
-        child: Center(
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-          const Text('Could not load devices.'),
-          TextButton(
-            onPressed: () => unawaited(sync.ensureDeviceDetails()),
-            child: const Text('Try again'),
-          ),
-        ])),
-      );
+    final needsDetails = sync.needsDeviceDetails;
+    if (!needsDetails) {
+      _loadedOwnerGeneration = sync.deviceDetailsOwnerGeneration;
+    } else if (_requestedGeneration != sync.deviceDetailsGeneration) {
+      _load(sync);
     }
-    return const Material(
-      type: MaterialType.transparency,
-      child: Center(
-          child: CircularProgressIndicator(semanticsLabel: 'Loading devices')),
+    final keepChild =
+        _loadedOwnerGeneration == sync.deviceDetailsOwnerGeneration;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        if (keepChild)
+          // Keep operation contexts and local edits alive across refreshes, but
+          // never carry a screen's state over to a different cache owner.
+          ExcludeFocus(
+            excluding: needsDetails,
+            child: KeyedSubtree(
+              key: ValueKey((sync, sync.deviceDetailsOwnerGeneration)),
+              child: widget.child,
+            ),
+          ),
+        if (needsDetails)
+          Positioned.fill(
+            child: BlockSemantics(
+              child: Material(
+                color: Theme.of(context)
+                    .colorScheme
+                    .surface
+                    .withValues(alpha: keepChild ? 0.95 : 1),
+                child: Stack(
+                  children: [
+                    Center(
+                      child: sync.deviceDetailsFailed
+                          ? Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Text('Could not load devices.'),
+                                TextButton(
+                                  onPressed: () =>
+                                      unawaited(sync.ensureDeviceDetails()),
+                                  child: const Text('Try again'),
+                                ),
+                              ],
+                            )
+                          : const CircularProgressIndicator(
+                              semanticsLabel: 'Loading devices'),
+                    ),
+                    if (widget.showCloseButton)
+                      Positioned(
+                        top: 16,
+                        right: 16,
+                        child: SafeArea(
+                          child: HeaderCloseButton(
+                            onTap: () => Navigator.of(context).maybePop(),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 }

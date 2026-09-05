@@ -4173,7 +4173,10 @@ class _HubDetailScreen extends StatefulWidget {
         opaque: false,
         barrierColor: Colors.black54,
         pageBuilder: (context, animation, secondaryAnimation) {
-          return DeviceDetailsLoader(child: _HubDetailScreen(hubInfo: hubInfo));
+          return DeviceDetailsLoader(
+            showCloseButton: true,
+            child: _HubDetailScreen(hubInfo: hubInfo),
+          );
         },
         transitionsBuilder: (context, animation, secondaryAnimation, child) {
           final curve = CurvedAnimation(
