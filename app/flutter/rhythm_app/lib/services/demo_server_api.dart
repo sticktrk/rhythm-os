@@ -427,6 +427,18 @@ class DemoServerApi extends RhythmServerApi {
         ),
       );
 
+  static RhythmLightSceneOutput _paletteOutput(
+    int r,
+    int g,
+    int b, {
+    int brightness = 80,
+  }) =>
+      RhythmLightSceneOutput.on(
+        brightness: brightness,
+        color: RhythmLightColor.rgb(RhythmSceneRgbColor(r: r, g: g, b: b)),
+        transitionMs: 1200,
+      );
+
   /// A handful of vivid demo scenes so Mood mode has presets to show without a
   /// live server. Swatches in the picker are sampled from these colors.
   static final List<RhythmSceneDefinition> _demoScenes = [
@@ -501,6 +513,22 @@ class DemoServerApi extends RhythmServerApi {
           _rgbEntry('demo_living_ceiling', 142, 58, 255, brightness: 68),
           _rgbEntry('demo_living_strip', 255, 56, 184, brightness: 72),
           _rgbEntry('demo_floor_lamp', 44, 92, 255, brightness: 58),
+        ],
+      ),
+    ),
+    RhythmSceneDefinition(
+      id: 'demo_scene_halloween',
+      name: 'Halloween',
+      description:
+          'Pumpkin orange, witchy purple and ghoulish green spread across every light',
+      light: RhythmLightScene(
+        defaultTransitionMs: 1200,
+        palette: [
+          _paletteOutput(255, 104, 0, brightness: 80),
+          _paletteOutput(122, 0, 214, brightness: 70),
+          _paletteOutput(66, 232, 40, brightness: 72),
+          _paletteOutput(255, 150, 10, brightness: 78),
+          _paletteOutput(176, 0, 255, brightness: 66),
         ],
       ),
     ),
@@ -697,6 +725,68 @@ class DemoServerApi extends RhythmServerApi {
           ),
         )
         .toList(growable: false);
+  }
+
+  /// Demo stand-in for the server-owned whole-home scene apply.
+  ///
+  /// Mirrors the appliance contract: every enabled demo room is a target, the
+  /// palette rotates across rooms, and the synthesized result carries the same
+  /// per-target shape the app renders from a real server.
+  @override
+  Future<RhythmHomeSceneActionResult?> applyHomeScene({
+    required String sceneId,
+    int? transitionMs,
+    int? dispatchSpacingMs,
+    String? correlationId,
+  }) async {
+    ensureSeeded();
+    final scene = _demoScenes.where((scene) => scene.id == sceneId).firstOrNull;
+    if (scene == null) return null;
+
+    final palette = scene.light.palette;
+    final rooms = _nodeStates.values
+        .where((node) => node['kind'] == 'room')
+        .toList(growable: false)
+      ..sort((left, right) => (left['name'] as String? ?? '')
+          .compareTo(right['name'] as String? ?? ''));
+
+    final targets = <RhythmHomeSceneTargetResult>[];
+    var skipped = 0;
+    var paletteOffset = 0;
+    for (final room in rooms) {
+      final roomId = room['id'] as String;
+      if (room['disabled'] == true) {
+        skipped++;
+        continue;
+      }
+      final output = palette.isEmpty
+          ? scene.light.defaultOutput
+          : palette[paletteOffset % palette.length];
+      paletteOffset++;
+      final rgb = output?.color?.rgb;
+      updateRoomLightState(
+        roomId,
+        on: true,
+        brightness: output?.brightness,
+        color: rgb == null ? null : (rgb.r, rgb.g, rgb.b),
+        state: RoomModeState.mood,
+      );
+      targets.add(
+        RhythmHomeSceneTargetResult(
+          targetId: roomId,
+          affectedNodeIds: [roomId],
+        ),
+      );
+    }
+    _changes.add(null);
+
+    return RhythmHomeSceneActionResult(
+      sceneId: sceneId,
+      targets: targets,
+      appliedTargetCount: targets.length,
+      skippedTargetCount: skipped,
+      dispatchCount: targets.length,
+    );
   }
 
   void updateRoomLightState(

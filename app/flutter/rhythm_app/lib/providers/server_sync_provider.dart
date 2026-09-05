@@ -905,6 +905,61 @@ class ServerSyncProvider extends ChangeNotifier {
     return false;
   }
 
+  /// Apply [sceneId] to every eligible room in one server call.
+  ///
+  /// The server is authoritative: it decides which rooms are eligible, paces
+  /// dispatch and binds the Mood scene per room. The app only mirrors the
+  /// returned per-target outcome onto the room cards, so there is no per-room
+  /// rollback dance. Returns null when offline or when the server rejects the
+  /// call.
+  Future<RhythmHomeSceneActionResult?> applyHomeScene(
+    String sceneId, {
+    (int, int, int)? color,
+    int? transitionMs,
+    String? correlationId,
+  }) async {
+    if (!HueServiceLocator.isDemoMode && !_connection.connected) return null;
+    final scene = sceneById(sceneId);
+
+    RhythmHomeSceneActionResult? result;
+    try {
+      result = HueServiceLocator.isDemoMode
+          ? await DemoServerApi.instance.applyHomeScene(sceneId: sceneId)
+          : await _connection.api.applyHomeScene(
+              sceneId: sceneId,
+              transitionMs: transitionMs,
+              correlationId: correlationId,
+            );
+    } catch (_) {
+      result = null;
+    }
+    if (result == null) return null;
+
+    final brightness =
+        scene == null ? null : _sceneRepresentativeBrightness(scene);
+    for (final target in result.appliedTargets) {
+      final roomId = target.targetId;
+      _moodSceneApplyGenerations[roomId] =
+          (_moodSceneApplyGenerations[roomId] ?? 0) + 1;
+      if (color != null) {
+        _roomProvider.setRoomColorLocal(
+          roomId,
+          color.$1,
+          color.$2,
+          color.$3,
+          rememberAsMood: true,
+        );
+      }
+      if (brightness != null) {
+        _roomProvider.setMoodBrightnessLocal(roomId, brightness);
+      }
+      _roomProvider.setMoodEnabledLocal(roomId, true);
+      _optimisticMoodSceneIds[roomId] = sceneId;
+    }
+    notifyListeners();
+    return result;
+  }
+
   /// Current day/sleep toggle binding, if configured.
   RhythmInputBinding? get daySleepToggleInputBinding {
     for (final binding in _inputBindings) {
@@ -1159,6 +1214,14 @@ class ServerSyncProvider extends ChangeNotifier {
             RhythmFeature.buttonMultiRoomControls,
           ) ==
           true;
+
+  /// Whole-home scene apply is a server-owned operation: the appliance
+  /// enumerates the rooms, paces dispatch and binds the mood scene. The app has
+  /// no equivalent machinery, so this fails closed for appliances that do not
+  /// advertise it and the affordance stays hidden.
+  bool get supportsHomeSceneApply =>
+      HueServiceLocator.isDemoMode ||
+      _capabilities?.supportsFeature(RhythmFeature.homeSceneApply) == true;
 
   /// Device-health review is additive and must fail closed for older
   /// appliances so the app never probes routes they do not own.
