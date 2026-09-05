@@ -184,10 +184,12 @@ void main() {
       final store = _FakeRoomPageLayoutStore(
         scopedLayouts: {
           'scope-a': [
-            ['room-a']
+            ['room-a'],
+            ['room-b'],
           ],
           'scope-b': [
-            ['room-b']
+            ['room-b'],
+            ['room-a'],
           ],
         },
       );
@@ -377,6 +379,164 @@ void main() {
 
       provider.reorderInPage('room-a', 0, 0);
       expect(changes, ['scope-a']);
+    });
+
+    test('a transient partial room list keeps absent rooms on their page', () {
+      final store = _FakeRoomPageLayoutStore(
+        scopedLayouts: {
+          'scope-a': [
+            ['kitchen'],
+            ['bedroom', 'office'],
+          ],
+        },
+      );
+      final provider = RoomPageProvider(layoutStore: store);
+      provider.setLayoutScope('scope-a');
+      final all = [_room('kitchen'), _room('bedroom'), _room('office')];
+      provider.reconcileRooms(all);
+      provider.reconcileRooms([_room('kitchen'), _room('bedroom')]);
+
+      // A selective refresh dropped the office; its page still shows.
+      provider.reconcileRooms([_room('kitchen')]);
+      expect(provider.pageCount, 1);
+      expect(
+        provider.getRoomsForPage(0, [_room('kitchen')]).map((r) => r.id),
+        ['kitchen'],
+      );
+      expect(store.scopedLayouts['scope-a'], [
+        ['kitchen'],
+        ['bedroom', 'office'],
+      ]);
+
+      // The full list returns to the layout the user built.
+      provider.reconcileRooms(all);
+      expect(provider.pageCount, 2);
+      expect(
+        provider.getRoomsForPage(1, all).map((r) => r.id),
+        ['bedroom', 'office'],
+      );
+      expect(store.scopedLayouts['scope-a'], [
+        ['kitchen'],
+        ['bedroom', 'office'],
+      ]);
+    });
+
+    test('an empty room list never rewrites the stored layout', () {
+      final store = _FakeRoomPageLayoutStore(
+        scopedLayouts: {
+          'scope-a': [
+            ['kitchen'],
+            ['bedroom'],
+          ],
+        },
+      );
+      final provider = RoomPageProvider(layoutStore: store);
+      provider.setLayoutScope('scope-a');
+      provider.reconcileRooms([_room('kitchen'), _room('bedroom')]);
+      store.savedScopes.clear();
+
+      provider.reconcileRooms(const []);
+
+      expect(store.savedScopes, isEmpty);
+      expect(store.scopedLayouts['scope-a'], [
+        ['kitchen'],
+        ['bedroom'],
+      ]);
+    });
+
+    test('stale cached room ids do not collapse the layout onto one page',
+        () {
+      final store = _FakeRoomPageLayoutStore(
+        scopedLayouts: {
+          'scope-a': [
+            ['kitchen'],
+            ['bedroom'],
+          ],
+        },
+      );
+      final provider = RoomPageProvider(layoutStore: store);
+      provider.setLayoutScope('scope-a');
+      provider.reconcileRooms([_room('kitchen'), _room('bedroom')]);
+
+      // A cached room list from an older server generation.
+      final cached = [_room('old-kitchen'), _room('old-bedroom')];
+      provider.reconcileRooms(cached);
+      expect(provider.pageCount, 1);
+      expect(
+        provider.getRoomsForPage(0, cached).map((r) => r.id),
+        ['old-bedroom', 'old-kitchen'],
+      );
+
+      // The live list arrives; the layout the user built is intact.
+      final live = [_room('kitchen'), _room('bedroom')];
+      provider.reconcileRooms(live);
+      expect(provider.pageCount, 2);
+      expect(provider.getRoomsForPage(0, live).map((r) => r.id), ['kitchen']);
+      expect(provider.getRoomsForPage(1, live).map((r) => r.id), ['bedroom']);
+      expect(
+        store.scopedLayouts['scope-a']!.map((page) => page.take(1).toList()),
+        [
+          ['kitchen'],
+          ['bedroom'],
+        ],
+      );
+    });
+
+    test('rooms not placed yet show on the first page before reconcile', () {
+      final provider = RoomPageProvider(
+        layoutStore: _FakeRoomPageLayoutStore(
+          scopedLayouts: {
+            'scope-a': [
+              ['kitchen'],
+              ['bedroom'],
+            ],
+          },
+        ),
+      );
+      provider.setLayoutScope('scope-a');
+      final rooms = [_room('kitchen'), _room('bedroom'), _room('attic')];
+
+      expect(provider.pageCount, 2);
+      expect(
+        provider.getRoomsForPage(0, rooms).map((r) => r.id),
+        ['attic', 'kitchen'],
+      );
+      expect(provider.getRoomsForPage(1, rooms).map((r) => r.id), ['bedroom']);
+    });
+
+    test('entering edit mode prunes rooms that no longer exist', () {
+      final store = _FakeRoomPageLayoutStore(
+        scopedLayouts: {
+          'scope-a': [
+            ['kitchen'],
+            ['gone'],
+            ['bedroom'],
+          ],
+        },
+      );
+      final provider = RoomPageProvider(layoutStore: store);
+      provider.setLayoutScope('scope-a');
+      final rooms = [_room('kitchen'), _room('bedroom')];
+      provider.reconcileRooms(rooms);
+      // Persistence resumes once the room set moves past the scope switch.
+      provider.reconcileRooms([_room('kitchen')]);
+      provider.reconcileRooms(rooms);
+      expect(provider.pageCount, 2);
+      expect(store.scopedLayouts['scope-a'], [
+        ['kitchen'],
+        ['gone'],
+        ['bedroom'],
+      ]);
+
+      provider.reconcileRooms(rooms, removeMissing: true);
+      provider.enterEditMode();
+
+      expect(provider.pageCount, 3);
+      expect(provider.getPage('bedroom'), 1);
+      expect(store.scopedLayouts['scope-a'], [
+        ['kitchen'],
+        ['bedroom'],
+      ]);
     });
   });
 }

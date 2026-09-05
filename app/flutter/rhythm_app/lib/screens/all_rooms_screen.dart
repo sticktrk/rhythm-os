@@ -166,6 +166,27 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     });
   }
 
+  /// Pull the PageView back onto an existing page when the page count shrinks
+  /// underneath it (a layout reload, a page emptied by a room refresh). A
+  /// controller left beyond the last page renders nothing, which reads as the
+  /// room cards vanishing.
+  void _keepControllerWithinPageCount(int pageCount) {
+    final controller = widget.pageController;
+    if (pageCount <= 0 || !controller.hasClients || _draggingRoomId != null) {
+      return;
+    }
+    final page = controller.page?.round();
+    if (page == null || page < pageCount) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !controller.hasClients) return;
+      final latestCount = context.read<RoomPageProvider>().pageCount;
+      final current = controller.page?.round() ?? 0;
+      if (latestCount > 0 && current >= latestCount) {
+        controller.jumpToPage(latestCount - 1);
+      }
+    });
+  }
+
   double _headerVerticalPadding(bool isLandscape) => isLandscape ? 4.0 : 10.0;
 
   // -- Drag handle callbacks --------------------------------------------------
@@ -513,6 +534,7 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     final pageCount = pageProvider.pageCount;
     final clampedPage =
         pageCount == 0 ? 0 : _currentPage.clamp(0, pageCount - 1);
+    _keepControllerWithinPageCount(pageCount);
 
     return Stack(
       children: [
@@ -612,7 +634,9 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
 
   void _enterEditMode() {
     final pageProvider = context.read<RoomPageProvider>();
-    pageProvider.reconcileRooms(widget.rooms);
+    // Edit mode drags against the stored page numbering, so prune rooms that
+    // no longer exist here, where the room list is live and complete.
+    pageProvider.reconcileRooms(widget.rooms, removeMissing: true);
     AnalyticsService().logRoomLayoutEditStarted(
       roomCount: widget.rooms.length,
       pageCount: pageProvider.pageCount,

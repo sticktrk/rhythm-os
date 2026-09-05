@@ -199,6 +199,89 @@ void main() {
     });
   });
 
+  group('CloudBackupService.appSettingsBundleForCapture', () {
+    Map<String, dynamic> bundleWith(List<List<String>> pages,
+        {String hubKey = 'server_instance:abc'}) {
+      return {
+        'schema_version': 1,
+        'all_rooms_layouts': [
+          {'hub_key': hubKey, 'pages': pages},
+        ],
+      };
+    }
+
+    test('keeps the account layout when the local one is not a user edit', () {
+      final existing = bundleWith([
+        ['kitchen'],
+        ['bedroom'],
+      ]);
+      final local = bundleWith([
+        ['bedroom', 'kitchen'],
+      ]);
+
+      final chosen = CloudBackupService.appSettingsBundleForCapture(
+        existing: existing,
+        local: local,
+        hasUnsyncedLayoutEdit: false,
+      );
+
+      expect(chosen, existing);
+    });
+
+    test('publishes an unsynced local edit over the account layout', () {
+      final existing = bundleWith([
+        ['kitchen'],
+        ['bedroom'],
+      ]);
+      final local = bundleWith([
+        ['bedroom', 'kitchen'],
+      ]);
+
+      final chosen = CloudBackupService.appSettingsBundleForCapture(
+        existing: existing,
+        local: local,
+        hasUnsyncedLayoutEdit: true,
+      );
+
+      expect(chosen['all_rooms_layouts'], local['all_rooms_layouts']);
+    });
+
+    test('seeds a hub the account has no layout for yet', () {
+      final existing = bundleWith([
+        ['den'],
+      ], hubKey: 'server_instance:other');
+      final local = bundleWith([
+        ['kitchen'],
+        ['bedroom'],
+      ]);
+
+      final chosen = CloudBackupService.appSettingsBundleForCapture(
+        existing: existing,
+        local: local,
+        hasUnsyncedLayoutEdit: false,
+      );
+
+      expect(chosen['all_rooms_layouts'], [
+        ...existing['all_rooms_layouts'] as List,
+        ...local['all_rooms_layouts'] as List,
+      ]);
+    });
+
+    test('starts from the local bundle when the account has none', () {
+      final local = bundleWith([
+        ['kitchen'],
+      ]);
+      expect(
+        CloudBackupService.appSettingsBundleForCapture(
+          existing: null,
+          local: local,
+          hasUnsyncedLayoutEdit: false,
+        ),
+        local,
+      );
+    });
+  });
+
   group('CloudBackedServerApi', () {
     late _FakeRhythmServerApi delegate;
     late CloudBackedServerApi api;
