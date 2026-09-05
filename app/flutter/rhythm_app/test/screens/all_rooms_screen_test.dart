@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
@@ -100,7 +101,11 @@ class _TestRhythmConnection extends RhythmConnection {
 
   final bool _connected;
   final _FakeRhythmServerApi _api;
+  final StreamController<RhythmHello> _helloController =
+      StreamController<RhythmHello>.broadcast();
   VoidCallback? onReconnect;
+
+  void emitHello(RhythmHello hello) => _helloController.add(hello);
 
   @override
   _FakeRhythmServerApi get api => _api;
@@ -874,6 +879,82 @@ void main() {
       (nodeId: 'garage', action: 'reset'),
     ]);
     expect(find.text('Reset 3 of 3 rooms.'), findsOneWidget);
+  });
+
+  testWidgets('global reset restores mode defaults on capable servers',
+      (tester) async {
+    final screenshotPath =
+        Platform.environment['RHYTHM_GLOBAL_RESET_SCREENSHOT'];
+    final harness = await _pumpAllRooms(
+      tester,
+      rooms: const [_room1, _bedroom],
+    );
+    harness.connection.emitHello(
+      RhythmHello.fromJson({
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': [RhythmFeature.resetToModeDefault],
+          'hubs': const <dynamic>[],
+        },
+        'mode': {
+          'active': 'day',
+          'configs': [
+            {
+              'mode': 'day',
+              'active_profile_id': 'rhythm',
+              'room_defaults': [
+                {'room_id': 'room-1', 'state': 'active'},
+                {'room_id': 'bedroom', 'state': 'standby'},
+              ],
+            },
+          ],
+        },
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'hub_types': ['hue'],
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'lights_on': true,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+          },
+          {
+            'id': 'bedroom',
+            'name': 'Bedroom',
+            'kind': 'room',
+            'hub_types': ['hue'],
+            'state': 'active',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'lights_on': true,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+          },
+        ],
+      }),
+    );
+    await tester.pump();
+
+    await tester.tap(
+      find.byKey(const ValueKey('global-room-action-reset')),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(harness.api.actionBatches.single, [
+      (nodeId: 'room-1', action: 'reset_to_mode_default'),
+      (nodeId: 'bedroom', action: 'reset_to_mode_default'),
+    ]);
+    if (screenshotPath != null && screenshotPath.isNotEmpty) {
+      await expectLater(
+        find.byType(AllRoomsScreen),
+        matchesGoldenFile(Uri.file(screenshotPath)),
+      );
+    }
   });
 
   testWidgets('expanded slider applies one exact batch to adaptive-on rooms',

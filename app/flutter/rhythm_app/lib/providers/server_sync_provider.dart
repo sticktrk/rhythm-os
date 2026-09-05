@@ -4129,11 +4129,19 @@ class ServerSyncProvider extends ChangeNotifier {
             );
             break;
           case 'reset':
+          case 'reset_to_mode_default':
+            final targetState = _resetTargetState(
+              item.nodeId,
+              modeDefault: item.action == 'reset_to_mode_default',
+            );
             _roomProvider.setRoomStateLocal(
               item.nodeId,
-              RoomModeState.active,
+              targetState,
             );
-            await _roomProvider.setRoomLightsOnLocal(item.nodeId, true);
+            await _roomProvider.setRoomLightsOnLocal(
+              item.nodeId,
+              targetState != RoomModeState.hardOff,
+            );
             break;
         }
       }
@@ -4156,6 +4164,19 @@ class ServerSyncProvider extends ChangeNotifier {
       _onRhythmState(state, fromActionResponse: true);
     }
     return result;
+  }
+
+  /// Reset several nodes to the current mode's configured state when the
+  /// connected server supports it, with the legacy active-On reset fallback.
+  Future<RhythmDispatchResult?> dispatchBatchResetNodesResult(
+    List<String> nodeIds, {
+    String? correlationId,
+  }) {
+    final action = _resetNodeAction(modeDefault: true);
+    return dispatchBatchNodeActionsResult(
+      [for (final nodeId in nodeIds) (nodeId: nodeId, action: action)],
+      correlationId: correlationId,
+    );
   }
 
   /// Dispatch multiple node actions in a single batch request.
@@ -4658,14 +4679,18 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   RoomModeState _resetTargetState(String nodeId, {required bool modeDefault}) {
-    if (!modeDefault ||
-        _capabilities?.supportsFeature(RhythmFeature.resetToModeDefault) !=
-            true) {
+    if (_resetNodeAction(modeDefault: modeDefault) == 'reset') {
       return RoomModeState.active;
     }
     final mode = _activeMode ?? RhythmMode.day;
     return RoomModeState.fromString(roomDefaultStateForMode(nodeId, mode));
   }
+
+  String _resetNodeAction({required bool modeDefault}) => modeDefault &&
+          _capabilities?.supportsFeature(RhythmFeature.resetToModeDefault) ==
+              true
+      ? 'reset_to_mode_default'
+      : 'reset';
 
   /// Dispatch a reset action and report its acceptance outcome.
   ///
@@ -4678,11 +4703,7 @@ class ServerSyncProvider extends ChangeNotifier {
     String nodeId, {
     required bool modeDefault,
   }) async {
-    final supportsModeDefault =
-        _capabilities?.supportsFeature(RhythmFeature.resetToModeDefault) ==
-            true;
-    final action =
-        modeDefault && supportsModeDefault ? 'reset_to_mode_default' : 'reset';
+    final action = _resetNodeAction(modeDefault: modeDefault);
     final targetState = _resetTargetState(nodeId, modeDefault: modeDefault);
     final lightsOn = targetState != RoomModeState.hardOff;
     if (HueServiceLocator.isDemoMode) {

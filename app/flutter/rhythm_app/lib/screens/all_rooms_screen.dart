@@ -1092,15 +1092,19 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
 
     RhythmDispatchResult? result;
     if (dispatchable.isNotEmpty) {
-      final wireAction = switch (action) {
-        _GlobalRoomAction.soften => 'step_down',
-        _GlobalRoomAction.boost => 'step_up',
-        _GlobalRoomAction.reset => 'reset',
-      };
-      result = await serverSync.dispatchBatchNodeActionsResult([
-        for (final target in dispatchable)
-          (nodeId: target.room.id, action: wireAction),
-      ], correlationId: journeyId);
+      if (action == _GlobalRoomAction.reset) {
+        result = await serverSync.dispatchBatchResetNodesResult(
+          [for (final target in dispatchable) target.room.id],
+          correlationId: journeyId,
+        );
+      } else {
+        final wireAction =
+            action == _GlobalRoomAction.soften ? 'step_down' : 'step_up';
+        result = await serverSync.dispatchBatchNodeActionsResult([
+          for (final target in dispatchable)
+            (nodeId: target.room.id, action: wireAction),
+        ], correlationId: journeyId);
+      }
     }
     if (!mounted) return;
 
