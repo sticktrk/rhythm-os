@@ -7318,29 +7318,38 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&response.body).unwrap();
         assert_eq!(parsed["scene_id"], "halloween");
         assert_eq!(parsed["queued"], true);
-        assert_eq!(parsed["dispatch_count"], 1);
+        assert_eq!(parsed["dispatch_count"], 3);
         assert_eq!(parsed["dispatch_spacing_ms"], 250);
         assert!(parsed["estimated_dispatch_ms"].as_u64().is_some());
-        assert_eq!(parsed["applied_target_count"], 1);
-        // The two lightless rooms are skipped rather than reported as errors.
-        assert_eq!(parsed["skipped_target_count"], 2);
+        // Both engine-only rooms are their own dispatch unit, so they are
+        // targets alongside the roomless light.
+        assert_eq!(parsed["applied_target_count"], 3);
+        assert_eq!(parsed["skipped_target_count"], 0);
         let targets = parsed["targets"].as_array().unwrap();
-        assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0]["target_id"], "standalone-light");
-        assert!(targets[0].get("error").is_none());
+        assert_eq!(
+            targets
+                .iter()
+                .map(|target| target["target_id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["room1", "room2", "standalone-light"]
+        );
+        assert!(targets.iter().all(|target| target.get("error").is_none()));
 
-        assert!(matches!(
-            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
-            WorkItem::ApplyNodeCommand { .. }
-        ));
+        for _ in 0..3 {
+            assert!(matches!(
+                rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+                WorkItem::ApplyNodeCommand { .. }
+            ));
+        }
 
         let state = state.lock().unwrap();
-        assert_eq!(state.light_activity.len(), 1);
-        let activity = state.light_activity.first().unwrap();
-        assert_eq!(activity.action_id, "apply_scene");
-        assert_eq!(activity.correlation_id.as_deref(), Some("home-scene-123"));
-        assert_eq!(activity.fanout_of.as_deref(), Some("home-scene-123"));
-        assert_eq!(activity.payload.as_ref().unwrap()["home_scene"], true);
+        assert_eq!(state.light_activity.len(), 3);
+        for activity in &state.light_activity {
+            assert_eq!(activity.action_id, "apply_scene");
+            assert_eq!(activity.correlation_id.as_deref(), Some("home-scene-123"));
+            assert_eq!(activity.fanout_of.as_deref(), Some("home-scene-123"));
+            assert_eq!(activity.payload.as_ref().unwrap()["home_scene"], true);
+        }
     }
 
     #[test]

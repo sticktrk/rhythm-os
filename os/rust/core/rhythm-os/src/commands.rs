@@ -5729,9 +5729,16 @@ fn home_scene_targets_locked(s: &AppState, runtime: &Arc<dyn RuntimeHandle>) -> 
 
         let scope = light_scene_target_scope_node_ids(s, runtime, &snap.id);
         // A room whose only scope entry is the room node itself fell back to the
-        // room placeholder, which means it owns no light members at all.
-        let room_without_lights = is_room && scope.len() == 1 && scope.contains(&snap.id);
-        if scope.is_empty() || room_without_lights {
+        // room placeholder. For a topology room that means it owns no light
+        // members at all, so there is nothing to apply. A legacy engine-only
+        // room (one that is not in the topology, e.g. a classic HA/Hue room) IS
+        // the dispatch unit: the single-target apply and periodic dispatch both
+        // address the room node directly, so it stays eligible.
+        let topology_room_without_lights = is_room
+            && s.topology.get(&snap.id).is_some()
+            && scope.len() == 1
+            && scope.contains(&snap.id);
+        if scope.is_empty() || topology_room_without_lights {
             skipped += 1;
             continue;
         }
@@ -24301,6 +24308,97 @@ mod tests {
             !applied.contains_key(&harness.disabled_room_light),
             "a disabled room must stay untouched: {applied:?}"
         );
+    }
+
+    #[test]
+    fn home_scene_apply_includes_legacy_engine_rooms_that_are_the_dispatch_unit() {
+        // A classic HA/Hue room: known to the engine, absent from the topology,
+        // and owning no light-device children. The room node itself is the
+        // dispatch unit for the single-target apply and for periodic dispatch,
+        // so the whole-home apply must address it too.
+        let (state, runtime) = setup_state(vec![make_snapshot("legacy-room", false, false)]);
+        do_scene_upsert(
+            &state,
+            scene_with_palette("halloween", &halloween_palette()),
+        )
+        .unwrap();
+
+        let response = do_home_scene_apply(
+            &state,
+            "halloween",
+            HomeSceneApplyRequest {
+                transition_ms: None,
+            },
+            default_http_batch_dispatch_spacing(),
+        )
+        .unwrap();
+
+        assert_eq!(response.applied_target_count, 1);
+        assert_eq!(response.skipped_target_count, 0);
+        assert_eq!(response.targets.len(), 1);
+        let target = &response.targets[0];
+        assert_eq!(target.target_id, "legacy-room");
+        assert!(target.error.is_none(), "{target:?}");
+        assert_eq!(
+            target.affected_node_ids,
+            vec!["legacy-room".to_string()],
+            "the room node is the affected light target"
+        );
+
+        let calls = runtime.applied_commands();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(calls[0].0, "legacy-room");
+    }
+
+    #[test]
+    fn home_scene_apply_skips_topology_rooms_without_light_members() {
+        let (state, runtime) = setup_state(vec![
+            make_snapshot("room-a", false, false),
+            make_snapshot("empty-room", false, false),
+        ]);
+        let hub_key = HubKey::new(HubType::new(HubType::MATTER), "local");
+        let a_one = insert_canonical_device(&state, hub_key, "matter-a1", "A One", "", "");
+        add_topology_room(&state, "room-a", &[]);
+        add_topology_room(&state, "empty-room", &[]);
+        {
+            let mut s = state.lock().unwrap();
+            assert!(s.topology.attach_device_user_override("room-a", &a_one));
+        }
+        runtime
+            .snapshots
+            .lock()
+            .unwrap()
+            .push(make_light_child_snapshot(&a_one, "room-a"));
+        do_scene_upsert(
+            &state,
+            scene_with_palette("halloween", &halloween_palette()),
+        )
+        .unwrap();
+
+        let response = do_home_scene_apply(
+            &state,
+            "halloween",
+            HomeSceneApplyRequest {
+                transition_ms: None,
+            },
+            default_http_batch_dispatch_spacing(),
+        )
+        .unwrap();
+
+        assert_eq!(response.applied_target_count, 1);
+        assert_eq!(response.skipped_target_count, 1);
+        assert_eq!(
+            response
+                .targets
+                .iter()
+                .map(|target| target.target_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["room-a"],
+            "a topology room with no light members owns nothing to apply"
+        );
+        let applied = applied_rgb_by_node(&runtime);
+        assert_eq!(applied.len(), 1);
+        assert!(applied.contains_key(&a_one), "{applied:?}");
     }
 
     #[test]
