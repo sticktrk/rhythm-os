@@ -21,6 +21,50 @@ Future<void> _writeHello(
 }
 
 void main() {
+  test(
+      'authoritative connect requests one hello for new, same and changed endpoints',
+      () async {
+    final servers = <HttpServer>[];
+    final requests = <List<String?>>[];
+    for (var i = 0; i < 2; i++) {
+      final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+      servers.add(server);
+      final seen = <String?>[];
+      requests.add(seen);
+      server.listen((request) async {
+        seen.add(request.uri.queryParameters['authoritative']);
+        request.response.headers.contentType = ContentType.json;
+        request.response.write(jsonEncode({
+          'platform': 'embedded',
+          'version': '0.6.632',
+          'server_instance_id': 'appliance-$i',
+          'nodes': [],
+          'extension': 'x' * 100000,
+        }));
+        await request.response.close();
+      });
+    }
+    final connection = RhythmConnection();
+    addTearDown(() async {
+      connection.dispose();
+      for (final server in servers) {
+        await server.close(force: true);
+      }
+    });
+    await connection.connect('127.0.0.1',
+        port: servers[0].port, authoritative: true);
+    expect(requests[0], ['true']);
+    expect(connection.connected, isTrue);
+    expect(connection.lastHelloPerformance!.responseBytes, greaterThan(100000));
+    await connection.connect('127.0.0.1',
+        port: servers[0].port, authoritative: true);
+    expect(requests[0], ['true', 'true']);
+    await connection.connect('127.0.0.1',
+        port: servers[1].port, authoritative: true);
+    expect(requests[1], ['true']);
+    expect(requests[0], ['true', 'true']);
+  });
+
   group('RhythmConnection', () {
     late HttpServer server;
     late int nodeStateRequests;

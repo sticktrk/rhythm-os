@@ -39,11 +39,10 @@ RunnerStateDto replaceRoomsPreservingUserState(
     for (final r in existing) r.id: r,
   };
 
-  // Remove existing rooms from this source
-  for (final room in existing) {
-    state = room_state.removeRoom(state: state, roomId: room.id);
-  }
-
+  final nextById = <String, RoomDto>{
+    for (final room in state.rooms)
+      if (room.source != source) room.id: room,
+  };
   // Add fresh rooms, restoring preserved state from existing
   for (final room in freshRooms) {
     final prev = existingById[room.id];
@@ -65,8 +64,10 @@ RunnerStateDto replaceRoomsPreservingUserState(
             curveConfig: prev.curveConfig,
           )
         : room;
-    state = room_state.addRoom(state: state, room: toAdd);
+    nextById[toAdd.id] = toAdd;
   }
+
+  state = RunnerStateDto(rooms: nextById.values.toList(growable: false));
 
   return state;
 }
@@ -122,6 +123,89 @@ class MotionTimerInfo {
 /// - Provides enabled/disabled room filtering
 class RoomProvider extends ChangeNotifier {
   RunnerStateDto _state = room_state.emptyRunnerState();
+  RunnerStateDto? _indexedState;
+  Map<String, RoomDto> _nodeIndex = {};
+  Map<String, RoomDto>? _snapshotNodes;
+  bool _snapshotChanged = false;
+
+  @override
+  void notifyListeners() {
+    if (_snapshotNodes != null) {
+      _snapshotChanged = true;
+      return;
+    }
+    super.notifyListeners();
+  }
+
+  /// Apply membership and all live state synchronously, then publish once.
+  /// The callback must only reconcile runtime state; it must not await I/O.
+  void applyServerSnapshot(
+      List<RoomDto> nodes, void Function() applyRuntimeState) {
+    assert(_snapshotNodes == null);
+    final previous = {for (final node in _state.rooms) node.id: node};
+    final next = <String, RoomDto>{};
+    for (final node in nodes) {
+      final old = previous[node.id];
+      next[node.id] = RoomDto(
+        id: node.id, name: node.name, source: node.source, kind: node.kind,
+        parentId: node.parentId, placement: node.placement,
+        deviceIds: node.deviceIds, rhythmEnabled: node.rhythmEnabled,
+        disabled: old?.disabled ?? node.disabled,
+        // The runtime update below applies power through the optimistic locks.
+        lightsOn: old?.lightsOn ?? node.lightsOn,
+        timeOffsetMinutes: node.timeOffsetMinutes,
+        brightnessOffset: node.brightnessOffset,
+        curveConfig: old?.curveConfig ?? node.curveConfig,
+      );
+    }
+    _snapshotNodes = next;
+    _snapshotChanged = false;
+    try {
+      for (final id in previous.keys) {
+        if (!next.containsKey(id)) _forgetNode(id);
+      }
+      applyRuntimeState();
+    } finally {
+      final nextRooms = next.values.toList(growable: false);
+      final persistedChanged = !listEquals(_state.rooms, nextRooms);
+      _state = RunnerStateDto(rooms: nextRooms);
+      _snapshotNodes = null;
+      if (_currentIndex >= nextRooms.length) {
+        _currentIndex = nextRooms.isEmpty ? 0 : nextRooms.length - 1;
+      }
+      if (persistedChanged || SettingsService.instance.runnerStateSaveFailed) {
+        unawaited(_save());
+      }
+      if (persistedChanged || _snapshotChanged) notifyListeners();
+      if (previous.length != next.length) {
+        unawaited(AnalyticsService().setRoomCount(next.length));
+      }
+    }
+  }
+
+  void _forgetNode(String id) {
+    _clearRoomTransitioningState(id);
+    _lockExpiryTimers.remove(id)?.cancel();
+    _lightsOnLockedUntil.remove(id);
+    _roomStateLockedUntil.remove(id);
+    _suppressedRoomStates.remove(id);
+    _suppressedLightsOn.remove(id);
+    _acknowledgedRoomStates.remove(id);
+    _acknowledgedLightsOn.remove(id);
+    _motionTimers.remove(id);
+    _roomsWithSensors.remove(id);
+    _roomStates.remove(id);
+    _roomModes.remove(id);
+    _roomBrightness.remove(id);
+    _roomKelvin.remove(id);
+    _roomColor.remove(id);
+    _roomMoodColor.remove(id);
+    _roomMoodBrightness.remove(id);
+    _roomMoodEnabled.remove(id);
+    _roomMoodActive.remove(id);
+    _lastTickTime.remove(id);
+  }
+
   int _currentIndex = 0;
   bool _initialized = false;
   int _resetGeneration = 0;
@@ -918,6 +1002,7 @@ class RoomProvider extends ChangeNotifier {
     final room = getRoom(roomId);
     if (room == null) return;
 
+    var nextLightsOn = room.lightsOn;
     if (lightsOn != null) {
       _serverReportedLightsOn[roomId] = lightsOn;
     }
@@ -928,18 +1013,12 @@ class RoomProvider extends ChangeNotifier {
     }
 
     if (room.rhythmEnabled != rhythmEnabled) {
-      _state = room_state.setRoomRhythmEnabled(
-          state: _state, roomId: roomId, rhythmEnabled: rhythmEnabled);
       changed = true;
     }
     if (room.timeOffsetMinutes != timeOffset) {
-      _state = room_state.setRoomTimeOffset(
-          state: _state, roomId: roomId, timeOffsetMinutes: timeOffset);
       changed = true;
     }
     if (room.brightnessOffset != brightnessOffset) {
-      _state = room_state.setRoomBrightnessOffset(
-          state: _state, roomId: roomId, brightnessOffset: brightnessOffset);
       changed = true;
     }
     final roomStateLocked = _roomStateLockedUntil[roomId];
@@ -993,8 +1072,7 @@ class RoomProvider extends ChangeNotifier {
         _suppressedLightsOn.remove(roomId);
         _acknowledgedLightsOn.remove(roomId);
         if (room.lightsOn != lightsOn) {
-          _state = room_state.setRoomLightsOn(
-              state: _state, roomId: roomId, lightsOn: lightsOn);
+          nextLightsOn = lightsOn;
           changed = true;
         }
       } else if (room.lightsOn != lightsOn) {
@@ -1040,10 +1118,37 @@ class RoomProvider extends ChangeNotifier {
       _roomMoodActive[roomId] = moodActive;
       changed = true;
     }
-    if (changed) {
-      await _save();
-      notifyListeners();
+    final updated = RoomDto(
+      id: room.id,
+      name: room.name,
+      source: room.source,
+      kind: room.kind,
+      parentId: room.parentId,
+      placement: room.placement,
+      deviceIds: room.deviceIds,
+      disabled: room.disabled,
+      curveConfig: room.curveConfig,
+      rhythmEnabled: rhythmEnabled,
+      timeOffsetMinutes: timeOffset,
+      brightnessOffset: brightnessOffset,
+      lightsOn: nextLightsOn,
+    );
+    final persistedChanged = updated != room;
+    if (persistedChanged) {
+      if (_snapshotNodes != null) {
+        _snapshotNodes![roomId] = updated;
+      } else {
+        _state = RunnerStateDto(rooms: [
+          for (final node in _state.rooms) node.id == roomId ? updated : node,
+        ]);
+      }
     }
+    if (_snapshotNodes != null) {
+      if (changed) notifyListeners();
+      return;
+    }
+    if (persistedChanged) await _save();
+    if (changed) notifyListeners();
   }
 
   Future<void> applyServerNodeState(
@@ -1233,7 +1338,12 @@ class RoomProvider extends ChangeNotifier {
 
   /// Get a room by ID.
   RoomDto? getRoom(String roomId) {
-    return room_state.roomById(state: _state, roomId: roomId);
+    if (_snapshotNodes != null) return _snapshotNodes![roomId];
+    if (!identical(_indexedState, _state)) {
+      _nodeIndex = {for (final node in _state.rooms) node.id: node};
+      _indexedState = _state;
+    }
+    return _nodeIndex[roomId];
   }
 
   RoomDto? getNode(String nodeId) => getRoom(nodeId);

@@ -398,6 +398,11 @@ class SettingsService {
   LocalDataSource? _localDataSource;
   AppSettings _settings = AppSettings.defaults();
   bool _initialized = false;
+  int _runnerSaveGeneration = 0;
+  bool _runnerSaveFailed = false;
+  String? _persistedRunnerJson;
+  bool get runnerStateSaveFailed => _runnerSaveFailed;
+  Future<void> _settingsWriteTail = Future.value();
   Future<void> _pendingLocalBleMutationTail = Future.value();
 
   /// Whether the service has been initialized.
@@ -434,6 +439,7 @@ class SettingsService {
 
     // Load settings
     _settings = _localDataSource!.getSettings();
+    _persistedRunnerJson = _settings.runnerStateJson;
     _initialized = true;
 
     debugPrint(
@@ -667,13 +673,28 @@ class SettingsService {
 
   /// Save runner state.
   Future<void> saveRunnerState(RunnerStateDto state) async {
+    final generation = ++_runnerSaveGeneration;
+    // Coalesce synchronous hello/action bursts before doing any serialization.
+    // New membership, logout and cache clears invalidate superseded work.
+    await Future<void>.value();
+    if (generation != _runnerSaveGeneration) return;
     final json = runner_json.runnerStateToJson(state);
     _settings = _settings.copyWith(runnerStateJson: json);
-    await _save();
+    try {
+      await _save(runnerGeneration: generation);
+      if (generation == _runnerSaveGeneration) {
+        _runnerSaveFailed = false;
+      }
+    } catch (_) {
+      if (generation == _runnerSaveGeneration) _runnerSaveFailed = true;
+      rethrow;
+    }
   }
 
-  /// Clear runner state.
+  /// Clear runner state, superseding any not-yet-persisted snapshot.
   Future<void> clearRunnerState() async {
+    _runnerSaveGeneration++;
+    _runnerSaveFailed = false;
     _settings = _settings.clearField(clearRunnerStateJson: true);
     await _save();
   }
@@ -1201,23 +1222,50 @@ class SettingsService {
   // ============================================================
 
   /// Save current settings to storage.
-  Future<void> _save() async {
-    if (_localDataSource != null) {
-      await _localDataSource!.saveSettings(_settings);
-    }
+  Future<void> _save({int? runnerGeneration}) async {
+    final settings = _settings;
+    final source = _localDataSource;
+    if (source == null) return;
+    await _enqueueSettingsWrite(() async {
+      if (runnerGeneration != null && runnerGeneration != _runnerSaveGeneration) {
+        return;
+      }
+      // Compare only after earlier writes finish: an in-flight snapshot may
+      // replace the persisted value even when the newest state returns to it.
+      if (runnerGeneration != null &&
+          settings.runnerStateJson == _persistedRunnerJson &&
+          !_runnerSaveFailed) {
+        return;
+      }
+      await source.saveSettings(settings);
+      _persistedRunnerJson = settings.runnerStateJson;
+    });
+  }
+
+  Future<void> _enqueueSettingsWrite(Future<void> Function() write) {
+    final operation = _settingsWriteTail.then((_) => write());
+    // A failed cache write must not poison later writes or sign-out cleanup.
+    _settingsWriteTail = operation.catchError((Object _) {});
+    return operation;
   }
 
   /// Reset all settings to defaults.
   Future<void> resetToDefaults() async {
+    _runnerSaveGeneration++;
+    _runnerSaveFailed = false;
     _settings = AppSettings.defaults();
     await _save();
   }
 
   /// Clear all settings (for sign out / account deletion).
   Future<void> clearAll() async {
-    if (_localDataSource != null) {
-      await _localDataSource!.clearSettings();
-    }
+    _runnerSaveGeneration++;
+    _runnerSaveFailed = false;
+    _settings = AppSettings.defaults();
+    await _enqueueSettingsWrite(() async {
+      if (_localDataSource != null) await _localDataSource!.clearSettings();
+      _persistedRunnerJson = null;
+    });
     // Clear SharedPreferences to prevent re-migration of stale data
     try {
       final prefs = await SharedPreferences.getInstance();

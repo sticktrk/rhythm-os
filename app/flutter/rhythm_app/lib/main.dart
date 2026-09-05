@@ -155,7 +155,9 @@ Future<RhythmStartupResult> initializeRhythmApp(
 ) async {
   // Initialize SettingsService BEFORE Backend (for onboardingComplete check)
   // This also performs one-time migration from SharedPreferences to Hive
-  await SettingsService.instance.initialize();
+  final performance = AppStartupPerformance.instance;
+  await performance.measure(
+      AppStartupPhase.settings, () => SettingsService.instance.initialize());
   _startOptionalLocalServices();
 
   String? initError;
@@ -172,14 +174,16 @@ Future<RhythmStartupResult> initializeRhythmApp(
       debugPrint(initError);
     } else {
       try {
-        await BackendProvider.initialize(
-          BackendConfig.supabase(
-            url: SupabaseConfig.url,
-            anonKey: SupabaseConfig.anonKey,
-            enableLogging: true,
-          ),
-          initializeAnalytics: false,
-        ).timeout(const Duration(seconds: 20));
+        await performance.measure(
+            AppStartupPhase.auth,
+            () => BackendProvider.initialize(
+                  BackendConfig.supabase(
+                    url: SupabaseConfig.url,
+                    anonKey: SupabaseConfig.anonKey,
+                    enableLogging: true,
+                  ),
+                  initializeAnalytics: false,
+                ).timeout(const Duration(seconds: 20)));
         debugPrint('Backend initialized with Supabase');
         unawaited(_initializeAnalyticsInBackground());
       } catch (e) {
@@ -206,10 +210,12 @@ Future<RhythmStartupResult> initializeRhythmApp(
   if (initError == null) {
     try {
       // Try hybrid mode first (local brain + remote API)
-      client = await HybridApiClient.create(
-        storedHubs: LocalDataSource().getAllHubs(),
-        syncSolarDataOnCreate: false,
-      );
+      client = await performance.measure<HybridApiClient>(
+          AppStartupPhase.brain,
+          () => HybridApiClient.create(
+                storedHubs: LocalDataSource().getAllHubs(),
+                syncSolarDataOnCreate: false,
+              ));
 
       // Fail explicitly if local brain isn't available (except on web,
       // where the app works as a remote client to rhythm-server)
