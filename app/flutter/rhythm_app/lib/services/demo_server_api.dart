@@ -532,6 +532,22 @@ class DemoServerApi extends RhythmServerApi {
         ],
       ),
     ),
+    RhythmSceneDefinition(
+      id: 'demo_scene_dark_fantasy',
+      name: 'Dark Fantasy',
+      description:
+          'Midnight indigo, enchanted forest, torchlight amber, blood crimson and arcane violet across every light',
+      light: RhythmLightScene(
+        defaultTransitionMs: 1500,
+        palette: [
+          _paletteOutput(38, 20, 110, brightness: 55),
+          _paletteOutput(10, 92, 60, brightness: 58),
+          _paletteOutput(255, 120, 20, brightness: 70),
+          _paletteOutput(150, 8, 30, brightness: 52),
+          _paletteOutput(130, 40, 200, brightness: 60),
+        ],
+      ),
+    ),
   ];
 
   DemoServerSnapshot snapshot() {

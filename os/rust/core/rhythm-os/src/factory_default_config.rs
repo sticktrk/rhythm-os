@@ -78,9 +78,9 @@ fn parse_factory_default_profile_bundle() -> Result<ProfileBundle> {
         }
     }
 
-    if bundle.profile.scenes.len() > 4 {
+    if bundle.profile.scenes.len() > 5 {
         return Err(anyhow!(
-            "factory-default profile bundle must define at most 4 sample scenes"
+            "factory-default profile bundle must define at most 5 sample scenes"
         ));
     }
 
@@ -254,14 +254,15 @@ mod tests {
 
         let bundle = factory_default_profile_bundle();
         assert_eq!(bundle.name.as_deref(), Some("Factory Default"));
-        assert_eq!(bundle.profile.scenes.len(), 4);
+        assert_eq!(bundle.profile.scenes.len(), 5);
 
         let scenes = factory_default_scene_map();
-        assert_eq!(scenes.len(), 4);
+        assert_eq!(scenes.len(), 5);
         assert!(scenes.contains_key("color-carnival"));
         assert!(scenes.contains_key("electric-lagoon"));
         assert!(scenes.contains_key("berry-pop"));
         assert!(scenes.contains_key("halloween"));
+        assert!(scenes.contains_key("dark-fantasy"));
         let carnival = scenes.get("color-carnival").unwrap();
         assert_eq!(carnival.name, "Color Carnival");
         let palette = &carnival.light.as_ref().unwrap().palette;
@@ -287,6 +288,19 @@ mod tests {
             })
             .collect();
         assert_eq!(unique_halloween_colors.len(), 5);
+
+        let dark_fantasy = scenes.get("dark-fantasy").unwrap();
+        assert_eq!(dark_fantasy.name, "Dark Fantasy");
+        let dark_fantasy_palette = &dark_fantasy.light.as_ref().unwrap().palette;
+        assert_eq!(dark_fantasy_palette.len(), 5);
+        let unique_dark_fantasy_colors: std::collections::HashSet<_> = dark_fantasy_palette
+            .iter()
+            .map(|output| match output.color {
+                Some(crate::scenes::LightSceneColor::Rgb { rgb }) => (rgb.r, rgb.g, rgb.b),
+                other => panic!("expected rgb palette color, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(unique_dark_fantasy_colors.len(), 5);
 
         let profiles = factory_default_light_profile_config_map();
         assert_eq!(profiles.len(), 4);
