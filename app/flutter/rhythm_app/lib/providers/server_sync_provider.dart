@@ -224,6 +224,9 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Latest merged node state from server hello, detail reads and live events.
   List<RhythmRoom> _helloNodes = [];
+  // Cache ownership survives reconnects; _lastServerInstanceId only proves the
+  // current connection's identity and is cleared as soon as reconnect starts.
+  String? _cachedNodesServerInstanceId;
   bool _selectiveState = false;
   bool _deviceDetailsLoaded = false;
   int _deviceDetailConsumers = 0;
@@ -3227,11 +3230,12 @@ class ServerSyncProvider extends ChangeNotifier {
                 ? 'tunnel'
                 : 'lan');
     _authoritativeNodeSnapshotGeneration++;
-    if (_lastServerInstanceId != null &&
-        _lastServerInstanceId != hello.serverInstanceId) {
+    if (_cachedNodesServerInstanceId == null ||
+        _cachedNodesServerInstanceId != hello.serverInstanceId) {
       _helloNodes = [];
       _topologyNodes = [];
     }
+    _cachedNodesServerInstanceId = hello.serverInstanceId;
     _selectiveState = hello.stateScope != null;
     _invalidateDeviceDetails();
     final helloNodes =
@@ -3874,6 +3878,7 @@ class ServerSyncProvider extends ChangeNotifier {
     _optimisticMoodSceneIds.clear();
     _moodSceneApplyGenerations.clear();
     _helloNodes = [];
+    _cachedNodesServerInstanceId = null;
     _helloRooms = [];
     _clearStandbyEnabledOptimisticStates();
     _topologyNodes = [];

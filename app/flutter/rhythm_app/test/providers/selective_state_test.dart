@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -49,7 +50,7 @@ Map<String, dynamic> _node(String id,
     };
 
 RhythmHello _hello(
-        {String server = 'server-a',
+        {String? server = 'server-a',
         bool details = false,
         bool empty = false}) =>
     RhythmHello.fromJson({
@@ -117,6 +118,10 @@ class _ServerApi extends RhythmServerApi {
 
 class _Connection extends RhythmConnection {
   final hellos = StreamController<RhythmHello>.broadcast();
+  final connectionStates = StreamController<RhythmConnectionState>.broadcast();
+  @override
+  Stream<RhythmConnectionState> get connectionStateStream =>
+      connectionStates.stream;
   final states = StreamController<RhythmRoomState>.broadcast();
   final motion = StreamController<RhythmMotionTimer>.broadcast();
   final _runtime = _RuntimeApi();
@@ -136,6 +141,7 @@ class _Connection extends RhythmConnection {
   @override
   void dispose() {
     hellos.close();
+    connectionStates.close();
     states.close();
     motion.close();
     super.dispose();
@@ -276,6 +282,25 @@ void main() {
     expect(rooms.roomCount, 1);
   });
 
+  for (final server in ['server-a', 'server-b', null]) {
+    test('reconnect only retains devices for the same known server: $server',
+        () async {
+      expect(await sync.ensureDeviceDetails(), isTrue);
+      expect(rooms.getNode('bulb'), isNotNull);
+      connection.connectionStates.add(RhythmConnectionState.reconnecting);
+      await _drain();
+      connection.connectionStates.add(RhythmConnectionState.connected);
+      connection.hellos.add(_hello(server: server));
+      await _drain();
+      final sameServer = server == 'server-a';
+      expect(rooms.getNode('bulb'), sameServer ? isNotNull : isNull,
+          reason: 'only the same known server can retain cached children');
+      expect(sync.topologyNodes, sameServer ? isNotEmpty : isEmpty);
+      expect(connection._runtime.reads, 1,
+          reason: 'a reconnect does not trigger background device reads');
+    });
+  }
+
   test('failed topology preserves cache; a successful empty detail clears it',
       () async {
     connection._server.fail = true;
@@ -290,18 +315,34 @@ void main() {
     expect(sync.topologyNodes, isEmpty);
   });
 
-  testWidgets(
-      'device surface reports failure and retries without an empty-list lie',
+  testWidgets('standalone device route exposes readable loading failure',
       (tester) async {
     connection._server.fail = true;
     await tester.pumpWidget(ChangeNotifierProvider.value(
-        value: sync,
-        child: const MaterialApp(
-            home: Scaffold(
-                body: DeviceDetailsLoader(child: Text('Device controls'))))));
+      value: sync,
+      child: MaterialApp(
+        theme: ThemeData.dark(),
+        home: const RepaintBoundary(
+          key: ValueKey('detail-route-evidence'),
+          child: DeviceDetailsLoader(
+              child: Scaffold(body: Text('Device controls'))),
+        ),
+      ),
+    ));
     await tester.pumpAndSettle();
     expect(find.text('Could not load devices.'), findsOneWidget);
     expect(find.text('Device controls'), findsNothing);
+    final errorContext = tester.element(find.text('Could not load devices.'));
+    final errorStyle = DefaultTextStyle.of(errorContext).style;
+    expect(errorStyle.fontSize, lessThan(24));
+    expect(errorStyle.decoration, isNot(TextDecoration.underline));
+    final screenshotPath =
+        Platform.environment['RHYTHM_DETAIL_ROUTE_SCREENSHOT'];
+    if (screenshotPath != null) {
+      await expectLater(find.byKey(const ValueKey('detail-route-evidence')),
+          matchesGoldenFile(screenshotPath));
+    }
+    expect(tester.takeException(), isNull);
     connection._server.fail = false;
     await tester.tap(find.text('Try again'));
     await tester.pumpAndSettle();

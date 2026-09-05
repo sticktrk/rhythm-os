@@ -47,16 +47,22 @@ class _DeviceDetailsLoaderState extends State<DeviceDetailsLoader> {
     if (!sync.needsDeviceDetails) return widget.child;
     if (_requestedGeneration != sync.deviceDetailsGeneration) _load(sync);
     if (sync.deviceDetailsFailed) {
-      return Center(
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-        const Text('Could not load devices.'),
-        TextButton(
-          onPressed: () => unawaited(sync.ensureDeviceDetails()),
-          child: const Text('Try again'),
-        ),
-      ]));
+      return Material(
+        type: MaterialType.transparency,
+        child: Center(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Text('Could not load devices.'),
+          TextButton(
+            onPressed: () => unawaited(sync.ensureDeviceDetails()),
+            child: const Text('Try again'),
+          ),
+        ])),
+      );
     }
-    return const Center(
-        child: CircularProgressIndicator(semanticsLabel: 'Loading devices'));
+    return const Material(
+      type: MaterialType.transparency,
+      child: Center(
+          child: CircularProgressIndicator(semanticsLabel: 'Loading devices')),
+    );
   }
 }
