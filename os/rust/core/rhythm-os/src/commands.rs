@@ -54,10 +54,11 @@ use crate::factory_default_config::{
 use crate::hub::HubType;
 use crate::light_runtime::LightRuntimeKind;
 use crate::scenes::{
-    is_native_scene_id, LightSceneColor, LightSceneEntry, LightSceneLayer, LightSceneOutput,
-    LightScenePower, LightScenePreviewSession, LightSceneTargetRef, SceneApplyRequest,
-    SceneApplyResponse, SceneDefinition, SceneDraftPreviewRequest, ScenePreviewRequest,
-    SceneSource, DEFAULT_LIGHT_SCENE_PREVIEW_MS,
+    is_native_scene_id, HomeSceneApplyRequest, HomeSceneApplyResponse, HomeSceneTargetResult,
+    LightSceneColor, LightSceneEntry, LightSceneLayer, LightSceneOutput, LightScenePower,
+    LightScenePreviewSession, LightSceneTargetRef, SceneApplyRequest, SceneApplyResponse,
+    SceneDefinition, SceneDraftPreviewRequest, ScenePreviewRequest, SceneSource,
+    DEFAULT_LIGHT_SCENE_PREVIEW_MS,
 };
 use crate::state::{
     current_epoch_ms, rooms_from_engine, AppState, ObservedPowerSource, ObservedPowerState,
@@ -4745,6 +4746,7 @@ fn build_scene_application_plan_locked(
     scene: &SceneDefinition,
     target_id: &str,
     transition_ms: Option<u32>,
+    palette_offset: usize,
 ) -> Result<SceneApplicationPlan> {
     let layer = scene
         .light
@@ -4796,7 +4798,12 @@ fn build_scene_application_plan_locked(
         && explicit_node_ids.is_empty()
         && !direct_palette_room
     {
-        if let Some(room_output) = layer.palette.first().or(layer.default_output.as_ref()) {
+        let room_output = if layer.palette.is_empty() {
+            layer.default_output.as_ref()
+        } else {
+            layer.palette.get(palette_offset % layer.palette.len())
+        };
+        if let Some(room_output) = room_output {
             push_scene_light_command(
                 s,
                 layer.default_transition_ms,
@@ -4817,7 +4824,8 @@ fn build_scene_application_plan_locked(
     if !room_default_dispatched {
         if !layer.palette.is_empty() {
             for (index, node_id) in implicit_node_ids.iter().enumerate() {
-                let output = &layer.palette[index % layer.palette.len()];
+                let output =
+                    &layer.palette[palette_offset.wrapping_add(index) % layer.palette.len()];
                 push_scene_light_command(
                     s,
                     layer.default_transition_ms,
@@ -4865,13 +4873,27 @@ fn build_scene_application_plan_locked(
     })
 }
 
+/// Rendered scene lights for one target plus the palette slots the target
+/// consumed.
+///
+/// `palette_advance` is how many implicit palette assignments this target used.
+/// Single-target applies ignore it; the whole-home apply threads it forward so a
+/// multi-colour palette keeps rotating across rooms instead of restarting on
+/// the same colour in every room.
+struct RenderedSceneTarget {
+    scope_node_ids: BTreeSet<String>,
+    lights: Vec<RenderedSceneLight>,
+    palette_advance: usize,
+}
+
 fn render_scene_lights_locked(
     s: &AppState,
     runtime: &Arc<dyn RuntimeHandle>,
     scene: &SceneDefinition,
     target_id: &str,
     transition_ms: Option<u32>,
-) -> Result<(BTreeSet<String>, Vec<RenderedSceneLight>)> {
+    palette_offset: usize,
+) -> Result<RenderedSceneTarget> {
     let layer = scene
         .light
         .as_ref()
@@ -4890,9 +4912,14 @@ fn render_scene_lights_locked(
         .filter(|node_id| !outputs.contains_key(*node_id))
         .cloned()
         .collect::<Vec<_>>();
+    let mut palette_advance = 0usize;
     if !layer.palette.is_empty() {
+        palette_advance = implicit_node_ids.len();
         for (index, node_id) in implicit_node_ids.into_iter().enumerate() {
-            outputs.insert(node_id, layer.palette[index % layer.palette.len()].clone());
+            outputs.insert(
+                node_id,
+                layer.palette[palette_offset.wrapping_add(index) % layer.palette.len()].clone(),
+            );
         }
     } else if let Some(default_output) = &layer.default_output {
         for node_id in implicit_node_ids {
@@ -4912,7 +4939,11 @@ fn render_scene_lights_locked(
             .map_err(|error| anyhow::anyhow!("Invalid light scene output: {error}"))?;
         rendered.push(RenderedSceneLight { node_id, output });
     }
-    Ok((scope_node_ids, rendered))
+    Ok(RenderedSceneTarget {
+        scope_node_ids,
+        lights: rendered,
+        palette_advance,
+    })
 }
 
 fn authoritative_endpoint_for_scene_node(
@@ -5222,6 +5253,83 @@ fn dispatch_scene_plan(
     Ok(())
 }
 
+/// One target's planned scene dispatch: the light command plan, any managed
+/// (grouped) projections that must be applied by their owning integration, and
+/// how many palette slots the target consumed.
+struct PlannedSceneTarget {
+    plan: SceneApplicationPlan,
+    managed_dispatches: Vec<ManagedSceneDispatch>,
+    palette_advance: usize,
+}
+
+/// Plan a single scene target from one serialized state snapshot.
+///
+/// Shared by the single-target apply/preview path and by the whole-home apply so
+/// both paths produce identical rendering, managed projection and dispatch
+/// decisions. `palette_offset` is 0 for the single-target path, which keeps its
+/// behaviour byte-identical.
+fn plan_scene_target_locked(
+    s: &AppState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    scene: &SceneDefinition,
+    target_id: &str,
+    transition_ms: Option<u32>,
+    palette_offset: usize,
+) -> Result<PlannedSceneTarget> {
+    let rendered =
+        render_scene_lights_locked(s, runtime, scene, target_id, transition_ms, palette_offset)?;
+    if rendered.scope_node_ids.is_empty() {
+        anyhow::bail!(
+            "Target '{}' has no light scene-addressable nodes",
+            target_id
+        );
+    }
+    let managed_dispatches =
+        managed_scene_dispatches_locked(s, scene, &rendered.scope_node_ids, &rendered.lights)?;
+    let plan = if managed_dispatches.is_empty() {
+        build_scene_application_plan_locked(
+            s,
+            runtime,
+            scene,
+            target_id,
+            transition_ms,
+            palette_offset,
+        )?
+    } else {
+        companion_scene_plan_locked(s, &rendered.lights, &managed_dispatches)?
+    };
+    Ok(PlannedSceneTarget {
+        plan,
+        managed_dispatches,
+        palette_advance: rendered.palette_advance,
+    })
+}
+
+/// Hand every managed (grouped) projection to its owning integration and
+/// reconcile the projected node states.
+fn apply_managed_scene_dispatches(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    managed_dispatches: &[ManagedSceneDispatch],
+    ephemeral_projection: bool,
+) -> Result<()> {
+    for managed in managed_dispatches {
+        let handled = managed.discovery.apply_managed_scene_projection(
+            &managed.projection,
+            managed.transition_ms,
+            ephemeral_projection,
+        )?;
+        if !handled {
+            anyhow::bail!("An authoritative controller does not support managed room scenes");
+        }
+        for (node_id, lights_on) in &managed.projected_states {
+            update_lights_on_cache_for_runtime_node(state, runtime, node_id, *lights_on);
+            emit_node_state_event_after_apply(state, runtime, node_id);
+        }
+    }
+    Ok(())
+}
+
 fn do_scene_apply_definition_inner(
     state: &SharedState,
     source: SceneApplySource,
@@ -5257,49 +5365,22 @@ fn do_scene_apply_definition_inner(
     let transaction = transaction_lock
         .lock()
         .map_err(|_| anyhow::anyhow!("Failed to lock external topology transaction"))?;
-    let (runtime, plan, managed_dispatches) = {
+    let (runtime, planned) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let runtime = s
             .hub_runtime()
             .ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
-        let (scope_node_ids, rendered) =
-            render_scene_lights_locked(&s, &runtime, &scene, &target_id, request.transition_ms)?;
-        if scope_node_ids.is_empty() {
-            anyhow::bail!(
-                "Target '{}' has no light scene-addressable nodes",
-                target_id
-            );
-        }
-        let managed_dispatches =
-            managed_scene_dispatches_locked(&s, &scene, &scope_node_ids, &rendered)?;
-        let plan = if managed_dispatches.is_empty() {
-            build_scene_application_plan_locked(
-                &s,
-                &runtime,
-                &scene,
-                &target_id,
-                request.transition_ms,
-            )?
-        } else {
-            companion_scene_plan_locked(&s, &rendered, &managed_dispatches)?
-        };
-        (runtime, plan, managed_dispatches)
+        let planned =
+            plan_scene_target_locked(&s, &runtime, &scene, &target_id, request.transition_ms, 0)?;
+        (runtime, planned)
     };
+    let PlannedSceneTarget {
+        plan,
+        managed_dispatches,
+        palette_advance: _,
+    } = planned;
 
-    for managed in &managed_dispatches {
-        let handled = managed.discovery.apply_managed_scene_projection(
-            &managed.projection,
-            managed.transition_ms,
-            ephemeral_projection,
-        )?;
-        if !handled {
-            anyhow::bail!("An authoritative controller does not support managed room scenes");
-        }
-        for (node_id, lights_on) in &managed.projected_states {
-            update_lights_on_cache_for_runtime_node(state, &runtime, node_id, *lights_on);
-            emit_node_state_event_after_apply(state, &runtime, node_id);
-        }
-    }
+    apply_managed_scene_dispatches(state, &runtime, &managed_dispatches, ephemeral_projection)?;
     if plan.affected_node_ids.is_empty() {
         anyhow::bail!(
             "Scene '{}' has no routable light entries for target '{}'",
@@ -5612,6 +5693,304 @@ fn do_scene_apply_response(
         return do_native_scene_apply(state, scene_id, request, persist_state);
     }
     Err(anyhow::anyhow!("Scene '{}' not found", scene_id))
+}
+
+/// Eligible whole-home scene targets plus the count of targets deliberately
+/// skipped (disabled, or holding no light-addressable members).
+struct HomeSceneTargets {
+    eligible: Vec<String>,
+    skipped: usize,
+}
+
+/// Enumerate every whole-home scene target from one serialized state snapshot.
+///
+/// A target is every enabled, non-internal room that owns at least one
+/// light-addressable member, plus every enabled roomless light device. Order is
+/// deterministic (name, then id) so palette continuity across the house is
+/// stable between requests.
+fn home_scene_targets_locked(s: &AppState, runtime: &Arc<dyn RuntimeHandle>) -> HomeSceneTargets {
+    let mut eligible: Vec<(String, String)> = Vec::new();
+    let mut skipped = 0usize;
+
+    for snap in runtime.engine_all_effective_node_snapshots() {
+        if crate::topology::is_internal_light_node_id(&snap.id) {
+            continue;
+        }
+        let is_room = snap.kind.is_room();
+        let roomless_light =
+            !is_room && snap.kind.is_light_addressable() && snap.parent_id.is_none();
+        if !is_room && !roomless_light {
+            continue;
+        }
+        if snap.disabled {
+            skipped += 1;
+            continue;
+        }
+
+        let scope = light_scene_target_scope_node_ids(s, runtime, &snap.id);
+        // A room whose only scope entry is the room node itself fell back to the
+        // room placeholder, which means it owns no light members at all.
+        let room_without_lights = is_room && scope.len() == 1 && scope.contains(&snap.id);
+        if scope.is_empty() || room_without_lights {
+            skipped += 1;
+            continue;
+        }
+
+        eligible.push((snap.name.clone(), snap.id.clone()));
+    }
+
+    eligible.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    HomeSceneTargets {
+        eligible: eligible.into_iter().map(|(_, id)| id).collect(),
+        skipped,
+    }
+}
+
+fn home_scene_work_item(
+    command: &SceneLightCommand,
+    dispatch_spacing: Duration,
+    dispatch_generation: u64,
+) -> WorkItem {
+    match &command.dispatch {
+        SceneLightDispatch::On(lighting_command) => WorkItem::ApplyNodeCommand {
+            command_id: crate::logging::next_command_id("home-scene-apply"),
+            node_id: command.dispatch_node_id.clone(),
+            command: lighting_command.clone(),
+            dispatch_spacing,
+            dispatch_generation,
+        },
+        SceneLightDispatch::Off(transition_ms) => WorkItem::LightsOffRoom {
+            command_id: crate::logging::next_command_id("home-scene-apply"),
+            node_id: command.dispatch_node_id.clone(),
+            transition_ms: *transition_ms,
+            dispatch_spacing,
+            dispatch_generation,
+        },
+    }
+}
+
+/// Apply one stored scene to every eligible target in the home.
+///
+/// This is a first-class server operation: the server enumerates the targets,
+/// plans each one with palette continuity, hands managed (grouped) projections
+/// to their owning integrations, paces the remaining per-node dispatch through
+/// the node dispatch worker, binds the mood scene per target, and returns one
+/// structured result. Clients call it once instead of fanning out per room.
+///
+/// A failure on one target is reported in that target's `error` and does not
+/// abort the rest. The whole request only fails when the scene is missing, the
+/// scene is a room-bound native scene, or no target is eligible.
+pub fn do_home_scene_apply(
+    state: &SharedState,
+    scene_id: &str,
+    request: HomeSceneApplyRequest,
+    dispatch_spacing: Duration,
+) -> Result<HomeSceneApplyResponse> {
+    if is_native_scene_id(scene_id) {
+        anyhow::bail!(
+            "Native scene '{}' is room-bound and cannot be applied to the whole home",
+            scene_id
+        );
+    }
+
+    let scene_transaction_lock = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.scene_lifecycle_transaction_lock.clone()
+    };
+    let _scene_transaction = scene_transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Failed to lock scene lifecycle transaction"))?;
+
+    let mut scene = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.scenes
+            .get(scene_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("Scene '{}' not found", scene_id))?
+    };
+    scene.normalize();
+
+    let transaction_lock = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.external_topology_transaction_lock.clone()
+    };
+    let transaction = transaction_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Failed to lock external topology transaction"))?;
+
+    // Enumerate and plan every target from one serialized topology snapshot so
+    // palette continuity and managed projections cannot observe a half-applied
+    // house.
+    let (runtime, targets, planned) = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        let runtime = s
+            .hub_runtime()
+            .ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+        let targets = home_scene_targets_locked(&s, &runtime);
+        let mut palette_offset = 0usize;
+        let mut planned = Vec::with_capacity(targets.eligible.len());
+        for target_id in &targets.eligible {
+            let result = plan_scene_target_locked(
+                &s,
+                &runtime,
+                &scene,
+                target_id,
+                request.transition_ms,
+                palette_offset,
+            );
+            if let Ok(target) = &result {
+                palette_offset = palette_offset.wrapping_add(target.palette_advance);
+            }
+            planned.push((target_id.clone(), result));
+        }
+        (runtime, targets, planned)
+    };
+
+    if targets.eligible.is_empty() {
+        drop(transaction);
+        anyhow::bail!("No rooms with lights are available for a whole-home scene");
+    }
+
+    let mut results: Vec<HomeSceneTargetResult> = Vec::with_capacity(planned.len());
+    let mut applied: Vec<(String, SceneApplicationPlan)> = Vec::new();
+    for (target_id, planned_target) in planned {
+        let failure = |error: String| HomeSceneTargetResult {
+            target_id: target_id.clone(),
+            affected_node_ids: Vec::new(),
+            unresolved_node_ids: Vec::new(),
+            error: Some(error),
+        };
+        let target = match planned_target {
+            Ok(target) => target,
+            Err(error) => {
+                results.push(failure(error.to_string()));
+                continue;
+            }
+        };
+        if target.plan.affected_node_ids.is_empty() {
+            results.push(failure(format!(
+                "Scene '{}' has no routable light entries for target '{}'",
+                scene.id, target_id
+            )));
+            continue;
+        }
+        // Managed projections stay under the topology guard, exactly like the
+        // single-target apply.
+        if let Err(error) =
+            apply_managed_scene_dispatches(state, &runtime, &target.managed_dispatches, false)
+        {
+            results.push(failure(error.to_string()));
+            continue;
+        }
+        results.push(HomeSceneTargetResult {
+            target_id: target_id.clone(),
+            affected_node_ids: target.plan.affected_node_ids.clone(),
+            unresolved_node_ids: target.plan.unresolved_node_ids.clone(),
+            error: None,
+        });
+        applied.push((target_id, target.plan));
+    }
+
+    // External controllers take this same lock around their own dispatch, so it
+    // must be released before per-node light commands run.
+    drop(transaction);
+
+    let dispatch_generation = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.light_dispatch_generation
+    };
+    let work_items: Vec<WorkItem> = applied
+        .iter()
+        .flat_map(|(_, plan)| plan.commands.iter())
+        .map(|command| home_scene_work_item(command, dispatch_spacing, dispatch_generation))
+        .collect();
+    let dispatch_count = work_items.len();
+    let queued = if work_items.is_empty() {
+        false
+    } else {
+        match queue_node_dispatch_work_items(
+            state,
+            "home_scene_apply",
+            work_items,
+            dispatch_spacing,
+        ) {
+            Ok(queued) => queued,
+            Err(error) => {
+                warn!(
+                    target: "cmd",
+                    "home_scene_apply: failed to queue node dispatches: {}",
+                    error
+                );
+                false
+            }
+        }
+    };
+
+    if !queued {
+        // No dispatch worker (tests, CLI, or a runtime without a work queue):
+        // fall back to the synchronous per-target dispatch.
+        let mut dispatch_failures: Vec<(String, String)> = Vec::new();
+        applied.retain(
+            |(target_id, plan)| match dispatch_scene_plan(state, &runtime, plan) {
+                Ok(()) => true,
+                Err(error) => {
+                    dispatch_failures.push((target_id.clone(), error.to_string()));
+                    false
+                }
+            },
+        );
+        for (target_id, error) in dispatch_failures {
+            if let Some(result) = results
+                .iter_mut()
+                .find(|result| result.target_id == target_id)
+            {
+                result.affected_node_ids.clear();
+                result.unresolved_node_ids.clear();
+                result.error = Some(error);
+            }
+        }
+    }
+
+    // Mood binding is committed synchronously so the app sees the scene on every
+    // room immediately, regardless of dispatch pacing.
+    for (target_id, plan) in &applied {
+        set_scene_committed_state(
+            state,
+            &runtime,
+            &scene.id,
+            target_id,
+            &plan.affected_node_ids,
+        );
+        if let Ok(mut s) = state.lock() {
+            clear_scene_preview_sessions_locked(&mut s, target_id, &plan.affected_node_ids);
+        }
+        emit_node_state_event_after_apply(state, &runtime, target_id);
+    }
+    persist_rooms(state);
+
+    let applied_target_count = applied.len();
+    info!(
+        target: "cmd",
+        "home_scene_apply: scene={} applied={} failed={} skipped={} queued={} dispatch_count={}",
+        scene.id,
+        applied_target_count,
+        results.len() - applied_target_count,
+        targets.skipped,
+        queued,
+        dispatch_count,
+    );
+
+    Ok(HomeSceneApplyResponse {
+        scene_id: scene.id,
+        targets: results,
+        applied_target_count,
+        skipped_target_count: targets.skipped,
+        queued,
+        dispatch_count,
+        dispatch_spacing_ms: dispatch_spacing.as_millis() as u64,
+        estimated_dispatch_ms: estimated_dispatch_duration(dispatch_count, dispatch_spacing)
+            .as_millis() as u64,
+    })
 }
 
 fn do_native_scene_apply(
@@ -23809,6 +24188,302 @@ mod tests {
             applied_colors,
             std::collections::HashSet::from([(255, 48, 112), (48, 220, 112)])
         );
+    }
+
+    struct HomeSceneHarness {
+        state: SharedState,
+        runtime: Arc<MockRuntime>,
+        room_a_lights: Vec<String>,
+        room_b_lights: Vec<String>,
+        disabled_room_light: String,
+    }
+
+    /// Two enabled Matter rooms (two lights, then one light), plus a disabled
+    /// room that still owns a light.
+    fn setup_home_scene_rooms() -> HomeSceneHarness {
+        let (state, runtime) = setup_state(vec![
+            make_snapshot("room-a", false, false),
+            make_snapshot("room-b", false, false),
+            make_snapshot("room-c", true, false),
+        ]);
+        let hub_key = HubKey::new(HubType::new(HubType::MATTER), "local");
+        let a_one = insert_canonical_device(&state, hub_key.clone(), "matter-a1", "A One", "", "");
+        let a_two = insert_canonical_device(&state, hub_key.clone(), "matter-a2", "A Two", "", "");
+        let b_one = insert_canonical_device(&state, hub_key.clone(), "matter-b1", "B One", "", "");
+        let c_one = insert_canonical_device(&state, hub_key, "matter-c1", "C One", "", "");
+
+        add_topology_room(&state, "room-a", &[]);
+        add_topology_room(&state, "room-b", &[]);
+        add_topology_room(&state, "room-c", &[]);
+        {
+            let mut s = state.lock().unwrap();
+            assert!(s.topology.attach_device_user_override("room-a", &a_one));
+            assert!(s.topology.attach_device_user_override("room-a", &a_two));
+            assert!(s.topology.attach_device_user_override("room-b", &b_one));
+            assert!(s.topology.attach_device_user_override("room-c", &c_one));
+        }
+        runtime.snapshots.lock().unwrap().extend([
+            make_light_child_snapshot(&a_one, "room-a"),
+            make_light_child_snapshot(&a_two, "room-a"),
+            make_light_child_snapshot(&b_one, "room-b"),
+            make_light_child_snapshot(&c_one, "room-c"),
+        ]);
+
+        let mut room_a_lights = vec![a_one, a_two];
+        room_a_lights.sort();
+        HomeSceneHarness {
+            state,
+            runtime,
+            room_a_lights,
+            room_b_lights: vec![b_one],
+            disabled_room_light: c_one,
+        }
+    }
+
+    fn halloween_palette() -> Vec<Rgb> {
+        vec![
+            Rgb::new(255, 104, 0),
+            Rgb::new(122, 0, 214),
+            Rgb::new(66, 232, 40),
+            Rgb::new(255, 150, 10),
+            Rgb::new(176, 0, 255),
+        ]
+    }
+
+    fn applied_rgb_by_node(runtime: &Arc<MockRuntime>) -> HashMap<String, (u8, u8, u8)> {
+        runtime
+            .applied_commands()
+            .into_iter()
+            .map(|(node_id, command)| (node_id, (command.rgb.r, command.rgb.g, command.rgb.b)))
+            .collect()
+    }
+
+    #[test]
+    fn home_scene_apply_skips_disabled_rooms_and_applies_the_rest() {
+        let harness = setup_home_scene_rooms();
+        do_scene_upsert(
+            &harness.state,
+            scene_with_palette("halloween", &halloween_palette()),
+        )
+        .unwrap();
+
+        let response = do_home_scene_apply(
+            &harness.state,
+            "halloween",
+            HomeSceneApplyRequest {
+                transition_ms: None,
+            },
+            default_http_batch_dispatch_spacing(),
+        )
+        .unwrap();
+
+        assert_eq!(response.scene_id, "halloween");
+        assert_eq!(response.applied_target_count, 2);
+        assert_eq!(response.skipped_target_count, 1);
+        assert_eq!(
+            response
+                .targets
+                .iter()
+                .map(|target| target.target_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["room-a", "room-b"],
+            "targets are ordered deterministically and exclude the disabled room"
+        );
+        assert!(response.targets.iter().all(|target| target.error.is_none()));
+        // No dispatch worker in tests: the synchronous fallback still reports
+        // the exact command count.
+        assert!(!response.queued);
+        assert_eq!(response.dispatch_count, 3);
+
+        let applied = applied_rgb_by_node(&harness.runtime);
+        assert_eq!(applied.len(), 3);
+        assert!(
+            !applied.contains_key(&harness.disabled_room_light),
+            "a disabled room must stay untouched: {applied:?}"
+        );
+    }
+
+    #[test]
+    fn home_scene_apply_continues_the_palette_across_rooms() {
+        let harness = setup_home_scene_rooms();
+        let palette = halloween_palette();
+        do_scene_upsert(&harness.state, scene_with_palette("halloween", &palette)).unwrap();
+
+        do_home_scene_apply(
+            &harness.state,
+            "halloween",
+            HomeSceneApplyRequest {
+                transition_ms: None,
+            },
+            default_http_batch_dispatch_spacing(),
+        )
+        .unwrap();
+
+        let applied = applied_rgb_by_node(&harness.runtime);
+        let expect = |index: usize| {
+            let rgb = palette[index];
+            (rgb.r, rgb.g, rgb.b)
+        };
+        assert_eq!(
+            applied.get(&harness.room_a_lights[0]).copied(),
+            Some(expect(0))
+        );
+        assert_eq!(
+            applied.get(&harness.room_a_lights[1]).copied(),
+            Some(expect(1))
+        );
+        assert_eq!(
+            applied.get(&harness.room_b_lights[0]).copied(),
+            Some(expect(2)),
+            "the second room continues the palette instead of restarting it"
+        );
+    }
+
+    #[test]
+    fn single_room_scene_apply_still_starts_the_palette_at_the_first_color() {
+        let (state, runtime, device_one_id, device_two_id) = setup_matter_room_with_two_lights();
+        let palette = halloween_palette();
+        do_scene_upsert(&state, scene_with_palette("halloween", &palette)).unwrap();
+
+        do_scene_apply(
+            &state,
+            "halloween",
+            SceneApplyRequest {
+                target_id: "room1".to_string(),
+                transition_ms: None,
+            },
+        )
+        .unwrap();
+
+        let mut ids = vec![device_one_id, device_two_id];
+        ids.sort();
+        let applied = applied_rgb_by_node(&runtime);
+        assert_eq!(
+            applied.get(&ids[0]).copied(),
+            Some((palette[0].r, palette[0].g, palette[0].b))
+        );
+        assert_eq!(
+            applied.get(&ids[1]).copied(),
+            Some((palette[1].r, palette[1].g, palette[1].b))
+        );
+    }
+
+    #[test]
+    fn home_scene_apply_binds_the_mood_scene_on_every_applied_room() {
+        let harness = setup_home_scene_rooms();
+        do_scene_upsert(
+            &harness.state,
+            scene_with_palette("halloween", &halloween_palette()),
+        )
+        .unwrap();
+
+        do_home_scene_apply(
+            &harness.state,
+            "halloween",
+            HomeSceneApplyRequest {
+                transition_ms: None,
+            },
+            default_http_batch_dispatch_spacing(),
+        )
+        .unwrap();
+
+        for room_id in ["room-a", "room-b"] {
+            let room = harness.runtime.engine_room_snapshot(room_id).unwrap();
+            assert_eq!(
+                room.profile_settings.mood_scene_id.as_deref(),
+                Some("halloween"),
+                "{room_id} should be bound to the applied scene"
+            );
+            assert!(room.mood_active, "{room_id} should be in mood");
+        }
+        let disabled = harness.runtime.engine_room_snapshot("room-c").unwrap();
+        assert_eq!(disabled.profile_settings.mood_scene_id, None);
+        assert!(!disabled.mood_active);
+    }
+
+    #[test]
+    fn home_scene_apply_rejects_room_bound_native_scenes() {
+        let harness = setup_home_scene_rooms();
+
+        let error = do_home_scene_apply(
+            &harness.state,
+            &crate::scenes::native_scene_id("Hue", "abc-123"),
+            HomeSceneApplyRequest {
+                transition_ms: None,
+            },
+            default_http_batch_dispatch_spacing(),
+        )
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("room-bound"),
+            "unexpected error: {error}"
+        );
+        assert!(harness.runtime.applied_commands().is_empty());
+    }
+
+    #[test]
+    fn home_scene_apply_records_one_target_failure_without_blocking_the_others() {
+        let harness = setup_home_scene_rooms();
+        // A composite controller makes unroutable nodes fail to plan; the ghost
+        // room's light exists in the engine but not in topology.
+        harness.state.lock().unwrap().composite_controller =
+            Some(Arc::new(rhythm_core::CompositeController::new()));
+        harness.runtime.snapshots.lock().unwrap().extend([
+            make_snapshot("room-z", false, false),
+            make_light_child_snapshot("ghost-light", "room-z"),
+        ]);
+        do_scene_upsert(
+            &harness.state,
+            scene_with_palette("halloween", &halloween_palette()),
+        )
+        .unwrap();
+
+        let response = do_home_scene_apply(
+            &harness.state,
+            "halloween",
+            HomeSceneApplyRequest {
+                transition_ms: None,
+            },
+            default_http_batch_dispatch_spacing(),
+        )
+        .unwrap();
+
+        assert_eq!(response.applied_target_count, 2);
+        assert_eq!(response.targets.len(), 3);
+        let failed = response
+            .targets
+            .iter()
+            .find(|target| target.target_id == "room-z")
+            .expect("the unroutable room is reported");
+        assert!(failed.error.is_some(), "{failed:?}");
+        for room_id in ["room-a", "room-b"] {
+            let ok = response
+                .targets
+                .iter()
+                .find(|target| target.target_id == room_id)
+                .unwrap();
+            assert!(ok.error.is_none(), "{ok:?}");
+            assert!(!ok.affected_node_ids.is_empty());
+        }
+        assert_eq!(harness.runtime.applied_commands().len(), 3);
+    }
+
+    #[test]
+    fn home_scene_apply_requires_a_stored_scene() {
+        let harness = setup_home_scene_rooms();
+
+        let error = do_home_scene_apply(
+            &harness.state,
+            "not-a-scene",
+            HomeSceneApplyRequest {
+                transition_ms: None,
+            },
+            default_http_batch_dispatch_spacing(),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("not found"), "{error}");
     }
 
     #[test]

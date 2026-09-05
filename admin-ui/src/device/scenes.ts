@@ -40,6 +40,30 @@ export function applyScene(
   });
 }
 
+export function applyHomeScene(
+  client: DeviceClient,
+  sceneId: string,
+  options: {
+    transitionMs?: number;
+    dispatchSpacingMs?: number;
+    correlationId?: string;
+  } = {}
+) {
+  return client.post(`api/scenes/${encodeURIComponent(sceneId)}/apply-home`, {
+    body: {
+      ...(options.transitionMs !== undefined
+        ? { transition_ms: options.transitionMs }
+        : {}),
+      ...(options.dispatchSpacingMs !== undefined
+        ? { dispatch_spacing_ms: options.dispatchSpacingMs }
+        : {}),
+      ...(options.correlationId !== undefined
+        ? { correlation_id: options.correlationId }
+        : {})
+    }
+  });
+}
+
 export function previewScene(
   client: DeviceClient,
   sceneId: string,

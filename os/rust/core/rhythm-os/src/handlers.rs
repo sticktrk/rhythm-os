@@ -2230,6 +2230,51 @@ pub fn handle_post_scene_apply(state: &SharedState, scene_id: &str, body: &Value
     }
 }
 
+/// Apply one stored scene to every eligible room in the home in a single
+/// server-owned operation.
+///
+/// The server enumerates the targets, plans them with palette continuity, paces
+/// dispatch through the node dispatch worker and binds the mood scene per room,
+/// so the client makes exactly one call.
+pub fn handle_post_home_scene_apply(
+    state: &SharedState,
+    scene_id: &str,
+    body: &Value,
+) -> ApiResponse {
+    let correlation_id = correlation_id_from_body(body);
+    let dispatch_spacing = match dispatch_spacing_from_body(body) {
+        Ok(spacing) => spacing,
+        Err(e) => return ApiResponse::bad_request(&e),
+    };
+    let request: crate::scenes::HomeSceneApplyRequest = match serde_json::from_value(body.clone()) {
+        Ok(request) => request,
+        Err(e) => {
+            return ApiResponse::bad_request(&format!("Invalid home scene apply request: {}", e));
+        }
+    };
+
+    match commands::do_home_scene_apply(state, scene_id, request, dispatch_spacing) {
+        Ok(response) => {
+            for target in &response.targets {
+                if target.error.is_some() {
+                    continue;
+                }
+                let mut record =
+                    crate::activity::LightActivityRecord::app(&target.target_id, "apply_scene");
+                record.payload = Some(json!({"scene_id": scene_id, "home_scene": true}));
+                record.correlation_id = correlation_id.clone();
+                record.fanout_of = correlation_id.clone();
+                crate::activity::record_light_activity(state, record);
+            }
+            match serde_json::to_string(&response) {
+                Ok(json) => ApiResponse::json_ok(json),
+                Err(e) => ApiResponse::server_error(e),
+            }
+        }
+        Err(e) => ApiResponse::bad_request(&e.to_string()),
+    }
+}
+
 pub fn handle_post_scene_preview(state: &SharedState, scene_id: &str, body: &Value) -> ApiResponse {
     let request: crate::scenes::ScenePreviewRequest = match serde_json::from_value(body.clone()) {
         Ok(request) => request,
@@ -7173,6 +7218,129 @@ mod tests {
         let activity = state.light_activity.first().unwrap();
         assert_eq!(activity.action_id, "apply_scene");
         assert_eq!(activity.correlation_id.as_deref(), Some("mood-scene-123"));
+    }
+
+    fn upsert_home_palette_scene(state: &SharedState, scene_id: &str) {
+        commands::do_scene_upsert(
+            state,
+            crate::scenes::SceneDefinition {
+                id: scene_id.to_string(),
+                name: "Halloween".to_string(),
+                description: None,
+                source: crate::scenes::SceneSource::User,
+                light: Some(crate::scenes::LightSceneLayer {
+                    default_transition_ms: Some(1200),
+                    default_output: None,
+                    palette: vec![
+                        crate::scenes::LightSceneOutput {
+                            power: crate::scenes::LightScenePower::On,
+                            brightness: 80,
+                            color: Some(crate::scenes::LightSceneColor::Rgb {
+                                rgb: rhythm_core::Rgb::new(255, 104, 0),
+                            }),
+                            transition_ms: None,
+                        },
+                        crate::scenes::LightSceneOutput {
+                            power: crate::scenes::LightScenePower::On,
+                            brightness: 70,
+                            color: Some(crate::scenes::LightSceneColor::Rgb {
+                                rgb: rhythm_core::Rgb::new(122, 0, 214),
+                            }),
+                            transition_ms: None,
+                        },
+                    ],
+                    entries: Vec::new(),
+                }),
+                extensions: BTreeMap::new(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn home_scene_apply_rejects_an_invalid_body() {
+        let state = handler_state_with_runtime();
+        upsert_home_palette_scene(&state, "halloween");
+
+        let response =
+            handle_post_home_scene_apply(&state, "halloween", &json!({"transition_ms": "soon"}));
+
+        assert_eq!(response.status, 400, "{}", response.body);
+        assert!(response.body.contains("home scene apply request"));
+    }
+
+    #[test]
+    fn home_scene_apply_rejects_a_bad_dispatch_spacing() {
+        let state = handler_state_with_runtime();
+        upsert_home_palette_scene(&state, "halloween");
+
+        let response = handle_post_home_scene_apply(
+            &state,
+            "halloween",
+            &json!({"dispatch_spacing_ms": 120_000}),
+        );
+
+        assert_eq!(response.status, 400, "{}", response.body);
+        assert!(response.body.contains("dispatch_spacing_ms"));
+    }
+
+    #[test]
+    fn home_scene_apply_rejects_room_bound_native_scenes() {
+        let state = handler_state_with_runtime();
+
+        let response = handle_post_home_scene_apply(
+            &state,
+            &crate::scenes::native_scene_id("Hue", "abc-123"),
+            &json!({}),
+        );
+
+        assert_eq!(response.status, 400, "{}", response.body);
+        assert!(response.body.contains("room-bound"));
+    }
+
+    #[test]
+    fn home_scene_apply_queues_dispatch_and_records_fanout_activity() {
+        let state = handler_state_with_runtime();
+        let rx = attach_work_queue(&state);
+        upsert_home_palette_scene(&state, "halloween");
+
+        let response = handle_post_home_scene_apply(
+            &state,
+            "halloween",
+            &json!({
+                "transition_ms": 1200,
+                "dispatch_spacing_ms": 250,
+                "correlation_id": "home-scene-123"
+            }),
+        );
+
+        assert_eq!(response.status, 200, "{}", response.body);
+        let parsed: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(parsed["scene_id"], "halloween");
+        assert_eq!(parsed["queued"], true);
+        assert_eq!(parsed["dispatch_count"], 1);
+        assert_eq!(parsed["dispatch_spacing_ms"], 250);
+        assert!(parsed["estimated_dispatch_ms"].as_u64().is_some());
+        assert_eq!(parsed["applied_target_count"], 1);
+        // The two lightless rooms are skipped rather than reported as errors.
+        assert_eq!(parsed["skipped_target_count"], 2);
+        let targets = parsed["targets"].as_array().unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0]["target_id"], "standalone-light");
+        assert!(targets[0].get("error").is_none());
+
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            WorkItem::ApplyNodeCommand { .. }
+        ));
+
+        let state = state.lock().unwrap();
+        assert_eq!(state.light_activity.len(), 1);
+        let activity = state.light_activity.first().unwrap();
+        assert_eq!(activity.action_id, "apply_scene");
+        assert_eq!(activity.correlation_id.as_deref(), Some("home-scene-123"));
+        assert_eq!(activity.fanout_of.as_deref(), Some("home-scene-123"));
+        assert_eq!(activity.payload.as_ref().unwrap()["home_scene"], true);
     }
 
     #[test]

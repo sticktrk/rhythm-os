@@ -294,6 +294,52 @@ pub struct SceneDraftPreviewRequest {
     pub duration_ms: Option<u64>,
 }
 
+/// Whole-home scene apply request.
+///
+/// Unlike [`SceneApplyRequest`] there is no `target_id`: the server enumerates
+/// every eligible room itself so the client never has to fan out. Dispatch
+/// pacing and correlation are read from the same envelope fields node batches
+/// use (`dispatch_spacing_ms`, `correlation_id`).
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct HomeSceneApplyRequest {
+    #[serde(default)]
+    pub transition_ms: Option<u32>,
+}
+
+/// Per-target outcome of a whole-home scene apply.
+///
+/// A target that failed to plan or dispatch reports `error` and does not stop
+/// the remaining targets.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HomeSceneTargetResult {
+    pub target_id: String,
+    #[serde(default)]
+    pub affected_node_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unresolved_node_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HomeSceneApplyResponse {
+    pub scene_id: String,
+    #[serde(default)]
+    pub targets: Vec<HomeSceneTargetResult>,
+    #[serde(default)]
+    pub applied_target_count: usize,
+    #[serde(default)]
+    pub skipped_target_count: usize,
+    #[serde(default)]
+    pub queued: bool,
+    #[serde(default)]
+    pub dispatch_count: usize,
+    #[serde(default)]
+    pub dispatch_spacing_ms: u64,
+    #[serde(default)]
+    pub estimated_dispatch_ms: u64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SceneApplyResponse {
     pub scene_id: String,

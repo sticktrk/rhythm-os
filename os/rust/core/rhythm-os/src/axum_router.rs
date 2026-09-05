@@ -194,6 +194,7 @@ fn shared_routes() -> Router<SharedState> {
         .route("/api/scenes/preview", post(post_scene_draft_preview))
         .route("/api/scenes/:id", put(put_scene).delete(delete_scene))
         .route("/api/scenes/:id/apply", post(post_scene_apply))
+        .route("/api/scenes/:id/apply-home", post(post_home_scene_apply))
         .route("/api/scenes/:id/preview", post(post_scene_preview))
         .route(
             "/api/scene-previews/:id/commit",
@@ -839,6 +840,14 @@ async fn post_scene_apply(
     Json(body): Json<Value>,
 ) -> ApiResponse {
     run_blocking(move || handlers::handle_post_scene_apply(&state, &id, &body)).await
+}
+
+async fn post_home_scene_apply(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_post_home_scene_apply(&state, &id, &body)).await
 }
 
 async fn post_scene_preview(
