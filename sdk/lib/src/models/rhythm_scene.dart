@@ -405,7 +405,9 @@ class RhythmLightScene {
 
   /// How the palette is dealt across lights: `spread` (the default) derives
   /// one distinct colour per light by walking the path from the first palette
-  /// anchor to the last; `cycle` deals the anchors out in order and repeats.
+  /// anchor to the last; `shuffle` deals those same colours in a random order
+  /// fixed by the layer's `palette_seed` (kept in [raw]); `cycle` deals the
+  /// anchors out in order and repeats.
   final String paletteMode;
   final List<RhythmLightSceneEntry> entries;
   final Map<String, dynamic> raw;
@@ -541,6 +543,13 @@ class RhythmSceneDefinition {
 
   bool get isHuePaletteScene =>
       isImportedHueScene && extensions['hue_palette_scene'] == true;
+
+  /// Whether the scene is offered in the app's whole-home scene picker.
+  ///
+  /// Set by the `whole_home` extension flag (the factory Halloween and Dark
+  /// Fantasy scenes carry it; the admin scene studio can set it on any
+  /// scene). Any scene can still be applied to the whole home by id.
+  bool get isWholeHomeScene => extensions['whole_home'] == true;
 
   List<String> get validationErrors {
     final errors = <String>[];

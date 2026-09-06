@@ -135,6 +135,12 @@ pub struct LightSceneLayer {
     /// [`PaletteMode::Spread`].
     #[serde(default)]
     pub palette_mode: PaletteMode,
+    /// Seed for [`PaletteMode::Shuffle`]: the same seed over the same span
+    /// deals the same arrangement, so a preview can show exactly what the
+    /// house will do and re-rolling is a matter of picking a new seed.
+    /// Ignored by the other modes and left off the wire while zero.
+    #[serde(default, skip_serializing_if = "is_zero_seed")]
+    pub palette_seed: u32,
     #[serde(default)]
     pub entries: Vec<LightSceneEntry>,
 }
@@ -153,6 +159,42 @@ pub enum PaletteMode {
     /// Deal the palette entries out in order and wrap, so colours repeat every
     /// `palette.len()` lights.
     Cycle,
+    /// Derive the same distinct colours as [`PaletteMode::Spread`], then deal
+    /// them across the lights in a random order fixed by
+    /// [`LightSceneLayer::palette_seed`], so a whole-home apply mixes the
+    /// palette through every room instead of walking it room by room.
+    Shuffle,
+}
+
+fn is_zero_seed(seed: &u32) -> bool {
+    *seed == 0
+}
+
+/// A small deterministic 32-bit generator (mulberry32). The scene studio
+/// runs the same generator, so a shuffled arrangement previews exactly as it
+/// applies; keep the two in step.
+fn mulberry32(state: &mut u32) -> u32 {
+    *state = state.wrapping_add(0x6D2B_79F5);
+    let mut t = *state;
+    t = (t ^ (t >> 15)).wrapping_mul(t | 1);
+    t ^= t.wrapping_add((t ^ (t >> 7)).wrapping_mul(t | 61));
+    t ^ (t >> 14)
+}
+
+/// The slot `slot` lands on after a Fisher-Yates shuffle of `0..span` seeded
+/// with `seed`. Slots beyond the span have nothing to trade places with and
+/// map to themselves.
+pub fn shuffled_slot(seed: u32, span: usize, slot: usize) -> usize {
+    if slot >= span {
+        return slot;
+    }
+    let mut order: Vec<usize> = (0..span).collect();
+    let mut state = seed;
+    for index in (1..span).rev() {
+        let swap_with = mulberry32(&mut state) as usize % (index + 1);
+        order.swap(index, swap_with);
+    }
+    order[slot]
 }
 
 /// A window onto a scene palette: the slot a target starts at and, when known,
@@ -297,29 +339,32 @@ impl LightSceneLayer {
     /// span is distinct and the anchors themselves still appear along the
     /// way. The path is deliberately open rather than a loop: closing it would
     /// retrace the same hues on the way back and hand two lights one colour.
-    /// `None` when the scene has no palette.
+    /// Shuffle mode deals exactly the spread colours, but to slots in the
+    /// order fixed by [`Self::palette_seed`]. `None` when the scene has no
+    /// palette.
     pub fn palette_output(&self, slot: usize, span: usize) -> Option<LightSceneOutput> {
         let anchors = self.palette.len();
         if anchors == 0 {
             return None;
         }
-        let cycled = || self.palette[slot % anchors].clone();
-        match self.palette_mode {
-            PaletteMode::Cycle => Some(cycled()),
-            PaletteMode::Spread if span <= anchors => Some(cycled()),
-            PaletteMode::Spread => {
-                // span > anchors >= 1, so span >= 2 and the division is safe.
-                let last_leg = anchors - 1;
-                let position = (slot.min(span - 1) as f32 / (span - 1) as f32) * last_leg as f32;
-                let lower = (position.floor() as usize).min(last_leg.saturating_sub(1));
-                let fraction = position - lower as f32;
-                Some(blend_outputs(
-                    &self.palette[lower],
-                    &self.palette[(lower + 1).min(last_leg)],
-                    fraction,
-                ))
-            }
+        let span = span.max(1);
+        let slot = match self.palette_mode {
+            PaletteMode::Shuffle => shuffled_slot(self.palette_seed, span, slot),
+            PaletteMode::Spread | PaletteMode::Cycle => slot,
+        };
+        if self.palette_mode == PaletteMode::Cycle || span <= anchors {
+            return Some(self.palette[slot % anchors].clone());
         }
+        // span > anchors >= 1, so span >= 2 and the division is safe.
+        let last_leg = anchors - 1;
+        let position = (slot.min(span - 1) as f32 / (span - 1) as f32) * last_leg as f32;
+        let lower = (position.floor() as usize).min(last_leg.saturating_sub(1));
+        let fraction = position - lower as f32;
+        Some(blend_outputs(
+            &self.palette[lower],
+            &self.palette[(lower + 1).min(last_leg)],
+            fraction,
+        ))
     }
 
     pub fn normalize(&mut self) {
@@ -597,6 +642,7 @@ mod tests {
             default_output: None,
             palette: outputs,
             palette_mode: mode,
+            palette_seed: 0,
             entries: Vec::new(),
         }
     }
@@ -615,6 +661,115 @@ mod tests {
         let layer: LightSceneLayer =
             serde_json::from_str(r#"{"palette": [], "palette_mode": "cycle"}"#).unwrap();
         assert_eq!(layer.palette_mode, PaletteMode::Cycle);
+        let layer: LightSceneLayer = serde_json::from_str(
+            r#"{"palette": [], "palette_mode": "shuffle", "palette_seed": 42}"#,
+        )
+        .unwrap();
+        assert_eq!(layer.palette_mode, PaletteMode::Shuffle);
+        assert_eq!(layer.palette_seed, 42);
+    }
+
+    #[test]
+    fn palette_seed_stays_off_the_wire_while_zero() {
+        let layer = palette_layer(PaletteMode::Spread, Vec::new());
+        let json = serde_json::to_value(&layer).unwrap();
+        assert!(json.get("palette_seed").is_none(), "{json}");
+        let mut layer = palette_layer(PaletteMode::Shuffle, Vec::new());
+        layer.palette_seed = 7;
+        let json = serde_json::to_value(&layer).unwrap();
+        assert_eq!(json["palette_seed"], 7);
+        assert_eq!(json["palette_mode"], "shuffle");
+    }
+
+    #[test]
+    fn mulberry32_matches_the_studio_reference_sequence() {
+        // The scene studio (`admin-ui/.../scenePalette.ts`) asserts the same
+        // vectors, so a shuffled preview and the house agree slot for slot.
+        for (seed, expected) in [
+            (0u32, [1_144_304_738u32, 1_416_247, 958_946_056]),
+            (1, [2_693_262_067, 11_749_833, 2_265_367_787]),
+            (7, [50_271_532, 266_108_690, 4_195_786_334]),
+            (0xDEAD_BEEF, [4_043_151_706, 1_147_597_007, 3_315_858_022]),
+        ] {
+            let mut state = seed;
+            let drawn = [
+                mulberry32(&mut state),
+                mulberry32(&mut state),
+                mulberry32(&mut state),
+            ];
+            assert_eq!(drawn, expected, "seed {seed}");
+        }
+        assert_eq!(
+            (0..8).map(|slot| shuffled_slot(7, 8, slot)).collect::<Vec<_>>(),
+            [7, 6, 5, 3, 0, 2, 1, 4]
+        );
+        assert_eq!(
+            (0..8).map(|slot| shuffled_slot(1, 8, slot)).collect::<Vec<_>>(),
+            [6, 0, 2, 7, 1, 5, 4, 3]
+        );
+        assert_eq!(
+            (0..5).map(|slot| shuffled_slot(7, 5, slot)).collect::<Vec<_>>(),
+            [1, 0, 3, 4, 2]
+        );
+        assert_eq!(shuffled_slot(7, 5, 9), 9, "slots past the span stay put");
+    }
+
+    #[test]
+    fn shuffle_deals_every_spread_colour_once_in_a_seeded_order() {
+        let orange = Rgb::new(255, 104, 0);
+        let purple = Rgb::new(122, 0, 214);
+        let anchors = vec![rgb_output(orange, 80), rgb_output(purple, 40)];
+        let span = 8;
+        let spread = palette_layer(PaletteMode::Spread, anchors.clone());
+        let mut shuffled = palette_layer(PaletteMode::Shuffle, anchors);
+        shuffled.palette_seed = 7;
+
+        let deal = |layer: &LightSceneLayer| -> Vec<LightSceneOutput> {
+            (0..span)
+                .map(|slot| layer.palette_output(slot, span).unwrap())
+                .collect()
+        };
+        let spread_outputs = deal(&spread);
+        let shuffled_outputs = deal(&shuffled);
+        let sort = |outputs: &[LightSceneOutput]| {
+            let mut keys: Vec<_> = outputs.iter().map(rgb_of).collect();
+            keys.sort();
+            keys
+        };
+        assert_eq!(
+            sort(&spread_outputs),
+            sort(&shuffled_outputs),
+            "shuffle deals exactly the spread colours"
+        );
+        assert_ne!(spread_outputs, shuffled_outputs, "in a different order");
+        assert_eq!(
+            rgb_of(&shuffled_outputs[0]),
+            rgb_of(&spread_outputs[7]),
+            "slot 0 takes spread slot 7 under seed 7"
+        );
+        assert_eq!(deal(&shuffled), shuffled_outputs, "the same seed repeats");
+
+        let mut rerolled = shuffled.clone();
+        rerolled.palette_seed = 1;
+        assert_ne!(deal(&rerolled), shuffled_outputs, "a new seed re-deals");
+    }
+
+    #[test]
+    fn shuffle_within_the_anchor_count_deals_each_anchor_once() {
+        let mut layer = palette_layer(
+            PaletteMode::Shuffle,
+            vec![
+                rgb_output(Rgb::new(255, 0, 0), 50),
+                rgb_output(Rgb::new(0, 255, 0), 50),
+                rgb_output(Rgb::new(0, 0, 255), 50),
+            ],
+        );
+        layer.palette_seed = 3;
+        let mut dealt: Vec<_> = (0..3)
+            .map(|slot| rgb_of(&layer.palette_output(slot, 3).unwrap()))
+            .collect();
+        dealt.sort();
+        assert_eq!(dealt, [(0, 0, 255), (0, 255, 0), (255, 0, 0)]);
     }
 
     #[test]
