@@ -59,6 +59,9 @@ pub struct HueDiscovery<H: HueTransport> {
     endpoint_capabilities_cache: Mutex<HashMap<String, serde_json::Value>>,
     mode: Mutex<HueDiscoveryMode>,
     ownership_source: Option<HueDiscoveryOwnershipSource>,
+    /// Bridge inventories shared by the managed scene projections of one
+    /// batch (a whole-home apply). `None` outside a batch.
+    managed_scene_batch: Mutex<Option<crate::managed_scenes::ManagedSceneBridgeCache>>,
 }
 
 impl<H: HueTransport> HueDiscovery<H> {
@@ -75,6 +78,7 @@ impl<H: HueTransport> HueDiscovery<H> {
             endpoint_capabilities_cache: Mutex::new(HashMap::new()),
             mode: Mutex::new(mode),
             ownership_source: None,
+            managed_scene_batch: Mutex::new(None),
         }
     }
 
@@ -95,6 +99,7 @@ impl<H: HueTransport> HueDiscovery<H> {
             endpoint_capabilities_cache: Mutex::new(HashMap::new()),
             mode: Mutex::new(HueDiscoveryMode::BridgeNative),
             ownership_source: Some(HueDiscoveryOwnershipSource { storage, bridge_id }),
+            managed_scene_batch: Mutex::new(None),
         })
     }
 
@@ -1057,6 +1062,10 @@ impl<H: HueTransport + 'static> HubDiscovery for HueDiscovery<H> {
         )?
         .filter(|ownership| ownership.phase == crate::ownership::HueOwnershipPhase::Active)
         .ok_or_else(|| anyhow::anyhow!("Hue controller authority is not active"))?;
+        let mut batch = self
+            .managed_scene_batch
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Failed to lock Hue managed scene batch cache"))?;
         crate::managed_scenes::apply_managed_scene(
             source.storage.as_ref(),
             &mut ownership,
@@ -1065,8 +1074,21 @@ impl<H: HueTransport + 'static> HubDiscovery for HueDiscovery<H> {
             projection,
             transition_ms,
             ephemeral,
+            batch.as_mut(),
         )?;
         Ok(true)
+    }
+
+    fn begin_managed_scene_batch(&self) {
+        if let Ok(mut batch) = self.managed_scene_batch.lock() {
+            *batch = Some(crate::managed_scenes::ManagedSceneBridgeCache::default());
+        }
+    }
+
+    fn end_managed_scene_batch(&self) {
+        if let Ok(mut batch) = self.managed_scene_batch.lock() {
+            *batch = None;
+        }
     }
 
     fn delete_managed_scene_projection(&self, scene_id: &str) -> Result<bool> {

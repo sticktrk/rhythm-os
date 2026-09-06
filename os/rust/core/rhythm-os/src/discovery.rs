@@ -167,6 +167,18 @@ pub trait HubDiscovery: Send + Sync {
         Ok(false)
     }
 
+    /// Start a batch of managed scene projections against this integration.
+    ///
+    /// A whole-home apply projects many rooms back to back on one hub. Between
+    /// this call and [`HubDiscovery::end_managed_scene_batch`] an integration
+    /// may memoize hub inventories that every projection would otherwise
+    /// re-read, as long as its own mutations keep them coherent. Default no-op.
+    fn begin_managed_scene_batch(&self) {}
+
+    /// End a batch started by [`HubDiscovery::begin_managed_scene_batch`],
+    /// discarding anything memoized for it. Default no-op.
+    fn end_managed_scene_batch(&self) {}
+
     /// Discover devices with native hub automation configured.
     ///
     /// Returns `(behavior_id, device_id)` pairs for devices that have

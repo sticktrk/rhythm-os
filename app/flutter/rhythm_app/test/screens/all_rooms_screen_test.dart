@@ -56,6 +56,7 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     int? transitionMs,
     int? dispatchSpacingMs,
     String? correlationId,
+    RhythmHomeSceneTargetMode? targetMode,
   }) async {
     homeSceneApplies.add(sceneId);
     homeSceneTransitionMs.add(transitionMs);
@@ -489,18 +490,30 @@ void main() {
     return harness;
   }
 
+  /// The whole-home scene chooser lives inside the tune panel.
   Future<void> openScenePanel(WidgetTester tester) async {
-    await tester.tap(find.byKey(const ValueKey('global-room-action-scene')));
+    await tester.tap(find.byKey(const ValueKey('global-room-action-expand')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
   }
 
-  testWidgets('Scene sits right of Reset and is hidden without the capability',
-      (tester) async {
+  testWidgets(
+      'the scene chooser lives inside the tune panel and is hidden without '
+      'the capability', (tester) async {
     final harness = await pumpWithHomeScenes(tester, supported: false);
 
     expect(
       find.byKey(const ValueKey('global-room-action-scene')),
+      findsNothing,
+      reason: 'the dock has no separate Scene button',
+    );
+    await openScenePanel(tester);
+    expect(
+      find.byKey(const ValueKey('global-room-slider-panel')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('global-room-scene-panel')),
       findsNothing,
       reason: 'a previous-floor appliance must not offer the whole-home apply',
     );
@@ -509,23 +522,22 @@ void main() {
       _helloWithFeatures(const [RhythmFeature.homeSceneApply]),
     );
     await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
 
-    final scene = find.byKey(const ValueKey('global-room-action-scene'));
-    expect(scene, findsOneWidget);
-    final resetX = tester
-        .getCenter(find.byKey(const ValueKey('global-room-action-reset')))
-        .dx;
-    final sceneX = tester.getCenter(scene).dx;
-    final tuneX = tester
-        .getCenter(find.byKey(const ValueKey('global-room-action-expand')))
-        .dx;
-    expect(sceneX, greaterThan(resetX));
-    expect(sceneX, lessThan(tuneX));
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('global-room-slider-panel')),
+        matching: find.byKey(const ValueKey('global-room-scene-panel')),
+      ),
+      findsOneWidget,
+      reason:
+          'the chooser sits beneath the brightness slider in the same panel',
+    );
   });
 
   testWidgets(
-      'Scene panel opens, collapses the brightness panel and hides '
-      'Hue-imported scenes', (tester) async {
+      'the tune panel shows the slider and the scene chooser together and '
+      'hides Hue-imported scenes', (tester) async {
     await pumpWithHomeScenes(
       tester,
       scenes: [
@@ -541,24 +553,20 @@ void main() {
       ],
     );
 
-    await tester.tap(find.byKey(const ValueKey('global-room-action-expand')));
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(
-      find.byKey(const ValueKey('global-room-slider-panel')),
-      findsOneWidget,
-    );
-
     await openScenePanel(tester);
 
     expect(
-      find.byKey(const ValueKey('global-room-scene-panel')),
+      find.byKey(const ValueKey('global-room-slider-panel')),
       findsOneWidget,
     );
     expect(
-      find.byKey(const ValueKey('global-room-slider-panel')),
-      findsNothing,
-      reason: 'only one header panel may be open at a time',
+      find.byKey(const ValueKey('global-room-brightness-slider')),
+      findsOneWidget,
+      reason: 'the exact brightness slider stays available alongside scenes',
+    );
+    expect(
+      find.byKey(const ValueKey('global-room-scene-panel')),
+      findsOneWidget,
     );
     expect(find.text('Whole home scene'), findsOneWidget);
     expect(find.text('Applies to every room'), findsOneWidget);
@@ -572,11 +580,15 @@ void main() {
       reason: 'Hue-imported scenes are room-bound and cannot cover the home',
     );
 
-    await tester.tap(find.byKey(const ValueKey('global-room-action-scene')));
+    await tester.tap(find.byKey(const ValueKey('global-room-action-expand')));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 300));
     expect(
       find.byKey(const ValueKey('global-room-scene-panel')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey('global-room-slider-panel')),
       findsNothing,
     );
   });
@@ -983,6 +995,92 @@ void main() {
         matchesGoldenFile(Uri.file(screenshotPath)),
       );
     }
+  });
+
+  testWidgets('global reset also targets rooms in Mood, Low glow and off',
+      (tester) async {
+    final harness = await _pumpAllRooms(
+      tester,
+      rooms: const [_room1, _bedroom, _garage],
+    );
+    harness.connection.emitHello(
+      RhythmHello.fromJson({
+        'capabilities': {
+          'api_schema_version': 2,
+          'features': [RhythmFeature.resetToModeDefault],
+          'hubs': const <dynamic>[],
+        },
+        'mode': {
+          'active': 'day',
+          'configs': [
+            {
+              'mode': 'day',
+              'active_profile_id': 'rhythm',
+              'room_defaults': const <dynamic>[],
+            },
+          ],
+        },
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Kitchen',
+            'kind': 'room',
+            'hub_types': ['hue'],
+            // A whole-home scene left this room in Mood.
+            'state': 'mood',
+            'mood_active': true,
+            'rhythm_enabled': true,
+            'disabled': false,
+            'lights_on': true,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            'profile_settings': {'mood_scene_id': 'halloween'},
+          },
+          {
+            'id': 'bedroom',
+            'name': 'Bedroom',
+            'kind': 'room',
+            'hub_types': ['hue'],
+            'state': 'standby',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'lights_on': true,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+          },
+          {
+            'id': 'garage',
+            'name': 'Garage',
+            'kind': 'room',
+            'hub_types': ['hue'],
+            'state': 'hard_off',
+            'rhythm_enabled': true,
+            'disabled': false,
+            'lights_on': false,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+          },
+        ],
+      }),
+    );
+    await tester.pump();
+
+    await tester.tap(
+      find.byKey(const ValueKey('global-room-action-reset')),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+
+    expect(
+      harness.api.actionBatches.single,
+      [
+        (nodeId: 'room-1', action: 'reset_to_mode_default'),
+        (nodeId: 'bedroom', action: 'reset_to_mode_default'),
+        (nodeId: 'garage', action: 'reset_to_mode_default'),
+      ],
+      reason: 'Reset restores every enabled room to the mode default, '
+          'whatever state it is in',
+    );
   });
 
   testWidgets('expanded slider applies one exact batch to adaptive-on rooms',

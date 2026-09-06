@@ -7324,6 +7324,32 @@ mod tests {
     }
 
     #[test]
+    fn home_scene_apply_accepts_device_target_mode_over_http() {
+        let state = handler_state_with_runtime();
+        upsert_home_palette_scene(&state, "halloween");
+
+        let response = handle_post_home_scene_apply(
+            &state,
+            "halloween",
+            &json!({"target_mode": "devices", "dispatch_spacing_ms": 0}),
+        );
+
+        assert_eq!(response.status, 200, "{}", response.body);
+        let parsed: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+        assert_eq!(parsed["target_mode"], "devices");
+        // Two legacy engine-only rooms (their own dispatch units) plus the
+        // standalone light, all on the engine lane.
+        assert_eq!(parsed["applied_target_count"], 3);
+        assert_eq!(parsed["dispatch_lanes"].as_array().unwrap().len(), 1);
+        assert_eq!(parsed["dispatch_lanes"][0]["dispatch_count"], 3);
+        assert_eq!(state.lock().unwrap().light_activity.len(), 3);
+
+        let rejected =
+            handle_post_home_scene_apply(&state, "halloween", &json!({"target_mode": "buildings"}));
+        assert_eq!(rejected.status, 400, "{}", rejected.body);
+    }
+
+    #[test]
     fn home_scene_apply_queues_dispatch_and_records_fanout_activity() {
         let state = handler_state_with_runtime();
         let rx = attach_work_queue(&state);

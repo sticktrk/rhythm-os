@@ -754,6 +754,7 @@ class DemoServerApi extends RhythmServerApi {
     int? transitionMs,
     int? dispatchSpacingMs,
     String? correlationId,
+    RhythmHomeSceneTargetMode? targetMode,
   }) async {
     ensureSeeded();
     final scene = _demoScenes.where((scene) => scene.id == sceneId).firstOrNull;

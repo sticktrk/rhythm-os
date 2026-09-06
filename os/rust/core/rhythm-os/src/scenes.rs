@@ -312,6 +312,34 @@ pub struct SceneDraftPreviewRequest {
 pub struct HomeSceneApplyRequest {
     #[serde(default)]
     pub transition_ms: Option<u32>,
+    /// How the house is carved into targets. Defaults to rooms.
+    #[serde(default)]
+    pub target_mode: HomeSceneTargetMode,
+}
+
+/// How a whole-home scene apply chooses its targets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HomeSceneTargetMode {
+    /// Every eligible room (plus every roomless light) is one target, planned
+    /// by the single-target planner: a grouped room recalls one managed
+    /// projection or one group command, and the palette rotates room by room.
+    #[default]
+    Rooms,
+    /// Every eligible light device is one target regardless of its room. Each
+    /// device gets its own command, the palette rotates across the whole house
+    /// in one continuous order, and dispatch runs as one paced lane per hub so
+    /// hubs proceed concurrently. This is the path for scenes authored per
+    /// device so the house reads as one theme instead of a set of rooms.
+    Devices,
+}
+
+/// One hub's share of a device-mode whole-home dispatch.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HomeSceneDispatchLane {
+    pub hub: String,
+    #[serde(default)]
+    pub dispatch_count: usize,
 }
 
 /// Per-target outcome of a whole-home scene apply.
@@ -346,6 +374,11 @@ pub struct HomeSceneApplyResponse {
     pub dispatch_spacing_ms: u64,
     #[serde(default)]
     pub estimated_dispatch_ms: u64,
+    #[serde(default)]
+    pub target_mode: HomeSceneTargetMode,
+    /// Present in device mode: one entry per hub lane dispatched concurrently.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dispatch_lanes: Vec<HomeSceneDispatchLane>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

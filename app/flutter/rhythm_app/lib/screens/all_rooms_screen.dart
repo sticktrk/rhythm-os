@@ -92,7 +92,6 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
   static const _headerControlHeight = 38.0;
   bool _globalActionPending = false;
   bool _globalSliderExpanded = false;
-  bool _globalScenePanelExpanded = false;
   bool _globalSceneFetchInFlight = false;
   String? _globalAppliedSceneId;
   double? _globalSliderValue;
@@ -939,20 +938,23 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
                     padding: const EdgeInsets.only(top: 8),
                     child: _buildGlobalBrightnessPanel(),
                   )
-                : _globalScenePanelExpanded
-                    ? Padding(
-                        padding: const EdgeInsets.only(top: 8),
-                        child: _buildGlobalScenePanel(),
-                      )
-                    : const SizedBox.shrink(),
+                : const SizedBox.shrink(),
           ),
         ],
       ),
     );
   }
 
+  /// Rooms and standalone lights a global action may address.
+  ///
+  /// Soften, Boost and the brightness slider only touch rooms whose lights are
+  /// on in an adaptive state. Reset is different: it restores every enabled
+  /// light node to the current mode's default, so it deliberately includes
+  /// rooms that are off, in Mood (a whole-home scene, for instance), in Low
+  /// glow, mid-transition or still waiting on a queued dispatch.
   List<_GlobalRoomTarget> _eligibleGlobalRoomTargets({
     bool includeLowGlow = true,
+    bool forReset = false,
   }) {
     final roomProvider = context.read<RoomProvider>();
     final provisional = <_GlobalRoomTarget>[];
@@ -967,13 +969,13 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
           state == RoomModeState.warning ||
           (includeLowGlow &&
               (state == RoomModeState.standby || state == RoomModeState.idle));
-      if (!isLightNode ||
-          room.disabled ||
-          !room.rhythmEnabled ||
-          !room.lightsOn ||
-          !isAdaptiveOn ||
-          roomProvider.isRoomTransitioning(room.id) ||
-          roomProvider.isNodeDispatchPending(room.id)) {
+      if (!isLightNode || room.disabled) continue;
+      if (!forReset &&
+          (!room.rhythmEnabled ||
+              !room.lightsOn ||
+              !isAdaptiveOn ||
+              roomProvider.isRoomTransitioning(room.id) ||
+              roomProvider.isNodeDispatchPending(room.id))) {
         continue;
       }
       provisional.add(
@@ -1085,6 +1087,7 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     };
     final eligible = _eligibleGlobalRoomTargets(
       includeLowGlow: action == _GlobalRoomAction.reset,
+      forReset: action == _GlobalRoomAction.reset,
     );
     if (eligible.isEmpty) {
       AnalyticsService().logGlobalRoomActionCompleted(
@@ -1316,26 +1319,16 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
   void _toggleGlobalBrightnessPanel() {
     if (_globalActionPending) return;
     HapticFeedback.selectionClick();
+    final opening = !_globalSliderExpanded;
     setState(() {
-      _globalSliderExpanded = !_globalSliderExpanded;
-      if (_globalSliderExpanded) _globalScenePanelExpanded = false;
-      if (!_globalSliderExpanded) _globalSliderValue = null;
+      _globalSliderExpanded = opening;
+      if (!opening) _globalSliderValue = null;
     });
-  }
-
-  void _toggleGlobalScenePanel() {
-    if (_globalActionPending) return;
-    HapticFeedback.selectionClick();
-    final opening = !_globalScenePanelExpanded;
-    setState(() {
-      _globalScenePanelExpanded = opening;
-      // Only one header panel is open at a time.
-      if (opening) {
-        _globalSliderExpanded = false;
-        _globalSliderValue = null;
-      }
-    });
-    if (opening) _refreshGlobalScenes();
+    // The whole-home scene chooser lives inside this panel; keep its list
+    // fresh every time the panel opens on an appliance that supports it.
+    if (opening && context.read<ServerSyncProvider>().supportsHomeSceneApply) {
+      _refreshGlobalScenes();
+    }
   }
 
   Future<void> _refreshGlobalScenes() async {
@@ -1436,10 +1429,6 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
 
   Widget _buildGlobalActionDock() {
     final enabled = widget.interactionsEnabled && !_globalActionPending;
-    // Previous-floor appliances do not own the whole-home apply, so the
-    // affordance is hidden rather than offered and failing.
-    final sceneSupported =
-        context.watch<ServerSyncProvider>().supportsHomeSceneApply;
     return Container(
       key: const ValueKey('global-room-action-dock'),
       height: _headerControlHeight,
@@ -1489,19 +1478,6 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
               onTap: () => _runGlobalRoomAction(_GlobalRoomAction.reset),
             ),
           ),
-          if (sceneSupported) ...[
-            const _GlobalActionDivider(),
-            Expanded(
-              child: _GlobalActionButton(
-                key: const ValueKey('global-room-action-scene'),
-                icon: Icons.auto_awesome_rounded,
-                label: 'Scene',
-                enabled: enabled,
-                selected: _globalScenePanelExpanded,
-                onTap: _toggleGlobalScenePanel,
-              ),
-            ),
-          ],
           const _GlobalActionDivider(),
           SizedBox(
             width: 36,
@@ -1511,8 +1487,8 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
                   ? Icons.expand_less_rounded
                   : Icons.tune_rounded,
               label: _globalSliderExpanded
-                  ? 'Hide exact brightness'
-                  : 'Set exact brightness',
+                  ? 'Hide brightness and scenes'
+                  : 'Brightness and scenes',
               showLabel: false,
               enabled: enabled,
               selected: _globalSliderExpanded,
@@ -1538,6 +1514,58 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
         !_globalActionPending &&
         targets.isNotEmpty;
 
+    // Previous-floor appliances do not own the whole-home apply, so the scene
+    // chooser is hidden rather than offered and failing.
+    final sceneSupported =
+        context.watch<ServerSyncProvider>().supportsHomeSceneApply;
+
+    final sliderRow = Row(
+      children: [
+        const Icon(
+          Icons.wb_sunny_rounded,
+          size: 18,
+          color: Color(0xFFFFC857),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              trackHeight: 6,
+              activeTrackColor: const Color(0xFFFFC857),
+              inactiveTrackColor:
+                  CelestialColors.orbitRing.withValues(alpha: 0.55),
+              thumbColor: const Color(0xFFFFD978),
+              overlayColor: const Color(0xFFFFC857).withValues(alpha: 0.16),
+            ),
+            child: Slider(
+              key: const ValueKey('global-room-brightness-slider'),
+              value: value,
+              min: 1,
+              max: 100,
+              onChanged: enabled
+                  ? (next) => setState(() => _globalSliderValue = next)
+                  : null,
+              onChangeEnd: enabled ? _setGlobalBrightness : null,
+            ),
+          ),
+        ),
+        SizedBox(
+          width: 42,
+          child: Text(
+            '${value.round()}%',
+            textAlign: TextAlign.end,
+            style: TextStyle(
+              color: enabled
+                  ? CelestialColors.textPrimary
+                  : CelestialColors.textSecondary.withValues(alpha: 0.6),
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+      ],
+    );
+
     return Container(
       key: const ValueKey('global-room-slider-panel'),
       padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
@@ -1548,56 +1576,29 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
           color: CelestialColors.accentBlue.withValues(alpha: 0.26),
         ),
       ),
-      child: Row(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const Icon(
-            Icons.wb_sunny_rounded,
-            size: 18,
-            color: Color(0xFFFFC857),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: SliderTheme(
-              data: SliderTheme.of(context).copyWith(
-                trackHeight: 6,
-                activeTrackColor: const Color(0xFFFFC857),
-                inactiveTrackColor:
-                    CelestialColors.orbitRing.withValues(alpha: 0.55),
-                thumbColor: const Color(0xFFFFD978),
-                overlayColor: const Color(0xFFFFC857).withValues(alpha: 0.16),
-              ),
-              child: Slider(
-                key: const ValueKey('global-room-brightness-slider'),
-                value: value,
-                min: 1,
-                max: 100,
-                onChanged: enabled
-                    ? (next) => setState(() => _globalSliderValue = next)
-                    : null,
-                onChangeEnd: enabled ? _setGlobalBrightness : null,
+          sliderRow,
+          if (sceneSupported) ...[
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: Divider(
+                height: 1,
+                color: CelestialColors.orbitRing.withValues(alpha: 0.45),
               ),
             ),
-          ),
-          SizedBox(
-            width: 42,
-            child: Text(
-              '${value.round()}%',
-              textAlign: TextAlign.end,
-              style: TextStyle(
-                color: enabled
-                    ? CelestialColors.textPrimary
-                    : CelestialColors.textSecondary.withValues(alpha: 0.6),
-                fontSize: 13,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ),
+            _buildGlobalSceneSection(),
+          ],
         ],
       ),
     );
   }
 
-  Widget _buildGlobalScenePanel() {
+  /// The whole-home scene chooser, rendered inside the tune panel beneath the
+  /// brightness slider.
+  Widget _buildGlobalSceneSection() {
     final serverSync = context.watch<ServerSyncProvider>();
     final scenes = _globalSceneChoices(serverSync);
     final enabled = widget.interactionsEnabled && !_globalActionPending;
@@ -1637,47 +1638,37 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
       );
     }
 
-    return Container(
+    return Column(
       key: const ValueKey('global-room-scene-panel'),
-      padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
-      decoration: BoxDecoration(
-        color: CelestialColors.backgroundCard.withValues(alpha: 0.92),
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(
-          color: CelestialColors.accentBlue.withValues(alpha: 0.26),
-        ),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              const Text(
-                'Whole home scene',
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Text(
+              'Whole home scene',
+              style: TextStyle(
+                color: CelestialColors.textPrimary,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Applies to every room',
+                overflow: TextOverflow.ellipsis,
                 style: TextStyle(
-                  color: CelestialColors.textPrimary,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w700,
+                  color: CelestialColors.textSecondary.withValues(alpha: 0.8),
+                  fontSize: 11,
                 ),
               ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  'Applies to every room',
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    color: CelestialColors.textSecondary.withValues(alpha: 0.8),
-                    fontSize: 11,
-                  ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          SizedBox(height: 46, child: body),
-        ],
-      ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        SizedBox(height: 46, child: body),
+      ],
     );
   }
 }

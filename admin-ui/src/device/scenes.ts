@@ -47,10 +47,15 @@ export function applyHomeScene(
     transitionMs?: number;
     dispatchSpacingMs?: number;
     correlationId?: string;
+    /** `rooms` (server default) or `devices` for per-light, per-hub-lane dispatch. */
+    targetMode?: 'rooms' | 'devices';
   } = {}
 ) {
   return client.post(`api/scenes/${encodeURIComponent(sceneId)}/apply-home`, {
     body: {
+      ...(options.targetMode !== undefined
+        ? { target_mode: options.targetMode }
+        : {}),
       ...(options.transitionMs !== undefined
         ? { transition_ms: options.transitionMs }
         : {}),
