@@ -8,7 +8,11 @@ import {
   Wand2
 } from 'lucide-react';
 
-import { hsvToRgb, rgbToCss } from '../../../components/controls/colorMath';
+import {
+  hsvToRgb,
+  rgbToCss,
+  rgbToHsv
+} from '../../../components/controls/colorMath';
 import { NumberField } from '../../../components/controls/fields';
 import { SegmentedControl } from '../../../components/controls/SegmentedControl';
 import { asRecordArray, asString } from '../../../device/values';
@@ -276,16 +280,5 @@ export function PaletteEditor({
 }
 
 function hueOf(rgb: { r: number; g: number; b: number }): number {
-  const r = rgb.r / 255;
-  const g = rgb.g / 255;
-  const b = rgb.b / 255;
-  const max = Math.max(r, g, b);
-  const min = Math.min(r, g, b);
-  const delta = max - min;
-  if (delta === 0) return 0;
-  let hue = 0;
-  if (max === r) hue = 60 * (((g - b) / delta) % 6);
-  else if (max === g) hue = 60 * ((b - r) / delta + 2);
-  else hue = 60 * ((r - g) / delta + 4);
-  return ((hue % 360) + 360) % 360;
+  return rgbToHsv(rgb).h;
 }

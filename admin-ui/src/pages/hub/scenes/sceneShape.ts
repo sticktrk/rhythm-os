@@ -1,10 +1,11 @@
-import { kelvinToRgb, rgbToCss } from '../../../components/controls/colorMath';
+import { kelvinToRgb, rgbToCss } from '../../../components/controls/colorMath.ts';
 import {
   asNumber,
   asRecord,
   asRecordArray,
   asString
-} from '../../../device/values';
+} from '../../../device/values.ts';
+import { isBulbKind } from '../topologyMembership.ts';
 
 /** Some payloads nest the output under `output`, others inline the keys. */
 export function outputContainer(entry: Record<string, unknown>): {
@@ -132,7 +133,8 @@ export function swatchStripCss(
 }
 
 export function nodeOptionsFromState(
-  payload: unknown
+  payload: unknown,
+  { lightsOnly = false }: { lightsOnly?: boolean } = {}
 ): Array<{ value: string; label: string }> {
   const record = asRecord(payload);
   const nodes = Array.isArray(payload)
@@ -144,11 +146,26 @@ export function nodeOptionsFromState(
     const id = asString(node.node_id) ?? asString(node.id);
     if (!id || seen.has(id)) continue;
     if (id.startsWith('__rhythm_light_node__')) continue;
+    if (
+      lightsOnly &&
+      !isBulbKind(asString(node.kind) ?? asString(node.node_kind))
+    ) {
+      continue;
+    }
     seen.add(id);
     const name = asString(node.name) ?? asString(node.label);
     options.push({ value: id, label: name ? `${name} (${id})` : id });
   }
   return options;
+}
+
+/** Only light devices can be pinned by a scene entry: the server resolves an
+    entry against the target's light scope, so a room or sensor id would
+    silently match nothing. */
+export function lightNodeOptionsFromState(
+  payload: unknown
+): Array<{ value: string; label: string }> {
+  return nodeOptionsFromState(payload, { lightsOnly: true });
 }
 
 const rgbOutput = (r: number, g: number, b: number, brightness: number) => ({

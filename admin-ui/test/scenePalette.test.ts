@@ -143,3 +143,51 @@ test('generators produce well-formed anchors', () => {
   assert.equal(rgbKey(complementary({ r: 255, g: 0, b: 0 })[1]), '0,255,255');
   assert.equal(analogous({ r: 255, g: 0, b: 0 }).length, 3);
 });
+
+// ---------------------------------------------------------------------------
+// Scene shape helpers
+// ---------------------------------------------------------------------------
+
+import {
+  entryNodeId,
+  entryWithNodeId,
+  lightLayer,
+  lightNodeOptionsFromState,
+  withLightLayer
+} from '../src/pages/hub/scenes/sceneShape.ts';
+
+test('a legacy top-level layer is read and folded into the canonical light layer', () => {
+  const legacy = {
+    id: 'old',
+    name: 'Old',
+    default_output: { power: true, brightness: 50, color: { kelvin: 3000 } },
+    entries: [{ target_id: 'bulb-1', power: true, brightness: 40, color: { kelvin: 2700 } }]
+  };
+  const layer = lightLayer(legacy);
+  assert.deepEqual(Object.keys(layer).sort(), ['default_output', 'entries']);
+  const canonical = withLightLayer(legacy, layer);
+  assert.equal('default_output' in canonical, false);
+  assert.equal('entries' in canonical, false);
+  assert.deepEqual(lightLayer(canonical), layer);
+
+  const stored = { id: 's', name: 'S', light: { palette: [], entries: [] } };
+  assert.deepEqual(lightLayer(stored), stored.light);
+});
+
+test('entries resolve their node id from every spelling and are rewritten canonically', () => {
+  assert.equal(entryNodeId({ target: { kind: 'node', node_id: 'bulb-1' } }), 'bulb-1');
+  assert.equal(entryNodeId({ target_id: 'bulb-2' }), 'bulb-2');
+  assert.equal(entryNodeId({ node_id: 'bulb-3' }), 'bulb-3');
+  assert.deepEqual(entryWithNodeId({ target_id: 'bulb-2', output: {} }, 'bulb-9'), {
+    target: { kind: 'node', node_id: 'bulb-9' },
+    output: {}
+  });
+});
+
+test('pin options offer only light devices', () => {
+  const options = lightNodeOptionsFromState(nodes);
+  assert.deepEqual(
+    options.map((option) => option.value),
+    ['bulb-k2', 'bulb-k1', 'bulb-b1', 'bulb-b0', 'bulb-a1', 'bulb-z9']
+  );
+});

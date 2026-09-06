@@ -57,6 +57,7 @@ import {
   entryNodeId,
   entryWithNodeId,
   lightLayer,
+  lightNodeOptionsFromState,
   nodeOptionsFromState,
   outputContainer,
   swatchStripCss,
@@ -105,6 +106,7 @@ export default function ScenesPage() {
 
   const scenes = scenesFromPayload(scenesQuery.data);
   const nodeOptions = nodeOptionsFromState(nodesQuery.data);
+  const lightOptions = lightNodeOptionsFromState(nodesQuery.data);
   const house = useMemo(
     () => (nodesQuery.data ? houseLightOrder(nodesQuery.data) : null),
     [nodesQuery.data]
@@ -472,7 +474,12 @@ export default function ScenesPage() {
             </div>
 
             <h4 className="p5SubHeading">Palette</h4>
-            <PaletteEditor layer={layer} disabled={mutate.busy} onChange={updateLayer} />
+            <PaletteEditor
+              key={selectedId ?? 'new-scene'}
+              layer={layer}
+              disabled={mutate.busy}
+              onChange={updateLayer}
+            />
 
             <h4 className="p5SubHeading">House preview</h4>
             <HousePreview scene={draft} house={house} loading={nodesQuery.loading} />
@@ -536,7 +543,7 @@ export default function ScenesPage() {
                     <SelectField
                       value={entryNodeId(entry)}
                       placeholder="Pick a light…"
-                      options={nodeOptions}
+                      options={lightOptions}
                       onChange={(value) => {
                         const next = entries.map((item, i) =>
                           i === index ? entryWithNodeId(item, value) : item
@@ -580,7 +587,7 @@ export default function ScenesPage() {
                   entries: [
                     ...entries,
                     {
-                      target: { kind: 'node', node_id: nodeOptions[0]?.value ?? '' },
+                      target: { kind: 'node', node_id: lightOptions[0]?.value ?? '' },
                       output: {
                         power: 'on',
                         brightness: 80,
