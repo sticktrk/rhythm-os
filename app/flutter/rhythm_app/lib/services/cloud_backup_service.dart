@@ -563,7 +563,9 @@ class CloudBackupService {
       client: client,
       userId: userId,
       serverHub: serverHub,
+      home: home,
       roomLayoutScopeKey: roomLayoutScopeKey,
+      reason: reason,
     );
 
     final snapshot = buildSnapshot(
@@ -596,34 +598,83 @@ class CloudBackupService {
     required SupabaseClient client,
     required String userId,
     required Hub serverHub,
+    required Home? home,
     required String? roomLayoutScopeKey,
+    required String reason,
   }) async {
-    final bundle = SettingsService.instance.buildCloudSettingsBundle(
+    final localBundle = SettingsService.instance.buildCloudSettingsBundle(
       roomLayoutScopeKey: roomLayoutScopeKey,
       roomLayoutHubKey: RoomPageProvider.hubLayoutKey(serverHub),
       roomLayoutHubKeyAliases: RoomPageProvider.hubLayoutKeyAliases(serverHub),
     );
 
-    try {
-      final row = await client
+    // A capture rewrites the whole app settings bundle, so it must start from
+    // what the account already has. Failing the capture is safer than
+    // overwriting another device's layout with a guess.
+    final row = await _runCaptureStep(
+      serverHub: serverHub,
+      reason: reason,
+      context: 'Failed to read the existing cloud app settings.',
+      action: () => client
           .from(tableName)
           .select('app_settings_bundle')
           .eq('user_id', userId)
-          .maybeSingle();
-      final existingBundle = row?['app_settings_bundle'];
-      if (existingBundle is Map) {
-        final existing = Map<String, dynamic>.from(existingBundle);
-        return bundle['all_rooms_layouts'] == null
-            ? existing
-            : mergeAppSettingsBundles(existing, bundle);
-      }
-    } catch (error) {
-      debugPrint(
-        'CloudBackupService: existing app settings lookup failed: $error',
-      );
-    }
+          .maybeSingle(),
+    );
+    final existingBundle = row?['app_settings_bundle'];
+    final existing = existingBundle is Map
+        ? Map<String, dynamic>.from(existingBundle)
+        : null;
 
-    return bundle;
+    final scopeKeys = <String?>{
+      roomLayoutScopeKey,
+      ...RoomPageProvider.layoutScopeAliasesFor(
+        home: home,
+        hubs: <Hub>[serverHub],
+      ),
+    };
+    final hasUnsyncedLayoutEdit = scopeKeys.any(
+      (scopeKey) => SettingsService.instance.isRoomPageLayoutCloudDirty(
+        userId: userId,
+        scopeKey: scopeKey,
+      ),
+    );
+
+    return appSettingsBundleForCapture(
+      existing: existing,
+      local: localBundle,
+      hasUnsyncedLayoutEdit: hasUnsyncedLayoutEdit,
+    );
+  }
+
+  /// Choose the app settings bundle a backup capture writes.
+  ///
+  /// Only a user-authored layout edit that has not reached the account yet
+  /// may replace a layout the account already holds. The local layout is
+  /// otherwise frequently the automatic "everything on page 0" arrangement a
+  /// device builds before it restores the account layout, and letting a
+  /// routine capture publish that would collapse the layout on every other
+  /// device at its next restore. When the account holds no layout for this
+  /// hub, the local layout seeds it.
+  @visibleForTesting
+  static Map<String, dynamic> appSettingsBundleForCapture({
+    required Map<String, dynamic>? existing,
+    required Map<String, dynamic> local,
+    required bool hasUnsyncedLayoutEdit,
+  }) {
+    if (existing == null) return local;
+    final localLayouts = _layoutMaps(local['all_rooms_layouts']);
+    if (localLayouts.isEmpty) return existing;
+    if (hasUnsyncedLayoutEdit) {
+      return mergeAppSettingsBundles(existing, local);
+    }
+    final localKeys = localLayouts.expand(_layoutIdentityKeys).toSet();
+    final accountHasLayoutForHub = _layoutMaps(existing['all_rooms_layouts'])
+        .any(
+      (layout) => _layoutIdentityKeys(layout).any(localKeys.contains),
+    );
+    if (accountHasLayoutForHub) return existing;
+    return mergeAppSettingsBundles(existing, local);
   }
 
   Future<Map<String, dynamic>> _getConfigurationBundleBestEffort({

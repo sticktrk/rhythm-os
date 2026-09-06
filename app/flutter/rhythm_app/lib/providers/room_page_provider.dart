@@ -65,6 +65,13 @@ class RoomPageProvider extends ChangeNotifier {
   bool _pausePersistenceUntilRoomSetChanges = false;
   String? _roomSignatureAtScopeChange;
 
+  /// Room IDs seen by the most recent [reconcileRooms] call, or null before
+  /// any reconcile. Stored pages whose rooms are all absent are hidden from
+  /// normal presentation instead of being deleted from the saved layout, so a
+  /// transient room list (cached rooms at startup, a partial server snapshot,
+  /// a hub reconnect) cannot erase the user's page assignments.
+  Set<String>? _presentRoomIds;
+
   RoomPageProvider({
     RoomPageLayoutStore? layoutStore,
     void Function(String? scopeKey)? onUserLayoutChanged,
@@ -243,6 +250,8 @@ class RoomPageProvider extends ChangeNotifier {
   }
 
   /// Get the page index for a room (defaults to 0 if not in any page).
+  ///
+  /// This is the stored page index, which is what edit mode drags against.
   int getPage(String roomId) {
     for (var i = 0; i < _pages.length; i++) {
       if (_pages[i].contains(roomId)) return i;
@@ -252,40 +261,77 @@ class RoomPageProvider extends ChangeNotifier {
 
   /// Get rooms for a specific page.
   ///
-  /// Normal presentation is alphabetical within each swipeable page. Edit mode
-  /// keeps the stored order so drag targets remain stable while page membership
-  /// and positions are being changed.
+  /// Normal presentation is alphabetical within each swipeable page and only
+  /// counts pages that currently hold at least one room (see
+  /// [_visiblePageIndices]). Edit mode keeps the stored order and the stored
+  /// page numbering so drag targets remain stable while page membership and
+  /// positions are being changed. Rooms that are not in any stored page yet
+  /// are shown on the first page until [reconcileRooms] materializes them.
   List<RoomDto> getRoomsForPage(int pageIndex, List<RoomDto> allRooms) {
     final roomMap = {for (final r in allRooms) r.id: r};
 
-    // Preserve the legacy first-frame behavior before rooms have been
-    // reconciled into explicit pages.
-    if (_pages.isEmpty) {
-      if (pageIndex != 0) return [];
-      final fallback = List<RoomDto>.from(allRooms)..sort(_compareRoomsByName);
-      return fallback;
+    final int? storedIndex;
+    if (_editMode) {
+      storedIndex = pageIndex;
+    } else {
+      final visible = _visiblePageIndices();
+      storedIndex = pageIndex < visible.length ? visible[pageIndex] : null;
     }
+    if (storedIndex == null) return [];
 
-    if (pageIndex < _pages.length) {
-      final ordered = <RoomDto>[];
-      for (final id in _pages[pageIndex]) {
+    final ordered = <RoomDto>[];
+    if (storedIndex < _pages.length) {
+      for (final id in _pages[storedIndex]) {
         final room = roomMap[id];
         if (room != null) ordered.add(room);
       }
-      if (!_editMode) {
-        ordered.sort(_compareRoomsByName);
-      }
-      return ordered;
     }
-
-    // Page beyond stored pages — empty
-    return [];
+    if (storedIndex == 0) {
+      final placed = <String>{for (final page in _pages) ...page};
+      final unplaced = allRooms
+          .where((room) => !placed.contains(room.id))
+          .toList()
+        ..sort(_compareRoomsByName);
+      ordered.addAll(unplaced);
+    }
+    if (!_editMode) {
+      ordered.sort(_compareRoomsByName);
+    }
+    return ordered;
   }
 
   /// Number of pages. In edit mode, includes one extra empty page.
   int get pageCount {
-    final base = _pages.isEmpty ? 1 : _pages.length;
-    return _editMode ? base + 1 : base;
+    if (_editMode) {
+      return (_pages.isEmpty ? 1 : _pages.length) + 1;
+    }
+    return _visiblePageIndices().length;
+  }
+
+  /// Stored page indices that normal presentation shows, in order.
+  ///
+  /// A stored page is visible when at least one of its rooms is present. The
+  /// first page is also visible when present rooms are not placed anywhere
+  /// yet. Before the first reconcile every stored page is shown as-is. The
+  /// result is never empty.
+  List<int> _visiblePageIndices() {
+    if (_pages.isEmpty) return const [0];
+    final present = _presentRoomIds;
+    if (present == null) {
+      return List<int>.generate(_pages.length, (i) => i);
+    }
+    final visible = <int>[];
+    final placed = <String>{};
+    for (var i = 0; i < _pages.length; i++) {
+      final page = _pages[i];
+      placed.addAll(page);
+      if (page.any(present.contains)) visible.add(i);
+    }
+    final hasUnplaced = present.any((id) => !placed.contains(id));
+    if (hasUnplaced && (visible.isEmpty || visible.first != 0)) {
+      visible.insert(0, 0);
+    }
+    return visible.isEmpty ? const [0] : visible;
   }
 
   /// Enter edit mode — cards wiggle and become draggable.
@@ -350,11 +396,39 @@ class RoomPageProvider extends ChangeNotifier {
 
   /// Reconcile page layout with the current room list.
   ///
-  /// Ensures every current room appears exactly once across all pages,
-  /// preserving stored order where possible and appending new rooms to page 0.
-  void reconcileRooms(List<RoomDto> currentRooms) {
-    final allowPersistence = _allowPersistenceForRooms(currentRooms);
+  /// Ensures every current room appears at most once across all pages,
+  /// preserving stored order and appending rooms that are not placed yet to
+  /// page 0. Rooms missing from [currentRooms] keep their stored page: the
+  /// room list the UI sees is frequently transient (cached rooms before the
+  /// first server snapshot, a selective server refresh, a source being
+  /// re-synced), and deleting their assignments would permanently collapse
+  /// the user's layout. Absent rooms are hidden from presentation instead.
+  ///
+  /// Pass [removeMissing] only when [currentRooms] is known to be complete,
+  /// such as when the user enters edit mode against a live room list. That
+  /// prunes assignments for rooms that no longer exist and compacts pages.
+  ///
+  /// An empty [currentRooms] never changes the stored layout.
+  void reconcileRooms(
+    List<RoomDto> currentRooms, {
+    bool removeMissing = false,
+  }) {
     final currentSet = currentRooms.map((room) => room.id).toSet();
+    final presentChanged = !setEquals(_presentRoomIds, currentSet);
+    _presentRoomIds = currentSet;
+    if (currentRooms.isEmpty) {
+      if (presentChanged) notifyListeners();
+      return;
+    }
+
+    // Right after a scope switch the room list still belongs to the previous
+    // scope. Leave the stored pages untouched until the room set moves on;
+    // presentation shows unplaced rooms on the first page meanwhile.
+    if (!_allowPersistenceForRooms(currentRooms)) {
+      if (presentChanged) notifyListeners();
+      return;
+    }
+
     final normalizedPages = <List<String>>[];
     final seen = <String>{};
     var changed = false;
@@ -362,7 +436,7 @@ class RoomPageProvider extends ChangeNotifier {
     for (final page in _pages) {
       final nextPage = <String>[];
       for (final id in page) {
-        if (!currentSet.contains(id)) {
+        if (removeMissing && !currentSet.contains(id)) {
           changed = true;
           continue;
         }
@@ -375,7 +449,7 @@ class RoomPageProvider extends ChangeNotifier {
       normalizedPages.add(nextPage);
     }
 
-    if (normalizedPages.isEmpty && currentRooms.isNotEmpty) {
+    if (normalizedPages.isEmpty) {
       normalizedPages.add([]);
       changed = true;
     }
@@ -383,27 +457,26 @@ class RoomPageProvider extends ChangeNotifier {
     final missingRooms = currentRooms
         .where((room) => !seen.contains(room.id))
         .toList()
-      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+      ..sort(_compareRoomsByName);
     if (missingRooms.isNotEmpty) {
-      if (normalizedPages.isEmpty) {
-        normalizedPages.add([]);
-      }
       normalizedPages.first.addAll(missingRooms.map((room) => room.id));
       changed = true;
     }
 
-    if (!_editMode && normalizedPages.any((page) => page.isEmpty)) {
+    if (removeMissing &&
+        !_editMode &&
+        normalizedPages.any((page) => page.isEmpty)) {
       changed = true;
     }
 
     if (changed) {
       _pages = normalizedPages;
-      if (!_editMode) {
+      if (removeMissing && !_editMode) {
         _compactPages();
       }
-      if (allowPersistence) {
-        _save();
-      }
+      _save();
+      notifyListeners();
+    } else if (presentChanged) {
       notifyListeners();
     }
   }

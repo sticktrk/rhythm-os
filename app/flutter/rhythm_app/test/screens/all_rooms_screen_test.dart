@@ -118,10 +118,6 @@ class _TestRhythmConnection extends RhythmConnection {
       ? RhythmConnectionState.connected
       : RhythmConnectionState.disconnected;
 
-  final _helloController = StreamController<RhythmHello>.broadcast();
-
-  void emitHello(RhythmHello hello) => _helloController.add(hello);
-
   @override
   Stream<RhythmHello> get helloEvents => _helloController.stream;
 
@@ -691,6 +687,38 @@ void main() {
     await tester.pump();
 
     expect(harness.pageController.page, 1);
+    expect(find.text('Bedroom').hitTestable(), findsOneWidget);
+  });
+
+  testWidgets('the page view returns to the last page when pages disappear',
+      (tester) async {
+    final harness = await _pumpAllRooms(
+      tester,
+      rooms: const [_room1, _bedroom],
+    );
+    harness.roomPageProvider.reconcileRooms(const [_room1, _bedroom]);
+    harness.roomPageProvider.moveRoom(_bedroom.id, 1);
+    await tester.pump();
+    harness.pageController.jumpToPage(1);
+    await tester.pump();
+    expect(harness.pageController.page, 1);
+    expect(find.text('Bedroom').hitTestable(), findsOneWidget);
+
+    // A refresh that momentarily omits the bedroom empties page 1.
+    harness.roomPageProvider.reconcileRooms(const [_room1]);
+    await tester.pump();
+    await tester.pump();
+
+    expect(harness.roomPageProvider.pageCount, 1);
+    expect(harness.pageController.page, 0);
+    expect(find.text('Kitchen').hitTestable(), findsOneWidget);
+
+    // The bedroom comes back on its own page.
+    harness.roomPageProvider.reconcileRooms(const [_room1, _bedroom]);
+    await tester.pump();
+    expect(harness.roomPageProvider.pageCount, 2);
+    harness.pageController.jumpToPage(1);
+    await tester.pump();
     expect(find.text('Bedroom').hitTestable(), findsOneWidget);
   });
 
