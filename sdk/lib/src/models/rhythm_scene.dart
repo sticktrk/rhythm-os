@@ -665,13 +665,13 @@ class RhythmHomeSceneTargetResult {
 enum RhythmHomeSceneTargetMode {
   /// Every eligible room (and roomless light) is one target; a grouped room
   /// gets one projection or one group command and the palette rotates room by
-  /// room. The server default.
+  /// room.
   rooms('rooms'),
 
   /// Every light device is its own target regardless of room: each gets its
   /// own command, the palette runs through the whole house in one continuous
-  /// order, and dispatch runs as one paced lane per hub concurrently. The path
-  /// for scenes authored per device so the house reads as one theme.
+  /// order, and dispatch runs as one paced lane per hub concurrently. The
+  /// server default: a whole-home scene is one theme for the house.
   devices('devices');
 
   const RhythmHomeSceneTargetMode(this.wireValue);
@@ -679,10 +679,9 @@ enum RhythmHomeSceneTargetMode {
   /// The value carried in `target_mode` on the wire.
   final String wireValue;
 
-  static RhythmHomeSceneTargetMode fromWire(String? value) =>
-      values.firstWhere(
+  static RhythmHomeSceneTargetMode fromWire(String? value) => values.firstWhere(
         (mode) => mode.wireValue == value,
-        orElse: () => RhythmHomeSceneTargetMode.rooms,
+        orElse: () => RhythmHomeSceneTargetMode.devices,
       );
 }
 
@@ -729,7 +728,7 @@ class RhythmHomeSceneActionResult {
     this.dispatchCount = 0,
     this.dispatchSpacingMs = 0,
     this.estimatedDispatchMs = 0,
-    this.targetMode = RhythmHomeSceneTargetMode.rooms,
+    this.targetMode = RhythmHomeSceneTargetMode.devices,
     this.dispatchLanes = const [],
     this.raw = const <String, dynamic>{},
   });

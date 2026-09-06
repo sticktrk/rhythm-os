@@ -5970,6 +5970,49 @@ void main() {
       );
     });
 
+    test('device-mode targets fold onto the rooms whose cards present them',
+        () async {
+      await roomProvider.addRoom(const RoomDto(
+        id: 'bulb-1',
+        name: 'Kitchen lamp',
+        source: RoomSourceDto.hue,
+        kind: RoomNodeKind.lightDevice,
+        parentId: 'room-1',
+        deviceIds: [],
+        rhythmEnabled: true,
+        disabled: false,
+        lightsOn: true,
+        timeOffsetMinutes: 0,
+        brightnessOffset: 0,
+      ));
+      api.scenes = [_testPaletteScene('halloween')];
+      await provider.fetchScenes();
+      api.applyHomeSceneResult = const RhythmHomeSceneActionResult(
+        sceneId: 'halloween',
+        targetMode: RhythmHomeSceneTargetMode.devices,
+        targets: [
+          RhythmHomeSceneTargetResult(
+            targetId: 'bulb-1',
+            affectedNodeIds: ['bulb-1'],
+          ),
+        ],
+        appliedTargetCount: 1,
+      );
+
+      final result = await provider.applyHomeScene(
+        'halloween',
+        color: (255, 104, 0),
+      );
+
+      expect(result?.appliedTargetCount, 1);
+      expect(
+        provider.moodSceneIdForRoom('room-1'),
+        'halloween',
+        reason: 'the light was applied; its room card shows the scene',
+      );
+      expect(roomProvider.getMoodColor('room-1'), (255, 104, 0));
+    });
+
     test('a hello refresh keeps the scene-backed mood brightness on the card',
         () async {
       // The server folds the bound scene's brightness into the node state, and

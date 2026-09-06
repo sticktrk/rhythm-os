@@ -1050,8 +1050,9 @@ class RhythmServerApi {
   ///
   /// The server owns the fan-out: it enumerates the rooms, plans them with
   /// palette continuity, paces dispatch and binds the mood scene per room. The
-  /// client makes exactly one call. [targetMode] selects rooms (the server
-  /// default) or per-device dispatch with one paced lane per hub. Requires
+  /// client makes exactly one call. [targetMode] selects per-device dispatch
+  /// with one paced lane per hub (the server default) or per-room planning.
+  /// Requires
   /// [RhythmFeature.homeSceneApply]; older servers return 404 and this
   /// resolves to `null`.
   Future<RhythmHomeSceneActionResult?> applyHomeScene({

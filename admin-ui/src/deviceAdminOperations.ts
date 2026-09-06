@@ -598,20 +598,20 @@ export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
     category: 'Scenes',
     label: 'Apply scene to whole home',
     description:
-      'Apply a saved scene to every eligible room in one server-owned operation.',
+      'Apply a saved scene to every light in the house individually (the default): one continuous palette across the home and one paced dispatch lane per hub.',
     method: 'POST',
     path: 'api/scenes/{scene_id}/apply-home',
     body: { transition_ms: 1200, dispatch_spacing_ms: 120 }
   },
   {
-    id: 'scene-apply-home-devices',
+    id: 'scene-apply-home-rooms',
     category: 'Scenes',
-    label: 'Apply scene to whole home (per device)',
+    label: 'Apply scene to whole home (per room)',
     description:
-      'Apply a saved scene to every light individually, ignoring rooms: one continuous palette across the house and one paced dispatch lane per hub.',
+      'Apply a saved scene room by room instead: grouped rooms recall one projection or group command and the palette rotates per room.',
     method: 'POST',
     path: 'api/scenes/{scene_id}/apply-home',
-    body: { target_mode: 'devices', transition_ms: 1200, dispatch_spacing_ms: 120 }
+    body: { target_mode: 'rooms', transition_ms: 1200, dispatch_spacing_ms: 120 }
   },
   {
     id: 'scene-preview',

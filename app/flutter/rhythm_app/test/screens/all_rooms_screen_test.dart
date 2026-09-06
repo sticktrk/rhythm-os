@@ -471,6 +471,7 @@ void main() {
     harness.api.homeSceneResult = result ??
         const RhythmHomeSceneActionResult(
           sceneId: 'halloween',
+          targetMode: RhythmHomeSceneTargetMode.rooms,
           targets: [
             RhythmHomeSceneTargetResult(
               targetId: 'room-1',
@@ -618,6 +619,39 @@ void main() {
     );
   });
 
+  testWidgets('a device-mode result is reported in lights', (tester) async {
+    await pumpWithHomeScenes(
+      tester,
+      result: const RhythmHomeSceneActionResult(
+        sceneId: 'halloween',
+        targetMode: RhythmHomeSceneTargetMode.devices,
+        targets: [
+          RhythmHomeSceneTargetResult(
+            targetId: 'bulb-1',
+            affectedNodeIds: ['bulb-1'],
+          ),
+          RhythmHomeSceneTargetResult(
+            targetId: 'bulb-2',
+            affectedNodeIds: ['bulb-2'],
+          ),
+          RhythmHomeSceneTargetResult(
+            targetId: 'bulb-3',
+            affectedNodeIds: ['bulb-3'],
+          ),
+        ],
+        appliedTargetCount: 3,
+        dispatchCount: 3,
+      ),
+    );
+    await openScenePanel(tester);
+
+    await tester.tap(find.byKey(const ValueKey('global-room-scene-halloween')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.text('Set Halloween on 3 of 3 lights.'), findsOneWidget);
+  });
+
   testWidgets('an errored target is excluded from the applied room count',
       (tester) async {
     await pumpWithHomeScenes(
@@ -636,6 +670,7 @@ void main() {
         ],
         appliedTargetCount: 1,
         skippedTargetCount: 3,
+        targetMode: RhythmHomeSceneTargetMode.rooms,
       ),
     );
     await openScenePanel(tester);

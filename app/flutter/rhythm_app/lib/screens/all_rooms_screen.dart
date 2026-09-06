@@ -6,7 +6,12 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show RhythmDispatchResult, RhythmMode, RhythmSceneDefinition, RoomModeState;
+    show
+        RhythmDispatchResult,
+        RhythmHomeSceneTargetMode,
+        RhythmMode,
+        RhythmSceneDefinition,
+        RoomModeState;
 import 'package:uuid/uuid.dart';
 import '../providers/room_page_provider.dart';
 import '../providers/room_provider.dart';
@@ -1044,6 +1049,7 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     required int completed,
     required int eligible,
     String? connector,
+    String unit = 'rooms',
   }) {
     final messenger = ScaffoldMessenger.of(context);
     messenger.hideCurrentSnackBar();
@@ -1052,7 +1058,7 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
       SnackBar(
         duration: const Duration(seconds: 8),
         persist: false,
-        content: Text('$verb$joined $completed of $eligible rooms.'),
+        content: Text('$verb$joined $completed of $eligible $unit.'),
       ),
     );
   }
@@ -1294,12 +1300,16 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     }
 
     // Skipped targets (disabled rooms, rooms with no lights) are excluded from
-    // the denominator; the user only sees rooms the server actually attempted.
+    // the denominator; the user only sees what the server actually attempted.
+    // The server default addresses every light individually, so the count is
+    // in lights; a per-room apply reports rooms.
     final attempted = result.attemptedTargetCount;
     final completed = result.appliedTargetCount;
+    final perDevice = result.targetMode == RhythmHomeSceneTargetMode.devices;
     _showGlobalResult(
       verb: 'Set ${scene.name}',
-      connector: 'in',
+      connector: perDevice ? 'on' : 'in',
+      unit: perDevice ? 'lights' : 'rooms',
       completed: completed,
       eligible: attempted,
     );
