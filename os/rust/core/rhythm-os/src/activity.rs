@@ -626,6 +626,46 @@ mod tests {
     }
 
     #[test]
+    fn record_light_activity_batch_keeps_sequential_order_and_unique_ids() {
+        let state = test_state();
+
+        record_light_activity_batch(
+            &state,
+            vec![
+                LightActivityRecord::app("bedroom", "apply_scene"),
+                LightActivityRecord::app("kitchen", "apply_scene"),
+                LightActivityRecord::app("porch", "apply_scene"),
+            ],
+        );
+
+        let s = state.lock().unwrap();
+        assert_eq!(s.light_activity.len(), 3);
+        // Newest first, exactly as recording the three one after another
+        // would have left the history.
+        assert_eq!(
+            s.light_activity
+                .iter()
+                .map(|event| event.node_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["porch", "kitchen", "bedroom"]
+        );
+        let ids: std::collections::HashSet<_> = s
+            .light_activity
+            .iter()
+            .map(|event| event.id.as_str())
+            .collect();
+        assert_eq!(ids.len(), 3, "each event keeps its own id");
+        assert!(s
+            .light_activity
+            .iter()
+            .all(|event| event.epoch_ms == s.light_activity[0].epoch_ms));
+        assert!(s
+            .light_activity
+            .iter()
+            .all(|event| event.server_instance_id.is_some()));
+    }
+
+    #[test]
     fn activity_event_ids_include_epoch_component() {
         let id = activity_event_id(1_783_278_659_924);
 
