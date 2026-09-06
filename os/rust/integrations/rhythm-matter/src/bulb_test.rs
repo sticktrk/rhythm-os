@@ -1972,6 +1972,7 @@ mod tests {
         let hub_data = Arc::new(MatterHubData {
             transport: transport_cell,
             capture_dir: std::sync::OnceLock::new(),
+            diagnostics: Default::default(),
             registry,
             fabric_id: "local-test".to_string(),
             commissioned: Mutex::new(vec![MatterDeviceInfo {

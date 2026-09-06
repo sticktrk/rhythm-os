@@ -130,6 +130,7 @@ impl MatterLightController {
         if plans.is_empty() {
             return Ok(HubCommandReceipt::delivered());
         }
+        self.hub_data.diagnostics.submitted(&plans);
         self.hub_data.readback.record_submitted(&plans);
         if let Ok(mut pending) = self.hub_data.pending_turn_on_plans.lock() {
             for plan in &plans {
@@ -142,6 +143,7 @@ impl MatterLightController {
         let submissions = match self.transport.submit_endpoint_plans(&plans) {
             Ok(submissions) => submissions,
             Err(error) => {
+                self.hub_data.diagnostics.submission_failed(&expected_ids);
                 remove_pending_plans(&self.hub_data.pending_turn_on_plans, &expected_ids);
                 if Self::looks_like_connectivity_timeout(&error) {
                     for plan in &plans {
@@ -163,6 +165,7 @@ impl MatterLightController {
             .map(|submission| submission.command_id)
             .collect();
         if returned_ids != expected_ids {
+            self.hub_data.diagnostics.submission_failed(&expected_ids);
             remove_pending_plans(&self.hub_data.pending_turn_on_plans, &expected_ids);
             return Err(LightControlError::CommandFailed(format!(
                 "Matter controller returned mismatched command ids for target {}",
@@ -170,6 +173,7 @@ impl MatterLightController {
             )));
         }
         for (plan, submission) in plans.iter().zip(&submissions) {
+            self.hub_data.diagnostics.accepted(submission);
             if submission.completed {
                 self.clear_connectivity_backoff(plan.node_id, plan.endpoint);
                 if let Ok(mut pending) = self.hub_data.pending_turn_on_plans.lock() {
@@ -198,12 +202,14 @@ impl MatterLightController {
                 .filter(|submission| !submission.completed)
                 .filter_map(|submission| submission.controller_stream_id.as_deref());
             let Some(stream_id) = stream_ids.next() else {
+                self.hub_data.diagnostics.submission_failed(&expected_ids);
                 return Err(LightControlError::CommandFailed(format!(
                     "Matter controller accepted target {} plans without a stream identity",
                     target_label
                 )));
             };
             if stream_ids.any(|candidate| candidate != stream_id) {
+                self.hub_data.diagnostics.submission_failed(&expected_ids);
                 return Err(LightControlError::CommandFailed(format!(
                     "Matter controller accepted target {} plans across multiple stream identities",
                     target_label
@@ -1500,6 +1506,7 @@ mod tests {
         let hub_data = Arc::new(crate::hub_state::MatterHubData {
             transport: std::sync::OnceLock::new(),
             capture_dir: std::sync::OnceLock::new(),
+            diagnostics: Default::default(),
             registry: registry.clone(),
             fabric_id: "test".to_string(),
             commissioned: std::sync::Mutex::new(Vec::new()),
@@ -2013,6 +2020,7 @@ mod tests {
         let hub_data = Arc::new(crate::hub_state::MatterHubData {
             transport: std::sync::OnceLock::new(),
             capture_dir: std::sync::OnceLock::new(),
+            diagnostics: Default::default(),
             registry,
             fabric_id: "test".to_string(),
             commissioned: std::sync::Mutex::new(vec![crate::transport::MatterDeviceInfo {
@@ -3022,6 +3030,19 @@ mod tests {
 
         block_on(controller.turn_off("kitchen", None)).unwrap();
 
+        let evidence =
+            serde_json::to_value(controller.hub_data.diagnostics.snapshot().unwrap()).unwrap();
+        assert_eq!(evidence["pending_command_count"], 0);
+        assert_eq!(evidence["commands"].as_array().unwrap().len(), 2);
+        assert!(evidence["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|command| command["completed_inline"] == true
+                && command["plan"]["steps"][0]
+                    == serde_json::json!({"operation": "set_on_off", "on": false})));
+        assert!(evidence["observations"].as_array().unwrap().is_empty());
+
         let operations = spy.operations();
         assert_eq!(operations.len(), 2);
         for node_id in [42, 43] {
@@ -3583,6 +3604,7 @@ mod tests {
         let hub_data = Arc::new(crate::hub_state::MatterHubData {
             transport: std::sync::OnceLock::new(),
             capture_dir: std::sync::OnceLock::new(),
+            diagnostics: Default::default(),
             registry,
             fabric_id: "test".to_string(),
             commissioned: std::sync::Mutex::new(Vec::new()),
@@ -3761,6 +3783,7 @@ mod tests {
         let hub_data = Arc::new(crate::hub_state::MatterHubData {
             transport: std::sync::OnceLock::new(),
             capture_dir: std::sync::OnceLock::new(),
+            diagnostics: Default::default(),
             registry,
             fabric_id: "test".to_string(),
             commissioned: std::sync::Mutex::new(Vec::new()),
@@ -3892,6 +3915,7 @@ mod tests {
         let hub_data = Arc::new(crate::hub_state::MatterHubData {
             transport: std::sync::OnceLock::new(),
             capture_dir: std::sync::OnceLock::new(),
+            diagnostics: Default::default(),
             registry,
             fabric_id: "test".to_string(),
             commissioned: std::sync::Mutex::new(Vec::new()),
@@ -4021,6 +4045,7 @@ mod tests {
         let hub_data = Arc::new(crate::hub_state::MatterHubData {
             transport: std::sync::OnceLock::new(),
             capture_dir: std::sync::OnceLock::new(),
+            diagnostics: Default::default(),
             registry,
             fabric_id: "test".to_string(),
             commissioned: std::sync::Mutex::new(Vec::new()),
@@ -4245,6 +4270,7 @@ mod tests {
         let hub_data = Arc::new(crate::hub_state::MatterHubData {
             transport: std::sync::OnceLock::new(),
             capture_dir: std::sync::OnceLock::new(),
+            diagnostics: Default::default(),
             registry,
             fabric_id: "test".to_string(),
             commissioned: std::sync::Mutex::new(Vec::new()),
@@ -4453,6 +4479,7 @@ mod tests {
         let hub_data = Arc::new(crate::hub_state::MatterHubData {
             transport: std::sync::OnceLock::new(),
             capture_dir: std::sync::OnceLock::new(),
+            diagnostics: Default::default(),
             registry,
             fabric_id: "test".to_string(),
             commissioned: std::sync::Mutex::new(Vec::new()),

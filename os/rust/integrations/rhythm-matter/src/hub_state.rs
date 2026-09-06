@@ -209,6 +209,8 @@ pub struct MatterHubData {
     pub transport: std::sync::OnceLock<Arc<dyn MatterTransport>>,
     /// Optional directory for raw probe captures.
     pub capture_dir: std::sync::OnceLock<String>,
+    /// Bounded passive command, observation, and recovery evidence.
+    pub diagnostics: Arc<crate::diagnostics::MatterDiagnostics>,
     /// Device registry (shared with controller).
     pub registry: Arc<Mutex<MatterDeviceRegistry>>,
     /// Matter fabric identifier.
@@ -597,6 +599,7 @@ mod tests {
         MatterHubData {
             transport: std::sync::OnceLock::new(),
             capture_dir: std::sync::OnceLock::new(),
+            diagnostics: Default::default(),
             registry: Arc::new(Mutex::new(MatterDeviceRegistry::new())),
             fabric_id: "default".to_string(),
             commissioned: Mutex::new(Vec::new()),
