@@ -186,6 +186,7 @@ mod tests {
         MatterHubData {
             transport: std::sync::OnceLock::new(),
             capture_dir: std::sync::OnceLock::new(),
+            diagnostics: Default::default(),
             registry: Arc::new(Mutex::new(MatterDeviceRegistry::new())),
             fabric_id: "test".to_string(),
             commissioned: Mutex::new(Vec::<MatterDeviceInfo>::new()),

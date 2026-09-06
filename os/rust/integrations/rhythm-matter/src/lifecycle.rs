@@ -15,6 +15,7 @@ use rhythm_os::hub::{ActiveHub, HubEvent, HubType};
 use rhythm_os::registry::HubDeviceRegistry;
 use rhythm_os::state::SharedState;
 
+use crate::diagnostics::{MatterDiagnosticEvent, MatterDiagnostics};
 use crate::hub_state::MatterHubData;
 use crate::transport::{
     CommissionedDevice, MatterAttributeReport, MatterAttributeValue, MatterControllerEvent,
@@ -232,6 +233,7 @@ struct MatterSubscriptionWorkerState {
     retry_initial: Duration,
     retry_max: Duration,
     cadence: MatterSubscriptionCadence,
+    diagnostics: Arc<MatterDiagnostics>,
 }
 
 impl MatterSubscriptionWorkerState {
@@ -239,6 +241,7 @@ impl MatterSubscriptionWorkerState {
         retry_initial: Duration,
         retry_max: Duration,
         cadence: MatterSubscriptionCadence,
+        diagnostics: Arc<MatterDiagnostics>,
     ) -> Self {
         Self {
             subscribed: HashMap::new(),
@@ -250,6 +253,7 @@ impl MatterSubscriptionWorkerState {
             retry_initial,
             retry_max,
             cadence,
+            diagnostics,
         }
     }
 
@@ -377,6 +381,14 @@ impl MatterSubscriptionWorkerState {
                 self.note_key(key);
                 self.subscribed.remove(&key);
                 let (failures, delay) = self.schedule_retry(&target);
+                self.diagnostics
+                    .event(MatterDiagnosticEvent::SubscriptionRetry {
+                        node_id: target.node_id,
+                        endpoint: target.endpoint,
+                        failure_class,
+                        attempts: failures,
+                        retry_in_ms: delay.as_millis() as u64,
+                    });
                 if failures.is_power_of_two() {
                     warn!(
                         target: "evt",
@@ -430,12 +442,22 @@ impl MatterSubscriptionWorkerState {
                 continue;
             }
 
+            self.diagnostics
+                .event(MatterDiagnosticEvent::SubscriptionAttempt {
+                    node_id: target.node_id,
+                    endpoint: target.endpoint,
+                });
             match transport.subscribe_light_state(
                 std::slice::from_ref(&target),
                 DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
                 DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS,
             ) {
                 Ok(()) => {
+                    self.diagnostics
+                        .event(MatterDiagnosticEvent::SubscriptionReady {
+                            node_id: target.node_id,
+                            endpoint: target.endpoint,
+                        });
                     if let Some(retry) = self.retries.remove(&key) {
                         info!(target: "evt", "Matter observed-state subscription recovered after {} attempts", retry.failures.saturating_add(1));
                     }
@@ -452,6 +474,14 @@ impl MatterSubscriptionWorkerState {
                     // key itself stayed skipped by its own backoff.
                     self.subscribed.remove(&key);
                     let (failures, delay) = self.schedule_retry(&target);
+                    self.diagnostics
+                        .event(MatterDiagnosticEvent::SubscriptionRetry {
+                            node_id: target.node_id,
+                            endpoint: target.endpoint,
+                            failure_class,
+                            attempts: failures,
+                            retry_in_ms: delay.as_millis() as u64,
+                        });
                     if failures.is_power_of_two() {
                         warn!(
                             target: "evt",
@@ -493,6 +523,7 @@ impl MatterSubscriptionWorkerState {
 fn start_observed_state_subscription_worker(
     transport: Arc<dyn MatterTransport>,
     shutdown: Arc<std::sync::atomic::AtomicBool>,
+    diagnostics: Arc<MatterDiagnostics>,
 ) -> Sender<MatterSubscriptionRefresh> {
     start_observed_state_subscription_worker_with_backoff(
         transport,
@@ -500,6 +531,7 @@ fn start_observed_state_subscription_worker(
         MATTER_SUBSCRIPTION_RETRY_INITIAL,
         MATTER_SUBSCRIPTION_RETRY_MAX,
         MatterSubscriptionCadence::production(),
+        diagnostics,
     )
 }
 
@@ -509,6 +541,7 @@ fn start_observed_state_subscription_worker_with_backoff(
     retry_initial: Duration,
     retry_max: Duration,
     cadence: MatterSubscriptionCadence,
+    diagnostics: Arc<MatterDiagnostics>,
 ) -> Sender<MatterSubscriptionRefresh> {
     // Proof, termination and reset signals are correctness events, not advisory
     // wakeups. An unbounded channel avoids silently dropping a controller
@@ -519,7 +552,8 @@ fn start_observed_state_subscription_worker_with_backoff(
     let spawn_result = std::thread::Builder::new()
         .name("matter-observed-subscriptions".to_string())
         .spawn(move || {
-            let mut state = MatterSubscriptionWorkerState::new(retry_initial, retry_max, cadence);
+            let mut state =
+                MatterSubscriptionWorkerState::new(retry_initial, retry_max, cadence, diagnostics);
             loop {
                 if shutdown.load(Ordering::Relaxed) {
                     break;
@@ -608,9 +642,13 @@ fn start_controller_event_stream(
     needs_audition: Arc<Mutex<HashSet<(u64, u16)>>>,
     readback: Arc<crate::hub_state::MatterReadbackCoordinator>,
     attribute_report_history: Arc<Mutex<VecDeque<MatterAttributeReport>>>,
+    diagnostics: Arc<MatterDiagnostics>,
 ) {
-    let subscription_refresh =
-        start_observed_state_subscription_worker(transport.clone(), shutdown.clone());
+    let subscription_refresh = start_observed_state_subscription_worker(
+        transport.clone(),
+        shutdown.clone(),
+        diagnostics.clone(),
+    );
     let spawn_result = std::thread::Builder::new()
         .name("matter-controller-events".to_string())
         .spawn(move || {
@@ -631,6 +669,7 @@ fn start_controller_event_stream(
                     Ok(batch) => batch,
                     Err(error) => {
                         if connection_state != Some(false) {
+                            diagnostics.event(MatterDiagnosticEvent::StreamUnavailable);
                             let _ = event_tx.send(HubEvent::Disconnected {
                                 hub_key: None,
                                 reason: format!("Matter controller event stream: {error:#}"),
@@ -654,6 +693,10 @@ fn start_controller_event_stream(
                         && cursor.sequence.saturating_add(1) < batch.oldest_sequence
                 });
                 if stream_changed || history_gap {
+                    diagnostics.event(MatterDiagnosticEvent::StreamReset {
+                        stream_id: batch.stream_id.clone(),
+                        history_gap,
+                    });
                     let reason = if stream_changed {
                         "Matter controller sidecar restarted"
                     } else {
@@ -681,6 +724,7 @@ fn start_controller_event_stream(
                     last_sequence = last_sequence.max(envelope.sequence);
                     let event = match envelope.event {
                         MatterControllerEvent::CommandOutcome(outcome) => {
+                            diagnostics.outcome(&event_stream_id, &outcome);
                             let pending_plan = pending_turn_on_plans
                                 .lock()
                                 .ok()
@@ -754,6 +798,7 @@ fn start_controller_event_stream(
                             ))
                         }
                         MatterControllerEvent::AttributeReport(report) => {
+                            diagnostics.attribute_report(&report);
                             record_attribute_report_history(
                                 &report,
                                 attribute_report_history.as_ref(),
@@ -781,6 +826,12 @@ fn start_controller_event_stream(
                             crate::events::translate_report(&report)
                         }
                         MatterControllerEvent::SubscriptionTerminated(termination) => {
+                            diagnostics.event(MatterDiagnosticEvent::SubscriptionTerminated {
+                                node_id: termination.node_id,
+                                endpoint: termination.endpoint,
+                                failure_class: termination.failure_class,
+                                chip_error: termination.chip_error,
+                            });
                             // Native auto-resubscribe is disabled; this event is
                             // the only prompt notice that observation stopped.
                             //
@@ -860,6 +911,9 @@ fn start_controller_event_stream(
                     sequence: last_sequence,
                 });
                 if connection_state != Some(true) {
+                    diagnostics.event(MatterDiagnosticEvent::StreamConnected {
+                        stream_id: event_stream_id,
+                    });
                     let _ = event_tx.send(HubEvent::Connected { hub_key: None });
                     connection_state = Some(true);
                 }
@@ -930,6 +984,8 @@ pub fn connect_matter(
             })
     };
 
+    let diagnostics = Arc::new(MatterDiagnostics::default());
+    let diagnostics_for_closure = diagnostics.clone();
     let commissioned_for_closure = commissioned.clone();
     let transport_for_closure = transport.clone();
     let fabric_id_for_closure = fabric_id.clone();
@@ -983,6 +1039,7 @@ pub fn connect_matter(
             Box::new(Arc::new(MatterHubData {
                 transport: transport_cell,
                 capture_dir: std::sync::OnceLock::new(),
+                diagnostics: diagnostics_for_closure.clone(),
                 registry,
                 fabric_id: fabric_id_for_closure.clone(),
                 commissioned: std::sync::Mutex::new(commissioned_for_closure.clone()),
@@ -1017,6 +1074,7 @@ pub fn connect_matter(
                 needs_audition_for_events,
                 readback_for_events,
                 attribute_report_history_for_events,
+                diagnostics,
             );
             event_rx
         },
@@ -2158,6 +2216,19 @@ mod tests {
         assert_eq!(event.hub_key(), Some(&key));
         wait_for_atomic_at_least(&transport.subscribe_calls, 2);
         assert_eq!(transport.subscribe_calls.load(Ordering::SeqCst), 2);
+        let evidence = serde_json::to_value(data.diagnostics.snapshot().unwrap()).unwrap();
+        assert!(evidence["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["kind"] == "stream_connected"));
+        assert!(evidence["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["kind"] == "subscription_attempt"
+                && event["node_id"] == 10
+                && event["endpoint"] == 2));
         std::env::remove_var("RHYTHM_MATTER_PROFILE_SYNC");
     }
 
@@ -2170,7 +2241,11 @@ mod tests {
         transport.fail_subscription_attempts(103, 1, 1);
         let shutdown = Arc::new(AtomicBool::new(false));
 
-        let refresh = start_observed_state_subscription_worker(transport.clone(), shutdown.clone());
+        let refresh = start_observed_state_subscription_worker(
+            transport.clone(),
+            shutdown.clone(),
+            Default::default(),
+        );
         wait_for_atomic_at_least(&transport.subscribe_calls, 2);
         assert_eq!(
             transport.subscription_attempts.lock().unwrap().as_slice(),
@@ -2236,6 +2311,7 @@ mod tests {
             Duration::from_millis(20),
             Duration::from_millis(80),
             MatterSubscriptionCadence::production(),
+            Default::default(),
         );
         wait_for_atomic_at_least(&transport.subscribe_calls, 22);
 
@@ -2300,6 +2376,7 @@ mod tests {
             Duration::from_secs(10),
             Duration::from_secs(10),
             MatterSubscriptionCadence::production(),
+            Default::default(),
         );
         wait_for_atomic_at_least(&transport.subscribe_calls, 1);
 
@@ -2336,6 +2413,7 @@ mod tests {
             Duration::from_secs(10),
             Duration::from_secs(10),
             MatterSubscriptionCadence::production(),
+            Default::default(),
         );
         wait_for_atomic_at_least(&transport.subscribe_calls, 1);
 
@@ -2374,6 +2452,7 @@ mod tests {
             Duration::from_secs(10),
             Duration::from_secs(10),
             MatterSubscriptionCadence::production(),
+            Default::default(),
         );
         wait_for_atomic_at_least(&transport.subscribe_calls, 2);
 
@@ -2396,6 +2475,7 @@ mod tests {
             MATTER_SUBSCRIPTION_RETRY_INITIAL,
             MATTER_SUBSCRIPTION_RETRY_MAX,
             MatterSubscriptionCadence::production(),
+            Default::default(),
         )
     }
 
@@ -2568,6 +2648,7 @@ mod tests {
             Duration::from_millis(300),
             Duration::from_millis(300),
             MatterSubscriptionCadence::production(),
+            Default::default(),
         );
         wait_for_atomic_at_least(&transport.subscribe_calls, 1);
 
@@ -2614,6 +2695,7 @@ mod tests {
                 target_refresh: Duration::from_millis(50),
                 max_idle_wait: Duration::from_millis(250),
             },
+            Default::default(),
         );
 
         transport.add_commissioned_device(commissioned_device(91, 1));
@@ -2845,6 +2927,7 @@ mod tests {
             Arc::new(Mutex::new(HashSet::new())),
             Arc::new(crate::hub_state::MatterReadbackCoordinator::default()),
             report_history.clone(),
+            Default::default(),
         );
 
         match event_rx.recv_timeout(Duration::from_secs(1)).unwrap() {
@@ -2934,6 +3017,7 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         let (event_tx, event_rx) = std::sync::mpsc::channel();
 
+        let diagnostics = Arc::new(MatterDiagnostics::default());
         start_controller_event_stream(
             transport,
             event_tx,
@@ -2945,6 +3029,7 @@ mod tests {
             Arc::new(Mutex::new(HashSet::new())),
             Arc::new(crate::hub_state::MatterReadbackCoordinator::default()),
             Arc::new(Mutex::new(VecDeque::new())),
+            diagnostics.clone(),
         );
 
         // Every outcome also translates to an ordinary CommandOutcome hub
@@ -2969,6 +3054,15 @@ mod tests {
             "only the connectivity-classified outcome may emit evidence: {reachability:?}"
         );
 
+        let evidence = serde_json::to_value(diagnostics.snapshot().unwrap()).unwrap();
+        assert_eq!(evidence["commands"].as_array().unwrap().len(), 3);
+        assert_eq!(evidence["recent_failures"].as_array().unwrap().len(), 3);
+        assert!(evidence["commands"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|command| command["outcome"]["status"] == "failed"
+                && command["outcome"]["detail"].is_null()));
         shutdown.store(true, Ordering::SeqCst);
     }
 
@@ -3014,6 +3108,7 @@ mod tests {
             Arc::new(Mutex::new(HashSet::new())),
             Arc::new(crate::hub_state::MatterReadbackCoordinator::default()),
             Arc::new(Mutex::new(VecDeque::new())),
+            Default::default(),
         );
 
         let deadline = std::time::Instant::now() + Duration::from_secs(1);

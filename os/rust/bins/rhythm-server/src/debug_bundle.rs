@@ -836,6 +836,7 @@ pub fn build_debug_bundle_with_app_log(
     let matter_controller_json =
         build_matter_controller_debug_json(&runtime, created_at, &mut diagnostics)
             .context("building Matter controller debug snapshot")?;
+    let matter_runtime_json = build_matter_runtime_debug_json(state, created_at)?;
     let hue_controller_json = build_hue_controller_debug_json(state, created_at, &mut diagnostics)
         .context("building Hue controller debug snapshot")?;
     #[cfg(target_os = "linux")]
@@ -926,6 +927,12 @@ pub fn build_debug_bundle_with_app_log(
         &mut generated_files,
         "matter_controller.json",
         matter_controller_json.as_bytes(),
+    )?;
+    append_generated_file(
+        &mut builder,
+        &mut generated_files,
+        "matter_runtime.json",
+        matter_runtime_json.as_bytes(),
     )?;
     append_generated_file(
         &mut builder,
@@ -1810,6 +1817,55 @@ fn build_hue_controller_debug_json(
         "room_policy": room_policy,
     }))
     .context("serializing Hue controller debug snapshot")
+}
+
+fn build_matter_runtime_debug_json(
+    state: &SharedState,
+    generated_at: DateTime<Utc>,
+) -> Result<String> {
+    // Only clone Arcs under AppState; serialization happens after release, and
+    // nothing here asks chipd or a device to do work while collecting a bundle.
+    // A poisoned lock is reported as unavailable rather than as an empty fleet.
+    let hubs = state.lock().ok().map(|state| {
+        state
+            .hubs
+            .iter()
+            .filter_map(|(key, hub)| {
+                hub.data::<std::sync::Arc<rhythm_matter::hub_state::MatterHubData>>()
+                    .map(|data| {
+                        (
+                            key.to_string(),
+                            data.fabric_id.clone(),
+                            data.diagnostics.clone(),
+                        )
+                    })
+            })
+            .collect::<Vec<_>>()
+    });
+    let available = hubs.is_some();
+    let mut hubs: Vec<_> = hubs
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(key, fabric_id, recorder)| {
+            let snapshot = recorder.snapshot();
+            serde_json::json!({
+                "hub_key": key,
+                "fabric_id": fabric_id,
+                "status": if snapshot.is_some() { "available" } else { "busy_or_unavailable" },
+                "diagnostics": snapshot,
+            })
+        })
+        .collect();
+    hubs.sort_by(|a, b| a["hub_key"].as_str().cmp(&b["hub_key"].as_str()));
+    serde_json::to_string_pretty(&serde_json::json!({
+        "schema_version": 1,
+        "generated_at": generated_at.to_rfc3339(),
+        "status": if available { "available" } else { "busy_or_unavailable" },
+        "scope": "current_hub_lifetime",
+        "collection": "passive_cached_evidence",
+        "hubs": hubs,
+    }))
+    .context("serializing Matter runtime debug snapshot")
 }
 
 fn build_matter_controller_debug_json(
@@ -3626,6 +3682,67 @@ mod tests {
         files
     }
 
+    #[test]
+    fn matter_runtime_snapshot_reports_unavailable_instead_of_empty_success() {
+        let state = std::sync::Arc::new(std::sync::Mutex::new(AppState::default()));
+        let poisoner = state.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock().unwrap();
+            panic!("poison the state lock");
+        })
+        .join();
+        assert!(state.lock().is_err());
+        let unavailable: Value =
+            serde_json::from_str(&build_matter_runtime_debug_json(&state, Utc::now()).unwrap())
+                .unwrap();
+        assert_eq!(unavailable["status"], "busy_or_unavailable");
+        assert_eq!(unavailable["hubs"], serde_json::json!([]));
+
+        let state = std::sync::Arc::new(std::sync::Mutex::new(AppState::default()));
+        let empty: Value =
+            serde_json::from_str(&build_matter_runtime_debug_json(&state, Utc::now()).unwrap())
+                .unwrap();
+        assert_eq!(empty["status"], "available");
+        assert_eq!(empty["hubs"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn matter_runtime_snapshot_lists_matter_hubs() {
+        let state = std::sync::Arc::new(std::sync::Mutex::new(AppState::default()));
+        for fabric in ["fabric-b", "fabric-a"] {
+            let key = rhythm_os::canonical::identity::HubKey::new(
+                rhythm_os::hub::HubType::new(rhythm_os::hub::HubType::MATTER),
+                fabric,
+            );
+            state.lock().unwrap().hubs.insert(
+                key.clone(),
+                rhythm_os::hub::ActiveHub {
+                    hub_type: rhythm_os::hub::HubType::new(rhythm_os::hub::HubType::MATTER),
+                    hub_key: key,
+                    runtime: None,
+                    hub_data: Box::new(std::sync::Arc::new(
+                        rhythm_matter::hub_state::MatterHubData::detached(fabric),
+                    )),
+                    registry: None,
+                    discovery: None,
+                    shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                },
+            );
+        }
+        let json: Value =
+            serde_json::from_str(&build_matter_runtime_debug_json(&state, Utc::now()).unwrap())
+                .unwrap();
+        assert_eq!(json["status"], "available");
+        let hubs = json["hubs"].as_array().unwrap();
+        assert_eq!(hubs.len(), 2);
+        assert_eq!(hubs[0]["hub_key"], "matter@fabric-a");
+        assert_eq!(hubs[0]["fabric_id"], "fabric-a");
+        assert_eq!(hubs[0]["status"], "available");
+        assert_eq!(hubs[0]["diagnostics"]["schema_version"], 1);
+        assert_eq!(hubs[0]["diagnostics"]["commands"], serde_json::json!([]));
+        assert_eq!(hubs[1]["hub_key"], "matter@fabric-b");
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn shared_ble_snapshot_preserves_the_runtime_initialization_state() {
@@ -4560,6 +4677,12 @@ mod tests {
         assert!(files.contains_key("log_summary.json"));
         assert!(files.contains_key("process_resources.json"));
         assert!(files.contains_key("matter_controller.json"));
+        let matter_runtime: Value =
+            serde_json::from_slice(files.get("matter_runtime.json").unwrap()).unwrap();
+        assert_eq!(matter_runtime["schema_version"], 1);
+        assert_eq!(matter_runtime["status"], "available");
+        assert_eq!(matter_runtime["collection"], "passive_cached_evidence");
+        assert_eq!(matter_runtime["hubs"], serde_json::json!([]));
         #[cfg(target_os = "linux")]
         assert!(files.contains_key("shared_ble_runtime.json"));
         assert!(files.contains_key("host_flight_recorder_summary.json"));

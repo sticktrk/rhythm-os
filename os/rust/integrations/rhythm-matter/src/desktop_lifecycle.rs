@@ -863,6 +863,7 @@ mod tests {
         Arc::new(MatterHubData {
             transport: OnceLock::new(),
             capture_dir: OnceLock::new(),
+            diagnostics: Default::default(),
             registry: Arc::new(Mutex::new(MatterDeviceRegistry::new())),
             fabric_id: "default".to_string(),
             commissioned: Mutex::new(Vec::new()),
