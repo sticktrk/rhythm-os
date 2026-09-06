@@ -1,7 +1,9 @@
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Check,
+  ChevronDown,
   Eye,
+  Home,
   Play,
   Plus,
   RefreshCw,
@@ -11,13 +13,20 @@ import {
 } from 'lucide-react';
 
 import '../../styles/pages-phase5.css';
+import '../../styles/scene-studio.css';
 
 import { JsonEditor } from '../../components/controls/JsonEditor';
-import { NumberField, SelectField, TextField } from '../../components/controls/fields';
+import {
+  NumberField,
+  SelectField,
+  TextField
+} from '../../components/controls/fields';
+import { SegmentedControl } from '../../components/controls/SegmentedControl';
 import { EmptyState, ErrorNotice } from '../../components/ui/bits';
 import { useConfirm } from '../../components/ui/ConfirmDialog';
 import { RawPayloadToggle, SectionCard } from '../../components/ui/SectionCard';
 import {
+  applyHomeScene,
   applyScene,
   cancelScenePreview,
   commitScenePreview,
@@ -29,7 +38,7 @@ import {
 } from '../../device/scenes';
 import { getNodesState } from '../../device/state';
 import {
-  asArray,
+  asNumber,
   asRecord,
   asRecordArray,
   asString,
@@ -39,17 +48,30 @@ import { useDeviceCall } from '../../hooks/useDeviceCall';
 import { useDeviceClient } from '../../hooks/useDeviceClient';
 import { usePolling } from '../../hooks/usePolling';
 import { prettyJson } from '../../lib/json';
+import { HousePreview } from './scenes/HousePreview';
 import { OutputEditor } from './scenes/OutputEditor';
+import { PaletteEditor } from './scenes/PaletteEditor';
+import { houseLightOrder } from './scenes/scenePalette';
 import {
-  colorSummaryCss,
+  SCENE_TEMPLATES,
+  entryNodeId,
+  entryWithNodeId,
+  lightLayer,
+  lightNodeOptionsFromState,
   nodeOptionsFromState,
-  outputContainer
+  outputContainer,
+  swatchStripCss,
+  withLightLayer
 } from './scenes/sceneShape';
 
-const NEW_SCENE: Record<string, unknown> = {
-  name: 'New scene',
-  default_output: { power: true, brightness: 80, color: { kelvin: 3000 } },
-  entries: []
+type HomeApplyOutcome = {
+  sceneId: string;
+  applied: number;
+  attempted: number;
+  skipped: number;
+  lanes: string[];
+  mode: string;
+  queued: boolean;
 };
 
 export default function ScenesPage() {
@@ -67,9 +89,16 @@ export default function ScenesPage() {
   const [isNew, setIsNew] = useState(false);
   const [draft, setDraft] = useState<Record<string, unknown> | null>(null);
   const [draftText, setDraftText] = useState('');
+  const [templateMenuOpen, setTemplateMenuOpen] = useState(false);
+  const templateMenuRef = useRef<HTMLDivElement | null>(null);
+
   const [targetId, setTargetId] = useState('');
   const [transitionMs, setTransitionMs] = useState<number | undefined>(undefined);
   const [previewId, setPreviewId] = useState<string | null>(null);
+
+  const [homeMode, setHomeMode] = useState<'devices' | 'rooms'>('devices');
+  const [dispatchSpacingMs, setDispatchSpacingMs] = useState<number | undefined>(120);
+  const [homeOutcome, setHomeOutcome] = useState<HomeApplyOutcome | null>(null);
 
   const mutate = useDeviceCall(
     useCallback(async (action: () => Promise<unknown>) => action(), [])
@@ -77,13 +106,34 @@ export default function ScenesPage() {
 
   const scenes = scenesFromPayload(scenesQuery.data);
   const nodeOptions = nodeOptionsFromState(nodesQuery.data);
+  const lightOptions = lightNodeOptionsFromState(nodesQuery.data);
+  const house = useMemo(
+    () => (nodesQuery.data ? houseLightOrder(nodesQuery.data) : null),
+    [nodesQuery.data]
+  );
+
+  useEffect(() => {
+    if (!templateMenuOpen) return;
+    function close(event: MouseEvent) {
+      if (!templateMenuRef.current?.contains(event.target as Node)) {
+        setTemplateMenuOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [templateMenuOpen]);
 
   function openScene(scene: Record<string, unknown>, id: string | null) {
     const clone = JSON.parse(JSON.stringify(scene)) as Record<string, unknown>;
+    // Always edit the canonical shape; a legacy top-level layer is folded
+    // into `light` so the server sees one definition on save.
+    const canonical = withLightLayer(clone, lightLayer(clone));
     setSelectedId(id);
     setIsNew(id === null);
-    setDraft(clone);
-    setDraftText(prettyJson(clone));
+    setDraft(canonical);
+    setDraftText(prettyJson(canonical));
+    setHomeOutcome(null);
+    setTemplateMenuOpen(false);
     mutate.reset();
   }
 
@@ -92,15 +142,25 @@ export default function ScenesPage() {
     setDraftText(prettyJson(next));
   }
 
+  function updateLayer(next: Record<string, unknown>) {
+    if (!draft) return;
+    updateDraft(withLightLayer(draft, next));
+  }
+
   async function handleSave() {
     if (!draft) return;
+    const name = sceneName(draft);
+    const id = asString(draft.id)?.trim() || slugify(name);
+    if (!id) return;
+    const body = { ...draft, id, name };
     await mutate.run(async () => {
       if (isNew || !selectedId) {
-        await createScene(client, draft);
+        await createScene(client, body);
         setIsNew(false);
-        setDraft(null);
+        setSelectedId(id);
+        updateDraft(body);
       } else {
-        await updateScene(client, selectedId, draft);
+        await updateScene(client, selectedId, body);
       }
       await scenesQuery.refresh();
     });
@@ -123,18 +183,45 @@ export default function ScenesPage() {
     });
   }
 
-  async function handleApply() {
+  async function handleApplyRoom() {
     if (!selectedId || !targetId) return;
     await mutate.run(() =>
       applyScene(client, selectedId, { targetId, transitionMs })
     );
   }
 
+  async function handleApplyHome() {
+    if (!selectedId) return;
+    setHomeOutcome(null);
+    await mutate.run(async () => {
+      const result = await applyHomeScene(client, selectedId, {
+        targetMode: homeMode,
+        dispatchSpacingMs,
+        transitionMs
+      });
+      const targets = asRecordArray(pick(result, 'targets'));
+      setHomeOutcome({
+        sceneId: selectedId,
+        applied:
+          asNumber(pick(result, 'applied_target_count')) ??
+          targets.filter((target) => !('error' in target)).length,
+        attempted: targets.length,
+        skipped: asNumber(pick(result, 'skipped_target_count')) ?? 0,
+        lanes: asRecordArray(pick(result, 'dispatch_lanes')).map(
+          (lane) =>
+            `${asString(lane.hub) ?? 'hub'} ×${asNumber(lane.dispatch_count) ?? 0}`
+        ),
+        mode: asString(pick(result, 'target_mode')) ?? homeMode,
+        queued: pick(result, 'queued') === true
+      });
+    });
+  }
+
   async function handlePreviewDraft() {
     if (!draft || !targetId) return;
     await mutate.run(async () => {
       const result = await previewDraftScene(client, {
-        scene: draft,
+        scene: { ...draft, id: asString(draft.id) || slugify(sceneName(draft)) },
         targetId,
         transitionMs
       });
@@ -156,9 +243,21 @@ export default function ScenesPage() {
     });
   }
 
-  const entries = draft ? asRecordArray(draft.entries) : [];
-  const defaultOutput = draft ? asRecord(draft.default_output) : {};
-  const palette = draft ? asArray(draft.palette) : [];
+  const layer = draft ? lightLayer(draft) : {};
+  const entries = asRecordArray(layer.entries);
+  const defaultOutput = asRecord(layer.default_output);
+  const hasDefaultOutput = Object.keys(defaultOutput).length > 0;
+  const roomOptions = useMemo(
+    () =>
+      house
+        ? house.rooms.map((room) => ({
+            value: room.id,
+            label: `${room.name} (${room.lights.length} lights)`
+          }))
+        : [],
+    [house]
+  );
+  const targetOptions = roomOptions.length > 0 ? [...roomOptions, ...nodeOptions.filter((option) => !roomOptions.some((room) => room.value === option.value))] : nodeOptions;
 
   return (
     <div className="consolePage">
@@ -167,27 +266,49 @@ export default function ScenesPage() {
           <div className="eyebrow">Device console</div>
           <h2>Scenes</h2>
           <p className="pageIntro">
-            Saved lighting presets. Preview drafts live on a target before
-            committing.
+            Compose palettes and per-light looks, see how they land on every
+            bulb in the house, then apply to one room or the whole home.
           </p>
         </div>
         <div className="pageHeaderActions">
           <button
             className="consoleButton"
             type="button"
-            onClick={() => void scenesQuery.refresh()}
+            onClick={() => {
+              void scenesQuery.refresh();
+              void nodesQuery.refresh();
+            }}
           >
             <RefreshCw size={15} />
             <span>Refresh</span>
           </button>
-          <button
-            className="consoleButton primary"
-            type="button"
-            onClick={() => openScene(NEW_SCENE, null)}
-          >
-            <Plus size={15} />
-            <span>New scene</span>
-          </button>
+          <div className="ssTemplateAnchor" ref={templateMenuRef}>
+            <button
+              className="consoleButton primary"
+              type="button"
+              onClick={() => setTemplateMenuOpen((open) => !open)}
+            >
+              <Plus size={15} />
+              <span>New scene</span>
+              <ChevronDown size={14} />
+            </button>
+            {templateMenuOpen ? (
+              <div className="ssTemplateMenu" role="menu">
+                {SCENE_TEMPLATES.map((template) => (
+                  <button
+                    key={template.id}
+                    type="button"
+                    role="menuitem"
+                    className="ssTemplateItem"
+                    onClick={() => openScene(template.scene, null)}
+                  >
+                    <strong>{template.label}</strong>
+                    <small>{template.description}</small>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
         </div>
       </header>
 
@@ -235,6 +356,8 @@ export default function ScenesPage() {
             <div className="p5SceneList">
               {scenes.map((scene) => {
                 const id = sceneId(scene);
+                const swatches = swatchStripCss(scene);
+                const anchorCount = asRecordArray(lightLayer(scene).palette).length;
                 return (
                   <button
                     key={id ?? sceneName(scene)}
@@ -242,13 +365,20 @@ export default function ScenesPage() {
                     className={`p5SceneItem${id !== null && id === selectedId ? ' selected' : ''}`}
                     onClick={() => id !== null && openScene(scene, id)}
                   >
-                    <span
-                      className="p5Swatch"
-                      style={{ background: colorSummaryCss(scene) }}
-                    />
+                    <span className="ssSwatchStrip">
+                      {swatches.map((css, index) => (
+                        <span
+                          key={index}
+                          className="p5Swatch"
+                          style={{ background: css }}
+                        />
+                      ))}
+                    </span>
                     <span className="p5SceneName">{sceneName(scene) || id}</span>
                     <span className="p5SceneMeta">
-                      {asRecordArray(scene.entries).length} entries
+                      {anchorCount > 0
+                        ? `${anchorCount} anchor${anchorCount === 1 ? '' : 's'}`
+                        : `${asRecordArray(lightLayer(scene).entries).length} entries`}
                     </span>
                   </button>
                 );
@@ -266,7 +396,7 @@ export default function ScenesPage() {
                 <button
                   className="consoleButton primary"
                   type="button"
-                  disabled={mutate.busy}
+                  disabled={mutate.busy || !sceneName(draft).trim()}
                   onClick={() => void handleSave()}
                 >
                   <Save size={15} />
@@ -297,37 +427,112 @@ export default function ScenesPage() {
                 />
               </div>
             </div>
+            <div className="formRow">
+              <div className="formRowLabel">
+                <span>Id</span>
+                <small>{isNew ? 'Derived from the name unless set' : 'Fixed once saved'}</small>
+              </div>
+              <div className="formRowControl">
+                <TextField
+                  value={asString(draft.id) ?? ''}
+                  placeholder={slugify(sceneName(draft))}
+                  mono
+                  disabled={!isNew}
+                  onChange={(value) => updateDraft({ ...draft, id: value })}
+                />
+              </div>
+            </div>
+            <div className="formRow">
+              <div className="formRowLabel">
+                <span>Description</span>
+              </div>
+              <div className="formRowControl">
+                <TextField
+                  value={asString(draft.description) ?? ''}
+                  placeholder="What this scene feels like"
+                  onChange={(value) =>
+                    updateDraft({ ...draft, description: value || undefined })
+                  }
+                />
+              </div>
+            </div>
+            <div className="formRow">
+              <div className="formRowLabel">
+                <span>Default transition</span>
+                <small>ms, unless an output sets its own</small>
+              </div>
+              <div className="formRowControl">
+                <NumberField
+                  value={asNumber(layer.default_transition_ms)}
+                  min={0}
+                  placeholder="e.g. 1200"
+                  onChange={(value) =>
+                    updateLayer({ ...layer, default_transition_ms: value })
+                  }
+                />
+              </div>
+            </div>
 
-            <h4 className="p5SubHeading">Default output</h4>
-            <OutputEditor
-              output={defaultOutput}
-              onChange={(next) => updateDraft({ ...draft, default_output: next })}
+            <h4 className="p5SubHeading">Palette</h4>
+            <PaletteEditor
+              key={selectedId ?? 'new-scene'}
+              layer={layer}
+              disabled={mutate.busy}
+              onChange={updateLayer}
             />
 
-            {palette.length > 0 ? (
-              <>
-                <h4 className="p5SubHeading">Palette</h4>
-                <div className="p5Palette">
-                  {palette.map((item, index) => (
-                    <span
-                      key={index}
-                      className="p5Swatch large"
-                      style={{
-                        background: colorSummaryCss({
-                          default_output: { color: item }
-                        })
-                      }}
-                      title={prettyJson(item)}
-                    />
-                  ))}
-                </div>
-              </>
-            ) : null}
+            <h4 className="p5SubHeading">House preview</h4>
+            <HousePreview scene={draft} house={house} loading={nodesQuery.loading} />
 
-            <h4 className="p5SubHeading">Per-target entries</h4>
+            <h4 className="p5SubHeading">Default output</h4>
+            {hasDefaultOutput ? (
+              <>
+                <p className="cardNote">
+                  Used by lights the palette does not reach (an empty palette) and
+                  by grouped rooms that take one command.
+                </p>
+                <OutputEditor
+                  output={defaultOutput}
+                  onChange={(next) => updateLayer({ ...layer, default_output: next })}
+                />
+                <button
+                  className="consoleButton small"
+                  type="button"
+                  onClick={() => {
+                    const next = { ...layer };
+                    delete next.default_output;
+                    updateLayer(next);
+                  }}
+                >
+                  <Trash2 size={14} />
+                  <span>Remove default output</span>
+                </button>
+              </>
+            ) : (
+              <button
+                className="consoleButton small"
+                type="button"
+                onClick={() =>
+                  updateLayer({
+                    ...layer,
+                    default_output: {
+                      power: 'on',
+                      brightness: 80,
+                      color: { kind: 'kelvin', kelvin: 3000 }
+                    }
+                  })
+                }
+              >
+                <Plus size={14} />
+                <span>Add default output</span>
+              </button>
+            )}
+
+            <h4 className="p5SubHeading">Pinned lights</h4>
             {entries.length === 0 ? (
               <p className="cardNote">
-                No per-target entries — the default output applies everywhere.
+                No pinned lights. Pin one to give it its own look; it steps out
+                of the palette rotation.
               </p>
             ) : null}
             {entries.map((entry, index) => {
@@ -335,20 +540,15 @@ export default function ScenesPage() {
               return (
                 <div className="p5Entry" key={index}>
                   <div className="p5EntryHeader">
-                    <TextField
-                      value={
-                        asString(entry.target_id) ??
-                        asString(entry.node_id) ??
-                        asString(entry.id) ??
-                        ''
-                      }
-                      placeholder="target id"
-                      mono
+                    <SelectField
+                      value={entryNodeId(entry)}
+                      placeholder="Pick a light…"
+                      options={lightOptions}
                       onChange={(value) => {
                         const next = entries.map((item, i) =>
-                          i === index ? { ...item, target_id: value } : item
+                          i === index ? entryWithNodeId(item, value) : item
                         );
-                        updateDraft({ ...draft, entries: next });
+                        updateLayer({ ...layer, entries: next });
                       }}
                     />
                     <button
@@ -356,8 +556,8 @@ export default function ScenesPage() {
                       type="button"
                       aria-label="Remove entry"
                       onClick={() =>
-                        updateDraft({
-                          ...draft,
+                        updateLayer({
+                          ...layer,
                           entries: entries.filter((_, i) => i !== index)
                         })
                       }
@@ -367,11 +567,12 @@ export default function ScenesPage() {
                   </div>
                   <OutputEditor
                     output={container.output}
+                    compact
                     onChange={(next) => {
                       const nextEntries = entries.map((item, i) =>
                         i === index ? container.write(item, next) : item
                       );
-                      updateDraft({ ...draft, entries: nextEntries });
+                      updateLayer({ ...layer, entries: nextEntries });
                     }}
                   />
                 </div>
@@ -381,43 +582,96 @@ export default function ScenesPage() {
               className="consoleButton small"
               type="button"
               onClick={() =>
-                updateDraft({
-                  ...draft,
+                updateLayer({
+                  ...layer,
                   entries: [
                     ...entries,
                     {
-                      target_id: nodeOptions[0]?.value ?? '',
-                      power: true,
-                      brightness: 80,
-                      color: { kelvin: 3000 }
+                      target: { kind: 'node', node_id: lightOptions[0]?.value ?? '' },
+                      output: {
+                        power: 'on',
+                        brightness: 80,
+                        color: { kind: 'kelvin', kelvin: 3000 }
+                      }
                     }
                   ]
                 })
               }
             >
               <Plus size={14} />
-              <span>Add entry</span>
+              <span>Pin a light</span>
             </button>
 
-            <h4 className="p5SubHeading">Apply / preview target</h4>
+            <h4 className="p5SubHeading">Apply to the whole home</h4>
+            <div className="ssApply">
+              <div className="ssApplyRow">
+                <SegmentedControl
+                  value={homeMode}
+                  onChange={(value) => setHomeMode(value as 'devices' | 'rooms')}
+                  options={[
+                    { value: 'devices', label: 'Every light' },
+                    { value: 'rooms', label: 'Room by room' }
+                  ]}
+                />
+                <NumberField
+                  value={dispatchSpacingMs}
+                  min={0}
+                  max={60000}
+                  placeholder="spacing ms"
+                  onChange={setDispatchSpacingMs}
+                />
+                <NumberField
+                  value={transitionMs}
+                  min={0}
+                  placeholder="transition ms"
+                  onChange={setTransitionMs}
+                />
+                <button
+                  className="consoleButton primary"
+                  type="button"
+                  disabled={mutate.busy || isNew || !selectedId}
+                  onClick={() => void handleApplyHome()}
+                >
+                  <Home size={15} />
+                  <span>Apply to whole home</span>
+                </button>
+              </div>
+              <p className="cardNote">
+                {homeMode === 'devices'
+                  ? 'Every light gets its own command and the palette runs through the house in the order shown above, one paced lane per hub.'
+                  : 'Each room is planned as a unit: grouped rooms recall one projection and the palette rotates room by room.'}
+                {isNew ? ' Save the scene first.' : ''}
+              </p>
+              {homeOutcome ? (
+                <div className={`ssResult${homeOutcome.applied < homeOutcome.attempted ? ' warn' : ''}`}>
+                  <Check size={15} />
+                  <span>
+                    Set {sceneName(draft)} on {homeOutcome.applied} of{' '}
+                    {homeOutcome.attempted}{' '}
+                    {homeOutcome.mode === 'devices' ? 'lights' : 'rooms'}
+                    {homeOutcome.skipped > 0 ? `, ${homeOutcome.skipped} skipped` : ''}
+                    {homeOutcome.queued ? ', pacing in the background' : ''}
+                  </span>
+                  {homeOutcome.lanes.length > 0 ? (
+                    <span className="ssTag">{homeOutcome.lanes.join(' · ')}</span>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+
+            <h4 className="p5SubHeading">Apply or preview on one target</h4>
             <div className="p5ApplyRow">
               <SelectField
                 value={targetId}
-                placeholder="Pick a node…"
-                options={nodeOptions}
+                placeholder="Pick a room or light…"
+                options={targetOptions}
                 onChange={setTargetId}
-              />
-              <NumberField
-                value={transitionMs}
-                min={0}
-                placeholder="transition ms"
-                onChange={setTransitionMs}
               />
               <button
                 className="consoleButton"
                 type="button"
                 disabled={mutate.busy || !targetId || isNew || !selectedId}
-                onClick={() => void handleApply()}
+                onClick={() => void handleApplyRoom()}
               >
                 <Play size={15} />
                 <span>Apply saved</span>
@@ -429,7 +683,7 @@ export default function ScenesPage() {
                 onClick={() => void handlePreviewDraft()}
               >
                 <Eye size={15} />
-                <span>Preview draft</span>
+                <span>Preview draft live</span>
               </button>
             </div>
 
@@ -453,7 +707,7 @@ export default function ScenesPage() {
           </SectionCard>
         ) : (
           <SectionCard title="Editor">
-            <EmptyState message="Select a scene or create a new one." />
+            <EmptyState message="Select a scene or start one from a template." />
           </SectionCard>
         )}
       </div>
@@ -473,4 +727,14 @@ function sceneId(scene: Record<string, unknown>): string | null {
 
 function sceneName(scene: Record<string, unknown>): string {
   return asString(scene.name) ?? asString(scene.label) ?? '';
+}
+
+/** The server derives an id from the name the same way; keep the two in step
+    so the list and the editor agree before the first save. */
+function slugify(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
 }
