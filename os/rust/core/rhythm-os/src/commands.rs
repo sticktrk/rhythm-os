@@ -25614,18 +25614,34 @@ mod tests {
         .unwrap();
         let (tx, rx) = std::sync::mpsc::sync_channel(16);
         harness.state.lock().unwrap().work_tx = Some(tx);
-        let spacing = std::time::Duration::from_millis(100);
+        let spacing = std::time::Duration::from_millis(120);
 
-        let response = do_home_scene_apply(
-            &harness.state,
-            "halloween",
-            HomeSceneApplyRequest {
-                transition_ms: None,
-                target_mode: HomeSceneTargetMode::Devices,
-            },
-            spacing,
-        )
-        .unwrap();
+        // Receive on this thread while the apply runs on another, so every
+        // arrival is stamped the moment the lane sends it. Receiving only
+        // after the apply returned let items pile up in the channel on a slow
+        // runner and collapsed the measured window.
+        let state = harness.state.clone();
+        let apply = std::thread::spawn(move || {
+            do_home_scene_apply(
+                &state,
+                "halloween",
+                HomeSceneApplyRequest {
+                    transition_ms: None,
+                    target_mode: HomeSceneTargetMode::Devices,
+                },
+                spacing,
+            )
+            .unwrap()
+        });
+        let mut arrivals = Vec::new();
+        for _ in 0..4 {
+            let item = rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("every lane hands its items to the worker");
+            assert!(matches!(item, WorkItem::ApplyNodeCommand { .. }));
+            arrivals.push(std::time::Instant::now());
+        }
+        let response = apply.join().unwrap();
 
         assert!(response.queued);
         assert_eq!(response.dispatch_count, 4);
@@ -25636,18 +25652,10 @@ mod tests {
             response.dispatch_lanes
         );
         assert_eq!(
-            response.estimated_dispatch_ms, 200,
+            response.estimated_dispatch_ms, 240,
             "the estimate is the longest lane (three Matter lights), not the sum"
         );
 
-        let mut arrivals = Vec::new();
-        for _ in 0..4 {
-            let item = rx
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .expect("every lane hands its items to the worker");
-            assert!(matches!(item, WorkItem::ApplyNodeCommand { .. }));
-            arrivals.push(std::time::Instant::now());
-        }
         let first = arrivals[0];
         let within_first_slot = arrivals
             .iter()
@@ -25660,8 +25668,9 @@ mod tests {
         );
         let last = *arrivals.last().unwrap();
         assert!(
-            last.duration_since(first) >= spacing * 2,
-            "the Matter lane still paces its own three commands"
+            last.duration_since(first) >= spacing * 2 - std::time::Duration::from_millis(20),
+            "the Matter lane still paces its own three commands: {:?}",
+            last.duration_since(first)
         );
     }
 
