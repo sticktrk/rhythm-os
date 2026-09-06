@@ -51,7 +51,7 @@ import { prettyJson } from '../../lib/json';
 import { HousePreview } from './scenes/HousePreview';
 import { OutputEditor } from './scenes/OutputEditor';
 import { PaletteEditor } from './scenes/PaletteEditor';
-import { houseLightOrder } from './scenes/scenePalette';
+import { houseLightOrder, newPaletteSeed } from './scenes/scenePalette';
 import {
   SCENE_TEMPLATES,
   entryNodeId,
@@ -482,7 +482,21 @@ export default function ScenesPage() {
             />
 
             <h4 className="p5SubHeading">House preview</h4>
-            <HousePreview scene={draft} house={house} loading={nodesQuery.loading} />
+            <HousePreview
+              scene={draft}
+              house={house}
+              loading={nodesQuery.loading}
+              onRandomize={
+                mutate.busy
+                  ? undefined
+                  : () =>
+                      updateLayer({
+                        ...layer,
+                        palette_mode: 'shuffle',
+                        palette_seed: newPaletteSeed()
+                      })
+              }
+            />
 
             <h4 className="p5SubHeading">Default output</h4>
             {hasDefaultOutput ? (

@@ -43,6 +43,7 @@ export function lightLayer(scene: Record<string, unknown>): Record<string, unkno
     'default_output',
     'palette',
     'palette_mode',
+    'palette_seed',
     'entries'
   ]) {
     if (key in scene) legacy[key] = scene[key];
@@ -62,6 +63,7 @@ export function withLightLayer(
     'default_output',
     'palette',
     'palette_mode',
+    'palette_seed',
     'entries'
   ]) {
     delete next[key];

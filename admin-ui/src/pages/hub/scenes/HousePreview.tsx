@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react';
-import { Home, Layers, Pin, SlidersHorizontal } from 'lucide-react';
+import { Home, Layers, Pin, Shuffle, SlidersHorizontal } from 'lucide-react';
 
 import { rgbToCss } from '../../../components/controls/colorMath';
 import { SelectField } from '../../../components/controls/fields';
@@ -20,11 +20,15 @@ type ScopeKind = PreviewScope['kind'];
 export function HousePreview({
   scene,
   house,
-  loading
+  loading,
+  onRandomize
 }: {
   scene: Record<string, unknown>;
   house: HouseOrder | null;
   loading?: boolean;
+  /** Deal the palette across the house in a fresh random order (switching
+      the layer to shuffle mode); absent when the preview is read-only. */
+  onRandomize?: () => void;
 }) {
   const hasHouse = house !== null && house.ordered.length > 0;
   const [scopeKind, setScopeKind] = useState<ScopeKind>(hasHouse ? 'home' : 'strip');
@@ -101,6 +105,21 @@ export function HousePreview({
             }))}
           />
         ) : null}
+        {onRandomize && preview.anchorCount > 0 ? (
+          <button
+            className="consoleButton small ssRandomize"
+            type="button"
+            onClick={onRandomize}
+            title={
+              preview.mode === 'shuffle'
+                ? 'Deal the colours across the house again'
+                : 'Deal the spread colours across the whole house in random order'
+            }
+          >
+            <Shuffle size={14} />
+            {preview.mode === 'shuffle' ? 'Re-roll house' : 'Randomize house'}
+          </button>
+        ) : null}
         {effectiveKind === 'strip' ? (
           <div className="ssStripSlider">
             <Slider
@@ -127,7 +146,12 @@ export function HousePreview({
               <>
                 {' '}
                 · {preview.anchorCount} anchor{preview.anchorCount === 1 ? '' : 's'}{' '}
-                {preview.mode === 'spread' ? 'spread' : 'cycled'} over{' '}
+                {preview.mode === 'spread'
+                  ? 'spread'
+                  : preview.mode === 'shuffle'
+                    ? 'shuffled'
+                    : 'cycled'}{' '}
+                over{' '}
                 {preview.span} slot{preview.span === 1 ? '' : 's'}
               </>
             ) : null}

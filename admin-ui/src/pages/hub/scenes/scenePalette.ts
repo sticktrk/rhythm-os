@@ -24,7 +24,56 @@ export type SceneOutput = {
   transitionMs?: number;
 };
 
-export type PaletteMode = 'spread' | 'cycle';
+/** `spread` walks the anchor path so every light differs; `cycle` deals the
+    anchors out and repeats; `shuffle` deals the spread colours in a random
+    order fixed by the layer's `palette_seed`. */
+export type PaletteMode = 'spread' | 'cycle' | 'shuffle';
+
+export function parsePaletteMode(value: unknown): PaletteMode {
+  return value === 'cycle' || value === 'shuffle' ? value : 'spread';
+}
+
+/** The seed a shuffled layer deals with; zero (the wire default) when unset. */
+export function parsePaletteSeed(value: unknown): number {
+  const seed = asNumber(value);
+  return seed === undefined || !Number.isFinite(seed) ? 0 : Math.floor(seed) >>> 0;
+}
+
+/** A fresh non-zero 32-bit seed for a re-roll. */
+export function newPaletteSeed(): number {
+  const bytes = new Uint32Array(1);
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    crypto.getRandomValues(bytes);
+  } else {
+    bytes[0] = Math.floor(Math.random() * 0xffffffff);
+  }
+  return bytes[0] === 0 ? 1 : bytes[0];
+}
+
+/** mulberry32: the same generator `rhythm-os` runs, so a shuffled preview
+    matches what the house receives slot for slot. Keep the two in step. */
+export function mulberry32(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return (t ^ (t >>> 14)) >>> 0;
+  };
+}
+
+/** The Fisher-Yates order of `0..span` under `seed`: entry `i` is the spread
+    slot that shuffled slot `i` takes. Mirrors `shuffled_slot` in rhythm-os. */
+export function slotPermutation(seed: number, span: number): number[] {
+  const order = Array.from({ length: Math.max(0, span) }, (_, index) => index);
+  const next = mulberry32(seed);
+  for (let index = order.length - 1; index > 0; index -= 1) {
+    const swapWith = next() % (index + 1);
+    [order[index], order[swapWith]] = [order[swapWith], order[index]];
+  }
+  return order;
+}
 
 export function parseOutput(record: Record<string, unknown>): SceneOutput {
   const color = asRecord(record.color);
@@ -137,15 +186,23 @@ export function blendOutputs(
     Mirrors `LightSceneLayer::palette_output` in rhythm-os: cycle deals the
     anchors out and wraps; spread uses the anchors as they are while the
     span fits, and otherwise walks the open path from the first anchor to
-    the last so every slot is distinct. */
+    the last so every slot is distinct; shuffle deals the spread colours to
+    the slots in the order `seed` fixes. Pass `permutation` when dealing a
+    whole span so the shuffle order is built once. */
 export function paletteOutputForSlot(
   anchors: SceneOutput[],
   mode: PaletteMode,
   slot: number,
-  span: number
+  span: number,
+  seed = 0,
+  permutation?: number[]
 ): SceneOutput | null {
   const count = anchors.length;
   if (count === 0) return null;
+  span = Math.max(1, span);
+  if (mode === 'shuffle' && slot < span) {
+    slot = (permutation ?? slotPermutation(seed, span))[slot] ?? slot;
+  }
   if (mode === 'cycle' || span <= count) return anchors[slot % count];
   const lastLeg = count - 1;
   const position = (Math.min(slot, span - 1) / (span - 1)) * lastLeg;
@@ -158,15 +215,17 @@ export function paletteOutputForSlot(
   );
 }
 
-/** The whole spread path sampled for a gradient bar. */
+/** The whole colour path sampled for a gradient bar. A shuffle deals the
+    spread path, so the bar shows the path rather than the deal. */
 export function palettePathSamples(
   anchors: SceneOutput[],
   mode: PaletteMode,
   samples: number
 ): Rgb[] {
   const result: Rgb[] = [];
+  const pathMode: PaletteMode = mode === 'cycle' ? 'cycle' : 'spread';
   for (let index = 0; index < samples; index += 1) {
-    const output = paletteOutputForSlot(anchors, mode, index, samples);
+    const output = paletteOutputForSlot(anchors, pathMode, index, samples);
     if (output) result.push(outputRgb(output));
   }
   return result;
@@ -288,19 +347,21 @@ export type ScenePreview = {
   span: number;
   anchorCount: number;
   mode: PaletteMode;
+  seed: number;
 };
 
 export function sceneLayer(scene: Record<string, unknown>): {
   anchors: SceneOutput[];
   mode: PaletteMode;
+  seed: number;
   defaultOutput: SceneOutput | null;
   entries: Map<string, SceneOutput>;
 } {
   const light = asRecord(scene.light);
   const layer = Object.keys(light).length > 0 ? light : scene;
   const anchors = asRecordArray(layer.palette).map(parseOutput);
-  const mode: PaletteMode =
-    asString(layer.palette_mode) === 'cycle' ? 'cycle' : 'spread';
+  const mode = parsePaletteMode(asString(layer.palette_mode));
+  const seed = parsePaletteSeed(layer.palette_seed);
   const defaultRecord = asRecord(layer.default_output);
   const defaultOutput =
     Object.keys(defaultRecord).length > 0 ? parseOutput(defaultRecord) : null;
@@ -318,7 +379,7 @@ export function sceneLayer(scene: Record<string, unknown>): {
       parseOutput(Object.keys(nested).length > 0 ? nested : entry)
     );
   }
-  return { anchors, mode, defaultOutput, entries };
+  return { anchors, mode, seed, defaultOutput, entries };
 }
 
 /** Render what every light would receive, the way the server deals the
@@ -329,7 +390,7 @@ export function renderScenePreview(
   house: HouseOrder,
   scope: PreviewScope
 ): ScenePreview {
-  const { anchors, mode, defaultOutput, entries } = sceneLayer(scene);
+  const { anchors, mode, seed, defaultOutput, entries } = sceneLayer(scene);
   let candidates: HouseLight[];
   switch (scope.kind) {
     case 'home':
@@ -355,6 +416,8 @@ export function renderScenePreview(
   }
   const active = candidates.filter((light) => !light.disabled);
   const span = active.filter((light) => !entries.has(light.id)).length;
+  const permutation =
+    mode === 'shuffle' ? slotPermutation(seed, span) : undefined;
   let slot = 0;
   const lights: PreviewLight[] = candidates.map((light) => {
     const base = {
@@ -376,7 +439,7 @@ export function renderScenePreview(
       return {
         ...base,
         slot: own,
-        output: paletteOutputForSlot(anchors, mode, own, span),
+        output: paletteOutputForSlot(anchors, mode, own, span, seed, permutation),
         pinned: false,
         skipped: false
       };
@@ -389,7 +452,7 @@ export function renderScenePreview(
       skipped: false
     };
   });
-  return { lights, span, anchorCount: anchors.length, mode };
+  return { lights, span, anchorCount: anchors.length, mode, seed };
 }
 
 // ---------------------------------------------------------------------------

@@ -2,7 +2,9 @@ import { useState } from 'react';
 import {
   ChevronLeft,
   ChevronRight,
+  Dices,
   Plus,
+  Shuffle,
   Sparkles,
   Trash2,
   Wand2
@@ -21,10 +23,13 @@ import {
   analogous,
   complementary,
   hueSweep,
+  newPaletteSeed,
   outputRgb,
   outputToRecord,
   palettePathSamples,
   parseOutput,
+  parsePaletteMode,
+  parsePaletteSeed,
   warmToCool,
   type PaletteMode,
   type SceneOutput
@@ -42,8 +47,8 @@ export function PaletteEditor({
   onChange: (next: Record<string, unknown>) => void;
 }) {
   const anchors = asRecordArray(layer.palette);
-  const mode: PaletteMode =
-    asString(layer.palette_mode) === 'cycle' ? 'cycle' : 'spread';
+  const mode = parsePaletteMode(asString(layer.palette_mode));
+  const seed = parsePaletteSeed(layer.palette_seed);
   const [selected, setSelected] = useState<number | null>(
     anchors.length > 0 ? 0 : null
   );
@@ -103,19 +108,46 @@ export function PaletteEditor({
         <SegmentedControl
           value={mode}
           disabled={disabled}
-          onChange={(value) =>
-            onChange({ ...layer, palette_mode: value as PaletteMode })
-          }
+          onChange={(value) => {
+            const next = value as PaletteMode;
+            onChange({
+              ...layer,
+              palette_mode: next,
+              // A shuffle needs a seed to be reproducible; keep any it has.
+              ...(next === 'shuffle' && seed === 0
+                ? { palette_seed: newPaletteSeed() }
+                : {})
+            });
+          }}
           options={[
             { value: 'spread', label: 'Spread', icon: <Sparkles size={14} /> },
+            { value: 'shuffle', label: 'Shuffle', icon: <Shuffle size={14} /> },
             { value: 'cycle', label: 'Cycle' }
           ]}
         />
         <p className="cardNote ssPaletteNote">
           {mode === 'spread'
             ? 'Anchors mark a colour path. Every light gets its own point along it, first anchor to last, so no two bulbs match even with a short palette.'
-            : 'Anchors are dealt out in order and repeat, so colours recur every few lights.'}
+            : mode === 'shuffle'
+              ? 'The same one-colour-per-light path, dealt across the whole house in a random order so rooms mix instead of walking the palette. Re-roll until the preview looks right; the house gets exactly that deal.'
+              : 'Anchors are dealt out in order and repeat, so colours recur every few lights.'}
         </p>
+        {mode === 'shuffle' ? (
+          <div className="ssReroll">
+            <button
+              className="consoleButton small"
+              type="button"
+              disabled={disabled}
+              onClick={() => onChange({ ...layer, palette_seed: newPaletteSeed() })}
+            >
+              <Dices size={14} />
+              Re-roll
+            </button>
+            <span className="ssSeed" title="Shuffle seed">
+              deal #{seed.toString(16).padStart(8, '0')}
+            </span>
+          </div>
+        ) : null}
       </div>
 
       {parsed.length > 0 ? (
