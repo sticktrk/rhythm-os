@@ -6,21 +6,30 @@ import { ToggleSwitch } from '../../../components/controls/ToggleSwitch';
 import {
   asBoolean,
   asNumber,
-  asRecord
+  asRecord,
+  asString
 } from '../../../device/values';
 
-/** A scene "output" is a loose record with power/brightness/color keys.
-    Color is kelvin | rgb | xy; xy stays JSON-only (no wheel mapping). */
+/** A scene output on the wire: `power` is "on" | "off", `color` is tagged
+    with `kind` ("kelvin" | "rgb" | "xy" | "rgb_xy"). Legacy records with a
+    boolean `power` or an untagged colour are read but rewritten canonically.
+    `xy` colours stay JSON-only (no wheel mapping). */
 export function OutputEditor({
   output,
   disabled,
+  compact,
   onChange
 }: {
   output: Record<string, unknown>;
   disabled?: boolean;
+  compact?: boolean;
   onChange: (next: Record<string, unknown>) => void;
 }) {
-  const power = asBoolean(output.power) ?? asBoolean(output.on) ?? true;
+  const powerRaw = output.power;
+  const power =
+    typeof powerRaw === 'string'
+      ? powerRaw !== 'off'
+      : (asBoolean(powerRaw) ?? asBoolean(output.on) ?? true);
   const brightness = asNumber(output.brightness) ?? 80;
   const color = asRecord(output.color);
   const kelvin = asNumber(color.kelvin);
@@ -31,23 +40,25 @@ export function OutputEditor({
     b: asNumber(rgbRecord.b) ?? 140
   };
   const colorKind =
-    kelvin !== undefined
+    asString(color.kind) === 'kelvin' || kelvin !== undefined
       ? 'kelvin'
       : asNumber(rgbRecord.r) !== undefined
         ? 'rgb'
         : 'kelvin';
 
   function patch(next: Record<string, unknown>) {
-    onChange({ ...output, ...next });
+    const merged: Record<string, unknown> = { ...output, ...next };
+    delete merged.on;
+    onChange(merged);
   }
 
   return (
-    <div className="p5Output">
+    <div className={`p5Output${compact ? ' compact' : ''}`}>
       <div className="p5OutputRow">
         <ToggleSwitch
           checked={power}
           disabled={disabled}
-          onChange={(value) => patch({ power: value })}
+          onChange={(value) => patch({ power: value ? 'on' : 'off' })}
           label={power ? 'On' : 'Off'}
         />
         <SegmentedControl
@@ -58,8 +69,8 @@ export function OutputEditor({
             patch({
               color:
                 kind === 'kelvin'
-                  ? { kelvin: kelvin ?? 3000 }
-                  : { rgb }
+                  ? { kind: 'kelvin', kelvin: kelvin ?? 3000 }
+                  : { kind: 'rgb', rgb }
             });
           }}
           options={[
@@ -92,15 +103,17 @@ export function OutputEditor({
           value={kelvin ?? 3000}
           label="Color temp"
           disabled={disabled}
-          onCommit={(value) => patch({ color: { kelvin: Math.round(value) } })}
+          onCommit={(value) =>
+            patch({ color: { kind: 'kelvin', kelvin: Math.round(value) } })
+          }
         />
       ) : (
         <div className="p5WheelRow">
           <ColorWheel
             rgb={rgb}
-            size={150}
+            size={compact ? 120 : 150}
             disabled={disabled}
-            onCommit={(next) => patch({ color: { rgb: next } })}
+            onCommit={(next) => patch({ color: { kind: 'rgb', rgb: next } })}
           />
         </div>
       )}
