@@ -312,7 +312,7 @@ pub struct SceneDraftPreviewRequest {
 pub struct HomeSceneApplyRequest {
     #[serde(default)]
     pub transition_ms: Option<u32>,
-    /// How the house is carved into targets. Defaults to rooms.
+    /// How the house is carved into targets. Defaults to devices.
     #[serde(default)]
     pub target_mode: HomeSceneTargetMode,
 }
@@ -324,13 +324,13 @@ pub enum HomeSceneTargetMode {
     /// Every eligible room (plus every roomless light) is one target, planned
     /// by the single-target planner: a grouped room recalls one managed
     /// projection or one group command, and the palette rotates room by room.
-    #[default]
     Rooms,
     /// Every eligible light device is one target regardless of its room. Each
     /// device gets its own command, the palette rotates across the whole house
     /// in one continuous order, and dispatch runs as one paced lane per hub so
-    /// hubs proceed concurrently. This is the path for scenes authored per
-    /// device so the house reads as one theme instead of a set of rooms.
+    /// hubs proceed concurrently. The default: a whole-home scene is one theme
+    /// for the house, not a set of per-room recalls.
+    #[default]
     Devices,
 }
 

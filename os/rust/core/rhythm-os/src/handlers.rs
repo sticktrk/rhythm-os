@@ -7347,6 +7347,24 @@ mod tests {
         let rejected =
             handle_post_home_scene_apply(&state, "halloween", &json!({"target_mode": "buildings"}));
         assert_eq!(rejected.status, 400, "{}", rejected.body);
+
+        // Omitting the mode is the device mode: a whole-home scene is one
+        // theme for the house by default.
+        let defaulted =
+            handle_post_home_scene_apply(&state, "halloween", &json!({"dispatch_spacing_ms": 0}));
+        assert_eq!(defaulted.status, 200, "{}", defaulted.body);
+        let parsed: serde_json::Value = serde_json::from_str(&defaulted.body).unwrap();
+        assert_eq!(parsed["target_mode"], "devices");
+
+        let rooms = handle_post_home_scene_apply(
+            &state,
+            "halloween",
+            &json!({"target_mode": "rooms", "dispatch_spacing_ms": 0}),
+        );
+        assert_eq!(rooms.status, 200, "{}", rooms.body);
+        let parsed: serde_json::Value = serde_json::from_str(&rooms.body).unwrap();
+        assert_eq!(parsed["target_mode"], "rooms");
+        assert!(parsed.get("dispatch_lanes").is_none());
     }
 
     #[test]

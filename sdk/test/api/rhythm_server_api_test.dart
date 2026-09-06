@@ -1902,7 +1902,11 @@ void main() {
       expect(result?.dispatchCount, 0);
       expect(result?.targets.single.affectedNodeIds, isEmpty);
       expect(result?.targets.single.succeeded, isTrue);
-      expect(result?.targetMode, RhythmHomeSceneTargetMode.rooms);
+      expect(
+        result?.targetMode,
+        RhythmHomeSceneTargetMode.devices,
+        reason: 'a payload without the field came from the device default',
+      );
       expect(result?.dispatchLanes, isEmpty);
       verify(() => dio.post(
             'api/scenes/halloween/apply-home',

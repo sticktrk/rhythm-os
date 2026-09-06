@@ -47,7 +47,7 @@ export function applyHomeScene(
     transitionMs?: number;
     dispatchSpacingMs?: number;
     correlationId?: string;
-    /** `rooms` (server default) or `devices` for per-light, per-hub-lane dispatch. */
+    /** `devices` (server default: per-light, one paced lane per hub) or `rooms`. */
     targetMode?: 'rooms' | 'devices';
   } = {}
 ) {

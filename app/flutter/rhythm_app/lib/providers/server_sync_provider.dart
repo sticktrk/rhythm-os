@@ -939,8 +939,14 @@ class ServerSyncProvider extends ChangeNotifier {
 
     final brightness =
         scene == null ? null : _sceneRepresentativeBrightness(scene);
-    for (final target in result.appliedTargets) {
-      final roomId = target.targetId;
+    // In device mode every applied target is a light; the card that shows it
+    // is the light's room (the server binds Mood there), so fold the targets
+    // onto their rooms. Roomless lights and room targets map to themselves.
+    final presentedIds = <String>{
+      for (final target in result.appliedTargets)
+        _roomProvider.getNode(target.targetId)?.parentId ?? target.targetId,
+    };
+    for (final roomId in presentedIds) {
       _moodSceneApplyGenerations[roomId] =
           (_moodSceneApplyGenerations[roomId] ?? 0) + 1;
       if (color != null) {

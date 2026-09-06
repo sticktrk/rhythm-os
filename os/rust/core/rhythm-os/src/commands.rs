@@ -5910,6 +5910,9 @@ impl Drop for ManagedSceneBatch {
 /// abort the rest. The whole request only fails when the scene is missing, the
 /// scene is a room-bound native scene, no target is eligible, or every eligible
 /// target failed.
+///
+/// `target_mode` defaults to devices (see [`home_scene_apply_to_devices`]);
+/// `rooms` keeps the per-room planner with grouped projections.
 pub fn do_home_scene_apply(
     state: &SharedState,
     scene_id: &str,
@@ -25027,7 +25030,7 @@ mod tests {
             "halloween",
             HomeSceneApplyRequest {
                 transition_ms: None,
-                ..Default::default()
+                target_mode: HomeSceneTargetMode::Rooms,
             },
             std::time::Duration::ZERO,
         )
@@ -25077,7 +25080,7 @@ mod tests {
             "halloween",
             HomeSceneApplyRequest {
                 transition_ms: None,
-                ..Default::default()
+                target_mode: HomeSceneTargetMode::Rooms,
             },
             std::time::Duration::ZERO,
         )
@@ -25130,7 +25133,7 @@ mod tests {
             "halloween",
             HomeSceneApplyRequest {
                 transition_ms: None,
-                ..Default::default()
+                target_mode: HomeSceneTargetMode::Rooms,
             },
             std::time::Duration::ZERO,
         )
@@ -25163,7 +25166,7 @@ mod tests {
             "halloween",
             HomeSceneApplyRequest {
                 transition_ms: None,
-                ..Default::default()
+                target_mode: HomeSceneTargetMode::Rooms,
             },
             std::time::Duration::ZERO,
         )
@@ -25232,7 +25235,7 @@ mod tests {
             "halloween",
             HomeSceneApplyRequest {
                 transition_ms: None,
-                ..Default::default()
+                target_mode: HomeSceneTargetMode::Rooms,
             },
             std::time::Duration::ZERO,
         )
@@ -25261,7 +25264,7 @@ mod tests {
             &crate::scenes::native_scene_id("Hue", "abc-123"),
             HomeSceneApplyRequest {
                 transition_ms: None,
-                ..Default::default()
+                target_mode: HomeSceneTargetMode::Rooms,
             },
             std::time::Duration::ZERO,
         )
@@ -25296,7 +25299,7 @@ mod tests {
             "halloween",
             HomeSceneApplyRequest {
                 transition_ms: None,
-                ..Default::default()
+                target_mode: HomeSceneTargetMode::Rooms,
             },
             std::time::Duration::ZERO,
         )
@@ -25331,7 +25334,7 @@ mod tests {
             "not-a-scene",
             HomeSceneApplyRequest {
                 transition_ms: None,
-                ..Default::default()
+                target_mode: HomeSceneTargetMode::Rooms,
             },
             std::time::Duration::ZERO,
         )
@@ -25356,7 +25359,7 @@ mod tests {
             "halloween",
             HomeSceneApplyRequest {
                 transition_ms: None,
-                ..Default::default()
+                target_mode: HomeSceneTargetMode::Rooms,
             },
             spacing,
         )
@@ -25415,7 +25418,7 @@ mod tests {
             "halloween",
             HomeSceneApplyRequest {
                 transition_ms: None,
-                ..Default::default()
+                target_mode: HomeSceneTargetMode::Rooms,
             },
             std::time::Duration::ZERO,
         )
@@ -25686,7 +25689,7 @@ mod tests {
             "halloween",
             HomeSceneApplyRequest {
                 transition_ms: None,
-                ..Default::default()
+                target_mode: HomeSceneTargetMode::Rooms,
             },
             std::time::Duration::ZERO,
         )
@@ -25722,7 +25725,7 @@ mod tests {
             "halloween",
             HomeSceneApplyRequest {
                 transition_ms: None,
-                ..Default::default()
+                target_mode: HomeSceneTargetMode::Rooms,
             },
             spacing,
         )
@@ -25751,7 +25754,7 @@ mod tests {
             "halloween",
             HomeSceneApplyRequest {
                 transition_ms: None,
-                ..Default::default()
+                target_mode: HomeSceneTargetMode::Rooms,
             },
             std::time::Duration::ZERO,
         )
