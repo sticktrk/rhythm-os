@@ -402,6 +402,11 @@ class RhythmLightScene {
   final int? defaultTransitionMs;
   final RhythmLightSceneOutput? defaultOutput;
   final List<RhythmLightSceneOutput> palette;
+
+  /// How the palette is dealt across lights: `spread` (the default) derives
+  /// one distinct colour per light by walking a loop through the palette
+  /// anchors; `cycle` deals the anchors out in order and repeats.
+  final String paletteMode;
   final List<RhythmLightSceneEntry> entries;
   final Map<String, dynamic> raw;
 
@@ -409,6 +414,7 @@ class RhythmLightScene {
     this.defaultTransitionMs,
     this.defaultOutput,
     this.palette = const [],
+    this.paletteMode = 'spread',
     this.entries = const [],
     this.raw = const <String, dynamic>{},
   });
@@ -418,6 +424,7 @@ class RhythmLightScene {
       ..remove('default_transition_ms')
       ..remove('default_output')
       ..remove('palette')
+      ..remove('palette_mode')
       ..remove('entries');
     final defaultOutputJson = jsonMap(json['default_output']);
     return RhythmLightScene(
@@ -433,6 +440,9 @@ class RhythmLightScene {
           .nonNulls
           .map(RhythmLightSceneOutput.fromJson)
           .toList(),
+      paletteMode: (json['palette_mode'] as String?)?.trim().isNotEmpty == true
+          ? (json['palette_mode'] as String).trim()
+          : 'spread',
       entries: ((json['entries'] as List<dynamic>?) ?? const <dynamic>[])
           .map(jsonMap)
           .nonNulls
@@ -472,6 +482,7 @@ class RhythmLightScene {
         'default_output': defaultOutput?.toJson(),
         if (palette.isNotEmpty)
           'palette': palette.map((output) => output.toJson()).toList(),
+        if (palette.isNotEmpty) 'palette_mode': paletteMode,
         'entries': entries.map((entry) => entry.toJson()).toList(),
       };
 }

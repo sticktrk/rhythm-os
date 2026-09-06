@@ -781,6 +781,7 @@ impl<H: HueTransport> HueDiscovery<H> {
                             .find(|output| output.power == LightScenePower::On)
                             .cloned(),
                         palette,
+                        palette_mode: Default::default(),
                         entries: Vec::new(),
                     }),
                     extensions,

@@ -1540,6 +1540,18 @@ pub struct RoomProfileSettings {
     )]
     pub mood_scene_palette_offset: Option<u32>,
 
+    /// How many palette slots the apply that bound `mood_scene_id` covered.
+    ///
+    /// A spread palette places each slot on a colour loop relative to the
+    /// whole apply, so re-rendering one room needs the span the house was
+    /// rendered with, not just this room's slot. `None` means the span is
+    /// this node's own light count.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub mood_scene_palette_span: Option<u32>,
+
     /// Optional per-room fade override.
     #[cfg_attr(
         feature = "serde",
@@ -1611,6 +1623,7 @@ impl RoomProfileSettings {
             && self.mood_profile_id.is_none()
             && self.mood_scene_id.is_none()
             && self.mood_scene_palette_offset.is_none()
+            && self.mood_scene_palette_span.is_none()
             && self.fade_ms.is_none()
             && self.motion_timeout_secs.is_none()
             && self.motion_activation_enabled.is_none()
@@ -1725,6 +1738,11 @@ impl RoomProfileSettings {
                 self.mood_scene_palette_offset
             } else {
                 parent.mood_scene_palette_offset
+            },
+            mood_scene_palette_span: if self.mood_scene_id.is_some() {
+                self.mood_scene_palette_span
+            } else {
+                parent.mood_scene_palette_span
             },
             fade_ms: self.fade_ms.clone().or_else(|| parent.fade_ms.clone()),
             motion_timeout_secs: self
@@ -2369,6 +2387,7 @@ mod tests {
             mood_profile_id: None,
             mood_scene_id: None,
             mood_scene_palette_offset: None,
+            mood_scene_palette_span: None,
             fade_ms: Some(TimerSetting::Fixed { value: 250 }),
             motion_timeout_secs: Some(TimerSetting::Fixed { value: 42 }),
             motion_activation_enabled: Some(false),
