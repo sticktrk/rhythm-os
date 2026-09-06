@@ -57,8 +57,8 @@ use crate::scenes::{
     is_native_scene_id, HomeSceneApplyRequest, HomeSceneApplyResponse, HomeSceneDispatchLane,
     HomeSceneTargetMode, HomeSceneTargetResult, LightSceneColor, LightSceneEntry, LightSceneLayer,
     LightSceneOutput, LightScenePower, LightScenePreviewSession, LightSceneTargetRef,
-    SceneApplyRequest, SceneApplyResponse, SceneDefinition, SceneDraftPreviewRequest,
-    ScenePreviewRequest, SceneSource, DEFAULT_LIGHT_SCENE_PREVIEW_MS,
+    PaletteWindow, SceneApplyRequest, SceneApplyResponse, SceneDefinition,
+    SceneDraftPreviewRequest, ScenePreviewRequest, SceneSource, DEFAULT_LIGHT_SCENE_PREVIEW_MS,
 };
 use crate::state::{
     current_epoch_ms, rooms_from_engine, AppState, ObservedPowerSource, ObservedPowerState,
@@ -1160,6 +1160,7 @@ impl RoomProfileSettingsPatch {
                 // A new binding starts its palette from the first slot; the
                 // offset only ever describes the scene it was written with.
                 settings.mood_scene_palette_offset = None;
+                settings.mood_scene_palette_span = None;
             }
             settings.mood_scene_id = mood_scene_id.clone();
         }
@@ -4756,7 +4757,7 @@ fn build_scene_application_plan_locked(
     scene: &SceneDefinition,
     target_id: &str,
     transition_ms: Option<u32>,
-    palette_offset: usize,
+    palette: PaletteWindow,
 ) -> Result<SceneApplicationPlan> {
     let layer = scene
         .light
@@ -4810,10 +4811,11 @@ fn build_scene_application_plan_locked(
         && !direct_palette_room
     {
         let room_output = if layer.palette.is_empty() {
-            layer.default_output.as_ref()
+            layer.default_output.clone()
         } else {
+            // One grouped command is one slot of the apply.
             palette_slots_consumed = 1;
-            layer.palette.get(palette_offset % layer.palette.len())
+            layer.palette_output(palette.offset, palette.span_or(1))
         };
         if let Some(room_output) = room_output {
             push_scene_light_command(
@@ -4821,7 +4823,7 @@ fn build_scene_application_plan_locked(
                 layer.default_transition_ms,
                 transition_ms,
                 target_id,
-                room_output,
+                &room_output,
                 &mut commands,
                 &mut unresolved_node_ids,
             )?;
@@ -4836,15 +4838,17 @@ fn build_scene_application_plan_locked(
     if !room_default_dispatched {
         if !layer.palette.is_empty() {
             palette_slots_consumed = implicit_node_ids.len();
+            let span = palette.span_or(implicit_node_ids.len());
             for (index, node_id) in implicit_node_ids.iter().enumerate() {
-                let output =
-                    &layer.palette[palette_offset.wrapping_add(index) % layer.palette.len()];
+                let output = layer
+                    .palette_output(palette.offset.wrapping_add(index), span)
+                    .expect("palette is not empty");
                 push_scene_light_command(
                     s,
                     layer.default_transition_ms,
                     transition_ms,
                     node_id,
-                    output,
+                    &output,
                     &mut commands,
                     &mut unresolved_node_ids,
                 )?;
@@ -4901,7 +4905,7 @@ fn render_scene_lights_locked(
     scene: &SceneDefinition,
     target_id: &str,
     transition_ms: Option<u32>,
-    palette_offset: usize,
+    palette: PaletteWindow,
 ) -> Result<RenderedSceneTarget> {
     let layer = scene
         .light
@@ -4924,10 +4928,13 @@ fn render_scene_lights_locked(
     let mut palette_slots_consumed = 0usize;
     if !layer.palette.is_empty() {
         palette_slots_consumed = implicit_node_ids.len();
+        let span = palette.span_or(implicit_node_ids.len());
         for (index, node_id) in implicit_node_ids.into_iter().enumerate() {
             outputs.insert(
                 node_id,
-                layer.palette[palette_offset.wrapping_add(index) % layer.palette.len()].clone(),
+                layer
+                    .palette_output(palette.offset.wrapping_add(index), span)
+                    .expect("palette is not empty"),
             );
         }
     } else if let Some(default_output) = &layer.default_output {
@@ -5180,14 +5187,24 @@ fn companion_scene_plan_locked(
     })
 }
 
-/// The palette slot a node's bound mood scene starts at, as persisted by the
-/// apply that bound it. Nodes bound by a single-target apply start at 0.
-fn stored_mood_palette_offset(runtime: &Arc<dyn RuntimeHandle>, node_id: &str) -> usize {
+/// The palette window a node's bound mood scene was rendered with, as
+/// persisted by the apply that bound it. Nodes bound by a single-target apply
+/// start at slot 0 and span their own lights.
+fn stored_mood_palette_window(runtime: &Arc<dyn RuntimeHandle>, node_id: &str) -> PaletteWindow {
     runtime
         .engine_effective_node_snapshot(node_id)
-        .and_then(|snap| snap.profile_settings.mood_scene_palette_offset)
-        .map(|offset| offset as usize)
-        .unwrap_or(0)
+        .map(|snap| PaletteWindow {
+            offset: snap
+                .profile_settings
+                .mood_scene_palette_offset
+                .map(|offset| offset as usize)
+                .unwrap_or(0),
+            span: snap
+                .profile_settings
+                .mood_scene_palette_span
+                .map(|span| span as usize),
+        })
+        .unwrap_or_default()
 }
 
 fn set_scene_committed_state(
@@ -5196,7 +5213,7 @@ fn set_scene_committed_state(
     scene_id: &str,
     target_id: &str,
     affected_node_ids: &[String],
-    palette_offset: usize,
+    palette: PaletteWindow,
 ) {
     let mut state_node_ids: BTreeSet<String> = BTreeSet::new();
     if runtime
@@ -5214,9 +5231,11 @@ fn set_scene_committed_state(
         };
         let mut profile_settings = snap.profile_settings.clone();
         profile_settings.mood_scene_id = Some(scene_id.to_string());
-        profile_settings.mood_scene_palette_offset = u32::try_from(palette_offset)
+        profile_settings.mood_scene_palette_offset = u32::try_from(palette.offset)
             .ok()
             .filter(|offset| *offset > 0);
+        profile_settings.mood_scene_palette_span =
+            palette.span.and_then(|span| u32::try_from(span).ok());
         runtime.restore_node_state(
             &node_id,
             RestoredNodeState {
@@ -5301,18 +5320,18 @@ struct PlannedSceneTarget {
 ///
 /// Shared by the single-target apply/preview path and by the whole-home apply so
 /// both paths produce identical rendering, managed projection and dispatch
-/// decisions. `palette_offset` is 0 for the single-target path, which keeps its
-/// behaviour byte-identical.
+/// decisions. The single-target path passes a default window (slot 0, own
+/// span); the whole-home apply threads the house-wide window through.
 fn plan_scene_target_locked(
     s: &AppState,
     runtime: &Arc<dyn RuntimeHandle>,
     scene: &SceneDefinition,
     target_id: &str,
     transition_ms: Option<u32>,
-    palette_offset: usize,
+    palette: PaletteWindow,
 ) -> Result<PlannedSceneTarget> {
     let rendered =
-        render_scene_lights_locked(s, runtime, scene, target_id, transition_ms, palette_offset)?;
+        render_scene_lights_locked(s, runtime, scene, target_id, transition_ms, palette)?;
     if rendered.scope_node_ids.is_empty() {
         anyhow::bail!(
             "Target '{}' has no light scene-addressable nodes",
@@ -5322,14 +5341,7 @@ fn plan_scene_target_locked(
     let managed_dispatches =
         managed_scene_dispatches_locked(s, scene, &rendered.scope_node_ids, &rendered.lights)?;
     let plan = if managed_dispatches.is_empty() {
-        build_scene_application_plan_locked(
-            s,
-            runtime,
-            scene,
-            target_id,
-            transition_ms,
-            palette_offset,
-        )?
+        build_scene_application_plan_locked(s, runtime, scene, target_id, transition_ms, palette)?
     } else {
         companion_scene_plan_locked(
             s,
@@ -5383,9 +5395,10 @@ fn apply_managed_scene_dispatches(
 
 /// Apply one scene definition to one target.
 ///
-/// `palette_offset` is the palette slot the target starts at. User-initiated
-/// applies pass 0; re-applies of a node's bound mood scene pass the offset the
-/// binding was persisted with so a whole-home layout survives re-entry.
+/// `palette` is the window the target renders its palette through.
+/// User-initiated applies pass the default (slot 0, own span); re-applies of a
+/// node's bound mood scene pass the window the binding was persisted with so a
+/// whole-home layout survives re-entry.
 #[allow(clippy::too_many_arguments)]
 fn do_scene_apply_definition_inner(
     state: &SharedState,
@@ -5395,7 +5408,7 @@ fn do_scene_apply_definition_inner(
     persist_state: bool,
     preview_id: Option<String>,
     ephemeral_projection: bool,
-    palette_offset: usize,
+    palette: PaletteWindow,
 ) -> Result<SceneApplyResponse> {
     let scene_transaction_lock = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -5434,7 +5447,7 @@ fn do_scene_apply_definition_inner(
             &scene,
             &target_id,
             request.transition_ms,
-            palette_offset,
+            palette,
         )?;
         (runtime, planned)
     };
@@ -5474,7 +5487,7 @@ fn do_scene_apply_definition_inner(
             &scene.id,
             &target_id,
             &plan.affected_node_ids,
-            palette_offset,
+            palette,
         );
         if let Ok(mut s) = state.lock() {
             clear_scene_preview_sessions_locked(&mut s, &target_id, &plan.affected_node_ids);
@@ -5500,7 +5513,7 @@ fn do_scene_apply_inner(
     commit_state: bool,
     persist_state: bool,
     preview_id: Option<String>,
-    palette_offset: usize,
+    palette: PaletteWindow,
 ) -> Result<SceneApplyResponse> {
     do_scene_apply_definition_inner(
         state,
@@ -5510,7 +5523,7 @@ fn do_scene_apply_inner(
         persist_state,
         preview_id,
         false,
-        palette_offset,
+        palette,
     )
 }
 
@@ -5745,8 +5758,10 @@ pub fn do_scene_apply(
     scene_id: &str,
     request: SceneApplyRequest,
 ) -> Result<String> {
-    // A user-initiated single-target apply always starts the palette at slot 0.
-    let response = do_scene_apply_response(state, scene_id, request, true, 0)?;
+    // A user-initiated single-target apply always starts the palette at slot 0
+    // and spreads it over its own lights.
+    let response =
+        do_scene_apply_response(state, scene_id, request, true, PaletteWindow::default())?;
     serde_json::to_string(&response).map_err(|e| anyhow::anyhow!("serialize scene apply: {}", e))
 }
 
@@ -5755,22 +5770,14 @@ fn do_scene_apply_response(
     scene_id: &str,
     request: SceneApplyRequest,
     persist_state: bool,
-    palette_offset: usize,
+    palette: PaletteWindow,
 ) -> Result<SceneApplyResponse> {
     let is_stored = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.scenes.contains_key(scene_id)
     };
     if is_stored {
-        return do_scene_apply_inner(
-            state,
-            scene_id,
-            request,
-            true,
-            persist_state,
-            None,
-            palette_offset,
-        );
+        return do_scene_apply_inner(state, scene_id, request, true, persist_state, None, palette);
     }
     if is_native_scene_id(scene_id) {
         return do_native_scene_apply(state, scene_id, request, persist_state);
@@ -5964,22 +5971,44 @@ pub fn do_home_scene_apply(
             .hub_runtime()
             .ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
         let targets = home_scene_targets_locked(&s, &runtime);
+        // A spread palette places every slot on the colour path relative to
+        // the whole house, so count the slots first, then plan each target
+        // with the house-wide span and its own starting slot.
+        let house_span: usize = targets
+            .eligible
+            .iter()
+            .filter_map(|target_id| {
+                plan_scene_target_locked(
+                    &s,
+                    &runtime,
+                    &scene,
+                    target_id,
+                    request.transition_ms,
+                    PaletteWindow::default(),
+                )
+                .ok()
+                .map(|target| target.plan.palette_slots_consumed)
+            })
+            .sum();
         let mut palette_offset = 0usize;
         let mut planned = Vec::with_capacity(targets.eligible.len());
         for target_id in &targets.eligible {
+            let window = PaletteWindow {
+                offset: palette_offset,
+                span: Some(house_span),
+            };
             let result = plan_scene_target_locked(
                 &s,
                 &runtime,
                 &scene,
                 target_id,
                 request.transition_ms,
-                palette_offset,
+                window,
             );
-            let target_offset = palette_offset;
             if let Ok(target) = &result {
                 palette_offset = palette_offset.wrapping_add(target.plan.palette_slots_consumed);
             }
-            planned.push((target_id.clone(), target_offset, result));
+            planned.push((target_id.clone(), window, result));
         }
         (runtime, targets, planned)
     };
@@ -5999,8 +6028,8 @@ pub fn do_home_scene_apply(
     }));
     let mut projected_any = false;
     let mut results: Vec<HomeSceneTargetResult> = Vec::with_capacity(planned.len());
-    let mut applied: Vec<(String, usize, SceneApplicationPlan)> = Vec::new();
-    for (target_id, palette_offset, planned_target) in planned {
+    let mut applied: Vec<(String, PaletteWindow, SceneApplicationPlan)> = Vec::new();
+    for (target_id, palette, planned_target) in planned {
         let failure = |error: String| HomeSceneTargetResult {
             target_id: target_id.clone(),
             affected_node_ids: Vec::new(),
@@ -6040,7 +6069,7 @@ pub fn do_home_scene_apply(
             unresolved_node_ids: target.plan.unresolved_node_ids.clone(),
             error: None,
         });
-        applied.push((target_id, palette_offset, target.plan));
+        applied.push((target_id, palette, target.plan));
     }
 
     drop(managed_batch);
@@ -6142,14 +6171,14 @@ pub fn do_home_scene_apply(
     // Mood binding is committed synchronously so the app sees the scene on every
     // room immediately, regardless of dispatch pacing. Each target keeps the
     // palette slot it started at so re-entering Mood reproduces this layout.
-    for (target_id, palette_offset, plan) in &applied {
+    for (target_id, palette, plan) in &applied {
         set_scene_committed_state(
             state,
             &runtime,
             &scene.id,
             target_id,
             &plan.affected_node_ids,
-            *palette_offset,
+            *palette,
         );
         if let Ok(mut s) = state.lock() {
             clear_scene_preview_sessions_locked(&mut s, target_id, &plan.affected_node_ids);
@@ -6328,13 +6357,14 @@ fn home_scene_device_targets_locked(
 /// Render one device's scene output into a dispatchable command.
 ///
 /// An explicit scene entry for the device wins and consumes no palette slot;
-/// otherwise the device takes `palette[slot]` and consumes one; otherwise the
-/// layer default applies. Returns the command and the slots consumed.
+/// otherwise the device takes the palette output for its slot of the
+/// house-wide window and consumes one; otherwise the layer default applies.
+/// Returns the command and the slots consumed.
 fn plan_home_scene_device(
     scene: &SceneDefinition,
     target: &HomeSceneDeviceTarget,
     request_transition_ms: Option<u32>,
-    palette_slot: usize,
+    palette: PaletteWindow,
 ) -> Result<(SceneLightCommand, usize)> {
     let layer = scene
         .light
@@ -6346,8 +6376,8 @@ fn plan_home_scene_device(
         .find(|entry| entry.target.node_id() == target.node_id)
     {
         (entry.output.clone(), 0)
-    } else if !layer.palette.is_empty() {
-        (layer.palette[palette_slot % layer.palette.len()].clone(), 1)
+    } else if let Some(output) = layer.palette_output(palette.offset, palette.span_or(1)) {
+        (output, 1)
     } else if let Some(default_output) = &layer.default_output {
         (default_output.clone(), 0)
     } else {
@@ -6409,17 +6439,38 @@ fn home_scene_apply_to_devices(
             .hub_runtime()
             .ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
         let targets = home_scene_device_targets_locked(&s, &runtime);
+        // Every light without an explicit entry takes one palette slot; the
+        // house-wide span lets a spread palette give each of them its own
+        // colour.
+        let house_span = scene
+            .light
+            .as_ref()
+            .map(|layer| {
+                targets
+                    .eligible
+                    .iter()
+                    .filter(|target| {
+                        !layer
+                            .entries
+                            .iter()
+                            .any(|entry| entry.target.node_id() == target.node_id)
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
         let mut palette_slot = 0usize;
         let mut planned = Vec::with_capacity(targets.eligible.len());
         for target in targets.eligible {
-            let result =
-                plan_home_scene_device(&scene, &target, request.transition_ms, palette_slot);
-            let start_slot = palette_slot;
+            let window = PaletteWindow {
+                offset: palette_slot,
+                span: Some(house_span),
+            };
+            let result = plan_home_scene_device(&scene, &target, request.transition_ms, window);
             let result = result.map(|(command, consumed)| {
                 palette_slot = palette_slot.wrapping_add(consumed);
                 command
             });
-            planned.push((target, start_slot, result));
+            planned.push((target, window, result));
         }
         (runtime, targets.skipped, planned)
     };
@@ -6429,8 +6480,8 @@ fn home_scene_apply_to_devices(
     }
 
     let mut results: Vec<HomeSceneTargetResult> = Vec::with_capacity(planned.len());
-    let mut applied: Vec<(HomeSceneDeviceTarget, usize, SceneLightCommand)> = Vec::new();
-    for (target, slot, planned_command) in planned {
+    let mut applied: Vec<(HomeSceneDeviceTarget, PaletteWindow, SceneLightCommand)> = Vec::new();
+    for (target, window, planned_command) in planned {
         match planned_command {
             Ok(command) => {
                 results.push(HomeSceneTargetResult {
@@ -6439,7 +6490,7 @@ fn home_scene_apply_to_devices(
                     unresolved_node_ids: Vec::new(),
                     error: None,
                 });
-                applied.push((target, slot, command));
+                applied.push((target, window, command));
             }
             Err(error) => results.push(HomeSceneTargetResult {
                 target_id: target.node_id.clone(),
@@ -6557,15 +6608,15 @@ fn home_scene_apply_to_devices(
     // Bind Mood per room so periodic output and motion stay suppressed until a
     // reset; the room remembers the slot its first light started at so a
     // re-entry renders the same colours. Roomless lights bind themselves.
-    let mut rooms: Vec<(String, usize, Vec<String>)> = Vec::new();
-    for (target, slot, _) in &applied {
+    let mut rooms: Vec<(String, PaletteWindow, Vec<String>)> = Vec::new();
+    for (target, window, _) in &applied {
         match &target.room_id {
             Some(room_id) => match rooms.iter_mut().find(|(id, _, _)| id == room_id) {
-                Some((_, first_slot, members)) => {
-                    *first_slot = (*first_slot).min(*slot);
+                Some((_, first, members)) => {
+                    first.offset = first.offset.min(window.offset);
                     members.push(target.node_id.clone());
                 }
-                None => rooms.push((room_id.clone(), *slot, vec![target.node_id.clone()])),
+                None => rooms.push((room_id.clone(), *window, vec![target.node_id.clone()])),
             },
             None => {
                 let affected = vec![target.node_id.clone()];
@@ -6575,7 +6626,7 @@ fn home_scene_apply_to_devices(
                     &scene.id,
                     &target.node_id,
                     &affected,
-                    *slot,
+                    *window,
                 );
                 if let Ok(mut s) = state.lock() {
                     clear_scene_preview_sessions_locked(&mut s, &target.node_id, &affected);
@@ -6584,8 +6635,8 @@ fn home_scene_apply_to_devices(
             }
         }
     }
-    for (room_id, first_slot, members) in &rooms {
-        set_scene_committed_state(state, &runtime, &scene.id, room_id, members, *first_slot);
+    for (room_id, window, members) in &rooms {
+        set_scene_committed_state(state, &runtime, &scene.id, room_id, members, *window);
         if let Ok(mut s) = state.lock() {
             clear_scene_preview_sessions_locked(&mut s, room_id, members);
         }
@@ -6706,7 +6757,14 @@ fn do_native_scene_apply(
             unresolved_node_ids = plan.unresolved_node_ids;
         }
 
-        set_scene_committed_state(state, &runtime, scene_id, &target_id, &affected_node_ids, 0);
+        set_scene_committed_state(
+            state,
+            &runtime,
+            scene_id,
+            &target_id,
+            &affected_node_ids,
+            PaletteWindow::default(),
+        );
         if let Ok(mut s) = state.lock() {
             clear_scene_preview_sessions_locked(&mut s, &target_id, &affected_node_ids);
         }
@@ -6864,7 +6922,7 @@ pub fn do_scene_preview(
         false,
         false,
         Some(preview_id.clone()),
-        0,
+        PaletteWindow::default(),
     )?;
     record_scene_preview_session(
         state,
@@ -6898,7 +6956,7 @@ pub fn do_scene_draft_preview(
         false,
         Some(preview_id.clone()),
         true,
-        0,
+        PaletteWindow::default(),
     )?;
     record_scene_preview_session(
         state,
@@ -6952,12 +7010,12 @@ pub fn do_scene_preview_cancel(state: &SharedState, preview_id: &str) -> Result<
         {
             // Restore the previous binding exactly as it was rendered, including
             // the palette slot a whole-home apply gave this target.
-            let palette_offset = state
+            let palette = state
                 .lock()
                 .ok()
                 .and_then(|s| s.hub_runtime())
-                .map(|runtime| stored_mood_palette_offset(&runtime, &preview.target_node_id))
-                .unwrap_or(0);
+                .map(|runtime| stored_mood_palette_window(&runtime, &preview.target_node_id))
+                .unwrap_or_default();
             let _ = do_scene_apply_inner(
                 state,
                 &previous_scene_id,
@@ -6968,7 +7026,7 @@ pub fn do_scene_preview_cancel(state: &SharedState, preview_id: &str) -> Result<
                 false,
                 false,
                 None,
-                palette_offset,
+                palette,
             );
         }
     } else if let Some(runtime) = state.lock().ok().and_then(|s| s.hub_runtime()) {
@@ -7019,7 +7077,7 @@ fn apply_mood_scene_or_tick(
         // Re-entering Mood re-renders the bound scene from the palette slot it
         // was bound with, so a whole-home layout survives leaving and
         // re-entering Mood.
-        let palette_offset = stored_mood_palette_offset(runtime, node_id);
+        let palette = stored_mood_palette_window(runtime, node_id);
         do_scene_apply_response(
             state,
             scene_id,
@@ -7028,7 +7086,7 @@ fn apply_mood_scene_or_tick(
                 transition_ms: None,
             },
             persist_state,
-            palette_offset,
+            palette,
         )?;
         return Ok(());
     }
@@ -9700,7 +9758,7 @@ fn update_node_mood_scene_color(
     let node_scene_id = node_mood_scene_id(node_id);
     // Editing one light re-renders the node's bound scene from the palette
     // slot it was bound with so the untouched lights keep their colours.
-    let palette_offset = stored_mood_palette_offset(runtime, node_id);
+    let palette = stored_mood_palette_window(runtime, node_id);
     let (scene_id, seed_scene, current_scene_is_node_scene) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let current_scene_id = snapshot
@@ -9732,6 +9790,7 @@ fn update_node_mood_scene_color(
                 default_transition_ms: update.transition_ms,
                 default_output: None,
                 palette: Vec::new(),
+                palette_mode: crate::scenes::PaletteMode::default(),
                 entries: Vec::new(),
             }),
             extensions: BTreeMap::new(),
@@ -9775,6 +9834,7 @@ fn update_node_mood_scene_color(
         default_transition_ms: update.transition_ms,
         default_output: None,
         palette: Vec::new(),
+        palette_mode: crate::scenes::PaletteMode::default(),
         entries: Vec::new(),
     });
     if snapshot.kind.is_room() {
@@ -9846,7 +9906,7 @@ fn update_node_mood_scene_color(
         true,
         false,
         None,
-        palette_offset,
+        palette,
     )?;
     update_lights_on_cache_for_runtime_node(state, runtime, node_id, true);
     emit_node_state_event_after_apply(state, runtime, node_id);
@@ -9871,7 +9931,7 @@ fn update_node_mood_scene_brightness(
         .mood_scene_id
         .clone()
         .ok_or_else(|| anyhow::anyhow!("Node '{}' has no mood scene", node_id))?;
-    let palette_offset = stored_mood_palette_offset(runtime, node_id);
+    let palette = stored_mood_palette_window(runtime, node_id);
     let node_scene_id = node_mood_scene_id(node_id);
     let updates_generated_scene = bound_scene_id == node_scene_id;
     let scope_node_ids = {
@@ -9941,7 +10001,7 @@ fn update_node_mood_scene_brightness(
         true,
         false,
         None,
-        palette_offset,
+        palette,
     )?;
     update_lights_on_cache_for_runtime_node(state, runtime, node_id, true);
     emit_node_state_event_after_apply(state, runtime, node_id);
@@ -21979,6 +22039,7 @@ mod tests {
                     transition_ms: None,
                 }),
                 palette: Vec::new(),
+                palette_mode: crate::scenes::PaletteMode::default(),
                 entries: Vec::new(),
             }),
             extensions: BTreeMap::new(),
@@ -22900,6 +22961,7 @@ mod tests {
             mood_profile_id: Some("mood".to_string()),
             mood_scene_id: Some("scene".to_string()),
             mood_scene_palette_offset: None,
+            mood_scene_palette_span: None,
             fade_ms: Some(TimerSetting::Fixed { value: 100 }),
             motion_timeout_secs: Some(TimerSetting::Fixed { value: 20 }),
             motion_activation_enabled: Some(false),
@@ -23856,6 +23918,7 @@ mod tests {
                 default_transition_ms: Some(700),
                 default_output: None,
                 palette: Vec::new(),
+                palette_mode: crate::scenes::PaletteMode::default(),
                 entries: vec![crate::scenes::LightSceneEntry {
                     target: crate::scenes::LightSceneTargetRef::Node {
                         node_id: device_id.to_string(),
@@ -23886,6 +23949,7 @@ mod tests {
                 default_transition_ms: Some(900),
                 default_output: None,
                 palette: Vec::new(),
+                palette_mode: crate::scenes::PaletteMode::default(),
                 entries: vec![crate::scenes::LightSceneEntry {
                     target: crate::scenes::LightSceneTargetRef::Node {
                         node_id: device_id.to_string(),
@@ -23917,6 +23981,7 @@ mod tests {
                     transition_ms: None,
                 }),
                 palette: Vec::new(),
+                palette_mode: crate::scenes::PaletteMode::default(),
                 entries: Vec::new(),
             }),
             extensions: BTreeMap::new(),
@@ -23941,6 +24006,7 @@ mod tests {
                         transition_ms: None,
                     })
                     .collect(),
+                palette_mode: crate::scenes::PaletteMode::default(),
                 entries: Vec::new(),
             }),
             extensions: BTreeMap::new(),
@@ -23968,6 +24034,7 @@ mod tests {
                 default_transition_ms: None,
                 default_output: None,
                 palette: Vec::new(),
+                palette_mode: crate::scenes::PaletteMode::default(),
                 entries: Vec::new(),
             }),
             extensions: BTreeMap::new(),
@@ -25614,18 +25681,34 @@ mod tests {
         .unwrap();
         let (tx, rx) = std::sync::mpsc::sync_channel(16);
         harness.state.lock().unwrap().work_tx = Some(tx);
-        let spacing = std::time::Duration::from_millis(100);
+        let spacing = std::time::Duration::from_millis(120);
 
-        let response = do_home_scene_apply(
-            &harness.state,
-            "halloween",
-            HomeSceneApplyRequest {
-                transition_ms: None,
-                target_mode: HomeSceneTargetMode::Devices,
-            },
-            spacing,
-        )
-        .unwrap();
+        // Receive on this thread while the apply runs on another, so every
+        // arrival is stamped the moment the lane sends it. Receiving only
+        // after the apply returned let items pile up in the channel on a slow
+        // runner and collapsed the measured window.
+        let state = harness.state.clone();
+        let apply = std::thread::spawn(move || {
+            do_home_scene_apply(
+                &state,
+                "halloween",
+                HomeSceneApplyRequest {
+                    transition_ms: None,
+                    target_mode: HomeSceneTargetMode::Devices,
+                },
+                spacing,
+            )
+            .unwrap()
+        });
+        let mut arrivals = Vec::new();
+        for _ in 0..4 {
+            let item = rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("every lane hands its items to the worker");
+            assert!(matches!(item, WorkItem::ApplyNodeCommand { .. }));
+            arrivals.push(std::time::Instant::now());
+        }
+        let response = apply.join().unwrap();
 
         assert!(response.queued);
         assert_eq!(response.dispatch_count, 4);
@@ -25636,18 +25719,10 @@ mod tests {
             response.dispatch_lanes
         );
         assert_eq!(
-            response.estimated_dispatch_ms, 200,
+            response.estimated_dispatch_ms, 240,
             "the estimate is the longest lane (three Matter lights), not the sum"
         );
 
-        let mut arrivals = Vec::new();
-        for _ in 0..4 {
-            let item = rx
-                .recv_timeout(std::time::Duration::from_secs(2))
-                .expect("every lane hands its items to the worker");
-            assert!(matches!(item, WorkItem::ApplyNodeCommand { .. }));
-            arrivals.push(std::time::Instant::now());
-        }
         let first = arrivals[0];
         let within_first_slot = arrivals
             .iter()
@@ -25660,8 +25735,113 @@ mod tests {
         );
         let last = *arrivals.last().unwrap();
         assert!(
-            last.duration_since(first) >= spacing * 2,
-            "the Matter lane still paces its own three commands"
+            last.duration_since(first) >= spacing * 2 - std::time::Duration::from_millis(20),
+            "the Matter lane still paces its own three commands: {:?}",
+            last.duration_since(first)
+        );
+    }
+
+    #[test]
+    fn home_scene_apply_spreads_a_short_palette_so_every_light_differs() {
+        // Three lights, two anchors: spread mode derives three distinct
+        // colours instead of repeating the first anchor on the third light.
+        let harness = setup_home_scene_rooms();
+        let orange = Rgb::new(255, 104, 0);
+        let purple = Rgb::new(122, 0, 214);
+        do_scene_upsert(&harness.state, scene_with_palette("duo", &[orange, purple])).unwrap();
+
+        let response = do_home_scene_apply(
+            &harness.state,
+            "duo",
+            HomeSceneApplyRequest {
+                transition_ms: None,
+                target_mode: HomeSceneTargetMode::Devices,
+            },
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(response.applied_target_count, 3);
+
+        let calls = harness.runtime.applied_commands();
+        let rgb_for = |light: &str| {
+            let alias = crate::topology::device_light_node_id(light);
+            let (_, command) = calls.iter().find(|(id, _)| *id == alias).unwrap();
+            (command.rgb.r, command.rgb.g, command.rgb.b)
+        };
+        let first = rgb_for(&harness.room_a_lights[0]);
+        let second = rgb_for(&harness.room_a_lights[1]);
+        let third = rgb_for(&harness.room_b_lights[0]);
+        assert_eq!(first, (255, 104, 0), "slot 0 is the first anchor");
+        assert_ne!(second, first);
+        assert_ne!(third, first);
+        assert_ne!(third, second, "no two lights share a colour");
+        // Room B remembers both its slot and the house-wide span, so
+        // re-entering Mood there reproduces the same derived colour.
+        let room_b = harness.runtime.engine_room_snapshot("room-b").unwrap();
+        assert_eq!(room_b.profile_settings.mood_scene_palette_offset, Some(2));
+        assert_eq!(room_b.profile_settings.mood_scene_palette_span, Some(3));
+        let before = calls.len();
+        let runtime: Arc<dyn RuntimeHandle> = harness.runtime.clone();
+        apply_mood_scene_or_tick(&harness.state, &runtime, "room-b", Some("duo"), false).unwrap();
+        let calls = harness.runtime.applied_commands();
+        let (_, command) = &calls[before..][0];
+        assert_eq!((command.rgb.r, command.rgb.g, command.rgb.b), third);
+    }
+
+    #[test]
+    fn home_scene_apply_in_room_mode_spreads_over_the_house_span() {
+        let harness = setup_home_scene_rooms();
+        let orange = Rgb::new(255, 104, 0);
+        let purple = Rgb::new(122, 0, 214);
+        do_scene_upsert(&harness.state, scene_with_palette("duo", &[orange, purple])).unwrap();
+
+        do_home_scene_apply(
+            &harness.state,
+            "duo",
+            HomeSceneApplyRequest {
+                transition_ms: None,
+                target_mode: HomeSceneTargetMode::Rooms,
+            },
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+
+        let applied = applied_rgb_by_node(&harness.runtime);
+        let colours: std::collections::HashSet<_> = applied.values().copied().collect();
+        assert_eq!(colours.len(), 3, "three lights, three colours: {applied:?}");
+        assert_eq!(applied[&harness.room_a_lights[0]], (255, 104, 0));
+    }
+
+    #[test]
+    fn a_cycle_palette_still_repeats_its_anchors() {
+        let harness = setup_home_scene_rooms();
+        let mut scene = scene_with_palette("duo", &[Rgb::new(255, 0, 0), Rgb::new(0, 0, 255)]);
+        scene.light.as_mut().unwrap().palette_mode = crate::scenes::PaletteMode::Cycle;
+        do_scene_upsert(&harness.state, scene).unwrap();
+
+        do_home_scene_apply(
+            &harness.state,
+            "duo",
+            HomeSceneApplyRequest {
+                transition_ms: None,
+                target_mode: HomeSceneTargetMode::Devices,
+            },
+            std::time::Duration::ZERO,
+        )
+        .unwrap();
+
+        let calls = harness.runtime.applied_commands();
+        let rgb_for = |light: &str| {
+            let alias = crate::topology::device_light_node_id(light);
+            let (_, command) = calls.iter().find(|(id, _)| *id == alias).unwrap();
+            (command.rgb.r, command.rgb.g, command.rgb.b)
+        };
+        assert_eq!(rgb_for(&harness.room_a_lights[0]), (255, 0, 0));
+        assert_eq!(rgb_for(&harness.room_a_lights[1]), (0, 0, 255));
+        assert_eq!(
+            rgb_for(&harness.room_b_lights[0]),
+            (255, 0, 0),
+            "cycle wraps"
         );
     }
 
@@ -25771,6 +25951,12 @@ mod tests {
             Some(2),
             "the second room remembers that it started after room A's two lights"
         );
+        assert_eq!(
+            room_a.profile_settings.mood_scene_palette_span,
+            Some(3),
+            "every room remembers the house-wide span the palette was spread over"
+        );
+        assert_eq!(room_b.profile_settings.mood_scene_palette_span, Some(3));
 
         // Leaving and re-entering Mood re-applies the bound scene; room B must
         // come back with the colour the whole-home apply gave it.
@@ -25848,8 +26034,15 @@ mod tests {
 
         let s = state.lock().unwrap();
         let runtime: Arc<dyn RuntimeHandle> = runtime.clone();
-        let plan =
-            build_scene_application_plan_locked(&s, &runtime, &scene, "room1", None, 0).unwrap();
+        let plan = build_scene_application_plan_locked(
+            &s,
+            &runtime,
+            &scene,
+            "room1",
+            None,
+            PaletteWindow::default(),
+        )
+        .unwrap();
 
         assert_eq!(
             plan.commands.len(),
@@ -26732,6 +26925,7 @@ mod tests {
                     transition_ms: None,
                 },
             ],
+            palette_mode: crate::scenes::PaletteMode::default(),
             entries: Vec::new(),
         });
         native.extensions.insert(
