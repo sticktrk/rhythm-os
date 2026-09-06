@@ -179,5 +179,31 @@ void main() {
       expect(otherProvider.isImportedHueScene, isFalse);
       expect(otherProvider.isHuePaletteScene, isFalse);
     });
+
+    test('offers a scene to the whole-home picker only when flagged', () {
+      final flagged = RhythmSceneDefinition.fromJson({
+        'id': 'halloween',
+        'name': 'Halloween',
+        'extensions': {'whole_home': true},
+      });
+      final unflagged = RhythmSceneDefinition.fromJson({
+        'id': 'color-carnival',
+        'name': 'Color Carnival',
+      });
+      final offFlag = RhythmSceneDefinition.fromJson({
+        'id': 'berry-pop',
+        'name': 'Berry Pop',
+        'extensions': {'whole_home': false},
+      });
+
+      expect(flagged.isWholeHomeScene, isTrue);
+      expect(unflagged.isWholeHomeScene, isFalse);
+      expect(offFlag.isWholeHomeScene, isFalse);
+      expect(
+        flagged.toJson()['extensions'],
+        {'whole_home': true},
+        reason: 'the flag round-trips',
+      );
+    });
   });
 }

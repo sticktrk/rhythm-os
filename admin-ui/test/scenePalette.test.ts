@@ -7,9 +7,14 @@ import {
   complementary,
   houseLightOrder,
   hueSweep,
+  mulberry32,
+  newPaletteSeed,
   paletteOutputForSlot,
   parseOutput,
+  parsePaletteMode,
+  parsePaletteSeed,
   renderScenePreview,
+  slotPermutation,
   type SceneOutput
 } from '../src/pages/hub/scenes/scenePalette.ts';
 
@@ -41,6 +46,59 @@ test('spread derives one distinct colour per slot across a larger span', () => {
   const brightness = outputs.map((output) => output?.brightness ?? 0);
   for (let index = 1; index < brightness.length; index += 1) {
     assert.ok(brightness[index] < brightness[index - 1], `${brightness}`);
+  }
+});
+
+test('mulberry32 and the slot permutation match the server reference vectors', () => {
+  // rhythm-os asserts the same vectors in scenes.rs, so a shuffled preview
+  // and the house agree slot for slot.
+  const vectors: [number, number[]][] = [
+    [0, [1144304738, 1416247, 958946056]],
+    [1, [2693262067, 11749833, 2265367787]],
+    [7, [50271532, 266108690, 4195786334]],
+    [0xdeadbeef, [4043151706, 1147597007, 3315858022]]
+  ];
+  for (const [seed, expected] of vectors) {
+    const next = mulberry32(seed);
+    assert.deepEqual([next(), next(), next()], expected, `seed ${seed}`);
+  }
+  assert.deepEqual(slotPermutation(7, 8), [7, 6, 5, 3, 0, 2, 1, 4]);
+  assert.deepEqual(slotPermutation(1, 8), [6, 0, 2, 7, 1, 5, 4, 3]);
+  assert.deepEqual(slotPermutation(7, 5), [1, 0, 3, 4, 2]);
+});
+
+test('shuffle deals every spread colour once in a seeded order', () => {
+  const span = 8;
+  const deal = (mode: 'spread' | 'shuffle', seed: number) =>
+    Array.from({ length: span }, (_, slot) =>
+      rgbKey(paletteOutputForSlot([orange, purple], mode, slot, span, seed))
+    );
+  const spread = deal('spread', 0);
+  const shuffled = deal('shuffle', 7);
+  assert.deepEqual([...shuffled].sort(), [...spread].sort(), 'same colours');
+  assert.notDeepEqual(shuffled, spread, 'different order');
+  assert.equal(shuffled[0], spread[7], 'slot 0 takes spread slot 7 under seed 7');
+  assert.deepEqual(deal('shuffle', 7), shuffled, 'the same seed repeats');
+  assert.notDeepEqual(deal('shuffle', 1), shuffled, 'a new seed re-deals');
+  // Within the anchor count each anchor is dealt exactly once.
+  const few = [0, 1].map((slot) =>
+    rgbKey(paletteOutputForSlot([orange, purple], 'shuffle', slot, 2, 3))
+  );
+  assert.deepEqual([...few].sort(), ['122,0,214', '255,104,0']);
+});
+
+test('palette mode and seed parse from the wire with safe defaults', () => {
+  assert.equal(parsePaletteMode('shuffle'), 'shuffle');
+  assert.equal(parsePaletteMode('cycle'), 'cycle');
+  assert.equal(parsePaletteMode('nonsense'), 'spread');
+  assert.equal(parsePaletteMode(undefined), 'spread');
+  assert.equal(parsePaletteSeed(42), 42);
+  assert.equal(parsePaletteSeed('42'), 42);
+  assert.equal(parsePaletteSeed(undefined), 0);
+  assert.equal(parsePaletteSeed(-1), 0xffffffff, 'seeds are 32-bit unsigned');
+  for (let i = 0; i < 20; i += 1) {
+    const seed = newPaletteSeed();
+    assert.ok(seed >= 1 && seed <= 0xffffffff && Number.isInteger(seed));
   }
 });
 
@@ -134,6 +192,58 @@ test('the preview pins explicit entries, skips disabled lights and spreads the r
   const strip = renderScenePreview(scene, houseLightOrder(nodes), { kind: 'strip', count: 5 });
   assert.equal(strip.span, 5);
   assert.equal(new Set(strip.lights.map((light) => rgbKey(light.output))).size, 5);
+});
+
+test('a shuffled preview deals the spread colours across the house in seed order', () => {
+  const light = {
+    palette: [
+      { power: 'on', brightness: 80, color: { rgb: { r: 255, g: 104, b: 0 } } },
+      { power: 'on', brightness: 40, color: { rgb: { r: 122, g: 0, b: 214 } } }
+    ],
+    entries: []
+  };
+  const house = houseLightOrder(nodes);
+  const spread = renderScenePreview({ light }, house, { kind: 'strip', count: 8 });
+  const shuffled = renderScenePreview(
+    { light: { ...light, palette_mode: 'shuffle', palette_seed: 7 } },
+    house,
+    { kind: 'strip', count: 8 }
+  );
+  assert.equal(shuffled.mode, 'shuffle');
+  assert.equal(shuffled.seed, 7);
+  const keys = (preview: typeof spread) => preview.lights.map((l) => rgbKey(l.output));
+  assert.deepEqual([...keys(shuffled)].sort(), [...keys(spread)].sort());
+  assert.notDeepEqual(keys(shuffled), keys(spread));
+  // Slot i of the shuffle is spread slot permutation[i].
+  const order = slotPermutation(7, 8);
+  assert.deepEqual(
+    keys(shuffled),
+    order.map((slot) => keys(spread)[slot])
+  );
+  // Pinned lights still consume no slot and keep their entry.
+  const pinned = renderScenePreview(
+    {
+      light: {
+        ...light,
+        palette_mode: 'shuffle',
+        palette_seed: 7,
+        entries: [
+          {
+            target: { node_id: 'bulb-k1' },
+            output: { power: 'on', brightness: 33, color: { rgb: { r: 1, g: 2, b: 3 } } }
+          }
+        ]
+      }
+    },
+    house,
+    { kind: 'home' }
+  );
+  assert.equal(pinned.span, 3);
+  assert.equal(rgbKey(pinned.lights.find((l) => l.id === 'bulb-k1')?.output ?? null), '1,2,3');
+  assert.deepEqual(
+    pinned.lights.filter((l) => l.slot !== null).map((l) => l.slot),
+    [0, 1, 2]
+  );
 });
 
 test('generators produce well-formed anchors', () => {

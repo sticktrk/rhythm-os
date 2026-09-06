@@ -782,6 +782,7 @@ impl<H: HueTransport> HueDiscovery<H> {
                             .cloned(),
                         palette,
                         palette_mode: Default::default(),
+                        palette_seed: 0,
                         entries: Vec::new(),
                     }),
                     extensions,

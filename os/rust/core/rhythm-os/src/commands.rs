@@ -9791,6 +9791,7 @@ fn update_node_mood_scene_color(
                 default_output: None,
                 palette: Vec::new(),
                 palette_mode: crate::scenes::PaletteMode::default(),
+                palette_seed: 0,
                 entries: Vec::new(),
             }),
             extensions: BTreeMap::new(),
@@ -9835,6 +9836,7 @@ fn update_node_mood_scene_color(
         default_output: None,
         palette: Vec::new(),
         palette_mode: crate::scenes::PaletteMode::default(),
+        palette_seed: 0,
         entries: Vec::new(),
     });
     if snapshot.kind.is_room() {
@@ -22040,6 +22042,7 @@ mod tests {
                 }),
                 palette: Vec::new(),
                 palette_mode: crate::scenes::PaletteMode::default(),
+                palette_seed: 0,
                 entries: Vec::new(),
             }),
             extensions: BTreeMap::new(),
@@ -23919,6 +23922,7 @@ mod tests {
                 default_output: None,
                 palette: Vec::new(),
                 palette_mode: crate::scenes::PaletteMode::default(),
+                palette_seed: 0,
                 entries: vec![crate::scenes::LightSceneEntry {
                     target: crate::scenes::LightSceneTargetRef::Node {
                         node_id: device_id.to_string(),
@@ -23950,6 +23954,7 @@ mod tests {
                 default_output: None,
                 palette: Vec::new(),
                 palette_mode: crate::scenes::PaletteMode::default(),
+                palette_seed: 0,
                 entries: vec![crate::scenes::LightSceneEntry {
                     target: crate::scenes::LightSceneTargetRef::Node {
                         node_id: device_id.to_string(),
@@ -23982,6 +23987,7 @@ mod tests {
                 }),
                 palette: Vec::new(),
                 palette_mode: crate::scenes::PaletteMode::default(),
+                palette_seed: 0,
                 entries: Vec::new(),
             }),
             extensions: BTreeMap::new(),
@@ -24007,6 +24013,7 @@ mod tests {
                     })
                     .collect(),
                 palette_mode: crate::scenes::PaletteMode::default(),
+                palette_seed: 0,
                 entries: Vec::new(),
             }),
             extensions: BTreeMap::new(),
@@ -24035,6 +24042,7 @@ mod tests {
                 default_output: None,
                 palette: Vec::new(),
                 palette_mode: crate::scenes::PaletteMode::default(),
+                palette_seed: 0,
                 entries: Vec::new(),
             }),
             extensions: BTreeMap::new(),
@@ -26926,6 +26934,7 @@ mod tests {
                 },
             ],
             palette_mode: crate::scenes::PaletteMode::default(),
+            palette_seed: 0,
             entries: Vec::new(),
         });
         native.extensions.insert(

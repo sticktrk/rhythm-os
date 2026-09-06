@@ -519,6 +519,7 @@ class DemoServerApi extends RhythmServerApi {
     RhythmSceneDefinition(
       id: 'demo_scene_halloween',
       name: 'Halloween',
+      extensions: const {'whole_home': true},
       description:
           'Pumpkin orange, witchy purple and ghoulish green spread across every light',
       light: RhythmLightScene(
@@ -535,6 +536,7 @@ class DemoServerApi extends RhythmServerApi {
     RhythmSceneDefinition(
       id: 'demo_scene_dark_fantasy',
       name: 'Dark Fantasy',
+      extensions: const {'whole_home': true},
       description:
           'Midnight indigo, enchanted forest, torchlight amber, blood crimson and arcane violet across every light',
       light: RhythmLightScene(

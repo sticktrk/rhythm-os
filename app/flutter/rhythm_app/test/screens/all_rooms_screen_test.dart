@@ -309,11 +309,13 @@ RhythmSceneDefinition _paletteScene({
   RhythmSceneSource source = const RhythmSceneSource(
     kind: RhythmSceneSourceKind.user,
   ),
+  bool wholeHome = true,
 }) {
   return RhythmSceneDefinition(
     id: id,
     name: name,
     source: source,
+    extensions: {if (wholeHome) 'whole_home': true},
     light: RhythmLightScene(
       defaultTransitionMs: 1200,
       palette: [
@@ -534,6 +536,31 @@ void main() {
       reason:
           'the chooser sits beneath the brightness slider in the same panel',
     );
+  });
+
+  testWidgets('the scene chooser offers only scenes flagged whole_home',
+      (tester) async {
+    await pumpWithHomeScenes(
+      tester,
+      scenes: [
+        _paletteScene(id: 'halloween', name: 'Halloween'),
+        _paletteScene(id: 'dark-fantasy', name: 'Dark Fantasy'),
+        _paletteScene(
+            id: 'color-carnival', name: 'Color Carnival', wholeHome: false),
+        _paletteScene(id: 'berry-pop', name: 'Berry Pop', wholeHome: false),
+      ],
+    );
+
+    await openScenePanel(tester);
+
+    expect(find.byKey(const ValueKey('global-room-scene-halloween')),
+        findsOneWidget);
+    expect(find.byKey(const ValueKey('global-room-scene-dark-fantasy')),
+        findsOneWidget);
+    expect(find.byKey(const ValueKey('global-room-scene-color-carnival')),
+        findsNothing);
+    expect(find.byKey(const ValueKey('global-room-scene-berry-pop')),
+        findsNothing);
   });
 
   testWidgets(
