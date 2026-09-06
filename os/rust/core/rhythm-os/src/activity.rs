@@ -329,39 +329,61 @@ pub fn http_action_id(action: &str) -> String {
     .to_string()
 }
 
-pub fn record_light_activity(state: &SharedState, mut record: LightActivityRecord) {
-    record.action_id = http_action_id(record.action_id.as_str());
+pub fn record_light_activity(state: &SharedState, record: LightActivityRecord) {
+    record_light_activity_batch(state, vec![record]);
+}
+
+/// Record several activity events from one operation, persisting the history
+/// and enqueueing the cloud upload once for the whole batch.
+///
+/// Every record costs a full rewrite of the 2,000-entry history file and a
+/// cloud upload attempt, so a fan-out that recorded per target one at a time
+/// (a whole-home scene over 70 lights) held the HTTP response for longer than
+/// the app waits. Batching keeps that cost constant per request.
+pub fn record_light_activity_batch(state: &SharedState, records: Vec<LightActivityRecord>) {
+    if records.is_empty() {
+        return;
+    }
     let epoch_ms = crate::state::current_epoch_ms();
-    let target = build_light_activity_target(state, &record.node_id);
+    let prepared: Vec<(LightActivityRecord, Option<LightActivityTarget>)> = records
+        .into_iter()
+        .map(|mut record| {
+            record.action_id = http_action_id(record.action_id.as_str());
+            let target = build_light_activity_target(state, &record.node_id);
+            (record, target)
+        })
+        .collect();
 
     {
         let Ok(mut s) = state.lock() else { return };
-        let event = LightActivityEvent {
-            id: activity_event_id(epoch_ms),
-            node_id: record.node_id,
-            action_id: record.action_id,
-            source: LightActivitySource {
-                raw: record.source_raw,
-                kind: record.source_kind,
-                marks_touched: record.marks_touched,
-                control_id: record.source_control_id,
-            },
-            epoch_ms,
-            server_instance_id: Some(s.server_instance_id.clone()),
-            server_version: Some(s.firmware_version.to_string()),
-            platform: Some(s.platform_type.to_string()),
-            active_mode: Some(json!(s.active_mode)),
-            target,
-            change: record.change,
-            count: 1,
-            correlation_id: record.correlation_id,
-            fanout_of: record.fanout_of,
-            payload: record.payload,
-            brightness: record.brightness,
-            kelvin: record.kelvin,
-        };
-
-        s.light_activity.insert(0, event);
+        // Newest first, like a sequence of single records would have left it.
+        for (record, target) in prepared {
+            let event = LightActivityEvent {
+                id: activity_event_id(epoch_ms),
+                node_id: record.node_id,
+                action_id: record.action_id,
+                source: LightActivitySource {
+                    raw: record.source_raw,
+                    kind: record.source_kind,
+                    marks_touched: record.marks_touched,
+                    control_id: record.source_control_id,
+                },
+                epoch_ms,
+                server_instance_id: Some(s.server_instance_id.clone()),
+                server_version: Some(s.firmware_version.to_string()),
+                platform: Some(s.platform_type.to_string()),
+                active_mode: Some(json!(s.active_mode)),
+                target,
+                change: record.change,
+                count: 1,
+                correlation_id: record.correlation_id,
+                fanout_of: record.fanout_of,
+                payload: record.payload,
+                brightness: record.brightness,
+                kelvin: record.kelvin,
+            };
+            s.light_activity.insert(0, event);
+        }
         s.light_activity.truncate(LIGHT_ACTIVITY_HISTORY_LIMIT);
     }
 

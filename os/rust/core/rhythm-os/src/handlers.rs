@@ -2255,17 +2255,24 @@ pub fn handle_post_home_scene_apply(
 
     match commands::do_home_scene_apply(state, scene_id, request, dispatch_spacing) {
         Ok(response) => {
-            for target in &response.targets {
-                if target.error.is_some() {
-                    continue;
-                }
-                let mut record =
-                    crate::activity::LightActivityRecord::app(&target.target_id, "apply_scene");
-                record.payload = Some(json!({"scene_id": scene_id, "home_scene": true}));
-                record.correlation_id = correlation_id.clone();
-                record.fanout_of = correlation_id.clone();
-                crate::activity::record_light_activity(state, record);
-            }
+            // One activity record per applied target, persisted as a single
+            // batch: recording them one at a time rewrote the history file
+            // and enqueued an upload per light, which on a Pi Zero held the
+            // response past the app's timeout for a large house.
+            let records = response
+                .targets
+                .iter()
+                .filter(|target| target.error.is_none())
+                .map(|target| {
+                    let mut record =
+                        crate::activity::LightActivityRecord::app(&target.target_id, "apply_scene");
+                    record.payload = Some(json!({"scene_id": scene_id, "home_scene": true}));
+                    record.correlation_id = correlation_id.clone();
+                    record.fanout_of = correlation_id.clone();
+                    record
+                })
+                .collect();
+            crate::activity::record_light_activity_batch(state, records);
             match serde_json::to_string(&response) {
                 Ok(json) => ApiResponse::json_ok(json),
                 Err(e) => ApiResponse::server_error(e),

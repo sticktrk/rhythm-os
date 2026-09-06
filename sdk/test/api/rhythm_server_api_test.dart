@@ -1804,7 +1804,8 @@ void main() {
 
     test('applyHomeScene posts the whole-home body and parses targets',
         () async {
-      when(() => dio.post(any(), data: any(named: 'data')))
+      when(() => dio.post(any(),
+              data: any(named: 'data'), options: any(named: 'options')))
           .thenAnswer((_) async => Response(
                 requestOptions:
                     RequestOptions(path: 'api/scenes/halloween/apply-home'),
@@ -1865,7 +1866,7 @@ void main() {
       );
       expect(result?.failedTargets.single.targetId, 'room2');
       expect(result?.failedTargets.single.error, 'hub is offline');
-      verify(() => dio.post(
+      final captured = verify(() => dio.post(
             'api/scenes/halloween/apply-home',
             data: {
               'transition_ms': 1200,
@@ -1873,12 +1874,19 @@ void main() {
               'correlation_id': 'home-scene-123',
               'target_mode': 'devices',
             },
-          )).called(1);
+            options: captureAny(named: 'options'),
+          )).captured;
+      expect(
+        (captured.single as Options).receiveTimeout,
+        const Duration(seconds: 30),
+        reason: 'a large home needs longer than the 10 s connection default',
+      );
     });
 
     test('applyHomeScene omits optional fields and tolerates a sparse response',
         () async {
-      when(() => dio.post(any(), data: any(named: 'data')))
+      when(() => dio.post(any(),
+              data: any(named: 'data'), options: any(named: 'options')))
           .thenAnswer((_) async => Response(
                 requestOptions:
                     RequestOptions(path: 'api/scenes/halloween/apply-home'),
@@ -1911,12 +1919,14 @@ void main() {
       verify(() => dio.post(
             'api/scenes/halloween/apply-home',
             data: const <String, dynamic>{},
+            options: any(named: 'options'),
           )).called(1);
     });
 
     test('applyHomeScene returns null when the server rejects the call',
         () async {
-      when(() => dio.post(any(), data: any(named: 'data'))).thenThrow(
+      when(() => dio.post(any(),
+          data: any(named: 'data'), options: any(named: 'options'))).thenThrow(
         DioException(
           requestOptions:
               RequestOptions(path: 'api/scenes/halloween/apply-home'),
