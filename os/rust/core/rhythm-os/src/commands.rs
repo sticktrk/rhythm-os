@@ -5971,9 +5971,9 @@ pub fn do_home_scene_apply(
             .hub_runtime()
             .ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
         let targets = home_scene_targets_locked(&s, &runtime);
-        // A spread palette places every slot on the loop relative to the whole
-        // house, so count the slots first, then plan each target with the
-        // house-wide span and its own starting slot.
+        // A spread palette places every slot on the colour path relative to
+        // the whole house, so count the slots first, then plan each target
+        // with the house-wide span and its own starting slot.
         let house_span: usize = targets
             .eligible
             .iter()

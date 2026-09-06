@@ -649,7 +649,7 @@ mod tests {
         assert_eq!(rgb_of(&outputs[5]), (122, 0, 214));
         assert_eq!(outputs[0].brightness, 80);
         assert_eq!(outputs[5].brightness, 40);
-        // Half way between orange and purple the loop passes through red, not
+        // On the way from orange to purple the path passes through red, not
         // through grey, and brightness blends with it.
         let (r, g, b) = rgb_of(&outputs[1]);
         assert!(

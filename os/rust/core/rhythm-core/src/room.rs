@@ -1542,7 +1542,7 @@ pub struct RoomProfileSettings {
 
     /// How many palette slots the apply that bound `mood_scene_id` covered.
     ///
-    /// A spread palette places each slot on a colour loop relative to the
+    /// A spread palette places each slot on the colour path relative to the
     /// whole apply, so re-rendering one room needs the span the house was
     /// rendered with, not just this room's slot. `None` means the span is
     /// this node's own light count.

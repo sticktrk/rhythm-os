@@ -404,8 +404,8 @@ class RhythmLightScene {
   final List<RhythmLightSceneOutput> palette;
 
   /// How the palette is dealt across lights: `spread` (the default) derives
-  /// one distinct colour per light by walking a loop through the palette
-  /// anchors; `cycle` deals the anchors out in order and repeats.
+  /// one distinct colour per light by walking the path from the first palette
+  /// anchor to the last; `cycle` deals the anchors out in order and repeats.
   final String paletteMode;
   final List<RhythmLightSceneEntry> entries;
   final Map<String, dynamic> raw;
