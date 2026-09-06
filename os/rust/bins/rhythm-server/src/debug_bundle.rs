@@ -1823,9 +1823,10 @@ fn build_matter_runtime_debug_json(
     state: &SharedState,
     generated_at: DateTime<Utc>,
 ) -> Result<String> {
-    // Do not hold AppState while cloning/serializing integration evidence, and
-    // do not ask chipd or a device to do work while collecting a support bundle.
-    let hubs = state.try_lock().ok().map(|state| {
+    // Only clone Arcs under AppState; serialization happens after release, and
+    // nothing here asks chipd or a device to do work while collecting a bundle.
+    // A poisoned lock is reported as unavailable rather than as an empty fleet.
+    let hubs = state.lock().ok().map(|state| {
         state
             .hubs
             .iter()
@@ -3682,19 +3683,64 @@ mod tests {
     }
 
     #[test]
-    fn matter_runtime_snapshot_reports_busy_instead_of_empty_success() {
+    fn matter_runtime_snapshot_reports_unavailable_instead_of_empty_success() {
         let state = std::sync::Arc::new(std::sync::Mutex::new(AppState::default()));
-        let guard = state.lock().unwrap();
-        let busy: Value =
+        let poisoner = state.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner.lock().unwrap();
+            panic!("poison the state lock");
+        })
+        .join();
+        assert!(state.lock().is_err());
+        let unavailable: Value =
             serde_json::from_str(&build_matter_runtime_debug_json(&state, Utc::now()).unwrap())
                 .unwrap();
-        assert_eq!(busy["status"], "busy_or_unavailable");
-        drop(guard);
+        assert_eq!(unavailable["status"], "busy_or_unavailable");
+        assert_eq!(unavailable["hubs"], serde_json::json!([]));
+
+        let state = std::sync::Arc::new(std::sync::Mutex::new(AppState::default()));
         let empty: Value =
             serde_json::from_str(&build_matter_runtime_debug_json(&state, Utc::now()).unwrap())
                 .unwrap();
         assert_eq!(empty["status"], "available");
         assert_eq!(empty["hubs"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn matter_runtime_snapshot_lists_matter_hubs() {
+        let state = std::sync::Arc::new(std::sync::Mutex::new(AppState::default()));
+        for fabric in ["fabric-b", "fabric-a"] {
+            let key = rhythm_os::canonical::identity::HubKey::new(
+                rhythm_os::hub::HubType::new(rhythm_os::hub::HubType::MATTER),
+                fabric,
+            );
+            state.lock().unwrap().hubs.insert(
+                key.clone(),
+                rhythm_os::hub::ActiveHub {
+                    hub_type: rhythm_os::hub::HubType::new(rhythm_os::hub::HubType::MATTER),
+                    hub_key: key,
+                    runtime: None,
+                    hub_data: Box::new(std::sync::Arc::new(
+                        rhythm_matter::hub_state::MatterHubData::detached(fabric),
+                    )),
+                    registry: None,
+                    discovery: None,
+                    shutdown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                },
+            );
+        }
+        let json: Value =
+            serde_json::from_str(&build_matter_runtime_debug_json(&state, Utc::now()).unwrap())
+                .unwrap();
+        assert_eq!(json["status"], "available");
+        let hubs = json["hubs"].as_array().unwrap();
+        assert_eq!(hubs.len(), 2);
+        assert_eq!(hubs[0]["hub_key"], "matter@fabric-a");
+        assert_eq!(hubs[0]["fabric_id"], "fabric-a");
+        assert_eq!(hubs[0]["status"], "available");
+        assert_eq!(hubs[0]["diagnostics"]["schema_version"], 1);
+        assert_eq!(hubs[0]["diagnostics"]["commands"], serde_json::json!([]));
+        assert_eq!(hubs[1]["hub_key"], "matter@fabric-b");
     }
 
     #[cfg(target_os = "linux")]

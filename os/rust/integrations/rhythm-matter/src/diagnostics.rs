@@ -216,6 +216,9 @@ impl MatterDiagnostics {
                             .as_ref()
                             .is_some_and(|owner| owner != &stream)
                             || (gap && record.started.is_some_and(|started| started <= reset_at)));
+                    if record.outcome_may_be_lost {
+                        record.finish_elapsed();
+                    }
                 }
             }
             record.completed_inline = submission.completed;
@@ -292,6 +295,7 @@ impl MatterDiagnostics {
                         .is_some_and(|owner| *history_gap || owner != stream_id)
                     {
                         record.outcome_may_be_lost = true;
+                        record.finish_elapsed();
                     }
                 }
                 for observation in state.endpoints.values_mut() {
@@ -416,6 +420,16 @@ impl MatterDiagnostics {
     }
 
     fn retain_failure(state: &mut DiagnosticState, failed: MatterCommandDiagnostic) {
+        // A submission error followed by a late terminal outcome, or a replayed
+        // outcome after a stream resume, describes the same command.
+        if let Some(existing) = state
+            .failures
+            .iter_mut()
+            .find(|existing| existing.command_id == failed.command_id)
+        {
+            *existing = failed;
+            return;
+        }
         state.failures.push_back(failed);
         while state.failures.len() > FAILURE_LIMIT {
             state.failures.pop_front();
@@ -573,6 +587,7 @@ mod tests {
         assert_eq!(snapshot.pending_command_count, 0);
         assert!(snapshot.commands[0].outcome_may_be_lost);
         assert!(snapshot.commands[0].outcome.is_none());
+        assert!(snapshot.commands[0].elapsed_ms.is_some());
         assert!(snapshot.recent_failures.is_empty());
     }
 
@@ -593,7 +608,61 @@ mod tests {
         assert_eq!(snapshot.indeterminate_command_count, 1);
         assert_eq!(snapshot.pending_command_count, 1);
         assert!(snapshot.commands[0].outcome_may_be_lost);
+        assert!(snapshot.commands[0].elapsed_ms.is_some());
         assert!(!snapshot.commands[1].outcome_may_be_lost);
+    }
+
+    #[test]
+    fn submission_error_and_late_failed_outcome_share_one_failure_entry() {
+        let recorder = MatterDiagnostics::default();
+        recorder.submitted(&[plan(1)]);
+        recorder.submission_failed(&[1]);
+        recorder.outcome("stream-a", &outcome(1, MatterCommandOutcomeStatus::Failed));
+        // A replayed outcome after a stream resume describes the same command.
+        recorder.outcome("stream-a", &outcome(1, MatterCommandOutcomeStatus::Failed));
+        let snapshot = recorder.snapshot().unwrap();
+        assert_eq!(snapshot.recent_failures.len(), 1);
+        assert_eq!(snapshot.failures_evicted, 0);
+        let failure = &snapshot.recent_failures[0];
+        assert_eq!(failure.command_id, 1);
+        assert!(failure.submission_error);
+        assert_eq!(
+            failure.outcome.as_ref().unwrap().status,
+            MatterCommandOutcomeStatus::Failed
+        );
+    }
+
+    #[test]
+    fn stream_reset_invalidates_every_on_off_value_but_keeps_its_age() {
+        let recorder = MatterDiagnostics::default();
+        for endpoint in [1u16, 2u16] {
+            recorder.attribute_report(&MatterAttributeReport {
+                node_id: 112,
+                endpoint,
+                received_at_unix_ms: 100,
+                cluster: 6,
+                attr_id: 0,
+                value: MatterAttributeValue::Bool(true),
+            });
+        }
+        assert!(recorder
+            .snapshot()
+            .unwrap()
+            .observations
+            .iter()
+            .all(|observation| observation.on_off_valid_in_current_stream));
+        recorder.event(MatterDiagnosticEvent::StreamReset {
+            stream_id: "stream-b".into(),
+            history_gap: false,
+        });
+        let snapshot = recorder.snapshot().unwrap();
+        assert_eq!(snapshot.observations.len(), 2);
+        for observation in &snapshot.observations {
+            assert!(!observation.on_off_valid_in_current_stream);
+            assert_eq!(observation.last_on_off, Some(true));
+            assert_eq!(observation.last_on_off_received_at_unix_ms, Some(100));
+            assert!(observation.last_on_off_age_ms.is_some());
+        }
     }
 
     #[test]

@@ -21,8 +21,8 @@ pub mod commissioning;
 pub mod control_profile;
 pub mod controller;
 pub mod device_store;
-pub mod discovery;
 pub mod diagnostics;
+pub mod discovery;
 pub mod events;
 #[cfg(test)]
 mod fake_bulb;

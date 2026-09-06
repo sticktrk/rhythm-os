@@ -241,6 +241,7 @@ impl MatterSubscriptionWorkerState {
         retry_initial: Duration,
         retry_max: Duration,
         cadence: MatterSubscriptionCadence,
+        diagnostics: Arc<MatterDiagnostics>,
     ) -> Self {
         Self {
             subscribed: HashMap::new(),
@@ -252,7 +253,7 @@ impl MatterSubscriptionWorkerState {
             retry_initial,
             retry_max,
             cadence,
-            diagnostics: Default::default(),
+            diagnostics,
         }
     }
 
@@ -551,8 +552,8 @@ fn start_observed_state_subscription_worker_with_backoff(
     let spawn_result = std::thread::Builder::new()
         .name("matter-observed-subscriptions".to_string())
         .spawn(move || {
-            let mut state = MatterSubscriptionWorkerState::new(retry_initial, retry_max, cadence);
-            state.diagnostics = diagnostics;
+            let mut state =
+                MatterSubscriptionWorkerState::new(retry_initial, retry_max, cadence, diagnostics);
             loop {
                 if shutdown.load(Ordering::Relaxed) {
                     break;
@@ -2474,6 +2475,7 @@ mod tests {
             MATTER_SUBSCRIPTION_RETRY_INITIAL,
             MATTER_SUBSCRIPTION_RETRY_MAX,
             MatterSubscriptionCadence::production(),
+            Default::default(),
         )
     }
 

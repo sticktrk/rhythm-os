@@ -258,6 +258,38 @@ pub struct MatterHubData {
 }
 
 impl MatterHubData {
+    /// Hub data with no transport, no devices, and a detached event channel.
+    /// Used by support-bundle tests and integration fixtures that only need the
+    /// shared state shape.
+    pub fn detached(fabric_id: &str) -> Self {
+        let (event_tx, _event_rx) = std::sync::mpsc::channel();
+        Self {
+            transport: OnceLock::new(),
+            capture_dir: OnceLock::new(),
+            diagnostics: Default::default(),
+            registry: Arc::new(Mutex::new(MatterDeviceRegistry::new())),
+            fabric_id: fabric_id.to_string(),
+            commissioned: Mutex::new(Vec::new()),
+            next_node_id: AtomicU64::new(100),
+            device_caps: Mutex::new(HashMap::new()),
+            fallback_caps: Mutex::new(HashSet::new()),
+            device_quirks: Mutex::new(HashMap::new()),
+            device_profiles: Mutex::new(HashMap::new()),
+            pending_turn_on_plans: Arc::new(Mutex::new(HashMap::new())),
+            needs_audition: Arc::new(Mutex::new(HashSet::new())),
+            readback: Arc::new(MatterReadbackCoordinator::default()),
+            local_overrides: Mutex::new(crate::local_quirks::LocalMatterOverrides::default()),
+            cloud_profiles: Mutex::new(CloudMatterProfileCatalog::default()),
+            decommissioning: Mutex::new(HashSet::new()),
+            recently_decommissioned: Mutex::new(HashMap::new()),
+            node_proof_of_life: Arc::new(Mutex::new(HashMap::new())),
+            on_off_observations: Arc::new(Mutex::new(HashMap::new())),
+            attribute_report_history: Arc::new(Mutex::new(VecDeque::new())),
+            last_turn_on_dispatch: Mutex::new(HashMap::new()),
+            event_tx,
+        }
+    }
+
     /// Reserve the next node ID.
     pub fn reserve_node_id(&self) -> u64 {
         self.next_node_id.fetch_add(1, Ordering::SeqCst)
@@ -595,32 +627,7 @@ mod tests {
     }
 
     fn hub_data() -> MatterHubData {
-        let (event_tx, _event_rx) = std::sync::mpsc::channel();
-        MatterHubData {
-            transport: std::sync::OnceLock::new(),
-            capture_dir: std::sync::OnceLock::new(),
-            diagnostics: Default::default(),
-            registry: Arc::new(Mutex::new(MatterDeviceRegistry::new())),
-            fabric_id: "default".to_string(),
-            commissioned: Mutex::new(Vec::new()),
-            next_node_id: AtomicU64::new(100),
-            device_caps: Mutex::new(HashMap::new()),
-            fallback_caps: Mutex::new(HashSet::new()),
-            device_quirks: Mutex::new(HashMap::new()),
-            device_profiles: Mutex::new(HashMap::new()),
-            pending_turn_on_plans: Arc::new(Mutex::new(HashMap::new())),
-            needs_audition: Arc::new(Mutex::new(HashSet::new())),
-            readback: Arc::new(MatterReadbackCoordinator::default()),
-            local_overrides: Mutex::new(crate::local_quirks::LocalMatterOverrides::default()),
-            cloud_profiles: Mutex::new(CloudMatterProfileCatalog::default()),
-            decommissioning: Mutex::new(HashSet::new()),
-            recently_decommissioned: Mutex::new(HashMap::new()),
-            node_proof_of_life: Arc::new(Mutex::new(HashMap::new())),
-            on_off_observations: Arc::new(Mutex::new(HashMap::new())),
-            attribute_report_history: Arc::new(Mutex::new(VecDeque::new())),
-            last_turn_on_dispatch: Mutex::new(HashMap::new()),
-            event_tx,
-        }
+        MatterHubData::detached("default")
     }
 
     fn level_plan(command_id: u64, level: u8) -> MatterEndpointCommandPlan {
