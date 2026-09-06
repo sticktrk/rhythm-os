@@ -1072,6 +1072,10 @@ class RhythmServerApi {
           if (correlationId != null) 'correlation_id': correlationId,
           if (targetMode != null) 'target_mode': targetMode.wireValue,
         },
+        // The server plans every light in the house and, in room mode,
+        // projects Hue rooms synchronously before answering; a large home
+        // needs longer than the connection's 10 s default.
+        options: Options(receiveTimeout: const Duration(seconds: 30)),
       );
       final responseJson = jsonMap(response.data);
       if (responseJson == null) return null;

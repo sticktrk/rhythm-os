@@ -477,6 +477,11 @@ fn hue_v2_error_categories_from_value(value: &serde_json::Value) -> Vec<&'static
                 || description.contains("forbidden")
             {
                 "permission_denied"
+            } else if description.contains("unreachable") || description.contains("not reachable") {
+                // The bridge accepted the write but the light is powered off
+                // at the wall or out of Zigbee range. Individual light writes
+                // surface this; a room scene recall silently skips the light.
+                "device_unreachable"
             } else {
                 "opaque"
             };
@@ -1501,6 +1506,19 @@ mod tests {
     }
 
     #[test]
+    fn unreachable_lights_get_their_own_category_without_echoing_ids() {
+        let value: serde_json::Value = serde_json::from_str(
+            r#"{"data":[],"errors":[{"description":"device (light) is unreachable: private-light-id"}]}"#,
+        )
+        .unwrap();
+        let error = validate_hue_v2_envelope("light update", &value).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "light update returned Hue application error category: device_unreachable"
+        );
+    }
+
+    #[test]
     fn hue_error_categories_cover_fixed_categories_and_deduplicate_mixed_errors() {
         let body = r#"{
             "data": [],
@@ -1509,6 +1527,7 @@ mod tests {
                 {"description":"invalid base value for private-light-id"},
                 {"description":"operation forbidden for private-app-key"},
                 {"description":"read-only resource private-room-id"},
+                {"description":"device (light) is unreachable: private-light-id"},
                 {"description":"vendor-specific private detail"}
             ]
         }"#;
@@ -1516,6 +1535,7 @@ mod tests {
         assert_eq!(
             hue_v2_error_categories(body),
             [
+                "device_unreachable",
                 "invalid_value",
                 "opaque",
                 "permission_denied",
