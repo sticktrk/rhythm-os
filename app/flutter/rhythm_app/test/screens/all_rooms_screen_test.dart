@@ -612,11 +612,6 @@ void main() {
     );
     expect(find.text('Set Halloween in 2 of 2 rooms.'), findsOneWidget);
     expect(
-      find.byKey(const ValueKey('global-room-action-undo')),
-      findsNothing,
-      reason: 'the server owns this fan-out; there is nothing local to undo',
-    );
-    expect(
       find.byKey(const ValueKey('global-room-scene-panel')),
       findsOneWidget,
       reason: 'the panel stays open so another scene can be tried',
@@ -781,10 +776,6 @@ void main() {
       (nodeId: 'room-1', action: 'step_down'),
     ]);
     expect(find.text('Adjusted 1 of 1 rooms.'), findsOneWidget);
-    expect(
-      find.byKey(const ValueKey('global-room-action-undo')),
-      findsOneWidget,
-    );
   });
 
   testWidgets('global boost skips legacy Low glow and locks duplicate taps',
@@ -826,8 +817,7 @@ void main() {
     expect(find.text('Adjusted 1 of 1 rooms.'), findsOneWidget);
   });
 
-  testWidgets('global action result auto-dismisses while offering undo',
-      (tester) async {
+  testWidgets('global action result auto-dismisses', (tester) async {
     await _pumpAllRooms(
       tester,
       rooms: const [_room1],
@@ -840,24 +830,16 @@ void main() {
     await tester.pump(const Duration(milliseconds: 500));
 
     expect(find.text('Adjusted 1 of 1 rooms.'), findsOneWidget);
-    expect(
-      find.byKey(const ValueKey('global-room-action-undo')),
-      findsOneWidget,
-    );
+    expect(find.byType(SnackBarAction), findsNothing);
     expect(tester.widget<SnackBar>(find.byType(SnackBar)).persist, isFalse);
 
     await tester.pump(const Duration(seconds: 8));
     await tester.pump(const Duration(milliseconds: 500));
 
     expect(find.text('Adjusted 1 of 1 rooms.'), findsNothing);
-    expect(
-      find.byKey(const ValueKey('global-room-action-undo')),
-      findsNothing,
-    );
   });
 
-  testWidgets('global reset uses reset action and exposes brightness undo',
-      (tester) async {
+  testWidgets('global reset uses reset action', (tester) async {
     final harness = await _pumpAllRooms(
       tester,
       rooms: const [_room1, _bedroom],
@@ -874,21 +856,8 @@ void main() {
       (nodeId: 'bedroom', action: 'reset'),
     ]);
     expect(find.text('Reset 2 of 2 rooms.'), findsOneWidget);
-
-    await tester.tap(
-      find.byKey(const ValueKey('global-room-action-undo')),
-    );
-    await tester.pump();
-    await tester.pump(const Duration(seconds: 2));
-    await tester.pump(const Duration(milliseconds: 500));
-    await tester.pump();
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 500));
-
-    expect(harness.api.brightnessBatches.single, [
-      (nodeId: 'room-1', brightness: 50),
-      (nodeId: 'bedroom', brightness: 50),
-    ]);
+    expect(find.byType(SnackBarAction), findsNothing);
+    expect(harness.api.brightnessBatches, isEmpty);
   });
 
   testWidgets('global reset includes current and legacy Low glow rooms',

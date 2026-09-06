@@ -95,7 +95,6 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
   bool _globalSceneFetchInFlight = false;
   String? _globalAppliedSceneId;
   double? _globalSliderValue;
-  List<_GlobalRoomBrightness>? _globalUndoSnapshot;
 
   // Overlay-based drag state
   OverlayEntry? _dragOverlay;
@@ -1044,7 +1043,6 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     required String verb,
     required int completed,
     required int eligible,
-    bool offerUndo = true,
     String? connector,
   }) {
     final messenger = ScaffoldMessenger.of(context);
@@ -1055,14 +1053,6 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
         duration: const Duration(seconds: 8),
         persist: false,
         content: Text('$verb$joined $completed of $eligible rooms.'),
-        action: offerUndo && completed > 0 && _globalUndoSnapshot != null
-            ? SnackBarAction(
-                key: const ValueKey('global-room-action-undo'),
-                label: 'UNDO',
-                textColor: const Color(0xFFFFD166),
-                onPressed: _scheduleUndoGlobalRoomAction,
-              )
-            : null,
       ),
     );
   }
@@ -1139,15 +1129,6 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     setState(() {
       _globalActionPending = false;
       _globalSliderValue = null;
-      _globalUndoSnapshot = completed == 0
-          ? null
-          : [
-              for (final target in dispatchable.take(completed))
-                _GlobalRoomBrightness(
-                  nodeId: target.room.id,
-                  brightness: target.brightness,
-                ),
-            ];
     });
     _showGlobalResult(
       verb: resultVerb,
@@ -1208,15 +1189,6 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     setState(() {
       _globalActionPending = false;
       _globalSliderValue = brightness.toDouble();
-      _globalUndoSnapshot = completed == 0
-          ? null
-          : [
-              for (final target in dispatchable.take(completed))
-                _GlobalRoomBrightness(
-                  nodeId: target.room.id,
-                  brightness: target.brightness,
-                ),
-            ];
     });
     _showGlobalResult(
       verb: 'Adjusted',
@@ -1235,85 +1207,6 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
         completedCount: completed,
       ),
     );
-  }
-
-  Future<void> _undoGlobalRoomAction() async {
-    if (_globalActionPending || _globalUndoSnapshot == null) return;
-    final journeyId = 'global-room-${_uuid.v4()}';
-    final snapshot = List<_GlobalRoomBrightness>.of(_globalUndoSnapshot!);
-    final currentlyEligible = {
-      for (final target in _eligibleGlobalRoomTargets()) target.room.id: target,
-    };
-    final serverSync = context.read<ServerSyncProvider>();
-    final restorable = snapshot
-        .where(
-          (saved) =>
-              currentlyEligible.containsKey(saved.nodeId) &&
-              serverSync.isRoomHubConnected(
-                currentlyEligible[saved.nodeId]!.room.source,
-              ),
-        )
-        .toList(growable: false);
-
-    if (restorable.isEmpty) {
-      _globalUndoSnapshot = null;
-      AnalyticsService().logGlobalRoomActionCompleted(
-        journeyId: journeyId,
-        action: 'undo',
-        eligibleCount: snapshot.length,
-        attemptedCount: 0,
-        completedCount: 0,
-        outcome: 'no_restorable_rooms',
-      );
-      _showNoEligibleRooms();
-      return;
-    }
-
-    setState(() {
-      _globalActionPending = true;
-      _globalUndoSnapshot = null;
-    });
-    _showGlobalProgress('Restoring ${restorable.length} rooms…');
-    final result = await serverSync.dispatchBatchNodeCurveBrightnessResult([
-      for (final saved in restorable)
-        (nodeId: saved.nodeId, brightness: saved.brightness),
-    ], correlationId: journeyId);
-    if (!mounted) return;
-
-    final attemptedTargets = [
-      for (final saved in restorable) currentlyEligible[saved.nodeId]!,
-    ];
-    final completed = _completedDispatchCount(result, attemptedTargets);
-    setState(() {
-      _globalActionPending = false;
-      _globalSliderValue = null;
-    });
-    _showGlobalResult(
-      verb: 'Restored',
-      completed: completed,
-      eligible: snapshot.length,
-      offerUndo: false,
-    );
-    AnalyticsService().logGlobalRoomActionCompleted(
-      journeyId: journeyId,
-      action: 'undo',
-      eligibleCount: snapshot.length,
-      attemptedCount: restorable.length,
-      completedCount: completed,
-      outcome: _globalRoomActionOutcome(
-        eligibleCount: snapshot.length,
-        attemptedCount: restorable.length,
-        completedCount: completed,
-      ),
-    );
-  }
-
-  void _scheduleUndoGlobalRoomAction() {
-    // SnackBarAction dismisses its parent after invoking onPressed. Let that
-    // exit animation finish so it cannot also dismiss Undo's progress/result.
-    Future<void>.delayed(const Duration(milliseconds: 260), () {
-      if (mounted) _undoGlobalRoomAction();
-    });
   }
 
   void _toggleGlobalBrightnessPanel() {
@@ -1374,9 +1267,7 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
 
     setState(() {
       _globalActionPending = false;
-      // The server owns this fan-out; there is nothing local to undo. The
-      // tile only reads as active when at least one room actually took it.
-      _globalUndoSnapshot = null;
+      // The tile only reads as active when at least one room actually took it.
       _globalAppliedSceneId =
           result != null && result.appliedTargetCount > 0 ? scene.id : null;
     });
@@ -1411,7 +1302,6 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
       connector: 'in',
       completed: completed,
       eligible: attempted,
-      offerUndo: false,
     );
     AnalyticsService().logGlobalRoomActionCompleted(
       journeyId: journeyId,
@@ -1779,16 +1669,6 @@ class _GlobalRoomTarget {
   });
 
   final RoomDto room;
-  final int brightness;
-}
-
-class _GlobalRoomBrightness {
-  const _GlobalRoomBrightness({
-    required this.nodeId,
-    required this.brightness,
-  });
-
-  final String nodeId;
   final int brightness;
 }
 
