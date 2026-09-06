@@ -127,6 +127,9 @@
         "id": "halloween",
         "name": "Halloween",
         "description": "Pumpkin orange, witchy purple and ghoulish green spread across every light.",
+        "extensions": {
+          "whole_home": true
+        },
         "light": {
           "default_transition_ms": 1200,
           "palette": [
@@ -193,6 +196,9 @@
         "id": "dark-fantasy",
         "name": "Dark Fantasy",
         "description": "Midnight indigo, enchanted forest, torchlight amber, blood crimson and arcane violet across every light.",
+        "extensions": {
+          "whole_home": true
+        },
         "light": {
           "default_transition_ms": 1500,
           "palette": [

@@ -2238,6 +2238,9 @@ fn decode_authority_state(
 pub(crate) struct FactorySceneSeedOutcome {
     /// How many factory-default scenes this load added to the install.
     pub(crate) seeded_count: usize,
+    /// How many already-seeded factory scenes picked up a factory extension
+    /// flag (such as `whole_home`) that shipped after they were seeded.
+    pub(crate) updated_count: usize,
     /// Whether the persisted seed marker needs to be rewritten.
     pub(crate) marker_changed: bool,
 }
@@ -2269,8 +2272,26 @@ pub(crate) fn seed_new_factory_default_scenes(
     };
 
     let mut seeded_count = 0usize;
+    let mut updated_count = 0usize;
     for (scene_id, mut scene) in factory_default_scene_map() {
-        if seeded.contains(&scene_id) || s.scenes.contains_key(&scene_id) {
+        if let Some(stored) = s.scenes.get_mut(&scene_id) {
+            // A factory scene the install already holds keeps every edit the
+            // user made, but picks up extension flags the factory copy gained
+            // since it was seeded (a key the stored copy never had). The
+            // stored value always wins for keys it has.
+            let mut changed = false;
+            for (key, value) in scene.extensions {
+                if !stored.extensions.contains_key(&key) {
+                    stored.extensions.insert(key, value);
+                    changed = true;
+                }
+            }
+            if changed {
+                updated_count += 1;
+            }
+            continue;
+        }
+        if seeded.contains(&scene_id) {
             continue;
         }
         scene.normalize();
@@ -2284,6 +2305,7 @@ pub(crate) fn seed_new_factory_default_scenes(
 
     FactorySceneSeedOutcome {
         seeded_count,
+        updated_count,
         marker_changed,
     }
 }
@@ -2523,7 +2545,7 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
                     s,
                     stored.seeded_factory_scene_ids.into_iter().collect(),
                 );
-                if removed_native_definitions > 0 || seed.marker_changed {
+                if removed_native_definitions > 0 || seed.marker_changed || seed.updated_count > 0 {
                     if let Err(error) = storage.save_scenes(&s.stored_scenes()) {
                         warn!(
                             target: "sys",
@@ -2537,6 +2559,13 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
                         target: "sys",
                         "Seeded {} new factory-default scene(s) into this install",
                         seed.seeded_count
+                    );
+                }
+                if seed.updated_count > 0 {
+                    info!(
+                        target: "sys",
+                        "Added new factory extension flags to {} stored factory scene(s)",
+                        seed.updated_count
                     );
                 }
                 info!(target: "sys", "Loaded scenes: {}", s.scenes.len());
@@ -4418,6 +4447,73 @@ mod tests {
                 "an already-offered factory scene must not come back"
             );
             assert_eq!(state.scenes.len(), 1);
+            cleanup(&path);
+        }
+
+        #[test]
+        fn load_persisted_state_adds_new_factory_extension_flags_to_stored_factory_scenes() {
+            let (storage, path) = temp_storage();
+            let storage = Arc::new(storage);
+            // Seeded before `whole_home` existed: the stored copy has no
+            // extensions, and the user renamed it.
+            let mut halloween = stored_scene("halloween");
+            halloween.name = "Spooky".into();
+            // A stored key always wins over the factory value.
+            let mut dark_fantasy = stored_scene("dark-fantasy");
+            dark_fantasy
+                .extensions
+                .insert("whole_home".into(), serde_json::Value::Bool(false));
+            storage
+                .save_scenes(&crate::scenes::StoredScenes {
+                    schema_version: crate::scenes::LIGHT_SCENE_SCHEMA_VERSION,
+                    scenes: vec![
+                        halloween,
+                        dark_fantasy,
+                        stored_scene("color-carnival"),
+                        stored_scene("mine"),
+                    ],
+                    seeded_factory_scene_ids: factory_default_scene_ids().into_iter().collect(),
+                })
+                .unwrap();
+
+            let mut state = state_for_storage(storage.clone());
+            load_persisted_state(&mut state);
+
+            let halloween = &state.scenes["halloween"];
+            assert_eq!(halloween.name, "Spooky", "user edits are kept");
+            assert_eq!(
+                halloween.extensions.get("whole_home"),
+                Some(&serde_json::Value::Bool(true))
+            );
+            assert_eq!(
+                state.scenes["dark-fantasy"].extensions.get("whole_home"),
+                Some(&serde_json::Value::Bool(false)),
+                "a key the stored copy already has is left alone"
+            );
+            assert!(state.scenes["color-carnival"].extensions.is_empty());
+            assert!(state.scenes["mine"].extensions.is_empty());
+
+            // The flag is persisted, so the next load has nothing to add.
+            let reloaded = storage.load_scenes().unwrap().unwrap();
+            let stored_halloween = reloaded
+                .scenes
+                .iter()
+                .find(|scene| scene.id == "halloween")
+                .unwrap();
+            assert_eq!(
+                stored_halloween.extensions.get("whole_home"),
+                Some(&serde_json::Value::Bool(true))
+            );
+            let mut reloaded_state = crate::state::AppState::default();
+            for scene in reloaded.scenes {
+                reloaded_state.scenes.insert(scene.id.clone(), scene);
+            }
+            let seed = seed_new_factory_default_scenes(
+                &mut reloaded_state,
+                factory_default_scene_ids().into_iter().collect(),
+            );
+            assert_eq!(seed.updated_count, 0);
+            assert_eq!(seed.seeded_count, 0);
             cleanup(&path);
         }
 

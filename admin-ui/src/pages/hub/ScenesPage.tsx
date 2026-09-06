@@ -22,6 +22,7 @@ import {
   TextField
 } from '../../components/controls/fields';
 import { SegmentedControl } from '../../components/controls/SegmentedControl';
+import { ToggleSwitch } from '../../components/controls/ToggleSwitch';
 import { EmptyState, ErrorNotice } from '../../components/ui/bits';
 import { useConfirm } from '../../components/ui/ConfirmDialog';
 import { RawPayloadToggle, SectionCard } from '../../components/ui/SectionCard';
@@ -453,6 +454,29 @@ export default function ScenesPage() {
                   onChange={(value) =>
                     updateDraft({ ...draft, description: value || undefined })
                   }
+                />
+              </div>
+            </div>
+            <div className="formRow">
+              <div className="formRowLabel">
+                <span>Whole-home picker</span>
+                <small>Offer it in the app's whole-home scene chooser</small>
+              </div>
+              <div className="formRowControl">
+                <ToggleSwitch
+                  checked={asRecord(draft.extensions).whole_home === true}
+                  disabled={mutate.busy}
+                  label={
+                    asRecord(draft.extensions).whole_home === true
+                      ? 'Shown in the app'
+                      : 'Hidden from the app'
+                  }
+                  onChange={(value) => {
+                    const extensions = { ...asRecord(draft.extensions) };
+                    if (value) extensions.whole_home = true;
+                    else delete extensions.whole_home;
+                    updateDraft({ ...draft, extensions });
+                  }}
                 />
               </div>
             </div>

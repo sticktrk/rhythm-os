@@ -191,6 +191,7 @@ export const SCENE_TEMPLATES: Array<{
     scene: {
       name: 'New palette scene',
       source: { kind: 'user' },
+      extensions: { whole_home: true },
       light: {
         default_transition_ms: 1200,
         palette: [

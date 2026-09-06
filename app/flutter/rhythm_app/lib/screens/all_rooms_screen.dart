@@ -1241,15 +1241,15 @@ class _AllRoomsScreenState extends State<AllRoomsScreen> {
     }
   }
 
-  /// Scenes offered for the whole home.
-  ///
-  /// Hue-imported scenes are excluded: they are recalled against one bridge
-  /// room and cannot address the rest of the house.
+  /// Scenes offered for the whole home: only those flagged `whole_home`
+  /// (the factory Halloween and Dark Fantasy scenes, plus anything the scene
+  /// studio marks). Hue-imported scenes never qualify: they are recalled
+  /// against one bridge room and cannot address the rest of the house.
   List<RhythmSceneDefinition> _globalSceneChoices(
     ServerSyncProvider serverSync,
   ) =>
       serverSync.scenes
-          .where((scene) => !scene.isImportedHueScene)
+          .where((scene) => scene.isWholeHomeScene && !scene.isImportedHueScene)
           .toList(growable: false);
 
   Future<void> _applyGlobalScene(RhythmSceneDefinition scene) async {
