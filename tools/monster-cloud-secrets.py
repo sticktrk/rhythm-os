@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interactively upload owner-scoped Monster secrets; never store them in the repo."""
+"""Interactively upload the shared Monster account secrets; never store them in the repo."""
 import argparse
 import getpass
 import json
@@ -26,7 +26,11 @@ def main():
             parser.error('Cannot read Ayla application configuration')
     for name in names:
         if name not in values:
-            values[name] = getpass.getpass(f'{name}: ')
+            hint = ' (blank keeps the account shared)' if name == 'MONSTER_OWNER_USER_ID' else ''
+            values[name] = getpass.getpass(f'{name}{hint}: ')
+    # The vendor account is shared by default; an owner ID narrows it to one user.
+    if not values['MONSTER_OWNER_USER_ID'].strip():
+        del values['MONSTER_OWNER_USER_ID']
     if any(not isinstance(value, str) or not value or '\n' in value or '\r' in value for value in values.values()):
         parser.error('Every value must be nonempty and single-line')
     values['MONSTER_TICKET_SECRET'] = secrets.token_hex(32)

@@ -101,8 +101,10 @@ export function createMonsterBroker(deps: Dependencies) {
         throw new Failure(stage);
       }
       return JSON.parse(await boundedText(res.body, 2 * 1024 * 1024));
-    } catch {
-      throw new Failure(stage);
+    } catch (e) {
+      // Keep a typed failure's own status (for example 413 from boundedText);
+      // everything else collapses to this stage's bounded 502.
+      throw e instanceof Failure ? e : new Failure(stage);
     }
   }
   async function authenticate(signal: AbortSignal): Promise<string> {
@@ -313,9 +315,12 @@ export function createMonsterBroker(deps: Dependencies) {
       if (req.method !== "POST") {
         return response({ error: "method_not_allowed" }, 405);
       }
-      // One explicitly authorized Rhythm owner. Never expose a shared vendor
-      // account's devices to every authenticated Supabase user.
-      if (userId !== env("MONSTER_OWNER_USER_ID")) {
+      // Default: the configured Monster account is shared, so any authenticated
+      // Rhythm user can commission a light without creating their own vendor
+      // login. Setting MONSTER_OWNER_USER_ID narrows the broker to that one
+      // Supabase user; every other caller is refused before any vendor call.
+      const owner = deps.env("MONSTER_OWNER_USER_ID");
+      if (owner && userId !== owner) {
         return response({ error: "forbidden" }, 403);
       }
       let body: Json;
@@ -333,6 +338,9 @@ export function createMonsterBroker(deps: Dependencies) {
       if (body.action === "complete") {
         setupToken = await verifyTicket(body.ticket, userId, body.dsn);
       }
+      // Deliberate: "begin" only needs the ticket secret, but logging in first
+      // surfaces a misconfigured or revoked vendor account before the caller
+      // spends a BLE provisioning attempt on a ticket it can never complete.
       const auth = `auth_token ${await authenticate(signal)}`;
       if (body.action === "begin") {
         return response(await issueTicket(userId, body.dsn));

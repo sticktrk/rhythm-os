@@ -20,8 +20,10 @@ function fixture(
     fail?: string;
     missingKey?: boolean;
     model?: string;
+    env?: Record<string, string | undefined>;
   } = {},
 ) {
+  const env = { ...secrets, ...options.env };
   const calls: { url: string; body: any; headers: Headers }[] = [];
   let owned = options.owned ?? true;
   let clock = 100000000;
@@ -91,7 +93,7 @@ function fixture(
     return Response.json(result);
   };
   const handle = createMonsterBroker({
-    env: (n) => secrets[n],
+    env: (n) => env[n],
     fetch: fetcher,
     now: () => clock,
   });
@@ -111,6 +113,28 @@ function fixture(
     },
   };
 }
+Deno.test("shared account is the default; every authenticated user may use it", async () => {
+  const shared = fixture({ env: { MONSTER_OWNER_USER_ID: undefined } });
+  assert(
+    (await shared.call({ action: "key", dsn: DSN }, "other-user")).status ===
+      200,
+  );
+  const ticket = await (await shared.call({ action: "begin", dsn: DSN }, "a"))
+    .json();
+  // Tickets still bind the user who began commissioning, even when shared.
+  assert(
+    (await shared.call(
+      { action: "complete", dsn: DSN, ticket: ticket.ticket },
+      "b",
+    )).status === 400,
+  );
+  assert(
+    (await shared.call(
+      { action: "complete", dsn: DSN, ticket: ticket.ticket },
+      "a",
+    )).status === 200,
+  );
+});
 Deno.test("owner isolation and malformed requests make no vendor calls", async () => {
   const f = fixture();
   for (

@@ -50,15 +50,22 @@ outcome before retrying. The library owns no reset/unpair/persistence lifecycle.
 Deploy `tools/app/supabase/functions/monster-device` using the repository's normal
 Supabase deployment workflow. Its entrypoint verifies the caller's Supabase JWT
 through the existing shared auth middleware even though gateway `verify_jwt` is
-false. An additional exact owner gate limits the single configured Monster
-account to `MONSTER_OWNER_USER_ID`; ordinary authenticated users cannot access it.
+false. By default the configured Monster account is shared: every authenticated
+Rhythm user can commission lights and fetch LAN keys through it without creating
+a vendor login of their own. Set `MONSTER_OWNER_USER_ID` to narrow the broker to
+one Supabase user; all other callers are then refused before any vendor call.
+
+Shared mode means any authenticated user who knows a DSN can fetch that device's
+LAN key, since the vendor account cannot tell users apart. The key is only usable
+from the device's own private LAN, and commissioning tickets still bind the user
+who began setup, but per-user device claims are a follow-up before wide release.
 
 Configure these secrets in the Supabase dashboard or from a private env file
 outside the checkout using `supabase secrets set --env-file /private/path`:
 
 | Secret | Value |
 | --- | --- |
-| `MONSTER_OWNER_USER_ID` | Your Rhythm/Supabase auth user UUID |
+| `MONSTER_OWNER_USER_ID` | Optional. Leave unset to share the account (default); set a Supabase auth user UUID to restrict the broker to that one user |
 | `MONSTER_EMAIL` | Monster account email |
 | `MONSTER_PASSWORD` | Monster account password |
 | `MONSTER_APP_ID` | Ayla app ID from the matching Monster application configuration |
@@ -72,7 +79,8 @@ Supabase CLI. The helper generates a ticket-signing secret, uses a mode-0600
 transient file, and removes it after upload. It does not deploy the function.
 Pass `--ayla-config /private/app-config.json` to reuse the private Ayla
 application configuration recovered during the earlier control test. That file
-supplies `appId` and `appSecret`; you enter the account login and Rhythm owner ID.
+supplies `appId` and `appSecret`; you enter the account login and, optionally, a
+Rhythm owner ID (press Enter to keep the account shared).
 Re-running rotates the ticket secret and invalidates outstanding setup tickets.
 
 The crate receives the HTTPS function URL and the authorized user's Supabase

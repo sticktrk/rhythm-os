@@ -12,9 +12,9 @@ spec.loader.exec_module(module)
 
 
 class SecretUploadTests(unittest.TestCase):
-    def run_upload(self, fail=False):
+    def run_upload(self, fail=False, owner='owner'):
         seen = []
-        values = ['owner', 'email', 'p$word"é\\end', 'app', 'app-secret']
+        values = [owner, 'email', 'p$word"é\\end', 'app', 'app-secret']
 
         def upload(args, **kwargs):
             filename = Path(args[-1])
@@ -23,6 +23,10 @@ class SecretUploadTests(unittest.TestCase):
             contents = filename.read_text()
             self.assertIn('MONSTER_PASSWORD="p\\$word\\"é\\\\end"', contents)
             self.assertIn('MONSTER_TICKET_SECRET=', contents)
+            if owner.strip():
+                self.assertIn(f'MONSTER_OWNER_USER_ID="{owner}"', contents)
+            else:
+                self.assertNotIn('MONSTER_OWNER_USER_ID', contents)
             self.assertNotIn(values[2], args)
             self.assertEqual(kwargs['stdout'], subprocess.DEVNULL)
             self.assertEqual(kwargs['stderr'], subprocess.DEVNULL)
@@ -47,6 +51,10 @@ class SecretUploadTests(unittest.TestCase):
 
     def test_cli_failure_still_removes_private_file(self):
         self.run_upload(fail=True)
+
+    def test_blank_owner_keeps_the_account_shared(self):
+        self.run_upload(owner='')
+        self.run_upload(owner='   ')
 
 
 if __name__ == '__main__':

@@ -1,5 +1,6 @@
 //! Static Monster/Ayla lighting. Cloud authentication belongs exclusively to
-//! the owner-scoped `monster-device` Edge Function. This crate never accepts
+//! the `monster-device` Edge Function, which shares one Rhythm-operated Monster
+//! account with authenticated users by default. This crate never accepts
 //! Monster account credentials. No effects, music or firmware control APIs.
 pub mod ble;
 #[cfg(any(test, all(target_os = "linux", feature = "bluez")))]
