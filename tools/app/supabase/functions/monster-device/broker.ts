@@ -2,8 +2,21 @@
 // No credential values or provider bodies are included in errors or logs.
 type Env = (name: string) => string | undefined;
 type Json = Record<string, any>;
-type Dependencies = { env: Env; fetch: typeof fetch; now?: () => number };
+type AylaApp = { appId: string; appSecret: string };
+type Dependencies = {
+  env: Env;
+  fetch: typeof fetch;
+  now?: () => number;
+  ayla?: AylaApp;
+};
 const DEVICE = "https://ads-field.aylanetworks.com";
+// Ayla application credentials of the Monster Gen2 app. They identify the
+// vendor app (not a person) and ship inside the public Monster build, so they
+// are pinned here; only the shared account email and password are secrets.
+const AYLA_APP: AylaApp = {
+  appId: "RGBIC-yQ-id",
+  appSecret: "REMOVED_PRIVATE_VALUE",
+};
 const encoder = new TextEncoder();
 const dsnPattern = /^[A-Za-z0-9]{8,32}$/;
 class Failure extends Error {
@@ -67,10 +80,18 @@ export function createMonsterBroker(deps: Dependencies) {
   const now = deps.now ?? Date.now;
   let cached: { token: string; expires: number } | undefined;
   let pending: Promise<string> | undefined;
+  const ayla = deps.ayla ?? AYLA_APP;
   function env(name: string): string {
     const value = deps.env(name);
     if (!value) throw new Failure("cloud_not_configured", 503);
     return value;
+  }
+  function aylaApp(): AylaApp {
+    if (
+      !ayla.appId || !ayla.appSecret || ayla.appId.startsWith("REPLACE_WITH") ||
+      ayla.appSecret.startsWith("REPLACE_WITH")
+    ) throw new Failure("cloud_not_configured", 503);
+    return ayla;
   }
   async function request(
     url: string,
@@ -155,8 +176,8 @@ export function createMonsterBroker(deps: Dependencies) {
         signal,
         {
           token: ticket.partnerTicket,
-          app_id: env("MONSTER_APP_ID"),
-          app_secret: env("MONSTER_APP_SECRET"),
+          app_id: aylaApp().appId,
+          app_secret: aylaApp().appSecret,
         },
       );
       if (typeof session.access_token !== "string" || !session.access_token) {
@@ -178,11 +199,17 @@ export function createMonsterBroker(deps: Dependencies) {
     }
   }
   async function ticketKey() {
-    const secret = env("MONSTER_TICKET_SECRET");
-    if (secret.length < 32) throw new Failure("cloud_not_configured", 503);
+    // Derived from the shared account credentials so no third secret is
+    // needed. Changing the password invalidates outstanding setup tickets.
+    const material = encoder.encode(
+      `rhythm-monster-ticket-v1\n${env("MONSTER_EMAIL")}\n${
+        env("MONSTER_PASSWORD")
+      }`,
+    );
+    const digest = await crypto.subtle.digest("SHA-256", material);
     return crypto.subtle.importKey(
       "raw",
-      encoder.encode(secret),
+      digest,
       { name: "HMAC", hash: "SHA-256" },
       false,
       ["sign", "verify"],

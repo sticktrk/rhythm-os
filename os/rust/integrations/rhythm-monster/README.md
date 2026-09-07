@@ -80,28 +80,25 @@ LAN key, since the vendor account cannot tell users apart. The key is only usabl
 from the device's own private LAN, and commissioning tickets still bind the user
 who began setup, but per-user device claims are a follow-up before wide release.
 
-Configure these secrets in the Supabase dashboard or from a private env file
-outside the checkout using `supabase secrets set --env-file /private/path`:
+Only two secrets are configured, in the Supabase dashboard or with the helper
+below:
 
 | Secret | Value |
 | --- | --- |
-| `MONSTER_OWNER_USER_ID` | Optional. Leave unset to share the account (default); set a Supabase auth user UUID to restrict the broker to that one user |
-| `MONSTER_EMAIL` | Monster account email |
-| `MONSTER_PASSWORD` | Monster account password |
-| `MONSTER_APP_ID` | Ayla app ID from the matching Monster application configuration |
-| `MONSTER_APP_SECRET` | Matching Ayla application secret, kept server-side |
-| `MONSTER_TICKET_SECRET` | Random signing secret of at least 32 characters |
-| `MONSTER_MODEL_ALLOWLIST` | Optional comma-separated bench-verified model IDs |
+| `MONSTER_EMAIL` | Email of the shared Monster account Rhythm operates |
+| `MONSTER_PASSWORD` | That account's password |
+
+Optional: `MONSTER_OWNER_USER_ID` (a Supabase auth user UUID) restricts the
+broker to one user instead of sharing the account; `MONSTER_MODEL_ALLOWLIST`
+overrides the bench-verified model IDs. The Ayla application ID and secret
+identify the vendor app rather than a person and are pinned in `broker.ts`
+(`AYLA_APP`). The ticket-signing key is derived from the account credentials, so
+changing the password invalidates outstanding setup tickets.
 
 Use `python3 tools/monster-cloud-secrets.py --project-ref YOUR_PROJECT_REF` to
-enter these values without shell-history exposure and upload them through the
-Supabase CLI. The helper generates a ticket-signing secret, uses a mode-0600
-transient file, and removes it after upload. It does not deploy the function.
-Pass `--ayla-config /private/app-config.json` to reuse the private Ayla
-application configuration recovered during the earlier control test. That file
-supplies `appId` and `appSecret`; you enter the account login and, optionally, a
-Rhythm owner ID (press Enter to keep the account shared).
-Re-running rotates the ticket secret and invalidates outstanding setup tickets.
+enter the two values without shell-history exposure and upload them through the
+Supabase CLI via a mode-0600 transient file. Press Enter at the owner prompt to
+keep the account shared. It does not deploy the function.
 
 The crate receives the HTTPS function URL and the authorized user's Supabase
 access token. Never put a Supabase service-role key or Monster account password
