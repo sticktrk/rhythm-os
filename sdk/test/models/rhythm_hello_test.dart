@@ -617,9 +617,38 @@ void main() {
               'supports_unpairing': true,
               'supports_roomless_devices': true,
             },
+            {
+              'type': 'monster',
+              'configurable': false,
+              'device_onboarding_methods': [
+                RhythmDeviceOnboardingMethod.monsterBleNearbyScan,
+              ],
+              'supports_unpairing': true,
+              'supports_roomless_devices': true,
+              'blocks_room_readiness': false,
+            },
           ],
         },
       });
+
+      // Staged Monster onboarding is a vendor-specific method: only an
+      // appliance that names it may offer the No QR? Monster path, and it
+      // never holds the Rooms startup gate.
+      final monster = hello.capabilities!.hub('monster')!;
+      expect(
+        monster.supportsDeviceOnboardingMethod(
+          RhythmDeviceOnboardingMethod.monsterBleNearbyScan,
+        ),
+        isTrue,
+      );
+      expect(monster.blocksRoomReadiness, isFalse);
+      expect(monster.supportsRoomlessDevices, isTrue);
+      expect(
+        hello.capabilities!.hub('hue_ble')!.supportsDeviceOnboardingMethod(
+              RhythmDeviceOnboardingMethod.monsterBleNearbyScan,
+            ),
+        isFalse,
+      );
 
       final legacy = hello.capabilities!.hub('legacy_local')!;
       expect(legacy.deviceProfiles, isEmpty);

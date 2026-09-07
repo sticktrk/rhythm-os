@@ -21,6 +21,7 @@ void main() {
     bool hueBridgeOnly = false,
     bool matterOnNetworkAvailable = false,
     bool autoDiscoverHueBle = false,
+    bool nearbyScanAvailable = false,
     HueBleDiscoveryRequest? hueBleDiscoveryRequest,
   }) {
     return MaterialApp(
@@ -29,6 +30,7 @@ void main() {
         hueBridgeOnly: hueBridgeOnly,
         matterOnNetworkAvailable: matterOnNetworkAvailable,
         autoDiscoverHueBle: autoDiscoverHueBle,
+        nearbyScanAvailable: nearbyScanAvailable,
         analyticsSource: 'device_camera',
         hueBleDiscoveryRequest: hueBleDiscoveryRequest,
         cameraBuilder: (context, onDetect) {
@@ -64,6 +66,55 @@ void main() {
     expect(find.byTooltip('Back to Add & Review'), findsOneWidget);
     expect(find.text('Enter a Code'), findsOneWidget);
     expect(find.text('Already in another Matter app?'), findsNothing);
+  });
+
+  testWidgets('offers a capability-gated No QR? nearby Bluetooth action', (
+    tester,
+  ) async {
+    await tester.binding.setSurfaceSize(const Size(430, 900));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+
+    await tester.pumpWidget(buildScanner());
+    expect(find.byKey(const ValueKey('no-qr-nearby-scan')), findsNothing);
+
+    DevicePairingScannerResult? result;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Builder(
+          builder: (context) => TextButton(
+            onPressed: () async {
+              result = await Navigator.of(context).push(
+                MaterialPageRoute<DevicePairingScannerResult>(
+                  builder: (_) => DevicePairingScannerScreen(
+                    nearbyScanAvailable: true,
+                    journeyId: 'device-pair-journey',
+                    analyticsSource: 'device_camera',
+                    cameraBuilder: (context, onDetect) =>
+                        const ColoredBox(color: Colors.black),
+                  ),
+                ),
+              );
+            },
+            child: const Text('Open'),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('Open'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('no-qr-nearby-scan')));
+    await tester.pumpAndSettle();
+
+    expect(result?.action, DevicePairingScannerAction.nearbyScan);
+    expect(result?.inputMethod, 'nearby_sheet');
+    expect(result?.journeyId, 'device-pair-journey');
+    final event = analyticsBackend.events.singleWhere(
+      (event) =>
+          event.name == 'device_pairing_code_detected' &&
+          event.properties['outcome'] == 'nearby_scan_selected',
+    );
+    expect(event.properties['code_kind'], 'nearby');
   });
 
   testWidgets('offers capability-gated existing Matter intake', (tester) async {

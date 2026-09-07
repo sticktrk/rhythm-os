@@ -45,6 +45,26 @@ bounded admitted operation and disconnects before completion. Cancelling an
 outer caller does not cancel an already admitted server operation; reconcile its
 outcome before retrying. The library owns no reset/unpair/persistence lifecycle.
 
+## Appliance hub (Linux, `bluez` feature)
+
+`hub::INTEGRATION` registers Monster as the `monster` hub type on the Linux
+appliance and advertises the `monster_ble_nearby_scan` onboarding method. The
+app drives three terminal `api/devices/pair` requests and brokers the cloud
+steps between them, so the appliance never holds a Supabase session:
+
+| Stage | Params | Result `details` |
+| --- | --- | --- |
+| `discover` | `scan_secs` (optional) | `candidates: [{dsn, address}]` from FE28 advertisers whose DSN was read over GATT |
+| `provision` | `dsn`, `address`, `setup_token` | `dsn`; a failure sets `uncertain: true` after the first GATT write |
+| `adopt` | `dsn`, `ip`, `local_key`, `local_key_id`, `name` | the paired light, only after a signed LAN power readback |
+
+Wi-Fi credentials come from the appliance's stored commissioning credentials
+(the same source Matter BLE commissioning uses). Adopted lights persist in
+`<data_dir>/monster/devices.json` (0600 in a 0700 directory, corrupt files
+quarantined) and are restored into one `LightLanClient` each on hub connect.
+Unpairing removes the store entry and the canonical endpoint; it never calls
+the cloud. Only the Bluetooth stages reserve the shared appliance adapter.
+
 ## Cloud setup
 
 Deploy `tools/app/supabase/functions/monster-device` using the repository's normal

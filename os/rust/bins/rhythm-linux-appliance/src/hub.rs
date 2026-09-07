@@ -14,4 +14,6 @@ pub static INTEGRATIONS: &[&dyn ExternalLightHubIntegration] = &[
     &rhythm_hue::ble::bluez_lifecycle::INTEGRATION,
     #[cfg(target_os = "linux")]
     &rhythm_ble::bluez_lifecycle::INTEGRATION,
+    #[cfg(target_os = "linux")]
+    &rhythm_monster::hub::INTEGRATION,
 ];

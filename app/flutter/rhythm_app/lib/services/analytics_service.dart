@@ -1371,6 +1371,73 @@ class AnalyticsService {
   }
 
   /// Track the user's response to the privacy-safe nearby-bulb invitation.
+  Future<void> logNearbyDeviceScanCompleted({
+    required String source,
+    required String outcome,
+    required Map<String, int> familyCounts,
+  }) async {
+    await logEvent('device_pairing_nearby_scan_completed', {
+      'source': source,
+      'outcome': outcome,
+      for (final entry in familyCounts.entries)
+        '${entry.key}_count': entry.value < 0
+            ? 0
+            : entry.value > 10
+                ? 10
+                : entry.value,
+    });
+  }
+
+  Future<void> logNearbyDeviceFamilySelected({
+    required String source,
+    required String family,
+    required int deviceCount,
+  }) async {
+    await logEvent('device_pairing_nearby_family_selected', {
+      'source': source,
+      'family': family,
+      'device_count': deviceCount < 0
+          ? 0
+          : deviceCount > 10
+              ? 10
+              : deviceCount,
+    });
+  }
+
+  Future<void> logMonsterPairingAttempted({
+    required String journeyId,
+    required String source,
+    required String inputMethod,
+    required int attemptNumber,
+    bool resumed = false,
+  }) async {
+    await logEvent('monster_pairing_attempted', {
+      'journey_id': journeyId,
+      'source': source,
+      'input_method': inputMethod,
+      'attempt_number': attemptNumber,
+      'resumed': resumed,
+    });
+  }
+
+  Future<void> logMonsterPairingCompleted({
+    required String journeyId,
+    required String source,
+    required String inputMethod,
+    required int attemptNumber,
+    required String outcome,
+    String? failureStage,
+  }) async {
+    await logEvent('monster_pairing_completed', {
+      'journey_id': journeyId,
+      'source': source,
+      'input_method': inputMethod,
+      'attempt_number': attemptNumber,
+      'outcome': outcome,
+      if (failureStage != null) 'failure_stage': failureStage,
+    });
+  }
+
   Future<void> logHueBleNearbyPromptAnswered({
     required String source,
     required String outcome,

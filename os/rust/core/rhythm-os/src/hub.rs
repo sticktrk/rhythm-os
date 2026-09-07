@@ -227,6 +227,9 @@ impl HubType {
     pub const LOCAL_BLE: &'static str = "local_ble";
     pub const HA: &'static str = "ha";
     pub const MATTER: &'static str = "matter";
+    /// Monster/Ayla static lighting commissioned over the shared appliance
+    /// Bluetooth adapter and controlled over the authenticated LAN protocol.
+    pub const MONSTER: &'static str = "monster";
 
     pub fn new(s: impl Into<String>) -> Self {
         Self(s.into())
@@ -376,6 +379,10 @@ pub const DEVICE_ONBOARDING_METHOD_MATTER_BLE_WIFI_COMMISSIONING: &str =
 pub const DEVICE_ONBOARDING_METHOD_HUE_BLE_NEARBY_SCAN: &str = "hue_ble_nearby_scan";
 /// Resolve a locally parsed, server-advertised BLE device profile.
 pub const DEVICE_ONBOARDING_METHOD_LOCAL_BLE_QR: &str = "local_ble_qr";
+/// Find a nearby Monster/Ayla strip over Bluetooth, commission it onto the
+/// appliance's Wi-Fi, then adopt the cloud-issued LAN key. Staged: the app
+/// brokers the cloud steps between `discover`, `provision` and `adopt`.
+pub const DEVICE_ONBOARDING_METHOD_MONSTER_BLE_NEARBY_SCAN: &str = "monster_ble_nearby_scan";
 /// Ask an already connected Hue Bridge to find one Zigbee light by its
 /// six-character printed serial.
 pub const DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_SERIAL_SEARCH: &str = "hue_bridge_serial_search";
