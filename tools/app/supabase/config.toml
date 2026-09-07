@@ -59,3 +59,5 @@ verify_jwt = false
 [functions.server-activity-ingest]
 verify_jwt = false
 
+[functions.monster-device]
+verify_jwt = false
