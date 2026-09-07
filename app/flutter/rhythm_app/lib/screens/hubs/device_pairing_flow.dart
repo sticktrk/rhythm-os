@@ -4,6 +4,8 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
     show RhythmDevice, RhythmDeviceType, RhythmHubInfo, RhythmPairedDevice;
 import 'package:uuid/uuid.dart';
 
+import '../../widgets/nearby_device_sheet.dart';
+import '../../services/nearby_ble_discovery_service.dart';
 import '../../providers/server_sync_provider.dart';
 import '../../widgets/device_detail_sheet.dart';
 import 'device_pairing_code_entry_screen.dart';
@@ -11,6 +13,7 @@ import 'device_pairing_scanner_screen.dart';
 import 'hue_ble_device_add_screen.dart';
 import 'hue_bridge_light_add_screen.dart';
 import 'local_ble_device_add_screen.dart';
+import 'monster_device_add_screen.dart';
 import 'matter_pairing_flow.dart';
 
 enum DevicePairingTarget { any, hueBle, hueBridge }
@@ -158,6 +161,9 @@ Future<void> startDevicePairingFlow(
           syncProvider.canAddHueBleDevice,
       matterOnNetworkAvailable:
           !hueBridgeOnly && syncProvider.canAddMatterOnNetworkDevice,
+      nearbyScanAvailable: !hueBridgeOnly &&
+          allowsLightPairing &&
+          syncProvider.nearbyBleFamilies.isNotEmpty,
       analyticsSource: analyticsSource,
     );
     if (!context.mounted || intake == null) return;
@@ -294,8 +300,110 @@ Future<void> startDevicePairingFlow(
 
       case DevicePairingScannerAction.enterCode:
         continue;
+
+      case DevicePairingScannerAction.nearbyScan:
+        if (hueBridgeOnly || !allowsLightPairing) continue;
+        final family = await showNearbyDeviceSheet(
+          context,
+          families: syncProvider.nearbyBleFamilies,
+          source: analyticsSource,
+        );
+        if (!context.mounted) return;
+        if (family == null) continue;
+        final nearbyJourneyId = pairingJourneyIdForIntake(
+          intake,
+          fallbackPrefix: '${family.id}-pair',
+        );
+        switch (family) {
+          case NearbyBleFamily.hueBle:
+            await _startHueBlePairing(
+              context,
+              analyticsSource: analyticsSource,
+              roomAssignment: roomAssignment,
+              inputMethod: intake.inputMethod,
+              journeyId: nearbyJourneyId,
+            );
+          case NearbyBleFamily.monster:
+            await _startMonsterPairing(
+              context,
+              analyticsSource: analyticsSource,
+              roomAssignment: roomAssignment,
+              inputMethod: intake.inputMethod,
+              journeyId: nearbyJourneyId,
+            );
+        }
+        return;
     }
   }
+}
+
+Future<void> _startMonsterPairing(
+  BuildContext context, {
+  required String analyticsSource,
+  DevicePairingRoomAssignment? roomAssignment,
+  String inputMethod = 'nearby_sheet',
+  String? journeyId,
+}) async {
+  final syncProvider = context.read<ServerSyncProvider>();
+  final result = await MonsterDeviceAddScreen.show(
+    context,
+    analyticsSource: analyticsSource,
+    journeyId: journeyId ?? 'monster-pair-${const Uuid().v4()}',
+    inputMethod: inputMethod,
+  );
+  if (!context.mounted || result == null) return;
+
+  try {
+    await syncProvider.connection.reconnect();
+  } catch (_) {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          '${result.device.name} was added. It will appear in Devices after '
+          'the Rhythm Box reconnects.',
+        ),
+      ),
+    );
+    return;
+  }
+  if (!context.mounted) return;
+
+  final resolved = await _resolvePairedDevices(
+    context,
+    [
+      RhythmPairedDevice(
+        deviceId: result.device.nativeDeviceId,
+        name: result.device.name,
+        deviceType: result.device.deviceType,
+        manufacturer: result.device.manufacturer,
+        model: result.device.model,
+      ),
+    ],
+    hubType: 'monster',
+  );
+  if (!context.mounted) return;
+  final warningSuffix = _pairingWarningSuffix(result.warnings);
+  if (resolved.isEmpty) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          '${result.device.name} was added. It will appear in Devices after '
+          'the next sync.$warningSuffix',
+        ),
+      ),
+    );
+    return;
+  }
+  await _offerRoomAssignments(
+    context,
+    resolved,
+    allowNoRoom: syncProvider.supportsMonsterRoomlessDevices,
+    sourceLabel: 'Monster',
+    analyticsSource: analyticsSource,
+    expectedCount: 1,
+    roomAssignment: roomAssignment,
+  );
 }
 
 Future<DevicePairingScannerResult?> _capturePairingCode(
@@ -307,6 +415,7 @@ Future<DevicePairingScannerResult?> _capturePairingCode(
   required bool autoDiscoverHueBle,
   required bool matterOnNetworkAvailable,
   required String analyticsSource,
+  bool nearbyScanAvailable = false,
 }) async {
   if (supportsDevicePairingCamera) {
     final scanned = await DevicePairingScannerScreen.show(
@@ -316,6 +425,7 @@ Future<DevicePairingScannerResult?> _capturePairingCode(
       hueBridgeOnly: hueBridgeOnly,
       journeyId: journeyId,
       autoDiscoverHueBle: autoDiscoverHueBle,
+      nearbyScanAvailable: nearbyScanAvailable,
       matterOnNetworkAvailable: matterOnNetworkAvailable,
       analyticsSource: analyticsSource,
     );

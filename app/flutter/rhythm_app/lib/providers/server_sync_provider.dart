@@ -8,6 +8,7 @@
 /// - Location pushes from app → server
 library;
 
+import '../services/nearby_ble_discovery_service.dart';
 import '../services/app_startup_performance.dart';
 import 'dart:async';
 
@@ -1266,6 +1267,7 @@ class ServerSyncProvider extends ChangeNotifier {
   RhythmHubCapabilities? get localBleCapabilities =>
       hubCapabilities('local_ble');
   RhythmHubCapabilities? get hueBridgeCapabilities => hubCapabilities('hue');
+  RhythmHubCapabilities? get monsterCapabilities => hubCapabilities('monster');
 
   /// Whether the server advertises explicit Matter add methods.
   bool get hasExplicitMatterCapabilities => matterCapabilities != null;
@@ -1319,6 +1321,20 @@ class ServerSyncProvider extends ChangeNotifier {
         RhythmDeviceOnboardingMethod.hueBleNearbyScan,
       ) ??
       false;
+
+  /// Whether this appliance can find and commission a Monster strip over its
+  /// own Bluetooth adapter. Only offered when explicitly advertised.
+  bool get canAddMonsterNearby =>
+      monsterCapabilities?.supportsDeviceOnboardingMethod(
+        RhythmDeviceOnboardingMethod.monsterBleNearbyScan,
+      ) ??
+      false;
+
+  /// Device families the **No QR?** sheet may scan for on this appliance.
+  Set<NearbyBleFamily> get nearbyBleFamilies => {
+        if (canAddHueBleDevice) NearbyBleFamily.hueBle,
+        if (canAddMonsterNearby) NearbyBleFamily.monster,
+      };
 
   Map<String, String> get _localBleProfileRoutes {
     final capabilities = localBleCapabilities;
@@ -1428,10 +1444,14 @@ class ServerSyncProvider extends ChangeNotifier {
   bool get supportsLocalBleRoomlessDevices =>
       localBleCapabilities?.supportsRoomlessDevices ?? false;
 
+  bool get supportsMonsterRoomlessDevices =>
+      monsterCapabilities?.supportsRoomlessDevices ?? false;
+
   bool get canScanToAddDevice =>
       canAddMatterDevice ||
       canAddHueBridgeDeviceBySerial ||
       canAddHueBleDevice ||
+      canAddMonsterNearby ||
       canAddLocalBleDevice;
 
   /// Whether at least one advertised onboarding path can produce [deviceType].
@@ -1446,6 +1466,7 @@ class ServerSyncProvider extends ChangeNotifier {
       return canAddMatterDevice ||
           canAddHueBridgeDeviceBySerial ||
           canAddHueBleDevice ||
+          canAddMonsterNearby ||
           hasMatchingLocalBleProfile;
     }
     return hasMatchingLocalBleProfile;
