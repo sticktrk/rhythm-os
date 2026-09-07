@@ -617,9 +617,77 @@ void main() {
               'supports_unpairing': true,
               'supports_roomless_devices': true,
             },
+            {
+              'type': 'monster',
+              'configurable': false,
+              'device_onboarding_methods': [
+                RhythmDeviceOnboardingMethod.bleWifiNearbyScan,
+              ],
+              'device_profiles': [
+                {
+                  'id': 'monster.neon-flow.light.v1',
+                  'device_type': 'light',
+                  'display_name': 'Monster Neon Flow',
+                  'input_only': false,
+                  'onboarding_methods': [
+                    RhythmDeviceOnboardingMethod.bleWifiNearbyScan,
+                  ],
+                  'nearby_service_uuids': [
+                    '0000FE28-0000-1000-8000-00805F9B34FB',
+                    'not-a-uuid',
+                  ],
+                  'cloud_broker': 'monster-device',
+                },
+                {
+                  'id': 'vendor.no-cloud.light.v1',
+                  'device_type': 'light',
+                  'display_name': 'Cloudless strip',
+                  'input_only': false,
+                  'onboarding_methods': [
+                    RhythmDeviceOnboardingMethod.bleWifiNearbyScan,
+                  ],
+                  'cloud_broker': 'Bad Name!',
+                },
+              ],
+              'supports_unpairing': true,
+              'supports_roomless_devices': true,
+              'blocks_room_readiness': false,
+            },
           ],
         },
       });
+
+      // Staged Monster onboarding is a vendor-specific method: only an
+      // appliance that names it may offer the No QR? Monster path, and it
+      // never holds the Rooms startup gate.
+      final monster = hello.capabilities!.hub('monster')!;
+      expect(
+        monster.supportsDeviceOnboardingMethod(
+          RhythmDeviceOnboardingMethod.bleWifiNearbyScan,
+        ),
+        isTrue,
+      );
+      expect(monster.blocksRoomReadiness, isFalse);
+      expect(monster.supportsRoomlessDevices, isTrue);
+      final neonFlow = monster.deviceProfiles[0];
+      expect(neonFlow.supportsNearbyScan, isTrue);
+      expect(
+        neonFlow.nearbyServiceUuids,
+        ['0000fe28-0000-1000-8000-00805f9b34fb'],
+        reason: 'UUIDs are normalized and malformed entries dropped',
+      );
+      expect(neonFlow.cloudBroker, 'monster-device');
+      final cloudless = monster.deviceProfiles[1];
+      expect(cloudless.supportsNearbyScan, isFalse,
+          reason: 'no service UUID means the phone cannot find it');
+      expect(cloudless.cloudBroker, isNull,
+          reason: 'broker names must be safe function identifiers');
+      expect(
+        hello.capabilities!.hub('hue_ble')!.supportsDeviceOnboardingMethod(
+              RhythmDeviceOnboardingMethod.bleWifiNearbyScan,
+            ),
+        isFalse,
+      );
 
       final legacy = hello.capabilities!.hub('legacy_local')!;
       expect(legacy.deviceProfiles, isEmpty);

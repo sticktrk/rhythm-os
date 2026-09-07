@@ -227,6 +227,9 @@ impl HubType {
     pub const LOCAL_BLE: &'static str = "local_ble";
     pub const HA: &'static str = "ha";
     pub const MATTER: &'static str = "matter";
+    /// Monster/Ayla static lighting commissioned over the shared appliance
+    /// Bluetooth adapter and controlled over the authenticated LAN protocol.
+    pub const MONSTER: &'static str = "monster";
 
     pub fn new(s: impl Into<String>) -> Self {
         Self(s.into())
@@ -323,6 +326,15 @@ pub struct HubDeviceProfileCapability {
     /// offers onboarding.
     #[serde(default)]
     pub onboarding_methods: Vec<String>,
+    /// Bluetooth service UUIDs a phone may scan for to notice this profile's
+    /// devices waiting in setup mode. Empty when the profile is not found by
+    /// nearby scanning.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nearby_service_uuids: Vec<String>,
+    /// Name of the Rhythm cloud function the app brokers commissioning
+    /// through for this profile, when its vendor requires a cloud step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cloud_broker: Option<String>,
 }
 
 impl HubDeviceProfileCapability {
@@ -376,6 +388,11 @@ pub const DEVICE_ONBOARDING_METHOD_MATTER_BLE_WIFI_COMMISSIONING: &str =
 pub const DEVICE_ONBOARDING_METHOD_HUE_BLE_NEARBY_SCAN: &str = "hue_ble_nearby_scan";
 /// Resolve a locally parsed, server-advertised BLE device profile.
 pub const DEVICE_ONBOARDING_METHOD_LOCAL_BLE_QR: &str = "local_ble_qr";
+/// Find a nearby Wi-Fi light in Bluetooth setup mode, commission it onto the
+/// appliance's Wi-Fi, then adopt its LAN credentials. Staged and vendor
+/// neutral: the app brokers any cloud steps between `discover`, `provision`
+/// and `adopt`, guided by the hub's advertised device profiles.
+pub const DEVICE_ONBOARDING_METHOD_BLE_WIFI_NEARBY_SCAN: &str = "ble_wifi_nearby_scan";
 /// Ask an already connected Hue Bridge to find one Zigbee light by its
 /// six-character printed serial.
 pub const DEVICE_ONBOARDING_METHOD_HUE_BRIDGE_SERIAL_SEARCH: &str = "hue_bridge_serial_search";
@@ -2287,6 +2304,8 @@ mod tests {
             display_name: "BLE bulb".to_string(),
             input_only: false,
             onboarding_methods: vec!["local_ble_qr".to_string()],
+            nearby_service_uuids: Vec::new(),
+            cloud_broker: None,
         };
         assert_eq!(
             profile.canonical_id_for("future.vendor.bulb.v2"),

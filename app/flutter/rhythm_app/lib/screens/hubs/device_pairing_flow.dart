@@ -5,9 +5,12 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
 import 'package:uuid/uuid.dart';
 
 import '../../providers/server_sync_provider.dart';
+import '../../services/nearby_ble_discovery_service.dart';
 import '../../widgets/device_detail_sheet.dart';
+import '../../widgets/nearby_device_sheet.dart';
 import 'device_pairing_code_entry_screen.dart';
 import 'device_pairing_scanner_screen.dart';
+import 'ble_wifi_device_add_screen.dart';
 import 'hue_ble_device_add_screen.dart';
 import 'hue_bridge_light_add_screen.dart';
 import 'local_ble_device_add_screen.dart';
@@ -28,19 +31,13 @@ class DevicePairingRoomAssignment {
 }
 
 class HueBridgePairingTarget {
-  const HueBridgePairingTarget({
-    required this.address,
-    required this.label,
-  });
+  const HueBridgePairingTarget({required this.address, required this.label});
 
   final String address;
   final String label;
 }
 
-typedef _ResolvedPairedDevice = ({
-  RhythmDevice device,
-  String parentNodeId,
-});
+typedef _ResolvedPairedDevice = ({RhythmDevice device, String parentNodeId});
 
 @visibleForTesting
 String pairingJourneyIdForIntake(
@@ -72,7 +69,7 @@ List<HueBridgePairingTarget> connectedHueBridgePairingTargets({
     final configuredLabel = [
       rawInfo?['name'],
       rawInfo?['label'],
-      rawInfo?['bridge_name'],
+      rawInfo?['bridge_name']
     ]
         .map((value) => value?.toString().trim() ?? '')
         .firstWhere((value) => value.isNotEmpty, orElse: () => '');
@@ -108,9 +105,7 @@ Future<void> startDevicePairingFlow(
     if (!allowsLightPairing || !syncProvider.canAddHueBleDevice) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text(
-            'Update your Rhythm Box to add Hue Bluetooth bulbs.',
-          ),
+          content: Text('Update your Rhythm Box to add Hue Bluetooth bulbs.'),
         ),
       );
       return;
@@ -158,6 +153,9 @@ Future<void> startDevicePairingFlow(
           syncProvider.canAddHueBleDevice,
       matterOnNetworkAvailable:
           !hueBridgeOnly && syncProvider.canAddMatterOnNetworkDevice,
+      nearbyScanAvailable: !hueBridgeOnly &&
+          allowsLightPairing &&
+          syncProvider.nearbyBleFamilies.isNotEmpty,
       analyticsSource: analyticsSource,
     );
     if (!context.mounted || intake == null) return;
@@ -269,8 +267,9 @@ Future<void> startDevicePairingFlow(
           continue;
         }
         final expectedDeviceType = roomAssignment?.expectedDeviceType;
-        final scannedDeviceType =
-            syncProvider.localBleDeviceTypeForProfile(profileId);
+        final scannedDeviceType = syncProvider.localBleDeviceTypeForProfile(
+          profileId,
+        );
         if (expectedDeviceType != null &&
             scannedDeviceType != null &&
             scannedDeviceType != expectedDeviceType) {
@@ -294,8 +293,112 @@ Future<void> startDevicePairingFlow(
 
       case DevicePairingScannerAction.enterCode:
         continue;
+
+      case DevicePairingScannerAction.nearbyScan:
+        if (hueBridgeOnly || !allowsLightPairing) continue;
+        final family = await showNearbyDeviceSheet(
+          context,
+          families: syncProvider.nearbyBleFamilies,
+          source: analyticsSource,
+        );
+        if (!context.mounted) return;
+        if (family == null) continue;
+        final nearbyJourneyId = pairingJourneyIdForIntake(
+          intake,
+          fallbackPrefix: '${family.id}-pair',
+        );
+        switch (family.kind) {
+          case NearbyBleFamilyKind.hueBle:
+            await _startHueBlePairing(
+              context,
+              analyticsSource: analyticsSource,
+              roomAssignment: roomAssignment,
+              inputMethod: intake.inputMethod,
+              journeyId: nearbyJourneyId,
+            );
+          case NearbyBleFamilyKind.bleWifi:
+            await _startBleWifiPairing(
+              context,
+              family: family,
+              analyticsSource: analyticsSource,
+              roomAssignment: roomAssignment,
+              inputMethod: intake.inputMethod,
+              journeyId: nearbyJourneyId,
+            );
+        }
+        return;
     }
   }
+}
+
+Future<void> _startBleWifiPairing(
+  BuildContext context, {
+  required NearbyBleFamily family,
+  required String analyticsSource,
+  DevicePairingRoomAssignment? roomAssignment,
+  String inputMethod = 'nearby_sheet',
+  String? journeyId,
+}) async {
+  final syncProvider = context.read<ServerSyncProvider>();
+  final result = await BleWifiDeviceAddScreen.show(
+    context,
+    family: family,
+    analyticsSource: analyticsSource,
+    journeyId: journeyId ?? 'ble-wifi-pair-${const Uuid().v4()}',
+    inputMethod: inputMethod,
+  );
+  if (!context.mounted || result == null) return;
+
+  try {
+    await syncProvider.connection.reconnect();
+  } catch (_) {
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          '${result.device.name} was added. It will appear in Devices after '
+          'the Rhythm Box reconnects.',
+        ),
+      ),
+    );
+    return;
+  }
+  if (!context.mounted) return;
+
+  final resolved = await _resolvePairedDevices(
+      context,
+      [
+        RhythmPairedDevice(
+          deviceId: result.device.nativeDeviceId,
+          name: result.device.name,
+          deviceType: result.device.deviceType,
+          manufacturer: result.device.manufacturer,
+          model: result.device.model,
+        ),
+      ],
+      hubType: family.hubType);
+  if (!context.mounted) return;
+  final warningSuffix = _pairingWarningSuffix(result.warnings);
+  if (resolved.isEmpty) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          '${result.device.name} was added. It will appear in Devices after '
+          'the next sync.$warningSuffix',
+        ),
+      ),
+    );
+    return;
+  }
+  await _offerRoomAssignments(
+    context,
+    resolved,
+    allowNoRoom: syncProvider.supportsRoomlessDevicesForHub(family.hubType),
+    sourceLabel: family.label,
+    analyticsSource: analyticsSource,
+    expectedCount: 1,
+    roomAssignment: roomAssignment,
+  );
 }
 
 Future<DevicePairingScannerResult?> _capturePairingCode(
@@ -307,6 +410,7 @@ Future<DevicePairingScannerResult?> _capturePairingCode(
   required bool autoDiscoverHueBle,
   required bool matterOnNetworkAvailable,
   required String analyticsSource,
+  bool nearbyScanAvailable = false,
 }) async {
   if (supportsDevicePairingCamera) {
     final scanned = await DevicePairingScannerScreen.show(
@@ -316,6 +420,7 @@ Future<DevicePairingScannerResult?> _capturePairingCode(
       hueBridgeOnly: hueBridgeOnly,
       journeyId: journeyId,
       autoDiscoverHueBle: autoDiscoverHueBle,
+      nearbyScanAvailable: nearbyScanAvailable,
       matterOnNetworkAvailable: matterOnNetworkAvailable,
       analyticsSource: analyticsSource,
     );
@@ -352,8 +457,9 @@ Future<void> _startLocalBlePairing(
   final setup = intake.localBleSetup;
   if (setup == null) return;
   final syncProvider = context.read<ServerSyncProvider>();
-  final pairingProfileId =
-      syncProvider.canonicalLocalBleProfileId(setup.profileId);
+  final pairingProfileId = syncProvider.canonicalLocalBleProfileId(
+    setup.profileId,
+  );
   if (pairingProfileId == null) return;
   final result = await LocalBleDeviceAddScreen.show(
     context,
@@ -361,10 +467,7 @@ Future<void> _startLocalBlePairing(
     pairingProfileId: pairingProfileId,
     inputMethod: intake.inputMethod,
     analyticsSource: analyticsSource,
-    journeyId: pairingJourneyIdForIntake(
-      intake,
-      fallbackPrefix: 'device-pair',
-    ),
+    journeyId: pairingJourneyIdForIntake(intake, fallbackPrefix: 'device-pair'),
   );
   if (!context.mounted || result == null) return;
 
@@ -402,10 +505,11 @@ Future<void> continueRecoveredLocalBlePairingFlow(
   }
   if (!context.mounted) return;
   final resolved = await _resolvePairedDevices(
-    context,
-    [result],
-    hubType: 'local_ble',
-  );
+      context,
+      [
+        result,
+      ],
+      hubType: 'local_ble');
   if (!context.mounted) return;
   if (resolved.isEmpty) {
     ScaffoldMessenger.of(context).showSnackBar(
@@ -537,10 +641,7 @@ Future<({bool cancelled, String? address})> _selectHueBridgeForPairing(
     context,
     targets,
   );
-  return (
-    cancelled: selectedAddress == null,
-    address: selectedAddress,
-  );
+  return (cancelled: selectedAddress == null, address: selectedAddress);
 }
 
 @visibleForTesting
@@ -656,19 +757,18 @@ Future<List<_ResolvedPairedDevice>> _resolvePairedHueBleDevices(
   HueBleDevicePairingResult pairingResult,
 ) {
   return _resolvePairedDevices(
-    context,
-    [
-      for (final device in pairingResult.devices)
-        RhythmPairedDevice(
-          deviceId: device.nativeDeviceId,
-          name: device.name,
-          deviceType: device.deviceType,
-          manufacturer: device.manufacturer,
-          model: device.model,
-        ),
-    ],
-    hubType: 'hue_ble',
-  );
+      context,
+      [
+        for (final device in pairingResult.devices)
+          RhythmPairedDevice(
+            deviceId: device.nativeDeviceId,
+            name: device.name,
+            deviceType: device.deviceType,
+            manufacturer: device.manufacturer,
+            model: device.model,
+          ),
+      ],
+      hubType: 'hue_ble');
 }
 
 Future<List<_ResolvedPairedDevice>> _resolvePairedDevices(

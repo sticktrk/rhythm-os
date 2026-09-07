@@ -16,6 +16,7 @@ enum DevicePairingScannerAction {
   hueBle,
   localBle,
   enterCode,
+  nearbyScan,
 }
 
 class DevicePairingScannerResult {
@@ -79,6 +80,15 @@ class DevicePairingScannerResult {
           matterAddMethod: addMethod,
         );
 
+  /// The person has no QR code; scan nearby Bluetooth for known families.
+  const DevicePairingScannerResult.nearbyScan({
+    String? journeyId,
+  }) : this._(
+          action: DevicePairingScannerAction.nearbyScan,
+          inputMethod: 'nearby_sheet',
+          journeyId: journeyId,
+        );
+
   final DevicePairingScannerAction action;
   final String? payload;
   final LocalBleSetup? localBleSetup;
@@ -117,6 +127,7 @@ class DevicePairingScannerScreen extends StatefulWidget {
     this.hueBridgeOnly = false,
     this.journeyId,
     this.autoDiscoverHueBle = false,
+    this.nearbyScanAvailable = false,
     this.analyticsSource = 'unknown',
     @visibleForTesting this.hueBleDiscoveryRequest,
     @visibleForTesting this.cameraBuilder,
@@ -129,6 +140,10 @@ class DevicePairingScannerScreen extends StatefulWidget {
   final bool hueBridgeOnly;
   final String? journeyId;
   final bool autoDiscoverHueBle;
+
+  /// Whether the connected appliance can add at least one device family
+  /// without a QR code, which enables the **No QR?** action.
+  final bool nearbyScanAvailable;
   final String analyticsSource;
   final HueBleDiscoveryRequest? hueBleDiscoveryRequest;
   final DevicePairingCameraBuilder? cameraBuilder;
@@ -142,6 +157,7 @@ class DevicePairingScannerScreen extends StatefulWidget {
     bool hueBridgeOnly = false,
     String? journeyId,
     bool autoDiscoverHueBle = false,
+    bool nearbyScanAvailable = false,
     String analyticsSource = 'unknown',
   }) {
     return Navigator.of(context).push<DevicePairingScannerResult>(
@@ -157,6 +173,7 @@ class DevicePairingScannerScreen extends StatefulWidget {
             hueBridgeOnly: hueBridgeOnly,
             journeyId: journeyId,
             autoDiscoverHueBle: autoDiscoverHueBle,
+            nearbyScanAvailable: nearbyScanAvailable,
             analyticsSource: analyticsSource,
           );
         },
@@ -598,6 +615,30 @@ class _DevicePairingScannerScreenState
                 ),
               ),
             ),
+            if (!widget.hueBridgeOnly && widget.nearbyScanAvailable) ...[
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: TextButton.icon(
+                  key: const ValueKey('no-qr-nearby-scan'),
+                  onPressed: () {
+                    AnalyticsService().logDevicePairingCodeDetected(
+                      codeKind: 'nearby',
+                      outcome: 'nearby_scan_selected',
+                      journeyId: widget.journeyId,
+                      inputMethod: 'camera',
+                    );
+                    Navigator.of(context).pop(
+                      DevicePairingScannerResult.nearbyScan(
+                        journeyId: widget.journeyId,
+                      ),
+                    );
+                  },
+                  icon: const Icon(Icons.bluetooth_searching_rounded),
+                  label: const Text('No QR? Find it over Bluetooth'),
+                ),
+              ),
+            ],
             if (!widget.hueBridgeOnly && widget.matterOnNetworkAvailable) ...[
               const SizedBox(height: 8),
               SizedBox(

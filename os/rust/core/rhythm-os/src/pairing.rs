@@ -1877,6 +1877,8 @@ mod tests {
                 display_name: "Button".to_string(),
                 input_only: true,
                 onboarding_methods: vec!["local_ble_qr".to_string()],
+                nearby_service_uuids: Vec::new(),
+                cloud_broker: None,
             }],
             supports_unpairing: true,
             unpairable_device_types: vec!["button".to_string()],

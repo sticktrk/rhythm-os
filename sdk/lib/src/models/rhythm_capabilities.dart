@@ -28,6 +28,7 @@ abstract final class RhythmDeviceOnboardingMethod {
       'matter_ble_wifi_commissioning';
   static const String hueBleNearbyScan = 'hue_ble_nearby_scan';
   static const String localBleQr = 'local_ble_qr';
+  static const String bleWifiNearbyScan = 'ble_wifi_nearby_scan';
   static const String hueBridgeSerialSearch = 'hue_bridge_serial_search';
   static const String hueBridgeButtonSearch = 'hue_bridge_button_search';
 }
@@ -195,6 +196,13 @@ class RhythmDeviceProfile {
   final bool inputOnly;
   final List<String> onboardingMethods;
 
+  /// Lower-cased Bluetooth service UUIDs a phone scans for to notice this
+  /// profile's devices in setup mode. Empty unless nearby scanning applies.
+  final List<String> nearbyServiceUuids;
+
+  /// Rhythm cloud function the app brokers commissioning through, if any.
+  final String? cloudBroker;
+
   const RhythmDeviceProfile({
     required this.id,
     this.compatibleProfileIds = const [],
@@ -202,7 +210,14 @@ class RhythmDeviceProfile {
     required this.displayName,
     required this.inputOnly,
     this.onboardingMethods = const [],
+    this.nearbyServiceUuids = const [],
+    this.cloudBroker,
   });
+
+  /// Whether the **No QR?** sheet can find this profile by scanning nearby.
+  bool get supportsNearbyScan =>
+      supportsOnboardingMethod(RhythmDeviceOnboardingMethod.bleWifiNearbyScan) &&
+      nearbyServiceUuids.isNotEmpty;
 
   bool supportsOnboardingMethod(String method) {
     return onboardingMethods.contains(method);
@@ -240,8 +255,25 @@ class RhythmDeviceProfile {
       inputOnly:
           json['input_only'] is bool ? json['input_only'] as bool : false,
       onboardingMethods: _parseStringList(json['onboarding_methods']),
+      nearbyServiceUuids: _parseStringList(json['nearby_service_uuids'])
+          .map((uuid) => uuid.trim().toLowerCase())
+          .where(_serviceUuidPattern.hasMatch)
+          .toSet()
+          .toList(growable: false),
+      cloudBroker: _parseCloudBroker(json['cloud_broker']),
     );
   }
+}
+
+final RegExp _serviceUuidPattern = RegExp(
+  r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$',
+);
+final RegExp _cloudBrokerPattern = RegExp(r'^[a-z0-9][a-z0-9-]{0,63}$');
+
+String? _parseCloudBroker(Object? value) {
+  if (value is! String) return null;
+  final trimmed = value.trim();
+  return _cloudBrokerPattern.hasMatch(trimmed) ? trimmed : null;
 }
 
 /// Explicit add-device methods for a host-managed hub like Matter.
