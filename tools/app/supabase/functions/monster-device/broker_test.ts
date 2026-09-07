@@ -10,10 +10,8 @@ const secrets: Record<string, string> = {
   MONSTER_OWNER_USER_ID: "owner",
   MONSTER_EMAIL: "fixture@example.invalid",
   MONSTER_PASSWORD: "fixture-password",
-  MONSTER_APP_ID: "fixture-app",
-  MONSTER_APP_SECRET: "fixture-app-secret",
-  MONSTER_TICKET_SECRET: "fixture-ticket-secret-at-least-32-characters",
 };
+const fixtureAyla = { appId: "fixture-app", appSecret: "fixture-app-secret" };
 function fixture(
   options: {
     owned?: boolean;
@@ -21,6 +19,7 @@ function fixture(
     missingKey?: boolean;
     model?: string;
     env?: Record<string, string | undefined>;
+    ayla?: { appId: string; appSecret: string };
   } = {},
 ) {
   const env = { ...secrets, ...options.env };
@@ -61,7 +60,8 @@ function fixture(
       assert(headers.get("Authorization") === "Bearer provider-token");
       result = { partnerTicket: "partner-token" };
     } else if (url.endsWith("/token_sign_in")) {
-      assert(body.app_secret === secrets.MONSTER_APP_SECRET);
+      assert(body.app_id === fixtureAyla.appId);
+      assert(body.app_secret === fixtureAyla.appSecret);
       result = { access_token: "ayla-token", expires_in: 300 };
     } else {
       assert(headers.get("Authorization") === "auth_token ayla-token");
@@ -96,6 +96,7 @@ function fixture(
     env: (n) => env[n],
     fetch: fetcher,
     now: () => clock,
+    ayla: options.ayla ?? fixtureAyla,
   });
   const call = (body: unknown, user = "owner") =>
     handle(
@@ -215,6 +216,34 @@ Deno.test("unowned key lookup never registers and provider failures are sanitize
   const response = await f.call({ action: "key", dsn: DSN });
   const text = await response.text();
   assert(response.status === 502 && text === '{"error":"monster_login"}');
+});
+Deno.test("only the account email and password are secrets", async () => {
+  // Unpinned Ayla app credentials fail closed instead of sending a login.
+  const unpinned = fixture({
+    ayla: { appId: "REPLACE_WITH_MONSTER_APP_ID", appSecret: "x" },
+  });
+  const response = await unpinned.call({ action: "key", dsn: DSN });
+  assert(response.status === 503);
+  assert(!unpinned.calls.some((c) => c.url.endsWith("/token_sign_in")));
+
+  // Tickets are bound to the account credentials: a password change (or a
+  // different deployment) cannot complete a ticket issued before it.
+  const before = fixture({ owned: false });
+  const ticket = await (await before.call({ action: "begin", dsn: DSN }))
+    .json();
+  const after = fixture({
+    owned: false,
+    env: { MONSTER_PASSWORD: "rotated-password" },
+  });
+  assert(
+    (await after.call({ action: "complete", dsn: DSN, ticket: ticket.ticket }))
+      .status === 400,
+  );
+  const same = fixture({ owned: false });
+  assert(
+    (await same.call({ action: "complete", dsn: DSN, ticket: ticket.ticket }))
+      .status === 200,
+  );
 });
 Deno.test("unsupported model and missing key fail closed", async () => {
   assert(
