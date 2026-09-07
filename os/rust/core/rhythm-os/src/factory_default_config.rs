@@ -278,6 +278,14 @@ mod tests {
 
         let halloween = scenes.get("halloween").unwrap();
         assert_eq!(halloween.name, "Halloween");
+        assert_eq!(
+            halloween.light.as_ref().unwrap().palette_mode,
+            crate::scenes::PaletteMode::Shuffle
+        );
+        assert_eq!(
+            halloween.extensions.get("shuffle_on_apply"),
+            Some(&serde_json::Value::Bool(true))
+        );
         let halloween_palette = &halloween.light.as_ref().unwrap().palette;
         assert_eq!(halloween_palette.len(), 5);
         let unique_halloween_colors: std::collections::HashSet<_> = halloween_palette

@@ -2211,6 +2211,18 @@ pub fn handle_delete_scene(state: &SharedState, scene_id: &str) -> ApiResponse {
     }
 }
 
+fn scene_shuffle_activity_flag(state: &SharedState, scene_id: &str) -> bool {
+    state
+        .lock()
+        .ok()
+        .and_then(|s| {
+            s.scenes
+                .get(scene_id)
+                .map(commands::scene_shuffles_on_apply)
+        })
+        .unwrap_or(false)
+}
+
 pub fn handle_post_scene_apply(state: &SharedState, scene_id: &str, body: &Value) -> ApiResponse {
     let correlation_id = correlation_id_from_body(body);
     let request: crate::scenes::SceneApplyRequest = match serde_json::from_value(body.clone()) {
@@ -2221,7 +2233,9 @@ pub fn handle_post_scene_apply(state: &SharedState, scene_id: &str, body: &Value
     match commands::do_scene_apply(state, scene_id, request) {
         Ok(json) => {
             let mut record = crate::activity::LightActivityRecord::app(&target_id, "apply_scene");
-            record.payload = Some(json!({"scene_id": scene_id}));
+            record.payload = Some(
+                json!({"scene_id": scene_id, "shuffle_on_apply": scene_shuffle_activity_flag(state, scene_id)}),
+            );
             record.correlation_id = correlation_id;
             crate::activity::record_light_activity(state, record);
             ApiResponse::json_ok(json)
@@ -2266,7 +2280,7 @@ pub fn handle_post_home_scene_apply(
                 .map(|target| {
                     let mut record =
                         crate::activity::LightActivityRecord::app(&target.target_id, "apply_scene");
-                    record.payload = Some(json!({"scene_id": scene_id, "home_scene": true}));
+                    record.payload = Some(json!({"scene_id": scene_id, "home_scene": true, "shuffle_on_apply": scene_shuffle_activity_flag(state, scene_id)}));
                     record.correlation_id = correlation_id.clone();
                     record.fanout_of = correlation_id.clone();
                     record
@@ -7213,6 +7227,16 @@ mod tests {
         )
         .unwrap();
 
+        {
+            let mut s = state.lock().unwrap();
+            let scene = s.scenes.get_mut("analytics-scene").unwrap();
+            scene
+                .extensions
+                .insert("shuffle_on_apply".into(), json!(true));
+            let layer = scene.light.as_mut().unwrap();
+            layer.palette_mode = crate::scenes::PaletteMode::Shuffle;
+            layer.palette = vec![layer.default_output.clone().unwrap()];
+        }
         let response = handle_post_scene_apply(
             &state,
             "analytics-scene",
@@ -7226,6 +7250,13 @@ mod tests {
         let state = state.lock().unwrap();
         let activity = state.light_activity.first().unwrap();
         assert_eq!(activity.action_id, "apply_scene");
+        assert_eq!(activity.payload.as_ref().unwrap()["shuffle_on_apply"], true);
+        assert!(activity
+            .payload
+            .as_ref()
+            .unwrap()
+            .get("palette_seed")
+            .is_none());
         assert_eq!(activity.correlation_id.as_deref(), Some("mood-scene-123"));
     }
 

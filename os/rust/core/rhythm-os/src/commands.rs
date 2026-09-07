@@ -1161,6 +1161,7 @@ impl RoomProfileSettingsPatch {
                 // offset only ever describes the scene it was written with.
                 settings.mood_scene_palette_offset = None;
                 settings.mood_scene_palette_span = None;
+                settings.mood_scene_palette_seed = None;
             }
             settings.mood_scene_id = mood_scene_id.clone();
         }
@@ -4815,7 +4816,7 @@ fn build_scene_application_plan_locked(
         } else {
             // One grouped command is one slot of the apply.
             palette_slots_consumed = 1;
-            layer.palette_output(palette.offset, palette.span_or(1))
+            layer.palette_output_with_seed(palette.offset, palette.span_or(1), palette.seed)
         };
         if let Some(room_output) = room_output {
             push_scene_light_command(
@@ -4841,7 +4842,11 @@ fn build_scene_application_plan_locked(
             let span = palette.span_or(implicit_node_ids.len());
             for (index, node_id) in implicit_node_ids.iter().enumerate() {
                 let output = layer
-                    .palette_output(palette.offset.wrapping_add(index), span)
+                    .palette_output_with_seed(
+                        palette.offset.wrapping_add(index),
+                        span,
+                        palette.seed,
+                    )
                     .expect("palette is not empty");
                 push_scene_light_command(
                     s,
@@ -4933,7 +4938,11 @@ fn render_scene_lights_locked(
             outputs.insert(
                 node_id,
                 layer
-                    .palette_output(palette.offset.wrapping_add(index), span)
+                    .palette_output_with_seed(
+                        palette.offset.wrapping_add(index),
+                        span,
+                        palette.seed,
+                    )
                     .expect("palette is not empty"),
             );
         }
@@ -5203,6 +5212,7 @@ fn stored_mood_palette_window(runtime: &Arc<dyn RuntimeHandle>, node_id: &str) -
                 .profile_settings
                 .mood_scene_palette_span
                 .map(|span| span as usize),
+            seed: snap.profile_settings.mood_scene_palette_seed,
         })
         .unwrap_or_default()
 }
@@ -5236,6 +5246,7 @@ fn set_scene_committed_state(
             .filter(|offset| *offset > 0);
         profile_settings.mood_scene_palette_span =
             palette.span.and_then(|span| u32::try_from(span).ok());
+        profile_settings.mood_scene_palette_seed = palette.seed;
         runtime.restore_node_state(
             &node_id,
             RestoredNodeState {
@@ -5753,6 +5764,26 @@ pub fn do_scene_delete(state: &SharedState, scene_id: &str) -> Result<String> {
     build_scenes(state)
 }
 
+/// Only explicit applications roll; previews and Mood re-entry retain their seed.
+pub(crate) fn scene_shuffles_on_apply(scene: &SceneDefinition) -> bool {
+    scene.extensions.get("shuffle_on_apply") == Some(&serde_json::Value::Bool(true))
+        && scene.light.as_ref().is_some_and(|layer| {
+            layer.palette_mode == crate::scenes::PaletteMode::Shuffle && !layer.palette.is_empty()
+        })
+}
+
+fn fresh_scene_apply_seed(scene: &SceneDefinition) -> Option<u32> {
+    scene_shuffles_on_apply(scene).then(|| {
+        // A randomly initialized sequence guarantees fresh seeds for successive
+        // presses even if several requests arrive in the same clock tick.
+        static SEQUENCE: std::sync::OnceLock<std::sync::atomic::AtomicU32> =
+            std::sync::OnceLock::new();
+        SEQUENCE
+            .get_or_init(|| std::sync::atomic::AtomicU32::new(rand::random()))
+            .fetch_add(0x9e3779b9, std::sync::atomic::Ordering::Relaxed)
+    })
+}
+
 pub fn do_scene_apply(
     state: &SharedState,
     scene_id: &str,
@@ -5760,8 +5791,20 @@ pub fn do_scene_apply(
 ) -> Result<String> {
     // A user-initiated single-target apply always starts the palette at slot 0
     // and spreads it over its own lights.
-    let response =
-        do_scene_apply_response(state, scene_id, request, true, PaletteWindow::default())?;
+    let seed = {
+        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.scenes.get(scene_id).and_then(fresh_scene_apply_seed)
+    };
+    let response = do_scene_apply_response(
+        state,
+        scene_id,
+        request,
+        true,
+        PaletteWindow {
+            seed,
+            ..PaletteWindow::default()
+        },
+    )?;
     serde_json::to_string(&response).map_err(|e| anyhow::anyhow!("serialize scene apply: {}", e))
 }
 
@@ -5950,8 +5993,9 @@ pub fn do_home_scene_apply(
     };
     scene.normalize();
 
+    let seed = fresh_scene_apply_seed(&scene);
     if request.target_mode == HomeSceneTargetMode::Devices {
-        return home_scene_apply_to_devices(state, scene, &request, dispatch_spacing);
+        return home_scene_apply_to_devices(state, scene, &request, dispatch_spacing, seed);
     }
 
     let transaction_lock = {
@@ -5996,6 +6040,7 @@ pub fn do_home_scene_apply(
             let window = PaletteWindow {
                 offset: palette_offset,
                 span: Some(house_span),
+                seed,
             };
             let result = plan_scene_target_locked(
                 &s,
@@ -6376,7 +6421,9 @@ fn plan_home_scene_device(
         .find(|entry| entry.target.node_id() == target.node_id)
     {
         (entry.output.clone(), 0)
-    } else if let Some(output) = layer.palette_output(palette.offset, palette.span_or(1)) {
+    } else if let Some(output) =
+        layer.palette_output_with_seed(palette.offset, palette.span_or(1), palette.seed)
+    {
         (output, 1)
     } else if let Some(default_output) = &layer.default_output {
         (default_output.clone(), 0)
@@ -6423,6 +6470,7 @@ fn home_scene_apply_to_devices(
     scene: SceneDefinition,
     request: &HomeSceneApplyRequest,
     dispatch_spacing: Duration,
+    seed: Option<u32>,
 ) -> Result<HomeSceneApplyResponse> {
     // Enumerate and plan from one serialized topology snapshot so the palette
     // order cannot observe a half-applied house.
@@ -6464,6 +6512,7 @@ fn home_scene_apply_to_devices(
             let window = PaletteWindow {
                 offset: palette_slot,
                 span: Some(house_span),
+                seed,
             };
             let result = plan_home_scene_device(&scene, &target, request.transition_ms, window);
             let result = result.map(|(command, consumed)| {
@@ -22965,6 +23014,7 @@ mod tests {
             mood_scene_id: Some("scene".to_string()),
             mood_scene_palette_offset: None,
             mood_scene_palette_span: None,
+            mood_scene_palette_seed: None,
             fade_ms: Some(TimerSetting::Fixed { value: 100 }),
             motion_timeout_secs: Some(TimerSetting::Fixed { value: 20 }),
             motion_activation_enabled: Some(false),
@@ -25929,6 +25979,88 @@ mod tests {
             "three commands must be spaced twice: elapsed {elapsed:?}"
         );
         assert_eq!(harness.runtime.applied_commands().len(), 3);
+    }
+
+    #[test]
+    fn halloween_explicit_applies_shuffle_and_mood_reentry_preserves_each_binding() {
+        for mode in [HomeSceneTargetMode::Rooms, HomeSceneTargetMode::Devices] {
+            let harness = setup_home_scene_rooms();
+            let scene = factory_default_scene_map().remove("halloween").unwrap();
+            let layer = scene.light.clone().unwrap();
+            do_scene_upsert(&harness.state, scene).unwrap();
+            let mut seeds = Vec::new();
+            for _ in 0..3 {
+                do_home_scene_apply(
+                    &harness.state,
+                    "halloween",
+                    HomeSceneApplyRequest {
+                        transition_ms: None,
+                        target_mode: mode,
+                    },
+                    Duration::ZERO,
+                )
+                .unwrap();
+                let a = harness.runtime.engine_room_snapshot("room-a").unwrap();
+                let b = harness.runtime.engine_room_snapshot("room-b").unwrap();
+                let seed = a.profile_settings.mood_scene_palette_seed.unwrap();
+                assert_eq!(b.profile_settings.mood_scene_palette_seed, Some(seed));
+                seeds.push(seed);
+            }
+            assert!(seeds.windows(2).all(|pair| pair[0] != pair[1]));
+            let saved_b = harness
+                .runtime
+                .engine_room_snapshot("room-b")
+                .unwrap()
+                .profile_settings;
+            do_scene_apply(
+                &harness.state,
+                "halloween",
+                SceneApplyRequest {
+                    target_id: "room-a".into(),
+                    transition_ms: None,
+                },
+            )
+            .unwrap();
+            assert_ne!(
+                harness
+                    .runtime
+                    .engine_room_snapshot("room-a")
+                    .unwrap()
+                    .profile_settings
+                    .mood_scene_palette_seed,
+                saved_b.mood_scene_palette_seed
+            );
+            let before = harness.runtime.applied_commands().len();
+            let runtime: Arc<dyn RuntimeHandle> = harness.runtime.clone();
+            apply_mood_scene_or_tick(&harness.state, &runtime, "room-b", Some("halloween"), false)
+                .unwrap();
+            let expected = layer
+                .palette_output_with_seed(2, 3, saved_b.mood_scene_palette_seed)
+                .unwrap();
+            let crate::scenes::LightSceneColor::Rgb { rgb } = expected.color.unwrap() else {
+                panic!("RGB palette")
+            };
+            let calls = harness.runtime.applied_commands();
+            assert_eq!(calls[before].1.rgb, rgb);
+            assert_eq!(
+                harness
+                    .runtime
+                    .engine_room_snapshot("room-b")
+                    .unwrap()
+                    .profile_settings
+                    .mood_scene_palette_seed,
+                saved_b.mood_scene_palette_seed
+            );
+            // The catalog seed still represents the deterministic designer preview.
+            assert_eq!(
+                harness.state.lock().unwrap().scenes["halloween"]
+                    .light
+                    .as_ref()
+                    .unwrap()
+                    .palette_seed,
+                0
+            );
+        }
     }
 
     #[test]

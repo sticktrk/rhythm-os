@@ -207,6 +207,7 @@ pub fn shuffled_slot(seed: u32, span: usize, slot: usize) -> usize {
 pub struct PaletteWindow {
     pub offset: usize,
     pub span: Option<usize>,
+    pub seed: Option<u32>,
 }
 
 impl PaletteWindow {
@@ -343,13 +344,22 @@ impl LightSceneLayer {
     /// order fixed by [`Self::palette_seed`]. `None` when the scene has no
     /// palette.
     pub fn palette_output(&self, slot: usize, span: usize) -> Option<LightSceneOutput> {
+        self.palette_output_with_seed(slot, span, None)
+    }
+
+    pub fn palette_output_with_seed(
+        &self,
+        slot: usize,
+        span: usize,
+        seed: Option<u32>,
+    ) -> Option<LightSceneOutput> {
         let anchors = self.palette.len();
         if anchors == 0 {
             return None;
         }
         let span = span.max(1);
         let slot = match self.palette_mode {
-            PaletteMode::Shuffle => shuffled_slot(self.palette_seed, span, slot),
+            PaletteMode::Shuffle => shuffled_slot(seed.unwrap_or(self.palette_seed), span, slot),
             PaletteMode::Spread | PaletteMode::Cycle => slot,
         };
         if self.palette_mode == PaletteMode::Cycle || span <= anchors {
@@ -700,15 +710,21 @@ mod tests {
             assert_eq!(drawn, expected, "seed {seed}");
         }
         assert_eq!(
-            (0..8).map(|slot| shuffled_slot(7, 8, slot)).collect::<Vec<_>>(),
+            (0..8)
+                .map(|slot| shuffled_slot(7, 8, slot))
+                .collect::<Vec<_>>(),
             [7, 6, 5, 3, 0, 2, 1, 4]
         );
         assert_eq!(
-            (0..8).map(|slot| shuffled_slot(1, 8, slot)).collect::<Vec<_>>(),
+            (0..8)
+                .map(|slot| shuffled_slot(1, 8, slot))
+                .collect::<Vec<_>>(),
             [6, 0, 2, 7, 1, 5, 4, 3]
         );
         assert_eq!(
-            (0..5).map(|slot| shuffled_slot(7, 5, slot)).collect::<Vec<_>>(),
+            (0..5)
+                .map(|slot| shuffled_slot(7, 5, slot))
+                .collect::<Vec<_>>(),
             [1, 0, 3, 4, 2]
         );
         assert_eq!(shuffled_slot(7, 5, 9), 9, "slots past the span stay put");

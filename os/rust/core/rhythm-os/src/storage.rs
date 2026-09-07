@@ -2280,6 +2280,15 @@ pub(crate) fn seed_new_factory_default_scenes(
             // since it was seeded (a key the stored copy never had). The
             // stored value always wins for keys it has.
             let mut changed = false;
+            // Offer the new factory shuffle default once. The extension is the
+            // migration marker, so later edits (including spread) stay edited.
+            if scene.extensions.get("shuffle_on_apply") == Some(&serde_json::Value::Bool(true))
+                && !stored.extensions.contains_key("shuffle_on_apply")
+            {
+                if let Some(layer) = stored.light.as_mut() {
+                    layer.palette_mode = crate::scenes::PaletteMode::Shuffle;
+                }
+            }
             for (key, value) in scene.extensions {
                 if !stored.extensions.contains_key(&key) {
                     stored.extensions.insert(key, value);
@@ -4447,6 +4456,49 @@ mod tests {
                 "an already-offered factory scene must not come back"
             );
             assert_eq!(state.scenes.len(), 1);
+            cleanup(&path);
+        }
+
+        #[test]
+        fn halloween_shuffle_default_migrates_once_and_preserves_later_edits() {
+            let (storage, path) = temp_storage();
+            let storage = Arc::new(storage);
+            let mut halloween = factory_default_scene_map().remove("halloween").unwrap();
+            halloween.extensions.remove("shuffle_on_apply");
+            halloween.light.as_mut().unwrap().palette_mode = crate::scenes::PaletteMode::Spread;
+            storage
+                .save_scenes(&crate::scenes::StoredScenes {
+                    schema_version: crate::scenes::LIGHT_SCENE_SCHEMA_VERSION,
+                    scenes: vec![halloween],
+                    seeded_factory_scene_ids: factory_default_scene_ids().into_iter().collect(),
+                })
+                .unwrap();
+            let mut state = state_for_storage(storage.clone());
+            load_persisted_state(&mut state);
+            assert!(crate::commands::scene_shuffles_on_apply(
+                &state.scenes["halloween"]
+            ));
+            let mut persisted = storage.load_scenes().unwrap().unwrap();
+            assert_eq!(
+                persisted.scenes[0].light.as_ref().unwrap().palette_mode,
+                crate::scenes::PaletteMode::Shuffle
+            );
+            persisted.scenes[0].light.as_mut().unwrap().palette_mode =
+                crate::scenes::PaletteMode::Cycle;
+            storage.save_scenes(&persisted).unwrap();
+            let mut restored = state_for_storage(storage.clone());
+            load_persisted_state(&mut restored);
+            assert_eq!(
+                restored.scenes["halloween"]
+                    .light
+                    .as_ref()
+                    .unwrap()
+                    .palette_mode,
+                crate::scenes::PaletteMode::Cycle
+            );
+            assert!(!crate::commands::scene_shuffles_on_apply(
+                &restored.scenes["halloween"]
+            ));
             cleanup(&path);
         }
 

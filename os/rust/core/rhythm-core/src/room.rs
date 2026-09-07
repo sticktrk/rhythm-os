@@ -1552,6 +1552,14 @@ pub struct RoomProfileSettings {
     )]
     pub mood_scene_palette_span: Option<u32>,
 
+    /// Seed chosen by the explicit scene apply; kept per binding so another
+    /// room's apply cannot change this room's arrangement on Mood re-entry.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub mood_scene_palette_seed: Option<u32>,
+
     /// Optional per-room fade override.
     #[cfg_attr(
         feature = "serde",
@@ -1624,6 +1632,7 @@ impl RoomProfileSettings {
             && self.mood_scene_id.is_none()
             && self.mood_scene_palette_offset.is_none()
             && self.mood_scene_palette_span.is_none()
+            && self.mood_scene_palette_seed.is_none()
             && self.fade_ms.is_none()
             && self.motion_timeout_secs.is_none()
             && self.motion_activation_enabled.is_none()
@@ -1743,6 +1752,11 @@ impl RoomProfileSettings {
                 self.mood_scene_palette_span
             } else {
                 parent.mood_scene_palette_span
+            },
+            mood_scene_palette_seed: if self.mood_scene_id.is_some() {
+                self.mood_scene_palette_seed
+            } else {
+                parent.mood_scene_palette_seed
             },
             fade_ms: self.fade_ms.clone().or_else(|| parent.fade_ms.clone()),
             motion_timeout_secs: self
@@ -2388,6 +2402,7 @@ mod tests {
             mood_scene_id: None,
             mood_scene_palette_offset: None,
             mood_scene_palette_span: None,
+            mood_scene_palette_seed: None,
             fade_ms: Some(TimerSetting::Fixed { value: 250 }),
             motion_timeout_secs: Some(TimerSetting::Fixed { value: 42 }),
             motion_activation_enabled: Some(false),
