@@ -212,3 +212,68 @@ fn backup_restore_then_first_sync_preserves_merged_device_without_requeueing_tri
         "runtime should contain exactly the merged room and merged device"
     );
 }
+
+#[test]
+fn backup_restore_then_first_sync_preserves_halloween_shuffle_binding() {
+    let source = TestHarness::new().with_discovery(
+        vec![room("mock-kitchen", "Kitchen")],
+        vec![
+            light("lamp-1", "mock-kitchen"),
+            light("lamp-2", "mock-kitchen"),
+        ],
+    );
+    source.sync();
+    let room_id = source.resolve("mock-kitchen");
+    commands::do_scene_apply(
+        &source.state,
+        "halloween",
+        rhythm_os::scenes::SceneApplyRequest {
+            target_id: room_id.clone(),
+            transition_ms: None,
+        },
+    )
+    .unwrap();
+    let seed = source
+        .snapshot("mock-kitchen")
+        .unwrap()
+        .profile_settings
+        .mood_scene_palette_seed;
+    assert!(seed.is_some());
+    let bundle = commands::build_backup_bundle_dto(&source.state, false).unwrap();
+    let mut restored = TestHarness::new();
+    let dir = std::env::temp_dir().join(format!(
+        "rhythm-halloween-backup-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    ));
+    let storage =
+        std::sync::Arc::new(rhythm_os::storage::FileStorage::new(dir.to_str().unwrap()).unwrap());
+    restored.state.lock().unwrap().storage = Some(storage.clone());
+    commands::do_backup_restore(&restored.state, bundle).unwrap();
+    let key = restored.add_hub("mock", "192.168.1.100");
+    restored.set_hub_discovery(
+        &key,
+        vec![room("mock-kitchen", "Kitchen")],
+        vec![
+            light("lamp-1", "mock-kitchen"),
+            light("lamp-2", "mock-kitchen"),
+        ],
+    );
+    rhythm_os::storage::load_persisted_state(&mut restored.state.lock().unwrap());
+    restored.sync_all();
+    assert_eq!(
+        restored
+            .snapshot(&room_id)
+            .unwrap()
+            .profile_settings
+            .mood_scene_palette_seed,
+        seed
+    );
+    let exported = commands::build_backup_bundle_dto(&restored.state, false).unwrap();
+    assert!(exported
+        .configuration
+        .rooms
+        .iter()
+        .any(|room| room.room_profile.mood_scene_palette_seed == seed));
+    std::fs::remove_dir_all(dir).unwrap();
+}

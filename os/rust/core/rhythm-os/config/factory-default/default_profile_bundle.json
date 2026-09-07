@@ -128,10 +128,12 @@
         "name": "Halloween",
         "description": "Pumpkin orange, witchy purple and ghoulish green spread across every light.",
         "extensions": {
-          "whole_home": true
+          "whole_home": true,
+          "shuffle_on_apply": true
         },
         "light": {
           "default_transition_ms": 1200,
+          "palette_mode": "shuffle",
           "palette": [
             {
               "brightness": 80,

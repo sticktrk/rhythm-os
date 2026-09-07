@@ -2,6 +2,21 @@ import 'package:rhythm_sdk/rhythm_sdk.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test(
+      'scene binding accepts legacy settings and retains an additive shuffle seed',
+      () {
+    final legacy =
+        RhythmNodeProfileSettings.fromJson({'mood_scene_id': 'halloween'});
+    expect(legacy.moodSceneId, 'halloween');
+    expect(legacy.toJson().containsKey('mood_scene_palette_seed'), isFalse);
+    final current = RhythmNodeProfileSettings.fromJson({
+      'mood_scene_id': 'halloween',
+      'mood_scene_palette_seed': 4294967295,
+    });
+    expect(current.moodSceneId, 'halloween');
+    expect(current.toJson()['mood_scene_palette_seed'], 4294967295);
+  });
+
   group('RoomModeState', () {
     test('separates mood from standby while accepting legacy idle', () {
       expect(RoomModeState.mood.wireValue, 'mood');
