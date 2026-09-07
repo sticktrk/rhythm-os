@@ -40,6 +40,12 @@ impl LightSecret {
         &self.0
     }
 }
+impl serde::Serialize for LightSecret {
+    /// Only the appliance's owner-only device store serializes secrets.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.0)
+    }
+}
 impl fmt::Debug for LightSecret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("[REDACTED]")

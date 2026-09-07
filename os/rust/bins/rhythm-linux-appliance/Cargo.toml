@@ -15,6 +15,7 @@ rhythm-os = { path = "../../core/rhythm-os" }
 rhythm-os-runtime-modules = { path = "../../../../runtime/rust/rhythm-os-runtime-modules" }
 rhythm-hue = { path = "../../integrations/rhythm-hue", features = ["bluez"] }
 rhythm-ble = { path = "../../integrations/rhythm-ble", features = ["bluez"] }
+rhythm-monster = { path = "../../integrations/rhythm-monster", features = ["bluez"] }
 rhythm-ha = { path = "../../integrations/rhythm-ha" }
 rhythm-matter = { path = "../../integrations/rhythm-matter" }
 

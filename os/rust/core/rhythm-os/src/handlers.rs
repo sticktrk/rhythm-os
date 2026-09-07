@@ -3811,6 +3811,10 @@ fn matter_pairing_uses_bluetooth(params: &serde_json::Value) -> bool {
     }
 }
 
+fn monster_pairing_uses_bluetooth(params: &serde_json::Value) -> bool {
+    params.get("stage").and_then(serde_json::Value::as_str) != Some("adopt")
+}
+
 fn pairing_slots(
     platform_type: &str,
     hub_type: &str,
@@ -3844,6 +3848,22 @@ fn pairing_slots(
                 pairing_slot: "appliance_bluetooth_adapter".to_string(),
                 resource_activity: false,
             }]
+        }
+        crate::hub::HubType::MONSTER => {
+            // Only the Bluetooth stages touch the shared adapter. Adopting a
+            // cloud-issued LAN key is a network-only step that must not block
+            // or be blocked by another radio pairing.
+            if monster_pairing_uses_bluetooth(params) {
+                vec![PairingReservation {
+                    pairing_slot: "appliance_bluetooth_adapter".to_string(),
+                    resource_activity: false,
+                }]
+            } else {
+                vec![PairingReservation {
+                    pairing_slot: crate::hub::HubType::MONSTER.to_string(),
+                    resource_activity: false,
+                }]
+            }
         }
         _ => vec![PairingReservation {
             pairing_slot: hub_type.to_string(),
@@ -5984,7 +6004,7 @@ mod tests {
             }));
         }
 
-        for hub_type in ["matter", "hue_ble", "local_ble"] {
+        for hub_type in ["matter", "hue_ble", "local_ble", "monster"] {
             let response = handle_pair_device(
                 &state,
                 &PairingRequest {
@@ -6026,6 +6046,25 @@ mod tests {
             "a request observed as pending must close terminally when adapter admission fails"
         );
         fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn appliance_monster_adopt_stage_does_not_reserve_bluetooth() {
+        let bluetooth = pairing_slots(
+            "appliance",
+            crate::hub::HubType::MONSTER,
+            &json!({"stage": "discover"}),
+        );
+        assert_eq!(bluetooth.len(), 1);
+        assert_eq!(bluetooth[0].pairing_slot, "appliance_bluetooth_adapter");
+
+        let adopt = pairing_slots(
+            "appliance",
+            crate::hub::HubType::MONSTER,
+            &json!({"stage": "adopt", "dsn": "ACFIXTURE123456"}),
+        );
+        assert_eq!(adopt.len(), 1);
+        assert_eq!(adopt[0].pairing_slot, "monster");
     }
 
     #[test]

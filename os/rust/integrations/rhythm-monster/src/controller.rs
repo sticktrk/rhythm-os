@@ -12,8 +12,12 @@ use rhythm_os::{controller_helpers::rooms_from_registry, registry::HubDeviceRegi
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
 };
+
+/// Live transport directory shared with the hub so newly adopted lights are
+/// controllable without rebuilding the controller.
+pub type SharedLightTransports = Arc<RwLock<HashMap<String, Arc<dyn LightTransport>>>>;
 
 /// Static RGB output. Kelvin commands use Rhythm's existing Kelvin-to-RGB
 /// projection. No dedicated white channel, native fades, scenes or effects are
@@ -35,7 +39,7 @@ pub fn static_values(command: &LightingCommand) -> Vec<(P, Value)> {
 }
 pub struct LightMonsterController {
     registry: Arc<Mutex<HubDeviceRegistry>>,
-    devices: HashMap<String, Arc<dyn LightTransport>>,
+    devices: SharedLightTransports,
 }
 fn error(e: LightError) -> LightControlError {
     LightControlError::CommandFailed(e.to_string())
@@ -45,7 +49,19 @@ impl LightMonsterController {
         registry: Arc<Mutex<HubDeviceRegistry>>,
         devices: HashMap<String, Arc<dyn LightTransport>>,
     ) -> Self {
+        Self::with_shared_devices(registry, Arc::new(RwLock::new(devices)))
+    }
+    pub fn with_shared_devices(
+        registry: Arc<Mutex<HubDeviceRegistry>>,
+        devices: SharedLightTransports,
+    ) -> Self {
         Self { registry, devices }
+    }
+    fn transports(&self) -> HashMap<String, Arc<dyn LightTransport>> {
+        self.devices
+            .read()
+            .map(|devices| devices.clone())
+            .unwrap_or_default()
     }
     fn targets(
         &self,
@@ -64,10 +80,11 @@ impl LightMonsterController {
                 "Monster target has no lights".into(),
             ));
         }
+        let devices = self.transports();
         Ok(ids
             .iter()
             .map(|id| {
-                self.devices
+                devices
                     .get(id)
                     .cloned()
                     .ok_or(LightControlError::AuthRequired)
@@ -129,8 +146,7 @@ impl LightController for LightMonsterController {
         // offline siblings (each bounded by the transport's own timeout) cannot
         // serialize into a minute-long stall.
         let mut probes = tokio::task::JoinSet::new();
-        for device in self.devices.values() {
-            let device = Arc::clone(device);
+        for device in self.transports().into_values() {
             probes.spawn(async move { device.read(P::Power).await.is_ok() });
         }
         while let Some(result) = probes.join_next().await {

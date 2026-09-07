@@ -10,6 +10,10 @@ pub mod bluez;
 pub mod cloud;
 pub mod controller;
 pub mod crypto;
+#[cfg(all(target_os = "linux", feature = "bluez"))]
+pub mod hub;
 pub mod lan;
+pub mod pairing;
+pub mod store;
 pub mod types;
 pub use types::{LightCredentials, LightError, LightProperty, LightResult, LightSecret};

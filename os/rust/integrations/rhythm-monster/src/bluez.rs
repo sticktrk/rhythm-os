@@ -17,6 +17,7 @@ use rhythm_ble::bluez::{BluezClient, BluezDriverId, DetachedBluezOutput};
 use std::time::Duration;
 use uuid::Uuid;
 
+#[derive(Clone)]
 pub struct LightBluezTransport {
     address: Address,
 }
@@ -29,6 +30,85 @@ impl LightBluezTransport {
                 .parse()
                 .map_err(|_| LightError::InvalidInput)?,
         })
+    }
+    /// Synchronous identify for callers already on a blocking thread (the
+    /// appliance pairing handler). Runs inside the shared admitted operation.
+    pub fn identify_blocking(&self) -> LightResult<String> {
+        let address = self.address;
+        let client =
+            BluezClient::new(BluezDriverId::Monster).map_err(|_| LightError::Unavailable)?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(13);
+        let output = client
+            .run_adapter_operation_for(
+                &address.to_string(),
+                Duration::from_secs(5),
+                Duration::from_secs(20),
+                move |_, adapter| async move {
+                    let device = adapter.device(address)?;
+                    let result = with_disconnect(
+                        deadline,
+                        LightError::Unavailable,
+                        async {
+                            device
+                                .connect()
+                                .await
+                                .map_err(|_| LightError::Unavailable)?;
+                            ble::identify_gatt(&Gatt(device.clone())).await
+                        },
+                        async {
+                            device
+                                .disconnect()
+                                .await
+                                .map_err(|_| LightError::Unavailable)
+                        },
+                    )
+                    .await;
+                    DetachedBluezOutput::from_value(result)
+                },
+            )
+            .map_err(|_| LightError::Unavailable)?;
+        output.into_value().map_err(|_| LightError::Unavailable)?
+    }
+
+    /// Synchronous provisioning counterpart of `identify_blocking`.
+    pub fn provision_blocking(
+        &self,
+        dsn: &str,
+        token: &LightSecret,
+        wifi: &LightWifiConfig,
+    ) -> LightResult<()> {
+        let address = self.address;
+        let dsn = dsn.to_owned();
+        let token = token.clone();
+        let wifi = wifi.clone();
+        let client =
+            BluezClient::new(BluezDriverId::Monster).map_err(|_| LightError::Unavailable)?;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(105);
+        let output = client
+            .run_adapter_operation_for(
+                &address.to_string(),
+                Duration::from_secs(5),
+                Duration::from_secs(115),
+                move |_, adapter| async move {
+                    let device = adapter.device(address)?;
+                    let result = with_disconnect(
+                        deadline,
+                        LightError::Uncertain,
+                        async {
+                            device
+                                .connect()
+                                .await
+                                .map_err(|_| LightError::Unavailable)?;
+                            ble::provision_gatt(&Gatt(device.clone()), &dsn, &token, &wifi).await
+                        },
+                        async { device.disconnect().await.map_err(|_| LightError::Uncertain) },
+                    )
+                    .await;
+                    DetachedBluezOutput::from_value(result)
+                },
+            )
+            .map_err(|_| LightError::Uncertain)?;
+        output.into_value().map_err(|_| LightError::Uncertain)?
     }
 }
 struct Gatt(Device);
@@ -89,44 +169,10 @@ impl LightGatt for Gatt {
 #[async_trait]
 impl LightBleTransport for LightBluezTransport {
     async fn identify(&self) -> LightResult<String> {
-        let address = self.address;
-        tokio::task::spawn_blocking(move || {
-            let client =
-                BluezClient::new(BluezDriverId::Monster).map_err(|_| LightError::Unavailable)?;
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(13);
-            let output = client
-                .run_adapter_operation_for(
-                    &address.to_string(),
-                    Duration::from_secs(5),
-                    Duration::from_secs(20),
-                    move |_, adapter| async move {
-                        let device = adapter.device(address)?;
-                        let result = with_disconnect(
-                            deadline,
-                            LightError::Unavailable,
-                            async {
-                                device
-                                    .connect()
-                                    .await
-                                    .map_err(|_| LightError::Unavailable)?;
-                                ble::identify_gatt(&Gatt(device.clone())).await
-                            },
-                            async {
-                                device
-                                    .disconnect()
-                                    .await
-                                    .map_err(|_| LightError::Unavailable)
-                            },
-                        )
-                        .await;
-                        DetachedBluezOutput::from_value(result)
-                    },
-                )
-                .map_err(|_| LightError::Unavailable)?;
-            output.into_value().map_err(|_| LightError::Unavailable)?
-        })
-        .await
-        .map_err(|_| LightError::Unavailable)?
+        let transport = self.clone();
+        tokio::task::spawn_blocking(move || transport.identify_blocking())
+            .await
+            .map_err(|_| LightError::Unavailable)?
     }
     async fn provision(
         &self,
@@ -134,42 +180,12 @@ impl LightBleTransport for LightBluezTransport {
         token: &LightSecret,
         wifi: &LightWifiConfig,
     ) -> LightResult<()> {
-        let address = self.address;
+        let transport = self.clone();
         let dsn = dsn.to_owned();
         let token = token.clone();
         let wifi = wifi.clone();
-        tokio::task::spawn_blocking(move || {
-            let client =
-                BluezClient::new(BluezDriverId::Monster).map_err(|_| LightError::Unavailable)?;
-            let deadline = tokio::time::Instant::now() + Duration::from_secs(105);
-            let output = client
-                .run_adapter_operation_for(
-                    &address.to_string(),
-                    Duration::from_secs(5),
-                    Duration::from_secs(115),
-                    move |_, adapter| async move {
-                        let device = adapter.device(address)?;
-                        let result = with_disconnect(
-                            deadline,
-                            LightError::Uncertain,
-                            async {
-                                device
-                                    .connect()
-                                    .await
-                                    .map_err(|_| LightError::Unavailable)?;
-                                ble::provision_gatt(&Gatt(device.clone()), &dsn, &token, &wifi)
-                                    .await
-                            },
-                            async { device.disconnect().await.map_err(|_| LightError::Uncertain) },
-                        )
-                        .await;
-                        DetachedBluezOutput::from_value(result)
-                    },
-                )
-                .map_err(|_| LightError::Uncertain)?;
-            output.into_value().map_err(|_| LightError::Uncertain)?
-        })
-        .await
-        .map_err(|_| LightError::Uncertain)?
+        tokio::task::spawn_blocking(move || transport.provision_blocking(&dsn, &token, &wifi))
+            .await
+            .map_err(|_| LightError::Uncertain)?
     }
 }
