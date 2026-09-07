@@ -4,42 +4,93 @@ import 'dart:io' show Platform;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 import 'analytics_service.dart';
 
-/// Device families Rhythm can add without a QR code, keyed by the service
-/// UUID each family advertises while it is waiting to be set up.
-enum NearbyBleFamily {
-  hueBle(
-    id: 'hue_ble',
-    serviceUuid: '0000fe0f-0000-1000-8000-00805f9b34fb',
-    label: 'Hue Bluetooth bulb',
-    pluralLabel: 'Hue Bluetooth bulbs',
-    hint: 'Factory-reset bulbs that advertise over Bluetooth.',
-  ),
-  monster(
-    id: 'monster',
-    serviceUuid: '0000fe28-0000-1000-8000-00805f9b34fb',
-    label: 'Monster Neon Flow',
-    pluralLabel: 'Monster Neon Flow strips',
-    hint: 'A strip in setup mode. Rhythm joins it to Wi-Fi for you.',
-  );
+/// How a nearby family is paired once the person picks it.
+enum NearbyBleFamilyKind {
+  /// Hue's built-in nearby scan: the appliance bonds every eligible bulb.
+  hueBle,
 
+  /// Vendor-neutral staged flow: the appliance finds the device over
+  /// Bluetooth, joins it to Wi-Fi, and adopts its LAN credentials while the
+  /// app brokers any cloud step through the family's named broker function.
+  bleWifi,
+}
+
+/// A device family Rhythm can add without a QR code.
+///
+/// Apart from Hue's built-in scan, families are described entirely by the
+/// appliance's advertised device profiles: the name people see, the Bluetooth
+/// service UUIDs the phone scans for, and the cloud broker to call. The app
+/// carries no vendor-specific knowledge.
+class NearbyBleFamily {
   const NearbyBleFamily({
     required this.id,
-    required this.serviceUuid,
+    required this.kind,
+    required this.hubType,
+    required this.serviceUuids,
     required this.label,
-    required this.pluralLabel,
     required this.hint,
+    this.profileId,
+    this.cloudBroker,
   });
 
+  /// Stable analytics/UI key: the profile id, or `hue_ble` for the built-in.
   final String id;
-  final String serviceUuid;
-  final String label;
-  final String pluralLabel;
-  final String hint;
+  final NearbyBleFamilyKind kind;
 
-  String countLabel(int count) => count == 1 ? label : '$count $pluralLabel';
+  /// Hub type that owns pairing for this family.
+  final String hubType;
+
+  /// Lower-cased service UUIDs advertised while the device waits for setup.
+  final List<String> serviceUuids;
+  final String label;
+  final String hint;
+  final String? profileId;
+  final String? cloudBroker;
+
+  static const hueBle = NearbyBleFamily(
+    id: 'hue_ble',
+    kind: NearbyBleFamilyKind.hueBle,
+    hubType: 'hue_ble',
+    serviceUuids: ['0000fe0f-0000-1000-8000-00805f9b34fb'],
+    label: 'Hue Bluetooth bulb',
+    hint: 'Factory-reset bulbs that advertise over Bluetooth.',
+  );
+
+  /// Build a family from an advertised profile that supports nearby scanning.
+  factory NearbyBleFamily.fromProfile({
+    required String hubType,
+    required RhythmDeviceProfile profile,
+  }) {
+    final name = profile.displayName.trim();
+    return NearbyBleFamily(
+      id: profile.id,
+      kind: NearbyBleFamilyKind.bleWifi,
+      hubType: hubType,
+      serviceUuids: profile.nearbyServiceUuids,
+      label: name.isEmpty ? 'Wi-Fi light' : name,
+      hint: 'A device in setup mode. Rhythm joins it to Wi-Fi for you.',
+      profileId: profile.id,
+      cloudBroker: profile.cloudBroker,
+    );
+  }
+
+  String countLabel(int count) => count == 1 ? label : '$label ($count nearby)';
+
+  bool advertises(Iterable<String> normalizedServiceUuids) =>
+      normalizedServiceUuids.any(serviceUuids.contains);
+
+  @override
+  bool operator ==(Object other) => other is NearbyBleFamily && other.id == id;
+
+  @override
+  int get hashCode => id.hashCode;
+
+  @override
+  String toString() => 'NearbyBleFamily($id)';
 }
 
 enum NearbyBleDiscoveryOutcome {
@@ -52,10 +103,7 @@ enum NearbyBleDiscoveryOutcome {
 }
 
 class NearbyBleDiscoveryResult {
-  const NearbyBleDiscoveryResult(
-    this.outcome, {
-    this.counts = const {},
-  });
+  const NearbyBleDiscoveryResult(this.outcome, {this.counts = const {}});
 
   final NearbyBleDiscoveryOutcome outcome;
 
@@ -64,10 +112,19 @@ class NearbyBleDiscoveryResult {
 
   bool get found => outcome == NearbyBleDiscoveryOutcome.found;
 
-  List<NearbyBleFamily> get families => [
-        for (final family in NearbyBleFamily.values)
-          if ((counts[family] ?? 0) > 0) family,
-      ];
+  /// Families with at least one advertiser, Hue first, then by label.
+  List<NearbyBleFamily> get families {
+    final found = [
+      for (final entry in counts.entries)
+        if (entry.value > 0) entry.key,
+    ]..sort((a, b) {
+        if (a.kind != b.kind) {
+          return a.kind == NearbyBleFamilyKind.hueBle ? -1 : 1;
+        }
+        return a.label.toLowerCase().compareTo(b.label.toLowerCase());
+      });
+    return found;
+  }
 
   int countFor(NearbyBleFamily family) => counts[family] ?? 0;
 }
@@ -82,19 +139,18 @@ typedef NearbyBlePlatformScan = Future<NearbyBleDiscoveryResult> Function(
   Duration timeout,
 );
 
-/// Classify one advertisement into a known family, or null when unknown.
+/// Classify one advertisement into one of [families], or null when unknown.
 @visibleForTesting
 NearbyBleFamily? nearbyBleFamilyForAdvertisement({
   required Iterable<String> serviceUuids,
   required bool connectable,
-  Set<NearbyBleFamily> families = const {},
+  required Iterable<NearbyBleFamily> families,
 }) {
   if (!connectable) return null;
-  final normalized = serviceUuids.map((uuid) => uuid.trim().toLowerCase());
-  for (final family in families.isEmpty
-      ? NearbyBleFamily.values
-      : NearbyBleFamily.values.where(families.contains)) {
-    if (normalized.contains(family.serviceUuid)) return family;
+  final normalized =
+      serviceUuids.map((uuid) => uuid.trim().toLowerCase()).toList();
+  for (final family in families) {
+    if (family.advertises(normalized)) return family;
   }
   return null;
 }
@@ -134,9 +190,8 @@ class NearbyBleDiscoveryService {
     late final Future<NearbyBleDiscoveryResult> request;
     request = Future.sync(() => _platformScan(families, scanTimeout))
         .onError(
-      (error, stackTrace) => const NearbyBleDiscoveryResult(
-        NearbyBleDiscoveryOutcome.failed,
-      ),
+      (error, stackTrace) =>
+          const NearbyBleDiscoveryResult(NearbyBleDiscoveryOutcome.failed),
     )
         .then((result) async {
       await AnalyticsService().logNearbyDeviceScanCompleted(
@@ -239,13 +294,18 @@ class NearbyBleDiscoveryService {
       // Let the full window elapse so every family gets a chance to show up
       // instead of stopping on the first match.
       await FlutterBluePlus.startScan(
-        withServices: [for (final family in families) Guid(family.serviceUuid)],
+        withServices: [
+          for (final family in families)
+            for (final uuid in family.serviceUuids) Guid(uuid),
+        ],
         timeout: timeout,
       );
       await FlutterBluePlus.isScanning
           .firstWhere((isScanning) => !isScanning)
-          .timeout(timeout + const Duration(seconds: 1),
-              onTimeout: () => false);
+          .timeout(
+            timeout + const Duration(seconds: 1),
+            onTimeout: () => false,
+          );
 
       final counts = {
         for (final entry in seen.entries)

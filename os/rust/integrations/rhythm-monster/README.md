@@ -48,7 +48,7 @@ outcome before retrying. The library owns no reset/unpair/persistence lifecycle.
 ## Appliance hub (Linux, `bluez` feature)
 
 `hub::INTEGRATION` registers Monster as the `monster` hub type on the Linux
-appliance and advertises the `monster_ble_nearby_scan` onboarding method. The
+appliance and advertises the vendor-neutral `ble_wifi_nearby_scan` onboarding method together with a device profile (display name, the FE28 service UUID the phone scans for, and the `monster-device` cloud broker name), so the app carries no Monster-specific code. The
 app drives three terminal `api/devices/pair` requests and brokers the cloud
 steps between them, so the appliance never holds a Supabase session:
 

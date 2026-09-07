@@ -4,16 +4,16 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
     show RhythmDevice, RhythmDeviceType, RhythmHubInfo, RhythmPairedDevice;
 import 'package:uuid/uuid.dart';
 
-import '../../widgets/nearby_device_sheet.dart';
-import '../../services/nearby_ble_discovery_service.dart';
 import '../../providers/server_sync_provider.dart';
+import '../../services/nearby_ble_discovery_service.dart';
 import '../../widgets/device_detail_sheet.dart';
+import '../../widgets/nearby_device_sheet.dart';
 import 'device_pairing_code_entry_screen.dart';
 import 'device_pairing_scanner_screen.dart';
+import 'ble_wifi_device_add_screen.dart';
 import 'hue_ble_device_add_screen.dart';
 import 'hue_bridge_light_add_screen.dart';
 import 'local_ble_device_add_screen.dart';
-import 'monster_device_add_screen.dart';
 import 'matter_pairing_flow.dart';
 
 enum DevicePairingTarget { any, hueBle, hueBridge }
@@ -31,19 +31,13 @@ class DevicePairingRoomAssignment {
 }
 
 class HueBridgePairingTarget {
-  const HueBridgePairingTarget({
-    required this.address,
-    required this.label,
-  });
+  const HueBridgePairingTarget({required this.address, required this.label});
 
   final String address;
   final String label;
 }
 
-typedef _ResolvedPairedDevice = ({
-  RhythmDevice device,
-  String parentNodeId,
-});
+typedef _ResolvedPairedDevice = ({RhythmDevice device, String parentNodeId});
 
 @visibleForTesting
 String pairingJourneyIdForIntake(
@@ -75,7 +69,7 @@ List<HueBridgePairingTarget> connectedHueBridgePairingTargets({
     final configuredLabel = [
       rawInfo?['name'],
       rawInfo?['label'],
-      rawInfo?['bridge_name'],
+      rawInfo?['bridge_name']
     ]
         .map((value) => value?.toString().trim() ?? '')
         .firstWhere((value) => value.isNotEmpty, orElse: () => '');
@@ -111,9 +105,7 @@ Future<void> startDevicePairingFlow(
     if (!allowsLightPairing || !syncProvider.canAddHueBleDevice) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text(
-            'Update your Rhythm Box to add Hue Bluetooth bulbs.',
-          ),
+          content: Text('Update your Rhythm Box to add Hue Bluetooth bulbs.'),
         ),
       );
       return;
@@ -275,8 +267,9 @@ Future<void> startDevicePairingFlow(
           continue;
         }
         final expectedDeviceType = roomAssignment?.expectedDeviceType;
-        final scannedDeviceType =
-            syncProvider.localBleDeviceTypeForProfile(profileId);
+        final scannedDeviceType = syncProvider.localBleDeviceTypeForProfile(
+          profileId,
+        );
         if (expectedDeviceType != null &&
             scannedDeviceType != null &&
             scannedDeviceType != expectedDeviceType) {
@@ -314,8 +307,8 @@ Future<void> startDevicePairingFlow(
           intake,
           fallbackPrefix: '${family.id}-pair',
         );
-        switch (family) {
-          case NearbyBleFamily.hueBle:
+        switch (family.kind) {
+          case NearbyBleFamilyKind.hueBle:
             await _startHueBlePairing(
               context,
               analyticsSource: analyticsSource,
@@ -323,9 +316,10 @@ Future<void> startDevicePairingFlow(
               inputMethod: intake.inputMethod,
               journeyId: nearbyJourneyId,
             );
-          case NearbyBleFamily.monster:
-            await _startMonsterPairing(
+          case NearbyBleFamilyKind.bleWifi:
+            await _startBleWifiPairing(
               context,
+              family: family,
               analyticsSource: analyticsSource,
               roomAssignment: roomAssignment,
               inputMethod: intake.inputMethod,
@@ -337,18 +331,20 @@ Future<void> startDevicePairingFlow(
   }
 }
 
-Future<void> _startMonsterPairing(
+Future<void> _startBleWifiPairing(
   BuildContext context, {
+  required NearbyBleFamily family,
   required String analyticsSource,
   DevicePairingRoomAssignment? roomAssignment,
   String inputMethod = 'nearby_sheet',
   String? journeyId,
 }) async {
   final syncProvider = context.read<ServerSyncProvider>();
-  final result = await MonsterDeviceAddScreen.show(
+  final result = await BleWifiDeviceAddScreen.show(
     context,
+    family: family,
     analyticsSource: analyticsSource,
-    journeyId: journeyId ?? 'monster-pair-${const Uuid().v4()}',
+    journeyId: journeyId ?? 'ble-wifi-pair-${const Uuid().v4()}',
     inputMethod: inputMethod,
   );
   if (!context.mounted || result == null) return;
@@ -370,18 +366,17 @@ Future<void> _startMonsterPairing(
   if (!context.mounted) return;
 
   final resolved = await _resolvePairedDevices(
-    context,
-    [
-      RhythmPairedDevice(
-        deviceId: result.device.nativeDeviceId,
-        name: result.device.name,
-        deviceType: result.device.deviceType,
-        manufacturer: result.device.manufacturer,
-        model: result.device.model,
-      ),
-    ],
-    hubType: 'monster',
-  );
+      context,
+      [
+        RhythmPairedDevice(
+          deviceId: result.device.nativeDeviceId,
+          name: result.device.name,
+          deviceType: result.device.deviceType,
+          manufacturer: result.device.manufacturer,
+          model: result.device.model,
+        ),
+      ],
+      hubType: family.hubType);
   if (!context.mounted) return;
   final warningSuffix = _pairingWarningSuffix(result.warnings);
   if (resolved.isEmpty) {
@@ -398,8 +393,8 @@ Future<void> _startMonsterPairing(
   await _offerRoomAssignments(
     context,
     resolved,
-    allowNoRoom: syncProvider.supportsMonsterRoomlessDevices,
-    sourceLabel: 'Monster',
+    allowNoRoom: syncProvider.supportsRoomlessDevicesForHub(family.hubType),
+    sourceLabel: family.label,
     analyticsSource: analyticsSource,
     expectedCount: 1,
     roomAssignment: roomAssignment,
@@ -462,8 +457,9 @@ Future<void> _startLocalBlePairing(
   final setup = intake.localBleSetup;
   if (setup == null) return;
   final syncProvider = context.read<ServerSyncProvider>();
-  final pairingProfileId =
-      syncProvider.canonicalLocalBleProfileId(setup.profileId);
+  final pairingProfileId = syncProvider.canonicalLocalBleProfileId(
+    setup.profileId,
+  );
   if (pairingProfileId == null) return;
   final result = await LocalBleDeviceAddScreen.show(
     context,
@@ -471,10 +467,7 @@ Future<void> _startLocalBlePairing(
     pairingProfileId: pairingProfileId,
     inputMethod: intake.inputMethod,
     analyticsSource: analyticsSource,
-    journeyId: pairingJourneyIdForIntake(
-      intake,
-      fallbackPrefix: 'device-pair',
-    ),
+    journeyId: pairingJourneyIdForIntake(intake, fallbackPrefix: 'device-pair'),
   );
   if (!context.mounted || result == null) return;
 
@@ -512,10 +505,11 @@ Future<void> continueRecoveredLocalBlePairingFlow(
   }
   if (!context.mounted) return;
   final resolved = await _resolvePairedDevices(
-    context,
-    [result],
-    hubType: 'local_ble',
-  );
+      context,
+      [
+        result,
+      ],
+      hubType: 'local_ble');
   if (!context.mounted) return;
   if (resolved.isEmpty) {
     ScaffoldMessenger.of(context).showSnackBar(
@@ -647,10 +641,7 @@ Future<({bool cancelled, String? address})> _selectHueBridgeForPairing(
     context,
     targets,
   );
-  return (
-    cancelled: selectedAddress == null,
-    address: selectedAddress,
-  );
+  return (cancelled: selectedAddress == null, address: selectedAddress);
 }
 
 @visibleForTesting
@@ -766,19 +757,18 @@ Future<List<_ResolvedPairedDevice>> _resolvePairedHueBleDevices(
   HueBleDevicePairingResult pairingResult,
 ) {
   return _resolvePairedDevices(
-    context,
-    [
-      for (final device in pairingResult.devices)
-        RhythmPairedDevice(
-          deviceId: device.nativeDeviceId,
-          name: device.name,
-          deviceType: device.deviceType,
-          manufacturer: device.manufacturer,
-          model: device.model,
-        ),
-    ],
-    hubType: 'hue_ble',
-  );
+      context,
+      [
+        for (final device in pairingResult.devices)
+          RhythmPairedDevice(
+            deviceId: device.nativeDeviceId,
+            name: device.name,
+            deviceType: device.deviceType,
+            manufacturer: device.manufacturer,
+            model: device.model,
+          ),
+      ],
+      hubType: 'hue_ble');
 }
 
 Future<List<_ResolvedPairedDevice>> _resolvePairedDevices(

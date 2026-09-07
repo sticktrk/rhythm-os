@@ -198,6 +198,8 @@ impl ExternalLightHubIntegration for BluezLocalBleIntegration {
                             .into_iter()
                             .map(str::to_string)
                             .collect(),
+                        nearby_service_uuids: Vec::new(),
+                        cloud_broker: None,
                     }
                 })
                 .collect(),

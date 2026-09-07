@@ -14,8 +14,8 @@ use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_os::canonical::identity::{DiscoveredIdentity, HardwareId, HubKey};
 use rhythm_os::discovery::{DiscoveredDevice, DiscoveredRoom, HubDiscovery};
 use rhythm_os::hub::{
-    ActiveHub, ExternalLightHubIntegration, HubCredentials, HubEvent, HubIntegrationCapability,
-    HubProvider, HubType, DEVICE_ONBOARDING_METHOD_MONSTER_BLE_NEARBY_SCAN,
+    ActiveHub, ExternalLightHubIntegration, HubCredentials, HubDeviceProfileCapability, HubEvent,
+    HubIntegrationCapability, HubProvider, HubType, DEVICE_ONBOARDING_METHOD_BLE_WIFI_NEARBY_SCAN,
 };
 use rhythm_os::pairing::{
     emit_pairing_progress, PairingRequestContext, PairingSession, PairingStage, PairingStatus,
@@ -38,6 +38,11 @@ use crate::{LightError, LightProperty, LightSecret};
 
 pub const HUB_TYPE: &str = pairing::HUB_TYPE;
 pub const HUB_ADDRESS: &str = "local";
+/// Advertised device profile for the bench-verified Neon Flow strip.
+pub const NEON_FLOW_PROFILE_ID: &str = "monster.neon-flow.light.v1";
+pub const NEON_FLOW_DISPLAY_NAME: &str = "Monster Neon Flow";
+/// Edge function the app brokers commissioning through for this profile.
+pub const CLOUD_BROKER_FUNCTION: &str = "monster-device";
 const ADAPTER_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
 const PAIRING_SERVER_SLA: Duration = Duration::from_secs(150);
 const ADOPT_READBACK_BUDGET: Duration = Duration::from_secs(20);
@@ -688,9 +693,20 @@ impl ExternalLightHubIntegration for MonsterIntegration {
             hub_type: HUB_TYPE.to_string(),
             configurable: false,
             device_onboarding_methods: vec![
-                DEVICE_ONBOARDING_METHOD_MONSTER_BLE_NEARBY_SCAN.to_string()
+                DEVICE_ONBOARDING_METHOD_BLE_WIFI_NEARBY_SCAN.to_string()
             ],
-            device_profiles: Vec::new(),
+            // The profile is what the app renders and scans for; nothing
+            // vendor-specific is hardcoded on the phone.
+            device_profiles: vec![HubDeviceProfileCapability {
+                id: NEON_FLOW_PROFILE_ID.to_string(),
+                compatible_profile_ids: Vec::new(),
+                device_type: "light".to_string(),
+                display_name: NEON_FLOW_DISPLAY_NAME.to_string(),
+                input_only: false,
+                onboarding_methods: vec![DEVICE_ONBOARDING_METHOD_BLE_WIFI_NEARBY_SCAN.to_string()],
+                nearby_service_uuids: vec![ble::ID_SERVICE.to_string()],
+                cloud_broker: Some(CLOUD_BROKER_FUNCTION.to_string()),
+            }],
             supports_unpairing: true,
             unpairable_device_types: vec!["light".to_string()],
             supports_roomless_devices: true,
@@ -819,11 +835,18 @@ mod tests {
         assert_eq!(capabilities.hub_type, "monster");
         assert_eq!(
             capabilities.device_onboarding_methods,
-            vec![DEVICE_ONBOARDING_METHOD_MONSTER_BLE_NEARBY_SCAN]
+            vec![DEVICE_ONBOARDING_METHOD_BLE_WIFI_NEARBY_SCAN]
         );
         assert!(capabilities.supports_unpairing);
         assert!(capabilities.supports_roomless_devices);
         assert!(!capabilities.blocks_room_readiness);
+        let profile = &capabilities.device_profiles[0];
+        assert_eq!(profile.id, NEON_FLOW_PROFILE_ID);
+        assert_eq!(profile.nearby_service_uuids, vec![ble::ID_SERVICE]);
+        assert_eq!(profile.cloud_broker.as_deref(), Some(CLOUD_BROKER_FUNCTION));
+        assert!(rhythm_os::hub::is_valid_device_profile_id(
+            NEON_FLOW_PROFILE_ID
+        ));
     }
 
     #[test]

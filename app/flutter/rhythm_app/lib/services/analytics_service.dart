@@ -209,7 +209,9 @@ class AnalyticsService {
 
   /// Track sleep schedule step.
   Future<void> logOnboardingSleepSchedule(
-      String wakeTime, String sleepTime) async {
+    String wakeTime,
+    String sleepTime,
+  ) async {
     await logEvent('onboarding_sleep_schedule', {
       'wake_time': wakeTime,
       'sleep_time': sleepTime,
@@ -251,9 +253,7 @@ class AnalyticsService {
   Future<void> logMatterSetupCodeRecoveryAttempted({
     required String source,
   }) async {
-    await logEvent('matter_setup_code_recovery_attempted', {
-      'source': source,
-    });
+    await logEvent('matter_setup_code_recovery_attempted', {'source': source});
   }
 
   Future<void> logMatterSetupCodeRecoveryCompleted({
@@ -322,10 +322,7 @@ class AnalyticsService {
 
   /// Track room sync from a hub.
   Future<void> logRoomSync(int roomCount, String hubType) async {
-    await logEvent('room_sync', {
-      'room_count': roomCount,
-      'hub_type': hubType,
-    });
+    await logEvent('room_sync', {'room_count': roomCount, 'hub_type': hubType});
   }
 
   Future<void> logHueAuthorityReviewOpened({
@@ -409,10 +406,7 @@ class AnalyticsService {
     String mode, {
     required String source,
   }) async {
-    await logEvent('global_mode_changed', {
-      'mode': mode,
-      'source': source,
-    });
+    await logEvent('global_mode_changed', {'mode': mode, 'source': source});
   }
 
   /// Track a per-room mode change from the room card UI.
@@ -454,9 +448,7 @@ class AnalyticsService {
 
   /// Track the dedicated room-card settings affordance without identifiers.
   Future<void> logRoomCardSettingsOpened({required String nodeKind}) async {
-    await logEvent('room_card_settings_opened', {
-      'node_kind': nodeKind,
-    });
+    await logEvent('room_card_settings_opened', {'node_kind': nodeKind});
   }
 
   /// Track an explicit request to understand a physical delivery warning.
@@ -650,12 +642,11 @@ class AnalyticsService {
   }
 
   /// Track mirror toggle in slider controls.
-  Future<void> logMirrorToggle(
-      {required bool enabled, required String side}) async {
-    await logEvent('mirror_toggle', {
-      'enabled': enabled ? 1 : 0,
-      'side': side,
-    });
+  Future<void> logMirrorToggle({
+    required bool enabled,
+    required String side,
+  }) async {
+    await logEvent('mirror_toggle', {'enabled': enabled ? 1 : 0, 'side': side});
   }
 
   // ===========================================================================
@@ -1404,34 +1395,40 @@ class AnalyticsService {
     });
   }
 
-  Future<void> logMonsterPairingAttempted({
+  /// Staged Bluetooth-to-Wi-Fi onboarding attempt; [family] is the advertised
+  /// profile id, never a serial or key.
+  Future<void> logBleWifiPairingAttempted({
     required String journeyId,
     required String source,
     required String inputMethod,
+    required String family,
     required int attemptNumber,
     bool resumed = false,
   }) async {
-    await logEvent('monster_pairing_attempted', {
+    await logEvent('ble_wifi_pairing_attempted', {
       'journey_id': journeyId,
       'source': source,
       'input_method': inputMethod,
+      'family': family,
       'attempt_number': attemptNumber,
       'resumed': resumed,
     });
   }
 
-  Future<void> logMonsterPairingCompleted({
+  Future<void> logBleWifiPairingCompleted({
     required String journeyId,
     required String source,
     required String inputMethod,
+    required String family,
     required int attemptNumber,
     required String outcome,
     String? failureStage,
   }) async {
-    await logEvent('monster_pairing_completed', {
+    await logEvent('ble_wifi_pairing_completed', {
       'journey_id': journeyId,
       'source': source,
       'input_method': inputMethod,
+      'family': family,
       'attempt_number': attemptNumber,
       'outcome': outcome,
       if (failureStage != null) 'failure_stage': failureStage,

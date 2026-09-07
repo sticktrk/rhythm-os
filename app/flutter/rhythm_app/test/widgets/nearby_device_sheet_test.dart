@@ -4,8 +4,22 @@ import 'package:rhythm_app/backend/backend.dart';
 import 'package:rhythm_app/services/analytics_service.dart';
 import 'package:rhythm_app/services/nearby_ble_discovery_service.dart';
 import 'package:rhythm_app/widgets/nearby_device_sheet.dart';
+import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 import '../helpers/capturing_analytics_backend.dart';
+
+final stripFamily = NearbyBleFamily.fromProfile(
+  hubType: 'vendor_hub',
+  profile: const RhythmDeviceProfile(
+    id: 'vendor.strip.light.v1',
+    deviceType: 'light',
+    displayName: 'Vendor strip',
+    inputOnly: false,
+    onboardingMethods: [RhythmDeviceOnboardingMethod.bleWifiNearbyScan],
+    nearbyServiceUuids: ['0000fe28-0000-1000-8000-00805f9b34fb'],
+    cloudBroker: 'vendor-device',
+  ),
+);
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -60,34 +74,39 @@ void main() {
     Set<NearbyBleFamily>? requested;
     final chosenFuture = await open(
       tester,
-      families: {NearbyBleFamily.hueBle, NearbyBleFamily.monster},
+      families: {NearbyBleFamily.hueBle, stripFamily},
       discoveryRequest: ({required source, required families}) async {
         requested = families;
-        return const NearbyBleDiscoveryResult(
+        return NearbyBleDiscoveryResult(
           NearbyBleDiscoveryOutcome.found,
-          counts: {NearbyBleFamily.monster: 1},
+          counts: {stripFamily: 2},
         );
       },
     );
     await tester.pumpAndSettle();
 
-    expect(requested, {NearbyBleFamily.hueBle, NearbyBleFamily.monster});
-    expect(find.byKey(const ValueKey('nearby-device-family-monster')),
-        findsOneWidget);
-    expect(find.byKey(const ValueKey('nearby-device-family-hue_ble')),
-        findsNothing);
-    expect(find.text('Monster Neon Flow'), findsOneWidget);
+    expect(requested, {NearbyBleFamily.hueBle, stripFamily});
+    expect(
+      find.byKey(const ValueKey('nearby-device-family-vendor.strip.light.v1')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('nearby-device-family-hue_ble')),
+      findsNothing,
+    );
+    expect(find.text('Vendor strip (2 nearby)'), findsOneWidget);
 
-    await tester
-        .tap(find.byKey(const ValueKey('nearby-device-family-monster')));
+    await tester.tap(
+      find.byKey(const ValueKey('nearby-device-family-vendor.strip.light.v1')),
+    );
     await tester.pumpAndSettle();
-    expect(await chosenFuture, NearbyBleFamily.monster);
+    expect(await chosenFuture, stripFamily);
 
     final selected = analyticsBackend.events.singleWhere(
       (event) => event.name == 'device_pairing_nearby_family_selected',
     );
-    expect(selected.properties['family'], 'monster');
-    expect(selected.properties['device_count'], 1);
+    expect(selected.properties['family'], 'vendor.strip.light.v1');
+    expect(selected.properties['device_count'], 2);
   });
 
   testWidgets('explains an empty scan and lets the person scan again', (
@@ -96,7 +115,7 @@ void main() {
     var scans = 0;
     final chosenFuture = await open(
       tester,
-      families: {NearbyBleFamily.monster},
+      families: {stripFamily},
       discoveryRequest: ({required source, required families}) async {
         scans += 1;
         return NearbyBleDiscoveryResult(
@@ -108,13 +127,17 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.text('Turn on Bluetooth to look for nearby devices.'),
-        findsOneWidget);
+    expect(
+      find.text('Turn on Bluetooth to look for nearby devices.'),
+      findsOneWidget,
+    );
     await tester.tap(find.byKey(const ValueKey('nearby-device-sheet-rescan')));
     await tester.pumpAndSettle();
     expect(scans, 2);
-    expect(find.byKey(const ValueKey('nearby-device-sheet-empty')),
-        findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('nearby-device-sheet-empty')),
+      findsOneWidget,
+    );
 
     await tester.tap(find.byKey(const ValueKey('nearby-device-sheet-close')));
     await tester.pumpAndSettle();

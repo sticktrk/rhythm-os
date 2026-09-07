@@ -7,12 +7,13 @@ import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 import '../../providers/server_sync_provider.dart';
 import '../../services/analytics_service.dart';
-import '../../services/monster_cloud_service.dart';
+import '../../services/device_cloud_broker_service.dart';
+import '../../services/nearby_ble_discovery_service.dart';
 import '../../widgets/solar_orbit.dart';
 import '../../widgets/stage_timeline.dart';
 
-class MonsterPairedDevice {
-  const MonsterPairedDevice({
+class BleWifiPairedDevice {
+  const BleWifiPairedDevice({
     required this.nativeDeviceId,
     required this.name,
     required this.deviceType,
@@ -27,19 +28,20 @@ class MonsterPairedDevice {
   final String? model;
 }
 
-class MonsterDevicePairingResult {
-  const MonsterDevicePairingResult({
+class BleWifiDevicePairingResult {
+  const BleWifiDevicePairingResult({
     required this.device,
     this.warnings = const [],
   });
 
-  final MonsterPairedDevice device;
+  final BleWifiPairedDevice device;
   final List<String> warnings;
 }
 
-class MonsterDiscoveredCandidate {
-  const MonsterDiscoveredCandidate({required this.dsn, required this.address});
+class BleWifiDiscoveredCandidate {
+  const BleWifiDiscoveredCandidate({required this.dsn, required this.address});
 
+  /// Manufacturer serial read over Bluetooth; shown only as a short suffix.
   final String dsn;
   final String address;
 
@@ -48,26 +50,30 @@ class MonsterDiscoveredCandidate {
       : dsn.substring(dsn.length - 4).toUpperCase();
 }
 
-typedef MonsterPairingRequest = Future<Map<String, dynamic>?> Function({
+typedef BleWifiPairingRequest = Future<Map<String, dynamic>?> Function({
   required String hubType,
   required Map<String, dynamic> params,
   required Duration receiveTimeout,
   required String sessionId,
 });
 
-/// Stage names shared with the appliance's `rhythm-monster` hub.
-abstract final class MonsterPairingStage {
+/// Stage names shared with every appliance hub that implements the
+/// vendor-neutral `ble_wifi_nearby_scan` onboarding method.
+abstract final class BleWifiPairingStage {
   static const discover = 'discover';
   static const provision = 'provision';
   static const adopt = 'adopt';
 }
 
-/// Drives the staged Monster onboarding: the Rhythm Box finds the strip and
-/// joins it to Wi-Fi over Bluetooth, the app brokers the cloud registration,
-/// and the Box adopts the LAN key only after a signed readback.
-class MonsterDeviceAddScreen extends StatefulWidget {
-  const MonsterDeviceAddScreen({
+/// Drives staged Bluetooth-to-Wi-Fi onboarding for any family the appliance
+/// advertises: the Rhythm Box finds the device and joins it to Wi-Fi over
+/// Bluetooth, the app brokers registration through the family's cloud
+/// broker, and the Box adopts the LAN credentials only after a signed
+/// readback. Nothing here is specific to one manufacturer.
+class BleWifiDeviceAddScreen extends StatefulWidget {
+  const BleWifiDeviceAddScreen({
     super.key,
+    required this.family,
     this.analyticsSource = 'unknown',
     this.journeyId,
     this.inputMethod = 'nearby_sheet',
@@ -78,24 +84,27 @@ class MonsterDeviceAddScreen extends StatefulWidget {
     @visibleForTesting this.completeRetryLimit = 12,
   });
 
+  final NearbyBleFamily family;
   final String analyticsSource;
   final String? journeyId;
   final String inputMethod;
-  final MonsterPairingRequest? pairingRequest;
-  final MonsterCloudService? cloudService;
+  final BleWifiPairingRequest? pairingRequest;
+  final DeviceCloudBrokerService? cloudService;
   final Stream<RhythmPairingProgress>? progressEvents;
   final Duration completeRetryDelay;
   final int completeRetryLimit;
 
-  static Future<MonsterDevicePairingResult?> show(
+  static Future<BleWifiDevicePairingResult?> show(
     BuildContext context, {
+    required NearbyBleFamily family,
     String analyticsSource = 'unknown',
     String? journeyId,
     String inputMethod = 'nearby_sheet',
   }) {
-    return Navigator.of(context).push<MonsterDevicePairingResult>(
+    return Navigator.of(context).push<BleWifiDevicePairingResult>(
       MaterialPageRoute(
-        builder: (_) => MonsterDeviceAddScreen(
+        builder: (_) => BleWifiDeviceAddScreen(
+          family: family,
           analyticsSource: analyticsSource,
           journeyId: journeyId,
           inputMethod: inputMethod,
@@ -105,24 +114,23 @@ class MonsterDeviceAddScreen extends StatefulWidget {
   }
 
   @override
-  State<MonsterDeviceAddScreen> createState() => _MonsterDeviceAddScreenState();
+  State<BleWifiDeviceAddScreen> createState() => _BleWifiDeviceAddScreenState();
 }
 
-class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
-  static const _accent = Color(0xFF7C4DFF);
+class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
+  static const _accent = Color(0xFF26C6DA);
   static const _danger = Color(0xFFEF5350);
   static const _discoverTimeout = Duration(seconds: 45);
   static const _provisionTimeout = Duration(minutes: 3);
   static const _adoptTimeout = Duration(seconds: 75);
   static const _stages = [
-    StageTimelineItem(label: 'Find the strip', icon: Icons.radar_rounded),
+    StageTimelineItem(label: 'Find the device', icon: Icons.radar_rounded),
     StageTimelineItem(label: 'Join Wi-Fi', icon: Icons.wifi_rounded),
-    StageTimelineItem(
-        label: 'Register with Monster', icon: Icons.cloud_rounded),
+    StageTimelineItem(label: 'Register', icon: Icons.cloud_rounded),
     StageTimelineItem(label: 'Add to Rhythm', icon: Icons.light_mode_rounded),
   ];
 
-  late final String _journeyId = widget.journeyId ?? 'monster-pair';
+  late final String _journeyId = widget.journeyId ?? 'ble-wifi-pair';
   StreamSubscription<RhythmPairingProgress>? _progressSubscription;
   String? _activeSessionId;
   int _attemptNumber = 0;
@@ -133,15 +141,17 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
   bool _flowCompleted = false;
   String? _error;
 
-  /// Retained across retries so an already-provisioned strip is never sent a
+  /// Retained across retries so an already-provisioned device is never sent a
   /// second Wi-Fi payload; only registration and adoption are repeated.
   String? _retainedDsn;
   String? _retainedTicket;
   bool _provisioned = false;
   bool _uncertainProvision = false;
 
-  MonsterCloudService get _cloud =>
-      widget.cloudService ?? MonsterCloudService.instance;
+  NearbyBleFamily get _family => widget.family;
+
+  DeviceCloudBrokerService get _cloud =>
+      widget.cloudService ?? DeviceCloudBrokerService.instance;
 
   @override
   void initState() {
@@ -169,7 +179,9 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
   void _subscribeToProgress() {
     _progressSubscription?.cancel();
     _progressSubscription = _pairingProgressStream?.listen((event) {
-      if (!mounted || event.hubType != 'monster' || _flowCompleted) return;
+      if (!mounted || event.hubType != _family.hubType || _flowCompleted) {
+        return;
+      }
       if (event.sessionId != _activeSessionId) return;
       if (event.stage == RhythmPairingStage.complete ||
           event.stage == RhythmPairingStage.failed) {
@@ -188,17 +200,21 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
   ) {
     _activeSessionId = '$_journeyId-$stage-$_attemptNumber';
     final request = widget.pairingRequest;
-    final body = {'stage': stage, ...params};
+    final body = {
+      'stage': stage,
+      if (_family.profileId != null) 'profile_id': _family.profileId,
+      ...params,
+    };
     if (request != null) {
       return request(
-        hubType: 'monster',
+        hubType: _family.hubType,
         params: body,
         receiveTimeout: timeout,
         sessionId: _activeSessionId!,
       );
     }
     return context.read<ServerSyncProvider>().api.pairDevice(
-          hubType: 'monster',
+          hubType: _family.hubType,
           params: body,
           receiveTimeout: timeout,
           sessionId: _activeSessionId!,
@@ -218,17 +234,26 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
       _message = null;
     });
     HapticFeedback.mediumImpact();
-    AnalyticsService().logMonsterPairingAttempted(
+    AnalyticsService().logBleWifiPairingAttempted(
       journeyId: _journeyId,
       source: widget.analyticsSource,
       inputMethod: widget.inputMethod,
+      family: _family.id,
       attemptNumber: _attemptNumber,
       resumed: _provisioned,
     );
     try {
+      final broker = _family.cloudBroker;
+      if (broker == null) {
+        _fail(
+          'This device type needs a cloud step this app cannot run yet.',
+          failureStage: 'no_cloud_broker',
+        );
+        return;
+      }
       if (!_cloud.canUse) {
         _fail(
-          'Sign in to your Rhythm account to add a Monster strip.',
+          'Sign in to your Rhythm account to add this device.',
           failureStage: 'not_signed_in',
         );
         return;
@@ -236,10 +261,13 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
       if (!_provisioned) {
         final candidate = await _discover();
         if (candidate == null || !mounted) return;
-        final begin = await _cloud.begin(candidate.dsn);
+        final begin = await _cloud.begin(broker, candidate.dsn);
         if (!mounted) return;
         if (!begin.ok || begin.setupToken == null || begin.ticket == null) {
-          _fail(monsterCloudFailureMessage(begin), failureStage: 'cloud_begin');
+          _fail(
+            deviceCloudBrokerFailureMessage(begin),
+            failureStage: 'cloud_begin',
+          );
           return;
         }
         _retainedDsn = candidate.dsn;
@@ -248,7 +276,7 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
         if (!provisioned || !mounted) return;
         _provisioned = true;
       }
-      final credentials = await _complete();
+      final credentials = await _complete(broker);
       if (credentials == null || !mounted) return;
       await _adopt(credentials);
     } catch (_) {
@@ -262,14 +290,14 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
     }
   }
 
-  Future<MonsterDiscoveredCandidate?> _discover() async {
+  Future<BleWifiDiscoveredCandidate?> _discover() async {
     setState(() {
       _stageIndex = 0;
-      _message = 'Hold the strip\'s button until it blinks, then keep it near '
-          'your Rhythm Box.';
+      _message = 'Put the device in setup mode and keep it near your Rhythm '
+          'Box.';
     });
     final response = await _pair(
-      MonsterPairingStage.discover,
+      BleWifiPairingStage.discover,
       const {},
       _discoverTimeout,
     );
@@ -282,26 +310,26 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
     final candidates = _candidatesFromResponse(response!);
     if (candidates.isEmpty) {
       _fail(
-        'No Monster strip in setup mode was found. Hold its button until it '
-        'blinks and try again.',
+        'No device in setup mode was found. Put it in setup mode and try '
+        'again.',
         failureStage: 'discover_empty',
       );
       return null;
     }
     if (candidates.length == 1) return candidates.single;
-    final chosen = await showDialog<MonsterDiscoveredCandidate>(
+    final chosen = await showDialog<BleWifiDiscoveredCandidate>(
       context: context,
       builder: (dialogContext) => SimpleDialog(
-        title: const Text('Choose the strip to add'),
+        title: const Text('Choose the device to add'),
         children: [
           for (final candidate in candidates)
             SimpleDialogOption(
-              key: ValueKey('monster-candidate-${candidate.dsn}'),
+              key: ValueKey('ble-wifi-candidate-${candidate.dsn}'),
               onPressed: () => Navigator.of(dialogContext).pop(candidate),
               child: ListTile(
                 contentPadding: EdgeInsets.zero,
                 leading: const Icon(Icons.light_mode_rounded),
-                title: Text('Neon Flow …${candidate.dsnSuffix}'),
+                title: Text('${_family.label} …${candidate.dsnSuffix}'),
                 subtitle: const Text('Serial ends with these characters'),
               ),
             ),
@@ -309,29 +337,28 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
       ),
     );
     if (chosen == null && mounted) {
-      _fail('Choose a strip to continue.', failureStage: 'candidate_declined');
+      _fail('Choose a device to continue.', failureStage: 'candidate_declined');
     }
     return chosen;
   }
 
   Future<bool> _provision(
-    MonsterDiscoveredCandidate candidate,
+    BleWifiDiscoveredCandidate candidate,
     String setupToken,
   ) async {
     setState(() {
       _stageIndex = 1;
-      _message = 'Sending your Wi-Fi details to the strip. This can take a '
+      _message = 'Sending your Wi-Fi details to the device. This can take a '
           'minute.';
     });
     final response = await _pair(
-      MonsterPairingStage.provision,
-      {
-        'dsn': candidate.dsn,
-        'address': candidate.address,
-        'setup_token': setupToken,
-      },
-      _provisionTimeout,
-    );
+        BleWifiPairingStage.provision,
+        {
+          'dsn': candidate.dsn,
+          'address': candidate.address,
+          'setup_token': setupToken,
+        },
+        _provisionTimeout);
     if (!mounted) return false;
     final failure = _responseFailure(response);
     if (failure == null) return true;
@@ -339,15 +366,15 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
     _uncertainProvision = uncertain;
     _fail(
       uncertain
-          ? '$failure If the strip\'s light shows it joined Wi-Fi, continue '
-              'without sending Wi-Fi again.'
+          ? '$failure If the device shows it joined Wi-Fi, continue without '
+              'sending Wi-Fi again.'
           : failure,
       failureStage: uncertain ? 'provision_uncertain' : 'provision',
     );
     return false;
   }
 
-  /// Continue after an uncertain Wi-Fi write: the person confirmed the strip
+  /// Continue after an uncertain Wi-Fi write: the person confirmed the device
   /// joined, so registration and adoption run with the retained ticket.
   Future<void> _continueAfterUncertainProvision() async {
     if (_retainedDsn == null || _retainedTicket == null) return;
@@ -355,59 +382,62 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
     await _start();
   }
 
-  Future<MonsterCloudResponse?> _complete() async {
+  Future<DeviceCloudBrokerResponse?> _complete(String broker) async {
     final dsn = _retainedDsn;
     final ticket = _retainedTicket;
     if (dsn == null || ticket == null) {
-      _fail('This setup session expired. Start over from the scan.',
-          failureStage: 'ticket_missing');
+      _fail(
+        'This setup session expired. Start over from the scan.',
+        failureStage: 'ticket_missing',
+      );
       return null;
     }
     setState(() {
       _stageIndex = 2;
-      _message = 'Registering the strip with Monster and fetching its key.';
+      _message = 'Registering the device and fetching its network key.';
     });
-    MonsterCloudResponse response = await _cloud.complete(dsn, ticket);
+    var response = await _cloud.complete(broker, dsn, ticket);
     var attempts = 0;
     while (!response.ok && response.lanPending && mounted) {
       attempts += 1;
       if (attempts > widget.completeRetryLimit) break;
       setState(() {
-        _message = 'Waiting for the strip to appear on your network…';
+        _message = 'Waiting for the device to appear on your network…';
       });
       await Future<void>.delayed(widget.completeRetryDelay);
       if (!mounted) return null;
-      response = await _cloud.complete(dsn, ticket);
+      response = await _cloud.complete(broker, dsn, ticket);
     }
     if (!mounted) return null;
     if (!response.ok || !response.hasCredentials) {
-      final expired = response.error == 'invalid_ticket';
-      if (expired) {
+      if (response.error == 'invalid_ticket') {
         _provisioned = false;
         _retainedTicket = null;
       }
       _fail(
-        monsterCloudFailureMessage(response),
+        deviceCloudBrokerFailureMessage(response),
         failureStage:
             response.lanPending ? 'cloud_lan_pending' : 'cloud_complete',
       );
       return null;
     }
     if (response.dsn != dsn) {
-      _fail('The cloud returned a different strip. Start over from the scan.',
-          failureStage: 'cloud_identity');
+      _fail(
+        'The cloud returned a different device. Start over from the scan.',
+        failureStage: 'cloud_identity',
+      );
       return null;
     }
     return response;
   }
 
-  Future<void> _adopt(MonsterCloudResponse credentials) async {
+  Future<void> _adopt(DeviceCloudBrokerResponse credentials) async {
     setState(() {
       _stageIndex = 3;
-      _message = 'Checking the strip on your network.';
+      _message = 'Checking the device on your network.';
     });
     final response = await _pair(
-      MonsterPairingStage.adopt,
+      BleWifiPairingStage.adopt,
       credentials.adoptParams(),
       _adoptTimeout,
     );
@@ -419,21 +449,24 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
     }
     final device = _deviceFromResponse(response!);
     if (device == null) {
-      _fail('The Rhythm Box finished but did not report the new light.',
-          failureStage: 'adopt_missing_device');
+      _fail(
+        'The Rhythm Box finished but did not report the new light.',
+        failureStage: 'adopt_missing_device',
+      );
       return;
     }
     _flowCompleted = true;
-    AnalyticsService().logMonsterPairingCompleted(
+    AnalyticsService().logBleWifiPairingCompleted(
       journeyId: _journeyId,
       source: widget.analyticsSource,
       inputMethod: widget.inputMethod,
+      family: _family.id,
       attemptNumber: _attemptNumber,
       outcome: 'succeeded',
     );
     HapticFeedback.heavyImpact();
     Navigator.of(context).pop(
-      MonsterDevicePairingResult(
+      BleWifiDevicePairingResult(
         device: device,
         warnings: _responseWarnings(response),
       ),
@@ -442,10 +475,11 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
 
   void _fail(String message, {required String failureStage}) {
     if (!mounted || _flowCompleted) return;
-    AnalyticsService().logMonsterPairingCompleted(
+    AnalyticsService().logBleWifiPairingCompleted(
       journeyId: _journeyId,
       source: widget.analyticsSource,
       inputMethod: widget.inputMethod,
+      family: _family.id,
       attemptNumber: _attemptNumber,
       outcome: 'failed',
       failureStage: failureStage,
@@ -467,7 +501,7 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
           'The Rhythm Box rejected the pairing request.';
     }
     if (response['status'] == 'failed') {
-      return _responseError(response) ?? 'Monster setup failed.';
+      return _responseError(response) ?? 'Device setup failed.';
     }
     if (response['status'] != 'complete') {
       return _responseError(response) ??
@@ -479,23 +513,23 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
   Map<String, dynamic>? _details(Map<String, dynamic>? response) =>
       _jsonMap(response?['details']);
 
-  List<MonsterDiscoveredCandidate> _candidatesFromResponse(
+  List<BleWifiDiscoveredCandidate> _candidatesFromResponse(
     Map<String, dynamic> response,
   ) {
     final raw = _details(response)?['candidates'];
     if (raw is! List) return const [];
-    final candidates = <MonsterDiscoveredCandidate>[];
+    final candidates = <BleWifiDiscoveredCandidate>[];
     for (final entry in raw) {
       final map = _jsonMap(entry);
       final dsn = map?['dsn']?.toString().trim() ?? '';
       final address = map?['address']?.toString().trim() ?? '';
       if (dsn.isEmpty || address.isEmpty) continue;
-      candidates.add(MonsterDiscoveredCandidate(dsn: dsn, address: address));
+      candidates.add(BleWifiDiscoveredCandidate(dsn: dsn, address: address));
     }
     return candidates;
   }
 
-  MonsterPairedDevice? _deviceFromResponse(Map<String, dynamic> response) {
+  BleWifiPairedDevice? _deviceFromResponse(Map<String, dynamic> response) {
     final devices = response['devices'];
     final raw = devices is List && devices.isNotEmpty
         ? devices.first
@@ -507,9 +541,9 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
             .trim() ??
         '';
     if (id.isEmpty) return null;
-    return MonsterPairedDevice(
+    return BleWifiPairedDevice(
       nativeDeviceId: id,
-      name: device['name'] as String? ?? 'Monster Neon Flow',
+      name: device['name'] as String? ?? _family.label,
       deviceType: device['device_type'] as String? ?? 'light',
       manufacturer: device['manufacturer'] as String?,
       model: device['model'] as String?,
@@ -547,7 +581,7 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
     final message = _failed
         ? _error
         : (_message ??
-            'Keep the strip powered on and close to your Rhythm Box.');
+            'Keep the device powered on and close to your Rhythm Box.');
     return PopScope(
       canPop: !_running,
       onPopInvokedWithResult: (didPop, _) {
@@ -564,12 +598,12 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
           );
       },
       child: Scaffold(
-        key: const ValueKey('monster-pairing-screen'),
+        key: const ValueKey('ble-wifi-pairing-screen'),
         backgroundColor: CelestialColors.backgroundDark,
         appBar: AppBar(
           backgroundColor: CelestialColors.backgroundDark,
           foregroundColor: CelestialColors.textPrimary,
-          title: const Text('Add Monster Neon Flow'),
+          title: Text('Add ${_family.label}'),
           elevation: 0,
         ),
         body: SafeArea(
@@ -595,9 +629,9 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
                 ),
               ),
               const SizedBox(height: 20),
-              const Text(
-                'Adding a Monster Neon Flow strip',
-                style: TextStyle(
+              Text(
+                'Adding a ${_family.label}',
+                style: const TextStyle(
                   color: CelestialColors.textPrimary,
                   fontSize: 25,
                   height: 1.15,
@@ -607,9 +641,9 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
               ),
               const SizedBox(height: 9),
               Text(
-                'Your Rhythm Box joins the strip to its Wi-Fi network and '
-                'registers it with Monster using Rhythm\'s account. No Monster '
-                'login is needed.',
+                'Your Rhythm Box joins the device to its Wi-Fi network and '
+                'registers it for you. No manufacturer account or login is '
+                'needed.',
                 style: TextStyle(
                   color: CelestialColors.textSecondary.withValues(alpha: 0.84),
                   fontSize: 14,
@@ -623,8 +657,9 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
                   color: CelestialColors.backgroundCard,
                   borderRadius: BorderRadius.circular(18),
                   border: Border.all(
-                    color:
-                        (_failed ? _danger : _accent).withValues(alpha: 0.34),
+                    color: (_failed ? _danger : _accent).withValues(
+                      alpha: 0.34,
+                    ),
                   ),
                 ),
                 child: StageTimeline(
@@ -639,7 +674,7 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
                 const SizedBox(height: 12),
                 Text(
                   _error!,
-                  key: const ValueKey('monster-pairing-error'),
+                  key: const ValueKey('ble-wifi-pairing-error'),
                   style: const TextStyle(
                     color: _danger,
                     fontSize: 13,
@@ -654,16 +689,16 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
                   SizedBox(
                     height: 52,
                     child: FilledButton.icon(
-                      key: const ValueKey('monster-continue-registration'),
+                      key: const ValueKey('ble-wifi-continue-registration'),
                       onPressed:
                           _running ? null : _continueAfterUncertainProvision,
                       style: FilledButton.styleFrom(
                         backgroundColor: _accent,
-                        foregroundColor: Colors.white,
+                        foregroundColor: const Color(0xFF00363B),
                       ),
                       icon: const Icon(Icons.cloud_done_rounded),
                       label: const Text(
-                        'Strip joined Wi-Fi, continue',
+                        'Device joined Wi-Fi, continue',
                         style: TextStyle(fontWeight: FontWeight.w700),
                       ),
                     ),
@@ -673,7 +708,7 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
                 SizedBox(
                   height: 52,
                   child: FilledButton.icon(
-                    key: const ValueKey('monster-retry'),
+                    key: const ValueKey('ble-wifi-retry'),
                     onPressed: _running
                         ? null
                         : () {
@@ -690,7 +725,9 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
                       backgroundColor: _uncertainProvision
                           ? CelestialColors.backgroundCard
                           : _accent,
-                      foregroundColor: Colors.white,
+                      foregroundColor: _uncertainProvision
+                          ? CelestialColors.textPrimary
+                          : const Color(0xFF00363B),
                     ),
                     icon: const Icon(Icons.refresh_rounded),
                     label: Text(
@@ -705,7 +742,7 @@ class _MonsterDeviceAddScreenState extends State<MonsterDeviceAddScreen> {
                 SizedBox(
                   height: 48,
                   child: TextButton(
-                    key: const ValueKey('monster-cancel'),
+                    key: const ValueKey('ble-wifi-cancel'),
                     onPressed:
                         _running ? null : () => Navigator.of(context).pop(),
                     child: const Text('Cancel'),

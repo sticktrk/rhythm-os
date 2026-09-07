@@ -1299,6 +1299,8 @@ mod tests {
                 display_name: "Button".into(),
                 input_only: true,
                 onboarding_methods: vec!["local_ble_qr".into()],
+                nearby_service_uuids: Vec::new(),
+                cloud_broker: None,
             }],
             supports_unpairing: true,
             unpairable_device_types: vec!["button".into()],

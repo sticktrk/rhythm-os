@@ -93,7 +93,7 @@ class _NearbyDeviceSheetState extends State<NearbyDeviceSheet> {
         NearbyBleDiscoveryOutcome.failed =>
           'The Bluetooth scan did not finish. Try again.',
         _ => 'No supported device is in setup mode nearby. Put the bulb or '
-            'strip in pairing mode, keep your phone close, and scan again.',
+            'light in pairing mode, keep your phone close, and scan again.',
       };
 
   @override
@@ -126,8 +126,10 @@ class _NearbyDeviceSheetState extends State<NearbyDeviceSheet> {
                   key: const ValueKey('nearby-device-sheet-close'),
                   tooltip: 'Close',
                   onPressed: () => Navigator.of(context).pop(),
-                  icon: const Icon(Icons.close_rounded,
-                      color: CelestialColors.textSecondary),
+                  icon: const Icon(
+                    Icons.close_rounded,
+                    color: CelestialColors.textSecondary,
+                  ),
                 ),
               ],
             ),
@@ -198,7 +200,7 @@ class _NearbyDeviceSheetState extends State<NearbyDeviceSheet> {
                         child: Row(
                           children: [
                             Icon(
-                              family == NearbyBleFamily.hueBle
+                              family.kind == NearbyBleFamilyKind.hueBle
                                   ? Icons.lightbulb_rounded
                                   : Icons.light_mode_rounded,
                               color: _teal,
