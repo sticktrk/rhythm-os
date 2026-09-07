@@ -10,6 +10,7 @@ members = [
     "os/rust/integrations/rhythm-hue",
     "os/rust/integrations/rhythm-ble",
     "os/rust/integrations/rhythm-ha",
+    "os/rust/integrations/rhythm-monster",
     "os/rust/integrations/rhythm-matter",
     "os/rust/bins/rhythm-server",
     "os/rust/bins/rhythm-host-recorder",

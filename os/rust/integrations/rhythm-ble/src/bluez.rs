@@ -41,6 +41,7 @@ use crate::transport::LocalBleAssociationDiagnostics;
 pub enum BluezDriverId {
     LocalProfiles,
     Hue,
+    Monster,
 }
 
 impl BluezDriverId {
@@ -48,6 +49,7 @@ impl BluezDriverId {
         match self {
             Self::LocalProfiles => "local_ble",
             Self::Hue => "hue_ble",
+            Self::Monster => "monster_ble",
         }
     }
 }
