@@ -76,3 +76,28 @@ fn zero_brightness_is_off_and_no_effects_or_white_claims_are_emitted() {
         assert_ne!(p.name(), "color_temp");
     }
 }
+
+#[tokio::test]
+async fn missing_credentials_do_not_block_healthy_sibling_writes_or_observations() {
+    let good = Arc::new(Spy {
+        writes: Mutex::new(vec![]),
+        fail: false,
+    });
+    let devices: HashMap<String, Arc<dyn LightTransport>> =
+        HashMap::from([("good".into(), good.clone() as Arc<dyn LightTransport>)]);
+    let controller =
+        LightMonsterController::new(Arc::new(Mutex::new(HubDeviceRegistry::new())), devices);
+    let target = HubDispatchTarget::Devices {
+        native_ids: vec!["missing".into(), "good".into()],
+    };
+    assert!(controller.turn_off_target(&target, None).await.is_err());
+    assert_eq!(
+        *good.writes.lock().unwrap(),
+        vec![vec![(P::Power, json!(0))]]
+    );
+    assert!(controller.any_lights_on_target(&target).await.unwrap());
+    let missing = HubDispatchTarget::Devices {
+        native_ids: vec!["missing".into()],
+    };
+    assert!(controller.any_lights_on_target(&missing).await.is_err());
+}

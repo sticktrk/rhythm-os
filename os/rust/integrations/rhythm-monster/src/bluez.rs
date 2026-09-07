@@ -2,6 +2,7 @@
 //! rhythm-ble driver's admitted operation; never create a private radio runtime.
 use crate::{
     ble::{self, LightBleTransport, LightGatt, LightWifiConfig},
+    ble_cleanup::with_disconnect,
     LightError, LightResult, LightSecret,
 };
 use async_trait::async_trait;
@@ -92,6 +93,7 @@ impl LightBleTransport for LightBluezTransport {
         tokio::task::spawn_blocking(move || {
             let client =
                 BluezClient::new(BluezDriverId::Monster).map_err(|_| LightError::Unavailable)?;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(13);
             let output = client
                 .run_adapter_operation_for(
                     &address.to_string(),
@@ -99,14 +101,24 @@ impl LightBleTransport for LightBluezTransport {
                     Duration::from_secs(20),
                     move |_, adapter| async move {
                         let device = adapter.device(address)?;
-                        device.connect().await?;
-                        let result = ble::identify_gatt(&Gatt(device.clone())).await;
-                        let cleanup = device.disconnect().await;
-                        let result = if cleanup.is_err() {
-                            Err(LightError::Unavailable)
-                        } else {
-                            result
-                        };
+                        let result = with_disconnect(
+                            deadline,
+                            LightError::Unavailable,
+                            async {
+                                device
+                                    .connect()
+                                    .await
+                                    .map_err(|_| LightError::Unavailable)?;
+                                ble::identify_gatt(&Gatt(device.clone())).await
+                            },
+                            async {
+                                device
+                                    .disconnect()
+                                    .await
+                                    .map_err(|_| LightError::Unavailable)
+                            },
+                        )
+                        .await;
                         DetachedBluezOutput::from_value(result)
                     },
                 )
@@ -129,6 +141,7 @@ impl LightBleTransport for LightBluezTransport {
         tokio::task::spawn_blocking(move || {
             let client =
                 BluezClient::new(BluezDriverId::Monster).map_err(|_| LightError::Unavailable)?;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(105);
             let output = client
                 .run_adapter_operation_for(
                     &address.to_string(),
@@ -136,20 +149,20 @@ impl LightBleTransport for LightBluezTransport {
                     Duration::from_secs(115),
                     move |_, adapter| async move {
                         let device = adapter.device(address)?;
-                        if device.connect().await.is_err() {
-                            return DetachedBluezOutput::from_value(Err::<(), _>(
-                                LightError::Unavailable,
-                            ));
-                        }
-                        let result =
-                            ble::provision_gatt(&Gatt(device.clone()), &dsn, &token, &wifi).await;
-                        let cleanup =
-                            tokio::time::timeout(Duration::from_secs(5), device.disconnect()).await;
-                        let result = if !matches!(cleanup, Ok(Ok(()))) {
-                            Err(LightError::Uncertain)
-                        } else {
-                            result
-                        };
+                        let result = with_disconnect(
+                            deadline,
+                            LightError::Uncertain,
+                            async {
+                                device
+                                    .connect()
+                                    .await
+                                    .map_err(|_| LightError::Unavailable)?;
+                                ble::provision_gatt(&Gatt(device.clone()), &dsn, &token, &wifi)
+                                    .await
+                            },
+                            async { device.disconnect().await.map_err(|_| LightError::Uncertain) },
+                        )
+                        .await;
                         DetachedBluezOutput::from_value(result)
                     },
                 )

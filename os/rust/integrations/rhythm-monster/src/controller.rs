@@ -50,7 +50,7 @@ impl LightMonsterController {
     fn targets(
         &self,
         target: &HubDispatchTarget,
-    ) -> LightControlResult<Vec<Arc<dyn LightTransport>>> {
+    ) -> LightControlResult<Vec<LightControlResult<Arc<dyn LightTransport>>>> {
         let ids = match target {
             HubDispatchTarget::Devices { native_ids } => native_ids.clone(),
             HubDispatchTarget::Group { room_id, .. } => self
@@ -64,14 +64,15 @@ impl LightMonsterController {
                 "Monster target has no lights".into(),
             ));
         }
-        ids.iter()
+        Ok(ids
+            .iter()
             .map(|id| {
                 self.devices
                     .get(id)
                     .cloned()
                     .ok_or(LightControlError::AuthRequired)
             })
-            .collect()
+            .collect())
     }
     async fn apply(
         &self,
@@ -82,11 +83,18 @@ impl LightMonsterController {
         // writes. Each device transport owns its own serialization and timeout.
         let targets = self.targets(target)?;
         let mut tasks = tokio::task::JoinSet::new();
+        let mut failure = None;
         for transport in targets {
+            let transport = match transport {
+                Ok(transport) => transport,
+                Err(e) => {
+                    failure = Some(e);
+                    continue;
+                }
+            };
             let values = values.clone();
             tasks.spawn(async move { transport.write(values).await });
         }
-        let mut failure = None;
         while let Some(result) = tasks.join_next().await {
             match result {
                 Ok(Ok(())) => {}
@@ -156,15 +164,22 @@ impl HubLightController for LightMonsterController {
     async fn any_lights_on_target(&self, target: &HubDispatchTarget) -> LightControlResult<bool> {
         let mut failure = None;
         for device in self.targets(target)? {
+            let device = match device {
+                Ok(device) => device,
+                Err(e) => {
+                    failure = Some(e);
+                    continue;
+                }
+            };
             match device.read(P::Power).await {
                 Ok(value) if value == 1 => return Ok(true),
                 Ok(value) if value == 0 => {}
-                Ok(_) => failure = Some(LightError::Readback),
-                Err(e) => failure = Some(e),
+                Ok(_) => failure = Some(error(LightError::Readback)),
+                Err(e) => failure = Some(error(e)),
             }
         }
         if let Some(e) = failure {
-            Err(error(e))
+            Err(e)
         } else {
             Ok(false)
         }
