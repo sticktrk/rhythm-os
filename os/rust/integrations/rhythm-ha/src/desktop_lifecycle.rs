@@ -476,7 +476,7 @@ mod tests {
 
     use crate::hub_state::HaHubData;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::test_support::ENV_LOCK;
 
     struct NoopRuntime;
 
