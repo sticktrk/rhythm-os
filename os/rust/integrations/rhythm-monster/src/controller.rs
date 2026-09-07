@@ -125,8 +125,16 @@ impl LightController for LightMonsterController {
         rooms_from_registry(&self.registry)
     }
     async fn is_connected(&self) -> bool {
+        // Probe every device at once and answer on the first verified read, so
+        // offline siblings (each bounded by the transport's own timeout) cannot
+        // serialize into a minute-long stall.
+        let mut probes = tokio::task::JoinSet::new();
         for device in self.devices.values() {
-            if device.read(P::Power).await.is_ok() {
+            let device = Arc::clone(device);
+            probes.spawn(async move { device.read(P::Power).await.is_ok() });
+        }
+        while let Some(result) = probes.join_next().await {
+            if result.unwrap_or(false) {
                 return true;
             }
         }

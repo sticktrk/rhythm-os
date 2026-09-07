@@ -104,6 +104,10 @@ impl LightLanCrypto {
             }
             next_iv = ciphertext;
         }
+        // Ayla zero-pads to the next block boundary and always emits at least
+        // one pad byte (a full zero block when the JSON is already a multiple
+        // of 16), mirroring `encrypt`. Bench-verified on Neon Flow 2.6.3; a
+        // ciphertext with no trailing zero cannot be a valid frame.
         if bytes.last() != Some(&0) {
             return Err(LightError::Integrity);
         }

@@ -64,12 +64,15 @@ impl LightLanClient {
         socket
             .set_reuseaddr(true)
             .map_err(|_| LightError::Unavailable)?;
-        socket
-            .bind(SocketAddr::new(
-                local,
-                self.port.load(std::sync::atomic::Ordering::Relaxed),
-            ))
-            .map_err(|_| LightError::Unavailable)?;
+        // Reuse the last callback port so the device keeps one session slot,
+        // but never fail an exchange because a timed-out server task is still
+        // releasing it: fall back to an ephemeral port instead.
+        let remembered = self.port.load(std::sync::atomic::Ordering::Relaxed);
+        if remembered == 0 || socket.bind(SocketAddr::new(local, remembered)).is_err() {
+            socket
+                .bind(SocketAddr::new(local, 0))
+                .map_err(|_| LightError::Unavailable)?;
+        }
         let listener = socket.listen(16).map_err(|_| LightError::Unavailable)?;
         let address = listener.local_addr().map_err(|_| LightError::Unavailable)?;
         self.port
