@@ -1082,6 +1082,11 @@ class DemoServerApi extends RhythmServerApi {
   }
 
   @override
+  Future<RhythmCommissioningWifi?> getCommissioningWifiCredentials() async {
+    return null;
+  }
+
+  @override
   Future<RhythmPairingRecoverySecret?> getMatterSetupCode(
     String nativeDeviceId,
   ) async {

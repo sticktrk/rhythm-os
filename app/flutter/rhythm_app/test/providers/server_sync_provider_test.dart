@@ -4045,6 +4045,7 @@ void main() {
                 'configurable': true,
                 'device_onboarding_methods': [
                   'matter_on_network_setup_code',
+                  RhythmDeviceOnboardingMethod.matterPhoneCommissioningHandoff,
                 ],
                 'supports_unpairing': true,
                 'supports_roomless_devices': true,
@@ -4059,6 +4060,7 @@ void main() {
       expect(provider.canAddMatterDevice, isTrue);
       expect(provider.canAddMatterOnNetworkDevice, isTrue);
       expect(provider.canCommissionMatterBleWifi, isFalse);
+      expect(provider.canCommissionMatterWithPhone, isTrue);
       expect(provider.canUnpairMatterDevices, isTrue);
       expect(provider.canRecoverMatterSetupCode, isTrue);
       expect(provider.removedDeviceArchiveSupported, isTrue);
@@ -4104,6 +4106,7 @@ void main() {
       expect(provider.canAddMatterDevice, isFalse);
       expect(provider.canAddMatterOnNetworkDevice, isFalse);
       expect(provider.canCommissionMatterBleWifi, isFalse);
+      expect(provider.canCommissionMatterWithPhone, isFalse);
     });
 
     test('exposes Hue BLE only for its advertised nearby-scan method',

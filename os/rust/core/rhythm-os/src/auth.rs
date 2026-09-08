@@ -775,6 +775,11 @@ fn forbidden(message: &str) -> Response {
 
 fn support_token_forbidden_reason(method: &Method, uri: &Uri) -> Option<&'static str> {
     let path = uri.path();
+    if (*method == Method::GET || *method == Method::HEAD)
+        && path == "/api/pairing/wifi-credentials"
+    {
+        return Some("Support token cannot read Wi-Fi credentials");
+    }
     if *method == Method::GET && path.starts_with("/api/matter/setup-code/") {
         return Some("Support token cannot read Matter setup codes");
     }
@@ -816,7 +821,9 @@ fn support_token_forbidden_reason(method: &Method, uri: &Uri) -> Option<&'static
 }
 
 fn owner_token_required(method: &Method, uri: &Uri) -> bool {
-    (*method == Method::GET && uri.path().starts_with("/api/matter/setup-code/"))
+    ((*method == Method::GET || *method == Method::HEAD)
+        && uri.path() == "/api/pairing/wifi-credentials")
+        || (*method == Method::GET && uri.path().starts_with("/api/matter/setup-code/"))
         || (*method == Method::GET && uri.path() == "/api/devices/removed")
         || (*method == Method::DELETE && uri.path().starts_with("/api/devices/canonical/"))
 }
@@ -1235,6 +1242,55 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn commissioning_wifi_requires_owner_even_on_lan_and_denies_support() {
+        let state = test_state();
+        {
+            let mut guard = state.lock().unwrap();
+            guard.platform_type = "appliance";
+            guard.platform_context = "rpiz";
+            guard.commissioning_wifi_credentials_provider = Some(Arc::new(|| {
+                Ok(Some(crate::provisioning::WifiCredentials {
+                    ssid: "FixtureNetwork".into(),
+                    password: "fixture-secret".into(),
+                }))
+            }));
+        }
+        let owner = issue_local_owner_token(&state, Some("fixture".into())).unwrap();
+        let support = issue_local_support_token(&state, Some("fixture".into())).unwrap();
+        let app = auth_test_router(state);
+        for method in [Method::GET, Method::HEAD] {
+            for (token, expected) in [
+                (None, StatusCode::UNAUTHORIZED),
+                (Some("invalid".to_string()), StatusCode::UNAUTHORIZED),
+                (Some(support.token.clone()), StatusCode::FORBIDDEN),
+                (Some(owner.token.clone()), StatusCode::OK),
+            ] {
+                let mut request = request_with_peer(
+                    method.clone(),
+                    "/api/pairing/wifi-credentials",
+                    IpAddr::V4(Ipv4Addr::new(192, 168, 1, 42)),
+                    Body::empty(),
+                );
+                if let Some(token) = token {
+                    request
+                        .headers_mut()
+                        .insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+                }
+                let response = app.clone().oneshot(request).await.unwrap();
+                assert_eq!(response.status(), expected);
+                if expected == StatusCode::OK {
+                    assert_eq!(response.headers()["cache-control"], "no-store");
+                }
+                let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                assert_eq!(
+                    String::from_utf8_lossy(&body).contains("fixture-secret"),
+                    expected == StatusCode::OK && method == Method::GET
+                );
+            }
+        }
     }
 
     #[tokio::test]

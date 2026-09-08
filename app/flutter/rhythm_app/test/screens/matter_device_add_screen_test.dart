@@ -1,16 +1,21 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/backend/backend.dart';
 import 'package:rhythm_app/screens/hubs/matter_add_method.dart';
 import 'package:rhythm_app/screens/hubs/matter_device_add_screen.dart';
 import 'package:rhythm_app/services/analytics_service.dart';
+import 'package:rhythm_app/services/phone_matter_commissioner.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 import '../helpers/capturing_analytics_backend.dart';
+import '../helpers/ui_evidence_fonts.dart';
 
 void main() {
   late CapturingAnalyticsBackend analyticsBackend;
@@ -419,15 +424,332 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     }
   });
+
+  testWidgets('phone failure offers an explicit server fallback',
+      (tester) async {
+    final screenshotPath =
+        Platform.environment['RHYTHM_PHONE_MATTER_SCREENSHOT'];
+    if (screenshotPath != null) {
+      await tester.runAsync(loadUiEvidenceFonts);
+      await tester.binding.setSurfaceSize(const Size(420, 920));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+    }
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    var phoneRequestCount = 0;
+    var serverRequestCount = 0;
+    try {
+      final phone = _FakePhoneMatterCommissioner(
+        onCommission: () async {
+          phoneRequestCount += 1;
+          throw const PhoneMatterCommissioningException(
+            stage: 'handoff',
+            message: 'The phone could not reach the Rhythm Box.',
+          );
+        },
+      );
+      final api = _FakeRhythmMatterApi(
+        onResult: () => const RhythmMatterPairingResponse(
+            httpStatus: 200, status: 'failed', error: 'Handoff timed out'),
+        onPair: (_) async {
+          serverRequestCount += 1;
+          return const RhythmMatterPairingResponse(
+            httpStatus: 200,
+            status: 'failed',
+            error: 'server BLE timed out',
+          );
+        },
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          debugShowCheckedModeBanner: false,
+          home: MatterDeviceAddScreen(
+            endpoint: const HubEndpoint(host: '127.0.0.1', port: 0),
+            addMethod: MatterAddMethod.phoneCommissioning,
+            initialSetupPayload: 'MT:Y.K908OC16750648G00',
+            analyticsSource: 'test_phone',
+            journeyId: 'matter-phone-test',
+            pairingApi: api,
+            phoneCommissioner: phone,
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 10));
+
+      expect(phoneRequestCount, 1);
+      expect(serverRequestCount, 0);
+      expect(find.text('Try from Rhythm Box'), findsOneWidget);
+      if (screenshotPath != null) {
+        await tester.pump(const Duration(seconds: 1));
+        await expectLater(
+            find.byType(Overlay), matchesGoldenFile(screenshotPath));
+      }
+      final firstAttempt = analyticsBackend.events.firstWhere(
+        (event) => event.name == 'matter_pairing_attempted',
+      );
+      final firstCompletion = analyticsBackend.events.firstWhere(
+        (event) => event.name == 'matter_pairing_completed',
+      );
+      expect(firstAttempt.properties['add_method'], 'phone_commissioning');
+      expect(firstCompletion.properties['failure_stage'], 'handoff');
+      expect(
+        firstCompletion.properties.values,
+        isNot(contains('MT:Y.K908OC16750648G00')),
+      );
+
+      await tester.ensureVisible(find.text('Try from Rhythm Box'));
+      await tester.tap(find.text('Try from Rhythm Box'));
+      await tester.pump(const Duration(milliseconds: 10));
+
+      expect(phoneRequestCount, 1);
+      expect(serverRequestCount, 1);
+      expect(api.lastRendezvous, 'auto');
+      expect(api.resultQueries, phone.sessionIds);
+      expect(api.sessionIds.single, isNot(phone.sessionIds.single));
+      expect(api.lastSetupPayload, phone.setupPayloads.single);
+      final attempts = analyticsBackend.events
+          .where((event) => event.name == 'matter_pairing_attempted')
+          .toList();
+      expect(attempts, hasLength(2));
+      expect(attempts.last.properties['add_method'], 'automatic');
+      expect(attempts.map((event) => event.properties['journey_id']).toSet(),
+          {'matter-phone-test'});
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets(
+      'native failed receipt retains recovery and skips redundant reconciliation',
+      (tester) async {
+    final screenshot = Platform.environment['RHYTHM_NATIVE_RECEIPT_SCREENSHOT'];
+    if (screenshot != null) {
+      await tester.binding.setSurfaceSize(const Size(420, 920));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+    }
+    final fixture = jsonDecode(File(
+      '../../../tools/app/testdata/phone_matter_contract.json',
+    ).readAsStringSync()) as Map<String, dynamic>;
+    const channel = MethodChannel('phone-matter-test');
+    final calls = <MethodCall>[];
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel,
+        (call) async {
+      calls.add(call);
+      return {'http_status': 200, 'body': fixture['failed_receipt']};
+    });
+    addTearDown(() => tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, null));
+    const commissioner = PhoneMatterCommissioner(channel: channel);
+    final receipt = await commissioner.commission(
+        baseUrl: 'http://127.0.0.1',
+        originalSetupPayload: 'MT:ORIGINAL-OWNER-CODE',
+        sessionId: 'test-receipt');
+    expect(receipt.status, 'failed');
+    expect(receipt.recoveryAction, 'existing_node_recommission_failed');
+    expect(receipt.warnings, ['The original setup code remains available.']);
+    calls.clear();
+    final api = _FakeRhythmMatterApi(onPair: (_) async => receipt);
+    await tester.pumpWidget(MaterialApp(
+        debugShowCheckedModeBanner: false,
+        home: MatterDeviceAddScreen(
+          endpoint: const HubEndpoint(host: '127.0.0.1', port: 0),
+          initialSetupPayload: 'MT:Y.K908OC16750648G00',
+          addMethod: MatterAddMethod.phoneCommissioning,
+          phoneCommissioner: commissioner,
+          pairingApi: api,
+        )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(find.textContaining('Pairing failed.'), findsOneWidget);
+    expect(find.textContaining('Phone commissioning did not complete.'),
+        findsNothing);
+    expect(find.textContaining('Please reset the bulb before trying again.'),
+        findsOneWidget);
+    final event = analyticsBackend.events
+        .singleWhere((event) => event.name == 'matter_pairing_completed');
+    expect(event.properties['failure_stage'], 'commissioning');
+    expect(event.properties['recovery_action'],
+        'existing_node_recommission_failed');
+    if (screenshot != null) {
+      await tester.pump(const Duration(seconds: 1));
+      await expectLater(find.byType(Overlay), matchesGoldenFile(screenshot));
+    }
+    await tester.ensureVisible(find.text('Try from Rhythm Box'));
+    await tester.tap(find.text('Try from Rhythm Box'));
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(api.resultQueries, isEmpty);
+    expect(api.sessionIds, hasLength(1));
+    expect(api.sessionIds.single,
+        isNot((calls.single.arguments as Map)['session_id']));
+  });
+
+  for (final state in ['pending', 'unavailable']) {
+    testWidgets('does not start another attempt while prior receipt is $state',
+        (tester) async {
+      final phone = _FakePhoneMatterCommissioner(
+        onCommission: () async => throw const PhoneMatterCommissioningException(
+            stage: 'handoff', message: 'Response lost'),
+      );
+      final api = _FakeRhythmMatterApi(
+        onResult: () => state == 'pending'
+            ? const RhythmMatterPairingResponse(
+                httpStatus: 200, status: 'pending')
+            : null,
+        onPair: (_) async => throw StateError('Must not recommission'),
+      );
+      await tester.pumpWidget(MaterialApp(
+          home: MatterDeviceAddScreen(
+        endpoint: const HubEndpoint(host: '127.0.0.1', port: 0),
+        addMethod: MatterAddMethod.phoneCommissioning,
+        initialSetupPayload: 'MT:Y.K908OC16750648G00',
+        pairingApi: api,
+        phoneCommissioner: phone,
+      )));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 10));
+      for (var retry = 0; retry < 2; retry++) {
+        await tester.ensureVisible(find.text('Try from Rhythm Box'));
+        await tester.tap(find.text('Try from Rhythm Box'));
+        await tester.pump(const Duration(milliseconds: 10));
+      }
+      expect(api.sessionIds, isEmpty);
+      expect(phone.sessionIds, hasLength(1));
+      expect(api.resultQueries,
+          [phone.sessionIds.single, phone.sessionIds.single]);
+      expect(
+          find.textContaining(
+              state == 'pending' ? 'still finishing' : 'could not be checked'),
+          findsOneWidget);
+    });
+  }
+
+  testWidgets('recovers a completed phone result without recommissioning',
+      (tester) async {
+    MatterDevicePairingResult? result;
+    final phone = _FakePhoneMatterCommissioner(
+      onCommission: () async => throw const PhoneMatterCommissioningException(
+          stage: 'handoff', message: 'Response lost'),
+    );
+    final api = _FakeRhythmMatterApi(
+      onResult: () => const RhythmMatterPairingResponse(
+          httpStatus: 200,
+          status: 'complete',
+          device: {
+            'device_id': 'matter-42',
+            'name': 'Test bulb',
+            'device_type': 'light'
+          },
+          warnings: [
+            'Recovery code was not saved.'
+          ]),
+      onPair: (_) async => throw StateError('Must not recommission'),
+    );
+    await tester.pumpWidget(MaterialApp(
+        home: Builder(
+      builder: (context) => TextButton(
+          onPressed: () async {
+            result = await Navigator.of(context)
+                .push<MatterDevicePairingResult>(MaterialPageRoute(
+                    builder: (_) => MatterDeviceAddScreen(
+                          endpoint:
+                              const HubEndpoint(host: '127.0.0.1', port: 0),
+                          addMethod: MatterAddMethod.phoneCommissioning,
+                          initialSetupPayload: 'MT:Y.K908OC16750648G00',
+                          pairingApi: api,
+                          phoneCommissioner: phone,
+                        )));
+          },
+          child: const Text('PAIR')),
+    )));
+    await tester.tap(find.text('PAIR'));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+    await tester.ensureVisible(find.text('Try from Rhythm Box'));
+    await tester.tap(find.text('Try from Rhythm Box'));
+    await tester.pumpAndSettle();
+    expect(result?.nativeDeviceId, 'matter-42');
+    expect(result?.warnings, ['Recovery code was not saved.']);
+    expect(api.sessionIds, isEmpty);
+    expect(phone.sessionIds, hasLength(1));
+    final completion = analyticsBackend.events
+        .lastWhere((event) => event.name == 'matter_pairing_completed');
+    expect(completion.properties['add_method'], 'phone_commissioning');
+    expect(completion.properties['outcome'], 'succeeded');
+  });
+
+  testWidgets('a missing prior receipt allows a fresh phone retry',
+      (tester) async {
+    final phone = _FakePhoneMatterCommissioner(
+      onCommission: () async => throw const PhoneMatterCommissioningException(
+          stage: 'cancelled', message: 'Cancelled'),
+    );
+    final api = _FakeRhythmMatterApi(
+      onPair: (_) async => throw StateError('Must use phone'),
+    );
+    await tester.pumpWidget(MaterialApp(
+        home: MatterDeviceAddScreen(
+      endpoint: const HubEndpoint(host: '127.0.0.1', port: 0),
+      addMethod: MatterAddMethod.phoneCommissioning,
+      initialSetupPayload: 'MT:Y.K908OC16750648G00',
+      pairingApi: api,
+      phoneCommissioner: phone,
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 10));
+    await tester.tap(find.text('Try Again'));
+    await tester.pump(const Duration(seconds: 1));
+    await tester.ensureVisible(find.text('Add Device'));
+    await tester.tap(find.text('Add Device'));
+    await tester.pump(const Duration(milliseconds: 10));
+    expect(phone.sessionIds, hasLength(2));
+    expect(phone.sessionIds[0], isNot(phone.sessionIds[1]));
+    expect(api.resultQueries, [phone.sessionIds.first]);
+    expect(phone.setupPayloads.toSet(), {'MT:Y.K908OC16750648G00'});
+  });
+}
+
+class _FakePhoneMatterCommissioner extends PhoneMatterCommissioner {
+  _FakePhoneMatterCommissioner({required this.onCommission});
+
+  final Future<RhythmMatterPairingResponse> Function() onCommission;
+  final sessionIds = <String>[];
+  final setupPayloads = <String>[];
+
+  @override
+  Future<RhythmMatterPairingResponse> commission({
+    required String baseUrl,
+    required String originalSetupPayload,
+    required String sessionId,
+    String? authToken,
+  }) {
+    sessionIds.add(sessionId);
+    setupPayloads.add(originalSetupPayload);
+    return onCommission();
+  }
 }
 
 class _FakeRhythmMatterApi extends RhythmMatterApi {
-  _FakeRhythmMatterApi({required this.onPair})
+  _FakeRhythmMatterApi({required this.onPair, this.onResult})
       : super(baseUrl: 'http://127.0.0.1');
 
   final Future<RhythmMatterPairingResponse> Function(Duration receiveTimeout)
       onPair;
+  final RhythmMatterPairingResponse? Function()? onResult;
+  final resultQueries = <String>[];
+  String? lastSetupPayload;
   String? lastRendezvous;
+
+  @override
+  Future<RhythmMatterPairingResponse?> getPairingResult(
+      String sessionId) async {
+    resultQueries.add(sessionId);
+    return onResult != null
+        ? onResult!()
+        : const RhythmMatterPairingResponse(
+            httpStatus: 404, status: 'not_found');
+  }
+
   final sessionIds = <String?>[];
 
   @override
@@ -438,6 +760,7 @@ class _FakeRhythmMatterApi extends RhythmMatterApi {
     Duration receiveTimeout = const Duration(seconds: 45),
     String? sessionId,
   }) {
+    lastSetupPayload = setupPayload;
     lastRendezvous = rendezvous;
     sessionIds.add(sessionId);
     return onPair(receiveTimeout);

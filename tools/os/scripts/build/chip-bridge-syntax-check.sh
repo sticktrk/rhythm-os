@@ -17,6 +17,8 @@
 #     tools/os/scripts/build/chip-bridge-syntax-check.sh [extra clang++ flags]
 #
 # Exit code is clang++'s (0 = clean).
+# Pass --test-phone-discovery to compile/run the focused discovery regression
+# against this same SDK's host library and headers.
 
 set -euo pipefail
 
@@ -62,6 +64,17 @@ if command -v pkg-config >/dev/null 2>&1; then
 fi
 
 echo "Checking $BRIDGE_DIR/chip_bridge.cc against $CHIP_ROOT ($(git -C "$CHIP_ROOT" describe --tags --always 2>/dev/null || echo unknown))"
+if [ "${1:-}" = "--test-phone-discovery" ]; then
+    shift
+    TEST_BINARY="$(mktemp "${TMPDIR:-/tmp}/phone-discovery.XXXXXX")"
+    trap 'rm -f "$TEST_BINARY"' EXIT
+    "$CXX" -std=c++17 -fno-rtti -DCHIP_HAVE_CONFIG_H=1 -DOPENSSL_NO_ASM=1 \
+        "${INCLUDES[@]}" "${PKG_FLAGS[@]}" "$@" \
+        "$BRIDGE_DIR/tests/phone_commissioning_discovery_test.cc" \
+        "$CHIP_OUT_DIR/lib/libCHIP.a" -o "$TEST_BINARY"
+    "$TEST_BINARY"
+    exit 0
+fi
 exec "$CXX" -std=c++17 -fno-rtti -fsyntax-only \
     -DCHIP_HAVE_CONFIG_H=1 -DOPENSSL_NO_ASM=1 -DRHYTHM_CHIP_BRIDGE_NATIVE_LIBCHIP=1 \
     "${INCLUDES[@]}" "${PKG_FLAGS[@]}" "$@" \

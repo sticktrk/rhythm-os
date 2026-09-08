@@ -1,4 +1,5 @@
 #include "chip_bridge.h"
+#include "phone_commissioning_discovery.h"
 
 #include <app-common/zap-generated/cluster-objects.h>
 #include <app/AttributePathParams.h>
@@ -21,6 +22,8 @@
 #include <crypto/CHIPCryptoPAL.h>
 #include <crypto/RawKeySessionKeystore.h>
 #include <data-model-providers/codegen/Instance.h>
+#include <inet/IPAddress.h>
+#include <inet/InetInterface.h>
 #include <lib/core/CHIPCallback.h>
 #include <lib/core/ErrorStr.h>
 #include <lib/support/CodeUtils.h>
@@ -1224,10 +1227,34 @@ public:
             break;
         }
         case RHYTHM_CHIP_BRIDGE_RENDEZVOUS_ON_NETWORK:
-            ReturnErrorOnFailure(ExecuteOnMatterThread([this, &err, &request, &setupPayload, &commissioningParams]() {
-                err = mCommissioner->PairDevice(request.node_id, setupPayload.c_str(), commissioningParams,
-                                                DiscoveryType::kDiscoveryNetworkOnly);
-            }));
+            if (request.has_on_network_target)
+            {
+                VerifyOrReturnError(request.on_network_address != nullptr && request.on_network_address[0] != '\0',
+                                    CHIP_ERROR_INVALID_ARGUMENT);
+                VerifyOrReturnError(request.on_network_port != 0 && request.on_network_setup_pin_code != 0,
+                                    CHIP_ERROR_INVALID_ARGUMENT);
+                Inet::IPAddress address;
+                VerifyOrReturnError(Inet::IPAddress::FromString(request.on_network_address, address),
+                                    CHIP_ERROR_INVALID_ARGUMENT);
+                Inet::InterfaceId interfaceId;
+                ReturnErrorOnFailure(CommissioningInterfaceForAddress(address, request.on_network_port, interfaceId));
+                RendezvousParameters rendezvousParams;
+                rendezvousParams.SetSetupPINCode(request.on_network_setup_pin_code);
+                rendezvousParams.SetPeerAddress(Transport::PeerAddress::UDP(
+                    address, request.on_network_port, interfaceId));
+                ReturnErrorOnFailure(ExecuteOnMatterThread(
+                    [this, &err, &request, &rendezvousParams, &commissioningParams]() {
+                        err = mCommissioner->PairDevice(request.node_id, rendezvousParams, commissioningParams);
+                    }));
+            }
+            else
+            {
+                ReturnErrorOnFailure(ExecuteOnMatterThread(
+                    [this, &err, &request, &setupPayload, &commissioningParams]() {
+                        err = mCommissioner->PairDevice(request.node_id, setupPayload.c_str(), commissioningParams,
+                                                        DiscoveryType::kDiscoveryNetworkOnly);
+                    }));
+            }
             break;
         case RHYTHM_CHIP_BRIDGE_RENDEZVOUS_AUTO:
         default:
@@ -1251,6 +1278,38 @@ public:
             return tombstone;
         }
         return ProbeLight(request.node_id, device);
+    }
+
+    CHIP_ERROR CommissioningInterfaceForAddress(const Inet::IPAddress & address, uint16_t port,
+                                               Inet::InterfaceId & interfaceId)
+    {
+        interfaceId = Inet::InterfaceId::Null();
+        if (!address.IsIPv6LinkLocal())
+        {
+            return CHIP_NO_ERROR; // Routable addresses use the operating system's route.
+        }
+
+        mPhoneDiscovery.Begin(address, port);
+        CHIP_ERROR discoveryError = CHIP_NO_ERROR;
+        CHIP_ERROR err = ExecuteOnMatterThread([this, &discoveryError]() {
+            mCommissioner->RegisterDeviceDiscoveryDelegate(&mPhoneDiscovery);
+            discoveryError = mCommissioner->DiscoverCommissionableNodes(Dnssd::DiscoveryFilter());
+        });
+        if (err == CHIP_NO_ERROR)
+        {
+            err = discoveryError;
+            if (err == CHIP_NO_ERROR)
+            {
+                err = mPhoneDiscovery.WaitForInterface(std::chrono::seconds(15), interfaceId);
+            }
+        }
+        mPhoneDiscovery.End();
+        const CHIP_ERROR cleanup = ExecuteOnMatterThread([this]() {
+            (void) mCommissioner->StopCommissionableDiscovery();
+            mCommissioner->RegisterDeviceDiscoveryDelegate(nullptr);
+        });
+        // Never guess an interface or start PASE without a locally observed peer.
+        return err != CHIP_NO_ERROR ? err : cleanup;
     }
 
     CHIP_ERROR StartBlePairing(NodeId nodeId, const SetupPayload & parsedPayload,
@@ -2826,6 +2885,7 @@ private:
     RhythmOperationalCredentialsIssuer mOperationalCredentialsIssuer;
     chip::Crypto::RawKeySessionKeystore mSessionKeystore;
     chip::Crypto::P256Keypair mOperationalKeypair;
+    PhoneCommissioningDiscovery mPhoneDiscovery;
     BlockingPairingDelegate mPairingDelegate;
     std::unique_ptr<DeviceCommissioner> mCommissioner;
     // Matter-thread-owned subscription table plus the reservations and unpair

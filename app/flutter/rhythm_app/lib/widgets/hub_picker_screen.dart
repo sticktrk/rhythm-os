@@ -6,7 +6,6 @@ import 'package:rhythm_core/rhythm_core.dart';
 import '../providers/server_sync_provider.dart';
 import '../screens/hubs/ha_configurator_screen.dart';
 import '../screens/hubs/hue_configurator_screen.dart';
-import '../screens/hubs/matter_add_method.dart';
 import '../screens/hubs/matter_pairing_flow.dart';
 import 'beta_badge.dart';
 import 'solar_orbit.dart';
@@ -83,10 +82,7 @@ class _HubPickerScreenState extends State<HubPickerScreen>
 
   Future<void> _configureMatter() async {
     HapticFeedback.mediumImpact();
-    await startMatterPairingFlow(
-      context,
-      preferredMethod: MatterAddMethod.automatic,
-    );
+    await startMatterPairingFlow(context);
   }
 
   String _matterSubtitle(ServerSyncProvider serverSync) {

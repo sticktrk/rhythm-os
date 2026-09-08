@@ -26,6 +26,8 @@ abstract final class RhythmDeviceOnboardingMethod {
   static const String matterOnNetworkSetupCode = 'matter_on_network_setup_code';
   static const String matterBleWifiCommissioning =
       'matter_ble_wifi_commissioning';
+  static const String matterPhoneCommissioningHandoff =
+      'matter_phone_commissioning_handoff';
   static const String hueBleNearbyScan = 'hue_ble_nearby_scan';
   static const String localBleQr = 'local_ble_qr';
   static const String bleWifiNearbyScan = 'ble_wifi_nearby_scan';
@@ -203,6 +205,9 @@ class RhythmDeviceProfile {
   /// Rhythm cloud function the app brokers commissioning through, if any.
   final String? cloudBroker;
 
+  /// Versioned phone provisioning protocol; null preserves Box commissioning.
+  final String? phoneProvisioningProtocol;
+
   const RhythmDeviceProfile({
     required this.id,
     this.compatibleProfileIds = const [],
@@ -212,11 +217,13 @@ class RhythmDeviceProfile {
     this.onboardingMethods = const [],
     this.nearbyServiceUuids = const [],
     this.cloudBroker,
+    this.phoneProvisioningProtocol,
   });
 
   /// Whether the **No QR?** sheet can find this profile by scanning nearby.
   bool get supportsNearbyScan =>
-      supportsOnboardingMethod(RhythmDeviceOnboardingMethod.bleWifiNearbyScan) &&
+      supportsOnboardingMethod(
+          RhythmDeviceOnboardingMethod.bleWifiNearbyScan) &&
       nearbyServiceUuids.isNotEmpty;
 
   bool supportsOnboardingMethod(String method) {
@@ -261,6 +268,9 @@ class RhythmDeviceProfile {
           .toSet()
           .toList(growable: false),
       cloudBroker: _parseCloudBroker(json['cloud_broker']),
+      phoneProvisioningProtocol: json['phone_provisioning_protocol'] is String
+          ? json['phone_provisioning_protocol'] as String
+          : null,
     );
   }
 }

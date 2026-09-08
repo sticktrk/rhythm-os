@@ -1,5 +1,6 @@
 //! Shared Matter commissioning orchestration.
 
+use std::net::IpAddr;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -18,7 +19,8 @@ use crate::hub_state::MatterHubData;
 use crate::setup_recovery::SetupPayloadTarget;
 use crate::transport::{
     CommissionedDevice, MatterCommissionRequest, MatterCommissioningNetwork,
-    MatterCommissioningRendezvous, MatterCommissioningWifiCredentials, MatterTransport,
+    MatterCommissioningRendezvous, MatterCommissioningWifiCredentials,
+    MatterOnNetworkCommissioningTarget, MatterTransport,
 };
 
 const RECOVERY_ACTION_CONNECTION_RECOVERED: &str = "existing_connection_recovered";
@@ -54,6 +56,18 @@ pub struct MatterPairingParams {
     pub network: MatterCommissioningNetwork,
     /// How the commissioner reaches the device.
     pub rendezvous: MatterCommissioningRendezvous,
+    /// Short-lived platform handoff used only by phone-assisted commissioning.
+    pub phone_handoff: Option<PhoneCommissioningHandoff>,
+}
+
+/// Transient result supplied by the phone's platform Matter commissioner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PhoneCommissioningHandoff {
+    /// iOS supplies a temporary onboarding payload for the now-networked
+    /// accessory.
+    SetupPayload(String),
+    /// Android supplies the PASE endpoint directly.
+    OnNetworkTarget(MatterOnNetworkCommissioningTarget),
 }
 
 impl MatterPairingParams {
@@ -84,15 +98,79 @@ impl MatterPairingParams {
             ),
         };
 
-        let rendezvous = match params.get("rendezvous").and_then(|value| value.as_str()) {
+        let rendezvous_value = params.get("rendezvous").and_then(|value| value.as_str());
+        let rendezvous = match rendezvous_value {
             None => default_rendezvous_for_payload(setup_payload),
             Some("auto") => MatterCommissioningRendezvous::Auto,
             Some("ble") => MatterCommissioningRendezvous::Ble,
-            Some("on_network") => MatterCommissioningRendezvous::OnNetwork,
+            Some("on_network" | "phone") => MatterCommissioningRendezvous::OnNetwork,
             Some(other) => anyhow::bail!(
-                "Unsupported Matter rendezvous '{}'; expected 'auto', 'ble', or 'on_network'",
+                "Unsupported Matter rendezvous '{}'; expected 'auto', 'ble', 'on_network', or 'phone'",
                 other
             ),
+        };
+
+        let handoff_setup_payload = optional_non_empty_string(params, "handoff_setup_payload");
+        let handoff_address = optional_non_empty_string(params, "handoff_address");
+        let handoff_port = params
+            .get("handoff_port")
+            .and_then(Value::as_u64)
+            .and_then(|value| u16::try_from(value).ok())
+            .filter(|value| *value != 0);
+        let handoff_passcode = params
+            .get("handoff_passcode")
+            .and_then(Value::as_u64)
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| (1..=134_217_727).contains(value));
+        let has_any_direct_handoff = params.get("handoff_address").is_some()
+            || params.get("handoff_port").is_some()
+            || params.get("handoff_passcode").is_some();
+        let phone_handoff = if rendezvous_value == Some("phone") {
+            match (
+                handoff_setup_payload,
+                handoff_address,
+                handoff_port,
+                handoff_passcode,
+            ) {
+                (Some(payload), None, None, None) if payload.len() <= 512 => {
+                    Some(PhoneCommissioningHandoff::SetupPayload(payload))
+                }
+                (None, Some(address), Some(port), Some(setup_pin_code)) => {
+                    // Android's formatted IPv6 location may include the
+                    // phone-local scope index. The appliance must choose its
+                    // own interface for a link-local peer, so never forward
+                    // that unrelated index.
+                    let address = address
+                        .split_once('%')
+                        .map_or(address.as_str(), |(address, _)| address)
+                        .to_string();
+                    let parsed_address = address.parse::<IpAddr>().with_context(|| {
+                        "Invalid 'handoff_address'; expected an IPv4 or IPv6 literal"
+                    })?;
+                    if parsed_address.is_unspecified()
+                        || parsed_address.is_multicast()
+                        || parsed_address.is_loopback()
+                        || matches!(parsed_address, IpAddr::V4(address) if address.is_broadcast())
+                    {
+                        anyhow::bail!("Invalid 'handoff_address'; address is not commissionable");
+                    }
+                    Some(PhoneCommissioningHandoff::OnNetworkTarget(
+                        MatterOnNetworkCommissioningTarget {
+                            address,
+                            port,
+                            setup_pin_code,
+                        },
+                    ))
+                }
+                _ => anyhow::bail!(
+                    "Phone Matter commissioning requires exactly one complete handoff payload or address/port/passcode target"
+                ),
+            }
+        } else {
+            if handoff_setup_payload.is_some() || has_any_direct_handoff {
+                anyhow::bail!("Matter handoff fields are only accepted with rendezvous 'phone'");
+            }
+            None
         };
 
         Ok(Self {
@@ -100,6 +178,7 @@ impl MatterPairingParams {
             session_id,
             network,
             rendezvous,
+            phone_handoff,
         })
     }
 
@@ -109,14 +188,38 @@ impl MatterPairingParams {
         node_id: u64,
         wifi_credentials: MatterCommissioningWifiCredentials,
     ) -> MatterCommissionRequest {
+        let (commissioning_setup_payload, on_network_target) = match &self.phone_handoff {
+            Some(PhoneCommissioningHandoff::SetupPayload(payload)) => (payload.clone(), None),
+            Some(PhoneCommissioningHandoff::OnNetworkTarget(target)) => {
+                (self.setup_payload.clone(), Some(target.clone()))
+            }
+            None => (self.setup_payload.clone(), None),
+        };
         MatterCommissionRequest {
-            setup_payload: self.setup_payload.clone(),
+            setup_payload: commissioning_setup_payload,
             node_id,
             network: self.network,
             rendezvous: self.rendezvous,
             wifi_credentials,
+            on_network_target,
         }
     }
+
+    fn needs_wifi_credentials(&self) -> bool {
+        matches!(
+            self.rendezvous,
+            MatterCommissioningRendezvous::Auto | MatterCommissioningRendezvous::Ble
+        )
+    }
+}
+
+fn optional_non_empty_string(params: &Value, key: &str) -> Option<String> {
+    params
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn default_rendezvous_for_payload(setup_payload: &str) -> MatterCommissioningRendezvous {
@@ -269,7 +372,7 @@ pub fn pair_device_with_context(
             }
         }
 
-        let wifi_credentials = match load_commissioning_wifi_credentials(state) {
+        let wifi_credentials = match commissioning_wifi_credentials(state, request) {
             Ok(credentials) => credentials,
             Err(error) => {
                 return Ok(failed_recovery_session(
@@ -321,7 +424,7 @@ pub fn pair_device_with_context(
     }
 
     ensure_pairing_request_active(request_context)?;
-    let wifi_credentials = load_commissioning_wifi_credentials(state)?;
+    let wifi_credentials = commissioning_wifi_credentials(state, request)?;
     let node_id = hub_data.reserve_node_id();
     let commission_request = request.to_commission_request(node_id, wifi_credentials);
     rhythm_os::pairing::emit_pairing_progress(
@@ -508,14 +611,10 @@ fn is_linux_ble_stack_error(lower_detail: &str) -> bool {
 fn load_commissioning_wifi_credentials(
     state: &SharedState,
 ) -> Result<MatterCommissioningWifiCredentials> {
-    let wifi = match load_stored_commissioning_wifi_credentials(state)? {
-        Some(wifi) => wifi,
-        None => load_platform_commissioning_wifi_credentials(state)?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "Matter Wi-Fi commissioning requires stored appliance Wi-Fi credentials; provision the appliance over Wi-Fi before pairing Matter lights"
-            )
-        })?,
-    };
+    let wifi = rhythm_os::provisioning::load_accessory_wifi_credentials(state)?
+        .ok_or_else(|| anyhow::anyhow!(
+            "Matter Wi-Fi commissioning requires stored appliance Wi-Fi credentials; provision the appliance over Wi-Fi before pairing Matter lights"
+        ))?;
 
     Ok(MatterCommissioningWifiCredentials {
         ssid: wifi.ssid,
@@ -523,66 +622,17 @@ fn load_commissioning_wifi_credentials(
     })
 }
 
-fn load_stored_commissioning_wifi_credentials(
+fn commissioning_wifi_credentials(
     state: &SharedState,
-) -> Result<Option<rhythm_os::provisioning::WifiCredentials>> {
-    let state = state
-        .lock()
-        .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
-    let Some(storage) = state.storage.as_ref() else {
-        return Ok(None);
-    };
-
-    storage
-        .load_commissioning_wifi_credentials()
-        .context("loading stored appliance Wi-Fi credentials")
-}
-
-fn load_platform_commissioning_wifi_credentials(
-    state: &SharedState,
-) -> Result<Option<rhythm_os::provisioning::WifiCredentials>> {
-    let provider = state
-        .lock()
-        .map_err(|_| anyhow::anyhow!("state lock poisoned"))?
-        .commissioning_wifi_credentials_provider
-        .clone();
-    let Some(provider) = provider else {
-        return Ok(None);
-    };
-
-    let creds = provider().context("loading platform appliance Wi-Fi credentials")?;
-    if let Some(creds) = creds.as_ref() {
-        persist_commissioning_wifi_credentials(state, creds);
-        info!(
-            target: "pair",
-            "Recovered Matter commissioning Wi-Fi credentials from platform network config for SSID '{}'",
-            creds.ssid
-        );
-    }
-    Ok(creds)
-}
-
-fn persist_commissioning_wifi_credentials(
-    state: &SharedState,
-    creds: &rhythm_os::provisioning::WifiCredentials,
-) {
-    let result = state
-        .lock()
-        .map_err(|_| anyhow::anyhow!("state lock poisoned"))
-        .and_then(|state| {
-            let storage = state
-                .storage
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("storage not configured"))?;
-            storage.save_commissioning_wifi_credentials(creds)
-        });
-
-    if let Err(error) = result {
-        warn!(
-            target: "pair",
-            "Failed to persist recovered Matter commissioning Wi-Fi credentials: {:#}",
-            error
-        );
+    request: &MatterPairingParams,
+) -> Result<MatterCommissioningWifiCredentials> {
+    if request.needs_wifi_credentials() {
+        load_commissioning_wifi_credentials(state)
+    } else {
+        Ok(MatterCommissioningWifiCredentials {
+            ssid: String::new(),
+            password: String::new(),
+        })
     }
 }
 
@@ -1311,7 +1361,7 @@ mod tests {
                 "setup_payload": "MT:payload",
                 "rendezvous": "nfc",
             }))),
-            "Unsupported Matter rendezvous 'nfc'; expected 'auto', 'ble', or 'on_network'"
+            "Unsupported Matter rendezvous 'nfc'; expected 'auto', 'ble', 'on_network', or 'phone'"
         );
     }
 
@@ -1334,6 +1384,120 @@ mod tests {
 
         let parsed = MatterPairingParams::from_value(&params).unwrap();
         assert_eq!(parsed.session_id.as_deref(), Some("pair-1"));
+    }
+
+    #[test]
+    fn native_phone_handoff_fixtures_match_the_server_parser() {
+        let fixtures: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../tools/app/testdata/phone_matter_contract.json"
+        ))
+        .unwrap();
+        for platform in ["ios_request", "android_request"] {
+            let request = &fixtures[platform];
+            let parsed = MatterPairingParams::from_value(&request["params"]).unwrap();
+            assert_eq!(parsed.setup_payload, "MT:ORIGINAL-OWNER-CODE");
+            assert_eq!(parsed.rendezvous, MatterCommissioningRendezvous::OnNetwork);
+            match parsed.phone_handoff.unwrap() {
+                PhoneCommissioningHandoff::SetupPayload(payload) => {
+                    assert_eq!(payload, "MT:TEMPORARY-HANDOFF")
+                }
+                PhoneCommissioningHandoff::OnNetworkTarget(target) => {
+                    assert_eq!(target.address, "fe80::1234");
+                    assert_eq!(target.port, 5540);
+                    assert_eq!(target.setup_pin_code, 20202021);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn phone_pairing_accepts_one_transient_handoff_shape() {
+        let ios = MatterPairingParams::from_value(&serde_json::json!({
+            "setup_payload": "MT:ORIGINAL",
+            "rendezvous": "phone",
+            "handoff_setup_payload": " 34970112332 ",
+        }))
+        .unwrap();
+        let ios_request = ios.to_commission_request(
+            44,
+            MatterCommissioningWifiCredentials {
+                ssid: String::new(),
+                password: String::new(),
+            },
+        );
+        assert_eq!(ios.setup_payload, "MT:ORIGINAL");
+        assert_eq!(ios_request.setup_payload, "34970112332");
+        assert_eq!(
+            ios_request.rendezvous,
+            MatterCommissioningRendezvous::OnNetwork
+        );
+        assert_eq!(ios_request.on_network_target, None);
+
+        let android = MatterPairingParams::from_value(&serde_json::json!({
+            "setup_payload": "MT:ORIGINAL",
+            "rendezvous": "phone",
+            "handoff_address": "192.0.2.42",
+            "handoff_port": 5540,
+            "handoff_passcode": 20202021,
+        }))
+        .unwrap();
+        let android_request = android.to_commission_request(
+            45,
+            MatterCommissioningWifiCredentials {
+                ssid: String::new(),
+                password: String::new(),
+            },
+        );
+        assert_eq!(android_request.setup_payload, "MT:ORIGINAL");
+        assert_eq!(
+            android_request.on_network_target,
+            Some(MatterOnNetworkCommissioningTarget {
+                address: "192.0.2.42".to_string(),
+                port: 5540,
+                setup_pin_code: 20202021,
+            })
+        );
+    }
+
+    #[test]
+    fn phone_pairing_rejects_missing_mixed_or_out_of_scope_handoff_fields() {
+        let error = |value| string_error(MatterPairingParams::from_value(&value));
+        assert!(error(serde_json::json!({
+            "setup_payload": "MT:ORIGINAL",
+            "rendezvous": "phone",
+        }))
+        .contains("exactly one complete handoff"));
+        assert!(error(serde_json::json!({
+            "setup_payload": "MT:ORIGINAL",
+            "rendezvous": "phone",
+            "handoff_setup_payload": "12345678901",
+            "handoff_address": "192.0.2.42",
+            "handoff_port": 5540,
+            "handoff_passcode": 20202021,
+        }))
+        .contains("exactly one complete handoff"));
+        assert!(error(serde_json::json!({
+            "setup_payload": "MT:ORIGINAL",
+            "rendezvous": "auto",
+            "handoff_setup_payload": "12345678901",
+        }))
+        .contains("only accepted with rendezvous 'phone'"));
+        assert!(error(serde_json::json!({
+            "setup_payload": "MT:ORIGINAL",
+            "rendezvous": "phone",
+            "handoff_address": "not-an-ip",
+            "handoff_port": 5540,
+            "handoff_passcode": 20202021,
+        }))
+        .contains("Invalid 'handoff_address'"));
+        assert!(error(serde_json::json!({
+            "setup_payload": "MT:ORIGINAL",
+            "rendezvous": "phone",
+            "handoff_address": "127.0.0.1",
+            "handoff_port": 5540,
+            "handoff_passcode": 20202021,
+        }))
+        .contains("not commissionable"));
     }
 
     #[test]

@@ -1,8 +1,10 @@
+import 'pairing_receipt_reader.dart';
 import 'package:dio/dio.dart';
 import 'package:logging/logging.dart';
 
 import '../api_auth.dart';
 import '../json_parsing.dart';
+import '../models/rhythm_pairing.dart';
 import '../rhythm_log_interceptor.dart';
 
 class RhythmMatterWifiStatus {
@@ -208,6 +210,34 @@ class RhythmMatterApi {
       _dio.options.headers.addAll(headers);
     }
     _dio.interceptors.add(RhythmLogInterceptor(_log));
+  }
+
+  /// Read the durable receipt before retrying a phone handoff whose native
+  /// completion may have been lost. A missing receipt is distinct from a
+  /// transport failure; the server fences a not-found attempt against late POSTs.
+  Future<RhythmMatterPairingResponse?> getPairingResult(
+    String sessionId,
+  ) async {
+    final envelope =
+        await readPairingReceipt(_dio, sessionId, expectedHubType: 'matter');
+    if (envelope == null) return null;
+    switch (envelope.status.state) {
+      case RhythmPairingResultState.notFound:
+        return const RhythmMatterPairingResponse(
+          httpStatus: 404,
+          status: 'not_found',
+        );
+      case RhythmPairingResultState.pending:
+        return const RhythmMatterPairingResponse(
+          httpStatus: 200,
+          status: 'pending',
+        );
+      case RhythmPairingResultState.terminal:
+        return RhythmMatterPairingResponse.fromHttp(
+          statusCode: 200,
+          data: envelope.terminalData,
+        );
+    }
   }
 
   Future<RhythmMatterWifiStatus?> getWifiStatus() async {

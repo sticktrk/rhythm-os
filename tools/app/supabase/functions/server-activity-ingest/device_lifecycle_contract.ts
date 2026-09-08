@@ -56,6 +56,11 @@ export function rowForDeviceLifecycle({
     : null
   const failureStage = boundedToken(event.failure_stage, 64)
   const correlationId = boundedToken(event.correlation_id, 96)
+  const rawCommissioner = boundedToken(event.commissioner, 16)
+  const commissioner = rawCommissioner &&
+      ['phone', 'server'].includes(rawCommissioner)
+    ? rawCommissioner
+    : null
 
   return {
     user_id: userId,
@@ -70,6 +75,7 @@ export function rowForDeviceLifecycle({
     ...(deviceType ? { device_type: deviceType } : {}),
     outcome,
     ...(failureStage ? { failure_stage: failureStage } : {}),
+    ...(commissioner ? { commissioner } : {}),
     force: event.force === true,
     ...(correlationId ? { correlation_id: correlationId } : {}),
     sync_source: 'device_server_direct',

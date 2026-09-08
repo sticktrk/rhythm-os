@@ -392,32 +392,8 @@ fn discover(
 }
 
 fn load_wifi(state: &SharedState) -> Result<LightWifiConfig> {
-    let stored = {
-        let guard = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        match guard.storage.as_ref() {
-            Some(storage) => storage
-                .load_commissioning_wifi_credentials()
-                .context("loading stored appliance Wi-Fi credentials")?,
-            None => None,
-        }
-    };
-    let wifi = match stored {
-        Some(wifi) => wifi,
-        None => {
-            let provider = state
-                .lock()
-                .map_err(|_| anyhow::anyhow!("lock"))?
-                .commissioning_wifi_credentials_provider
-                .clone();
-            provider
-                .and_then(|provider| provider().ok().flatten())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Monster Wi-Fi commissioning requires stored appliance Wi-Fi credentials; provision the appliance over Wi-Fi first"
-                    )
-                })?
-        }
-    };
+    let wifi = rhythm_os::provisioning::load_accessory_wifi_credentials(state)?
+        .ok_or_else(|| anyhow::anyhow!("No saved appliance Wi-Fi credentials are available"))?;
     let security = if wifi.password.is_empty() {
         LightWifiSecurity::Open
     } else {
@@ -706,6 +682,7 @@ impl ExternalLightHubIntegration for MonsterIntegration {
                 onboarding_methods: vec![DEVICE_ONBOARDING_METHOD_BLE_WIFI_NEARBY_SCAN.to_string()],
                 nearby_service_uuids: vec![ble::ID_SERVICE.to_string()],
                 cloud_broker: Some(CLOUD_BROKER_FUNCTION.to_string()),
+                phone_provisioning_protocol: Some("ayla_v1".to_string()),
             }],
             supports_unpairing: true,
             unpairable_device_types: vec!["light".to_string()],
@@ -843,6 +820,10 @@ mod tests {
         let profile = &capabilities.device_profiles[0];
         assert_eq!(profile.id, NEON_FLOW_PROFILE_ID);
         assert_eq!(profile.nearby_service_uuids, vec![ble::ID_SERVICE]);
+        assert_eq!(
+            profile.phone_provisioning_protocol.as_deref(),
+            Some("ayla_v1")
+        );
         assert_eq!(profile.cloud_broker.as_deref(), Some(CLOUD_BROKER_FUNCTION));
         assert!(rhythm_os::hub::is_valid_device_profile_id(
             NEON_FLOW_PROFILE_ID

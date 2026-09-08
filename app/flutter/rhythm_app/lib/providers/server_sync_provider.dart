@@ -1289,6 +1289,14 @@ class ServerSyncProvider extends ChangeNotifier {
       ) ??
       false;
 
+  /// Let a supported phone perform BLE/network setup before handing the
+  /// accessory to the appliance's durable Matter fabric.
+  bool get canCommissionMatterWithPhone =>
+      matterCapabilities?.supportsDeviceOnboardingMethod(
+        RhythmDeviceOnboardingMethod.matterPhoneCommissioningHandoff,
+      ) ??
+      false;
+
   /// Whether the UI should allow Matter decommissioning.
   bool get canUnpairMatterDevices =>
       matterCapabilities?.supportsUnpairing ?? !hasExplicitHubCapabilities;

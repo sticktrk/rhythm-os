@@ -390,6 +390,7 @@ void main() {
               'configurable': true,
               'device_onboarding_methods': [
                 'matter_on_network_setup_code',
+                RhythmDeviceOnboardingMethod.matterPhoneCommissioningHandoff,
               ],
               'supports_unpairing': true,
               'supports_roomless_devices': true,
@@ -481,6 +482,12 @@ void main() {
       );
       expect(hello.capabilities!.supportsFeature('missing'), isFalse);
       expect(hello.capabilities!.hub('matter')?.supportsUnpairing, isTrue);
+      expect(
+        hello.capabilities!.hub('matter')?.supportsDeviceOnboardingMethod(
+              RhythmDeviceOnboardingMethod.matterPhoneCommissioningHandoff,
+            ),
+        isTrue,
+      );
       expect(
         hello.capabilities!.hub('local_ble')?.supportsDeviceOnboardingMethod(
               RhythmDeviceOnboardingMethod.localBleQr,

@@ -1,0 +1,35 @@
+{
+  "ios_request": {
+    "hub_type": "matter",
+    "session_id": "phone-attempt-1",
+    "params": {
+      "setup_payload": "MT:ORIGINAL-OWNER-CODE",
+      "network": "wifi",
+      "rendezvous": "phone",
+      "session_id": "phone-attempt-1",
+      "handoff_setup_payload": "MT:TEMPORARY-HANDOFF"
+    }
+  },
+  "android_request": {
+    "hub_type": "matter",
+    "session_id": "phone-attempt-1",
+    "params": {
+      "setup_payload": "MT:ORIGINAL-OWNER-CODE",
+      "network": "wifi",
+      "rendezvous": "phone",
+      "session_id": "phone-attempt-1",
+      "handoff_address": "fe80::1234%phone-wifi",
+      "handoff_port": 5540,
+      "handoff_passcode": 20202021
+    }
+  },
+  "failed_receipt": {
+    "hub_type": "matter",
+    "status": "failed",
+    "device": null,
+    "error": "Please reset the bulb before trying again.",
+    "details": {"recovery_action": "existing_node_recommission_failed"},
+    "warnings": ["The original setup code remains available."],
+    "future_field": {"retained": true}
+  }
+}

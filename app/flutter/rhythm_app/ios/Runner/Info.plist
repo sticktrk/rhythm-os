@@ -60,6 +60,9 @@
 		<string>_http._tcp</string>
 		<string>_hue._tcp</string>
 		<string>_home-assistant._tcp</string>
+		<string>_matter._tcp</string>
+		<string>_matterc._udp</string>
+		<string>_matterd._udp</string>
 	</array>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>Rhythm uses Bluetooth to provision nearby Rhythm devices onto Wi-Fi.</string>

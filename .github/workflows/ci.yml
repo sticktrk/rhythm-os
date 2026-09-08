@@ -6,7 +6,14 @@ on:
 permissions:
   contents: read
 jobs:
+  changes:
+    name: Detect changed surfaces
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: ./tools/ci/detect-changed-surfaces.sh --all --github-output
   source:
+    name: Repository invariants
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -15,7 +22,7 @@ jobs:
       - name: Rust workspace manifests
         run: cargo metadata --no-deps --format-version 1 > /dev/null
       - name: Edge Function fixtures without credentials or external effects
-        run: npx --yes deno@2.9.6 test --deny-net --deny-env --deny-read --deny-write --deny-run --deny-ffi tools/app/supabase/functions/monster-device/broker_test.ts tools/app/supabase/functions/_shared/deployment_config_test.ts tools/app/supabase/functions/report-bug/github_support_issue_test.ts tools/app/supabase/functions/set-subscription-tier/response_test.ts
+        run: npx --yes deno@2.9.6 test --deny-net --deny-env --deny-read --deny-write --deny-run --deny-ffi tools/app/supabase/functions/monster-device/broker_test.ts tools/app/supabase/functions/_shared/deployment_config_test.ts tools/app/supabase/functions/report-bug/github_support_issue_test.ts tools/app/supabase/functions/set-subscription-tier/response_test.ts tools/app/supabase/functions/server-activity-ingest/device_lifecycle_contract_test.ts
       - name: Private credential provisioning fixture
         run: python3 tools/tests/test_monster_cloud_secrets.py
   flutter:

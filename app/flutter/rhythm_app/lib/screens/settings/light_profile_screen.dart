@@ -2176,6 +2176,11 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
     const color = _Palette.amber;
     final minPct = _minBrightness.round();
     final maxPct = _maxBrightness.round();
+    final currentBrightness = widget.roomId == null
+        ? null
+        : context.select<ServerSyncProvider, int?>(
+            (sync) => sync.nodeById(widget.roomId!)?.brightness,
+          );
 
     return AnimatedContainer(
       duration: const Duration(milliseconds: 300),
@@ -2280,6 +2285,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
             child: LightProfileBrightnessRangeBar(
               minValue: _minBrightness,
               maxValue: _maxBrightness,
+              currentValue: currentBrightness?.toDouble(),
               tint: color,
               onMinChanged: (v) => _onCurveChanged(() => _minBrightness = v),
               onMaxChanged: (v) => _onCurveChanged(() => _maxBrightness = v),
@@ -2300,6 +2306,9 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
     final fixedValue = _roomDayFixedBrightness.clamp(1, 100).toDouble();
     final minValue = _minBrightness.clamp(1, 100).toDouble();
     final maxValue = _maxBrightness.clamp(1, 100).toDouble();
+    final currentBrightness = context.select<ServerSyncProvider, int?>(
+      (sync) => sync.nodeById(widget.roomId!)?.brightness,
+    );
     final isFixed = _roomDayBrightnessMode == RoomDayBrightnessMode.fixed;
     final modeLabel = isFixed
         ? '${fixedValue.round()} percent fixed'
@@ -2311,6 +2320,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
           child: LightProfileBrightnessRangeBar(
             minValue: minValue,
             maxValue: maxValue,
+            currentValue: currentBrightness?.toDouble(),
             tint: color,
             onMinChanged: (value) =>
                 _onCurveChanged(() => _minBrightness = value),
@@ -2448,6 +2458,9 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
     final minValue = _minColorTemp.clamp(hardMin, hardMax).toDouble();
     final maxValue = _maxColorTemp.clamp(hardMin, hardMax).toDouble();
     final whiteValue = _roomDayWhiteKelvin.clamp(hardMin, hardMax).toDouble();
+    final currentKelvin = context.select<ServerSyncProvider, int?>(
+      (sync) => sync.nodeById(widget.roomId!)?.kelvin,
+    );
     final span = hardMax - hardMin;
     final divisions = (span / 100).round().clamp(1, 190);
     final warmColor = AppColorTemperature.curveColor(minValue.round());
@@ -2474,6 +2487,7 @@ class _LightProfileScreenState extends State<LightProfileScreen> {
           child: LightProfileColorTemperatureRangeBar(
             minValue: minValue,
             maxValue: maxValue,
+            currentValue: currentKelvin?.toDouble(),
             hardMin: hardMin,
             hardMax: hardMax,
             tint: warmColor,
@@ -3856,6 +3870,7 @@ class LightProfileBrightnessRangeBar extends StatelessWidget {
     super.key,
     required this.minValue,
     required this.maxValue,
+    this.currentValue,
     required this.tint,
     required this.onMinChanged,
     required this.onMaxChanged,
@@ -3863,23 +3878,31 @@ class LightProfileBrightnessRangeBar extends StatelessWidget {
 
   final double minValue;
   final double maxValue;
+  final double? currentValue;
   final Color tint;
   final ValueChanged<double> onMinChanged;
   final ValueChanged<double> onMaxChanged;
 
   @override
   Widget build(BuildContext context) {
-    return _DualRangeBar(
-      minValue: minValue,
-      maxValue: maxValue,
-      hardMin: 1,
-      hardMax: 100,
-      minThumbMax: 50,
-      maxThumbMin: 2,
-      tint: tint,
-      divisions: 99,
-      onMinChanged: onMinChanged,
-      onMaxChanged: onMaxChanged,
+    return _RangeBarWithCurrentValue(
+      currentValue: currentValue,
+      currentLabel:
+          currentValue == null ? null : 'Current ${currentValue!.round()}%',
+      semanticsLabel: 'Current brightness',
+      child: _DualRangeBar(
+        minValue: minValue,
+        maxValue: maxValue,
+        hardMin: 1,
+        hardMax: 100,
+        minThumbMax: 100,
+        maxThumbMin: 2,
+        currentValue: currentValue,
+        tint: tint,
+        divisions: 99,
+        onMinChanged: onMinChanged,
+        onMaxChanged: onMaxChanged,
+      ),
     );
   }
 }
@@ -3894,6 +3917,7 @@ class LightProfileColorTemperatureRangeBar extends StatelessWidget {
     super.key,
     required this.minValue,
     required this.maxValue,
+    this.currentValue,
     required this.hardMin,
     required this.hardMax,
     required this.tint,
@@ -3907,6 +3931,7 @@ class LightProfileColorTemperatureRangeBar extends StatelessWidget {
 
   final double minValue;
   final double maxValue;
+  final double? currentValue;
   final double hardMin;
   final double hardMax;
   final Color tint;
@@ -3919,21 +3944,81 @@ class LightProfileColorTemperatureRangeBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return _DualRangeBar(
-      minValue: minValue,
-      maxValue: maxValue,
-      hardMin: hardMin,
-      hardMax: hardMax,
-      minThumbMax: hardMax,
-      maxThumbMin: hardMin,
-      minSeparation: 0,
-      tint: tint,
-      minThumbColor: minThumbColor,
-      maxThumbColor: maxThumbColor,
-      gradient: gradient,
-      divisions: divisions,
-      onMinChanged: onMinChanged,
-      onMaxChanged: onMaxChanged,
+    return _RangeBarWithCurrentValue(
+      currentValue: currentValue,
+      currentLabel:
+          currentValue == null ? null : 'Current ${currentValue!.round()}K',
+      semanticsLabel: 'Current color temperature',
+      child: _DualRangeBar(
+        minValue: minValue,
+        maxValue: maxValue,
+        hardMin: hardMin,
+        hardMax: hardMax,
+        minThumbMax: hardMax,
+        maxThumbMin: hardMin,
+        minSeparation: 0,
+        currentValue: currentValue,
+        tint: tint,
+        minThumbColor: minThumbColor,
+        maxThumbColor: maxThumbColor,
+        gradient: gradient,
+        divisions: divisions,
+        onMinChanged: onMinChanged,
+        onMaxChanged: onMaxChanged,
+      ),
+    );
+  }
+}
+
+class _RangeBarWithCurrentValue extends StatelessWidget {
+  const _RangeBarWithCurrentValue({
+    required this.currentValue,
+    required this.currentLabel,
+    required this.semanticsLabel,
+    required this.child,
+  });
+
+  final double? currentValue;
+  final String? currentLabel;
+  final String semanticsLabel;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final label = currentLabel;
+    if (currentValue == null || label == null) return child;
+
+    return Semantics(
+      container: true,
+      label: semanticsLabel,
+      value: label,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          child,
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              Icon(
+                Icons.location_on_rounded,
+                key: const ValueKey('light-profile-range-current-legend'),
+                size: 12,
+                color: _Palette.textPrimary.withValues(alpha: 0.72),
+              ),
+              const SizedBox(width: 3),
+              Text(
+                label,
+                style: TextStyle(
+                  color: _Palette.textSecondary.withValues(alpha: 0.72),
+                  fontSize: 10,
+                  fontWeight: FontWeight.w600,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }
@@ -3946,6 +4031,7 @@ class _DualRangeBar extends StatefulWidget {
     required this.hardMax,
     required this.minThumbMax,
     required this.maxThumbMin,
+    this.currentValue,
     required this.tint,
     required this.onMinChanged,
     required this.onMaxChanged,
@@ -3966,6 +4052,9 @@ class _DualRangeBar extends StatefulWidget {
 
   /// The max thumb cannot move below this value.
   final double maxThumbMin;
+
+  /// Live room output rendered as a read-only pin on the full track.
+  final double? currentValue;
 
   /// Tint used for the active fill (when no gradient is supplied) and as the
   /// default thumb color.
@@ -4090,21 +4179,45 @@ class _DualRangeBarState extends State<_DualRangeBar> {
               setState(() => _active = null);
             },
             onPanCancel: () => setState(() => _active = null),
-            child: CustomPaint(
-              size: Size(width, height),
-              painter: _DualRangePainter(
-                minFrac: _normalize(widget.minValue),
-                maxFrac: _normalize(widget.maxValue),
-                trackHeight: _trackHeight,
-                thumbDiameter: _thumbDiameter,
-                inset: inset,
-                tint: widget.tint,
-                minThumbColor: widget.minThumbColor ?? widget.tint,
-                maxThumbColor: widget.maxThumbColor ?? widget.tint,
-                gradient: widget.gradient,
-                draggingMin: _active == _DualRangeThumb.min,
-                draggingMax: _active == _DualRangeThumb.max,
-              ),
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                Positioned.fill(
+                  child: CustomPaint(
+                    painter: _DualRangePainter(
+                      minFrac: _normalize(widget.minValue),
+                      maxFrac: _normalize(widget.maxValue),
+                      trackHeight: _trackHeight,
+                      thumbDiameter: _thumbDiameter,
+                      inset: inset,
+                      tint: widget.tint,
+                      minThumbColor: widget.minThumbColor ?? widget.tint,
+                      maxThumbColor: widget.maxThumbColor ?? widget.tint,
+                      gradient: widget.gradient,
+                      draggingMin: _active == _DualRangeThumb.min,
+                      draggingMax: _active == _DualRangeThumb.max,
+                    ),
+                  ),
+                ),
+                if (widget.currentValue != null)
+                  Positioned(
+                    key: const ValueKey('light-profile-range-current-marker'),
+                    left: inset +
+                        _normalize(widget.currentValue!) * usableWidth -
+                        8,
+                    top: 0,
+                    child: IgnorePointer(
+                      child: Icon(
+                        Icons.location_on_rounded,
+                        size: 16,
+                        color: _Palette.textPrimary.withValues(alpha: 0.92),
+                        shadows: const [
+                          Shadow(color: Colors.black87, blurRadius: 3),
+                        ],
+                      ),
+                    ),
+                  ),
+              ],
             ),
           );
         },

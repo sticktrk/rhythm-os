@@ -540,6 +540,8 @@ struct DeviceLifecycleCloudEvent {
     outcome: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     failure_stage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commissioner: Option<String>,
     force: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     correlation_id: Option<String>,
@@ -572,6 +574,16 @@ fn device_lifecycle_cloud_event(entry: &PairingHistoryEntry) -> Option<DeviceLif
         .as_deref()
         .and_then(|value| privacy_safe_token(value, 96));
     let failure_stage = entry.failure_stage.map(|stage| stage.as_str().to_string());
+    let commissioner = (action == "pair"
+        && (hub_type == "matter"
+            || matches!(entry.rendezvous.as_deref(), Some("phone" | "server"))))
+    .then(|| {
+        if entry.rendezvous.as_deref() == Some("phone") {
+            "phone".to_string()
+        } else {
+            "server".to_string()
+        }
+    });
     let serialized = serde_json::to_vec(entry).ok()?;
     let event_hash = Sha256::digest(serialized);
 
@@ -583,6 +595,7 @@ fn device_lifecycle_cloud_event(entry: &PairingHistoryEntry) -> Option<DeviceLif
         device_type,
         outcome,
         failure_stage,
+        commissioner,
         force: entry.force.unwrap_or(false),
         correlation_id,
     })
@@ -1137,6 +1150,7 @@ mod tests {
         assert_eq!(first.action, "unpair");
         assert_eq!(first.device_type.as_deref(), Some("button"));
         assert!(first.force);
+        assert_eq!(first.commissioner, None);
 
         let serialized = serde_json::to_string(&first).unwrap();
         for private_value in [
@@ -1147,6 +1161,47 @@ mod tests {
         ] {
             assert!(!serialized.contains(private_value));
         }
+    }
+
+    #[test]
+    fn matter_device_lifecycle_records_only_the_bounded_commissioner() {
+        let mut entry = test_device_lifecycle_entry();
+        entry.kind = "pair".into();
+        entry.hub_type = "matter".into();
+        entry.rendezvous = Some("phone".into());
+        let phone = device_lifecycle_cloud_event(&entry).unwrap();
+        assert_eq!(phone.commissioner.as_deref(), Some("phone"));
+
+        entry.rendezvous = Some("ble".into());
+        let server = device_lifecycle_cloud_event(&entry).unwrap();
+        assert_eq!(server.commissioner.as_deref(), Some("server"));
+
+        entry.hub_type = "future_wifi".into();
+        entry.rendezvous = Some("phone".into());
+        assert_eq!(
+            device_lifecycle_cloud_event(&entry)
+                .unwrap()
+                .commissioner
+                .as_deref(),
+            Some("phone")
+        );
+        entry.rendezvous = Some("server".into());
+        assert_eq!(
+            device_lifecycle_cloud_event(&entry)
+                .unwrap()
+                .commissioner
+                .as_deref(),
+            Some("server")
+        );
+        entry.rendezvous = Some("private-unknown-value".into());
+        assert!(device_lifecycle_cloud_event(&entry)
+            .unwrap()
+            .commissioner
+            .is_none());
+
+        let serialized = serde_json::to_string(&phone).unwrap();
+        assert!(!serialized.contains("rendezvous"));
+        assert!(!serialized.contains("handoff"));
     }
 
     #[test]

@@ -542,6 +542,10 @@ class CloudBackedServerApi {
     return _delegate.getCanonicalDevice(id);
   }
 
+  Future<RhythmCommissioningWifi?> getCommissioningWifiCredentials() async {
+    return _delegate.getCommissioningWifiCredentials();
+  }
+
   Future<RhythmPairingRecoverySecret?> getMatterSetupCode(
     String nativeDeviceId,
   ) {

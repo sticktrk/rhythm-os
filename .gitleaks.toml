@@ -5,6 +5,9 @@ useDefault = true
 description = "Reviewed deterministic test tokens and CocoaPods dependency checksums"
 regexTarget = "secret"
 regexes = [
+  # Public Ayla Bluetooth service/characteristic UUIDs, not authentication tokens.
+  '^fce3ec41-59b6-4873-ae36-fab25bd59adc$',
+  '^7e9869ed-4db3-4520-88ea-1c21ef1ba834$',
   '^fixture-ticket-secret-at-least-32-characters$',
   '^0123456789abcdef(?:0123456789abcdef){1,3}$',
   '^1c1a8afa7e12f2ec3a294d9882dfa5ab7d3cb063$',

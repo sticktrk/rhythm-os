@@ -3421,6 +3421,73 @@ void main() {
     });
   });
 
+  group('phone commissioning Wi-Fi', () {
+    test(
+        'uses owner connection, preserves bytes, disables cache and redacts DTO',
+        () async {
+      when(() => dio.get(any(), options: any(named: 'options')))
+          .thenAnswer((_) async => Response(
+                requestOptions:
+                    RequestOptions(path: 'api/pairing/wifi-credentials'),
+                statusCode: 200,
+                data: {'ssid': ' Network ', 'password': ' password '},
+              ));
+      final wifi = await api.getCommissioningWifiCredentials();
+      expect(wifi?.ssid, ' Network ');
+      expect(wifi?.password, ' password ');
+      expect(wifi.toString(), isNot(contains('password')));
+      final options = verify(() => dio.get('api/pairing/wifi-credentials',
+          options: captureAny(named: 'options'))).captured.single as Options;
+      expect(options.headers?['Cache-Control'], 'no-store');
+      expect(options.validateStatus!(401), false);
+      expect(options.validateStatus!(403), false);
+      expect(options.validateStatus!(404), true);
+    });
+    test('only 404 is missing; failures are sanitized instead of falling back',
+        () async {
+      for (final status in [404, 401, 403, 500, 200]) {
+        when(() => dio.get(any(), options: any(named: 'options')))
+            .thenAnswer((_) async => Response(
+                  requestOptions:
+                      RequestOptions(path: 'api/pairing/wifi-credentials'),
+                  statusCode: status,
+                  data: {'error': 'raw-password-secret'},
+                ));
+        if (status == 404) {
+          expect(await api.getCommissioningWifiCredentials(), isNull);
+        } else {
+          await expectLater(
+              api.getCommissioningWifiCredentials(),
+              throwsA(isA<StateError>().having((e) => e.toString(), 'sanitized',
+                  isNot(contains('raw-password-secret')))));
+        }
+      }
+    });
+    test(
+        'missing and unknown profile protocol fields retain their compatibility meaning',
+        () {
+      final json = <String, dynamic>{
+        'id': 'vendor.strip.light.v1',
+        'device_type': 'light',
+        'display_name': 'Strip'
+      };
+      expect(
+          RhythmDeviceProfile.fromJson(json).phoneProvisioningProtocol, isNull);
+      for (final protocol in ['ayla_v1', 'future_v2']) {
+        expect(
+            RhythmDeviceProfile.fromJson(
+                    {...json, 'phone_provisioning_protocol': protocol})
+                .phoneProvisioningProtocol,
+            protocol);
+      }
+      expect(
+          RhythmDeviceProfile.fromJson(
+                  {...json, 'phone_provisioning_protocol': 42})
+              .phoneProvisioningProtocol,
+          isNull);
+    });
+  });
+
   group('Matter setup code recovery', () {
     test('parses a secret-bearing response without transforming the payload',
         () async {

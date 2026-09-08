@@ -1,8 +1,10 @@
+import 'pairing_receipt_reader.dart';
 import 'package:dio/dio.dart';
 import 'package:logging/logging.dart';
 
 import '../json_parsing.dart';
 import '../models/rhythm_assistant.dart';
+import '../models/rhythm_commissioning_wifi.dart';
 import '../models/rhythm_curve_config.dart';
 import '../models/rhythm_curve_data.dart';
 import '../models/rhythm_device_attention.dart';
@@ -1699,6 +1701,31 @@ class RhythmServerApi {
     return null;
   }
 
+  /// Owner-only, uncached credentials for a phone provisioning journey.
+  /// Null means no saved credentials. Auth/transport failures never become a
+  /// manual-password fallback and never log a secret-bearing response.
+  Future<RhythmCommissioningWifi?> getCommissioningWifiCredentials() async {
+    try {
+      final response = await _dio.get(
+        'api/pairing/wifi-credentials',
+        options: Options(
+          headers: {'Cache-Control': 'no-store'},
+          validateStatus: (status) => status == 200 || status == 404,
+        ),
+      );
+      if (response.statusCode == 404) return null;
+      if (response.statusCode != 200 ||
+          response.data is! Map<String, dynamic>) {
+        throw const FormatException('Invalid commissioning Wi-Fi response');
+      }
+      return RhythmCommissioningWifi.fromJson(
+          response.data as Map<String, dynamic>);
+    } catch (_) {
+      throw StateError(
+          'Could not securely read saved Wi-Fi credentials from the Rhythm Box');
+    }
+  }
+
   /// Fetch the setup payload retained for one currently registered Matter endpoint.
   ///
   /// Returns `null` when this endpoint has no saved recovery material. Other
@@ -2605,34 +2632,8 @@ class RhythmServerApi {
   /// Reconcile a pairing request after its POST response or SSE terminal
   /// event was lost. A valid unknown ID is returned as [notFound], not `null`;
   /// `null` is reserved for an unavailable/malformed status response.
-  Future<RhythmPairingResultStatus?> getPairingResult(String sessionId) async {
-    try {
-      final response = await _dio.get(
-        'api/devices/pair/${Uri.encodeComponent(sessionId)}',
-        options: Options(
-          validateStatus: (status) => status == 200 || status == 404,
-        ),
-      );
-      final data = response.data;
-      if (data is Map) {
-        final status = RhythmPairingResultStatus.fromJson(
-          data.cast<String, dynamic>(),
-        );
-        final httpStatus = response.statusCode;
-        final statusMatchesHttp = switch (httpStatus) {
-          200 => status.state != RhythmPairingResultState.notFound,
-          404 => status.state == RhythmPairingResultState.notFound,
-          _ => false,
-        };
-        return statusMatchesHttp && status.sessionId == sessionId
-            ? status
-            : null;
-      }
-    } catch (e) {
-      _log.fine('getPairingResult failed', e);
-    }
-    return null;
-  }
+  Future<RhythmPairingResultStatus?> getPairingResult(String sessionId) async =>
+      (await readPairingReceipt(_dio, sessionId))?.status;
 
   /// Confirm that a durable terminal pairing result has been consumed by the
   /// client. The server retains a small causal tombstone while releasing the

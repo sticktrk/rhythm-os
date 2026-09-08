@@ -35,6 +35,7 @@ import '../../widgets/report_bug_flow.dart';
 import 'device_pairing_flow.dart';
 import 'device_pairing_scanner_screen.dart';
 import 'hue_authority_screen.dart';
+import 'hub_device_scope.dart';
 import 'hue_bridge_button_add_screen.dart';
 import 'matter_pairing_flow.dart';
 import 'ota_update_overlay.dart';
@@ -1775,6 +1776,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
         'homeassistant' || 'home_assistant' || 'ha' => 'Home Assistant',
         'matter' => 'Matter',
         'zigbee' => 'Zigbee',
+        'third_party' => HubDeviceScope.thirdPartyLabel,
         _ when type.isEmpty => 'Hub',
         _ => type
             .split('_')
@@ -2802,12 +2804,6 @@ class _RhythmServerAdvancedSettingsScreenState
   }
 }
 
-class _DeviceCounts {
-  int lights = 0;
-  int buttons = 0;
-  int motion = 0;
-}
-
 class RhythmServerHubManagementSection extends StatefulWidget {
   const RhythmServerHubManagementSection({
     super.key,
@@ -2950,11 +2946,8 @@ class _RhythmServerHubManagementSectionState
     return identities.join(';');
   }
 
-  String _hubIdentity(Map<String, dynamic> hub) {
-    final type = hub['type']?.toString().trim().toLowerCase() ?? '';
-    final address = hub['address']?.toString().trim().toLowerCase() ?? '';
-    return '${type.length}:$type|${address.length}:$address';
-  }
+  String _hubIdentity(Map<String, dynamic> hub) =>
+      HubDeviceScope.hubIdentity(hub);
 
   Future<void> _fetchHubSummaries(
     List<Map<String, dynamic>> configuredHubs, {
@@ -2965,8 +2958,9 @@ class _RhythmServerHubManagementSectionState
     if (generation == null) {
       _requestedHubSummaryScope = _hubSummaryScope(configuredHubs);
     }
-    final configuredIdentities = configuredHubs
-        .map(_hubIdentity)
+    final scopes = HubDeviceScope.group(configuredHubs);
+    final configuredIdentities = scopes
+        .map((scope) => scope.identity)
         .where((identity) => identity.isNotEmpty)
         .toSet();
     try {
@@ -2983,55 +2977,11 @@ class _RhythmServerHubManagementSectionState
         return;
       }
 
-      final counts = <String, _DeviceCounts>{};
-      for (final d in devices) {
-        final dtype = d['device_type'] as String? ?? 'light';
-        final endpoints = d['endpoints'] as List<dynamic>? ?? [];
-        final hubIdentities = <String>{};
-        for (final ep in endpoints) {
-          final hubKey = (ep as Map<String, dynamic>)['hub_key']
-                  as Map<String, dynamic>? ??
-              {};
-          final type = hubKey['hub_type']?.toString().trim().toLowerCase();
-          if (type == null || type.isEmpty) continue;
-          final address =
-              hubKey['address']?.toString().trim().toLowerCase() ?? '';
-          hubIdentities.add(
-            '${type.length}:$type|${address.length}:$address',
-          );
-        }
-        for (final identity in hubIdentities) {
-          final countsForHub = counts[identity] ??= _DeviceCounts();
-          if (dtype == 'light') {
-            countsForHub.lights++;
-          } else if (dtype == 'button') {
-            countsForHub.buttons++;
-          } else if (dtype == 'motion') {
-            countsForHub.motion++;
-          }
-        }
-      }
-
       final summaries = <String, String>{
-        for (final identity in configuredIdentities) identity: 'No devices',
+        for (final scope in scopes)
+          scope.identity:
+              HubDeviceScope.summarize(devices.where(scope.containsDevice)),
       };
-      for (final entry in counts.entries) {
-        final countsForHub = entry.value;
-        final parts = <String>[];
-        if (countsForHub.lights > 0) {
-          parts.add(
-              '${countsForHub.lights} light${countsForHub.lights > 1 ? 's' : ''}');
-        }
-        if (countsForHub.buttons > 0) {
-          parts.add(
-              '${countsForHub.buttons} button${countsForHub.buttons > 1 ? 's' : ''}');
-        }
-        if (countsForHub.motion > 0) {
-          parts.add(
-              '${countsForHub.motion} sensor${countsForHub.motion > 1 ? 's' : ''}');
-        }
-        summaries[entry.key] = parts.isEmpty ? 'No devices' : parts.join(', ');
-      }
 
       setState(() {
         _hubSummaries = summaries;
@@ -3064,9 +3014,10 @@ class _RhythmServerHubManagementSectionState
   Widget? _buildConfiguredHubsSection(
       List<Map<String, dynamic>> configuredHubs) {
     if (configuredHubs.isEmpty) return null;
+    final scopes = HubDeviceScope.group(configuredHubs);
 
     return _buildSection(
-      title: configuredHubs.length > 1 ? 'HUBS' : 'HUB',
+      title: scopes.length > 1 ? 'HUBS' : 'HUB',
       subtitle: 'Open a hub to manage its connection and devices.',
       children: [
         Container(
@@ -3079,13 +3030,13 @@ class _RhythmServerHubManagementSectionState
           ),
           child: Column(
             children: [
-              for (final (index, hub) in configuredHubs.indexed) ...[
+              for (final (index, scope) in scopes.indexed) ...[
                 if (index > 0)
                   Divider(
                     height: 1,
                     color: CelestialColors.orbitRing.withValues(alpha: 0.3),
                   ),
-                _buildHubRow(hub),
+                _buildHubRow(scope),
               ],
             ],
           ),
@@ -3251,9 +3202,10 @@ class _RhythmServerHubManagementSectionState
     await _refreshHubSummaries();
   }
 
-  Widget _buildHubRow(Map<String, dynamic> hubInfo) {
-    final type = hubInfo['type'] as String;
-    final identity = _hubIdentity(hubInfo);
+  Widget _buildHubRow(HubDeviceScope scope) {
+    final hubInfo = scope.hubs.first;
+    final type = scope.isThirdParty ? 'third_party' : hubInfo['type'] as String;
+    final identity = scope.identity;
     final label = _RhythmServerSettingsScreenState._hubLabel(type);
     final hubColor = _RhythmServerSettingsScreenState._hubColor(type);
     final connected = hubInfo['connected'] as bool? ?? false;
@@ -3263,11 +3215,14 @@ class _RhythmServerHubManagementSectionState
         (_hubSummaryFailures.contains(identity)
             ? 'Devices unavailable'
             : 'Loading...');
-    final subtitle = _RhythmServerSettingsScreenState._hubRowSubtitle(
-        hubInfo, deviceSummary);
+    final subtitle = scope.isThirdParty
+        ? deviceSummary
+        : _RhythmServerSettingsScreenState._hubRowSubtitle(
+            hubInfo, deviceSummary);
 
     return GestureDetector(
-      onTap: () => _HubDetailScreen.show(context, hubInfo: hubInfo),
+      key: scope.isThirdParty ? const ValueKey('third-party-hubs') : null,
+      onTap: () => _HubDetailScreen.show(context, scope: scope),
       behavior: HitTestBehavior.opaque,
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
@@ -3275,7 +3230,8 @@ class _RhythmServerHubManagementSectionState
           children: [
             Icon(
               _RhythmServerSettingsScreenState._hubIcon(type),
-              color: hubColor.withValues(alpha: connected ? 1.0 : 0.5),
+              color: hubColor.withValues(
+                  alpha: scope.isThirdParty || connected ? 1.0 : 0.5),
               size: 20,
             ),
             const SizedBox(width: 12),
@@ -3313,24 +3269,25 @@ class _RhythmServerHubManagementSectionState
                 ],
               ),
             ),
-            Container(
-              width: 8,
-              height: 8,
-              margin: const EdgeInsets.only(right: 8),
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: statusColor,
-                boxShadow: !connected
-                    ? [
-                        BoxShadow(
-                          color: statusColor.withValues(alpha: 0.6),
-                          blurRadius: 6,
-                          spreadRadius: 1,
-                        ),
-                      ]
-                    : null,
+            if (!scope.isThirdParty)
+              Container(
+                width: 8,
+                height: 8,
+                margin: const EdgeInsets.only(right: 8),
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: statusColor,
+                  boxShadow: !connected
+                      ? [
+                          BoxShadow(
+                            color: statusColor.withValues(alpha: 0.6),
+                            blurRadius: 6,
+                            spreadRadius: 1,
+                          ),
+                        ]
+                      : null,
+                ),
               ),
-            ),
             Icon(
               Icons.chevron_right,
               color: CelestialColors.textSecondary.withValues(alpha: 0.4),
@@ -4162,12 +4119,12 @@ class _RhythmServerDiagnosticsScreenState
 // =============================================================================
 
 class _HubDetailScreen extends StatefulWidget {
-  final Map<String, dynamic> hubInfo;
+  final HubDeviceScope scope;
 
-  const _HubDetailScreen({required this.hubInfo});
+  const _HubDetailScreen({required this.scope});
 
   static Future<void> show(BuildContext context,
-      {required Map<String, dynamic> hubInfo}) {
+      {required HubDeviceScope scope}) {
     return Navigator.of(context).push(
       PageRouteBuilder(
         opaque: false,
@@ -4175,7 +4132,7 @@ class _HubDetailScreen extends StatefulWidget {
         pageBuilder: (context, animation, secondaryAnimation) {
           return DeviceDetailsLoader(
             showCloseButton: true,
-            child: _HubDetailScreen(hubInfo: hubInfo),
+            child: _HubDetailScreen(scope: scope),
           );
         },
         transitionsBuilder: (context, animation, secondaryAnimation, child) {
@@ -4205,13 +4162,18 @@ class _HubDetailScreen extends StatefulWidget {
 class _HubDetailScreenState extends State<_HubDetailScreen> {
   static const _teal = Color(0xFF00BCD4);
 
-  String get _type => widget.hubInfo['type'] as String;
-  String? get _address => widget.hubInfo['address'] as String?;
+  String get _type => widget.scope.isThirdParty
+      ? 'third_party'
+      : widget.scope.hubs.single['type'] as String;
+  String? get _address => widget.scope.isThirdParty
+      ? null
+      : widget.scope.hubs.single['address'] as String?;
 
   // Canonical devices grouped into rooms for this hub type.
   List<RhythmRoom>? _canonicalRooms;
   String? _canonicalSummary;
   bool _canonicalLoading = false;
+  bool _canonicalLoadFailed = false;
   List<Map<String, dynamic>> _removedDevices = const [];
   final Set<String> _removedDeviceBusy = <String>{};
   bool _removedOpenedLogged = false;
@@ -4220,6 +4182,9 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
   @override
   void initState() {
     super.initState();
+    if (widget.scope.isThirdParty) {
+      unawaited(AnalyticsService().logScreenView('third_party_devices'));
+    }
     _fetchCanonicalDevices();
   }
 
@@ -4227,7 +4192,12 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
     setState(() => _canonicalLoading = true);
     final http = context.read<RhythmConnection>();
     final syncProvider = context.read<ServerSyncProvider>();
-    final devices = await http.api.getCanonicalDevices();
+    List<Map<String, dynamic>>? devices;
+    try {
+      devices = await http.api.getCanonicalDevices();
+    } catch (_) {
+      // An unavailable catalog must not look like a successful empty sync.
+    }
     final removedDevices = syncProvider.removedDeviceArchiveSupported
         ? await http.api.getRemovedDevices()
         : const <Map<String, dynamic>>[];
@@ -4235,8 +4205,8 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
 
     if (devices == null) {
       setState(() {
-        _canonicalRooms = [];
-        _canonicalSummary = 'No devices';
+        _canonicalLoadFailed = true;
+        _canonicalSummary ??= 'Devices unavailable';
         _removedDevices = (removedDevices ?? const [])
             .where(_deviceBelongsToHub)
             .toList(growable: false);
@@ -4245,8 +4215,7 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
       return;
     }
 
-    // Filter to the exact configured hub. A type-only filter would combine
-    // devices from two Hue Bridges (or any future repeated integration).
+    // Retain exact endpoint ownership inside either presentation scope.
     final hubDevices = devices.where(_deviceBelongsToHub).toList();
     final removedHubDevices = (removedDevices ?? const <Map<String, dynamic>>[])
         .where(_deviceBelongsToHub)
@@ -4299,30 +4268,21 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
         disabled: false,
         timeOffset: 0,
         brightnessOffset: 0,
-        hubTypes: [_type],
+        hubTypes: widget.scope.hubs
+            .map((hub) => hub['type'] as String)
+            .toSet()
+            .toList(),
         devices: roomDevices,
       ));
     }
 
-    // Summary
-    final lights = hubDevices
-        .where((d) => (d['device_type'] as String? ?? 'light') == 'light')
-        .length;
-    final buttons =
-        hubDevices.where((d) => d['device_type'] == 'button').length;
-    final motion = hubDevices.where((d) => d['device_type'] == 'motion').length;
-    final parts = <String>[];
-    if (lights > 0) parts.add('$lights light${lights > 1 ? 's' : ''}');
-    if (buttons > 0) parts.add('$buttons button${buttons > 1 ? 's' : ''}');
-    if (motion > 0) parts.add('$motion sensor${motion > 1 ? 's' : ''}');
-    final roomCount = parsedRooms.length;
-    final summary = parts.isEmpty
-        ? 'No devices'
-        : '${parts.join(', ')} across $roomCount room${roomCount != 1 ? 's' : ''}';
+    final summary =
+        HubDeviceScope.summarize(hubDevices, roomCount: parsedRooms.length);
 
     setState(() {
       _canonicalRooms = parsedRooms;
       _canonicalSummary = summary;
+      _canonicalLoadFailed = false;
       _removedDevices = removedHubDevices;
       _canonicalLoading = false;
     });
@@ -4337,30 +4297,13 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
     }
   }
 
-  bool _deviceBelongsToHub(Map<String, dynamic> device) {
-    final endpoints = device['endpoints'] as List<dynamic>? ?? const [];
-    return endpoints.whereType<Map<String, dynamic>>().any((endpoint) {
-      final hubKey = endpoint['hub_key'] as Map<String, dynamic>? ?? const {};
-      if (hubKey['hub_type']?.toString() != _type) return false;
-      final address = _address?.trim();
-      if (address == null || address.isEmpty) return true;
-      return hubKey['address']?.toString().trim().toLowerCase() ==
-          address.toLowerCase();
-    });
-  }
+  bool _deviceBelongsToHub(Map<String, dynamic> device) =>
+      widget.scope.containsDevice(device);
 
   Map<String, dynamic>? _removedEndpoint(Map<String, dynamic> device) {
-    final endpoints = device['endpoints'] as List<dynamic>? ?? const [];
+    final endpoints = device['endpoints'] as List? ?? const [];
     for (final endpoint in endpoints.whereType<Map<String, dynamic>>()) {
-      final hubKey = endpoint['hub_key'] as Map<String, dynamic>? ?? const {};
-      if (hubKey['hub_type']?.toString() != _type) continue;
-      final address = _address?.trim();
-      if (address == null ||
-          address.isEmpty ||
-          hubKey['address']?.toString().trim().toLowerCase() ==
-              address.toLowerCase()) {
-        return endpoint;
-      }
+      if (widget.scope.matchesEndpoint(endpoint)) return endpoint;
     }
     return null;
   }
@@ -4470,106 +4413,122 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     const SizedBox(height: 8),
-                    // Hero
-                    Container(
-                      padding: const EdgeInsets.all(24),
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(24),
-                        gradient: RadialGradient(
-                          center: Alignment.center,
-                          radius: 1.2,
-                          colors: [
-                            hubColor.withValues(alpha: connected ? 0.08 : 0.03),
-                            CelestialColors.backgroundCard,
-                          ],
-                        ),
-                        border: Border.all(
-                          color:
-                              hubColor.withValues(alpha: connected ? 0.2 : 0.1),
-                          width: 1,
-                        ),
-                      ),
-                      child: Column(
-                        children: [
-                          Container(
-                            width: 56,
-                            height: 56,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: hubColor.withValues(
-                                  alpha: connected ? 0.2 : 0.1),
-                            ),
-                            child: Icon(
-                              hubIcon,
-                              color: hubColor.withValues(
-                                  alpha: connected ? 1.0 : 0.5),
-                              size: 28,
-                            ),
+                    // Provider connection controls belong to individual hubs.
+                    if (!widget.scope.isThirdParty)
+                      Container(
+                        padding: const EdgeInsets.all(24),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(24),
+                          gradient: RadialGradient(
+                            center: Alignment.center,
+                            radius: 1.2,
+                            colors: [
+                              hubColor.withValues(
+                                  alpha: connected ? 0.08 : 0.03),
+                              CelestialColors.backgroundCard,
+                            ],
                           ),
-                          const SizedBox(height: 12),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Container(
-                                width: 8,
-                                height: 8,
-                                decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  color: connectionColor,
-                                ),
+                          border: Border.all(
+                            color: hubColor.withValues(
+                                alpha: connected ? 0.2 : 0.1),
+                            width: 1,
+                          ),
+                        ),
+                        child: Column(
+                          children: [
+                            Container(
+                              width: 56,
+                              height: 56,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: hubColor.withValues(
+                                    alpha: connected ? 0.2 : 0.1),
                               ),
-                              const SizedBox(width: 8),
+                              child: Icon(
+                                hubIcon,
+                                color: hubColor.withValues(
+                                    alpha: connected ? 1.0 : 0.5),
+                                size: 28,
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Container(
+                                  width: 8,
+                                  height: 8,
+                                  decoration: BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    color: connectionColor,
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Text(
+                                  connectionLabel,
+                                  style: TextStyle(
+                                    color: connectionColor,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            if (retrySummary != null) ...[
+                              const SizedBox(height: 6),
                               Text(
-                                connectionLabel,
+                                retrySummary,
+                                textAlign: TextAlign.center,
                                 style: TextStyle(
-                                  color: connectionColor,
-                                  fontSize: 14,
+                                  color: connectionColor.withValues(alpha: 0.9),
+                                  fontSize: 12,
                                   fontWeight: FontWeight.w500,
                                 ),
                               ),
                             ],
-                          ),
-                          if (retrySummary != null) ...[
-                            const SizedBox(height: 6),
-                            Text(
-                              retrySummary,
-                              textAlign: TextAlign.center,
-                              style: TextStyle(
-                                color: connectionColor.withValues(alpha: 0.9),
-                                fontSize: 12,
-                                fontWeight: FontWeight.w500,
+                            if (_address != null && _address!.isNotEmpty) ...[
+                              const SizedBox(height: 4),
+                              Text(
+                                _address!,
+                                style: TextStyle(
+                                  color: CelestialColors.textSecondary
+                                      .withValues(alpha: 0.7),
+                                  fontSize: 13,
+                                  fontFamily: 'monospace',
+                                ),
                               ),
-                            ),
-                          ],
-                          if (_address != null && _address!.isNotEmpty) ...[
+                            ],
                             const SizedBox(height: 4),
                             Text(
-                              _address!,
+                              deviceSummary,
                               style: TextStyle(
                                 color: CelestialColors.textSecondary
-                                    .withValues(alpha: 0.7),
-                                fontSize: 13,
-                                fontFamily: 'monospace',
+                                    .withValues(alpha: 0.6),
+                                fontSize: 12,
                               ),
                             ),
                           ],
-                          const SizedBox(height: 4),
-                          Text(
-                            deviceSummary,
-                            style: TextStyle(
-                              color: CelestialColors.textSecondary
-                                  .withValues(alpha: 0.6),
-                              fontSize: 12,
-                            ),
-                          ),
-                        ],
+                        ),
                       ),
-                    ),
                     const SizedBox(height: 20),
-                    // Devices section
+                    // The aggregate destination opens directly onto devices.
+                    if (widget.scope.isThirdParty) ...[
+                      Text(deviceSummary,
+                          style: const TextStyle(
+                              color: CelestialColors.textSecondary)),
+                      const SizedBox(height: 12),
+                    ],
                     _buildSectionHeader('DEVICES'),
                     const SizedBox(height: 8),
-                    _buildDevicesCard(rooms),
+                    if (_canonicalLoadFailed)
+                      TextButton.icon(
+                        onPressed:
+                            _canonicalLoading ? null : _fetchCanonicalDevices,
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('Retry loading devices'),
+                      ),
+                    if (!_canonicalLoadFailed || _canonicalRooms != null)
+                      _buildDevicesCard(rooms),
                     if (syncProvider.removedDeviceArchiveSupported) ...[
                       const SizedBox(height: 20),
                       _buildSectionHeader('REMOVED BULBS'),
@@ -4656,7 +4615,9 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                         },
                       ),
                     ],
-                    if (_type != 'matter' && _type != 'hue_ble') ...[
+                    if (!widget.scope.isThirdParty &&
+                        _type != 'matter' &&
+                        _type != 'hue_ble') ...[
                       const SizedBox(height: 24),
                       // Actions
                       _buildActionButton(
@@ -5154,7 +5115,7 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
       if (address == null || address.isEmpty) return hubInfo;
       if (hubInfo['address'] == address) return hubInfo;
     }
-    return widget.hubInfo;
+    return widget.scope.hubs.first;
   }
 
   Future<void> _reviewHueAutomation() async {
