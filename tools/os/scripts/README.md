@@ -8,10 +8,6 @@ This directory contains all build and deployment scripts for Rhythm OS.
 # Development
 ./tools/os/scripts/run-dev.sh                    # Build and run addon locally
 
-# Triage
-./tools/triage-bug.sh [issue-number]             # Download and summarize app bug-report debug bundle
-./tools/triage-features.sh [issue-number]        # Scaffold a product brief for feature delivery
-
 # Build individual components
 ./tools/os/scripts/build-server.sh               # Build the server
 ./tools/os/scripts/build-rust.sh                 # Build Rust addon
@@ -23,8 +19,8 @@ This directory contains all build and deployment scripts for Rhythm OS.
 # Deploy (full OTA guide: docs/ota.md)
 ./tools/os/scripts/deploy-addon.sh               # Push addon to Docker Hub
 ./tools/os/scripts/deploy-addon.sh --local       # Deploy to local HA for testing
-./tools/os/scripts/release.sh                    # Tag + push a beta release (CI publishes; image auto-detected)
-./tools/os/scripts/release.sh --promote-stable   # Promote latest beta tag to the stable feed
+./tools/os/scripts/release.sh                    # Tag + push beta source; invoke the configured publisher
+./tools/os/scripts/release.sh --promote-stable   # Tag tested beta source as stable; invoke the publisher
 ./tools/os/scripts/verify-beta-release.sh        # Prove beta feed and optional bench device; write receipt
 ./tools/os/scripts/release.sh --upload           # Escape hatch: build + upload the rpiz OTA feed locally
 ```
@@ -53,10 +49,6 @@ Mostly invoked by the main flows above, but usable standalone:
 | `tests/r2-publishing-sim.sh` | Verify R2 publish ordering, immutability, cache policy, and manifest-aware retention; runs in repository invariants |
 | `tests/rpiz-hardware-watchdog-sim.sh` | Verify the rpiz watchdog starts from init, emits keepalives, and disarms cleanly; runs in CI |
 | `tests/rpiz-host-recorder-sim.sh` | Verify deterministic pre-watchdog boot capture, independent init supervision, and sampling after server exit; runs in CI |
-
-Triage scripts are intentionally not duplicated under `tools/os/scripts`. Use
-the canonical CROSS root entrypoints: `./tools/triage-bug.sh` and
-`./tools/triage-features.sh`.
 
 ---
 
@@ -180,8 +172,8 @@ the image when its baked inputs change, see
 Hashes the slow-path inputs (CHIP prebuilts, ARMv6 musl toolchain, Buildroot
 checkout + external tree, Dockerfile, packaging script) into a content tag
 like `v1-aa91843f7d73`, checks Docker Hub for it, and only builds+pushes when
-that tag is missing. Updates `install/rpiz/builder-image.lock`, which is what
-both your local `--docker` runs and `.github/workflows/rpiz-sd-image.yml` pull.
+that tag is missing. Updates `os/install/rpiz/builder-image.lock`, which is what
+local `--docker` runs and downstream image publishers should pull.
 
 ```bash
 ./tools/os/scripts/build/refresh-builder-image.sh            # dry-check: report if push needed
@@ -214,17 +206,20 @@ inputs, and the `third_party/` pruning knobs used to keep image size down.
 
 ### release.sh
 
-Create a Git release tag; the tag push drives the CI release pipeline
-(`ci.yml`), which publishes the GitHub release assets and the OTA feed.
+Create a Git release tag. An optional `RHYTHM_RELEASE_PUBLISH_HOOK` executable
+receives the tag and exact source commit after the push succeeds, allowing an
+operations workspace to dispatch its own publisher. The public CI workflow runs
+checks; it does not publish OTA artifacts. Without a hook, this command only
+versions and publishes source. Use `--upload` for an explicit local OTA upload.
 
 **The full OTA model — channels, binary vs image, fingerprint gate, manifest
 schema, runbooks — lives in [`docs/ota.md`](../../../docs/ota.md).** Short
 version:
 
-- Every release is tagged `vX.Y.Z-beta` and publishes the `rpiz/` (beta)
-  feed. `--promote-stable` re-tags the same commit `vX.Y.Z-stable`, which
-  publishes the `rpiz-stable/` feed that fleet auto-update consumes.
-- CI decides binary-only vs full-image automatically by comparing the rootfs
+- Every beta is tagged `vX.Y.Z-beta`; a configured publisher can update the
+  `rpiz/` (beta) feed. `--promote-stable` re-tags the same commit
+  `vX.Y.Z-stable` and invokes that publisher for the `rpiz-stable/` feed.
+- The publisher can decide binary-only vs full-image by comparing the rootfs
   fingerprint against the published feed. `--with-image` forces the image
   build (it embeds a `[with-image]` marker in the tag message).
 - `--upload` is the escape hatch when GitHub Actions is down: builds,
@@ -252,6 +247,9 @@ Run `release.sh --help` for the full flag list.
 - Updates the root workspace version in `Cargo.toml` before tagging and mechanically syncs only local `rhythm-*` package versions in the root `Cargo.lock`. It does not run Cargo dependency resolution, which avoids unrelated `rhythm-chipd` lockfile churn on macOS release hosts.
 - Creates the release commit automatically when those version files change.
 - Pushes the current branch and the new tag to `origin` by default.
+- Calls the optional publisher only after a successful tag push. Dry runs and
+  `--no-push` never call it. A publisher error is returned to the caller; the
+  published tag remains available for retrying that publisher.
 - Stable promotion verifies the matching remote beta tag and public beta
   manifest before creating the stable tag. Add `--device URL --token-file FILE`
   for a bench receipt. Emergency skips require
@@ -267,7 +265,7 @@ Rhythm OS now uses two versioning tracks:
 For workspace/server/appliance builds:
 
 - Tagged release builds resolve to the exact tag version only when the tracked worktree is clean, for example `v0.4.0` -> `0.4.0`.
-- Beta release tags are named `vX.Y.Z-beta`. Stable releases are promoted from beta with `./tools/os/scripts/release.sh --promote-stable [X.Y.Z]`, which creates `vX.Y.Z-stable` and lets CI rebuild the artifact with `-stable` embedded in the binary version. CI builds a full rootfs image automatically when the rootfs fingerprint changed.
+- Beta release tags are named `vX.Y.Z-beta`. Stable releases are promoted from beta with `./tools/os/scripts/release.sh --promote-stable [X.Y.Z]`, which creates `vX.Y.Z-stable`. A configured publisher can rebuild the artifact with `-stable` embedded in the binary version and use the rootfs fingerprint to decide whether a full image is needed.
 - Dirty tagged builds append `.dirty`, for example `v0.4.0` with local edits -> `0.4.0.dirty`.
 - Untagged builds resolve to a Git-derived prerelease, for example `0.4.0-beta.dev.66.g1b40e459`.
 - Dirty untagged builds append `.dirty`, for example `0.4.0-beta.dev.66.g1b40e459.dirty`.
@@ -385,8 +383,9 @@ git commit -m "Release v0.4.0"
 
 `./tools/os/scripts/release.sh` defaults to the newer of the workspace version
 or the next patch tag after the latest `vX.Y.Z`.
-Once the GitHub `Release` workflow finishes, the GitHub release page contains
-the platform binary tarballs.
+Artifact destinations and upload workflows are controlled by the configured
+publisher. The public repository's CI validates source; it does not upload
+release artifacts.
 
 ---
 

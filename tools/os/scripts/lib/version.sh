@@ -1,7 +1,7 @@
 # Shared version/semver helpers for the Rhythm release scripts.
 #
 # Source this file; do not execute it. Callers are expected to run under
-# `set -euo pipefail` and to have REPO_ROOT pointing at the CROSS repo root
+# `set -euo pipefail` and to have REPO_ROOT pointing at the public source root
 # (or to pass an explicit path where a function accepts one).
 #
 # This is the single home for semver parsing/comparison in the release

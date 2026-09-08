@@ -3,7 +3,7 @@
 
 set -euo pipefail
 
-REPO_ROOT="$(git rev-parse --show-toplevel)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 EXTRACTOR="$REPO_ROOT/.github/actions/configure-updates-r2/extract_zip_preserving_permissions.py"
 TEMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/rhythm-r2-extract-test.XXXXXX")"
 trap 'rm -rf "$TEMP_DIR"' EXIT

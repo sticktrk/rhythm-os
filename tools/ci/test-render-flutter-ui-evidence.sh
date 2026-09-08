@@ -19,7 +19,7 @@ BIN_DIR="$TMP_DIR/bin"
 mkdir -p "$BIN_DIR"
 cat > "$BIN_DIR/flutter" <<'EOF'
 #!/bin/bash
-printf '%s\n' "$PWD" > "$FAKE_FLUTTER_PWD"
+pwd -P > "$FAKE_FLUTTER_PWD"
 printf '%s\n' "$RHYTHM_UI_EVIDENCE_RENDERER" > "$FAKE_FLUTTER_RENDERER"
 printf '%s\n' "$@" > "$FAKE_FLUTTER_ARGS"
 EOF

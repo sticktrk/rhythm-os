@@ -32,7 +32,10 @@ jq -e '
     .source_commit == "53033dd7b3e41d6b693a68bf39e77e02bbc44dec" and
     (.artifact_sha256 | test("^[0-9a-f]{64}$"))
 ' "$RECEIPT" >/dev/null
-test "$(stat -f '%Lp' "$RECEIPT")" = "600"
+python3 - "$RECEIPT" <<'PY'
+import os, stat, sys
+assert stat.S_IMODE(os.stat(sys.argv[1]).st_mode) == 0o600
+PY
 
 if "$WRITER" \
     --store app-store-connect \

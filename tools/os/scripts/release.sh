@@ -21,6 +21,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 # shellcheck source=lib/version.sh
 source "$SCRIPT_DIR/lib/version.sh"
+source "$SCRIPT_DIR/lib/publication.sh"
 
 REMOTE="origin"
 VERSION=""
@@ -53,7 +54,7 @@ usage() {
 Usage: $0 [OPTIONS]
 
 Create a release tag. By default this pushes the release commit and tag so the
-GitHub release workflow can publish the assets. With --upload, the script keeps
+configured publisher can publish the assets. With --upload, the script keeps
 the release local, builds the rpiz artifact, packages the OTA feed, and uploads
 it directly using the external release credential profile.
 
@@ -455,6 +456,9 @@ commit_release_version_update() {
 
 require_command git
 require_command perl
+if [ "$PUSH" = true ]; then
+    validate_release_publish_hook
+fi
 
 case "$IMAGE_MODE" in
     auto|dev|prod)
@@ -690,6 +694,7 @@ if [ "$DRY_RUN" = true ]; then
     elif [ "$PUSH" = true ]; then
         echo "[dry-run] Would push branch: git push $REMOTE HEAD:refs/heads/$CURRENT_BRANCH"
         echo "[dry-run] Would push tag:    git push $REMOTE refs/tags/$TAG"
+        preview_release_publisher "$TAG"
     fi
     exit 0
 fi
@@ -718,6 +723,7 @@ if [ "$UPLOAD" = true ]; then
 elif [ "$PUSH" = true ]; then
     git -C "$REPO_ROOT" push "$REMOTE" "HEAD:refs/heads/$CURRENT_BRANCH"
     git -C "$REPO_ROOT" push "$REMOTE" "refs/tags/$TAG"
+    publish_release_tag "$TAG"
 fi
 
 echo ""
@@ -726,10 +732,10 @@ echo "Created $TAG at $(git -C "$REPO_ROOT" rev-parse --short HEAD)"
 if [ "$PUSH" = true ]; then
     echo "Pushed branch and tag to $REMOTE."
     if [ -n "$REPO_URL" ]; then
-        echo "GitHub Actions will publish the rpiz binary release assets after the CI workflow finishes:"
-        echo "  CI:       $REPO_URL/actions/workflows/ci.yml"
-        echo "  SD image: $REPO_URL/actions/workflows/rpiz-sd-image.yml"
-        echo "  Release:  $REPO_URL/releases/tag/$TAG"
+        echo "Source: $REPO_URL/tree/$TAG"
+    fi
+    if [ -z "${RHYTHM_RELEASE_PUBLISH_HOOK:-}" ]; then
+        echo "No publisher is configured; the source tag is published, but no OTA upload was requested."
     fi
 elif [ "$UPLOAD" = true ]; then
     echo "Built and uploaded the rpiz OTA feed locally."

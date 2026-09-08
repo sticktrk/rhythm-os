@@ -22,6 +22,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 # shellcheck source=lib/version.sh
 source "$SCRIPT_DIR/lib/version.sh"
+source "$SCRIPT_DIR/lib/publication.sh"
 
 REMOTE="origin"
 VERSION=""
@@ -336,9 +337,13 @@ if [ "$PUSH" = true ]; then
 fi
 
 if [ -z "$VERIFY_RECEIPT" ]; then
-    VERIFY_RECEIPT="$REPO_ROOT/.release-evidence/${SOURCE_TAG}.json"
+    VERIFY_RECEIPT="${RHYTHM_RELEASE_EVIDENCE_ROOT:-$REPO_ROOT/.release-evidence}/${SOURCE_TAG}.json"
 elif [ "${VERIFY_RECEIPT#/}" = "$VERIFY_RECEIPT" ]; then
     VERIFY_RECEIPT="$REPO_ROOT/$VERIFY_RECEIPT"
+fi
+
+if [ "$PUSH" = true ]; then
+    validate_release_publish_hook
 fi
 
 if [ "$VERIFY_BETA" = true ]; then
@@ -389,8 +394,7 @@ echo ""
 
 if [ "$WITH_IMAGE" = true ] && [ -n "$LOCAL_STABLE_COMMIT" ]; then
     echo "Warning: $STABLE_TAG already exists, so its message cannot gain the $(with_image_marker) marker." >&2
-    echo "To force an image for this release, run the rpiz-sd-image.yml workflow manually:" >&2
-    echo "  gh workflow run rpiz-sd-image.yml -f tag=$STABLE_TAG -f publish_full_image_ota=true -f image_mode=$IMAGE_MODE" >&2
+    echo "Use your image publisher to rebuild $STABLE_TAG with image mode $IMAGE_MODE." >&2
 fi
 
 if [ "$NO_IMAGE" = true ] && [ -n "$LOCAL_STABLE_COMMIT" ]; then
@@ -411,6 +415,7 @@ if [ "$DRY_RUN" = true ]; then
     if [ "$PUSH" = true ]; then
         if [ -z "$REMOTE_STABLE_COMMIT" ]; then
             echo "[dry-run] Would push stable tag: git push $REMOTE refs/tags/$STABLE_TAG"
+            preview_release_publisher "$STABLE_TAG"
         else
             echo "[dry-run] Remote stable tag already exists at the source commit."
         fi
@@ -429,7 +434,10 @@ if [ "$PUSH" = true ]; then
     if [ -z "$REMOTE_STABLE_COMMIT" ]; then
         git -C "$REPO_ROOT" push "$REMOTE" "refs/tags/$STABLE_TAG"
         echo "Pushed $STABLE_TAG to $REMOTE."
-        echo "GitHub Actions will build and publish the stable OTA feed."
+        publish_release_tag "$STABLE_TAG"
+        if [ -z "${RHYTHM_RELEASE_PUBLISH_HOOK:-}" ]; then
+            echo "No publisher is configured; the source tag is published, but no OTA upload was requested."
+        fi
     else
         echo "Remote stable tag already exists at $SOURCE_COMMIT"
     fi
