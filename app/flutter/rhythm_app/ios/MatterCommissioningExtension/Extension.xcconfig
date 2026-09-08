@@ -1,0 +1,2 @@
+// Share version/build values with Runner without importing its CocoaPods settings.
+#include "../Flutter/Generated.xcconfig"

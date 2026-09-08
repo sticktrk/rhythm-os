@@ -288,6 +288,7 @@ fn shared_routes() -> Router<SharedState> {
         .route("/api/matter/captures", get(get_matter_captures))
         .route("/api/matter/captures/:id", get(get_matter_capture))
         .route("/api/matter/setup-code/:id", get(get_matter_setup_code))
+        .route("/api/pairing/wifi-credentials", get(get_commissioning_wifi))
         .route("/api/matter/audition/run", post(post_matter_audition_run))
         .route(
             "/api/matter/audition/report",
@@ -1413,6 +1414,16 @@ pub async fn get_matter_capture(
     handlers::handle_get_matter_capture(&state, &id)
 }
 
+pub async fn get_commissioning_wifi(State(state): State<SharedState>) -> Response {
+    let mut response = run_blocking(move || handlers::handle_get_commissioning_wifi(&state))
+        .await
+        .into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
 pub async fn get_matter_setup_code(
     State(state): State<SharedState>,
     Path(id): Path<String>,
@@ -1748,6 +1759,21 @@ mod tests {
             .expect("500 responses should carry trace context");
 
         assert_eq!(context.0, "boom");
+    }
+
+    #[tokio::test]
+    async fn commissioning_wifi_missing_and_failed_responses_disable_caching() {
+        let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
+        for expected in [StatusCode::NOT_FOUND, StatusCode::INTERNAL_SERVER_ERROR] {
+            let response = get_commissioning_wifi(State(state.clone())).await;
+            assert_eq!(response.status(), expected);
+            assert_eq!(response.headers()[CACHE_CONTROL], "no-store");
+            state
+                .lock()
+                .unwrap()
+                .commissioning_wifi_credentials_provider =
+                Some(Arc::new(|| anyhow::bail!("secret")));
+        }
     }
 
     #[tokio::test]

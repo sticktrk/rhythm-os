@@ -525,6 +525,7 @@ mod tests {
                 ssid: "Rhythm".to_string(),
                 password: "secret".to_string(),
             },
+            on_network_target: None,
         }
     }
 
@@ -698,6 +699,10 @@ mod ffi_probe {
         rendezvous_mode: c_uchar,
         wifi_ssid: *const c_char,
         wifi_password: *const c_char,
+        has_on_network_target: bool,
+        on_network_address: *const c_char,
+        on_network_port: c_ushort,
+        on_network_setup_pin_code: u32,
     }
 
     #[repr(C)]
@@ -1020,6 +1025,13 @@ mod ffi_probe {
             .context("encoding Matter commissioning SSID")?;
         let wifi_password = CString::new(request.wifi_credentials.password.as_str())
             .context("encoding Matter commissioning password")?;
+        let on_network_address = request
+            .on_network_target
+            .as_ref()
+            .map(|target| CString::new(target.address.as_str()))
+            .transpose()
+            .context("encoding phone-provided Matter address")?;
+        let on_network_target = request.on_network_target.as_ref();
 
         let ffi_request = ChipBridgeCommissionRequest {
             setup_payload: setup_payload.as_ptr(),
@@ -1027,6 +1039,12 @@ mod ffi_probe {
             rendezvous_mode: map_rendezvous_mode(request.rendezvous),
             wifi_ssid: wifi_ssid.as_ptr(),
             wifi_password: wifi_password.as_ptr(),
+            has_on_network_target: on_network_target.is_some(),
+            on_network_address: on_network_address
+                .as_ref()
+                .map_or(std::ptr::null(), |address| address.as_ptr()),
+            on_network_port: on_network_target.map_or(0, |target| target.port),
+            on_network_setup_pin_code: on_network_target.map_or(0, |target| target.setup_pin_code),
         };
         let mut ffi_device = zeroed_device();
         let mut error_buffer = [0 as c_char; ERROR_BUFFER_SIZE];

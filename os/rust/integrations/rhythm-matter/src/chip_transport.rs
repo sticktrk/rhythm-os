@@ -2298,6 +2298,7 @@ mod tests {
                 ssid: "wifi".to_string(),
                 password: "secret".to_string(),
             },
+            on_network_target: None,
         }
     }
 
@@ -2506,6 +2507,7 @@ mod tests {
                 ssid: "wifi".to_string(),
                 password: "secret".to_string(),
             },
+            on_network_target: None,
         }
     }
 

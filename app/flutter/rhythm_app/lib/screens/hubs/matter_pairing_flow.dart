@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 import '../../providers/home_provider.dart';
 import '../../providers/server_sync_provider.dart';
 import '../../services/hue/hue_service_locator.dart';
+import '../../services/phone_matter_commissioner.dart';
 import '../../services/server_endpoint_resolver.dart';
 import '../../widgets/device_detail_sheet.dart';
 import '../../widgets/blocking_operation_overlay.dart';
@@ -267,5 +268,9 @@ Future<MatterAddMethod?> _resolveMatterAddMethod(
   MatterAddMethod? preferredMethod,
 }) async {
   if (preferredMethod != null) return preferredMethod;
+  if (syncProvider.canCommissionMatterWithPhone &&
+      await const PhoneMatterCommissioner().isSupported()) {
+    return MatterAddMethod.phoneCommissioning;
+  }
   return syncProvider.canAddMatterDevice ? MatterAddMethod.automatic : null;
 }

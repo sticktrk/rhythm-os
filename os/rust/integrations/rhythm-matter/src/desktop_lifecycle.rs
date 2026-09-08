@@ -303,8 +303,10 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
     }
 
     fn api_capabilities(&self) -> rhythm_os::hub::HubIntegrationCapability {
-        let mut device_onboarding_methods =
-            vec![rhythm_os::hub::DEVICE_ONBOARDING_METHOD_MATTER_ON_NETWORK_SETUP_CODE.to_string()];
+        let mut device_onboarding_methods = vec![
+            rhythm_os::hub::DEVICE_ONBOARDING_METHOD_MATTER_ON_NETWORK_SETUP_CODE.to_string(),
+            rhythm_os::hub::DEVICE_ONBOARDING_METHOD_MATTER_PHONE_COMMISSIONING_HANDOFF.to_string(),
+        ];
         if !cfg!(target_os = "macos") {
             device_onboarding_methods.push(
                 rhythm_os::hub::DEVICE_ONBOARDING_METHOD_MATTER_BLE_WIFI_COMMISSIONING.to_string(),
@@ -1128,6 +1130,11 @@ mod tests {
             .iter()
             .any(|method| method
                 == rhythm_os::hub::DEVICE_ONBOARDING_METHOD_MATTER_ON_NETWORK_SETUP_CODE));
+        assert!(capabilities
+            .device_onboarding_methods
+            .iter()
+            .any(|method| method
+                == rhythm_os::hub::DEVICE_ONBOARDING_METHOD_MATTER_PHONE_COMMISSIONING_HANDOFF));
 
         assert!(integration
             .credentials_interceptor(&state, &serde_json::json!({ "hub_type": "hue" }))
@@ -1249,6 +1256,7 @@ mod tests {
                 ssid: "wifi".to_string(),
                 password: "secret".to_string(),
             },
+            on_network_target: None,
         };
 
         assert_eq!(transport.commission_light(&request).unwrap().node_id, 123);

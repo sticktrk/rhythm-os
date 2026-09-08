@@ -556,6 +556,22 @@ pub fn handle_matter_bulb_test_report(state: &SharedState, body: &Value) -> ApiR
     handle_matter_audition_report(state, body)
 }
 
+/// Secret-bearing response: only the owner-authenticated, no-store route may expose it.
+pub fn handle_get_commissioning_wifi(state: &SharedState) -> ApiResponse {
+    match crate::provisioning::load_accessory_wifi_credentials(state) {
+        Ok(Some(wifi)) => ApiResponse::json_ok(
+            serde_json::json!({
+                "ssid": wifi.ssid,
+                "password": wifi.password,
+            })
+            .to_string(),
+        ),
+        Ok(None) => ApiResponse::not_found("No saved Wi-Fi credentials are available"),
+        // Platform/storage errors may contain network configuration. Never echo them.
+        Err(_) => ApiResponse::server_error("Saved Wi-Fi credentials are unavailable"),
+    }
+}
+
 pub fn handle_get_matter_setup_code(state: &SharedState, device_id: &str) -> ApiResponse {
     let loader = match state.lock() {
         Ok(state) => state.load_pairing_recovery_fn.clone(),
@@ -3809,6 +3825,7 @@ impl PairingAttemptGuard {
 fn matter_pairing_uses_bluetooth(params: &serde_json::Value) -> bool {
     match params.get("rendezvous").and_then(serde_json::Value::as_str) {
         Some("on_network") => false,
+        Some("phone") => false,
         Some(_) => true,
         None => params
             .get("setup_payload")
@@ -4030,7 +4047,12 @@ pub fn handle_pair_device_with_context(
     }
 
     let durable_reconciliation = request.hub_type == crate::hub::HubType::LOCAL_BLE
-        || (request.hub_type == crate::hub::HubType::MATTER
+        || ((request.hub_type == crate::hub::HubType::MATTER
+            || request
+                .params
+                .get("stage")
+                .and_then(serde_json::Value::as_str)
+                == Some("adopt"))
             && request.session_id.is_some()
             && state
                 .lock()
@@ -4216,13 +4238,13 @@ pub fn handle_pair_device_with_context(
 
     match start_fn(state, &request.hub_type, params, request_context) {
         Ok(mut session) => {
-            if request.hub_type == crate::hub::HubType::LOCAL_BLE {
+            if durable_reconciliation {
                 if !matches!(
                     session.status,
                     crate::pairing::PairingStatus::Complete | crate::pairing::PairingStatus::Failed
                 ) {
                     return ApiResponse::server_error(
-                        "Local Bluetooth pairing returned a non-terminal result",
+                        "Device pairing returned a non-terminal result",
                     );
                 }
                 session = match crate::pairing::sanitized_terminal_session_for_delivery(
@@ -4231,12 +4253,12 @@ pub fn handle_pair_device_with_context(
                 ) {
                     Ok(session) => session,
                     Err(error) => {
-                        log::error!(target: "pair", "Local Bluetooth integration returned an invalid terminal result: {error:#}");
+                        log::error!(target: "pair", "Integration returned an invalid terminal result: {error:#}");
                         // A successful store activation still owns an outbox;
                         // the status path can reconstruct a valid result from
                         // that authority without exposing malformed output.
                         return ApiResponse::server_error(
-                            "Local Bluetooth pairing returned an invalid final result",
+                            "Device pairing returned an invalid final result",
                         );
                     }
                 };
@@ -4363,7 +4385,7 @@ pub fn handle_pair_device_with_context(
                 warnings: Vec::new(),
                 details: None,
             };
-            if request.hub_type == crate::hub::HubType::LOCAL_BLE {
+            if durable_reconciliation {
                 failed_session = match crate::pairing::sanitized_terminal_session_for_delivery(
                     &failed_session,
                     &request.hub_type,
@@ -5076,6 +5098,57 @@ mod tests {
     }
 
     #[test]
+    fn commissioning_wifi_uses_persisted_credentials_then_platform_without_echoing_errors() {
+        let (state, path) = pairing_test_state("commissioning-wifi");
+        assert_eq!(handle_get_commissioning_wifi(&state).status, 404);
+        state
+            .lock()
+            .unwrap()
+            .commissioning_wifi_credentials_provider = Some(Arc::new(|| {
+            Ok(Some(crate::provisioning::WifiCredentials {
+                ssid: "platform-network".into(),
+                password: "platform-secret".into(),
+            }))
+        }));
+        assert!(handle_get_commissioning_wifi(&state)
+            .body
+            .contains("platform-secret"));
+        let stored = crate::provisioning::WifiCredentials {
+            ssid: "saved-network".into(),
+            password: "saved-secret".into(),
+        };
+        state
+            .lock()
+            .unwrap()
+            .storage
+            .as_ref()
+            .unwrap()
+            .save_commissioning_wifi_credentials(&stored)
+            .unwrap();
+        let response = handle_get_commissioning_wifi(&state);
+        assert_eq!(response.status, 200);
+        assert!(response.body.contains("saved-secret"));
+        assert!(!response.body.contains("platform-secret"));
+        // Reopening the existing store retains its normal authority; no new persisted state.
+        state.lock().unwrap().storage = Some(Arc::new(
+            crate::storage::FileStorage::new(path.to_str().unwrap()).unwrap(),
+        ));
+        assert!(handle_get_commissioning_wifi(&state)
+            .body
+            .contains("saved-secret"));
+        state.lock().unwrap().storage = None;
+        state
+            .lock()
+            .unwrap()
+            .commissioning_wifi_credentials_provider =
+            Some(Arc::new(|| anyhow::bail!("sensitive-platform-secret")));
+        let error = handle_get_commissioning_wifi(&state);
+        assert_eq!(error.status, 500);
+        assert!(!error.body.contains("sensitive-platform-secret"));
+        let _ = fs::remove_dir_all(path);
+    }
+
+    #[test]
     fn matter_setup_code_handler_returns_only_integration_owned_secret() {
         let state = test_state();
         state.lock().unwrap().load_pairing_recovery_fn =
@@ -5740,6 +5813,69 @@ mod tests {
     }
 
     #[test]
+    fn staged_adoption_reuses_the_shared_receipt_without_persisting_credentials() {
+        let (state, path) = pairing_test_state("generic-adoption-receipt");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        state.lock().unwrap().start_pairing_fn = Some(Arc::new(move |_, hub_type, params, _| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            let device = (params["stage"] == "adopt").then(|| PairedDeviceInfo {
+                device_id: "fixture-light-1".into(),
+                name: "Fixture strip".into(),
+                device_type: rhythm_core::DeviceType::Light,
+                manufacturer: None,
+                model: None,
+            });
+            Ok(PairingSession {
+                hub_type: hub_type.to_string(),
+                status: PairingStatus::Complete,
+                device,
+                devices: Vec::new(),
+                error: None,
+                failure_stage: None,
+                warnings: Vec::new(),
+                details: Some(
+                    json!({"private_key": "synthetic-lan-secret", "stage": params["stage"]}),
+                ),
+            })
+        }));
+        let request = PairingRequest {
+            hub_type: "future_wifi".into(),
+            session_id: Some("generic-phone-adopt".into()),
+            params: json!({"stage": "adopt", "rendezvous": "phone", "local_key": "synthetic-lan-secret"}),
+        };
+        let first = handle_pair_device(&state, &request);
+        assert_eq!(first.status, 200, "{}", first.body);
+        assert!(!first.body.contains("synthetic-lan-secret"));
+        assert_eq!(handle_pair_device(&state, &request).body, first.body);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let restarted = test_state();
+        restarted.lock().unwrap().storage = Some(Arc::new(
+            crate::storage::FileStorage::new(path.to_str().unwrap()).unwrap(),
+        ));
+        let receipt = handle_get_pair_device(&restarted, "generic-phone-adopt");
+        assert_eq!(receipt.status, 200);
+        assert!(receipt.body.contains("fixture-light-1"));
+        assert!(!receipt.body.contains("synthetic-lan-secret"));
+        // Discovery/provisioning still return their transient protocol details;
+        // they are not terminal device receipts and must not reserve durable IDs.
+        let discovery = PairingRequest {
+            session_id: Some("generic-discover".into()),
+            params: json!({"stage": "discover"}),
+            ..request.clone()
+        };
+        let response = handle_pair_device(&state, &discovery);
+        assert_eq!(response.status, 200);
+        assert!(response.body.contains("synthetic-lan-secret"));
+        assert!(
+            crate::pairing::lookup_pairing_result(&state, "generic-discover")
+                .unwrap()
+                .is_none()
+        );
+        fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
     fn an_overtaking_get_prevents_the_later_post_from_starting_work() {
         let (state, path) = pairing_test_state("overtaken-get");
         let calls = Arc::new(AtomicUsize::new(0));
@@ -6136,9 +6272,30 @@ mod tests {
 
         assert_eq!(response.status, 200);
         assert!(activity.lock().unwrap().is_empty());
-        let state = state.lock().unwrap();
-        assert!(!state.pairing_in_progress.contains("matter"));
-        assert!(state
+        let state_guard = state.lock().unwrap();
+        assert!(!state_guard.pairing_in_progress.contains("matter"));
+        assert!(state_guard
+            .pairing_in_progress
+            .contains("appliance_bluetooth_adapter"));
+        drop(state_guard);
+
+        let response = handle_pair_device(
+            &state,
+            &PairingRequest {
+                hub_type: "matter".to_string(),
+                session_id: None,
+                params: json!({
+                    "setup_payload": "34970112332",
+                    "rendezvous": "phone",
+                }),
+            },
+        );
+
+        assert_eq!(response.status, 200);
+        assert!(activity.lock().unwrap().is_empty());
+        let state_guard = state.lock().unwrap();
+        assert!(!state_guard.pairing_in_progress.contains("matter"));
+        assert!(state_guard
             .pairing_in_progress
             .contains("appliance_bluetooth_adapter"));
     }

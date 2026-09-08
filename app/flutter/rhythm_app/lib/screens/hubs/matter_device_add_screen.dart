@@ -9,9 +9,11 @@ import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 import '../../providers/server_sync_provider.dart';
 import '../../services/analytics_service.dart';
+import '../../services/device_commissioning_flow.dart';
 import '../../services/demo_server_api.dart';
 import '../../services/hue/hue_service_locator.dart';
 import '../../services/matter_setup_payload.dart';
+import '../../services/phone_matter_commissioner.dart';
 import '../../widgets/solar_orbit.dart';
 import '../../widgets/stage_timeline.dart';
 import 'matter_add_method.dart';
@@ -54,6 +56,7 @@ class MatterDeviceAddScreen extends StatefulWidget {
     this.analyticsSource = 'unknown',
     this.journeyId,
     @visibleForTesting this.pairingApi,
+    @visibleForTesting this.phoneCommissioner,
   });
 
   final HubEndpoint endpoint;
@@ -64,6 +67,7 @@ class MatterDeviceAddScreen extends StatefulWidget {
   final String analyticsSource;
   final String? journeyId;
   final RhythmMatterApi? pairingApi;
+  final PhoneMatterCommissioner? phoneCommissioner;
 
   static Future<MatterDevicePairingResult?> show(
     BuildContext context, {
@@ -126,14 +130,17 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
   late final AnimationController _pulseController;
   late final AnimationController _sweepController;
   late final RhythmMatterApi _pairingApi;
+  late final PhoneMatterCommissioner _phoneCommissioner;
+  late MatterAddMethod _activeAddMethod;
   late final String _journeyId;
-  late String _pairingSessionId;
+  late final DeviceCommissioningFlow<RhythmMatterPairingResponse> _flow;
+  String get _pairingSessionId => _flow.sessionId;
+  int get _attemptNumber => _flow.attemptNumber;
 
   _PairingPhase _phase = _PairingPhase.input;
   String? _errorText;
   bool _hasFailedOnce = false;
-  bool _pairingRequestInFlight = false;
-  int _attemptNumber = 0;
+  bool get _pairingRequestInFlight => _flow.isRunning;
   String _inputMethod = 'manual_code';
   StreamSubscription<RhythmPairingProgress>? _progressSub;
   RhythmPairingProgress? _latestProgress;
@@ -146,9 +153,12 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
           baseUrl: widget.endpoint.baseUrl,
           authToken: widget.authToken,
         );
+    _phoneCommissioner =
+        widget.phoneCommissioner ?? const PhoneMatterCommissioner();
+    _activeAddMethod = widget.addMethod;
     _journeyId = widget.journeyId ??
         'matter-pair-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}';
-    _pairingSessionId = _newPairingSessionId();
+    _flow = DeviceCommissioningFlow(readReceipt: _readReceipt);
     _pulseController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 2000),
@@ -179,6 +189,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     _pulseController.dispose();
     _sweepController.dispose();
     _progressSub?.cancel();
+    _flow.dispose();
     super.dispose();
   }
 
@@ -217,15 +228,12 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       isLikelyMatterSetupPayload(_setupPayloadController.text);
 
   bool get _usesWifiCommissioningPreflight =>
-      widget.addMethod.requiresWifiCommissioningPreflight;
+      _activeAddMethod.requiresWifiCommissioningPreflight;
 
   String get _sessionShortId {
     final tail = _pairingSessionId.split('-').last;
     return tail.length > 8 ? tail.substring(tail.length - 8) : tail;
   }
-
-  String _newPairingSessionId() =>
-      'matter-pair-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}-$_attemptNumber';
 
   String get _phaseTag => switch (_phase) {
         _PairingPhase.input => '01 / CAPTURE',
@@ -267,23 +275,39 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     await _startPairing();
   }
 
-  Future<void> _startPairing() async {
+  Future<void> _startPairing({MatterAddMethod? retryMethod}) async {
     final setupPayload = _setupPayload;
     if (!isLikelyMatterSetupPayload(setupPayload) || _pairingRequestInFlight) {
       return;
     }
 
-    _pairingRequestInFlight = true;
-    _attemptNumber += 1;
-    _pairingSessionId = _newPairingSessionId();
-    AnalyticsService().logMatterPairingAttempted(
-      journeyId: _journeyId,
-      source: widget.analyticsSource,
-      inputMethod: _inputMethod,
-      addMethod: _analyticsAddMethod,
-      attemptNumber: _attemptNumber,
-    );
+    final start = await _flow.begin();
+    if (!mounted) return;
+    if (start.state == CommissioningStartState.recovered) {
+      _handlePairingResponse(start.result!);
+      return;
+    }
+    if (start.state == CommissioningStartState.inactive) return;
+    if (start.state != CommissioningStartState.ready) {
+      _showPairingError(
+        start.state == CommissioningStartState.pending
+            ? 'The Rhythm Box is still finishing the previous attempt.'
+            : 'The previous pairing result could not be checked.',
+        detail:
+            'Keep the device powered on, check the connection to your Rhythm Box, and try again.',
+        failureStage: 'handoff',
+      );
+      return;
+    }
     try {
+      if (retryMethod != null) _activeAddMethod = retryMethod;
+      AnalyticsService().logMatterPairingAttempted(
+        journeyId: _journeyId,
+        source: widget.analyticsSource,
+        inputMethod: _inputMethod,
+        addMethod: _analyticsAddMethod,
+        attemptNumber: _attemptNumber,
+      );
       FocusScope.of(context).unfocus();
       HapticFeedback.mediumImpact();
       _subscribeToPairingProgress();
@@ -320,79 +344,122 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         }
       }
 
-      final result = await _pairingApi.pairDevice(
-        setupPayload: setupPayload,
-        rendezvous: widget.addMethod.rendezvous,
-        network: 'wifi',
-        receiveTimeout: _pairingRequestTimeout,
-        sessionId: _pairingSessionId,
-      );
+      if (widget.addMethod.usesPhoneCommissioner) {
+        _flow.expectReceipt();
+      }
+      final result = _activeAddMethod.usesPhoneCommissioner
+          ? await _phoneCommissioner.commission(
+              baseUrl: widget.endpoint.baseUrl,
+              authToken: widget.authToken,
+              originalSetupPayload: setupPayload,
+              sessionId: _pairingSessionId,
+            )
+          : await _pairingApi.pairDevice(
+              setupPayload: setupPayload,
+              rendezvous: _activeAddMethod.rendezvous,
+              network: 'wifi',
+              receiveTimeout: _pairingRequestTimeout,
+              sessionId: _pairingSessionId,
+            );
 
-      if (!mounted) return;
-
-      if (result.httpStatus != null && result.httpStatus != 200) {
+      if (result.status == 'failed' ||
+          (result.status == 'complete' &&
+              (result.device?['device_id'] as String?)?.isNotEmpty == true)) {
+        _flow.acceptTerminalResponse();
+      }
+      _handlePairingResponse(result);
+    } on PhoneMatterCommissioningException catch (error) {
+      if (mounted) {
         _showPairingError(
-          'The server rejected the pairing request.',
-          detail: result.error,
-          failureStage: 'server_rejected',
+          'Phone commissioning did not complete.',
+          detail: error.message,
+          failureStage: error.stage,
         );
-        return;
       }
-
-      if (result.status == 'failed') {
-        _showPairingError(
-          'Pairing failed.',
-          detail: _userFacingMatterPairingDetail(result.error),
-          failureStage: 'commissioning',
-          recoveryAction: result.recoveryAction,
-        );
-        return;
-      }
-
-      final device = result.device;
-      if (result.status == 'complete' && device != null) {
-        final nativeDeviceId = device['device_id'] as String? ?? '';
-        if (nativeDeviceId.isEmpty) {
-          _showPairingError(
-            'Pairing completed, but the server returned no device ID.',
-            failureStage: 'invalid_response',
-          );
-          return;
-        }
-
-        _logPairingCompleted(
-          outcome: 'succeeded',
-          recoveryAction: result.recoveryAction,
-        );
-        HapticFeedback.heavyImpact();
-        Navigator.of(context).pop(
-          MatterDevicePairingResult(
-            nativeDeviceId: nativeDeviceId,
-            name: device['name'] as String? ?? 'Device',
-            deviceType: device['device_type'] as String? ?? 'light',
-            manufacturer: device['manufacturer'] as String?,
-            model: device['model'] as String?,
-            warnings: result.warnings,
-          ),
-        );
-        return;
-      }
-
-      _showPairingError(
-        'Pairing did not complete.',
-        detail:
-            result.error ?? 'Unexpected status: ${result.status ?? 'unknown'}',
-        failureStage: 'unexpected_status',
-      );
     } catch (_) {
-      _logPairingCompleted(
-        outcome: 'failed',
-        failureStage: 'request_exception',
-      );
-      rethrow;
+      if (mounted) {
+        _showPairingError(
+          'Pairing request failed.',
+          detail: 'Check the connection to your Rhythm Box and try again.',
+          failureStage: 'request_exception',
+        );
+      }
     } finally {
-      _pairingRequestInFlight = false;
+      _flow.end();
     }
+  }
+
+  Future<CommissioningReceipt<RhythmMatterPairingResponse>?> _readReceipt(
+    String sessionId,
+  ) async {
+    final receipt = await _pairingApi.getPairingResult(sessionId);
+    final state = switch (receipt?.status) {
+      'complete' => CommissioningReceiptState.complete,
+      'failed' => CommissioningReceiptState.failed,
+      'not_found' => CommissioningReceiptState.notFound,
+      'pending' => CommissioningReceiptState.pending,
+      _ => null,
+    };
+    return state == null ? null : CommissioningReceipt(state, result: receipt);
+  }
+
+  void _handlePairingResponse(RhythmMatterPairingResponse result) {
+    if (!mounted) return;
+
+    if (result.httpStatus != null && result.httpStatus != 200) {
+      _showPairingError(
+        'The server rejected the pairing request.',
+        detail: result.error,
+        failureStage: 'server_rejected',
+      );
+      return;
+    }
+
+    if (result.status == 'failed') {
+      _showPairingError(
+        'Pairing failed.',
+        detail: _userFacingMatterPairingDetail(result.error),
+        failureStage: 'commissioning',
+        recoveryAction: result.recoveryAction,
+      );
+      return;
+    }
+
+    final device = result.device;
+    if (result.status == 'complete' && device != null) {
+      final nativeDeviceId = device['device_id'] as String? ?? '';
+      if (nativeDeviceId.isEmpty) {
+        _showPairingError(
+          'Pairing completed, but the server returned no device ID.',
+          failureStage: 'invalid_response',
+        );
+        return;
+      }
+
+      _logPairingCompleted(
+        outcome: 'succeeded',
+        recoveryAction: result.recoveryAction,
+      );
+      HapticFeedback.heavyImpact();
+      Navigator.of(context).pop(
+        MatterDevicePairingResult(
+          nativeDeviceId: nativeDeviceId,
+          name: device['name'] as String? ?? 'Device',
+          deviceType: device['device_type'] as String? ?? 'light',
+          manufacturer: device['manufacturer'] as String?,
+          model: device['model'] as String?,
+          warnings: result.warnings,
+        ),
+      );
+      return;
+    }
+
+    _showPairingError(
+      'Pairing did not complete.',
+      detail:
+          result.error ?? 'Unexpected status: ${result.status ?? 'unknown'}',
+      failureStage: 'unexpected_status',
+    );
   }
 
   String? _userFacingMatterPairingDetail(String? detail) {
@@ -447,8 +514,9 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     );
   }
 
-  String get _analyticsAddMethod => switch (widget.addMethod) {
+  String get _analyticsAddMethod => switch (_activeAddMethod) {
         MatterAddMethod.automatic => 'automatic',
+        MatterAddMethod.phoneCommissioning => 'phone_commissioning',
         MatterAddMethod.onNetworkSetupCode => 'on_network_setup_code',
         MatterAddMethod.bleWifiCommissioning => 'ble_wifi_commissioning',
       };
@@ -497,6 +565,10 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       _phase = _PairingPhase.input;
       _errorText = null;
     });
+  }
+
+  void _retryFromRhythmBox() {
+    _startPairing(retryMethod: MatterAddMethod.automatic);
   }
 
   @override
@@ -560,7 +632,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
               const SizedBox(width: 12),
               Expanded(
                 child: Text(
-                  widget.addMethod.actionLabel.toUpperCase(),
+                  _activeAddMethod.actionLabel.toUpperCase(),
                   style: const TextStyle(
                     color: CelestialColors.textPrimary,
                     fontSize: 12,
@@ -620,13 +692,15 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
           accent: _teal,
           warning: _amber,
           helperText: _setupPayloadController.text.isEmpty
-              ? (widget.addMethod == MatterAddMethod.onNetworkSetupCode
+              ? (_activeAddMethod == MatterAddMethod.onNetworkSetupCode
                   ? 'Paste the new setup code from the Matter app that '
                       'already controls this device.'
                   : 'Paste the setup payload or the code printed on the '
                       'device.')
               : (_looksLikeMatterPayload
-                  ? 'Ready to send to the server.'
+                  ? (_activeAddMethod.usesPhoneCommissioner
+                      ? 'Ready. Keep this phone near the device for setup.'
+                      : 'Ready to send to the server.')
                   : 'Enter a Matter QR payload or the numeric Matter setup '
                       'code printed on the device.'),
           isValidLooking: _looksLikeMatterPayload,
@@ -645,7 +719,8 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
   }
 
   Widget _buildDeviceReadinessCard() {
-    final isOnNetwork = widget.addMethod == MatterAddMethod.onNetworkSetupCode;
+    final isOnNetwork = _activeAddMethod == MatterAddMethod.onNetworkSetupCode;
+    final usesPhone = _activeAddMethod.usesPhoneCommissioner;
     return Container(
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
@@ -675,7 +750,11 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  isOnNetwork ? 'Open Matter pairing mode' : 'Ready the device',
+                  isOnNetwork
+                      ? 'Open Matter pairing mode'
+                      : usesPhone
+                          ? 'Keep this phone nearby'
+                          : 'Ready the device',
                   style: TextStyle(
                     color: CelestialColors.textPrimary,
                     fontSize: 16,
@@ -695,12 +774,20 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
                               'controller,” then use the new Matter code it '
                               'provides. Keep the device powered and on the '
                               'same home network.')
-                      : (_hasFailedOnce
-                          ? 'Put the device back in pairing mode, then try its '
-                              'setup code again. Follow the device maker’s '
-                              'reset instructions if needed.'
-                          : 'Keep the device powered on and in pairing mode '
-                              'while Rhythm connects to it.'),
+                      : usesPhone
+                          ? (_hasFailedOnce
+                              ? 'Reopen the device’s pairing window, keep this '
+                                  'phone beside it, and try again. You will use '
+                                  'the same Matter code.'
+                              : 'Keep this phone beside the powered device. '
+                                  'Your phone handles Bluetooth and network '
+                                  'setup; the Rhythm Box finishes automatically.')
+                          : (_hasFailedOnce
+                              ? 'Put the device back in pairing mode, then try its '
+                                  'setup code again. Follow the device maker’s '
+                                  'reset instructions if needed.'
+                              : 'Keep the device powered on and in pairing mode '
+                                  'while Rhythm connects to it.'),
                   style: TextStyle(
                     color:
                         CelestialColors.textSecondary.withValues(alpha: 0.78),
@@ -757,9 +844,12 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         const SizedBox(height: 6),
         Text(
           activeMessage ??
-              switch (widget.addMethod) {
+              switch (_activeAddMethod) {
                 MatterAddMethod.automatic =>
                   'Keep this screen open while Rhythm adds the device.',
+                MatterAddMethod.phoneCommissioning =>
+                  'Keep this phone near the device while it joins the network '
+                      'and the Rhythm Box finishes pairing.',
                 MatterAddMethod.onNetworkSetupCode =>
                   'Keep this screen open while Rhythm finds the device and '
                       'adds it.',
@@ -785,20 +875,24 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
             ),
           ),
           child: StageTimeline(
-            stages: const [
+            stages: [
               StageTimelineItem(
-                label: 'Sending request',
-                icon: Icons.outbox_outlined,
+                label: _activeAddMethod.usesPhoneCommissioner
+                    ? 'Phone setup'
+                    : 'Sending request',
+                icon: _activeAddMethod.usesPhoneCommissioner
+                    ? Icons.phone_android_outlined
+                    : Icons.outbox_outlined,
               ),
-              StageTimelineItem(
+              const StageTimelineItem(
                 label: 'Searching for device',
                 icon: Icons.radar_outlined,
               ),
-              StageTimelineItem(
+              const StageTimelineItem(
                 label: 'Pairing',
                 icon: Icons.verified_user_outlined,
               ),
-              StageTimelineItem(
+              const StageTimelineItem(
                 label: 'Finalizing',
                 icon: Icons.check_circle_outline,
               ),
@@ -947,6 +1041,13 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
           enabled: true,
           onTap: _resetToInput,
         ),
+        if (_activeAddMethod.usesPhoneCommissioner) ...[
+          const SizedBox(height: 12),
+          _SecondaryGhostButton(
+            label: 'Try from Rhythm Box',
+            onTap: _retryFromRhythmBox,
+          ),
+        ],
         const SizedBox(height: 12),
         _SecondaryGhostButton(
           label: 'Close',

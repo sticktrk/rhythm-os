@@ -24,7 +24,8 @@ enum NearbyBleFamilyKind {
 /// Apart from Hue's built-in scan, families are described entirely by the
 /// appliance's advertised device profiles: the name people see, the Bluetooth
 /// service UUIDs the phone scans for, and the cloud broker to call. The app
-/// carries no vendor-specific knowledge.
+/// selects an implemented provisioning protocol from explicit metadata rather
+/// than inferring one from a manufacturer or device name.
 class NearbyBleFamily {
   const NearbyBleFamily({
     required this.id,
@@ -35,6 +36,7 @@ class NearbyBleFamily {
     required this.hint,
     this.profileId,
     this.cloudBroker,
+    this.phoneProvisioningProtocol,
   });
 
   /// Stable analytics/UI key: the profile id, or `hue_ble` for the built-in.
@@ -50,6 +52,7 @@ class NearbyBleFamily {
   final String hint;
   final String? profileId;
   final String? cloudBroker;
+  final String? phoneProvisioningProtocol;
 
   static const hueBle = NearbyBleFamily(
     id: 'hue_ble',
@@ -75,6 +78,7 @@ class NearbyBleFamily {
       hint: 'A device in setup mode. Rhythm joins it to Wi-Fi for you.',
       profileId: profile.id,
       cloudBroker: profile.cloudBroker,
+      phoneProvisioningProtocol: profile.phoneProvisioningProtocol,
     );
   }
 

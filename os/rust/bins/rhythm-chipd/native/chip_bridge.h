@@ -34,6 +34,10 @@ struct rhythm_chip_bridge_commission_request
     uint8_t rendezvous_mode;
     const char * wifi_ssid;
     const char * wifi_password;
+    bool has_on_network_target;
+    const char * on_network_address;
+    uint16_t on_network_port;
+    uint32_t on_network_setup_pin_code;
 };
 
 struct rhythm_chip_bridge_device

@@ -1775,7 +1775,11 @@ mod tests {
         let params = serde_json::json!({
             "setup_payload": "MT:SECRET",
             "network": "wifi",
-            "rendezvous": "auto",
+            "rendezvous": "phone",
+            "handoff_setup_payload": "MT:TRANSIENT-HANDOFF",
+            "handoff_address": "192.0.2.10",
+            "handoff_port": 5540,
+            "handoff_passcode": 20202021,
             "session_id": "abc",
         });
         let session = PairingSession {
@@ -1791,7 +1795,7 @@ mod tests {
         let entry = pairing_history_entry_for_pair("matter", &params, &session);
         assert_eq!(entry.kind, "pair");
         assert_eq!(entry.network.as_deref(), Some("wifi"));
-        assert_eq!(entry.rendezvous.as_deref(), Some("auto"));
+        assert_eq!(entry.rendezvous.as_deref(), Some("phone"));
         assert_eq!(entry.status, "failed");
         assert_eq!(entry.error.as_deref(), Some("BLE timeout"));
         let json = serde_json::to_string(&entry).unwrap();
@@ -1799,6 +1803,9 @@ mod tests {
             !json.contains("SECRET"),
             "setup payload must never reach the history: {json}"
         );
+        assert!(!json.contains("TRANSIENT-HANDOFF"));
+        assert!(!json.contains("192.0.2.10"));
+        assert!(!json.contains("20202021"));
     }
 
     #[test]
@@ -1879,6 +1886,7 @@ mod tests {
                 onboarding_methods: vec!["local_ble_qr".to_string()],
                 nearby_service_uuids: Vec::new(),
                 cloud_broker: None,
+                phone_provisioning_protocol: None,
             }],
             supports_unpairing: true,
             unpairable_device_types: vec!["button".to_string()],

@@ -4,11 +4,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
+import 'package:uuid/uuid.dart';
 
 import '../../providers/server_sync_provider.dart';
 import '../../services/analytics_service.dart';
+import '../../services/device_commissioning_flow.dart';
 import '../../services/device_cloud_broker_service.dart';
 import '../../services/nearby_ble_discovery_service.dart';
+import '../../services/phone_ble_wifi_service.dart';
+import '../../widgets/commissioning_wifi_dialog.dart';
+
+export '../../services/phone_ble_wifi_service.dart'
+    show BleWifiDiscoveredCandidate;
 import '../../widgets/solar_orbit.dart';
 import '../../widgets/stage_timeline.dart';
 
@@ -38,18 +45,6 @@ class BleWifiDevicePairingResult {
   final List<String> warnings;
 }
 
-class BleWifiDiscoveredCandidate {
-  const BleWifiDiscoveredCandidate({required this.dsn, required this.address});
-
-  /// Manufacturer serial read over Bluetooth; shown only as a short suffix.
-  final String dsn;
-  final String address;
-
-  String get dsnSuffix => dsn.length <= 4
-      ? dsn.toUpperCase()
-      : dsn.substring(dsn.length - 4).toUpperCase();
-}
-
 typedef BleWifiPairingRequest = Future<Map<String, dynamic>?> Function({
   required String hubType,
   required Map<String, dynamic> params,
@@ -66,8 +61,8 @@ abstract final class BleWifiPairingStage {
 }
 
 /// Drives staged Bluetooth-to-Wi-Fi onboarding for any family the appliance
-/// advertises: the Rhythm Box finds the device and joins it to Wi-Fi over
-/// Bluetooth, the app brokers registration through the family's cloud
+/// advertises: supported phones find the device and join it to Wi-Fi over
+/// Bluetooth using the Box’s saved credentials; older profiles use the Box, the app brokers registration through the family's cloud
 /// broker, and the Box adopts the LAN credentials only after a signed
 /// readback. Nothing here is specific to one manufacturer.
 class BleWifiDeviceAddScreen extends StatefulWidget {
@@ -78,6 +73,9 @@ class BleWifiDeviceAddScreen extends StatefulWidget {
     this.journeyId,
     this.inputMethod = 'nearby_sheet',
     @visibleForTesting this.pairingRequest,
+    @visibleForTesting this.phoneService,
+    @visibleForTesting this.pairingResult,
+    @visibleForTesting this.wifiCredentials,
     @visibleForTesting this.cloudService,
     @visibleForTesting this.progressEvents,
     @visibleForTesting this.completeRetryDelay = const Duration(seconds: 5),
@@ -89,6 +87,9 @@ class BleWifiDeviceAddScreen extends StatefulWidget {
   final String? journeyId;
   final String inputMethod;
   final BleWifiPairingRequest? pairingRequest;
+  final PhoneBleWifiService? phoneService;
+  final Future<RhythmPairingResultStatus?> Function(String)? pairingResult;
+  final Future<RhythmCommissioningWifi?> Function()? wifiCredentials;
   final DeviceCloudBrokerService? cloudService;
   final Stream<RhythmPairingProgress>? progressEvents;
   final Duration completeRetryDelay;
@@ -130,22 +131,35 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
     StageTimelineItem(label: 'Add to Rhythm', icon: Icons.light_mode_rounded),
   ];
 
-  late final String _journeyId = widget.journeyId ?? 'ble-wifi-pair';
+  late final String _journeyId =
+      widget.journeyId ?? 'ble-wifi-${const Uuid().v4()}';
   StreamSubscription<RhythmPairingProgress>? _progressSubscription;
   String? _activeSessionId;
-  int _attemptNumber = 0;
+  late final _flow = DeviceCommissioningFlow<BleWifiDevicePairingResult>(
+    readReceipt: _readReceipt,
+  );
+  int get _attemptNumber => _flow.attemptNumber;
   int _stageIndex = 0;
   String? _message;
-  bool _running = false;
+  bool get _running => _flow.isRunning;
   bool _failed = false;
   bool _flowCompleted = false;
   String? _error;
 
   /// Retained across retries so an already-provisioned device is never sent a
   /// second Wi-Fi payload; only registration and adoption are repeated.
+  late final PhoneBleWifiService? _phoneService = PhoneBleWifiServices.create(
+      _family.phoneProvisioningProtocol,
+      service: widget.phoneService);
+  bool _useServer = false;
+  PhoneBleWifiService? get _phone => _useServer ? null : _phoneService;
+  RhythmCommissioningWifi? _wifi;
+  String get _commissioner => _phone == null ? 'server' : 'phone';
+
   String? _retainedDsn;
   String? _retainedTicket;
   bool _provisioned = false;
+  bool _ticketExpired = false;
   bool _uncertainProvision = false;
 
   NearbyBleFamily get _family => widget.family;
@@ -164,6 +178,11 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
   @override
   void dispose() {
     _progressSubscription?.cancel();
+    _flow.dispose();
+    unawaited(_phoneService?.dispose());
+    _wifi = null;
+    _retainedDsn = null;
+    _retainedTicket = null;
     super.dispose();
   }
 
@@ -198,10 +217,18 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
     Map<String, dynamic> params,
     Duration timeout,
   ) {
-    _activeSessionId = '$_journeyId-$stage-$_attemptNumber';
+    _activeSessionId = _flow.stageSessionId(stage);
+    // Protocol metadata also guarantees durable final-adoption receipts. Legacy
+    // profiles keep their existing request behavior on older appliances.
+    if (stage == BleWifiPairingStage.adopt &&
+        _family.phoneProvisioningProtocol != null) {
+      _flow.expectReceipt(_activeSessionId);
+    }
     final request = widget.pairingRequest;
     final body = {
       'stage': stage,
+      'rendezvous': _commissioner,
+      'correlation_id': _journeyId,
       if (_family.profileId != null) 'profile_id': _family.profileId,
       ...params,
     };
@@ -221,10 +248,25 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
         );
   }
 
-  Future<void> _start() async {
+  Future<void> _start({bool useServer = false}) async {
     if (_running || _flowCompleted) return;
-    _running = true;
-    _attemptNumber += 1;
+    final start = await _flow.begin();
+    if (!mounted) return;
+    if (start.state == CommissioningStartState.recovered) {
+      _finishAdoption(start.result!);
+      return;
+    }
+    if (start.state == CommissioningStartState.inactive) return;
+    if (start.state != CommissioningStartState.ready) {
+      _fail(
+        start.state == CommissioningStartState.pending
+            ? 'The Rhythm Box is still finishing the previous attempt. Try again shortly.'
+            : 'The previous pairing result could not be checked. Check the connection to your Rhythm Box and try again.',
+        failureStage: 'handoff',
+      );
+      return;
+    }
+    if (useServer) _useServer = true;
     _subscribeToProgress();
     setState(() {
       _failed = false;
@@ -240,6 +282,7 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
       inputMethod: widget.inputMethod,
       family: _family.id,
       attemptNumber: _attemptNumber,
+      commissioner: _commissioner,
       resumed: _provisioned,
     );
     try {
@@ -259,6 +302,8 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
         return;
       }
       if (!_provisioned) {
+        if (_phone != null && !await _loadPhoneWifi()) return;
+        if (!mounted) return;
         final candidate = await _discover();
         if (candidate == null || !mounted) return;
         final begin = await _cloud.begin(broker, candidate.dsn);
@@ -272,6 +317,7 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
         }
         _retainedDsn = candidate.dsn;
         _retainedTicket = begin.ticket;
+        _ticketExpired = false;
         final provisioned = await _provision(candidate, begin.setupToken!);
         if (!provisioned || !mounted) return;
         _provisioned = true;
@@ -286,28 +332,82 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
         failureStage: 'request_exception',
       );
     } finally {
-      _running = false;
+      _wifi = null;
+      _flow.end();
+      if (mounted) setState(() {});
+    }
+  }
+
+  Future<bool> _loadPhoneWifi() async {
+    setState(() =>
+        _message = 'Getting the saved Wi-Fi details from your Rhythm Box.');
+    try {
+      final loader = widget.wifiCredentials;
+      _wifi = await (loader != null
+          ? loader()
+          : context
+              .read<ServerSyncProvider>()
+              .api
+              .getCommissioningWifiCredentials());
+      if (!mounted) return false;
+      _wifi ??= await showDialog<RhythmCommissioningWifi>(
+        context: context,
+        builder: (_) =>
+            CommissioningWifiDialog(validateWifi: _phone!.validateWifi),
+      );
+      if (!mounted) return false;
+      if (_wifi == null) {
+        _fail('Wi-Fi setup was cancelled.', failureStage: 'wifi_cancelled');
+        return false;
+      }
+      _phone!.validateWifi(_wifi!);
+      return true;
+    } catch (_) {
+      if (mounted) {
+        _fail(
+          'Could not use the saved Wi-Fi details. Check that this app is connected as the Rhythm Box owner and try again.',
+          failureStage: 'wifi_credentials',
+        );
+      }
+      return false;
     }
   }
 
   Future<BleWifiDiscoveredCandidate?> _discover() async {
     setState(() {
       _stageIndex = 0;
-      _message = 'Put the device in setup mode and keep it near your Rhythm '
-          'Box.';
+      _message = _phone != null
+          ? 'Put the device in setup mode and keep it near your phone.'
+          : 'Put the device in setup mode and keep it near your Rhythm Box.';
     });
-    final response = await _pair(
-      BleWifiPairingStage.discover,
-      const {},
-      _discoverTimeout,
-    );
-    if (!mounted) return null;
-    final failure = _responseFailure(response);
-    if (failure != null) {
-      _fail(failure, failureStage: 'discover');
-      return null;
+    List<BleWifiDiscoveredCandidate> candidates;
+    final phone = _phone;
+    if (phone != null) {
+      try {
+        candidates = await phone.discover();
+      } on PhoneBleWifiFailure catch (error) {
+        if (mounted) _fail(error.message, failureStage: 'phone_discover');
+        return null;
+      } catch (_) {
+        if (mounted) {
+          _fail(
+              'Phone Bluetooth discovery failed. Check Bluetooth and try again.',
+              failureStage: 'phone_discover');
+        }
+        return null;
+      }
+    } else {
+      final response =
+          await _pair(BleWifiPairingStage.discover, const {}, _discoverTimeout);
+      if (!mounted) return null;
+      final failure = _responseFailure(response);
+      if (failure != null) {
+        _fail(failure, failureStage: 'discover');
+        return null;
+      }
+      candidates = _candidatesFromResponse(response!);
     }
-    final candidates = _candidatesFromResponse(response!);
+    if (!mounted) return null;
     if (candidates.isEmpty) {
       _fail(
         'No device in setup mode was found. Put it in setup mode and try '
@@ -351,6 +451,31 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
       _message = 'Sending your Wi-Fi details to the device. This can take a '
           'minute.';
     });
+    final phone = _phone;
+    if (phone != null) {
+      try {
+        await phone.provision(candidate, setupToken, _wifi!);
+        return true;
+      } catch (error) {
+        if (!mounted) return false;
+        // An unexpected transport exception cannot prove that no write occurred.
+        final failure = error is PhoneBleWifiFailure
+            ? error
+            : const PhoneBleWifiFailure('Phone setup did not finish.',
+                uncertain: true);
+        _uncertainProvision = failure.uncertain;
+        _fail(
+            failure.uncertain
+                ? '${failure.message} Try registration without sending Wi-Fi again.'
+                : failure.message,
+            failureStage: failure.uncertain
+                ? 'phone_provision_uncertain'
+                : 'phone_provision');
+        return false;
+      } finally {
+        _wifi = null;
+      }
+    }
     final response = await _pair(
         BleWifiPairingStage.provision,
         {
@@ -374,8 +499,8 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
     return false;
   }
 
-  /// Continue after an uncertain Wi-Fi write: the person confirmed the device
-  /// joined, so registration and adoption run with the retained ticket.
+  /// Reconcile an uncertain Wi-Fi write without resending it. Cloud identity
+  /// and Box LAN readback, rather than user confirmation, establish success.
   Future<void> _continueAfterUncertainProvision() async {
     if (_retainedDsn == null || _retainedTicket == null) return;
     _provisioned = true;
@@ -396,7 +521,20 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
       _stageIndex = 2;
       _message = 'Registering the device and fetching its network key.';
     });
-    var response = await _cloud.complete(broker, dsn, ticket);
+    Future<DeviceCloudBrokerResponse> reconcile() async {
+      var response = _ticketExpired
+          ? await _cloud.key(broker, dsn)
+          : await _cloud.complete(broker, dsn, ticket);
+      if (response.error == 'invalid_ticket' && mounted) {
+        // The device may already be registered. Reconcile existing ownership
+        // instead of making Retry Registration send Wi-Fi a second time.
+        _ticketExpired = true;
+        response = await _cloud.key(broker, dsn);
+      }
+      return response;
+    }
+
+    var response = await reconcile();
     var attempts = 0;
     while (!response.ok && response.lanPending && mounted) {
       attempts += 1;
@@ -406,14 +544,10 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
       });
       await Future<void>.delayed(widget.completeRetryDelay);
       if (!mounted) return null;
-      response = await _cloud.complete(broker, dsn, ticket);
+      response = await reconcile();
     }
     if (!mounted) return null;
     if (!response.ok || !response.hasCredentials) {
-      if (response.error == 'invalid_ticket') {
-        _provisioned = false;
-        _retainedTicket = null;
-      }
       _fail(
         deviceCloudBrokerFailureMessage(response),
         failureStage:
@@ -442,6 +576,11 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
       _adoptTimeout,
     );
     if (!mounted) return;
+    if (response?['status'] == 'failed' ||
+        (response?['status'] == 'complete' &&
+            _deviceFromResponse(response!) != null)) {
+      _flow.acceptTerminalResponse();
+    }
     final failure = _responseFailure(response);
     if (failure != null) {
       _fail(failure, failureStage: 'adopt');
@@ -455,6 +594,54 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
       );
       return;
     }
+    _finishAdoption(BleWifiDevicePairingResult(
+      device: device,
+      warnings: _responseWarnings(response),
+    ));
+  }
+
+  Future<CommissioningReceipt<BleWifiDevicePairingResult>?> _readReceipt(
+    String sessionId,
+  ) async {
+    final loader = widget.pairingResult;
+    final receipt = await (loader != null
+        ? loader(sessionId)
+        : context.read<ServerSyncProvider>().api.getPairingResult(sessionId));
+    if (receipt == null ||
+        receipt.sessionId != sessionId ||
+        (receipt.hubType != null && receipt.hubType != _family.hubType)) {
+      return null;
+    }
+    switch (receipt.state) {
+      case RhythmPairingResultState.notFound:
+        return const CommissioningReceipt(CommissioningReceiptState.notFound);
+      case RhythmPairingResultState.pending:
+        return const CommissioningReceipt(CommissioningReceiptState.pending);
+      case RhythmPairingResultState.terminal:
+        final result = receipt.result;
+        if (result == null) return null;
+        if (!result.succeeded) {
+          return const CommissioningReceipt(CommissioningReceiptState.failed);
+        }
+        if (result.completedDevices.isEmpty) return null;
+        final device = result.completedDevices.first;
+        return CommissioningReceipt(
+          CommissioningReceiptState.complete,
+          result: BleWifiDevicePairingResult(
+            device: BleWifiPairedDevice(
+              nativeDeviceId: device.deviceId,
+              name: device.name,
+              deviceType: device.deviceType,
+              manufacturer: device.manufacturer,
+              model: device.model,
+            ),
+            warnings: result.warnings,
+          ),
+        );
+    }
+  }
+
+  void _finishAdoption(BleWifiDevicePairingResult result) {
     _flowCompleted = true;
     AnalyticsService().logBleWifiPairingCompleted(
       journeyId: _journeyId,
@@ -462,15 +649,11 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
       inputMethod: widget.inputMethod,
       family: _family.id,
       attemptNumber: _attemptNumber,
+      commissioner: _commissioner,
       outcome: 'succeeded',
     );
     HapticFeedback.heavyImpact();
-    Navigator.of(context).pop(
-      BleWifiDevicePairingResult(
-        device: device,
-        warnings: _responseWarnings(response),
-      ),
-    );
+    Navigator.of(context).pop(result);
   }
 
   void _fail(String message, {required String failureStage}) {
@@ -481,6 +664,7 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
       inputMethod: widget.inputMethod,
       family: _family.id,
       attemptNumber: _attemptNumber,
+      commissioner: _commissioner,
       outcome: 'failed',
       failureStage: failureStage,
     );
@@ -581,7 +765,9 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
     final message = _failed
         ? _error
         : (_message ??
-            'Keep the device powered on and close to your Rhythm Box.');
+            (_phone != null
+                ? 'Keep the device powered on and close to your phone.'
+                : 'Keep the device powered on and close to your Rhythm Box.'));
     return PopScope(
       canPop: !_running,
       onPopInvokedWithResult: (didPop, _) {
@@ -641,9 +827,11 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
               ),
               const SizedBox(height: 9),
               Text(
-                'Your Rhythm Box joins the device to its Wi-Fi network and '
-                'registers it for you. No manufacturer account or login is '
-                'needed.',
+                _phone != null
+                    ? 'Your phone sends the saved Rhythm Box Wi-Fi details over Bluetooth. Keep the device near your phone; the Box connects to it over your network.'
+                    : 'Your Rhythm Box joins the device to its Wi-Fi network and '
+                        'registers it for you. No manufacturer account or login is '
+                        'needed.',
                 style: TextStyle(
                   color: CelestialColors.textSecondary.withValues(alpha: 0.84),
                   fontSize: 14,
@@ -698,7 +886,7 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
                       ),
                       icon: const Icon(Icons.cloud_done_rounded),
                       label: const Text(
-                        'Device joined Wi-Fi, continue',
+                        'Try Registration',
                         style: TextStyle(fontWeight: FontWeight.w700),
                       ),
                     ),
@@ -738,6 +926,17 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
                     ),
                   ),
                 ),
+                if (_phone != null &&
+                    !_provisioned &&
+                    !_uncertainProvision) ...[
+                  const SizedBox(height: 10),
+                  OutlinedButton.icon(
+                    key: const ValueKey('ble-wifi-server-fallback'),
+                    onPressed: _running ? null : () => _start(useServer: true),
+                    icon: const Icon(Icons.router_rounded),
+                    label: const Text('Try from Rhythm Box'),
+                  ),
+                ],
                 const SizedBox(height: 10),
                 SizedBox(
                   height: 48,

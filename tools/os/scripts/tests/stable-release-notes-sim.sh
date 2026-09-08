@@ -24,7 +24,7 @@ cp "$GENERATOR" "$REPO/tools/os/scripts/generate-stable-release-notes.sh"
 
 git -C "$REPO" init -q
 git -C "$REPO" config user.name "Release Test"
-git -C "$REPO" config user.email "release-test@example.com"
+git -C "$REPO" config user.email "fixture@example.invalid"
 touch "$REPO/history"
 git -C "$REPO" add history
 git -C "$REPO" commit -qm "initial"

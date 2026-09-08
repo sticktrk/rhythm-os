@@ -1,4 +1,7 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:rhythm_app/services/phone_ble_wifi_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/backend/backend.dart';
 import 'package:rhythm_app/screens/hubs/ble_wifi_device_add_screen.dart';
@@ -27,16 +30,78 @@ final stripFamily = NearbyBleFamily.fromProfile(
   ),
 );
 
+class _Phone implements PhoneBleWifiService {
+  int discoveries = 0;
+  int provisions = 0;
+  int disposed = 0;
+  bool uncertain = false;
+  bool discoveryFailure = false;
+  @override
+  void validateWifi(RhythmCommissioningWifi wifi) {
+    if (wifi.ssid.isEmpty) {
+      throw const PhoneBleWifiFailure('Enter a Wi-Fi name.');
+    }
+  }
+
+  @override
+  Future<List<BleWifiDiscoveredCandidate>> discover() async {
+    discoveries++;
+    if (discoveryFailure) {
+      throw const PhoneBleWifiFailure('Bluetooth unavailable');
+    }
+    return const [BleWifiDiscoveredCandidate(dsn: _dsn, address: 'phone-uuid')];
+  }
+
+  @override
+  Future<void> provision(BleWifiDiscoveredCandidate candidate, String token,
+      RhythmCommissioningWifi wifi) async {
+    provisions++;
+    expect(candidate.address, 'phone-uuid');
+    expect(token, _setupToken);
+    expect(wifi.ssid, 'Saved network');
+    expect(wifi.password, 'saved-password');
+    if (uncertain) {
+      throw const PhoneBleWifiFailure('Connection lost', uncertain: true);
+    }
+  }
+
+  @override
+  Future<void> dispose() async {
+    disposed++;
+  }
+}
+
+final phoneFamily = NearbyBleFamily.fromProfile(
+  hubType: 'vendor_hub',
+  profile: const RhythmDeviceProfile(
+    id: 'vendor.strip.light.v1',
+    deviceType: 'light',
+    displayName: 'Vendor strip',
+    inputOnly: false,
+    onboardingMethods: [RhythmDeviceOnboardingMethod.bleWifiNearbyScan],
+    nearbyServiceUuids: ['0000fe28-0000-1000-8000-00805f9b34fb'],
+    cloudBroker: 'vendor-device',
+    phoneProvisioningProtocol: 'ayla_v1',
+  ),
+);
+
 class _Fixture {
   _Fixture({
     this.provisionFailure,
     this.lanPendingRounds = 0,
     this.candidates = 1,
+    this.expiredTicket = false,
+    this.adoptFailures = 0,
+    this.loseAdoptionResponse = false,
   });
 
   final Map<String, dynamic>? provisionFailure;
   final int lanPendingRounds;
   final int candidates;
+  final bool expiredTicket;
+  int adoptFailures;
+  final bool loseAdoptionResponse;
+  final sessionIds = <String>[];
   final pairHubTypes = <String>[];
   final pairStages = <String>[];
   final pairParams = <Map<String, dynamic>>[];
@@ -49,6 +114,7 @@ class _Fixture {
     required Duration receiveTimeout,
     required String sessionId,
   }) async {
+    sessionIds.add(sessionId);
     pairHubTypes.add(hubType);
     final stage = params['stage'] as String;
     pairStages.add(stage);
@@ -72,6 +138,10 @@ class _Fixture {
               'details': {'stage': 'provision', 'dsn': _dsn},
             };
       case 'adopt':
+        if (loseAdoptionResponse) return null;
+        if (adoptFailures-- > 0) {
+          return {'status': 'failed', 'error': 'Not yet reachable'};
+        }
         return {
           'status': 'complete',
           'details': {'stage': 'adopt', 'dsn': _dsn},
@@ -104,6 +174,10 @@ class _Fixture {
               );
             case 'complete':
               expect(body['ticket'], 'fixture-ticket');
+              if (expiredTicket) {
+                return const DeviceCloudBrokerResponse(
+                    status: 403, error: 'invalid_ticket');
+              }
               completeCalls += 1;
               if (completeCalls <= lanPendingRounds) {
                 return const DeviceCloudBrokerResponse(
@@ -118,6 +192,14 @@ class _Fixture {
                 localKey: 'synthetic-fixture-key',
                 localKeyId: 7,
               );
+          }
+          if (action == 'key') {
+            return const DeviceCloudBrokerResponse(
+                status: 200,
+                dsn: _dsn,
+                ip: '192.168.4.20',
+                localKey: 'synthetic-fixture-key',
+                localKeyId: 7);
           }
           return const DeviceCloudBrokerResponse(status: 400, error: 'bad');
         },
@@ -153,13 +235,21 @@ void main() {
     WidgetTester tester,
     _Fixture fixture, {
     NearbyBleFamily? family,
+    PhoneBleWifiService? phone,
+    Future<RhythmCommissioningWifi?> Function()? wifiCredentials,
+    Future<RhythmPairingResultStatus?> Function(String)? pairingResult,
   }) async {
     // Tall enough that every action below the timeline is built.
-    await tester.binding.setSurfaceSize(const Size(430, 1400));
+    await tester.binding.setSurfaceSize(Size(
+        430,
+        Platform.environment['RHYTHM_PHONE_WIFI_SCREENSHOT'] == null
+            ? 1400
+            : 1000));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     BleWifiDevicePairingResult? result;
     await tester.pumpWidget(
       MaterialApp(
+        debugShowCheckedModeBanner: false,
         home: Builder(
           builder: (context) => TextButton(
             onPressed: () async {
@@ -167,6 +257,9 @@ void main() {
                 MaterialPageRoute<BleWifiDevicePairingResult>(
                   builder: (_) => BleWifiDeviceAddScreen(
                     family: family ?? stripFamily,
+                    phoneService: phone,
+                    wifiCredentials: wifiCredentials,
+                    pairingResult: pairingResult,
                     analyticsSource: 'test',
                     journeyId: 'ble-wifi-test',
                     pairingRequest: fixture.pair,
@@ -186,6 +279,212 @@ void main() {
     await settle(tester);
     return result;
   }
+
+  testWidgets(
+      'phone reuses saved Wi-Fi and only asks Box to adopt after registration',
+      (tester) async {
+    final fixture = _Fixture(lanPendingRounds: 1);
+    final phone = _Phone();
+    var credentialReads = 0;
+    final result = await pumpScreen(tester, fixture,
+        family: phoneFamily, phone: phone, wifiCredentials: () async {
+      credentialReads++;
+      return const RhythmCommissioningWifi(
+          ssid: 'Saved network', password: 'saved-password');
+    });
+    expect(result, isNotNull);
+    expect(credentialReads, 1);
+    expect(phone.discoveries, 1);
+    expect(phone.provisions, 1);
+    expect(fixture.pairStages, ['adopt']);
+    expect(find.byKey(const ValueKey('commissioning-wifi-password')),
+        findsNothing);
+    final events = analyticsBackend.events
+        .where((e) => e.name.startsWith('ble_wifi_pairing_'))
+        .toList();
+    expect(events.length, 2);
+    for (final event in events) {
+      expect(event.properties['commissioner'], 'phone');
+      final properties = event.properties.toString();
+      for (final secret in [
+        'Saved network',
+        'saved-password',
+        _dsn,
+        _setupToken,
+        'phone-uuid'
+      ]) {
+        expect(properties, isNot(contains(secret)));
+      }
+    }
+  },
+      variant:
+          TargetPlatformVariant({TargetPlatform.iOS, TargetPlatform.android}));
+
+  testWidgets('phone failure offers the same explicit Box fallback as Matter',
+      (tester) async {
+    final fixture = _Fixture();
+    final phone = _Phone()..discoveryFailure = true;
+    await pumpScreen(tester, fixture,
+        family: phoneFamily,
+        phone: phone,
+        wifiCredentials: () async => const RhythmCommissioningWifi(
+            ssid: 'Saved network', password: 'saved-password'));
+    expect(find.text('Try from Rhythm Box'), findsOneWidget);
+    final screenshotPath = Platform.environment['RHYTHM_PHONE_WIFI_SCREENSHOT'];
+    if (screenshotPath != null) {
+      await expectLater(
+          find.byType(Overlay), matchesGoldenFile(screenshotPath));
+    }
+    await tester.tap(find.byKey(const ValueKey('ble-wifi-server-fallback')));
+    await settle(tester);
+    expect(phone.discoveries, 1);
+    expect(phone.provisions, 0);
+    expect(fixture.pairStages, ['discover', 'provision', 'adopt']);
+    expect(fixture.pairParams.last['rendezvous'], 'server');
+    expect(fixture.pairParams.last['correlation_id'], 'ble-wifi-test');
+    expect(fixture.pairParams.toString(), isNot(contains('phone-uuid')));
+    expect(fixture.pairParams.toString(), isNot(contains('saved-password')));
+  },
+      variant:
+          TargetPlatformVariant({TargetPlatform.iOS, TargetPlatform.android}));
+
+  testWidgets(
+      'lost adoption success reconciles before any registration or setup replay',
+      (tester) async {
+    final fixture = _Fixture(loseAdoptionResponse: true);
+    final phone = _Phone();
+    final queries = <String>[];
+    var pending = true;
+    await pumpScreen(tester, fixture,
+        family: phoneFamily,
+        phone: phone,
+        wifiCredentials: () async => const RhythmCommissioningWifi(
+            ssid: 'Saved network', password: 'saved-password'),
+        pairingResult: (id) async {
+          queries.add(id);
+          return RhythmPairingResultStatus(
+            sessionId: id,
+            hubType: 'vendor_hub',
+            state: pending
+                ? RhythmPairingResultState.pending
+                : RhythmPairingResultState.terminal,
+            result: pending
+                ? null
+                : const RhythmPairingSessionResult(
+                    hubType: 'vendor_hub',
+                    status: RhythmPairingStatus.complete,
+                    device: RhythmPairedDevice(
+                        deviceId: 'vendor-acfixture123456',
+                        name: 'Recovered strip',
+                        deviceType: 'light'),
+                  ),
+          );
+        });
+    await tester.tap(find.byKey(const ValueKey('ble-wifi-retry')));
+    await settle(tester);
+    expect(find.textContaining('still finishing the previous attempt'),
+        findsWidgets);
+    pending = false;
+    await tester.tap(find.byKey(const ValueKey('ble-wifi-retry')));
+    await settle(tester);
+    expect(find.byKey(const ValueKey('ble-wifi-pairing-screen')), findsNothing);
+    expect(queries, [fixture.sessionIds.single, fixture.sessionIds.single]);
+    expect(phone.provisions, 1);
+    expect(fixture.pairStages, ['adopt']);
+    expect(
+        fixture.cloudCalls, ['vendor-device:begin', 'vendor-device:complete']);
+    expect(fixture.pairParams.single['rendezvous'], 'phone');
+  },
+      variant:
+          TargetPlatformVariant({TargetPlatform.iOS, TargetPlatform.android}));
+
+  testWidgets(
+      'uncertain phone write retries registration without provisioning again',
+      (tester) async {
+    final fixture = _Fixture();
+    final phone = _Phone()..uncertain = true;
+    await pumpScreen(tester, fixture,
+        family: phoneFamily,
+        phone: phone,
+        wifiCredentials: () async => const RhythmCommissioningWifi(
+            ssid: 'Saved network', password: 'saved-password'));
+    expect(fixture.pairStages, isEmpty);
+    expect(phone.provisions, 1);
+    expect(
+        find.byKey(const ValueKey('ble-wifi-server-fallback')), findsNothing);
+    await tester
+        .tap(find.byKey(const ValueKey('ble-wifi-continue-registration')));
+    await settle(tester);
+    expect(phone.provisions, 1);
+    expect(phone.discoveries, 1);
+    expect(fixture.pairStages, ['adopt']);
+    expect(fixture.cloudCalls.where((c) => c.endsWith(':begin')).length, 1);
+  },
+      variant:
+          TargetPlatformVariant({TargetPlatform.iOS, TargetPlatform.android}));
+
+  testWidgets(
+      'credential failure stops before Bluetooth and never prompts for a password',
+      (tester) async {
+    final fixture = _Fixture();
+    final phone = _Phone();
+    await pumpScreen(tester, fixture,
+        family: phoneFamily,
+        phone: phone,
+        wifiCredentials: () async => throw StateError('raw-sensitive-error'));
+    expect(phone.discoveries, 0);
+    expect(fixture.pairStages, isEmpty);
+    expect(find.byKey(const ValueKey('commissioning-wifi-password')),
+        findsNothing);
+    expect(find.textContaining('raw-sensitive-error'), findsNothing);
+  },
+      variant:
+          TargetPlatformVariant({TargetPlatform.iOS, TargetPlatform.android}));
+
+  testWidgets(
+      'missing saved credentials prompts once and validates manual input',
+      (tester) async {
+    final fixture = _Fixture();
+    final phone = _Phone();
+    await pumpScreen(tester, fixture,
+        family: phoneFamily, phone: phone, wifiCredentials: () async => null);
+    expect(phone.discoveries, 0);
+    await tester.tap(find.text('Continue'));
+    await tester.pump();
+    expect(phone.discoveries, 0);
+    await tester.enterText(
+        find.byKey(const ValueKey('commissioning-wifi-ssid')), 'Saved network');
+    await tester.enterText(
+        find.byKey(const ValueKey('commissioning-wifi-password')),
+        'saved-password');
+    await tester.tap(find.text('Continue'));
+    await settle(tester);
+    expect(phone.provisions, 1);
+    expect(fixture.pairStages, ['adopt']);
+  },
+      variant:
+          TargetPlatformVariant({TargetPlatform.iOS, TargetPlatform.android}));
+
+  testWidgets('expired ticket and failed LAN adoption never repeat phone Wi-Fi',
+      (tester) async {
+    final fixture = _Fixture(expiredTicket: true, adoptFailures: 1);
+    final phone = _Phone();
+    await pumpScreen(tester, fixture,
+        family: phoneFamily,
+        phone: phone,
+        wifiCredentials: () async => const RhythmCommissioningWifi(
+            ssid: 'Saved network', password: 'saved-password'));
+    expect(phone.provisions, 1);
+    expect(fixture.cloudCalls,
+        ['vendor-device:begin', 'vendor-device:complete', 'vendor-device:key']);
+    await tester.tap(find.byKey(const ValueKey('ble-wifi-retry')));
+    await settle(tester);
+    expect(phone.provisions, 1);
+    expect(fixture.pairStages, ['adopt', 'adopt']);
+    expect(fixture.cloudCalls.last, 'vendor-device:key');
+  },
+      variant:
+          TargetPlatformVariant({TargetPlatform.iOS, TargetPlatform.android}));
 
   testWidgets(
     'runs discover, begin, provision, complete, adopt against the family\'s '

@@ -1301,6 +1301,7 @@ mod tests {
                 onboarding_methods: vec!["local_ble_qr".into()],
                 nearby_service_uuids: Vec::new(),
                 cloud_broker: None,
+                phone_provisioning_protocol: None,
             }],
             supports_unpairing: true,
             unpairable_device_types: vec!["button".into()],

@@ -308,8 +308,9 @@ pub fn is_valid_device_profile_id(value: &str) -> bool {
 /// One device profile supported by a generic integration onboarding method.
 ///
 /// Profile identifiers are stable protocol contracts rather than marketing
-/// names. Clients use this bounded metadata for routing and copy only; all
-/// identity verification remains appliance-side.
+/// names. Clients use this bounded metadata for routing, presentation and
+/// known phone provisioning protocols. Final device admission and LAN identity
+/// verification remain appliance-side.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HubDeviceProfileCapability {
     pub id: String,
@@ -335,6 +336,10 @@ pub struct HubDeviceProfileCapability {
     /// through for this profile, when its vendor requires a cloud step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cloud_broker: Option<String>,
+    /// Versioned phone GATT protocol. Advertising it guarantees the owner-only
+    /// Wi-Fi credential route and durable, queryable final `adopt` receipts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phone_provisioning_protocol: Option<String>,
 }
 
 impl HubDeviceProfileCapability {
@@ -384,6 +389,8 @@ pub const DEVICE_ONBOARDING_METHOD_MATTER_ON_NETWORK_SETUP_CODE: &str =
     "matter_on_network_setup_code";
 pub const DEVICE_ONBOARDING_METHOD_MATTER_BLE_WIFI_COMMISSIONING: &str =
     "matter_ble_wifi_commissioning";
+pub const DEVICE_ONBOARDING_METHOD_MATTER_PHONE_COMMISSIONING_HANDOFF: &str =
+    "matter_phone_commissioning_handoff";
 /// Scan for and bond every newly advertising factory-reset Hue BLE bulb.
 pub const DEVICE_ONBOARDING_METHOD_HUE_BLE_NEARBY_SCAN: &str = "hue_ble_nearby_scan";
 /// Resolve a locally parsed, server-advertised BLE device profile.
@@ -2265,6 +2272,28 @@ mod tests {
     use crate::discovery::{DiscoveredDevice, DiscoveredRoom, HubDiscovery};
 
     #[test]
+    fn phone_provisioning_metadata_defaults_off_for_previous_profiles() {
+        let legacy = serde_json::json!({
+            "id": "vendor.strip.light.v1", "device_type": "light",
+            "display_name": "Strip", "input_only": false,
+            "onboarding_methods": ["ble_wifi_nearby_scan"]
+        });
+        let mut profile: HubDeviceProfileCapability = serde_json::from_value(legacy).unwrap();
+        assert!(profile.phone_provisioning_protocol.is_none());
+        assert!(serde_json::to_value(&profile)
+            .unwrap()
+            .get("phone_provisioning_protocol")
+            .is_none());
+        profile.phone_provisioning_protocol = Some("ayla_v1".into());
+        let current = serde_json::to_value(&profile).unwrap();
+        assert_eq!(current["phone_provisioning_protocol"], "ayla_v1");
+        assert_eq!(
+            serde_json::from_value::<HubDeviceProfileCapability>(current).unwrap(),
+            profile
+        );
+    }
+
+    #[test]
     fn device_profile_ids_have_one_canonical_versioned_grammar() {
         let parsed = ParsedDeviceProfileId::parse("orein.oc02001.button.v12").unwrap();
         assert_eq!(parsed.family(), "orein.oc02001.button");
@@ -2306,6 +2335,7 @@ mod tests {
             onboarding_methods: vec!["local_ble_qr".to_string()],
             nearby_service_uuids: Vec::new(),
             cloud_broker: None,
+            phone_provisioning_protocol: None,
         };
         assert_eq!(
             profile.canonical_id_for("future.vendor.bulb.v2"),

@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -6,6 +8,7 @@ import 'package:rhythm_app/providers/home_provider.dart';
 import 'package:rhythm_app/providers/room_provider.dart';
 import 'package:rhythm_app/providers/server_sync_provider.dart';
 import 'package:rhythm_app/screens/hubs/rhythmserver_settings_screen.dart';
+import 'package:rhythm_app/widgets/solar_orbit.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 class _SummaryApi extends RhythmServerApi {
@@ -143,10 +146,15 @@ void main() {
         ChangeNotifierProvider<ServerSyncProvider>.value(value: syncProvider),
       ],
       child: MaterialApp(
+        debugShowCheckedModeBanner: false,
         home: Scaffold(
-          body: RhythmServerHubManagementSection(
-            showConfigured: showConfigured,
-            showAddOptions: false,
+          backgroundColor: CelestialColors.backgroundDark,
+          body: Padding(
+            padding: const EdgeInsets.all(24),
+            child: RhythmServerHubManagementSection(
+              showConfigured: showConfigured,
+              showAddOptions: false,
+            ),
           ),
         ),
       ),
@@ -217,6 +225,136 @@ void main() {
       await tester.pump(const Duration(milliseconds: 16));
     }
     expect(api.canonicalDeviceCalls, 1);
+  });
+
+  testWidgets(
+      'third party hubs open one combined device list without vendor menus',
+      (tester) async {
+    const monster = {'type': 'monster', 'address': 'local', 'connected': true};
+    const future = {
+      'type': 'future_vendor',
+      'address': 'local',
+      'connected': false
+    };
+    syncProvider.replaceHubs(const [_matterHub, monster, future, _hueHub]);
+    api.canonicalDevices = const [
+      {
+        'id': 'strip',
+        'name': 'Neon strip',
+        'device_type': 'light',
+        'endpoints': [
+          {
+            'hub_key': {'hub_type': 'monster', 'address': 'local'}
+          },
+          {
+            'hub_key': {'hub_type': 'future_vendor', 'address': 'local'}
+          },
+        ],
+      },
+      {
+        'id': 'button',
+        'name': 'Desk button',
+        'device_type': 'button',
+        'endpoints': [
+          {
+            'hub_key': {'hub_type': 'future_vendor', 'address': 'local'}
+          },
+        ],
+      },
+      {
+        'id': 'hue',
+        'name': 'Hue-only bulb',
+        'device_type': 'light',
+        'endpoints': [
+          {
+            'hub_key': {'hub_type': 'hue', 'address': '192.0.2.25'}
+          },
+        ],
+      },
+      {
+        'id': 'outside',
+        'name': 'Other instance',
+        'device_type': 'light',
+        'endpoints': [
+          {
+            'hub_key': {'hub_type': 'future_vendor', 'address': 'other'}
+          },
+        ],
+      },
+    ];
+    final screenshotPrefix =
+        Platform.environment['RHYTHM_THIRD_PARTY_SCREENSHOT'];
+    if (screenshotPrefix != null) {
+      await tester.binding.setSurfaceSize(const Size(430, 900));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+    }
+    await tester.pumpWidget(buildSection(showConfigured: true));
+    await tester.pumpAndSettle();
+    expect(find.text('Third party Hubs'), findsOneWidget);
+    expect(find.text('Monster'), findsNothing);
+    expect(find.text('Future Vendor'), findsNothing);
+    expect(find.text('1 light, 1 button'), findsOneWidget);
+    expect(find.text('Matter'), findsOneWidget);
+    expect(find.text('Philips Hue'), findsOneWidget);
+    expect(api.canonicalDeviceCalls, 1);
+    if (screenshotPrefix != null) {
+      await expectLater(find.byType(Overlay),
+          matchesGoldenFile('$screenshotPrefix-hubs.png'));
+    }
+    await tester.tap(find.byKey(const ValueKey('third-party-hubs')));
+    await tester.pumpAndSettle();
+    expect(find.text('Third party Hubs').hitTestable(), findsOneWidget);
+    expect(find.text('Neon strip'), findsOneWidget);
+    expect(find.text('Desk button'), findsOneWidget);
+    expect(find.text('Hue-only bulb'), findsNothing);
+    expect(find.text('Other instance'), findsNothing);
+    expect(find.text('Monster'), findsNothing);
+    expect(find.text('Future Vendor'), findsNothing);
+    expect(find.text('Disconnect'), findsNothing);
+    expect(find.text('Reconnect'), findsNothing);
+    expect(api.canonicalDeviceCalls, 2);
+    if (screenshotPrefix != null) {
+      await expectLater(find.byType(Overlay),
+          matchesGoldenFile('$screenshotPrefix-devices.png'));
+    }
+  });
+
+  testWidgets(
+      'third party group handles legacy metadata and successful empty catalogs',
+      (tester) async {
+    syncProvider.replaceHubs(const [
+      {'type': 'monster', 'address': 'local', 'connected': true},
+    ]);
+    await tester.pumpWidget(buildSection(showConfigured: true));
+    await tester.pumpAndSettle();
+    expect(find.text('Third party Hubs'), findsOneWidget);
+    expect(find.text('No devices'), findsOneWidget);
+    await tester.tap(find.text('Third party Hubs'));
+    await tester.pumpAndSettle();
+    expect(find.text('No devices discovered'), findsOneWidget);
+    expect(find.text('Monster'), findsNothing);
+  });
+
+  testWidgets(
+      'third party catalog failure can retry to a successful empty list',
+      (tester) async {
+    syncProvider.replaceHubs(const [
+      {'type': 'monster', 'address': 'local', 'connected': true},
+    ]);
+    api.canonicalDevices = null;
+    await tester.pumpWidget(buildSection(showConfigured: true));
+    await tester.pumpAndSettle();
+    expect(find.text('Devices unavailable'), findsOneWidget);
+    await tester.tap(find.text('Third party Hubs'));
+    await tester.pumpAndSettle();
+    expect(find.text('No devices discovered'), findsNothing);
+    expect(find.text('Retry loading devices'), findsOneWidget);
+
+    api.canonicalDevices = const [];
+    await tester.tap(find.text('Retry loading devices'));
+    await tester.pumpAndSettle();
+    expect(find.text('Retry loading devices'), findsNothing);
+    expect(find.text('No devices discovered'), findsOneWidget);
   });
 
   testWidgets('Hue detail offers Bridge button search only when advertised', (

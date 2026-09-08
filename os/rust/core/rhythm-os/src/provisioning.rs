@@ -34,6 +34,42 @@ pub struct WifiCredentials {
     pub password: String,
 }
 
+/// Use the same credential authority for Box and phone accessory commissioning.
+/// Platform fallback executes outside the shared state lock.
+pub fn load_accessory_wifi_credentials(
+    state: &crate::state::SharedState,
+) -> anyhow::Result<Option<WifiCredentials>> {
+    let (storage, provider) = {
+        let guard = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Wi-Fi state unavailable"))?;
+        (
+            guard.storage.clone(),
+            guard.commissioning_wifi_credentials_provider.clone(),
+        )
+    };
+    if let Some(storage) = storage.as_ref() {
+        if let Some(credentials) = storage.load_commissioning_wifi_credentials()? {
+            return Ok(Some(credentials));
+        }
+    }
+    let credentials = match provider {
+        Some(provider) => provider()?,
+        None => None,
+    };
+    // Preserve Matter's platform-recovery policy for every protocol. Failure to
+    // cache does not discard valid credentials or echo a secret-bearing error.
+    if let (Some(storage), Some(credentials)) = (storage, credentials.as_ref()) {
+        if storage
+            .save_commissioning_wifi_credentials(credentials)
+            .is_err()
+        {
+            log::warn!("Could not cache recovered accessory Wi-Fi credentials");
+        }
+    }
+    Ok(credentials)
+}
+
 /// Metadata exposed to the provisioning client.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProvisioningDeviceInfo {

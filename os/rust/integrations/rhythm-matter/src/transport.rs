@@ -245,6 +245,17 @@ pub struct MatterCommissioningWifiCredentials {
     pub password: String,
 }
 
+/// A phone-provisioned accessory's short-lived PASE target.
+///
+/// This value may cross the in-process chipd RPC, but must never be persisted,
+/// logged, or included in ordinary diagnostics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MatterOnNetworkCommissioningTarget {
+    pub address: String,
+    pub port: u16,
+    pub setup_pin_code: u32,
+}
+
 /// Shared typed commissioning request built by the orchestrator.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MatterCommissionRequest {
@@ -258,6 +269,11 @@ pub struct MatterCommissionRequest {
     pub rendezvous: MatterCommissioningRendezvous,
     /// Stored appliance Wi-Fi credentials used during commissioning.
     pub wifi_credentials: MatterCommissioningWifiCredentials,
+    /// Explicit phone-provided on-network endpoint, when discovery is not
+    /// required. This is intentionally omitted from serialized requests for
+    /// every established commissioning path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_network_target: Option<MatterOnNetworkCommissioningTarget>,
 }
 
 /// Platform-agnostic typed interface to a Matter light controller.
@@ -982,11 +998,27 @@ mod tests {
                 ssid: "Rhythm".to_string(),
                 password: "secret".to_string(),
             },
+            on_network_target: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
         let decoded: MatterCommissionRequest = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, request);
+        assert!(!json.contains("on_network_target"));
+
+        let targeted = MatterCommissionRequest {
+            on_network_target: Some(MatterOnNetworkCommissioningTarget {
+                address: "192.0.2.42".to_string(),
+                port: 5540,
+                setup_pin_code: 20202021,
+            }),
+            ..request.clone()
+        };
+        let targeted_json = serde_json::to_string(&targeted).unwrap();
+        assert_eq!(
+            serde_json::from_str::<MatterCommissionRequest>(&targeted_json).unwrap(),
+            targeted
+        );
 
         let report = MatterAttributeReport {
             received_at_unix_ms: 1_700_000_000_000,

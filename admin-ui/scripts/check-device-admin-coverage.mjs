@@ -19,6 +19,8 @@ const explicitExemptions = new Set([
   'GET api/ota/version',
   // Owner-only Matter setup secrets must never become staff/admin operations.
   'GET api/matter/setup-code/{}',
+  // Saved commissioning Wi-Fi credentials are likewise owner-only secrets.
+  'GET api/pairing/wifi-credentials',
   // One-release bulb-test aliases remain SDK-callable for version skew but
   // the admin catalog exposes only the canonical Bulb Audition operations.
   'POST api/matter/bulb-test/run',

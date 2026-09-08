@@ -1403,6 +1403,7 @@ class AnalyticsService {
     required String inputMethod,
     required String family,
     required int attemptNumber,
+    String commissioner = 'server',
     bool resumed = false,
   }) async {
     await logEvent('ble_wifi_pairing_attempted', {
@@ -1411,6 +1412,7 @@ class AnalyticsService {
       'input_method': inputMethod,
       'family': family,
       'attempt_number': attemptNumber,
+      'commissioner': commissioner == 'phone' ? 'phone' : 'server',
       'resumed': resumed,
     });
   }
@@ -1421,6 +1423,7 @@ class AnalyticsService {
     required String inputMethod,
     required String family,
     required int attemptNumber,
+    String commissioner = 'server',
     required String outcome,
     String? failureStage,
   }) async {
@@ -1430,6 +1433,7 @@ class AnalyticsService {
       'input_method': inputMethod,
       'family': family,
       'attempt_number': attemptNumber,
+      'commissioner': commissioner == 'phone' ? 'phone' : 'server',
       'outcome': outcome,
       if (failureStage != null) 'failure_stage': failureStage,
     });

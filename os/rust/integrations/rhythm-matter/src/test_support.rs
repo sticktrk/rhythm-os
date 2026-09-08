@@ -861,6 +861,7 @@ mod tests {
                 ssid: "lab".to_string(),
                 password: "secret".to_string(),
             },
+            on_network_target: None,
         }
     }
 

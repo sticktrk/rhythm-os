@@ -200,6 +200,7 @@ impl ExternalLightHubIntegration for BluezLocalBleIntegration {
                             .collect(),
                         nearby_service_uuids: Vec::new(),
                         cloud_broker: None,
+                        phone_provisioning_protocol: None,
                     }
                 })
                 .collect(),
