@@ -47,3 +47,10 @@ for fixture in \
     tools/os/scripts/tests/stable-release-notes-sim.sh; do
     bash "$fixture"
 done
+
+# Product ownership rules must be reproducible by every contributor.
+for guard in check-supabase-single-root.sh check-shared-bluez-ownership.sh check-analytics-contract-anchors.sh test-check-shared-bluez-ownership.sh; do
+    bash "tools/ci/$guard"
+done
+python3 tools/ci/check-commissioning-reuse.py
+python3 tools/ci/check-commissioning-reuse.py --self-test

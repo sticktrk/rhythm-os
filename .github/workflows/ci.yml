@@ -29,6 +29,8 @@ jobs:
           echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check
           tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
           "$RUNNER_TEMP/gitleaks" git . --redact --no-banner
+      - name: Source guard dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y ripgrep
       - name: Public repository boundaries and deployment fixtures
         run: ./tools/check-repo-invariants.sh
       - name: Rust workspace manifests
@@ -72,6 +74,10 @@ jobs:
         run: sudo apt-get update -qq && sudo apt-get install -y pkg-config libdbus-1-dev libudev-dev libssl-dev
       - name: Portable workspace tests
         run: cargo test --workspace --all-targets --locked
+      - name: Build the contributor server
+        run: cargo build --locked -p rhythm-server
+      - name: Fresh server startup without cloud configuration
+        run: python3 tools/ci/smoke-server.py --binary target/debug/rhythm-server
   dart:
     name: Dart tests (${{ matrix.package }})
     runs-on: ubuntu-latest

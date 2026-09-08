@@ -246,7 +246,7 @@ A BLE change is review-ready only when:
 Run the ownership invariant from the repository root:
 
 ```bash
-.codex/skills/rhythm-feature-delivery/scripts/check-shared-bluez-ownership.sh
+tools/ci/check-shared-bluez-ownership.sh
 ```
 
 `tools/check-repo-invariants.sh` runs both this checker and its contract test in

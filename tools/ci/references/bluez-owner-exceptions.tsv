@@ -1,0 +1,5 @@
+# repo-relative path	categories	owner	expires	reason
+os/rust/bins/rhythm-linux-appliance/Cargo.toml	dependency	rhythm-linux-appliance	2027-07-31	Peripheral-only provisioning requires BlueZ types until shared peripheral-role support exists.
+os/rust/bins/rhythm-linux-appliance/src/ble_provision.rs	session,runtime	rhythm-linux-appliance	2027-07-31	Peripheral-only provisioning GATT server; it does not scan or drive remote devices and must be reviewed when shared peripheral-role support exists.
+os/rust/integrations/rhythm-hue/Cargo.toml	dependency	rhythm-hue	2027-07-31	Existing Hue BLE GATT driver uses BlueZ protocol types through the shared rhythm-ble operation boundary.
+os/rust/integrations/rhythm-monster/Cargo.toml	dependency	rhythm-monster	2027-07-31	Ayla commissioning uses remote GATT types only inside the shared rhythm-ble admitted operation; no private session, scanner, or runtime.

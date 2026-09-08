@@ -31,6 +31,7 @@ Developer, backend and packaging tooling. Production credentials and internal sc
   values stay outside the repository under `~/.config/rhythm/`.
 - `tools/check-repo-invariants.sh` - Source boundaries, licenses and deployment fixture checks.
 - `tools/install-git-hooks.sh` - Install the local source-check hook.
+- `tools/ci/check-*.sh` and `check-commissioning-reuse.py` - product ownership guards run by public CI.
 - `tools/ci/detect-changed-surfaces.sh` - Shared path classifier for CI jobs.
 
 Deploy a product-only Supabase backend from the repository root:
@@ -38,13 +39,6 @@ Deploy a product-only Supabase backend from the repository root:
 ```bash
 ./tools/deploy-supabase.sh
 ./tools/deploy-supabase.sh --dry-run
-```
-
-For the existing shared product/marketing database, compose both histories:
-
-```bash
-./tools/deploy-supabase.sh --marketing-repo rhythm-marketing --dry-run
-./tools/deploy-supabase.sh --marketing-repo rhythm-marketing
 ```
 
 Deploy only selected Supabase Edge Functions when needed:
