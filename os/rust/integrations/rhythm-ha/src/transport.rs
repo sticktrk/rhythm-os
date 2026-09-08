@@ -139,9 +139,8 @@ impl HaConnectionConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    use crate::test_support::ENV_LOCK;
 
     struct MinimalTransport;
 

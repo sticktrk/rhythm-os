@@ -159,6 +159,13 @@ impl HaTransport for SpyHaTransport {
     }
 }
 
+/// Serializes every test that mutates process environment variables.
+///
+/// Each test module used to keep its own lock, which let `transport` and
+/// `desktop_lifecycle` race on `SUPERVISOR_TOKEN` inside the same test
+/// binary and fail intermittently in CI. One lock, shared crate-wide.
+pub static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
