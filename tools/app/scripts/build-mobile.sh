@@ -356,7 +356,7 @@ KEYCHAIN_PROFILE="${KEYCHAIN_PROFILE:-}"
 APP_NAME="Rhythm Lighting"
 
 # TestFlight configuration
-ASC_API_KEY_PATH="$HOME/.config/rhythm/asc_api_key.json"
+ASC_API_KEY_PATH="${RHYTHM_ASC_API_KEY_PATH:-${RHYTHM_CONFIG_DIR:-$HOME/.config/rhythm}/asc_api_key.json}"
 IOS_APP_IDENTIFIER="lighting.rhythm.app"
 
 # Google Play configuration
@@ -577,6 +577,12 @@ fi
 
 echo "Building for: $PLATFORM"
 echo ""
+
+if [ "$BUILD_IPA" = true ] && [ -f "$ASC_API_KEY_PATH" ] && \
+   ! [[ "$TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]; then
+    echo "Error: set TEAM_ID to your 10-character Apple Developer team ID for authenticated IPA builds."
+    exit 1
+fi
 
 if [ -n "$BUILD_NUMBER_OVERRIDE" ] || [ -n "$RELEASE" ]; then
     resolve_release_build_number
@@ -892,32 +898,26 @@ else
         # deciding whether this build or its authenticated fallback succeeded.
         rm -rf "$FLUTTER_APP/build/ios/ipa" \
             "$FLUTTER_APP/build/ios/archive/Runner.xcarchive"
-        set +e
-        flutter build ipa "${FLUTTER_BUILD_ARGS[@]}"
-        FLUTTER_IPA_STATUS=$?
-        set -e
-
-        IPA_FILE=""
-        if [ -d "$FLUTTER_APP/build/ios/ipa" ]; then
-            IPA_FILE=$(find "$FLUTTER_APP/build/ios/ipa" -name "*.ipa" -type f | head -1)
-        fi
-
-        # Preserve the normal interactive Xcode path. If Flutter produced an
-        # archive but export could not see an Xcode account or distribution
-        # certificate, retry only the export with the same App Store Connect
-        # API key that TestFlight upload already requires.
-        if [ -z "$IPA_FILE" ] && [ -d "$FLUTTER_APP/build/ios/archive/Runner.xcarchive" ]; then
-            echo ""
-            echo "Flutter produced an archive but no IPA; retrying export with App Store Connect authentication..."
+        if [ -f "$ASC_API_KEY_PATH" ]; then
+            # Configure Flutter without asking its archive step to authenticate
+            # through an interactive Xcode account. The helper supplies the
+            # API key and team to archive and export, including app extensions.
+            flutter build ios --config-only --no-codesign "${FLUTTER_BUILD_ARGS[@]}"
             "$SCRIPT_DIR/export-testflight-ipa.sh" \
+                --workspace "$FLUTTER_APP/ios/Runner.xcworkspace" \
                 --archive "$FLUTTER_APP/build/ios/archive/Runner.xcarchive" \
                 --export-path "$FLUTTER_APP/build/ios/ipa" \
                 --api-key "$ASC_API_KEY_PATH" \
                 --team-id "$TEAM_ID" \
                 --bundle-id "$IOS_APP_IDENTIFIER"
+        else
+            # Contributors without an API key can use their Xcode account.
+            flutter build ipa "${FLUTTER_BUILD_ARGS[@]}"
+        fi
+
+        IPA_FILE=""
+        if [ -d "$FLUTTER_APP/build/ios/ipa" ]; then
             IPA_FILE=$(find "$FLUTTER_APP/build/ios/ipa" -name "*.ipa" -type f | head -1)
-        elif [ "$FLUTTER_IPA_STATUS" -ne 0 ]; then
-            exit "$FLUTTER_IPA_STATUS"
         fi
 
         if [ -z "$IPA_FILE" ]; then

@@ -1,14 +1,18 @@
 #!/bin/bash
-# Export an existing iOS archive with App Store Connect API-key authentication.
+# Archive/export for App Store Connect with API-key authentication.
 
 set -euo pipefail
 
 usage() {
     cat <<'EOF'
 Usage: export-testflight-ipa.sh --archive PATH --export-path PATH --api-key PATH --team-id ID --bundle-id ID
+                              [--workspace PATH --scheme NAME]
 
 Exports an xcarchive for App Store Connect while allowing Xcode to create or
 download managed distribution signing assets with the supplied API key.
+With --workspace, first creates the archive using the same authentication and
+team for every target, including app extensions. Generate Flutter's release
+configuration before invoking this mode.
 EOF
 }
 
@@ -17,9 +21,19 @@ EXPORT_PATH=""
 API_KEY_PATH=""
 TEAM_ID=""
 BUNDLE_ID=""
+WORKSPACE_PATH=""
+SCHEME="Runner"
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        --workspace)
+            WORKSPACE_PATH="${2:?--workspace requires a path}"
+            shift 2
+            ;;
+        --scheme)
+            SCHEME="${2:?--scheme requires a name}"
+            shift 2
+            ;;
         --archive)
             ARCHIVE_PATH="${2:?--archive requires a path}"
             shift 2
@@ -58,7 +72,11 @@ if [ -z "$ARCHIVE_PATH" ] || [ -z "$EXPORT_PATH" ] || [ -z "$API_KEY_PATH" ] || 
     exit 1
 fi
 
-if [ ! -d "$ARCHIVE_PATH" ]; then
+if [ -n "$WORKSPACE_PATH" ] && [ ! -d "$WORKSPACE_PATH" ]; then
+    echo "Error: Xcode workspace not found: $WORKSPACE_PATH" >&2
+    exit 1
+fi
+if [ -z "$WORKSPACE_PATH" ] && [ ! -d "$ARCHIVE_PATH" ]; then
     echo "Error: iOS archive not found: $ARCHIVE_PATH" >&2
     exit 1
 fi
@@ -136,14 +154,24 @@ cat > "$EXPORT_OPTIONS_FILE" <<EOF
 EOF
 
 mkdir -p "$EXPORT_PATH"
+AUTH_ARGS=(
+    -allowProvisioningUpdates
+    -authenticationKeyPath "$AUTH_KEY_FILE"
+    -authenticationKeyID "$KEY_ID"
+    -authenticationKeyIssuerID "$ISSUER_ID"
+)
+if [ -n "$WORKSPACE_PATH" ]; then
+    "$XCODEBUILD_CMD" -workspace "$WORKSPACE_PATH" -scheme "$SCHEME" \
+        -configuration Release -destination 'generic/platform=iOS' \
+        -archivePath "$ARCHIVE_PATH" \
+        "DEVELOPMENT_TEAM=$TEAM_ID" CODE_SIGN_STYLE=Automatic \
+        "${AUTH_ARGS[@]}" archive
+fi
 "$XCODEBUILD_CMD" -exportArchive \
     -archivePath "$ARCHIVE_PATH" \
     -exportPath "$EXPORT_PATH" \
     -exportOptionsPlist "$EXPORT_OPTIONS_FILE" \
-    -allowProvisioningUpdates \
-    -authenticationKeyPath "$AUTH_KEY_FILE" \
-    -authenticationKeyID "$KEY_ID" \
-    -authenticationKeyIssuerID "$ISSUER_ID"
+    "${AUTH_ARGS[@]}"
 
 IPA_FILE="$(find "$EXPORT_PATH" -name '*.ipa' -type f | head -1)"
 if [ -z "$IPA_FILE" ]; then

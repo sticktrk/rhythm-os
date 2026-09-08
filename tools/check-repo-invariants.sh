@@ -32,6 +32,7 @@ python3 -m unittest tools/tests/test_prepare_supabase_workdir.py
 bash tools/app/scripts/tests/deploy-supabase-functions-test.sh
 bash tools/app/scripts/tests/deploy-supabase-test.sh
 python3 -m unittest tools/tests/test_release_publication.py
+python3 -m unittest tools/tests/test_testflight_build.py
 python3 tools/config/test_rhythm_env.py
 for fixture in \
     tools/ci/test-detect-changed-surfaces.sh \
@@ -39,6 +40,7 @@ for fixture in \
     tools/ci/test-post-flutter-ui-evidence.sh \
     tools/ci/test-render-flutter-ui-evidence.sh \
     tools/app/scripts/tests/app-build-profile-test.sh \
+    tools/app/scripts/tests/export-testflight-ipa-test.sh \
     tools/app/scripts/tests/testflight-notes-test.sh \
     tools/app/scripts/tests/write-app-build-receipt-test.sh \
     tools/os/scripts/tests/r2-publishing-sim.sh \

@@ -94,10 +94,23 @@ then `RHYTHM_BUILD_NUMBER`, then the latest TestFlight build for the current
 `flutter/rhythm_app/pubspec.yaml` version plus one. Other release builds use common CI run-number
 variables, then the `+build` value from `pubspec.yaml`. It does not fall back to the current time.
 If TestFlight has no builds for the current version, the first build number is `1`.
-The normal interactive Xcode export remains the first path. If Flutter creates
-the archive but cannot see an Xcode account or distribution certificate during
-IPA export, the script retries that export with the configured App Store
-Connect API key and managed signing before uploading.
+When an App Store Connect API key is configured, IPA builds require `TEAM_ID`.
+Flutter generates the release configuration, then Xcode uses the API key for
+both archiving and export. The team override applies to the app and all its
+extensions without changing the checked-in project. No interactive Xcode account
+is needed for provisioning with this path. The API key must have permission to
+manage the signing assets, and the Mac must have an appropriate signing identity.
+The default key file is `~/.config/rhythm/asc_api_key.json`; override it with
+`RHYTHM_ASC_API_KEY_PATH` or set `RHYTHM_CONFIG_DIR`. IPA builds without a key
+continue to use Flutter's interactive Xcode signing path.
+
+Before the first build with phone-assisted Matter commissioning, register
+`group.lighting.rhythm.app.matter` in Apple Developer and associate it with both
+`lighting.rhythm.app` and `lighting.rhythm.app.MatterCommissioningExtension`.
+The app and extension must use profiles containing that shared App Group;
+enabling the App Groups capability alone does not assign the group. See
+[Apple's capability configuration guide](https://developer.apple.com/help/account/identifiers/enable-app-capabilities).
+Use matching identifiers and entitlements when distributing your own fork.
 
 Direct TestFlight uploads may include build-specific tester notes:
 
