@@ -1,10 +1,12 @@
 name: Public source checks
 on:
   push:
-    branches: [master]
   pull_request:
 permissions:
   contents: read
+concurrency:
+  group: public-checks-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   changes:
     name: Detect changed surfaces
@@ -17,6 +19,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Scan history for secrets
+        run: |
+          curl --fail --silent --show-error --location \
+            https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz \
+            --output "$RUNNER_TEMP/gitleaks.tar.gz"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP" gitleaks
+          "$RUNNER_TEMP/gitleaks" git . --redact --no-banner
       - name: Public repository boundaries and deployment fixtures
         run: ./tools/check-repo-invariants.sh
       - name: Rust workspace manifests
@@ -26,7 +38,9 @@ jobs:
       - name: Private credential provisioning fixture
         run: python3 tools/tests/test_monster_cloud_secrets.py
   flutter:
+    name: Flutter checks
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v5
       - uses: subosito/flutter-action@v2
@@ -39,3 +53,68 @@ jobs:
       - name: Analyze
         working-directory: app/flutter/rhythm_app
         run: flutter analyze --no-pub
+      - name: Tests
+        timeout-minutes: 25
+        working-directory: app/flutter/rhythm_app
+        run: flutter test --no-pub
+  rust:
+    name: Rust tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux build dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y pkg-config libdbus-1-dev libudev-dev libssl-dev
+      - name: Portable workspace tests
+        run: cargo test --workspace --all-targets --locked
+  dart:
+    name: Dart tests (${{ matrix.package }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [sdk, admin-api]
+    defaults:
+      run:
+        working-directory: ${{ matrix.package }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dart-lang/setup-dart@v1
+        with:
+          sdk: 3.12.2
+      - run: dart pub get
+      - run: dart test
+  admin-ui:
+    name: Admin UI checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: admin-ui
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: admin-ui/package-lock.json
+      - run: npm ci
+      - run: npm run test:mode-write-payload
+      - run: npm run build
+  required:
+    name: Public contributor checks
+    if: always()
+    needs: [changes, source, flutter, rust, dart, admin-ui]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all contributor checks to pass
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          echo "$RESULTS" | jq -e 'all(.[]; . == "success")'
