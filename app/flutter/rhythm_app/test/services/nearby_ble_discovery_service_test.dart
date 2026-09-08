@@ -81,6 +81,15 @@ void main() {
     );
     expect(
       nearbyBleFamilyForAdvertisement(
+        serviceUuids: const ['FE28'],
+        connectable: true,
+        families: families,
+      ),
+      stripFamily,
+      reason: 'flutter_blue_plus emits Bluetooth SIG UUIDs in compact form',
+    );
+    expect(
+      nearbyBleFamilyForAdvertisement(
         serviceUuids: const ['0000fe28-0000-1000-8000-00805f9b34fb'],
         connectable: false,
         families: families,

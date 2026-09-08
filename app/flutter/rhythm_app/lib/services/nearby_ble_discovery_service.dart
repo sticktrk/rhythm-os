@@ -80,8 +80,16 @@ class NearbyBleFamily {
 
   String countLabel(int count) => count == 1 ? label : '$label ($count nearby)';
 
-  bool advertises(Iterable<String> normalizedServiceUuids) =>
-      normalizedServiceUuids.any(serviceUuids.contains);
+  bool advertises(Iterable<String> advertisedServiceUuids) {
+    final advertised = <String>{
+      for (final uuid in advertisedServiceUuids)
+        if (_canonicalServiceUuid(uuid) case final canonical?) canonical,
+    };
+    return serviceUuids.any((uuid) {
+      final canonical = _canonicalServiceUuid(uuid);
+      return canonical != null && advertised.contains(canonical);
+    });
+  }
 
   @override
   bool operator ==(Object other) => other is NearbyBleFamily && other.id == id;
@@ -91,6 +99,16 @@ class NearbyBleFamily {
 
   @override
   String toString() => 'NearbyBleFamily($id)';
+}
+
+String? _canonicalServiceUuid(String raw) {
+  final value = raw.trim();
+  if (value.isEmpty) return null;
+  try {
+    return Guid(value).str128;
+  } on FormatException {
+    return null;
+  }
 }
 
 enum NearbyBleDiscoveryOutcome {
@@ -147,10 +165,8 @@ NearbyBleFamily? nearbyBleFamilyForAdvertisement({
   required Iterable<NearbyBleFamily> families,
 }) {
   if (!connectable) return null;
-  final normalized =
-      serviceUuids.map((uuid) => uuid.trim().toLowerCase()).toList();
   for (final family in families) {
-    if (family.advertises(normalized)) return family;
+    if (family.advertises(serviceUuids)) return family;
   }
   return null;
 }
