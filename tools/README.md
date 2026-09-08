@@ -1,5 +1,21 @@
 # Tools
 
+These are the canonical reusable tools for public contributors and downstream
+operations workspaces. Build/test/package/upload logic belongs here. Credentials
+are supplied at runtime; company-specific approvals and publisher workflows can
+remain in a separate operations repository.
+
+Release commands accept `RHYTHM_RELEASE_PUBLISH_HOOK`, an absolute executable
+path. After a successful tag push the hook receives the tag and its exact source
+commit as two arguments. Dry runs, `--no-push` and failed pushes do not invoke it;
+publisher failures make the release command fail. Without a hook, pushing a tag
+does not upload an OTA release. `--upload` remains the explicit local upload path.
+
+`RHYTHM_RELEASE_EVIDENCE_ROOT` selects the beta-verification receipt directory.
+`RHYTHM_APP_BUILD_EVIDENCE_ROOT` selects the mobile build receipt directory;
+`RHYTHM_APP_BUILD_RECEIPT_PATH` still overrides a single receipt's full path.
+These paths let operations callers retain evidence outside the public checkout.
+
 Developer, backend and packaging tooling. Production credentials and internal schedules are not included.
 
 - `tools/app/scripts/` - Flutter app build, codegen, mobile, Android, and web helpers.

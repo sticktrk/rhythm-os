@@ -214,17 +214,20 @@ inputs, and the `third_party/` pruning knobs used to keep image size down.
 
 ### release.sh
 
-Create a Git release tag; the tag push drives the CI release pipeline
-(`ci.yml`), which publishes the GitHub release assets and the OTA feed.
+Create a Git release tag. An optional `RHYTHM_RELEASE_PUBLISH_HOOK` executable
+receives the tag and exact source commit after the push succeeds, allowing an
+operations workspace to dispatch its own publisher. The public CI workflow runs
+checks; it does not publish OTA artifacts. Without a hook, this command only
+versions and publishes source. Use `--upload` for an explicit local OTA upload.
 
 **The full OTA model — channels, binary vs image, fingerprint gate, manifest
 schema, runbooks — lives in [`docs/ota.md`](../../../docs/ota.md).** Short
 version:
 
-- Every release is tagged `vX.Y.Z-beta` and publishes the `rpiz/` (beta)
+- Every beta is tagged `vX.Y.Z-beta`; a configured publisher updates the `rpiz/` (beta)
   feed. `--promote-stable` re-tags the same commit `vX.Y.Z-stable`, which
   publishes the `rpiz-stable/` feed that fleet auto-update consumes.
-- CI decides binary-only vs full-image automatically by comparing the rootfs
+- The publisher can decide binary-only vs full-image by comparing the rootfs
   fingerprint against the published feed. `--with-image` forces the image
   build (it embeds a `[with-image]` marker in the tag message).
 - `--upload` is the escape hatch when GitHub Actions is down: builds,
@@ -252,6 +255,9 @@ Run `release.sh --help` for the full flag list.
 - Updates the root workspace version in `Cargo.toml` before tagging and mechanically syncs only local `rhythm-*` package versions in the root `Cargo.lock`. It does not run Cargo dependency resolution, which avoids unrelated `rhythm-chipd` lockfile churn on macOS release hosts.
 - Creates the release commit automatically when those version files change.
 - Pushes the current branch and the new tag to `origin` by default.
+- Calls the optional publisher only after a successful tag push. Dry runs and
+  `--no-push` never call it. A publisher error is returned to the caller; the
+  published tag remains available for retrying that publisher.
 - Stable promotion verifies the matching remote beta tag and public beta
   manifest before creating the stable tag. Add `--device URL --token-file FILE`
   for a bench receipt. Emergency skips require

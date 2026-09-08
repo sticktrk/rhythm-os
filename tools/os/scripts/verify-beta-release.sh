@@ -164,7 +164,7 @@ LOCAL_COMMIT="$(git -C "$REPO_ROOT" rev-list -n 1 "$BETA_TAG" 2>/dev/null || tru
 }
 
 if [ -z "$RECEIPT" ]; then
-    RECEIPT="$REPO_ROOT/.release-evidence/${BETA_TAG}.json"
+    RECEIPT="${RHYTHM_RELEASE_EVIDENCE_ROOT:-$REPO_ROOT/.release-evidence}/${BETA_TAG}.json"
 elif [ "${RECEIPT#/}" = "$RECEIPT" ]; then
     RECEIPT="$REPO_ROOT/$RECEIPT"
 fi

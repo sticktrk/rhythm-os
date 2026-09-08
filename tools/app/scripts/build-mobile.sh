@@ -117,7 +117,7 @@ write_store_build_receipt() {
 
     version="$(pubspec_build_name)"
     source_commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"
-    receipt_path="${RHYTHM_APP_BUILD_RECEIPT_PATH:-$REPO_ROOT/.release-evidence/app-builds/$version-$channel-$build_number.json}"
+    receipt_path="${RHYTHM_APP_BUILD_RECEIPT_PATH:-${RHYTHM_APP_BUILD_EVIDENCE_ROOT:-$REPO_ROOT/.release-evidence/app-builds}/$version-$channel-$build_number.json}"
     "$BUILD_RECEIPT_WRITER" \
         --store "$store" \
         --channel "$channel" \
