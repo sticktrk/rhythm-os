@@ -38,6 +38,7 @@ admin-api/.env
 
 # Local Supabase CLI project metadata.
 tools/app/supabase/.temp/
+tools/app/supabase/.env
 
 # Marketing site: its own repo (sticktrk/rhythm-marketing), worked on in place, deployed standalone to prod.
 /rhythm-marketing/

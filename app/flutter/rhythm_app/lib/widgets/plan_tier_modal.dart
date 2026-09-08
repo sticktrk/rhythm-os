@@ -48,6 +48,7 @@ class PlanTierModal extends StatefulWidget {
     BuildContext context, {
     Entitlement? highlightFeature,
   }) {
+    if (!FeatureFlags.entitlementsEnabled) return Future<void>.value();
     HapticFeedback.lightImpact();
     return showModalBottomSheet<void>(
       context: context,

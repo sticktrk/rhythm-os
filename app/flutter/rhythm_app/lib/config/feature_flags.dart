@@ -15,18 +15,10 @@ class FeatureFlags {
     defaultValue: true,
   );
 
-  /// Enforce plan-tier entitlements throughout the app.
-  ///
-  /// When false, every [Entitlement] check returns true (except features
-  /// marked `isComingSoon`, which remain hidden because they're not yet
-  /// implemented). The plan-tier modal and Supabase subscription resolution
-  /// still run, but no feature surface is gated.
-  ///
-  /// Configure in .env: ENTITLEMENTS_ENABLED=true/false
-  static const bool entitlementsEnabled = bool.fromEnvironment(
-    'ENTITLEMENTS_ENABLED',
-    defaultValue: false,
-  );
+  /// Subscription tiers were never launched. Keep all implemented features
+  /// available, suppress plan UI and skip subscription reads/writes entirely.
+  /// An old ENTITLEMENTS_ENABLED build setting cannot enable unfinished billing.
+  static const bool entitlementsEnabled = false;
 
   /// Show the per-profile "Advanced" (timing fine-tune) section on the Light
   /// tab. Hidden for now while the Light tab is reworked around layered

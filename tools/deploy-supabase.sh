@@ -5,7 +5,7 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: deploy-supabase.sh [--dry-run]
+Usage: deploy-supabase.sh [--dry-run] [--marketing-repo PATH]
 
 Deploy the canonical Supabase project in release order:
   1. Apply pending database migrations from tools/app/supabase/migrations/.
@@ -13,6 +13,8 @@ Deploy the canonical Supabase project in release order:
 
 Options:
   --dry-run  Preview pending migrations and the function deployment command.
+  --marketing-repo PATH  Compose the marketing history for a shared project,
+                        then deploy its functions after core functions.
   -h, --help Show this help.
 
 Authentication:
@@ -29,9 +31,17 @@ die() {
 }
 
 DRY_RUN=false
+MARKETING_REPO=""
+COMPOSED_WORKDIR=""
+trap '[ -z "$COMPOSED_WORKDIR" ] || rm -rf "$COMPOSED_WORKDIR"' EXIT
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        --marketing-repo)
+            [ $# -ge 2 ] || die '--marketing-repo requires a path'
+            MARKETING_REPO="$(cd "$2" && pwd)"
+            shift 2
+            ;;
         --dry-run)
             DRY_RUN=true
             shift
@@ -64,9 +74,26 @@ if [ -n "${SUPABASE_PROJECT_REF:-}" ] && [ "$SUPABASE_PROJECT_REF" != "$PROJECT_
     die "SUPABASE_PROJECT_REF does not match the project linked at tools/app"
 fi
 
+DATABASE_WORKDIR=tools/app
+if [ -n "$MARKETING_REPO" ]; then
+    [ -f "$MARKETING_REPO/scripts/deploy-supabase-functions.sh" ] || \
+        die 'marketing repo has no function deployment wrapper'
+    MARKETING_REF_FILE="$MARKETING_REPO/supabase/.temp/project-ref"
+    if [ -f "$MARKETING_REF_FILE" ] && \
+        [ "$(tr -d '[:space:]' < "$MARKETING_REF_FILE")" != "$PROJECT_REF" ]; then
+        die 'marketing repo is linked to a different project; shared deployment refused'
+    fi
+    COMPOSED_WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/rhythm-supabase-history.XXXXXX")"
+    python3 "$SCRIPT_DIR/prepare-supabase-workdir.py" \
+        --core "$REPO_ROOT/tools/app/supabase" \
+        --marketing-repo "$MARKETING_REPO" \
+        --destination "$COMPOSED_WORKDIR"
+    DATABASE_WORKDIR="$COMPOSED_WORKDIR"
+fi
+
 DATABASE_COMMAND=(
     supabase
-    --workdir tools/app
+    --workdir "$DATABASE_WORKDIR"
     db push
     --linked
 )
@@ -90,6 +117,13 @@ echo "==> Database migrations"
 
 echo "==> Edge Functions"
 "${FUNCTION_COMMAND[@]}"
+
+if [ -n "$MARKETING_REPO" ]; then
+    MARKETING_COMMAND=(bash "$MARKETING_REPO/scripts/deploy-supabase-functions.sh")
+    if [ "$DRY_RUN" = true ]; then MARKETING_COMMAND+=(--dry-run); fi
+    echo "==> Marketing Edge Functions"
+    SUPABASE_PROJECT_REF="$PROJECT_REF" "${MARKETING_COMMAND[@]}"
+fi
 
 if [ "$DRY_RUN" = true ]; then
     echo "Combined dry run complete; nothing was deployed."

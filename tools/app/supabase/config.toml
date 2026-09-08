@@ -1,5 +1,6 @@
 # Supabase CLI configuration for Rhythm Lighting
 # See: https://supabase.com/docs/reference/cli/config
+project_id = "cross"
 
 [api]
 enabled = true
@@ -59,5 +60,10 @@ verify_jwt = false
 [functions.server-activity-ingest]
 verify_jwt = false
 
+# Performs user-token verification in _shared/auth; shared vendor account by default, optional owner scope.
 [functions.monster-device]
+verify_jwt = false
+
+# Retired endpoint returns 410 without reading or changing subscriptions.
+[functions.set-subscription-tier]
 verify_jwt = false

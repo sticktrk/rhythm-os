@@ -25,16 +25,16 @@ run_dry() {
         "$DEPLOY_SCRIPT" "$@" --dry-run
 }
 
-named_output="$(run_dry report-bug blog-post-intake)"
+named_output="$(run_dry report-bug delete-user)"
 printf '%s\n' "$named_output" | grep -Fq 'Supabase workdir: tools/app'
-printf '%s\n' "$named_output" | grep -Eq 'functions deploy .*report-bug .*blog-post-intake .*--use-api .*--project-ref test-project-ref'
+printf '%s\n' "$named_output" | grep -Eq 'functions deploy .*report-bug .*delete-user .*--use-api .*--project-ref test-project-ref'
 if printf '%s\n' "$named_output" | grep -q -- '--prune\|--no-verify-jwt'; then
     echo "named deployment bypassed canonical config or enabled pruning" >&2
     exit 1
 fi
 
 all_output="$(run_dry --all)"
-printf '%s\n' "$all_output" | grep -Fq 'blog-post-intake'
+printf '%s\n' "$all_output" | grep -Fq 'delete-user'
 printf '%s\n' "$all_output" | grep -Fq 'report-bug'
 if printf '%s\n' "$all_output" | grep -Fq '_shared'; then
     echo "--all attempted to deploy the shared source directory" >&2
@@ -42,6 +42,15 @@ if printf '%s\n' "$all_output" | grep -Fq '_shared'; then
 fi
 if printf '%s\n' "$all_output" | grep -Fq 'join-home-by-server-instance'; then
     echo "--all attempted to deploy a directory without an index.ts entrypoint" >&2
+    exit 1
+fi
+
+if printf '%s\n' "$all_output" | grep -Fq 'blog-post-intake'; then
+    echo 'core deployment included the marketing function' >&2
+    exit 1
+fi
+if run_dry blog-post-intake >"$TEMP_DIR/marketing.out" 2>&1; then
+    echo 'core deployment accepted the marketing-owned function' >&2
     exit 1
 fi
 

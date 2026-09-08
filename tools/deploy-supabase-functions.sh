@@ -3,7 +3,7 @@
 #
 # Usage:
 #   ./tools/deploy-supabase-functions.sh report-bug
-#   ./tools/deploy-supabase-functions.sh blog-post-intake
+#   ./tools/deploy-supabase-functions.sh delete-user
 #   ./tools/deploy-supabase-functions.sh --all
 
 set -euo pipefail
@@ -22,7 +22,7 @@ Options:
 
 Examples:
   ./tools/deploy-supabase-functions.sh report-bug
-  ./tools/deploy-supabase-functions.sh blog-post-intake
+  ./tools/deploy-supabase-functions.sh delete-user
   ./tools/deploy-supabase-functions.sh --all
   ./tools/deploy-supabase-functions.sh report-bug --dry-run
 

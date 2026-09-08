@@ -100,6 +100,7 @@ class EntitlementsService {
   Stream<PlanTier> get tierChanges => _controller.stream;
 
   Future<void> _initialize() async {
+    if (!FeatureFlags.entitlementsEnabled) return;
     _demoOverride = await _loadDemoOverride();
     // Resolve once synchronously-ish for the very first read (initial value
     // is `basic`; we'll emit the real one as soon as the query returns).
@@ -114,6 +115,7 @@ class EntitlementsService {
   /// Pin the demo tier to [tier]. Only takes effect in demo mode. Pass
   /// `null` to clear and fall back to the demo default (Pro).
   Future<void> setDemoOverride(PlanTier? tier) async {
+    if (!FeatureFlags.entitlementsEnabled) return;
     _demoOverride = tier;
     final prefs = await SharedPreferences.getInstance();
     if (tier == null) {
@@ -148,6 +150,7 @@ class EntitlementsService {
   }
 
   Future<PlanTier> _resolveTier() async {
+    if (!FeatureFlags.entitlementsEnabled) return _currentTier;
     // HA add-on / fully self-hosted: no SaaS model applies.
     if (!_capabilities.hasCloudBackend) {
       _unsubscribeRealtime();
@@ -244,6 +247,9 @@ class EntitlementsService {
   /// error. Successful calls re-emit the tier through [tierChanges] via the
   /// realtime listener; we also force a [refresh] for snappy UI.
   Future<void> changePlan(PlanTier tier) async {
+    if (!FeatureFlags.entitlementsEnabled) {
+      throw StateError('Subscription plans are unavailable.');
+    }
     final client = _client;
     if (client == null) {
       throw StateError('Cannot change plan: no Supabase client available.');

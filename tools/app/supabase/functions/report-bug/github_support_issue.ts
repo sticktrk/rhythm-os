@@ -7,13 +7,7 @@ import {
   isFleetSubmission,
 } from './support_issue_body.ts'
 import type { DebugBundleSubmission } from './support_issue_body.ts'
-
-const defaultGitHubIssuesRepo = 'sticktrk/cross'
-const legacyGitHubIssuesRepos = new Set([
-  'sticktrk/rhythm-app',
-  'sticktrk/rhythm-app-flutter',
-  'sticktrk/rhythm-os',
-])
+import { githubIssuesRepo } from '../_shared/deployment_config.ts'
 
 export type GitHubIssueReport = {
   ok: boolean
@@ -28,9 +22,10 @@ export type GitHubIssueReport = {
 export async function createOrRefreshGitHubIssue(
   adminClient: any,
   submission: DebugBundleSubmission,
+  env: (name: string) => string | undefined = (name) => Deno.env.get(name),
 ): Promise<GitHubIssueReport> {
-  const githubRepo = readGitHubIssuesRepo()
-  const githubToken = Deno.env.get('GITHUB_ISSUES_TOKEN')?.trim()
+  const githubRepo = githubIssuesRepo(env('GITHUB_ISSUES_REPO'))
+  const githubToken = env('GITHUB_ISSUES_TOKEN')?.trim()
   if (!githubToken) {
     return await failedReport(
       adminClient,
@@ -62,9 +57,9 @@ export async function createOrRefreshGitHubIssue(
           labels: githubLabelsForSupportReport({
             kind: submission.report_kind,
             fleet: isFleetSubmission(submission),
-            configuredLabels: readCsvEnv('GITHUB_ISSUES_LABELS'),
+            configuredLabels: readCsvEnv('GITHUB_ISSUES_LABELS', env),
           }),
-          assignees: readCsvEnv('GITHUB_ISSUES_ASSIGNEES'),
+          assignees: readCsvEnv('GITHUB_ISSUES_ASSIGNEES', env),
         })
       : await refreshGitHubIssue({
           repo: githubRepo,
@@ -271,17 +266,8 @@ async function failedReport(
   }
 }
 
-function readGitHubIssuesRepo(): string {
-  const configured = Deno.env.get('GITHUB_ISSUES_REPO')?.trim()
-  if (!configured) return defaultGitHubIssuesRepo
-  if (legacyGitHubIssuesRepos.has(configured.toLowerCase())) {
-    return defaultGitHubIssuesRepo
-  }
-  return configured
-}
-
-function readCsvEnv(name: string): string[] {
-  return (Deno.env.get(name) ?? '')
+function readCsvEnv(name: string, env: (name: string) => string | undefined): string[] {
+  return (env(name) ?? '')
     .split(',')
     .map((value) => value.trim())
     .filter((value) => value.length > 0)

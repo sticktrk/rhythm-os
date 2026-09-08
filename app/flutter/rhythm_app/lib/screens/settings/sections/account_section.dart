@@ -62,7 +62,7 @@ class AccountSection extends StatelessWidget {
               FeatureFlags.entitlementsEnabled ? 'Account & Plan' : 'Account',
           icon: Icons.account_circle_outlined,
           subtitle: isSignedIn
-              ? 'Your plan and cloud sync.'
+              ? 'Your account and cloud sync.'
               : 'Sign in to sync your setup across devices.',
         ),
         SettingsGroup(children: rows),

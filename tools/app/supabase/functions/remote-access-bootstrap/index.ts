@@ -7,10 +7,9 @@ import {
   withAuthenticatedRequest,
 } from '../_shared/auth.ts'
 import { resolveServerIdentity } from '../_shared/server_identity.ts'
+import { remoteAccessDomain as configuredRemoteAccessDomain } from '../_shared/deployment_config.ts'
 
 const CLOUDFLARE_API_BASE = 'https://api.cloudflare.com/client/v4'
-const DEFAULT_REMOTE_ACCESS_DOMAIN = 'rhythm.lighting'
-const LEGACY_REMOTE_ACCESS_DOMAIN = 'devices.rhythm.lighting'
 const DEFAULT_ORIGIN_SERVICE = 'http://localhost:54448'
 
 type CloudflareResponse<T> = {
@@ -1233,15 +1232,7 @@ function endpointForHostname(hostname: string): { host: string; port: number; us
 }
 
 function remoteAccessDomain(): string {
-  const domain = readEnv(
-    'RHYTHM_REMOTE_ACCESS_DOMAIN',
-    DEFAULT_REMOTE_ACCESS_DOMAIN,
-  )
-    .replace(/^\.+|\.+$/g, '')
-    .toLowerCase()
-  return domain === LEGACY_REMOTE_ACCESS_DOMAIN
-    ? DEFAULT_REMOTE_ACCESS_DOMAIN
-    : domain
+  return configuredRemoteAccessDomain(Deno.env.get('RHYTHM_REMOTE_ACCESS_DOMAIN'))
 }
 
 function hostnameForDomain(
