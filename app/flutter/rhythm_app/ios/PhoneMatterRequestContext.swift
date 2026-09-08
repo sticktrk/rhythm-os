@@ -103,6 +103,16 @@ enum PhoneMatterBridge {
   static let failureStageKey = "phone_matter.failure_stage"
   static let failureMessageKey = "phone_matter.failure_message"
 
+  /// Phone-assisted commissioning is deferred until the extension is provisioned
+  /// and embedded again. The app must use Box pairing when it is not packaged.
+  static func isExtensionPackaged(in bundle: Bundle = .main) -> Bool {
+    guard let plugins = bundle.builtInPlugInsURL else { return false }
+    let path = plugins.appendingPathComponent("MatterCommissioningExtension.appex").path
+    var isDirectory: ObjCBool = false
+    return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory)
+      && isDirectory.boolValue
+  }
+
   struct ServerPairingError: Error { let message: String }
 
   /// A 200 receipt is owned by the shared Dart parser, including failed,
