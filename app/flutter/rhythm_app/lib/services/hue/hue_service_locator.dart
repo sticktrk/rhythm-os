@@ -11,10 +11,10 @@ import 'demo_hue_bridge_service.dart';
 import 'hue_bridge_service.dart';
 import 'real_hue_bridge_service.dart';
 
-/// Demo credentials for App Store review.
+/// Synthetic credentials for the local simulated demo; no cloud account.
 class DemoCredentials {
-  static const email = 'REMOVED_PRIVATE_VALUE';
-  static const password = 'REMOVED_PRIVATE_VALUE';
+  static const email = 'demo@example.invalid';
+  static const password = 'demo';
 }
 
 /// Service locator that returns appropriate [HueBridgeService] implementation.

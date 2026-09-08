@@ -12,10 +12,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--project-ref', required=True)
     args = parser.parse_args()
-    # Only the shared account is secret. The Ayla application credentials are
-    # pinned in the edge function and the ticket-signing key is derived from
-    # these two values, so nothing else needs to be uploaded.
-    names = ('MONSTER_EMAIL', 'MONSTER_PASSWORD', 'MONSTER_OWNER_USER_ID')
+    # One vendor application credential plus the shared account email/password.
+    # Tickets derive their key from the account; there are no per-device secrets.
+    names = ('MONSTER_EMAIL', 'MONSTER_PASSWORD', 'MONSTER_AYLA_APP_SECRET', 'MONSTER_OWNER_USER_ID')
     values = {}
     for name in names:
         hint = ' (blank keeps the account shared)' if name == 'MONSTER_OWNER_USER_ID' else ''

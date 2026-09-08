@@ -1378,7 +1378,7 @@ http.Response _supabaseResponse(http.BaseRequest request) {
     return _jsonResponse({
       'issue_created': true,
       'status': 'reported',
-      'issue_url': 'https://github.com/sticktrk/cross/issues/177',
+      'issue_url': 'https://github.com/sticktrk/rhythm-os/issues/177',
       'issue_number': 177,
     });
   }

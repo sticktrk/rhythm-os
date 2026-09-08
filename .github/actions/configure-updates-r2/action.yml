@@ -1,0 +1,74 @@
+name: Configure updates R2
+description: Configure Cloudflare R2 credentials and the AWS CLI for OTA publishing.
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        set -euo pipefail
+
+        : "${CLOUDFLARE_ACCESS_KEY:?CLOUDFLARE_ACCESS_KEY is required}"
+        : "${CLOUDFLARE_SECRET_ACCESS_KEY:?CLOUDFLARE_SECRET_ACCESS_KEY is required}"
+        : "${CLOUDFLARE_S3_API_ENDPOINT:?CLOUDFLARE_S3_API_ENDPOINT is required}"
+        : "${CLOUDFLARE_R2_BUCKET:?CLOUDFLARE_R2_BUCKET is required}"
+
+        aws_supports_conditional_put() {
+          local skeleton
+          command -v aws >/dev/null 2>&1 || return 1
+          skeleton="$(aws s3api put-object --generate-cli-skeleton input 2>/dev/null)" \
+            || return 1
+          grep -q '"IfMatch"' <<<"$skeleton" \
+            && grep -q '"IfNoneMatch"' <<<"$skeleton"
+        }
+
+        if ! aws_supports_conditional_put; then
+          case "$(uname -m)" in
+            x86_64|amd64) aws_arch=x86_64 ;;
+            arm64|aarch64) aws_arch=aarch64 ;;
+            *)
+              echo "Unsupported runner architecture for AWS CLI: $(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+
+          install_root="$RUNNER_TEMP/rhythm-aws-cli"
+          archive="$RUNNER_TEMP/awscliv2.zip"
+          rm -rf "$install_root" "$archive"
+          mkdir -p "$install_root/bin" "$install_root/dist"
+          curl --fail --silent --show-error --location \
+            --proto '=https' --tlsv1.2 \
+            "https://awscli.amazonaws.com/awscli-exe-linux-${aws_arch}.zip" \
+            --output "$archive"
+          # Python's standard zipfile extractor drops Unix executable bits.
+          # The AWS CLI archive contains an executable installer and binaries,
+          # so use the action-owned extractor that restores the archived modes.
+          python3 "$GITHUB_ACTION_PATH/extract_zip_preserving_permissions.py" \
+            "$archive" "$install_root/dist"
+          test -x "$install_root/dist/aws/install"
+          "$install_root/dist/aws/install" \
+            --install-dir "$install_root/install" \
+            --bin-dir "$install_root/bin"
+          echo "$install_root/bin" >> "$GITHUB_PATH"
+          export PATH="$install_root/bin:$PATH"
+        fi
+
+        {
+          printf 'AWS_ACCESS_KEY_ID=%s\n' "$CLOUDFLARE_ACCESS_KEY"
+          printf 'AWS_SECRET_ACCESS_KEY=%s\n' "$CLOUDFLARE_SECRET_ACCESS_KEY"
+          printf 'AWS_DEFAULT_REGION=auto\n'
+          printf 'AWS_REGION=auto\n'
+          printf 'AWS_PAGER=\n'
+          printf 'RHYTHM_R2_ENDPOINT=%s\n' "$CLOUDFLARE_S3_API_ENDPOINT"
+          printf 'RHYTHM_R2_BUCKET=%s\n' "$CLOUDFLARE_R2_BUCKET"
+          printf 'RHYTHM_R2_PREFIX=server\n'
+        } >> "$GITHUB_ENV"
+
+        AWS_ACCESS_KEY_ID="$CLOUDFLARE_ACCESS_KEY" \
+        AWS_SECRET_ACCESS_KEY="$CLOUDFLARE_SECRET_ACCESS_KEY" \
+        AWS_DEFAULT_REGION=auto \
+        AWS_PAGER='' \
+          aws --endpoint-url "$CLOUDFLARE_S3_API_ENDPOINT" \
+          --no-cli-pager \
+          s3api head-bucket \
+          --bucket "$CLOUDFLARE_R2_BUCKET"

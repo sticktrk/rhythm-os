@@ -80,23 +80,24 @@ LAN key, since the vendor account cannot tell users apart. The key is only usabl
 from the device's own private LAN, and commissioning tickets still bind the user
 who began setup, but per-user device claims are a follow-up before wide release.
 
-Only two secrets are configured, in the Supabase dashboard or with the helper
+Three credentials are configured per deployment, in the Supabase dashboard or with the helper
 below:
 
 | Secret | Value |
 | --- | --- |
-| `MONSTER_EMAIL` | Email of the shared Monster account Rhythm operates |
+| `MONSTER_EMAIL` | Email of your dedicated shared Monster account |
 | `MONSTER_PASSWORD` | That account's password |
+| `MONSTER_AYLA_APP_SECRET` | Vendor application credential |
 
 Optional: `MONSTER_OWNER_USER_ID` (a Supabase auth user UUID) restricts the
 broker to one user instead of sharing the account; `MONSTER_MODEL_ALLOWLIST`
-overrides the bench-verified model IDs. The Ayla application ID and secret
-identify the vendor app rather than a person and are pinned in `broker.ts`
-(`AYLA_APP`). The ticket-signing key is derived from the account credentials, so
+overrides the bench-verified model IDs. The public Ayla application ID is pinned in `broker.ts`.
+The vendor application credential must be configured alongside the account
+credentials; it is never embedded in public source. The ticket-signing key is derived from the account credentials, so
 changing the password invalidates outstanding setup tickets.
 
 Use `python3 tools/monster-cloud-secrets.py --project-ref YOUR_PROJECT_REF` to
-enter the two values without shell-history exposure and upload them through the
+enter the three credentials without shell-history exposure and upload them through the
 Supabase CLI via a mode-0600 transient file. Press Enter at the owner prompt to
 keep the account shared. It does not deploy the function.
 

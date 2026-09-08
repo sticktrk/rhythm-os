@@ -14,7 +14,7 @@ spec.loader.exec_module(module)
 class SecretUploadTests(unittest.TestCase):
     def run_upload(self, fail=False, owner='owner'):
         seen = []
-        values = ['email', 'p$word"é\\end', owner]
+        values = ['email', 'p$word"é\\end', 'fixture-vendor-credential', owner]
 
         def upload(args, **kwargs):
             filename = Path(args[-1])
@@ -25,7 +25,8 @@ class SecretUploadTests(unittest.TestCase):
             self.assertNotIn('MONSTER_TICKET_SECRET', contents)
             self.assertNotIn('MONSTER_APP_ID', contents)
             self.assertNotIn('MONSTER_APP_SECRET', contents)
-            self.assertEqual(len(contents.strip().splitlines()), 3 if owner.strip() else 2)
+            self.assertIn('MONSTER_AYLA_APP_SECRET="fixture-vendor-credential"', contents)
+            self.assertEqual(len(contents.strip().splitlines()), 4 if owner.strip() else 3)
             if owner.strip():
                 self.assertIn(f'MONSTER_OWNER_USER_ID="{owner}"', contents)
             else:

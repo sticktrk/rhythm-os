@@ -112,7 +112,7 @@ void main() {
       data: {
         'issue_created': true,
         'status': 'reported',
-        'issue_url': 'https://github.com/sticktrk/cross/issues/42',
+        'issue_url': 'https://github.com/sticktrk/rhythm-os/issues/42',
         'issue_number': 42,
       },
     );
@@ -120,7 +120,7 @@ void main() {
     expect(updated.status, 'reported');
     expect(
       updated.githubIssueUrl,
-      'https://github.com/sticktrk/cross/issues/42',
+      'https://github.com/sticktrk/rhythm-os/issues/42',
     );
     expect(updated.githubIssueNumber, 42);
     expect(updated.githubIssueError, isNull);

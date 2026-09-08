@@ -1,0 +1,34 @@
+name: Public source checks
+on:
+  push:
+    branches: [master]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Public repository boundaries and deployment fixtures
+        run: ./tools/check-repo-invariants.sh
+      - name: Rust workspace manifests
+        run: cargo metadata --no-deps --format-version 1 > /dev/null
+      - name: Edge Function fixtures without credentials or external effects
+        run: npx --yes deno@2.9.6 test --deny-net --deny-env --deny-read --deny-write --deny-run --deny-ffi tools/app/supabase/functions/monster-device/broker_test.ts tools/app/supabase/functions/_shared/deployment_config_test.ts tools/app/supabase/functions/report-bug/github_support_issue_test.ts tools/app/supabase/functions/set-subscription-tier/response_test.ts
+      - name: Private credential provisioning fixture
+        run: python3 tools/tests/test_monster_cloud_secrets.py
+  flutter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.6
+      - name: Dependencies
+        working-directory: app/flutter/rhythm_app
+        run: flutter pub get
+      - name: Analyze
+        working-directory: app/flutter/rhythm_app
+        run: flutter analyze --no-pub

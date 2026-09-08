@@ -24,7 +24,7 @@ cp "$GENERATOR" "$REPO/tools/os/scripts/generate-stable-release-notes.sh"
 
 git -C "$REPO" init -q
 git -C "$REPO" config user.name "Release Test"
-git -C "$REPO" config user.email "823ae7597ce46775@users.noreply.github.com"
+git -C "$REPO" config user.email "release-test@example.com"
 touch "$REPO/history"
 git -C "$REPO" add history
 git -C "$REPO" commit -qm "initial"
@@ -47,7 +47,7 @@ EOF
 chmod +x "$BIN/gh"
 
 GH_ARGS="$GH_ARGS" \
-GITHUB_REPOSITORY="sticktrk/cross" \
+GITHUB_REPOSITORY="sticktrk/rhythm-os" \
 PATH="$BIN:$PATH" \
     "$REPO/tools/os/scripts/generate-stable-release-notes.sh" \
         v0.6.102-stable "$NOTES"

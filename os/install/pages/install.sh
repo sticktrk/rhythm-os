@@ -9,7 +9,7 @@ cat >&2 <<'EOF'
 The hosted Rhythm macOS/Linux binary installer has been retired.
 
 Build rhythm-server from source:
-  git clone https://github.com/sticktrk/cross.git
+  git clone https://github.com/sticktrk/rhythm-os.git
   cd cross/os
   cargo build -p rhythm-server --release
 

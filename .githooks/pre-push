@@ -1,19 +1,4 @@
 #!/bin/bash
-
 set -euo pipefail
-
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-BASE="origin/master"
-if ! git -C "$REPO_ROOT" rev-parse --verify "$BASE" >/dev/null 2>&1; then
-    BASE=""
-fi
-
-args=()
-if [ -n "$BASE" ]; then
-    args+=(--base "$BASE")
-fi
-if [ "$(git -C "$REPO_ROOT" config --bool rhythm.strictHooks 2>/dev/null || echo false)" = "true" ]; then
-    args+=(--strict)
-fi
-
-"$REPO_ROOT/tools/check-repo-invariants.sh" "${args[@]}"
+"$REPO_ROOT/tools/check-repo-invariants.sh"

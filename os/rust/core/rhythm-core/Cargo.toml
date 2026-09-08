@@ -3,7 +3,7 @@ name = "rhythm-core"
 version.workspace = true
 edition = "2021"
 license = "Apache-2.0"
-authors = ["Tim Kijewski <3043754+sticktrk@users.noreply.github.com>"]
+authors = ["Tim Kijewski"]
 description = "Core adaptive lighting algorithms for Rhythm OS"
 
 [features]

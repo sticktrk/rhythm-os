@@ -34,7 +34,7 @@ chmod +x "$REPO/tools/ci/detect-changed-surfaces.sh" "$BIN_DIR/gh"
 cd "$REPO"
 git init -q
 git config user.name "Flutter Evidence Test"
-git config user.email "a8ca0a522617cd3e@users.noreply.github.com"
+git config user.email "flutter-evidence@example.invalid"
 printf 'baseline\n' > README.md
 git add README.md tools/ci/detect-changed-surfaces.sh
 git commit -qm baseline

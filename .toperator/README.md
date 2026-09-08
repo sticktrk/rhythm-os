@@ -1,6 +1,6 @@
 # .toperator
 
-This directory is maintained by the DT Concepts Work Harness portal for sticktrk/cross.
+This directory is maintained by the DT Concepts Work Harness portal for sticktrk/rhythm-os.
 
 ## Files
 

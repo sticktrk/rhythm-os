@@ -10,13 +10,8 @@ type Dependencies = {
   ayla?: AylaApp;
 };
 const DEVICE = "https://ads-field.aylanetworks.com";
-// Ayla application credentials of the Monster Gen2 app. They identify the
-// vendor app (not a person) and ship inside the public Monster build, so they
-// are pinned here; only the shared account email and password are secrets.
-const AYLA_APP: AylaApp = {
-  appId: "RGBIC-yQ-id",
-  appSecret: "REMOVED_PRIVATE_VALUE",
-};
+// Vendor application identity is public; its credential is deployment configuration.
+const AYLA_APP_ID = "RGBIC-yQ-id";
 const encoder = new TextEncoder();
 const dsnPattern = /^[A-Za-z0-9]{8,32}$/;
 class Failure extends Error {
@@ -80,7 +75,10 @@ export function createMonsterBroker(deps: Dependencies) {
   const now = deps.now ?? Date.now;
   let cached: { token: string; expires: number } | undefined;
   let pending: Promise<string> | undefined;
-  const ayla = deps.ayla ?? AYLA_APP;
+  const ayla = deps.ayla ?? {
+    appId: AYLA_APP_ID,
+    appSecret: deps.env("MONSTER_AYLA_APP_SECRET") ?? "",
+  };
   function env(name: string): string {
     const value = deps.env(name);
     if (!value) throw new Failure("cloud_not_configured", 503);
@@ -360,6 +358,7 @@ export function createMonsterBroker(deps: Dependencies) {
         !body || typeof body.dsn !== "string" || !dsnPattern.test(body.dsn) ||
         !["begin", "complete", "key"].includes(body.action)
       ) return response({ error: "invalid_request" }, 400);
+      aylaApp(); // Reject incomplete deployment configuration before any vendor call.
       const signal = AbortSignal.timeout(35000);
       let setupToken: string | undefined;
       if (body.action === "complete") {

@@ -23,13 +23,6 @@ target/
 # Downloaded/extracted app bug-report debug bundles (see /triage).
 .triage/
 
-# Repo-owned Codex skills are versioned; other Codex state remains local.
-.codex/*
-!.codex/automations.toml
-!.codex/skills/
-!.codex/skills/**
-.codex/skills/**/__pycache__/
-.codex/skills/**/*.py[cod]
 .release-evidence/
 admin-api/.env
 
@@ -45,3 +38,21 @@ tools/app/supabase/.env
 
 # CHIP checkout
 /connectedhomeip/
+
+# Private development material and generated runtime traces.
+.codex/
+.claude/
+.triage/
+**/flutter_log.txt
+**/.firebase/
+**/.firebaserc
+**/.env
+**/.env.*
+!**/.env.example
+**/*.p12
+**/*.p8
+**/*.jks
+**/*.keystore
+
+# Generated web bindings and binaries may embed local build paths.
+/app/flutter/rhythm_app/web/pkg/

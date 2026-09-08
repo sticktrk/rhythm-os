@@ -13,7 +13,7 @@ import type { DebugBundleSubmission } from './support_issue_body.ts'
 // Optional secrets:
 // - SB_PUBLISHABLE_KEY: preferred Supabase public key for Auth claims
 // - SB_SECRET_KEY: preferred Supabase elevated key for admin operations
-// - GITHUB_ISSUES_REPO: owner/repo, defaults to sticktrk/cross
+// - GITHUB_ISSUES_REPO: owner/repo; explicitly configured, no default
 // - GITHUB_ISSUES_LABELS: comma-separated labels
 // - GITHUB_ISSUES_ASSIGNEES: comma-separated GitHub usernames
 

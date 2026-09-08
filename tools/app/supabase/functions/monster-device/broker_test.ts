@@ -217,7 +217,7 @@ Deno.test("unowned key lookup never registers and provider failures are sanitize
   const text = await response.text();
   assert(response.status === 502 && text === '{"error":"monster_login"}');
 });
-Deno.test("only the account email and password are secrets", async () => {
+Deno.test("vendor configuration fails closed and tickets bind the account credentials", async () => {
   // Unpinned Ayla app credentials fail closed instead of sending a login.
   const unpinned = fixture({
     ayla: { appId: "REPLACE_WITH_MONSTER_APP_ID", appSecret: "x" },
@@ -269,4 +269,16 @@ Deno.test("unsupported model and missing key fail closed", async () => {
   for (const ip of ["192.168.1.1", "10.1.2.3", "172.16.1.1"]) {
     assert(privateIp(ip));
   }
+});
+
+Deno.test("missing vendor application credential makes no provider requests", async () => {
+  let calls = 0;
+  const handler = createMonsterBroker({
+    env: (name) => ({ MONSTER_EMAIL: "fixture@example.invalid", MONSTER_PASSWORD: "fixture-password" } as Record<string, string>)[name],
+    fetch: async () => { calls++; throw new Error("unexpected provider request"); },
+  });
+  const result = await handler(new Request("https://example.invalid", {
+    method: "POST", body: JSON.stringify({ action: "key", dsn: DSN }),
+  }), "fixture-user");
+  assert(result.status === 503 && calls === 0);
 });
