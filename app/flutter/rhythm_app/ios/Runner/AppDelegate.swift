@@ -36,7 +36,7 @@ import UIKit
   private func handlePhoneMatterCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
     switch call.method {
     case "isSupported":
-      if #available(iOS 17.6, *) {
+      if #available(iOS 17.6, *), PhoneMatterBridge.isExtensionPackaged() {
         result(MatterAddDeviceRequest.isSupported)
       } else {
         result(false)
@@ -47,7 +47,8 @@ import UIKit
           message: "Another Matter commissioning request is already active.", details: nil))
         return
       }
-      guard #available(iOS 17.6, *), MatterAddDeviceRequest.isSupported else {
+      guard #available(iOS 17.6, *), PhoneMatterBridge.isExtensionPackaged(),
+        MatterAddDeviceRequest.isSupported else {
         result(FlutterError(
           code: "native_unavailable",
           message: "Phone Matter commissioning is unavailable on this iPhone.",

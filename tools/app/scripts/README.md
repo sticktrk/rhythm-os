@@ -104,7 +104,15 @@ The default key file is `~/.config/rhythm/asc_api_key.json`; override it with
 `RHYTHM_ASC_API_KEY_PATH` or set `RHYTHM_CONFIG_DIR`. IPA builds without a key
 continue to use Flutter's interactive Xcode signing path.
 
-Before the first build with phone-assisted Matter commissioning, register
+Phone-assisted Matter commissioning is deferred. `Runner` does not build or
+embed `MatterCommissioningExtension`, and its entitlements retain Apple Sign In
+without Matter or App Groups. The native availability check requires the
+packaged extension, so the app uses existing Rhythm Box pairing. The standalone
+extension target and its tests remain available for future development.
+
+To re-enable phone-assisted commissioning, restore the extension as a Runner
+dependency and embedded app extension, restore Runner's Matter setup payload
+and App Group entitlements, and register
 `group.lighting.rhythm.app.matter` in Apple Developer and associate it with both
 `lighting.rhythm.app` and `lighting.rhythm.app.MatterCommissioningExtension`.
 The app and extension must use profiles containing that shared App Group;

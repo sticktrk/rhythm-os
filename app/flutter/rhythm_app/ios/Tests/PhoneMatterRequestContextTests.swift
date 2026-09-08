@@ -3,6 +3,20 @@ import Foundation
 @main
 struct PhoneMatterRequestContextTests {
   static func main() async throws {
+    let plugins = Bundle.main.builtInPlugInsURL!
+    let extensionURL = plugins.appendingPathComponent("MatterCommissioningExtension.appex")
+    defer { try? FileManager.default.removeItem(at: plugins) }
+    precondition(!PhoneMatterBridge.isExtensionPackaged())
+    try FileManager.default.createDirectory(at: plugins, withIntermediateDirectories: true)
+    try Data().write(to: extensionURL)
+    precondition(!PhoneMatterBridge.isExtensionPackaged())
+    try FileManager.default.removeItem(at: extensionURL)
+    try FileManager.default.createDirectory(at: extensionURL, withIntermediateDirectories: true)
+    precondition(PhoneMatterBridge.isExtensionPackaged())
+    try FileManager.default.removeItem(at: extensionURL)
+    precondition(!PhoneMatterBridge.isExtensionPackaged())
+    print("PASS: phone commissioning is unavailable without a packaged extension")
+
     let container = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: container) }
     let now = Date()
