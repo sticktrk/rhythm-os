@@ -6,7 +6,14 @@ on:
 permissions:
   contents: read
 jobs:
+  changes:
+    name: Detect changed surfaces
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: ./tools/ci/detect-changed-surfaces.sh --all --github-output
   source:
+    name: Repository invariants
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
