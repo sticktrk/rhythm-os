@@ -2,7 +2,7 @@ name: Public source checks
 on:
   push:
     branches:
-      - '**'
+      - master
   pull_request:
 permissions:
   contents: read

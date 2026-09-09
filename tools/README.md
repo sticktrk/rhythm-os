@@ -18,6 +18,27 @@ These paths let operations callers retain evidence outside the public checkout.
 
 Developer, backend and packaging tooling. Production credentials and internal schedules are not included.
 
+Generate release notes with Python 3, Git and an authenticated GitHub CLI:
+
+```bash
+python3 tools/os/scripts/generate-release-notes.py v0.6.649-beta /tmp/release-notes.md \
+  --repository sticktrk/rhythm-os
+```
+
+Use a checkout with full history and tags. Betas compare with the previous
+published beta, or the newest stable if it starts a new beta cycle. Stable
+releases compare with the previous published stable. Drafts, unpublished tags,
+later versions and tags outside the current release's ancestry are excluded.
+Version-bump commits are omitted; the full changelog link retains the complete
+comparison. Without an earlier publication, notes include the source history.
+
+For offline previews, `--published-releases FILE` accepts a JSON array containing
+`tag_name`, `draft` and `published_at` from GitHub's releases API. A downstream
+publisher migrating repositories can supply the same metadata through
+`--additional-publications FILE`; only tags present in this source history are
+eligible and all output links use `--repository`. The stable-only shell
+entrypoint forwards to this shared generator.
+
 - `tools/app/scripts/` - Flutter app build, codegen, mobile, Android, and web helpers.
 - `tools/app/supabase/` - Supabase config, edge functions, and database migrations.
 - `tools/app/rhythm_harness.py` - App harness utility.
