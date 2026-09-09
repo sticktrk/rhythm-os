@@ -180,61 +180,17 @@ Most people never open the settings and lose nothing. If you come to speak light
 - Motion timeouts per room. Power-save. A light breaker that takes the whole system offline in one switch.
 - An energy view that estimates kWh from the curve and your bulb wattage.
 
-## For builders
+## Built to be built on
 
-Rhythm is a layered set of Rust crates with a clean contract at every seam. Bring your own frontend, your own curve, or your own lighting product.
+Rhythm is a layered set of Rust crates with a clean contract at every seam: a REST and SSE API on every target, a pluggable curve engine, a one-crate contract for adding lighting products, and a Dart SDK. Bring your own frontend, your own curve, or your own lights.
 
-- **REST + SSE.** Every platform exposes the same API. Full state snapshots, selective reads, and a real-time event stream for room state, motion, hub status, dispatch failures, and pairing progress. See the [API reference](os/CLAUDE.md#api-endpoints).
-- **Pluggable curve engine.** Implement `LightProfileModule` and the whole system runs your shape. The Gaussian solar default is just the one that ships.
-- **Add a lighting product in one crate.** Implement `LightController`, `HubRegistry`, `HubProvider`, and event translation. No changes to the core. Contract and template in [os/INTEGRATIONS.md](os/INTEGRATIONS.md).
-- **Dart SDK.** Typed models, SSE with polling fallback, pairing, OTA, diagnostics. Powers the Flutter app and available as [`rhythm_sdk`](sdk/).
-- **Assistant contract.** A machine-readable [contract](docs/architecture/light-assistant-contract.md) and topology endpoint so LLM and automation clients can drive lights without overstepping the user's authority.
-- **Flutter app.** iOS, macOS, Android, and web. Runs against a real server or a simulated home. See [app/](app/).
+Start at [docs/developers.md](docs/developers.md) for the architecture, repository map, local setup, and how to contribute.
 
-```
-┌─────────────────────────────────────────────────────────┐
-│  Binaries        rhythm-server · rhythm-linux-appliance  │
-│                  rhythm-addon                             │
-├─────────────────────────────────────────────────────────┤
-│  OS layer        rhythm-os  (rooms, events, commands)    │
-├─────────────────────────────────────────────────────────┤
-│  Integrations    rhythm-hue · rhythm-ha · rhythm-matter  │
-│  Protocols       rhythm-ble · (rhythm-zigbee, planned)   │
-├─────────────────────────────────────────────────────────┤
-│  Core            rhythm-core  (solar, curves, color)     │
-│                  rhythm-profile · rhythm-devices          │
-└─────────────────────────────────────────────────────────┘
-```
-
-Read the [server guide](os/README.md) for the crate-by-crate tour.
-
-## Repository map
-
-| Directory | Purpose |
-| --- | --- |
-| `os/` | Server, device integrations, and appliance packaging |
-| `app/` | Flutter mobile, desktop, and web app |
-| `sdk/` | Dart client SDK |
-| `runtime/` | Rust runtime API and modules |
-| `protocol/` | Shared protocol documentation and contracts |
-| `tools/app/supabase/` | Optional product database schema and Edge Functions |
-| `admin-api/`, `admin-ui/` | Optional staff administration source; requires your own authorized backend |
-| `lab/` | Hardware test tooling and synthetic fixtures |
-| `docs/` | Architecture and backend documentation |
-
-This repository preserves a privacy-filtered development history. Private marketing systems, customer investigation material, production environment files, and internal operational automation are excluded. See [public history](docs/public-history.md).
-
-Run the portable repository checks from the root:
-
-```bash
-./tools/check-repo-invariants.sh
-```
-
-## Community, contributing, security
+## Community
 
 - [Discord](https://discord.gg/8DXG3WjA) for help, setups, and feature discussion.
-- [GitHub Issues](https://github.com/sticktrk/rhythm-os/issues) for bugs and requests. Please keep raw customer logs, support bundles, credentials, and customer identifiers out of public issues.
-- [CONTRIBUTING.md](CONTRIBUTING.md) for how to submit changes. [SECURITY.md](SECURITY.md) for private vulnerability reporting.
+- [GitHub Issues](https://github.com/sticktrk/rhythm-os/issues) for bugs and requests.
+- [rhythm.lighting](https://rhythm.lighting) for the product site.
 
 ## License
 
