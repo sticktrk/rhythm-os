@@ -55,6 +55,7 @@ class MatterDeviceAddScreen extends StatefulWidget {
     this.initialInputMethod = 'camera',
     this.analyticsSource = 'unknown',
     this.journeyId,
+    this.phoneCommissioningAvailable = false,
     @visibleForTesting this.pairingApi,
     @visibleForTesting this.phoneCommissioner,
   });
@@ -69,10 +70,15 @@ class MatterDeviceAddScreen extends StatefulWidget {
   final RhythmMatterApi? pairingApi;
   final PhoneMatterCommissioner? phoneCommissioner;
 
+  /// Whether this Box and phone support the phone-assisted handoff. It is
+  /// offered only as recovery after a Box attempt fails.
+  final bool phoneCommissioningAvailable;
+
   static Future<MatterDevicePairingResult?> show(
     BuildContext context, {
     required HubEndpoint endpoint,
     required MatterAddMethod addMethod,
+    bool phoneCommissioningAvailable = false,
     String? authToken,
     String? initialSetupPayload,
     String initialInputMethod = 'camera',
@@ -87,6 +93,7 @@ class MatterDeviceAddScreen extends StatefulWidget {
           return MatterDeviceAddScreen(
             endpoint: endpoint,
             addMethod: addMethod,
+            phoneCommissioningAvailable: phoneCommissioningAvailable,
             authToken: authToken,
             initialSetupPayload: initialSetupPayload,
             initialInputMethod: initialInputMethod,
@@ -344,7 +351,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         }
       }
 
-      if (widget.addMethod.usesPhoneCommissioner) {
+      if (_activeAddMethod.usesPhoneCommissioner) {
         _flow.expectReceipt();
       }
       final result = _activeAddMethod.usesPhoneCommissioner
@@ -569,6 +576,14 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
 
   void _retryFromRhythmBox() {
     _startPairing(retryMethod: MatterAddMethod.automatic);
+  }
+
+  bool get _canRetryFromPhone =>
+      widget.phoneCommissioningAvailable ||
+      widget.addMethod.usesPhoneCommissioner;
+
+  void _retryFromPhone() {
+    _startPairing(retryMethod: MatterAddMethod.phoneCommissioning);
   }
 
   @override
@@ -1046,6 +1061,12 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
           _SecondaryGhostButton(
             label: 'Try from Rhythm Box',
             onTap: _retryFromRhythmBox,
+          ),
+        ] else if (_canRetryFromPhone) ...[
+          const SizedBox(height: 12),
+          _SecondaryGhostButton(
+            label: 'Try from phone',
+            onTap: _retryFromPhone,
           ),
         ],
         const SizedBox(height: 12),

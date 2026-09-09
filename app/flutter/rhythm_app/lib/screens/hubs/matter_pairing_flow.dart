@@ -37,6 +37,12 @@ Future<void> startMatterPairingFlow(
     preferredMethod: preferredMethod,
   );
   if (!context.mounted || addMethod == null) return;
+  // The Rhythm Box is always the first attempt. A supported phone is offered
+  // only as explicit recovery after a Box attempt fails.
+  final phoneCommissioningAvailable =
+      syncProvider.canCommissionMatterWithPhone &&
+          await const PhoneMatterCommissioner().isSupported();
+  if (!context.mounted) return;
 
   final serverEndpoint = await ServerEndpointResolver.resolve(
     serverHub,
@@ -94,6 +100,7 @@ Future<void> startMatterPairingFlow(
       endpoint: serverEndpoint.endpoint,
       authToken: serverEndpoint.hub.token,
       addMethod: intakeResult.matterAddMethod ?? addMethod,
+      phoneCommissioningAvailable: phoneCommissioningAvailable,
       analyticsSource: analyticsSource,
       journeyId: activeJourneyId,
       initialSetupPayload: intakeResult.payload,
@@ -268,9 +275,5 @@ Future<MatterAddMethod?> _resolveMatterAddMethod(
   MatterAddMethod? preferredMethod,
 }) async {
   if (preferredMethod != null) return preferredMethod;
-  if (syncProvider.canCommissionMatterWithPhone &&
-      await const PhoneMatterCommissioner().isSupported()) {
-    return MatterAddMethod.phoneCommissioning;
-  }
   return syncProvider.canAddMatterDevice ? MatterAddMethod.automatic : null;
 }
