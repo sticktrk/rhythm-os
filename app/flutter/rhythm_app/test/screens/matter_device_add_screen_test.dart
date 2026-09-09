@@ -425,6 +425,70 @@ void main() {
     }
   });
 
+  testWidgets('a Box failure offers the phone only when the handoff is supported',
+      (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    try {
+      for (final available in [false, true]) {
+        analyticsBackend.events.clear();
+        final phone = _FakePhoneMatterCommissioner(
+          onCommission: () async => const RhythmMatterPairingResponse(
+              httpStatus: 200, status: 'failed', error: 'phone failed'),
+        );
+        final api = _FakeRhythmMatterApi(
+          onPair: (_) async => const RhythmMatterPairingResponse(
+              httpStatus: 200, status: 'failed', error: 'Box BLE timed out'),
+        );
+        await tester.pumpWidget(
+          MaterialApp(
+            home: MatterDeviceAddScreen(
+              // A fresh State per iteration; same-position widgets reuse it.
+              key: ValueKey('box-first-$available'),
+              endpoint: const HubEndpoint(host: '127.0.0.1', port: 0),
+              addMethod: MatterAddMethod.automatic,
+              phoneCommissioningAvailable: available,
+              initialSetupPayload: 'MT:Y.K908OC16750648G00',
+              journeyId: 'matter-box-first-test',
+              pairingApi: api,
+              phoneCommissioner: phone,
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 10));
+
+        // The Box is always the first attempt, regardless of phone support.
+        expect(api.sessionIds, hasLength(1));
+        expect(api.lastRendezvous, 'auto');
+        expect(phone.sessionIds, isEmpty);
+        expect(api.resultQueries, isEmpty);
+        expect(find.text('Try from Rhythm Box'), findsNothing);
+        expect(find.text('Try from phone'),
+            available ? findsOneWidget : findsNothing);
+        if (!available) continue;
+
+        await tester.ensureVisible(find.text('Try from phone'));
+        await tester.tap(find.text('Try from phone'));
+        await tester.pump(const Duration(milliseconds: 10));
+
+        expect(phone.sessionIds, hasLength(1));
+        expect(api.sessionIds, hasLength(1));
+        expect(phone.sessionIds.single, isNot(api.sessionIds.single));
+        expect(phone.setupPayloads.single, 'MT:Y.K908OC16750648G00');
+        // A phone attempt can switch back to the Box, never the reverse twice.
+        expect(find.text('Try from Rhythm Box'), findsOneWidget);
+        expect(find.text('Try from phone'), findsNothing);
+        final attempts = analyticsBackend.events
+            .where((event) => event.name == 'matter_pairing_attempted')
+            .map((event) => event.properties['add_method'])
+            .toList();
+        expect(attempts, ['automatic', 'phone_commissioning']);
+      }
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
   testWidgets('phone failure offers an explicit server fallback',
       (tester) async {
     final screenshotPath =

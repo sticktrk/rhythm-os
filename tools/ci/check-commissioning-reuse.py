@@ -9,11 +9,11 @@ SDK = "sdk/lib/src/api/"
 RUST = "os/rust/"
 RULES = {
     APP + "screens/hubs/matter_device_add_screen.dart": (
-        ["DeviceCommissioningFlow", "_flow.begin()", "_flow.expectReceipt()"],
+        ["DeviceCommissioningFlow", "_flow.begin()", "_flow.expectReceipt()", "Try from phone"],
         ["_phoneAttemptToReconcile", "_newPairingSessionId"],
     ),
     APP + "screens/hubs/ble_wifi_device_add_screen.dart": (
-        ["DeviceCommissioningFlow", "_flow.begin()", "PhoneBleWifiServices.create", "Try from Rhythm Box"],
+        ["DeviceCommissioningFlow", "_flow.begin()", "PhoneBleWifiServices.create", "Try from phone", "Try from Rhythm Box"],
         ["AylaPhoneBleWifiService", "Uuid().v4()}-$stage"],
     ),
     APP + "widgets/commissioning_wifi_dialog.dart": (

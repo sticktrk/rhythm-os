@@ -61,10 +61,12 @@ abstract final class BleWifiPairingStage {
 }
 
 /// Drives staged Bluetooth-to-Wi-Fi onboarding for any family the appliance
-/// advertises: supported phones find the device and join it to Wi-Fi over
-/// Bluetooth using the Box’s saved credentials; older profiles use the Box, the app brokers registration through the family's cloud
-/// broker, and the Box adopts the LAN credentials only after a signed
-/// readback. Nothing here is specific to one manufacturer.
+/// advertises: the Rhythm Box finds the device and joins it to Wi-Fi over
+/// Bluetooth first; when the profile advertises a phone protocol, a supported
+/// phone can be tried as recovery using the Box’s saved credentials. The app
+/// brokers registration through the family's cloud broker, and the Box adopts
+/// the LAN credentials only after a signed readback. Nothing here is specific
+/// to one manufacturer.
 class BleWifiDeviceAddScreen extends StatefulWidget {
   const BleWifiDeviceAddScreen({
     super.key,
@@ -151,8 +153,10 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
   late final PhoneBleWifiService? _phoneService = PhoneBleWifiServices.create(
       _family.phoneProvisioningProtocol,
       service: widget.phoneService);
-  bool _useServer = false;
-  PhoneBleWifiService? get _phone => _useServer ? null : _phoneService;
+  // The Rhythm Box is always the first attempt; a supported phone is offered
+  // only as explicit recovery, and the person can switch back.
+  bool _usePhone = false;
+  PhoneBleWifiService? get _phone => _usePhone ? _phoneService : null;
   RhythmCommissioningWifi? _wifi;
   String get _commissioner => _phone == null ? 'server' : 'phone';
 
@@ -248,7 +252,7 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
         );
   }
 
-  Future<void> _start({bool useServer = false}) async {
+  Future<void> _start({bool? usePhone}) async {
     if (_running || _flowCompleted) return;
     final start = await _flow.begin();
     if (!mounted) return;
@@ -266,7 +270,7 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
       );
       return;
     }
-    if (useServer) _useServer = true;
+    if (usePhone != null) _usePhone = usePhone && _phoneService != null;
     _subscribeToProgress();
     setState(() {
       _failed = false;
@@ -926,16 +930,26 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
                     ),
                   ),
                 ),
-                if (_phone != null &&
+                if (_phoneService != null &&
                     !_provisioned &&
                     !_uncertainProvision) ...[
                   const SizedBox(height: 10),
-                  OutlinedButton.icon(
-                    key: const ValueKey('ble-wifi-server-fallback'),
-                    onPressed: _running ? null : () => _start(useServer: true),
-                    icon: const Icon(Icons.router_rounded),
-                    label: const Text('Try from Rhythm Box'),
-                  ),
+                  if (_usePhone)
+                    OutlinedButton.icon(
+                      key: const ValueKey('ble-wifi-server-fallback'),
+                      onPressed:
+                          _running ? null : () => _start(usePhone: false),
+                      icon: const Icon(Icons.router_rounded),
+                      label: const Text('Try from Rhythm Box'),
+                    )
+                  else
+                    OutlinedButton.icon(
+                      key: const ValueKey('ble-wifi-phone-fallback'),
+                      onPressed:
+                          _running ? null : () => _start(usePhone: true),
+                      icon: const Icon(Icons.phone_android_rounded),
+                      label: const Text('Try from phone'),
+                    ),
                 ],
                 const SizedBox(height: 10),
                 SizedBox(
