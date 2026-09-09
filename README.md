@@ -65,7 +65,7 @@ Rhythm speaks to whatever you already own, and gives it all one language.
 | --- | --- | --- |
 | **Philips Hue** | Bridge takeover over the V2 API, including buttons and motion sensors. Bridgeless Hue bulbs directly over Bluetooth. | Shipping |
 | **Matter over Wi-Fi** | Rhythm is its own Matter commissioner. Any Wi-Fi Matter bulb, any brand, no extra hub. | Shipping |
-| **Matter over Thread** | The Pi Zero has no Thread radio. Thread bulbs reach Rhythm through Home Assistant and its border router. | Via HA |
+| **Matter over Thread** | Same commissioner, through any Thread border router already on your network: a HomePod, an Apple TV, or Home Assistant. | Shipping |
 | **Home Assistant** | Any HA light entity: Zigbee, Z-Wave, Wi-Fi. Run Rhythm as an add-on and keep everything else in HA. | Shipping |
 | **Bluetooth buttons and sensors** | Shared local BLE runtime with versioned device profiles. | Shipping |
 | **Zigbee direct** | Native coordinator crate is designed and on the roadmap. Today, Zigbee reaches Rhythm through Home Assistant. | Planned |
@@ -99,7 +99,7 @@ Everything below runs on-box, in Rust, with the same REST and SSE surface on eve
 | **Lights** | | | | |
 | Philips Hue bridge | V2 API, SSE events, buttons, motion, grouped lights | ● | ● | ● |
 | Hue Bluetooth bulbs | Direct control, no bridge | ● | ● | ○ |
-| Matter commissioning | Wi-Fi bulbs, native CHIP daemon, no extra hub. Thread bulbs come in through Home Assistant | ● | ● | ● |
+| Matter commissioning | Wi-Fi bulbs directly; Thread bulbs through any border router on the network. Native CHIP daemon | ● | ● | ● |
 | Home Assistant entities | Any HA light, ZHA events | ● | ● | ● |
 | Bluetooth buttons and sensors | Shared BLE runtime with versioned device profiles | ● | ● | ○ |
 | Bulb Audition | Automated control-profile test with a typed report | ● | ● | ● |
@@ -133,7 +133,7 @@ Rhythm does one thing. It is not a replacement for Home Assistant, Homey, or Hub
 | Dimming follows the daily curve | Yes | No, percentages | No, percentages | No, percentages |
 | Override resumes on its own | Yes, by design | You script it | You script it | You script it |
 | Local only, no cloud dependency | Yes | Yes | Partly, cloud-tied | Yes |
-| Matter commissioning built in | Wi-Fi, no extra hardware. Thread via HA | Wi-Fi and Thread with a border router | Yes (Pro) | Yes (C-8 line) |
+| Matter commissioning built in | Yes. Thread via any border router | Yes. Thread via a border router | Yes (Pro) | Yes (C-8 line) |
 | Hue buttons and motion, bridge takeover | Yes | Via integration | Via integration | Via bridge integration |
 | Runs on | Pi Zero, macOS, Linux, HA add-on | Pi 4 and up, x86 | Homey hardware | Hubitat hardware |
 | Device breadth beyond lighting | None | Enormous | Large | Large |
