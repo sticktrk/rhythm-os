@@ -4,7 +4,11 @@ Thanks for your interest in contributing! This guide covers what you need to get
 
 ## Prerequisites
 
-- [Rust](https://rustup.rs/) stable toolchain (edition 2021)
+- [Rust](https://rustup.rs/) stable toolchain (edition 2021) and a C/C++ toolchain.
+- On Ubuntu/Debian: `build-essential`, `pkg-config`, `libdbus-1-dev`,
+  `libudev-dev` and `libssl-dev`. On macOS: Xcode Command Line Tools.
+
+See the [local quickstart](../docs/development.md) for complete commands.
 
 ## Building
 

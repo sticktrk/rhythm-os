@@ -4,10 +4,6 @@ Rhythm OS includes the product backend in `tools/app/supabase/`: accounts, homes
 devices, support, remote access and device activity. Keep its configuration,
 RLS policies, migrations and Edge Functions in the public source repository.
 
-Marketing owns article intake, articles, home lighting assessments, consent
-and plan-email tracking in the independent `rhythm-marketing` repository at
-`supabase/`. A public Rhythm OS clone does not need that private checkout.
-
 ## Local product setup
 
 Create local settings from `tools/app/supabase/.env.example`, then run:
@@ -97,33 +93,21 @@ Function authentication settings come from `config.toml`. Functions with
 `verify_jwt = false` enforce their own user/token authorization where needed;
 the retired subscription endpoint only returns an unavailable response.
 
-## Existing shared product and marketing project
+## Deployments that share a database
 
-The existing hosted database has one migration ledger containing both
-histories. **Do not push either partial history to that database.** Use the
-marketing checkout containing its moved migrations and deployment wrapper:
+A database with migrations owned by multiple repositories must receive the
+complete migration history. An operations workspace should select the expected
+project and exact source revisions before running the shared-history helper:
 
 ```bash
-./tools/deploy-supabase.sh --marketing-repo rhythm-marketing --dry-run
-./tools/deploy-supabase.sh --marketing-repo rhythm-marketing
+./tools/deploy-supabase.sh --marketing-repo /path/to/companion-repository --dry-run
 ```
 
-The wrapper composes byte-identical SQL files in a temporary CLI workdir,
-rejects duplicate versions and mismatched project links, applies pending
-migrations once, then deploys product functions and marketing functions from
-their owning repositories. The temporary workdir is removed on success or
-failure. Neither `.env` nor function source is copied into it. New marketing
-migrations must keep timestamps globally unique while the database is shared.
-
-This ownership change does not move or delete hosted data. Do not use
-`migration repair`, renumber applied SQL, or drop marketing tables to make a
-partial migration history fit. Merge the marketing ownership change before
-removing the files from a private combined checkout. For rollback, restore both matching source
-owners; never revert database migration records merely to match a checkout.
-
-A new independent marketing database can use only the marketing repository's
-history. Follow that repository's `supabase/README.md` for setup. Migrating
-production data into a separate database is a distinct operation.
+This optional interface expects the companion history at `supabase/migrations`
+and its deployment entrypoint at `scripts/deploy-supabase-functions.sh`. It
+preserves SQL bytes and rejects duplicate versions and mismatched project links.
+Do not deploy a partial history or repair applied migration records to fit one
+checkout. A standalone product project uses only the product commands above.
 
 ## Verification and rollout
 

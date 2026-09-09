@@ -21,6 +21,9 @@ production environment files and internal operational automation are excluded.
 
 ## Development
 
+Start with the [local development quickstart](docs/development.md) to run the
+server without cloud credentials or hardware.
+
 Read the [server guide](os/README.md), [app build helpers](tools/app/scripts/README.md)
 and [Supabase guide](docs/supabase.md) for platform prerequisites and setup.
 The Rust workspace is rooted here:

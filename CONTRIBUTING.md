@@ -1,5 +1,8 @@
 # Contributing
 
+Use the [local development quickstart](docs/development.md) for prerequisites,
+a credential-free server run and focused checks.
+
 Open an issue or pull request in this repository with the intended behavior,
 a focused change and the tests you ran. Keep unrelated formatting and generated
 build output out of changes. Follow existing Rust, Flutter and Dart patterns.
