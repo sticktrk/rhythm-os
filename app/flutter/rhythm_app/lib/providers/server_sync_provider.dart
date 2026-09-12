@@ -5809,7 +5809,7 @@ class ServerSyncProvider extends ChangeNotifier {
     if (_roomModeDefaultsRollback == null) {
       _modeConfigs = [...?mode?.configs];
     }
-    _profiles = const [];
+    _profiles = await DemoServerApi.instance.getProfiles();
     _rhythmIntervalSecs = 60;
     _effectiveFadeMs = 1800;
     _effectiveMotionTimeoutSecs = 120;
