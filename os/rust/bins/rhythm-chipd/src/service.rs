@@ -14,12 +14,15 @@ use rhythm_matter::chip_rpc::{
     ChipRpcProbeLightResponse, ChipRpcReadOnOffResponse, ChipRpcRequest,
     ChipRpcSubmitEndpointPlansResponse,
 };
-use rhythm_matter::transport::{CommissionedDevice, MatterControllerEvent};
+use rhythm_matter::transport::{
+    CommissionedDevice, MatterAttributeReport, MatterAttributeValue, MatterControllerEvent,
+};
 use rhythm_matter::transport::{MatterDeviceInfo, MatterSubscriptionTarget};
 
 use crate::backend::ChipControllerBackend;
 use crate::command_dispatch::{
-    CommandDispatcher, ControllerEventBroker, ControllerWorkBudget, MAX_CONCURRENT_CONTROLLER_WORK,
+    is_connectivity_failure, CommandDispatcher, ControllerEventBroker, ControllerWorkBudget,
+    MAX_CONCURRENT_CONTROLLER_WORK,
 };
 
 const DEVICE_STORE_SCHEMA_VERSION: u32 = 1;
@@ -111,14 +114,14 @@ impl ChipControllerService {
                 self.device_store().upsert(device.clone())?;
                 // Keep newly commissioned endpoints inside the same
                 // authoritative observed-state stream as restored devices.
-                let _permit = self.controller_work_budget.acquire();
-                if let Err(error) = self.backend().subscribe_on_off(
+                if let Err(error) = self.subscribe_with_budget(
                     &[MatterSubscriptionTarget {
                         node_id: device.node_id,
                         endpoint: device.light_endpoint,
                     }],
                     rhythm_matter::transport::DEFAULT_SUBSCRIPTION_MIN_INTERVAL_SECS,
                     rhythm_matter::transport::DEFAULT_SUBSCRIPTION_MAX_INTERVAL_SECS,
+                    false,
                 ) {
                     eprintln!(
                         "rhythm-chipd could not establish the initial subscription for node {} endpoint {}: {error:#}",
@@ -167,6 +170,7 @@ impl ChipControllerService {
                 let _lifecycle = self.lifecycle_lock.lock();
                 self.backend().decommission_device(node_id, force)?;
                 self.device_store().remove(node_id)?;
+                self.command_dispatcher.forget_node(node_id);
                 Ok(serde_json::to_value(ChipRpcEmpty::new())?)
             }
             ChipRpcRequest::SetOnOff {
@@ -365,31 +369,18 @@ impl ChipControllerService {
                 replace_existing,
             } => {
                 self.require_initialized()?;
-                // No lifecycle lock: subscribing is ordinary controller work,
-                // and the native subscription table is owned by the Matter
-                // thread, so it cannot race a concurrent decommission. Holding
-                // the lifecycle lock here made one slow subscribe stall every
-                // commission/decommission and turned into a false-failure
-                // cascade. The shared work budget is the only bound.
-                let _permit = self.controller_work_budget.acquire();
-                if replace_existing {
-                    self.backend().replace_on_off_subscription(
-                        &targets,
-                        min_interval_secs,
-                        max_interval_secs,
-                    )?;
-                } else {
-                    self.backend().subscribe_on_off(
-                        &targets,
-                        min_interval_secs,
-                        max_interval_secs,
-                    )?;
-                }
+                self.subscribe_with_budget(
+                    &targets,
+                    min_interval_secs,
+                    max_interval_secs,
+                    replace_existing,
+                )?;
                 Ok(serde_json::to_value(ChipRpcEmpty::new())?)
             }
             ChipRpcRequest::DrainAttributeReports => {
                 self.require_initialized()?;
                 let reports = self.backend().drain_attribute_reports()?;
+                self.record_reports(&reports);
                 Ok(serde_json::to_value(ChipRpcAttributeReportsResponse {
                     reports,
                 })?)
@@ -409,13 +400,20 @@ impl ChipControllerService {
                 let max_wait = Duration::from_millis(max_wait_ms.min(30_000));
                 let deadline = Instant::now() + max_wait;
                 loop {
-                    for report in self.backend().drain_attribute_reports()? {
+                    let reports = self.backend().drain_attribute_reports()?;
+                    self.record_reports(&reports);
+                    for report in reports {
                         self.event_broker
                             .publish(MatterControllerEvent::AttributeReport(report));
                     }
                     // Terminal subscription failures are reported once by the
                     // native bridge; rhythm-matter owns the retry timing.
                     for termination in self.backend().drain_subscription_terminations()? {
+                        self.command_dispatcher.record_connectivity_failure(
+                            termination.node_id,
+                            termination.endpoint,
+                            Instant::now(),
+                        );
                         self.event_broker
                             .publish(MatterControllerEvent::SubscriptionTerminated(termination));
                     }
@@ -432,6 +430,76 @@ impl ChipControllerService {
                 }
             }
         }
+    }
+
+    fn record_reports(&self, reports: &[MatterAttributeReport]) {
+        for report in reports {
+            if report.value == MatterAttributeValue::SubscriptionTerminated {
+                self.command_dispatcher.record_connectivity_failure(
+                    report.node_id,
+                    report.endpoint,
+                    Instant::now(),
+                );
+            } else {
+                // Use native receipt age so a delayed report cannot clear a
+                // more recent timeout. Zero is the previous-bridge unknown default.
+                let now = Instant::now();
+                let age = if report.received_at_unix_ms == 0 {
+                    Duration::ZERO
+                } else {
+                    let wall_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    Duration::from_millis(wall_ms.saturating_sub(report.received_at_unix_ms))
+                };
+                if let Some(received) = now.checked_sub(age) {
+                    self.command_dispatcher.record_endpoint_proof_at(
+                        report.node_id,
+                        report.endpoint,
+                        received,
+                    );
+                }
+            }
+        }
+    }
+
+    fn subscribe_with_budget(
+        &self,
+        targets: &[MatterSubscriptionTarget],
+        min_interval_secs: u16,
+        max_interval_secs: u16,
+        replace_existing: bool,
+    ) -> Result<()> {
+        let result = {
+            let _permit = self.controller_work_budget.acquire();
+            let started = Instant::now();
+            let result = if replace_existing {
+                self.backend().replace_on_off_subscription(
+                    targets,
+                    min_interval_secs,
+                    max_interval_secs,
+                )
+            } else {
+                self.backend()
+                    .subscribe_on_off(targets, min_interval_secs, max_interval_secs)
+            };
+            if let Err(error) = &result {
+                if is_connectivity_failure(error) {
+                    for target in targets {
+                        self.command_dispatcher.record_connectivity_failure(
+                            target.node_id,
+                            target.endpoint,
+                            started,
+                        );
+                    }
+                }
+            }
+            result
+        };
+        // Both success and failure release capacity which pending commands need.
+        self.command_dispatcher.start_ready_lanes();
+        result
     }
 
     fn init_controller(
@@ -460,7 +528,9 @@ impl ChipControllerService {
             // Initialization is the one exclusive backend operation.
             drop(device_store);
             let mut backend = self.backend.write().expect("chipd backend lock poisoned");
-            backend.init_controller(&state, ble_controller, &existing_devices)?
+            let response = backend.init_controller(&state, ble_controller, &existing_devices)?;
+            self.command_dispatcher.reset_reachability();
+            response
         };
         self.device_store()
             .ensure_controller_fabric(response.compressed_fabric_id.as_deref())?;

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 
@@ -15,9 +15,8 @@ use crate::backend::ChipControllerBackend;
 
 const EVENT_CAPACITY: usize = 2_048;
 const MAX_EVENT_WAIT: Duration = Duration::from_secs(30);
-/// One shared controller work budget governs every entry into the CHIP
-/// controller: command steps *and* subscribe attempts. It is the only cap —
-/// lane admission derives from it, so there is no second constant to drift.
+/// One shared budget bounds endpoint command plans and subscription attempts.
+/// Lane admission derives from it, so there is no second constant to drift.
 pub(crate) const MAX_CONCURRENT_CONTROLLER_WORK: usize = 4;
 static NEXT_STREAM_NONCE: AtomicU64 = AtomicU64::new(1);
 
@@ -25,12 +24,14 @@ static NEXT_STREAM_NONCE: AtomicU64 = AtomicU64::new(1);
 struct WorkBudgetState {
     next_ticket: u64,
     serving_ticket: u64,
+    recovery_waiters: usize,
     in_flight: usize,
+    recovery_in_flight: usize,
 }
 
-/// Fair controller-wide budget around endpoint discovery, CASE setup, and
-/// interaction work. Endpoint lanes remain isolated, but unavailable peers
-/// cannot all enter the constrained CHIP controller at once.
+/// Shared bound for commands and subscription setup. Unknown/unavailable peers
+/// share one recovery slot; they cannot consume the capacity reserved for peers
+/// with current controller proof of life. Ready work bypasses recovery waiters.
 pub(crate) struct ControllerWorkBudget {
     capacity: usize,
     state: Mutex<WorkBudgetState>,
@@ -47,41 +48,69 @@ impl ControllerWorkBudget {
         }
     }
 
-    pub(crate) fn acquire(&self) -> ControllerWorkPermit<'_> {
+    /// Subscription setup can block its RPC caller, but never takes a command
+    /// worker while waiting. FIFO applies within recovery, not across healthy work.
+    pub(crate) fn acquire(self: &Arc<Self>) -> ControllerWorkPermit {
         let mut state = self.state.lock().expect("chipd work budget lock poisoned");
         let ticket = state.next_ticket;
-        state.next_ticket = state.next_ticket.saturating_add(1);
-        while ticket != state.serving_ticket || state.in_flight >= self.capacity {
+        state.next_ticket += 1;
+        state.recovery_waiters += 1;
+        while ticket != state.serving_ticket
+            || state.in_flight >= self.capacity
+            || state.recovery_in_flight != 0
+        {
             state = self
                 .changed
                 .wait(state)
                 .expect("chipd work budget lock poisoned while waiting");
         }
-        state.serving_ticket = state.serving_ticket.saturating_add(1);
+        state.serving_ticket += 1;
+        state.recovery_waiters -= 1;
         state.in_flight += 1;
-        self.changed.notify_all();
-        ControllerWorkPermit { budget: self }
+        state.recovery_in_flight += 1;
+        ControllerWorkPermit {
+            budget: self.clone(),
+            recovery: true,
+        }
     }
 
-    /// Concurrent controller work this budget admits. Lane admission uses it so
-    /// the dispatcher can never run more lanes than the budget will serve.
+    fn try_acquire(self: &Arc<Self>, recovery: bool) -> Option<ControllerWorkPermit> {
+        let mut state = self.state.lock().expect("chipd work budget lock poisoned");
+        if state.in_flight >= self.capacity
+            || (!recovery
+                && state.in_flight - state.recovery_in_flight
+                    >= self.capacity.saturating_sub(1).max(1))
+            || (recovery && (state.recovery_in_flight != 0 || state.recovery_waiters != 0))
+        {
+            return None;
+        }
+        state.in_flight += 1;
+        state.recovery_in_flight += usize::from(recovery);
+        Some(ControllerWorkPermit {
+            budget: self.clone(),
+            recovery,
+        })
+    }
+
     pub(crate) fn capacity(&self) -> usize {
         self.capacity
     }
 }
 
-pub(crate) struct ControllerWorkPermit<'a> {
-    budget: &'a ControllerWorkBudget,
+pub(crate) struct ControllerWorkPermit {
+    budget: Arc<ControllerWorkBudget>,
+    recovery: bool,
 }
 
-impl Drop for ControllerWorkPermit<'_> {
+impl Drop for ControllerWorkPermit {
     fn drop(&mut self) {
         let mut state = self
             .budget
             .state
             .lock()
             .expect("chipd work budget lock poisoned while releasing");
-        state.in_flight = state.in_flight.saturating_sub(1);
+        state.in_flight -= 1;
+        state.recovery_in_flight -= usize::from(self.recovery);
         self.budget.changed.notify_all();
     }
 }
@@ -191,6 +220,24 @@ struct DispatchState {
     active_ids: HashSet<u64>,
     ready: VecDeque<(u64, u16)>,
     active_lanes: usize,
+    health: HashMap<(u64, u16), EndpointHealth>,
+}
+
+#[derive(Default)]
+struct EndpointHealth {
+    proof_at: Option<Instant>,
+    failures: u32,
+    failed_at: Option<Instant>,
+    retry_at: Option<Instant>,
+}
+
+impl EndpointHealth {
+    fn ready(&self) -> bool {
+        self.proof_at.is_some() && self.retry_at.is_none()
+    }
+    fn cooling_down(&self) -> bool {
+        self.retry_at.is_some_and(|at| Instant::now() < at)
+    }
 }
 
 /// Fair, bounded per-endpoint command executor.
@@ -280,50 +327,72 @@ impl CommandDispatcher {
         Ok(submissions)
     }
 
-    fn spawn_lane(self: &Arc<Self>, plan: MatterEndpointCommandPlan) -> Result<()> {
+    fn spawn_lane(
+        self: &Arc<Self>,
+        plan: MatterEndpointCommandPlan,
+        permit: ControllerWorkPermit,
+    ) -> Result<()> {
         let dispatcher = self.clone();
         std::thread::Builder::new()
             .name(format!("chipd-matter-{}-{}", plan.node_id, plan.endpoint))
-            .spawn(move || dispatcher.run_lane(plan))?;
+            .spawn(move || dispatcher.run_lane(plan, permit))?;
         Ok(())
     }
 
-    /// Admit ready endpoints until the shared budget is full.
-    ///
-    /// Single loop, no recursion: a lane that fails to spawn publishes its
-    /// failure and releases its slot through `release_lane_state`, which never
-    /// admits work itself, so this loop stays the only admission path.
-    fn start_ready_lanes(self: &Arc<Self>) {
-        let capacity = self.work_budget.capacity();
+    /// Reserve controller capacity before spawning. A pending recovery target
+    /// cannot occupy a worker or block a ready target behind it in the queue.
+    pub(crate) fn start_ready_lanes(self: &Arc<Self>) {
         loop {
-            let Some(plan) = ({
+            let selected = {
                 let mut state = self.state.lock().expect("chipd dispatch lock poisoned");
-                if state.active_lanes >= capacity {
-                    None
-                } else {
-                    let mut next = None;
-                    while let Some(key) = state.ready.pop_front() {
-                        let Some(slot) = state.slots.get_mut(&key) else {
-                            continue;
-                        };
-                        if slot.running {
-                            continue;
-                        }
-                        let Some(plan) = slot.pending.take() else {
-                            continue;
-                        };
-                        slot.running = true;
-                        state.active_lanes += 1;
-                        next = Some(plan);
+                if state.active_lanes >= self.work_budget.capacity() {
+                    return;
+                }
+                let mut selected = None;
+                for _ in 0..state.ready.len() {
+                    let Some(key) = state.ready.pop_front() else {
+                        break;
+                    };
+                    let Some(slot) = state.slots.get(&key) else {
+                        continue;
+                    };
+                    if slot.running || slot.pending.is_none() {
+                        continue;
+                    }
+                    let health = state.health.get(&key);
+                    if health.is_some_and(EndpointHealth::cooling_down) {
+                        let plan = state.slots.remove(&key).unwrap().pending.unwrap();
+                        state.active_ids.remove(&plan.command_id);
+                        selected = Some((plan, None));
                         break;
                     }
-                    next
+                    let recovery = !health.is_some_and(EndpointHealth::ready);
+                    let Some(permit) = self.work_budget.try_acquire(recovery) else {
+                        state.ready.push_back(key);
+                        continue;
+                    };
+                    let slot = state.slots.get_mut(&key).unwrap();
+                    let plan = slot.pending.take().unwrap();
+                    slot.running = true;
+                    state.active_lanes += 1;
+                    selected = Some((plan, Some(permit)));
+                    break;
                 }
-            }) else {
+                selected
+            };
+            let Some((plan, permit)) = selected else {
                 return;
             };
-
-            if let Err(error) = self.spawn_lane(plan.clone()) {
+            let Some(permit) = permit else {
+                self.publish_outcome(
+                    &plan,
+                    MatterCommandOutcomeStatus::Failed,
+                    Some("Matter endpoint is awaiting connectivity recovery".into()),
+                    Some(MatterCommandFailureClass::Connectivity),
+                );
+                continue;
+            };
+            if let Err(error) = self.spawn_lane(plan.clone(), permit) {
                 self.publish_outcome(
                     &plan,
                     MatterCommandOutcomeStatus::Failed,
@@ -331,9 +400,71 @@ impl CommandDispatcher {
                     Some(MatterCommandFailureClass::Other),
                 );
                 self.release_lane_state(&plan);
-                continue;
             }
         }
+    }
+
+    /// Only native command completion or a received report is proof of life.
+    /// Subscription admission alone must not promote an unreachable target.
+    pub(crate) fn record_endpoint_proof(self: &Arc<Self>, node_id: u64, endpoint: u16) {
+        self.record_endpoint_proof_at(node_id, endpoint, Instant::now());
+    }
+
+    pub(crate) fn record_endpoint_proof_at(
+        self: &Arc<Self>,
+        node_id: u64,
+        endpoint: u16,
+        received: Instant,
+    ) {
+        let mut state = self.state.lock().expect("chipd dispatch lock poisoned");
+        let health = state.health.entry((node_id, endpoint)).or_default();
+        if health.failed_at.is_some_and(|failed| received <= failed)
+            || health.proof_at.is_some_and(|proof| received <= proof)
+        {
+            return;
+        }
+        *health = EndpointHealth {
+            proof_at: Some(received),
+            ..Default::default()
+        };
+        drop(state);
+        self.start_ready_lanes();
+    }
+
+    pub(crate) fn record_connectivity_failure(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+        started: Instant,
+    ) {
+        let mut state = self.state.lock().expect("chipd dispatch lock poisoned");
+        let health = state.health.entry((node_id, endpoint)).or_default();
+        // A late timeout must not overwrite proof received after its operation began.
+        if health.proof_at.is_some_and(|proof| proof > started) {
+            return;
+        }
+        health.failures = health.failures.saturating_add(1);
+        let delay =
+            Duration::from_secs((5_u64 << health.failures.saturating_sub(1).min(6)).min(300));
+        health.proof_at = None;
+        health.failed_at = Some(Instant::now());
+        health.retry_at = Some(Instant::now() + delay);
+    }
+
+    pub(crate) fn forget_node(&self, node_id: u64) {
+        self.state
+            .lock()
+            .expect("chipd dispatch lock poisoned")
+            .health
+            .retain(|(node, _), _| *node != node_id);
+    }
+
+    pub(crate) fn reset_reachability(&self) {
+        self.state
+            .lock()
+            .expect("chipd dispatch lock poisoned")
+            .health
+            .clear();
     }
 
     /// Run one plan to completion.
@@ -343,14 +474,17 @@ impl CommandDispatcher {
     /// CASE timeouts, and killing chipd for that would restart every healthy
     /// endpoint too. The bounds that matter are the SDK's, the native bridge's
     /// last-resort wedge guard, and the client RPC timeout.
-    fn run_lane(self: Arc<Self>, plan: MatterEndpointCommandPlan) {
+    fn run_lane(self: Arc<Self>, plan: MatterEndpointCommandPlan, permit: ControllerWorkPermit) {
+        let started = Instant::now();
         let result = self.execute(&plan);
         match result {
             Ok(detail) => {
+                self.record_endpoint_proof(plan.node_id, plan.endpoint);
                 self.publish_outcome(&plan, MatterCommandOutcomeStatus::Succeeded, detail, None)
             }
             Err(error) => {
                 let failure_class = if is_connectivity_failure(&error) {
+                    self.record_connectivity_failure(plan.node_id, plan.endpoint, started);
                     MatterCommandFailureClass::Connectivity
                 } else {
                     MatterCommandFailureClass::Other
@@ -363,6 +497,7 @@ impl CommandDispatcher {
                 )
             }
         }
+        drop(permit);
         self.finish_lane(&plan);
     }
 
@@ -407,13 +542,11 @@ impl CommandDispatcher {
         let mut color_failure: Option<anyhow::Error> = None;
         let mut succeeded_after_color_failure = false;
         for (index, step) in plan.steps.iter().enumerate() {
-            // The shared controller budget is held for exactly one step, so a
-            // slow endpoint cannot hold a permit across its inter-step delay.
-            let permit = self.work_budget.acquire();
+            // Admission reserved a permit for this endpoint plan. Recovery
+            // plans cannot acquire the slots reserved for responsive peers.
             let backend = self.backend.read().expect("chipd backend lock poisoned");
             let step_result = execute_step(backend.as_ref(), plan.node_id, plan.endpoint, step);
             drop(backend);
-            drop(permit);
             match step_result {
                 Ok(()) => {
                     if color_failure.is_some() {
@@ -506,7 +639,7 @@ fn is_color_step(step: &MatterCommandStep) -> bool {
 /// A failure that says the node could not be reached, as opposed to a
 /// cluster rejecting the command. Mirrors
 /// `MatterLightController::looks_like_connectivity_timeout` in rhythm-matter.
-fn is_connectivity_failure(error: &anyhow::Error) -> bool {
+pub(crate) fn is_connectivity_failure(error: &anyhow::Error) -> bool {
     error.chain().any(|cause| {
         let lower = cause.to_string().to_ascii_lowercase();
         lower.contains("timeout")
@@ -661,7 +794,7 @@ mod tests {
             }
             self.state.active_calls.fetch_sub(1, Ordering::SeqCst);
             if self.state.failed_nodes.lock().unwrap().contains(&node_id) {
-                anyhow::bail!("synthetic offline endpoint {node_id}");
+                anyhow::bail!("failed to connect to synthetic offline endpoint {node_id}");
             }
             Ok(())
         }
@@ -929,6 +1062,7 @@ mod tests {
         let broker = Arc::new(ControllerEventBroker::new());
         let dispatcher = CommandDispatcher::new(backend.clone(), broker.clone());
 
+        dispatcher.record_endpoint_proof(9, 2);
         let started = std::time::Instant::now();
         let submissions = dispatcher.submit(vec![plan(1, 1, true)]).unwrap();
         assert!(started.elapsed() < Duration::from_millis(50));
@@ -993,6 +1127,9 @@ mod tests {
             .map(|endpoint| plan_for(u64::from(endpoint), u64::from(endpoint), endpoint, false))
             .collect();
 
+        for endpoint in 3..=22 {
+            dispatcher.record_endpoint_proof(u64::from(endpoint), endpoint);
+        }
         dispatcher.submit(plans).unwrap();
 
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
@@ -1004,13 +1141,13 @@ mod tests {
         assert_eq!(
             blocking.healthy_calls.load(Ordering::SeqCst),
             20,
-            "healthy endpoints must drain while two unavailable peers retain their lanes"
+            "healthy endpoints must drain while unavailable peers await recovery"
         );
         assert!(
             blocking.max_active_calls.load(Ordering::SeqCst) <= MAX_CONCURRENT_CONTROLLER_WORK,
             "controller work exceeded the global endpoint budget"
         );
-        assert_eq!(blocking.active_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(blocking.active_calls.load(Ordering::SeqCst), 1);
 
         blocking.release_first.store(true, Ordering::SeqCst);
         let command_ids: Vec<_> = (1_u64..=22).collect();
@@ -1050,6 +1187,154 @@ mod tests {
             blocking.max_active_calls.load(Ordering::SeqCst) <= MAX_CONCURRENT_CONTROLLER_WORK,
             "six unavailable peers must not exceed the controller budget or starve healthy work"
         );
+    }
+
+    #[test]
+    fn responsive_peer_completes_while_six_peers_are_still_in_discovery() {
+        let blocking = Arc::new(BlockingState::default());
+        blocking.blocked_endpoints.store(6, Ordering::SeqCst);
+        let backend = Arc::new(RwLock::new(
+            Box::new(BlockingBackend::new(blocking.clone())) as Box<dyn ChipControllerBackend>,
+        ));
+        let broker = Arc::new(ControllerEventBroker::new());
+        let dispatcher = CommandDispatcher::new(backend, broker.clone());
+        // Establish real success for the responsive peer before the outage fan-out.
+        dispatcher.submit(vec![plan_for(100, 7, 7, true)]).unwrap();
+        wait_for_outcomes(&broker, &[100]);
+        dispatcher
+            .submit((1..=6).map(|n| plan_for(n, n, n as u16, true)).collect())
+            .unwrap();
+        dispatcher.submit(vec![plan_for(200, 7, 7, false)]).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        let mut responsive_completed = false;
+        while std::time::Instant::now() < deadline {
+            responsive_completed = broker
+                .wait(None, Duration::from_millis(10))
+                .events
+                .iter()
+                .any(|e| {
+                    matches!(&e.event, MatterControllerEvent::CommandOutcome(o)
+                    if o.command_id == 200 && o.status == MatterCommandOutcomeStatus::Succeeded)
+                });
+            if responsive_completed {
+                break;
+            }
+        }
+        // Always release blocked fake I/O, including on the expected red run.
+        blocking.release_first.store(true, Ordering::SeqCst);
+        wait_for_outcomes(&broker, &[1, 2, 3, 4, 5, 6, 200]);
+        assert!(
+            responsive_completed,
+            "responsive peer waited for unrelated discovery to finish"
+        );
+        assert!(blocking.max_active_calls.load(Ordering::SeqCst) <= MAX_CONCURRENT_CONTROLLER_WORK);
+    }
+
+    #[test]
+    fn failed_peer_backs_off_until_new_proof_and_ignores_delayed_old_reports() {
+        let blocking = Arc::new(BlockingState::default());
+        blocking.release_first.store(true, Ordering::SeqCst);
+        blocking.failed_nodes.lock().unwrap().insert(1);
+        let backend = Arc::new(RwLock::new(
+            Box::new(BlockingBackend::new(blocking.clone())) as Box<dyn ChipControllerBackend>,
+        ));
+        let broker = Arc::new(ControllerEventBroker::new());
+        let dispatcher = CommandDispatcher::new(backend, broker.clone());
+        let old_report = Instant::now() - Duration::from_secs(1);
+        dispatcher.submit(vec![plan_for(1, 1, 1, true)]).unwrap();
+        assert!(wait_for_outcomes(&broker, &[1]).contains(&(1, MatterCommandOutcomeStatus::Failed)));
+        // A new desired state is terminally rejected during recovery, without
+        // restarting a 45-second native discovery operation.
+        dispatcher.record_endpoint_proof_at(1, 1, old_report);
+        dispatcher.submit(vec![plan_for(2, 1, 1, false)]).unwrap();
+        assert!(wait_for_outcomes(&broker, &[2]).contains(&(2, MatterCommandOutcomeStatus::Failed)));
+        assert_eq!(blocking.calls.load(Ordering::SeqCst), 1);
+        // A real report clears cooldown immediately; the latest request reaches I/O.
+        blocking.failed_nodes.lock().unwrap().clear();
+        dispatcher.record_endpoint_proof(1, 1);
+        dispatcher.submit(vec![plan_for(3, 1, 1, false)]).unwrap();
+        assert!(
+            wait_for_outcomes(&broker, &[3]).contains(&(3, MatterCommandOutcomeStatus::Succeeded))
+        );
+        assert_eq!(blocking.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn subscription_recovery_does_not_block_ready_commands_or_admit_cold_workers() {
+        let blocking = Arc::new(BlockingState::default());
+        blocking.release_first.store(true, Ordering::SeqCst);
+        let backend = Arc::new(RwLock::new(
+            Box::new(BlockingBackend::new(blocking.clone())) as Box<dyn ChipControllerBackend>,
+        ));
+        let broker = Arc::new(ControllerEventBroker::new());
+        let budget = Arc::new(ControllerWorkBudget::new(4));
+        let dispatcher =
+            CommandDispatcher::with_work_budget(backend, broker.clone(), budget.clone());
+        dispatcher.submit(vec![plan_for(100, 7, 7, true)]).unwrap();
+        wait_for_outcomes(&broker, &[100]);
+        let subscription = budget.acquire();
+        dispatcher
+            .submit((1..=6).map(|n| plan_for(n, n, n as u16, true)).collect())
+            .unwrap();
+        dispatcher.submit(vec![plan_for(200, 7, 7, false)]).unwrap();
+        assert!(wait_for_outcomes(&broker, &[200])
+            .contains(&(200, MatterCommandOutcomeStatus::Succeeded)));
+        assert_eq!(
+            blocking.calls.load(Ordering::SeqCst),
+            2,
+            "cold commands entered controller work during subscription recovery"
+        );
+        drop(subscription);
+        // Service wakeup must run on subscription failure as well as success.
+        dispatcher.start_ready_lanes();
+        wait_for_outcomes(&broker, &[1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn stale_in_flight_timeout_cannot_erase_newer_endpoint_proof() {
+        let blocking = Arc::new(BlockingState::default());
+        blocking.release_first.store(true, Ordering::SeqCst);
+        let backend = Arc::new(RwLock::new(
+            Box::new(BlockingBackend::new(blocking.clone())) as Box<dyn ChipControllerBackend>,
+        ));
+        let broker = Arc::new(ControllerEventBroker::new());
+        let dispatcher = CommandDispatcher::new(backend, broker.clone());
+        let old_attempt = Instant::now() - Duration::from_secs(1);
+        dispatcher.record_endpoint_proof(1, 1);
+        dispatcher.record_connectivity_failure(1, 1, old_attempt);
+        dispatcher.submit(vec![plan_for(1, 1, 1, true)]).unwrap();
+        assert!(
+            wait_for_outcomes(&broker, &[1]).contains(&(1, MatterCommandOutcomeStatus::Succeeded))
+        );
+    }
+
+    #[test]
+    fn expired_cooldown_allows_recovery_without_a_subscription_report() {
+        let blocking = Arc::new(BlockingState::default());
+        blocking.release_first.store(true, Ordering::SeqCst);
+        blocking.failed_nodes.lock().unwrap().insert(1);
+        let backend = Arc::new(RwLock::new(
+            Box::new(BlockingBackend::new(blocking.clone())) as Box<dyn ChipControllerBackend>,
+        ));
+        let broker = Arc::new(ControllerEventBroker::new());
+        let dispatcher = CommandDispatcher::new(backend, broker.clone());
+        dispatcher.submit(vec![plan_for(1, 1, 1, true)]).unwrap();
+        wait_for_outcomes(&broker, &[1]);
+        // Advance only this endpoint's retry deadline; avoid wall-clock sleeps.
+        dispatcher
+            .state
+            .lock()
+            .unwrap()
+            .health
+            .get_mut(&(1, 1))
+            .unwrap()
+            .retry_at = Some(Instant::now() - Duration::from_secs(1));
+        blocking.failed_nodes.lock().unwrap().clear();
+        dispatcher.submit(vec![plan_for(2, 1, 1, false)]).unwrap();
+        assert!(
+            wait_for_outcomes(&broker, &[2]).contains(&(2, MatterCommandOutcomeStatus::Succeeded))
+        );
+        assert_eq!(blocking.calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]
