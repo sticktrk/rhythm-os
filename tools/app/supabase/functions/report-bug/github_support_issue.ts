@@ -42,6 +42,7 @@ export async function createOrRefreshGitHubIssue(
   }
 
   try {
+    await requirePrivateRepository(githubRepo, githubToken)
     const storedNumber = submission.github_issue_number
     const recoveredIssue = storedNumber == null && !isFleetSubmission(submission)
       ? await findExistingIssue(githubRepo, githubToken, submission.id)
@@ -109,6 +110,21 @@ export async function createOrRefreshGitHubIssue(
     const message = errorMessage(error)
     console.error('GitHub support issue projection failed:', error)
     return await failedReport(adminClient, submission.id, message)
+  }
+}
+
+// Reports contain private diagnostics and must never follow a misconfigured
+// destination into a public issue, even when the token has permission to write.
+async function requirePrivateRepository(repo: string, token: string): Promise<void> {
+  const response = await fetch(`https://api.github.com/repos/${repo}`, {
+    headers: githubHeaders(token),
+  })
+  const metadata = await response.json().catch(() => null)
+  if (!response.ok) {
+    throw new Error(formatGitHubError(repo, response.status, metadata))
+  }
+  if (!metadata || metadata.private !== true) {
+    throw new Error('Support reports require a verified private repository. Check GITHUB_ISSUES_REPO.')
   }
 }
 

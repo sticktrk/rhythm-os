@@ -9,11 +9,11 @@ import { createOrRefreshGitHubIssue } from './github_support_issue.ts'
 import type { DebugBundleSubmission } from './support_issue_body.ts'
 
 // Required secrets:
-// - GITHUB_ISSUES_TOKEN: fine-grained token with issue write access
+// - GITHUB_ISSUES_TOKEN: fine-grained token with metadata read and issue write access
+// - GITHUB_ISSUES_REPO: private owner/repo; explicitly configured, no default
 // Optional secrets:
 // - SB_PUBLISHABLE_KEY: preferred Supabase public key for Auth claims
 // - SB_SECRET_KEY: preferred Supabase elevated key for admin operations
-// - GITHUB_ISSUES_REPO: owner/repo; explicitly configured, no default
 // - GITHUB_ISSUES_LABELS: comma-separated labels
 // - GITHUB_ISSUES_ASSIGNEES: comma-separated GitHub usernames
 
