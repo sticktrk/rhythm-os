@@ -32,6 +32,10 @@ anon key and service-role key inside hosted functions; do not duplicate them.
   metadata read and issue write access. Visibility is verified before sending
   support content. Missing configuration or failed verification leaves the
   submission stored with a routing error so it can retry after correction.
+  Redirects are refused, and existing issue URLs must match the configured
+  repository and issue number. After a repository rename, issue transfer, or
+  routing change, correct the routing and stored association before retrying;
+  an issue number by itself is not portable between repositories.
 - Support encryption uses the existing `SUPPORT_ACCESS_ENCRYPTION_KEY`, shared
   with the Admin API. Preserve it across upgrades.
 - Monster uses **three credentials per deployment**, `MONSTER_EMAIL`,

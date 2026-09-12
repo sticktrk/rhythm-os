@@ -44,6 +44,9 @@ export async function createOrRefreshGitHubIssue(
   try {
     await requirePrivateRepository(githubRepo, githubToken)
     const storedNumber = submission.github_issue_number
+    if (storedNumber != null) {
+      requireIssueIdentity(githubRepo, storedNumber, submission.github_issue_url)
+    }
     const recoveredIssue = storedNumber == null && !isFleetSubmission(submission)
       ? await findExistingIssue(githubRepo, githubToken, submission.id)
       : null
@@ -118,6 +121,7 @@ export async function createOrRefreshGitHubIssue(
 async function requirePrivateRepository(repo: string, token: string): Promise<void> {
   const response = await fetch(`https://api.github.com/repos/${repo}`, {
     headers: githubHeaders(token),
+    redirect: 'error',
   })
   const metadata = await response.json().catch(() => null)
   if (!response.ok) {
@@ -125,6 +129,20 @@ async function requirePrivateRepository(repo: string, token: string): Promise<vo
   }
   if (!metadata || metadata.private !== true) {
     throw new Error('Support reports require a verified private repository. Check GITHUB_ISSUES_REPO.')
+  }
+  if (typeof metadata.full_name !== 'string' || metadata.full_name.toLowerCase() !== repo.toLowerCase()) {
+    throw new Error('GitHub repository identity does not match GITHUB_ISSUES_REPO.')
+  }
+}
+
+function requireIssueIdentity(repo: string, number: number, issueUrl: unknown): void {
+  let url: URL | undefined
+  try { if (typeof issueUrl === 'string') url = new URL(issueUrl) } catch { /* fail below */ }
+  if (!Number.isSafeInteger(number) || number <= 0 || !url ||
+      url.protocol !== 'https:' || url.host !== 'github.com' || url.username || url.password ||
+      url.search || url.hash ||
+      url.pathname.toLowerCase() !== `/${repo}/issues/${number}`.toLowerCase()) {
+    throw new Error('Support issue association does not match the configured repository and issue number. Correct the routing or association before retrying.')
   }
 }
 
@@ -140,6 +158,7 @@ async function findExistingIssue(
   url.searchParams.set('per_page', '100')
   const response = await fetch(url, {
     headers: githubHeaders(token),
+    redirect: 'error',
   })
   const responseBody = await response.json().catch(() => [])
   if (!response.ok) {
@@ -154,13 +173,11 @@ async function findExistingIssue(
     candidate &&
     typeof candidate === 'object' &&
     typeof candidate.body === 'string' &&
-    candidate.body.split('\n').includes(marker) &&
-    typeof candidate.html_url === 'string' &&
-    typeof candidate.number === 'number'
+    candidate.body.split('\n').includes(marker)
   )
-  return match
-    ? { html_url: match.html_url, number: match.number }
-    : null
+  if (!match) return null
+  requireIssueIdentity(repo, match.number, match.html_url)
+  return { html_url: match.html_url, number: match.number }
 }
 
 async function createGitHubIssue({
@@ -229,6 +246,9 @@ async function callGitHubIssueApi({
 }): Promise<{ html_url: string; number: number }> {
   const response = await fetch(url, {
     method,
+    // In particular, a transferred issue can redirect a PATCH into a public
+    // repository. Refuse it before fetch forwards any diagnostic body.
+    redirect: 'error',
     headers: {
       ...githubHeaders(token),
       'Content-Type': 'application/json',
@@ -241,11 +261,13 @@ async function callGitHubIssueApi({
     throw new Error(formatGitHubError(repo, response.status, responseBody))
   }
   if (
+    !responseBody ||
     typeof responseBody.html_url !== 'string' ||
     typeof responseBody.number !== 'number'
   ) {
     throw new Error('GitHub response did not include an issue URL and number.')
   }
+  requireIssueIdentity(repo, responseBody.number, responseBody.html_url)
   return {
     html_url: responseBody.html_url,
     number: responseBody.number,
