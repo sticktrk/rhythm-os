@@ -1979,7 +1979,7 @@ pub fn integration_callbacks(
             }
         }
 
-        Ok(())
+        crate::commands::reconcile_room_binding_triage(state)
     });
 
     let sync_required_topology_groups_fn = Arc::new(move |state: &SharedState| -> Result<()> {

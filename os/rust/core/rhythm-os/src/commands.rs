@@ -8006,6 +8006,9 @@ fn restore_backup_installation_metadata(
         .unwrap_or_default()
         .as_secs();
     canonical_registry.backfill_unassigned_triage(now);
+    canonical_registry
+        .triage_mut()
+        .reconcile_room_bindings(&topology, now);
 
     {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -15144,6 +15147,7 @@ fn do_device_remove_with_retention(
     if let Some(name_scope) = automatic_name_scope.as_ref() {
         reconcile_automatic_light_names_best_effort(state, name_scope);
     }
+    reconcile_room_binding_triage(state)?;
     reconcile_runtime_from_state(state)?;
     reconcile_device_health(state);
 
@@ -15324,6 +15328,7 @@ pub fn do_device_endpoint_remove(
     drop(prepared_assignments);
 
     persist_registry(state);
+    reconcile_room_binding_triage(state)?;
     reconcile_runtime_from_state(state)?;
     reconcile_device_health(state);
     emit_triage_changed(state);
@@ -19585,6 +19590,43 @@ pub fn build_triage_queue(state: &SharedState) -> Result<String> {
     serde_json::to_string(&pending).map_err(|e| anyhow::anyhow!(e))
 }
 
+/// Keep persisted review proposals aligned with completed topology changes.
+/// The caller must hold the external topology transaction lock until this
+/// repair commits, so an unrelated operation cannot persist a transient graph.
+pub(crate) fn reconcile_room_binding_triage(state: &SharedState) -> Result<()> {
+    let changed = {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        if s.authority_state_recovery_required {
+            return Ok(());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let before = s.canonical_registry.triage().clone();
+        let AppState {
+            canonical_registry,
+            topology,
+            ..
+        } = &mut *s;
+        let changed = canonical_registry
+            .triage_mut()
+            .reconcile_room_bindings(topology, now);
+        if changed > 0 {
+            if let Err(error) = save_authority_state(&s) {
+                *s.canonical_registry.triage_mut() = before;
+                return Err(error.context("Failed to persist reconciled room review"));
+            }
+        }
+        changed
+    };
+    if changed > 0 {
+        info!(target: "cmd", "Reconciled {} pending room binding proposals with topology", changed);
+        emit_triage_changed(state);
+    }
+    Ok(())
+}
+
 fn commit_triage_authority_mutation(
     state: &SharedState,
     topology_before: crate::topology::RoomTopologyStore,
@@ -19938,6 +19980,11 @@ pub fn do_triage_bind_room_to(
             entry_id
         ));
     }
+    if entry.status != crate::canonical::triage::TriageStatus::Pending {
+        return Err(anyhow::anyhow!(
+            "Room binding proposal is no longer pending; refresh review"
+        ));
+    }
 
     let binding = entry
         .room_binding
@@ -20004,6 +20051,7 @@ pub fn do_triage_bind_room_to(
     commit_triage_authority_mutation(state, topology_before, canonical_before, "room binding")?;
     let name_scope = LightNameReconciliationScope::for_room(Some(target_id));
     reconcile_automatic_light_names_best_effort(state, &name_scope);
+    reconcile_room_binding_triage(state)?;
     reconcile_runtime_from_state(state)?;
 
     // Emit SSE events
@@ -20312,6 +20360,7 @@ pub fn do_topology_create_room(state: &SharedState, name: &str) -> Result<String
     persist_topology(&s);
     drop(s);
     ensure_sleep_mode_hard_off_default(state, &id);
+    reconcile_room_binding_triage(state)?;
     reconcile_runtime_from_state(state)?;
     Ok(format!(r#"{{"id":"{}","name":"{}"}}"#, id, name))
 }
@@ -20368,6 +20417,7 @@ pub fn do_topology_rename_room(state: &SharedState, room_id: &str, name: &str) -
     }
     let name_scope = LightNameReconciliationScope::for_room(Some(room_id.to_string()));
     reconcile_automatic_light_names_best_effort(state, &name_scope);
+    reconcile_room_binding_triage(state)?;
     reconcile_runtime_from_state(state)?;
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
     Ok(())
@@ -20517,6 +20567,7 @@ pub fn do_topology_delete_room(state: &SharedState, room_id: &str) -> Result<()>
     queue_motion_timer_clear(state, room_id);
     let name_scope = LightNameReconciliationScope::for_room(None);
     reconcile_automatic_light_names_best_effort(state, &name_scope);
+    reconcile_room_binding_triage(state)?;
     reconcile_runtime_from_state(state)?;
 
     {
@@ -20598,6 +20649,7 @@ pub fn do_topology_merge_rooms(
         }
         let name_scope = LightNameReconciliationScope::for_room(Some(target_id.to_string()));
         reconcile_automatic_light_names_best_effort(state, &name_scope);
+        reconcile_room_binding_triage(state)?;
         reconcile_runtime_from_state(state)?;
 
         {
@@ -38677,6 +38729,59 @@ mod tests {
             topology_before
         );
         assert!(state.hub_runtime().is_none());
+    }
+
+    #[test]
+    fn stale_room_review_persistence_failure_preserves_queue_until_retry() {
+        let (state, _) = setup_state(vec![]);
+        let storage = Arc::new(TestStorage::default());
+        let entry = serde_json::from_value(serde_json::json!({
+            "id": "stale-room-review",
+            "kind": "room_binding",
+            "discovered": {"native_id": "", "name": "", "device_type": "light", "room_name": ""},
+            "hub_key": {"hub_type": "ha", "address": "192.0.2.2"},
+            "room_binding": {
+                "hub_room_id": "missing-source", "hub_room_name": "Kitchen",
+                "control_id": "missing-group", "target_rhythm_room_id": "missing-target",
+                "target_rhythm_room_name": "Kitchen"
+            },
+            "status": "pending", "created_at": 1000
+        }))
+        .unwrap();
+        let before = {
+            let mut state = state.lock().unwrap();
+            state.canonical_registry.triage_mut().add(entry);
+            state.storage = Some(storage.clone());
+            save_authority_state(&state).unwrap();
+            serde_json::to_value(state.canonical_registry.triage()).unwrap()
+        };
+        let saved_before = storage.load_authority_state().unwrap().unwrap();
+        let transaction_lock = state.lock().unwrap().external_topology_transaction_lock.clone();
+        let _transaction = transaction_lock.lock().unwrap();
+        storage.inner.lock().unwrap().fail_save_authority_state = true;
+        assert!(reconcile_room_binding_triage(&state)
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to persist reconciled room review"));
+        assert_eq!(
+            serde_json::to_value(state.lock().unwrap().canonical_registry.triage()).unwrap(),
+            before
+        );
+        assert_eq!(
+            storage.load_authority_state().unwrap().unwrap().canonical_registry,
+            saved_before.canonical_registry
+        );
+
+        storage.inner.lock().unwrap().fail_save_authority_state = false;
+        reconcile_room_binding_triage(&state).unwrap();
+        assert_eq!(
+            state.lock().unwrap().canonical_registry.triage().pending_room_count(),
+            0
+        );
+        let saved = storage.load_authority_state().unwrap().unwrap();
+        let registry: crate::canonical::registry::CanonicalRegistry =
+            serde_json::from_value(saved.canonical_registry).unwrap();
+        assert_eq!(registry.triage().pending_room_count(), 0);
     }
 
     #[test]

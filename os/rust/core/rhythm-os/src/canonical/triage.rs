@@ -168,7 +168,7 @@ impl From<&DiscoveredIdentity> for TriageDiscoveredDevice {
 /// Created when a hub discovers a room whose name matches an existing Rhythm
 /// room from a different hub. The user decides whether to merge (bind) or
 /// keep them as separate rooms.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomBindingProposal {
     /// Hub-native room ID of the newly discovered room.
     pub hub_room_id: String,
@@ -482,6 +482,66 @@ impl TriageQueue {
                     .map(|rb| rb.hub_room_id == hub_room_id)
                     .unwrap_or(false)
         })
+    }
+
+    /// Reconcile pending review evidence with canonical topology, never with
+    /// transient hub connectivity. Resolved user decisions remain untouched.
+    /// Expired proposals are dismissed by the system so rediscovery can ask
+    /// for fresh approval instead of retaining an impossible merge forever.
+    pub fn reconcile_room_bindings(
+        &mut self,
+        topology: &crate::topology::RoomTopologyStore,
+        now: u64,
+    ) -> usize {
+        let mut changed = 0;
+        for entry in &mut self.entries {
+            if entry.kind != TriageKind::RoomBinding || entry.status != TriageStatus::Pending {
+                continue;
+            }
+            let valid = entry.room_binding.as_mut().is_some_and(|proposal| {
+                let Some(source_id) = topology
+                    .translate_room_id(&entry.hub_key, &proposal.hub_room_id)
+                    .filter(|id| topology.get(id).is_some())
+                else {
+                    return false;
+                };
+                // A manual merge may already have fulfilled this proposal.
+                // Do not turn it into a request to merge another candidate.
+                if source_id == proposal.target_rhythm_room_id {
+                    return false;
+                }
+                let before = proposal.clone();
+                let mut candidates = Vec::new();
+                // Older payloads may contain only the preferred target.
+                for id in std::iter::once(&proposal.target_rhythm_room_id)
+                    .chain(proposal.candidate_rooms.iter().map(|(id, _)| id))
+                {
+                    if id == source_id || candidates.iter().any(|(existing, _)| existing == id) {
+                        continue;
+                    }
+                    if let Some(room) = topology.get(id) {
+                        candidates.push((id.clone(), room.name.clone()));
+                    }
+                }
+                let Some((target_id, target_name)) = candidates.first().cloned() else {
+                    return false;
+                };
+                proposal.target_rhythm_room_id = target_id;
+                proposal.target_rhythm_room_name = target_name;
+                proposal.candidate_rooms = candidates;
+                if *proposal != before {
+                    changed += 1;
+                }
+                true
+            });
+            if !valid {
+                entry.status = TriageStatus::Dismissed;
+                entry.resolved_by = Some("topology".to_string());
+                entry.resolved_at = Some(now);
+                changed += 1;
+            }
+        }
+        changed
     }
 }
 

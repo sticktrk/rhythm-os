@@ -347,6 +347,7 @@ fn sync_from_hub_for_key_acquired(
         discover_devices,
         failure_policy,
     )?;
+    commands::reconcile_room_binding_triage(state)?;
     commands::reconcile_runtime_from_state(state)?;
     Ok(report)
 }
@@ -851,7 +852,13 @@ fn sync_with_discovery(
                             .has_room_binding(&canonical_hub_key, &room.id)
                         {
                             let entry = TriageEntry {
-                                id: format!("room-triage-{}-{}", now, room.id),
+                                // A retired proposal and its replacement can
+                                // be created in the same second. Old clients
+                                // must not approve the replacement by old ID.
+                                id: format!(
+                                    "room-triage-{}",
+                                    crate::canonical::identity::generate_uuid_public()
+                                ),
                                 kind: TriageKind::RoomBinding,
                                 discovered: TriageDiscoveredDevice::default(),
                                 hub_key: canonical_hub_key.clone(),

@@ -2822,10 +2822,27 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
         info!(target: "sys", "Initializing fresh versioned authority state");
     }
 
+    let reconciled_room_bindings = if loaded_authority_snapshot || loaded_legacy_authority {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        s.canonical_registry
+            .triage_mut()
+            .reconcile_room_bindings(&s.topology, now)
+    } else {
+        0
+    };
+    if reconciled_room_bindings > 0 {
+        info!(target: "sys", "Reconciled {} persisted room binding proposals with topology", reconciled_room_bindings);
+    }
+
     let should_persist_authority_migration = loaded_legacy_authority
         || should_initialize_fresh_authority
         || (loaded_authority_snapshot
-            && (topology_migration.changed() || external_automation_migration.changed()));
+            && (topology_migration.changed()
+                || external_automation_migration.changed()
+                || reconciled_room_bindings > 0));
     if should_persist_authority_migration {
         if let Some(storage) = authority_storage.as_ref() {
             let migration_commit = (|| -> Result<()> {
