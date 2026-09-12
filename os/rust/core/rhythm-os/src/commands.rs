@@ -15147,7 +15147,7 @@ fn do_device_remove_with_retention(
     if let Some(name_scope) = automatic_name_scope.as_ref() {
         reconcile_automatic_light_names_best_effort(state, name_scope);
     }
-    reconcile_room_binding_triage(state)?;
+    reconcile_room_binding_triage_best_effort(state);
     reconcile_runtime_from_state(state)?;
     reconcile_device_health(state);
 
@@ -15328,7 +15328,7 @@ pub fn do_device_endpoint_remove(
     drop(prepared_assignments);
 
     persist_registry(state);
-    reconcile_room_binding_triage(state)?;
+    reconcile_room_binding_triage_best_effort(state);
     reconcile_runtime_from_state(state)?;
     reconcile_device_health(state);
     emit_triage_changed(state);
@@ -19590,6 +19590,15 @@ pub fn build_triage_queue(state: &SharedState) -> Result<String> {
     serde_json::to_string(&pending).map_err(|e| anyhow::anyhow!(e))
 }
 
+/// Repair review evidence after a completed topology transaction. A failed
+/// repair restores the queue for the next sync, but must not interrupt runtime
+/// reconciliation or events for the topology change that already committed.
+pub(crate) fn reconcile_room_binding_triage_best_effort(state: &SharedState) {
+    if let Err(error) = reconcile_room_binding_triage(state) {
+        warn!(target: "cmd", "Room review repair deferred until the next topology sync: {:#}", error);
+    }
+}
+
 /// Keep persisted review proposals aligned with completed topology changes.
 /// The caller must hold the external topology transaction lock until this
 /// repair commits, so an unrelated operation cannot persist a transient graph.
@@ -20051,7 +20060,7 @@ pub fn do_triage_bind_room_to(
     commit_triage_authority_mutation(state, topology_before, canonical_before, "room binding")?;
     let name_scope = LightNameReconciliationScope::for_room(Some(target_id));
     reconcile_automatic_light_names_best_effort(state, &name_scope);
-    reconcile_room_binding_triage(state)?;
+    reconcile_room_binding_triage_best_effort(state);
     reconcile_runtime_from_state(state)?;
 
     // Emit SSE events
@@ -20360,7 +20369,7 @@ pub fn do_topology_create_room(state: &SharedState, name: &str) -> Result<String
     persist_topology(&s);
     drop(s);
     ensure_sleep_mode_hard_off_default(state, &id);
-    reconcile_room_binding_triage(state)?;
+    reconcile_room_binding_triage_best_effort(state);
     reconcile_runtime_from_state(state)?;
     Ok(format!(r#"{{"id":"{}","name":"{}"}}"#, id, name))
 }
@@ -20417,7 +20426,7 @@ pub fn do_topology_rename_room(state: &SharedState, room_id: &str, name: &str) -
     }
     let name_scope = LightNameReconciliationScope::for_room(Some(room_id.to_string()));
     reconcile_automatic_light_names_best_effort(state, &name_scope);
-    reconcile_room_binding_triage(state)?;
+    reconcile_room_binding_triage_best_effort(state);
     reconcile_runtime_from_state(state)?;
     crate::state::emit_server_event(state, crate::server_event::ServerEvent::NodesChanged);
     Ok(())
@@ -20567,7 +20576,7 @@ pub fn do_topology_delete_room(state: &SharedState, room_id: &str) -> Result<()>
     queue_motion_timer_clear(state, room_id);
     let name_scope = LightNameReconciliationScope::for_room(None);
     reconcile_automatic_light_names_best_effort(state, &name_scope);
-    reconcile_room_binding_triage(state)?;
+    reconcile_room_binding_triage_best_effort(state);
     reconcile_runtime_from_state(state)?;
 
     {
@@ -20649,7 +20658,7 @@ pub fn do_topology_merge_rooms(
         }
         let name_scope = LightNameReconciliationScope::for_room(Some(target_id.to_string()));
         reconcile_automatic_light_names_best_effort(state, &name_scope);
-        reconcile_room_binding_triage(state)?;
+        reconcile_room_binding_triage_best_effort(state);
         reconcile_runtime_from_state(state)?;
 
         {

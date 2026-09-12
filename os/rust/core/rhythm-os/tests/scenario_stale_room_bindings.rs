@@ -4,9 +4,16 @@ mod harness;
 
 use harness::{light, room, rooms_with_lights, TestHarness};
 use rhythm_os::canonical::identity::HubKey;
+use rhythm_os::canonical::registry::CanonicalRegistry;
+use rhythm_os::canonical::triage::TriageStatus;
 use rhythm_os::commands;
-use rhythm_os::storage::{load_persisted_state, FileStorage, Storage};
-use std::sync::Arc;
+use rhythm_os::server_event::ServerEvent;
+use rhythm_os::storage::{
+    load_persisted_state, FileStorage, Storage, StoredAuthorityState, StoredLightProfiles,
+    StoredLocation, StoredSettings,
+};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 fn pending_binding() -> (TestHarness, HubKey, String, String) {
     let mut harness = TestHarness::new().with_discovery(
@@ -100,13 +107,26 @@ fn deleting_one_candidate_keeps_a_live_candidate_available_for_approval() {
         other
     };
     commands::do_topology_delete_room(&harness.state, &target_id).unwrap();
+    let (replacement_id, _, _) = harness.triage_room_binding(0).unwrap();
+    assert_ne!(replacement_id, entry_id);
+    assert!(harness.triage_bind(&entry_id).is_err());
+    assert!(harness.triage_bind_to(&entry_id, &other_target).is_err());
+    {
+        let state = harness.state.lock().unwrap();
+        let retired = state.canonical_registry.triage().get(&entry_id).unwrap();
+        assert_eq!(retired.status, TriageStatus::Dismissed);
+        assert_eq!(
+            retired.room_binding.as_ref().unwrap().target_rhythm_room_id,
+            target_id
+        );
+    }
     let queue: serde_json::Value =
         serde_json::from_str(&commands::build_triage_queue(&harness.state).unwrap()).unwrap();
     let proposal = &queue
         .as_array()
         .unwrap()
         .iter()
-        .find(|entry| entry["id"] == entry_id)
+        .find(|entry| entry["id"] == replacement_id)
         .unwrap()["room_binding"];
     assert_eq!(proposal["target_rhythm_room_id"], other_target);
     assert_eq!(
@@ -117,11 +137,161 @@ fn deleting_one_candidate_keeps_a_live_candidate_available_for_approval() {
         harness.resolve_for_hub(&secondary, "secondary-kitchen"),
         other_target
     );
-    harness.triage_bind(&entry_id).unwrap();
+    // Restoring the updated queue must preserve both the retired identity and
+    // the fresh proposal, including for clients that omit the explicit target.
+    let bundle = commands::build_backup_bundle_dto(&harness.state, false).unwrap();
+    let restored = TestHarness::new();
+    commands::do_backup_restore(&restored.state, bundle).unwrap();
+    assert!(restored.triage_bind(&entry_id).is_err());
+    restored.triage_bind(&replacement_id).unwrap();
+    harness.triage_bind(&replacement_id).unwrap();
     assert_eq!(
         harness.resolve_for_hub(&secondary, "secondary-kitchen"),
         other_target
     );
+}
+
+/// Accept the topology commit, then fail only the subsequent review repair.
+/// This isolates the durability boundary from the ordinary transaction rollback.
+struct RoomReviewFailStorage {
+    entry_id: String,
+    fail_repairs: AtomicBool,
+    failed_repairs: AtomicUsize,
+    saved: Mutex<Option<StoredAuthorityState>>,
+}
+
+impl RoomReviewFailStorage {
+    fn new(entry_id: String) -> Self {
+        Self {
+            entry_id,
+            fail_repairs: AtomicBool::new(true),
+            failed_repairs: AtomicUsize::new(0),
+            saved: Mutex::new(None),
+        }
+    }
+}
+
+impl Storage for RoomReviewFailStorage {
+    fn load_rooms(&self) -> anyhow::Result<rhythm_core::RoomManager> {
+        Ok(Default::default())
+    }
+    fn save_rooms(&self, _: &rhythm_core::RoomManager) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn load_light_profiles(&self) -> anyhow::Result<StoredLightProfiles> {
+        anyhow::bail!("No stored light profiles")
+    }
+    fn save_light_profiles(&self, _: &StoredLightProfiles) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn load_location(&self) -> anyhow::Result<StoredLocation> {
+        anyhow::bail!("No stored location")
+    }
+    fn save_location(&self, _: &StoredLocation) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn load_settings(&self) -> anyhow::Result<StoredSettings> {
+        anyhow::bail!("No stored settings")
+    }
+    fn save_settings(&self, _: &StoredSettings) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn load_all_hub_credentials(&self) -> anyhow::Result<Vec<rhythm_os::hub::HubCredentials>> {
+        Ok(vec![])
+    }
+    fn save_all_hub_credentials(&self, _: &[rhythm_os::hub::HubCredentials]) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn load_hub_registry_for(&self, _: &HubKey) -> anyhow::Result<Option<serde_json::Value>> {
+        Ok(None)
+    }
+    fn save_hub_registry_for(&self, _: &HubKey, _: &serde_json::Value) -> anyhow::Result<()> {
+        Ok(())
+    }
+    fn load_authority_state(&self) -> anyhow::Result<Option<StoredAuthorityState>> {
+        Ok(self.saved.lock().unwrap().clone())
+    }
+    fn save_authority_state(&self, state: &StoredAuthorityState) -> anyhow::Result<()> {
+        let registry: CanonicalRegistry = serde_json::from_value(state.canonical_registry.clone())?;
+        let repaired = registry
+            .triage()
+            .get(&self.entry_id)
+            .is_some_and(|entry| entry.resolved_by.as_deref() == Some("topology"));
+        if repaired && self.fail_repairs.load(Ordering::SeqCst) {
+            self.failed_repairs.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("Simulated review repair write failure");
+        }
+        *self.saved.lock().unwrap() = Some(state.clone());
+        Ok(())
+    }
+}
+
+#[test]
+fn completed_topology_changes_update_runtime_and_events_when_review_repair_cannot_persist() {
+    for delete in [true, false] {
+        let (harness, secondary, entry_id, target_id) = pending_binding();
+        let source_id = harness.resolve_for_hub(&secondary, "secondary-kitchen");
+        let storage = Arc::new(RoomReviewFailStorage::new(entry_id.clone()));
+        let (tx, mut rx) = tokio::sync::broadcast::channel(64);
+        {
+            let mut state = harness.state.lock().unwrap();
+            state.storage = Some(storage.clone());
+            state.event_tx = Some(tx);
+            commands::save_authority_state(&state).unwrap();
+        }
+
+        let removed_id = if delete {
+            commands::do_topology_delete_room(&harness.state, &target_id).unwrap();
+            &target_id
+        } else {
+            commands::do_topology_merge_rooms(&harness.state, &target_id, &source_id).unwrap();
+            &source_id
+        };
+        assert_eq!(storage.failed_repairs.load(Ordering::SeqCst), 1);
+        {
+            let state = harness.state.lock().unwrap();
+            assert!(state.topology.get(removed_id).is_none());
+            assert!(state
+                .hub_runtime()
+                .unwrap()
+                .engine_room_snapshot(removed_id)
+                .is_none());
+            assert_eq!(
+                state
+                    .canonical_registry
+                    .triage()
+                    .get(&entry_id)
+                    .unwrap()
+                    .status,
+                TriageStatus::Pending
+            );
+        }
+        let saved = storage.load_authority_state().unwrap().unwrap();
+        let topology: rhythm_os::topology::RoomTopologyStore =
+            serde_json::from_value(saved.topology).unwrap();
+        assert!(topology.get(removed_id).is_none());
+        let registry: CanonicalRegistry = serde_json::from_value(saved.canonical_registry).unwrap();
+        assert_eq!(
+            registry.triage().get(&entry_id).unwrap().status,
+            TriageStatus::Pending
+        );
+        let mut nodes_changed = false;
+        while let Ok(event) = rx.try_recv() {
+            nodes_changed |= matches!(event, ServerEvent::NodesChanged);
+        }
+        assert!(
+            nodes_changed,
+            "A committed topology change must notify clients"
+        );
+
+        // The next sync retries the repair once persistence recovers.
+        storage.fail_repairs.store(false, Ordering::SeqCst);
+        harness.sync_hub(&secondary);
+        assert_no_room_proposals(&harness);
+        let saved = storage.load_authority_state().unwrap().unwrap();
+        let registry: CanonicalRegistry = serde_json::from_value(saved.canonical_registry).unwrap();
+        assert_eq!(registry.triage().pending_room_count(), 0);
+    }
 }
 
 #[test]

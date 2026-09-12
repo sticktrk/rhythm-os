@@ -347,7 +347,7 @@ fn sync_from_hub_for_key_acquired(
         discover_devices,
         failure_policy,
     )?;
-    commands::reconcile_room_binding_triage(state)?;
+    commands::reconcile_room_binding_triage_best_effort(state);
     commands::reconcile_runtime_from_state(state)?;
     Ok(report)
 }
