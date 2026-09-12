@@ -9497,6 +9497,8 @@ void main() {
       expect(provider.hubConfiguredConflicts, hasLength(1));
       expect(provider.reviewHistory, isNotEmpty);
       expect(provider.reviewHistory.first.isPending, isFalse);
+      expect(provider.profiles.map((profile) => profile.id),
+          containsAll(['rhythm', 'sleep', 'day_idle', 'sleep_idle']));
     });
 
     test('demo override rejects a stale effective snapshot', () async {
