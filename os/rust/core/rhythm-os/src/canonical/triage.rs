@@ -168,7 +168,7 @@ impl From<&DiscoveredIdentity> for TriageDiscoveredDevice {
 /// Created when a hub discovers a room whose name matches an existing Rhythm
 /// room from a different hub. The user decides whether to merge (bind) or
 /// keep them as separate rooms.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoomBindingProposal {
     /// Hub-native room ID of the newly discovered room.
     pub hub_room_id: String,
@@ -482,6 +482,83 @@ impl TriageQueue {
                     .map(|rb| rb.hub_room_id == hub_room_id)
                     .unwrap_or(false)
         })
+    }
+
+    /// Reconcile pending review evidence with canonical topology, never with
+    /// transient hub connectivity. Resolved user decisions remain untouched.
+    /// Expired proposals are dismissed by the system so rediscovery can ask
+    /// for fresh approval instead of retaining an impossible merge forever.
+    pub fn reconcile_room_bindings(
+        &mut self,
+        topology: &crate::topology::RoomTopologyStore,
+        now: u64,
+    ) -> usize {
+        let mut changed = 0;
+        let mut replacements = Vec::new();
+        for entry in &mut self.entries {
+            if entry.kind != TriageKind::RoomBinding || entry.status != TriageStatus::Pending {
+                continue;
+            }
+            let reconciled = entry.room_binding.as_ref().and_then(|proposal| {
+                let source_id = topology
+                    .translate_room_id(&entry.hub_key, &proposal.hub_room_id)
+                    .filter(|id| topology.get(id).is_some())?;
+                // A manual merge may already have fulfilled this proposal.
+                // Do not turn it into a request to merge another candidate.
+                if source_id == proposal.target_rhythm_room_id {
+                    return None;
+                }
+                let mut candidates = Vec::new();
+                // Older payloads may contain only the preferred target.
+                for id in std::iter::once(&proposal.target_rhythm_room_id)
+                    .chain(proposal.candidate_rooms.iter().map(|(id, _)| id))
+                {
+                    if id == source_id || candidates.iter().any(|(existing, _)| existing == id) {
+                        continue;
+                    }
+                    if let Some(room) = topology.get(id) {
+                        candidates.push((id.clone(), room.name.clone()));
+                    }
+                }
+                let (target_id, target_name) = candidates.first().cloned()?;
+                let mut proposal = proposal.clone();
+                proposal.target_rhythm_room_id = target_id;
+                proposal.target_rhythm_room_name = target_name;
+                proposal.candidate_rooms = candidates;
+                Some(proposal)
+            });
+            if let Some(proposal) = reconciled {
+                let before = entry.room_binding.as_ref().expect("reconciled proposal");
+                if &proposal == before {
+                    continue;
+                }
+                changed += 1;
+                if proposal.target_rhythm_room_id == before.target_rhythm_room_id {
+                    entry.room_binding = Some(proposal);
+                    continue;
+                }
+
+                // A bind request may omit the target and approve the default
+                // shown earlier. Changing that default requires fresh approval
+                // under a new ID, while the old entry retains its evidence.
+                let mut replacement = entry.clone();
+                replacement.id = format!(
+                    "room-triage-{}",
+                    crate::canonical::identity::generate_uuid_public()
+                );
+                replacement.room_binding = Some(proposal);
+                replacement.created_at = now;
+                replacement.resolved_by = None;
+                replacement.resolved_at = None;
+                replacements.push(replacement);
+            }
+            entry.status = TriageStatus::Dismissed;
+            entry.resolved_by = Some("topology".to_string());
+            entry.resolved_at = Some(now);
+            changed += 1;
+        }
+        self.entries.extend(replacements);
+        changed
     }
 }
 

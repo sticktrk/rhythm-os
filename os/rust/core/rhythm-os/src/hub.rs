@@ -1979,6 +1979,7 @@ pub fn integration_callbacks(
             }
         }
 
+        crate::commands::reconcile_room_binding_triage_best_effort(state);
         Ok(())
     });
 
