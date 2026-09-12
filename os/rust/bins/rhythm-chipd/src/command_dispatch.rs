@@ -279,7 +279,7 @@ struct DispatchState {
 struct EndpointHealth {
     proof_at: Option<Instant>,
     failures: u32,
-    failed_at: Option<Instant>,
+    failed_attempt_started_at: Option<Instant>,
     retry_at: Option<Instant>,
 }
 
@@ -479,7 +479,9 @@ impl CommandDispatcher {
     ) {
         let mut state = self.state.lock().expect("chipd dispatch lock poisoned");
         let health = state.health.entry((node_id, endpoint)).or_default();
-        if health.failed_at.is_some_and(|failed| received <= failed)
+        if health
+            .failed_attempt_started_at
+            .is_some_and(|started| received <= started)
             || health.proof_at.is_some_and(|proof| received <= proof)
         {
             return;
@@ -500,15 +502,23 @@ impl CommandDispatcher {
     ) {
         let mut state = self.state.lock().expect("chipd dispatch lock poisoned");
         let health = state.health.entry((node_id, endpoint)).or_default();
-        // A late timeout must not overwrite proof received after its operation began.
-        if health.proof_at.is_some_and(|proof| proof > started) {
+        // Order failures by attempt start, just as reports are ordered by
+        // native receipt time. Drain/completion order must not change which
+        // evidence wins, including overlapping command/subscription attempts.
+        if health.proof_at.is_some_and(|proof| proof > started)
+            || health
+                .failed_attempt_started_at
+                .is_some_and(|previous| started <= previous)
+        {
             return;
         }
         health.failures = health.failures.saturating_add(1);
         let delay =
             Duration::from_secs((5_u64 << health.failures.saturating_sub(1).min(6)).min(300));
         health.proof_at = None;
-        health.failed_at = Some(Instant::now());
+        health.failed_attempt_started_at = Some(started);
+        // Retry timing remains relative to completion, independently of the
+        // timestamp used to order reachability evidence.
         health.retry_at = Some(Instant::now() + delay);
     }
 
@@ -1467,6 +1477,82 @@ mod tests {
         assert!(
             wait_for_outcomes(&broker, &[1]).contains(&(1, MatterCommandOutcomeStatus::Succeeded))
         );
+    }
+
+    #[test]
+    fn native_report_drain_order_does_not_change_command_admission() {
+        for drain_after_timeout in [false, true] {
+            for report_age in [None, Some(11), Some(10), Some(9)] {
+                let blocking = Arc::new(BlockingState::default());
+                blocking.release_first.store(true, Ordering::SeqCst);
+                let backend = Arc::new(RwLock::new(
+                    Box::new(BlockingBackend::new(blocking.clone()))
+                        as Box<dyn ChipControllerBackend>,
+                ));
+                let broker = Arc::new(ControllerEventBroker::new());
+                let dispatcher = CommandDispatcher::new(backend, broker.clone());
+                let now = Instant::now();
+                // The attempt predates even the initial cooldown. Backoff
+                // must still start at failure completion, not attempt start.
+                let started = now - Duration::from_secs(10);
+                let received = report_age.map(|age| now - Duration::from_secs(age));
+                if drain_after_timeout {
+                    dispatcher.record_connectivity_failure(1, 1, started);
+                }
+                if let Some(received) = received {
+                    dispatcher.record_endpoint_proof_at(1, 1, received);
+                }
+                if !drain_after_timeout {
+                    dispatcher.record_connectivity_failure(1, 1, started);
+                }
+                dispatcher.submit(vec![plan_for(1, 1, 1, true)]).unwrap();
+                let admitted = received.is_some_and(|received| received > started);
+                let expected = if admitted {
+                    MatterCommandOutcomeStatus::Succeeded
+                } else {
+                    MatterCommandOutcomeStatus::Failed
+                };
+                assert!(
+                    wait_for_outcomes(&broker, &[1]).contains(&(1, expected)),
+                    "admission changed with report delivery: drain_after_timeout={drain_after_timeout}, report_age={report_age:?}"
+                );
+                assert_eq!(blocking.calls.load(Ordering::SeqCst), usize::from(admitted));
+            }
+        }
+    }
+
+    #[test]
+    fn overlapping_timeouts_cannot_move_report_ordering_backwards() {
+        for older_finishes_last in [false, true] {
+            let blocking = Arc::new(BlockingState::default());
+            blocking.release_first.store(true, Ordering::SeqCst);
+            let backend = Arc::new(RwLock::new(
+                Box::new(BlockingBackend::new(blocking.clone())) as Box<dyn ChipControllerBackend>,
+            ));
+            let broker = Arc::new(ControllerEventBroker::new());
+            let dispatcher = CommandDispatcher::new(backend, broker.clone());
+            let now = Instant::now();
+            let older_started = now - Duration::from_secs(3);
+            let received = now - Duration::from_secs(2);
+            let newer_started = now - Duration::from_secs(1);
+            let attempts = if older_finishes_last {
+                [newer_started, older_started]
+            } else {
+                [older_started, newer_started]
+            };
+            // A subscription attempt and a command can overlap. A report
+            // between their starts must not override the newer failure even
+            // when the older operation finishes last.
+            for started in attempts {
+                dispatcher.record_connectivity_failure(1, 1, started);
+            }
+            dispatcher.record_endpoint_proof_at(1, 1, received);
+            dispatcher.submit(vec![plan_for(1, 1, 1, true)]).unwrap();
+            assert!(
+                wait_for_outcomes(&broker, &[1]).contains(&(1, MatterCommandOutcomeStatus::Failed))
+            );
+            assert_eq!(blocking.calls.load(Ordering::SeqCst), 0);
+        }
     }
 
     #[test]
