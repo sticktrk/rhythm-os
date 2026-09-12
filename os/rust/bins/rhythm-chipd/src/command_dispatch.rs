@@ -23,7 +23,7 @@ static NEXT_STREAM_NONCE: AtomicU64 = AtomicU64::new(1);
 #[derive(Default)]
 struct WorkBudgetState {
     next_ticket: u64,
-    serving_ticket: u64,
+    recovery_queue: VecDeque<u64>,
     recovery_waiters: usize,
     in_flight: usize,
     recovery_in_flight: usize,
@@ -48,14 +48,27 @@ impl ControllerWorkBudget {
         }
     }
 
-    /// Subscription setup can block its RPC caller, but never takes a command
-    /// worker while waiting. FIFO applies within recovery, not across healthy work.
-    pub(crate) fn acquire(self: &Arc<Self>) -> ControllerWorkPermit {
+    fn recovery_ticket(self: &Arc<Self>) -> ControllerRecoveryTicket {
         let mut state = self.state.lock().expect("chipd work budget lock poisoned");
-        let ticket = state.next_ticket;
-        state.next_ticket += 1;
+        let id = state.next_ticket;
+        state.next_ticket = state
+            .next_ticket
+            .checked_add(1)
+            .expect("recovery ticket overflow");
+        state.recovery_queue.push_back(id);
+        ControllerRecoveryTicket {
+            budget: self.clone(),
+            id,
+        }
+    }
+
+    /// Subscription setup and command recovery share FIFO order. A queued
+    /// command holds a ticket, never a worker or controller permit.
+    pub(crate) fn acquire(self: &Arc<Self>) -> ControllerWorkPermit {
+        let ticket = self.recovery_ticket();
+        let mut state = self.state.lock().expect("chipd work budget lock poisoned");
         state.recovery_waiters += 1;
-        while ticket != state.serving_ticket
+        while state.recovery_queue.front() != Some(&ticket.id)
             || state.in_flight >= self.capacity
             || state.recovery_in_flight != 0
         {
@@ -64,28 +77,47 @@ impl ControllerWorkBudget {
                 .wait(state)
                 .expect("chipd work budget lock poisoned while waiting");
         }
-        state.serving_ticket += 1;
+        state.recovery_queue.pop_front();
         state.recovery_waiters -= 1;
         state.in_flight += 1;
         state.recovery_in_flight += 1;
+        drop(state);
         ControllerWorkPermit {
             budget: self.clone(),
             recovery: true,
         }
     }
 
-    fn try_acquire(self: &Arc<Self>, recovery: bool) -> Option<ControllerWorkPermit> {
+    fn try_acquire(
+        self: &Arc<Self>,
+        recovery: bool,
+        ticket: &mut Option<ControllerRecoveryTicket>,
+    ) -> Option<ControllerWorkPermit> {
+        if recovery {
+            ticket.get_or_insert_with(|| self.recovery_ticket());
+        } else {
+            // Fresh proof lets this endpoint leave recovery without stranding
+            // a subscription behind its unused ticket.
+            ticket.take();
+        }
         let mut state = self.state.lock().expect("chipd work budget lock poisoned");
         if state.in_flight >= self.capacity
             || (!recovery
                 && state.in_flight - state.recovery_in_flight
                     >= self.capacity.saturating_sub(1).max(1))
-            || (recovery && (state.recovery_in_flight != 0 || state.recovery_waiters != 0))
+            || (recovery
+                && (state.recovery_in_flight != 0
+                    || state.recovery_queue.front() != ticket.as_ref().map(|ticket| &ticket.id)))
         {
             return None;
         }
         state.in_flight += 1;
         state.recovery_in_flight += usize::from(recovery);
+        if recovery {
+            state.recovery_queue.pop_front();
+        }
+        drop(state);
+        ticket.take();
         Some(ControllerWorkPermit {
             budget: self.clone(),
             recovery,
@@ -94,6 +126,25 @@ impl ControllerWorkBudget {
 
     pub(crate) fn capacity(&self) -> usize {
         self.capacity
+    }
+}
+
+/// Cancellation is as important as admission: coalescing keeps the ticket,
+/// while a discarded or newly responsive endpoint must not block its successor.
+struct ControllerRecoveryTicket {
+    budget: Arc<ControllerWorkBudget>,
+    id: u64,
+}
+
+impl Drop for ControllerRecoveryTicket {
+    fn drop(&mut self) {
+        let mut state = self
+            .budget
+            .state
+            .lock()
+            .expect("chipd work budget lock poisoned");
+        state.recovery_queue.retain(|id| *id != self.id);
+        self.budget.changed.notify_all();
     }
 }
 
@@ -212,6 +263,7 @@ impl ControllerEventBroker {
 struct EndpointSlot {
     running: bool,
     pending: Option<MatterEndpointCommandPlan>,
+    recovery_ticket: Option<ControllerRecoveryTicket>,
 }
 
 #[derive(Default)]
@@ -303,7 +355,12 @@ impl CommandDispatcher {
                 state.active_ids.insert(plan.command_id);
 
                 let key = (plan.node_id, plan.endpoint);
+                let recovery = !state.health.get(&key).is_some_and(EndpointHealth::ready);
                 let slot = state.slots.entry(key).or_default();
+                if !slot.running && recovery {
+                    slot.recovery_ticket
+                        .get_or_insert_with(|| self.work_budget.recovery_ticket());
+                }
                 let was_idle = !slot.running && slot.pending.is_none();
                 if let Some(previous) = slot.pending.replace(plan.clone()) {
                     state.active_ids.remove(&previous.command_id);
@@ -367,7 +424,11 @@ impl CommandDispatcher {
                         break;
                     }
                     let recovery = !health.is_some_and(EndpointHealth::ready);
-                    let Some(permit) = self.work_budget.try_acquire(recovery) else {
+                    let slot = state.slots.get_mut(&key).unwrap();
+                    let Some(permit) = self
+                        .work_budget
+                        .try_acquire(recovery, &mut slot.recovery_ticket)
+                    else {
                         state.ready.push_back(key);
                         continue;
                     };
@@ -1291,6 +1352,106 @@ mod tests {
     }
 
     #[test]
+    fn a_queued_command_gets_recovery_capacity_before_a_later_subscription() {
+        let blocking = Arc::new(BlockingState::default());
+        blocking.release_first.store(true, Ordering::SeqCst);
+        let backend = Arc::new(RwLock::new(
+            Box::new(BlockingBackend::new(blocking.clone())) as Box<dyn ChipControllerBackend>,
+        ));
+        let broker = Arc::new(ControllerEventBroker::new());
+        let budget = Arc::new(ControllerWorkBudget::new(4));
+        let dispatcher =
+            CommandDispatcher::with_work_budget(backend, broker.clone(), budget.clone());
+        let first_subscription = budget.acquire();
+        dispatcher.submit(vec![plan_for(1, 1, 1, true)]).unwrap();
+
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let subscription_budget = budget.clone();
+        let later_subscription = std::thread::spawn(move || {
+            let _permit = subscription_budget.acquire();
+            acquired_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+        });
+        // Keep the later request blocked behind an occupied recovery slot.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while budget.state.lock().unwrap().recovery_waiters == 0 {
+            assert!(Instant::now() < deadline, "subscription did not queue");
+            std::thread::yield_now();
+        }
+        drop(first_subscription);
+        dispatcher.start_ready_lanes();
+        acquired_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        // The command queued first must already have finished before this
+        // later subscription can occupy the recovery slot for another timeout.
+        let command_finished_first = broker.wait(None, Duration::ZERO).events.iter().any(|e| {
+            matches!(&e.event, MatterControllerEvent::CommandOutcome(o)
+                if o.command_id == 1 && o.status == MatterCommandOutcomeStatus::Succeeded)
+        });
+        release_tx.send(()).unwrap();
+        later_subscription.join().unwrap();
+        dispatcher.start_ready_lanes();
+        wait_for_outcomes(&broker, &[1]);
+        assert!(
+            command_finished_first,
+            "subscription requests starved an earlier command"
+        );
+    }
+
+    #[test]
+    fn recovery_coalescing_preserves_order_and_releases_cancelled_reservations() {
+        for prove_responsive in [false, true] {
+            let blocking = Arc::new(BlockingState::default());
+            blocking.release_first.store(true, Ordering::SeqCst);
+            let backend = Arc::new(RwLock::new(
+                Box::new(BlockingBackend::new(blocking.clone())) as Box<dyn ChipControllerBackend>,
+            ));
+            let broker = Arc::new(ControllerEventBroker::new());
+            let budget = Arc::new(ControllerWorkBudget::new(4));
+            let dispatcher =
+                CommandDispatcher::with_work_budget(backend, broker.clone(), budget.clone());
+            let subscription = budget.acquire();
+            dispatcher.submit(vec![plan_for(1, 1, 1, true)]).unwrap();
+            dispatcher.submit(vec![plan_for(2, 2, 2, true)]).unwrap();
+            // Replacing desired state must keep exactly one reservation for
+            // endpoint 1, ahead of endpoint 2.
+            dispatcher.submit(vec![plan_for(3, 1, 1, false)]).unwrap();
+            assert!(wait_for_outcomes(&broker, &[1])
+                .contains(&(1, MatterCommandOutcomeStatus::Superseded)));
+            assert_eq!(budget.state.lock().unwrap().recovery_queue.len(), 2);
+
+            if prove_responsive {
+                dispatcher.record_endpoint_proof(1, 1);
+            } else {
+                dispatcher.record_connectivity_failure(1, 1, Instant::now());
+                dispatcher.start_ready_lanes();
+            }
+            let expected = if prove_responsive {
+                MatterCommandOutcomeStatus::Succeeded
+            } else {
+                MatterCommandOutcomeStatus::Failed
+            };
+            assert!(wait_for_outcomes(&broker, &[3]).contains(&(3, expected)));
+            // Cancelling or promoting the first endpoint cannot strand the
+            // next command behind a ticket with no owner.
+            drop(subscription);
+            dispatcher.start_ready_lanes();
+            let outcomes = wait_for_outcomes(&broker, &[1, 2, 3]);
+            assert_eq!(
+                outcomes.len(),
+                3,
+                "every accepted command gets one terminal outcome"
+            );
+            assert!(outcomes.contains(&(2, MatterCommandOutcomeStatus::Succeeded)));
+            assert!(budget.state.lock().unwrap().recovery_queue.is_empty());
+            assert_eq!(
+                blocking.calls.load(Ordering::SeqCst),
+                if prove_responsive { 2 } else { 1 }
+            );
+        }
+    }
+
+    #[test]
     fn stale_in_flight_timeout_cannot_erase_newer_endpoint_proof() {
         let blocking = Arc::new(BlockingState::default());
         blocking.release_first.store(true, Ordering::SeqCst);
@@ -1416,6 +1577,7 @@ mod tests {
                 EndpointSlot {
                     running: true,
                     pending: Some(queued.clone()),
+                    ..Default::default()
                 },
             );
             state.active_lanes = 1;

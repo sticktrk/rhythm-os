@@ -409,11 +409,10 @@ impl ChipControllerService {
                     // Terminal subscription failures are reported once by the
                     // native bridge; rhythm-matter owns the retry timing.
                     for termination in self.backend().drain_subscription_terminations()? {
-                        self.command_dispatcher.record_connectivity_failure(
-                            termination.node_id,
-                            termination.endpoint,
-                            Instant::now(),
-                        );
+                        // No native receipt time or subscription generation:
+                        // this may predate newer command/report proof. It also
+                        // includes local resource errors, not just unavailable
+                        // peers. It must not put commands into cooldown.
                         self.event_broker
                             .publish(MatterControllerEvent::SubscriptionTerminated(termination));
                     }
@@ -435,11 +434,9 @@ impl ChipControllerService {
     fn record_reports(&self, reports: &[MatterAttributeReport]) {
         for report in reports {
             if report.value == MatterAttributeValue::SubscriptionTerminated {
-                self.command_dispatcher.record_connectivity_failure(
-                    report.node_id,
-                    report.endpoint,
-                    Instant::now(),
-                );
+                // Legacy lifecycle reports do not identify a connectivity
+                // failure. Subscription recovery owns them, as above.
+                continue;
             } else {
                 // Use native receipt age so a delayed report cannot clear a
                 // more recent timeout. Zero is the previous-bridge unknown default.
@@ -1316,6 +1313,87 @@ mod tests {
         .unwrap();
         assert!(repeat.batch.events.is_empty());
 
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn unsequenced_subscription_termination_cannot_reject_a_working_light_command() {
+        use rhythm_matter::transport::{
+            MatterCommandOutcomeStatus, MatterCommandStep, MatterEndpointCommandPlan,
+        };
+
+        let dir = unique_test_dir("termination-after-command-proof");
+        let storage_path = dir.join("chip.json");
+        fs::write(
+            dir.join("devices.json"),
+            serde_json::to_string(&vec![commissioned_device(42, 1)]).unwrap(),
+        )
+        .unwrap();
+        let backend = FakeChipBackend::default();
+        let terminations = backend.termination_queue();
+        let service = ChipControllerService::new(Box::new(backend));
+        service
+            .handle(ChipRpcRequest::InitController(init_request(&storage_path)))
+            .unwrap();
+
+        for (index, failure_class) in [
+            MatterSubscriptionFailureClass::Timeout,
+            MatterSubscriptionFailureClass::ResourceBusy,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let command_id = 100 + index as u64;
+            // Native termination events carry neither receipt time nor a
+            // subscription generation. A queued event can precede a successful
+            // command even though the service drains it afterwards.
+            terminations
+                .lock()
+                .unwrap()
+                .push(MatterSubscriptionTermination {
+                    node_id: 42,
+                    endpoint: 1,
+                    failure_class,
+                    chip_error: 0x32,
+                    detail: None,
+                });
+            service.command_dispatcher.record_endpoint_proof(42, 1);
+            service
+                .handle(ChipRpcRequest::WaitControllerEvents {
+                    cursor: None,
+                    max_wait_ms: 0,
+                })
+                .unwrap();
+            service
+                .command_dispatcher
+                .submit(vec![MatterEndpointCommandPlan {
+                    command_id,
+                    node_id: 42,
+                    endpoint: 1,
+                    steps: vec![MatterCommandStep::SetOnOff { on: true }],
+                    inter_step_delay_ms: None,
+                }])
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let outcome = loop {
+                let batch = service.event_broker.wait(None, Duration::ZERO);
+                if let Some(outcome) = batch.events.into_iter().find_map(|envelope| match envelope
+                    .event
+                {
+                    MatterControllerEvent::CommandOutcome(outcome)
+                        if outcome.command_id == command_id =>
+                    {
+                        Some(outcome)
+                    }
+                    _ => None,
+                }) {
+                    break outcome;
+                }
+                assert!(Instant::now() < deadline, "command never completed");
+                std::thread::yield_now();
+            };
+            assert_eq!(outcome.status, MatterCommandOutcomeStatus::Succeeded);
+        }
         let _ = fs::remove_dir_all(dir);
     }
 
