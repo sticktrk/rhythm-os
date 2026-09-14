@@ -9,6 +9,9 @@ Usage: deploy-supabase.sh [--dry-run] [--marketing-repo PATH]
 
 Deploy the canonical Supabase project in release order:
   1. Apply pending database migrations from tools/app/supabase/migrations/.
+     Every local migration missing from the remote history is applied
+     (`db push --include-all`), including versions older than the newest
+     applied one; without that flag the CLI silently skips such files.
   2. Deploy every canonical Edge Function from tools/app/supabase/functions/.
 
 Options:
@@ -96,6 +99,7 @@ DATABASE_COMMAND=(
     --workdir "$DATABASE_WORKDIR"
     db push
     --linked
+    --include-all
 )
 FUNCTION_COMMAND=(
     env
