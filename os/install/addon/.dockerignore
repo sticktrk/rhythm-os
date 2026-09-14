@@ -1,7 +1,0 @@
-.env
-.DS_Store
-**/.DS_Store
-rhythm_state.json
-*.log
-.git
-.gitignore

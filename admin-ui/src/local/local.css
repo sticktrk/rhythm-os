@@ -1,0 +1,17 @@
+.localRhythm .consoleHubName { display: flex; align-items: center; gap: 10px; }
+.localRhythm .consolePage { max-width: 1400px; }
+.localRhythm .consoleButton { min-height: 44px; }
+.localRhythm label.consoleButton input[type=file] { max-width: 230px; }
+.localRhythm ol { line-height: 1.9; padding-left: 24px; }
+.localRhythm .consoleNavItem { min-height: 44px; }
+@media (max-width: 760px) {
+  .localRhythm { display: block; }
+  .localRhythm .consoleNav { position: static; width: auto; height: auto; padding: 14px; }
+  .localRhythm .consoleNavList { display: flex; flex-wrap: wrap; gap: 4px; }
+  .localRhythm .consoleNavItem { flex: 0 0 auto; }
+  .localRhythm .consoleMain { margin-left: 0; padding: 14px; min-width: 0; }
+  .localRhythm .consoleHubCard { margin-bottom: 12px; }
+}
+.managedLight { display: flex; align-items: center; gap: 12px; min-height: 48px; padding: 8px 0; }
+.managedLight small { display: block; opacity: .7; }
+.managedLight input { width: 20px; height: 20px; }

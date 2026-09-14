@@ -34,3 +34,5 @@ export function useSession(): SessionContextValue {
   }
   return value;
 }
+
+export function useOptionalSession() { return useContext(SessionContext); }

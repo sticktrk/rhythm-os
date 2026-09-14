@@ -17,7 +17,8 @@
     "test:topology-membership": "node --experimental-strip-types --test test/topologyMembership.test.ts",
     "test:hub-management": "node --experimental-strip-types --test test/hubManagement.test.ts",
     "preview": "vite preview --host 127.0.0.1",
-    "test:scene-palette": "node --experimental-strip-types --test test/scenePalette.test.ts"
+    "test:scene-palette": "node --experimental-strip-types --test test/scenePalette.test.ts",
+    "build:homeassistant": "tsc --noEmit && vite build --mode homeassistant"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.108.2",

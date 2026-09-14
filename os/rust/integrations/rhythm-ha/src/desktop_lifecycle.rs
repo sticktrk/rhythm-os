@@ -284,6 +284,16 @@ impl ExternalLightHubIntegration for HaIntegration {
     }
 
     fn refresh_credentials(&self, state: &SharedState, key: &HubKey) {
+        // Managed add-ons resolve the current runtime token when constructing a
+        // transport. Never replace the durable source marker with that secret.
+        let managed = state.lock().ok().is_some_and(|s| {
+            s.hub_credentials
+                .get(key)
+                .is_some_and(|creds| creds.get_str("credential_source") == Some("supervisor"))
+        });
+        if managed {
+            return;
+        }
         let token = match std::env::var("SUPERVISOR_TOKEN") {
             Ok(t) => t,
             Err(_) => return,

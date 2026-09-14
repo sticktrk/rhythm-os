@@ -36,3 +36,5 @@ export function useHub(): HubContextValue {
   }
   return value;
 }
+
+export function useOptionalHub() { return useContext(HubContext); }

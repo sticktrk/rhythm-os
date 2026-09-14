@@ -10,8 +10,6 @@ name = "rhythm-addon"
 
 [dependencies]
 rhythm-ha = { path = "../../integrations/rhythm-ha" }
-rhythm-hue = { path = "../../integrations/rhythm-hue" }
-rhythm-matter = { path = "../../integrations/rhythm-matter" }
 rhythm-os = { path = "../../core/rhythm-os" }
 rhythm-os-runtime-modules = { path = "../../../../runtime/rust/rhythm-os-runtime-modules" }
 
@@ -19,7 +17,7 @@ rhythm-os-runtime-modules = { path = "../../../../runtime/rust/rhythm-os-runtime
 tokio = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }
-tower = { workspace = true }
+tower = { workspace = true, features = ["util"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }

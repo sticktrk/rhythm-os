@@ -16,7 +16,7 @@ import {
 import { useDeviceClient } from '../../hooks/useDeviceClient';
 import { errorMessage, formatDateTime, formatEpochMs } from '../../lib/format';
 import { prettyJson } from '../../lib/json';
-import { useHub } from '../../state/HubContext';
+import { useOptionalHub } from '../../state/HubContext';
 
 import '../../styles/pages-phase6.css';
 
@@ -36,7 +36,7 @@ const DEFAULT_FILTERS: HistoryFilters = {
 
 export default function HistoryPage() {
   const client = useDeviceClient();
-  const { hub } = useHub();
+  const hubName = useOptionalHub()?.hub.name ?? 'Rhythm';
 
   // Draft vs applied filters so typing doesn't spam the device.
   const [draft, setDraft] = useState<HistoryFilters>(DEFAULT_FILTERS);
@@ -113,7 +113,7 @@ export default function HistoryPage() {
           <div className="eyebrow">Device console</div>
           <h2>Activity &amp; History</h2>
           <p className="pageIntro">
-            Activity log on {hub.name} (api/history), newest first.
+            Activity on {hubName}, newest first.
           </p>
         </div>
         <div className="pageHeaderActions">

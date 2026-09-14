@@ -153,6 +153,29 @@ pub struct IssuedToken {
 
 pub type IssuedOwnerToken = IssuedToken;
 
+/// Install a process-scoped credential for a supervisor-managed local API.
+/// The caller supplies a random secret shared through a private runtime file.
+/// This deliberately does not write a recoverable credential to storage.
+pub fn install_ephemeral_owner_token(state: &SharedState, raw_token: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        raw_token.len() >= 32 && raw_token.bytes().all(|byte| byte.is_ascii_alphanumeric()),
+        "Local API credential must contain at least 32 alphanumeric characters"
+    );
+    let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    s.api_auth = StoredApiAuth::default();
+    s.api_auth.require_api_auth = Some(true);
+    s.api_auth.tokens.push(StoredApiToken {
+        id: "local-supervisor".into(),
+        role: ApiTokenRole::Owner,
+        token_hash: hash_token(raw_token),
+        created_at_epoch_ms: current_epoch_ms(),
+        label: Some("Local admin API".into()),
+        expires_at_epoch_ms: None,
+    });
+    s.require_api_auth = true;
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssueOwnerTokenResult {
     Issued(IssuedOwnerToken),
@@ -934,6 +957,25 @@ mod tests {
 
     fn test_state() -> SharedState {
         Arc::new(Mutex::new(crate::state::AppState::default()))
+    }
+
+    #[test]
+    fn ephemeral_owner_token_replaces_restored_auth_without_storing_raw_token() {
+        let state = test_state();
+        let first = "a".repeat(64);
+        let second = "b".repeat(64);
+        install_ephemeral_owner_token(&state, &first).unwrap();
+        assert!(state.lock().unwrap().api_auth.verify_token(&first));
+        install_ephemeral_owner_token(&state, &second).unwrap();
+        let s = state.lock().unwrap();
+        assert!(s.require_api_auth);
+        assert!(!s.api_auth.verify_token(&first));
+        assert!(s.api_auth.verify_token(&second));
+        assert!(!serde_json::to_string(&s.api_auth)
+            .unwrap()
+            .contains(&second));
+        drop(s);
+        assert!(install_ephemeral_owner_token(&state, "short").is_err());
     }
 
     fn auth_test_router(state: SharedState) -> axum::Router {
