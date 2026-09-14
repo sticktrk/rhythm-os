@@ -56,7 +56,7 @@ deploy_first_call="$(sed -n '1p' "$TEMP_DIR/supabase.log")"
 deploy_second_call="$(sed -n '2p' "$TEMP_DIR/supabase.log")"
 
 [[ "$deploy_call_count" -eq 2 ]]
-[[ "$deploy_first_call" == "--workdir tools/app db push --linked" ]]
+[[ "$deploy_first_call" == "--workdir tools/app db push --linked --include-all" ]]
 [[ "$deploy_second_call" == *"--workdir tools/app functions deploy"* ]]
 [[ "$deploy_second_call" == *"--use-api --project-ref test-project-ref"* ]]
 printf '%s\n' "$deploy_output" | grep -Fq 'Combined Supabase deployment complete.'
@@ -67,7 +67,7 @@ dry_run_call_count="$(wc -l <"$TEMP_DIR/supabase.log" | tr -d '[:space:]')"
 dry_run_first_call="$(sed -n '1p' "$TEMP_DIR/supabase.log")"
 
 [[ "$dry_run_call_count" -eq 1 ]]
-[[ "$dry_run_first_call" == "--workdir tools/app db push --linked --dry-run" ]]
+[[ "$dry_run_first_call" == "--workdir tools/app db push --linked --include-all --dry-run" ]]
 printf '%s\n' "$dry_run_output" | grep -Fq 'functions deploy'
 printf '%s\n' "$dry_run_output" | grep -Fq 'Dry run only; nothing was deployed.'
 printf '%s\n' "$dry_run_output" | grep -Fq 'Combined dry run complete; nothing was deployed.'
@@ -86,7 +86,7 @@ set -e
 failure_call_count="$(wc -l <"$TEMP_DIR/supabase.log" | tr -d '[:space:]')"
 failure_first_call="$(sed -n '1p' "$TEMP_DIR/supabase.log")"
 [[ "$failure_call_count" -eq 1 ]]
-[[ "$failure_first_call" == "--workdir tools/app db push --linked" ]]
+[[ "$failure_first_call" == "--workdir tools/app db push --linked --include-all" ]]
 if grep -Fq 'functions deploy' "$TEMP_DIR/failure.out"; then
     echo "function deployment ran after a failed database push" >&2
     exit 1
@@ -122,7 +122,7 @@ EOF
 : >"$TEMP_DIR/supabase.log"
 shared_output="$(RHYTHM_TEST_EXPECT_COMPOSED=1 run_deploy --marketing-repo "$TEST_REPO/marketing")"
 [[ "$(wc -l <"$TEMP_DIR/supabase.log" | tr -d '[:space:]')" -eq 3 ]]
-shared_workdir="$(sed -n '1s/^--workdir \(.*\) db push --linked$/\1/p' "$TEMP_DIR/supabase.log")"
+shared_workdir="$(sed -n '1s/^--workdir \(.*\) db push --linked --include-all$/\1/p' "$TEMP_DIR/supabase.log")"
 [[ -n "$shared_workdir" && ! -e "$shared_workdir" ]]
 sed -n '3p' "$TEMP_DIR/supabase.log" | grep -Fq 'functions deploy blog-post-intake --project-ref test-project-ref'
 : >"$TEMP_DIR/supabase.log"
