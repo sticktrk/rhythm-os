@@ -177,7 +177,9 @@ pub struct HubDispatchPolicy {
     /// Optional outbound command pacing.
     pub rate_limit: Option<HubRateLimit>,
     /// Fan `HubDispatchTarget::Devices` out into one dispatch per device so
-    /// a single lagging device cannot delay its siblings (used for Matter).
+    /// a single lagging device cannot delay its siblings, and rate-limited
+    /// device lists cannot exceed the hub's burst capacity. Native groups
+    /// remain one grouped dispatch.
     pub split_device_targets: bool,
     /// Maximum time a single physical dispatch may run before it is reported
     /// as timed out and its target cooled down.
@@ -206,7 +208,10 @@ impl HubDispatchPolicy {
             "hue" => Self {
                 max_in_flight: DEFAULT_MAX_IN_FLIGHT,
                 rate_limit: Some(HUE_RATE_LIMIT),
-                split_device_targets: false,
+                // Direct fallback can contain an entire room. An unsplit
+                // list costing more than the bucket's eight-token capacity
+                // can never dispatch and blocks every later bridge command.
+                split_device_targets: true,
                 dispatch_timeout: DEFAULT_HUB_DISPATCH_TIMEOUT,
                 timeout_cooldown: DEFAULT_HUB_TIMEOUT_COOLDOWN,
                 timeout_scope: HubDispatchTimeoutScope::Target,
@@ -1044,7 +1049,7 @@ impl HubDispatcher {
     }
 
     /// Enqueue a command, splitting device-list targets when the policy
-    /// isolates devices from each other (Matter).
+    /// isolates devices or paces individual light writes.
     fn enqueue_action(&self, node_id: &str, action: HubDispatchAction) -> LightControlResult<()> {
         let split_ids = match (&self.shared.policy.split_device_targets, action.target()) {
             (true, HubDispatchTarget::Devices { native_ids }) if native_ids.len() > 1 => {
@@ -2050,7 +2055,7 @@ mod tests {
             .unwrap();
 
         assert!(hue.policy.rate_limit.is_some());
-        assert!(!hue.policy.split_device_targets);
+        assert!(hue.policy.split_device_targets);
         assert_eq!(hue.policy.timeout_scope, HubDispatchTimeoutScope::Target);
         assert_eq!(
             hue_ble.policy.dispatch_timeout,
@@ -2204,6 +2209,43 @@ mod tests {
         block_on(composite.turn_on("other", LightingCommand::new(70, 3500))).unwrap();
         assert!(wait_until(Duration::from_secs(5), || fast.turn_on_count() == 1));
         blocking.release();
+    }
+
+    #[test]
+    fn hue_ble_timeout_does_not_block_bridge_before_or_after_failure() {
+        let ble = Arc::new(BlockingController::new());
+        let bridge = Arc::new(MockController::new("hue"));
+        let composite = CompositeController::new();
+        let mut ble_policy = HubDispatchPolicy::for_hub_key("hue_ble@local");
+        // Compress only the deadline; retain the production isolation policy.
+        ble_policy.dispatch_timeout = Duration::from_millis(100);
+        composite.register_controller_with_policy("hue_ble@local", ble.clone(), ble_policy);
+        composite.register_controller("hue@bridge", bridge.clone());
+        let outcomes = OutcomeCollector::install(&composite);
+        composite.update_routing(route(&[
+            (
+                "unplugged",
+                "hue_ble@local",
+                HubDispatchTarget::Devices {
+                    native_ids: vec!["ble-bulb".to_string()],
+                },
+            ),
+            ("room", "hue@bridge", group_target("bridge-group")),
+        ]));
+
+        block_on(composite.turn_on("unplugged", LightingCommand::new(50, 3000))).unwrap();
+        let started = ble.wait_started_timeout(Duration::from_secs(2));
+        block_on(composite.turn_on("room", LightingCommand::new(60, 3000))).unwrap();
+        let delivered = wait_until(Duration::from_secs(2), || bridge.turn_on_count() == 1);
+        let timeout = outcomes.wait_for(Duration::from_secs(2), |outcome| {
+            outcome.node_id == "unplugged"
+                && matches!(outcome.status, HubDispatchStatus::TimedOut { .. })
+        });
+        // The BLE transport is still blocked after the supervisor has timed out.
+        block_on(composite.turn_off("room", Some(500))).unwrap();
+        let off_delivered = wait_until(Duration::from_secs(2), || bridge.turn_off_count() == 1);
+        ble.release();
+        assert!(started && delivered && timeout.is_some() && off_delivered);
     }
 
     #[test]
@@ -2622,6 +2664,100 @@ mod tests {
     }
 
     // ── Pacing ───────────────────────────────────────────────────────
+
+    #[test]
+    fn hue_large_direct_target_does_not_stall_following_group_commands() {
+        for turn_on in [true, false] {
+            let mock = Arc::new(MockController::new("hue"));
+            let composite = CompositeController::new();
+            composite.register_controller("hue@bridge", mock.clone());
+            let outcomes = OutcomeCollector::install(&composite);
+            let native_ids: Vec<_> = (0..13).map(|i| format!("light-{i:02}")).collect();
+            composite.update_routing(route(&[
+                (
+                    "large-room",
+                    "hue@bridge",
+                    HubDispatchTarget::Devices {
+                        native_ids: native_ids.clone(),
+                    },
+                ),
+                ("other-room", "hue@bridge", group_target("other-group")),
+            ]));
+
+            if turn_on {
+                block_on(composite.turn_on("large-room", LightingCommand::new(42, 2700))).unwrap();
+            } else {
+                block_on(composite.turn_off("large-room", Some(750))).unwrap();
+            }
+            block_on(composite.turn_on("other-room", LightingCommand::new(60, 3000))).unwrap();
+            let completed = outcomes.wait_for(Duration::from_secs(5), |outcome| {
+                outcome.node_id == "other-room" && outcome.status.is_success()
+            });
+            // Always close a failed reproduction's permanently waiting mailbox.
+            if completed.is_none() {
+                composite.remove_controller("hue@bridge");
+            }
+            assert!(
+                completed.is_some(),
+                "large Hue target stalled the bridge (on={turn_on})"
+            );
+
+            let calls = if turn_on {
+                mock.turn_on_calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(target, _)| target != "other-group")
+                    .map(|(target, command)| {
+                        assert_eq!(command.brightness, 42);
+                        target.clone()
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                mock.turn_off_calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(target, transition)| {
+                        assert_eq!(*transition, Some(750));
+                        target.clone()
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let mut delivered = calls;
+            delivered.sort();
+            assert_eq!(
+                delivered, native_ids,
+                "each direct light must be delivered once"
+            );
+            assert_eq!(
+                mock.turn_on_calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(target, _)| target == "other-group")
+                    .count(),
+                1
+            );
+
+            // Return the room to its verified group route after reconnect.
+            composite.update_routing(route(&[(
+                "large-room",
+                "hue@bridge",
+                group_target("restored-group"),
+            )]));
+            block_on(composite.turn_off("large-room", Some(1200))).unwrap();
+            assert!(outcomes
+                .wait_for(Duration::from_secs(3), |outcome| {
+                    outcome.target_label == "restored-group" && outcome.status.is_success()
+                })
+                .is_some());
+            assert_eq!(
+                mock.turn_off_calls.lock().unwrap().last().unwrap(),
+                &("restored-group".to_string(), Some(1200))
+            );
+        }
+    }
 
     #[test]
     fn rate_limit_paces_dispatches() {
