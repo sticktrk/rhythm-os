@@ -87,6 +87,14 @@ match the linked project for combined database/function deployment.
 
 The wrapper applies pending product migrations before deploying product
 functions. Failure stops later stages. It never prunes hosted functions.
+
+The migration stage runs `supabase db push --linked --include-all`. A pending
+migration is any local file whose version is missing from the remote history
+table, even when that version is older than the newest applied one. Without
+`--include-all` the CLI skips such out-of-order files without failing, which
+left `20260822000000_add_device_lifecycle_commissioner.sql` unapplied in
+production while later versions were pushed. Always confirm the `--dry-run`
+listing shows every migration you expect before applying.
 Deploy selected product functions without changing schema:
 
 ```bash
@@ -118,7 +126,9 @@ checkout. A standalone product project uses only the product commands above.
 ## Verification and rollout
 
 Review the pending migrations through the appropriate wrapper's `--dry-run`.
-After explicit deployment, list functions and exercise the relevant flows:
+The listing includes out-of-order versions because both wrappers push with
+`--include-all`. After explicit deployment, list functions and exercise the
+relevant flows:
 
 ```bash
 supabase --workdir tools/app functions list
