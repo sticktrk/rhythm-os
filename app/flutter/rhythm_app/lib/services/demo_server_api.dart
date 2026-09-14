@@ -6,9 +6,10 @@ library;
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:dio/dio.dart';
-import 'package:rhythm_core/rhythm_core.dart';
+import 'package:rhythm_core/rhythm_core.dart' hide TwilightPhase;
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 class DemoServerSnapshot {
@@ -89,6 +90,12 @@ class DemoServerApi extends RhythmServerApi {
   int _hueAuthorityRevision = 1;
   bool _hueTopologySyncEnabled = false;
   final Map<String, RhythmHueRoomAuthorityOwner> _hueRoomOwners = {};
+  final Map<String, RhythmCurveConfig> _profiles = {};
+
+  // Fixed demo sun times — match the Outdoor schedule's 06:45 / 19:30 so the
+  // curve preview lines up with the transitions the demo already advertises.
+  static const double _demoSunrise = 6.75;
+  static const double _demoSunset = 19.5;
 
   Stream<void> get changes => _changes.stream;
 
@@ -222,6 +229,11 @@ class DemoServerApi extends RhythmServerApi {
     _triageEntries.clear();
     _inputBindings.clear();
     _modeTransitions = _defaultModeTransitions();
+    _profiles
+      ..clear()
+      ..addEntries(
+        _defaultProfiles().map((profile) => MapEntry(profile.id, profile)),
+      );
 
     _addRoom(
       roomId: 'hue_demo_1',
@@ -891,6 +903,278 @@ class DemoServerApi extends RhythmServerApi {
       _changes.add(null);
     }
     return true;
+  }
+
+  // =========================================================================
+  // Light profiles / curve preview
+  //
+  // [RhythmServerApi] reaches these endpoints through a bare [Dio] with no
+  // base URL, so any method the demo does not override fails with
+  // "No host specified in URI api/…". Mirror the server's built-in profile
+  // set (see rhythm-core light_profile/defaults.rs) and sample curves locally.
+  // =========================================================================
+
+  /// Built-in profile set, mirroring `default_builtin_profiles()` in Rust.
+  List<RhythmCurveConfig> _defaultProfiles() => const [
+        RhythmCurveConfig(
+          id: 'rhythm',
+          name: 'Day',
+          curve: RhythmSuperGaussianCurve(),
+          fadeMs: null,
+          motionTimeoutSecs: null,
+          rhythmIntervalSecs: null,
+        ),
+        RhythmCurveConfig(
+          id: 'sleep',
+          name: 'Sleep',
+          curve: RhythmConstantCurve(brightness: 0, colorTemp: 0),
+          minBrightness: 1,
+          maxBrightness: 1,
+          minColorTemp: RhythmCurveConfig.defaultMinColorTemp,
+          maxColorTemp: RhythmCurveConfig.defaultMinColorTemp,
+          maxDimSteps: 1,
+          fadeMs: null,
+          motionTimeoutSecs: null,
+          rhythmIntervalSecs: null,
+        ),
+        RhythmCurveConfig(
+          id: 'day_idle',
+          name: 'Day Idle',
+          curve: RhythmInheritActiveCurve(),
+          minBrightness: 1,
+          maxBrightness: 1,
+          minColorTemp: 0,
+          maxColorTemp: 0,
+          maxDimSteps: 1,
+          fadeMs: null,
+          motionTimeoutSecs: null,
+          rhythmIntervalSecs: null,
+        ),
+        RhythmCurveConfig(
+          id: 'sleep_idle',
+          name: 'Sleep Idle',
+          curve: RhythmInheritActiveCurve(),
+          minBrightness: 1,
+          maxBrightness: 1,
+          minColorTemp: 0,
+          maxColorTemp: 0,
+          maxDimSteps: 1,
+          fadeMs: null,
+          motionTimeoutSecs: null,
+          rhythmIntervalSecs: null,
+        ),
+      ];
+
+  @override
+  Future<List<RhythmCurveConfig>> getProfiles() async {
+    ensureSeeded();
+    return List<RhythmCurveConfig>.unmodifiable(_profiles.values);
+  }
+
+  @override
+  Future<RhythmCurveConfig?> getConfig({required String id}) async {
+    ensureSeeded();
+    return _profiles[id];
+  }
+
+  @override
+  Future<bool> configSet(
+    RhythmCurveConfig config, {
+    String? id,
+    bool apply = false,
+  }) async {
+    ensureSeeded();
+    final profileId = (id ?? config.id).trim();
+    if (profileId.isEmpty) return false;
+    _profiles[profileId] =
+        config.id == profileId ? config : config.copyWith(id: profileId);
+    _changes.add(null);
+    return true;
+  }
+
+  @override
+  Future<RhythmCurveConfig?> resetConfig({String? id}) async {
+    ensureSeeded();
+    final profileId = id ?? 'rhythm';
+    final defaults = _defaultProfiles()
+        .where((profile) => profile.id == profileId)
+        .firstOrNull;
+    if (defaults == null) return null;
+    _profiles[profileId] = defaults;
+    _changes.add(null);
+    return defaults;
+  }
+
+  @override
+  Future<RhythmAbsorbTimeOffsetResult> absorbTimeOffsetResult(
+    double offsetMinutes, {
+    String? id,
+  }) async {
+    ensureSeeded();
+    // The demo has no dispatch pipeline; report the unchanged profile so the
+    // Time Simulator settles instead of waiting on a server round-trip.
+    return RhythmAbsorbTimeOffsetResult(config: _profiles[id ?? 'rhythm']);
+  }
+
+  @override
+  Future<RhythmCurveData?> getCurveData({
+    required String id,
+    RhythmCurveConfig? overrides,
+    DateTime? date,
+    int samplesPerHour = 4,
+    double startHour = 12,
+    int? maxSteps,
+  }) async {
+    ensureSeeded();
+    final config = overrides ?? _profiles[id];
+    if (config == null) return null;
+    final perHour = samplesPerHour < 1 ? 1 : samplesPerHour;
+    final count = 24 * perHour + 1;
+    final hours = <double>[];
+    final brightness = <int>[];
+    final kelvin = <int>[];
+    for (var i = 0; i < count; i++) {
+      final hour = i / perHour;
+      final (bri, cct) = _demoLightingAt(config, hour);
+      hours.add(hour);
+      brightness.add(bri);
+      kelvin.add(cct);
+    }
+    return RhythmCurveData(
+      hours: hours,
+      brightness: brightness,
+      kelvin: kelvin,
+      solar: _demoSolarInfo(),
+    );
+  }
+
+  @override
+  Future<RhythmTimeInfo?> getCurveNow({
+    required String id,
+    double? hour,
+  }) async {
+    ensureSeeded();
+    final config = _profiles[id];
+    if (config == null) return null;
+    final now = DateTime.now();
+    final currentHour = hour ?? now.hour + now.minute / 60.0;
+    final (bri, cct) = _demoLightingAt(config, currentHour);
+    final wholeHour = currentHour.floor() % 24;
+    final minute = ((currentHour - currentHour.floor()) * 60).round() % 60;
+    return RhythmTimeInfo(
+      currentTime:
+          '${wholeHour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}',
+      currentHour: currentHour,
+      timezone: now.timeZoneName,
+      brightness: bri,
+      kelvin: cct,
+      solarPosition: _demoSunPosition(currentHour),
+    );
+  }
+
+  RhythmSolarInfo _demoSolarInfo() {
+    const noon = (_demoSunrise + _demoSunset) / 2;
+    return RhythmSolarInfo(
+      sunrise: _demoSunrise,
+      sunset: _demoSunset,
+      solarNoon: noon,
+      solarMidnight: (noon + 12) % 24,
+      dayLength: _demoSunset - _demoSunrise,
+      dawn: const TwilightPhase(
+        civil: _demoSunrise - 0.5,
+        nautical: _demoSunrise - 1.05,
+        astronomical: _demoSunrise - 1.6,
+      ),
+      dusk: const TwilightPhase(
+        civil: _demoSunset + 0.5,
+        nautical: _demoSunset + 1.05,
+        astronomical: _demoSunset + 1.6,
+      ),
+    );
+  }
+
+  double _demoSunPosition(double hour) {
+    const noon = (_demoSunrise + _demoSunset) / 2;
+    final halfDay = (_demoSunset - _demoSunrise) / 2;
+    var dist = hour - noon;
+    if (dist > 12) dist -= 24;
+    if (dist < -12) dist += 24;
+    return (1 - dist.abs() / halfDay).clamp(-1.0, 1.0);
+  }
+
+  /// Sample brightness and kelvin at [hour] for [config].
+  ///
+  /// Super-Gaussian profiles use the same formula as `rhythm_core::curves`
+  /// (`map_super_gaussian`). Constant values are normalized within the profile
+  /// ranges. Other shapes use a simplified flat preview in the demo.
+  (int, int) _demoLightingAt(RhythmCurveConfig config, double hour) {
+    final curve = config.curve;
+    if (curve is RhythmSuperGaussianCurve) {
+      final bri = _mapSuperGaussian(
+        hour,
+        widthLeft: curve.widthLeftBri,
+        widthRight: curve.widthRightBri,
+        shapeP: curve.shapeP,
+        outMin: config.minBrightness.toDouble(),
+        outMax: config.maxBrightness.toDouble(),
+      );
+      final cct = _mapSuperGaussian(
+        hour,
+        widthLeft: curve.widthLeftCct,
+        widthRight: curve.widthRightCct,
+        shapeP: curve.shapeP,
+        outMin: config.minColorTemp.toDouble(),
+        outMax: config.maxColorTemp.toDouble(),
+      );
+      return (bri.round(), cct.round());
+    }
+    if (curve is RhythmConstantCurve) {
+      int sample(int first, int second, int value) {
+        final lower = math.min(first, second);
+        final upper = math.max(first, second);
+        return (lower + (upper - lower) * value).clamp(lower, upper);
+      }
+
+      return (
+        sample(config.minBrightness, config.maxBrightness, curve.brightness),
+        sample(config.minColorTemp, config.maxColorTemp, curve.colorTemp),
+      );
+    }
+    final bri = math.max(config.maxBrightness, config.minBrightness);
+    var cct = math.max(config.maxColorTemp, config.minColorTemp);
+    if (cct <= 0) cct = RhythmCurveConfig.defaultMinColorTemp;
+    return (bri, cct);
+  }
+
+  static double _mapSuperGaussian(
+    double hour, {
+    required double widthLeft,
+    required double widthRight,
+    required double shapeP,
+    required double outMin,
+    required double outMax,
+  }) {
+    const epsilon = 0.02;
+    final p = shapeP.clamp(2.0, 10.0);
+    const mu = (_demoSunrise + _demoSunset) / 2;
+    final factor = math.pow(math.log(1 / epsilon), 1 / p).toDouble();
+    final sigmaL0 = (mu - _demoSunrise) / factor;
+    final sigmaR0 = (_demoSunset - mu) / factor;
+    final sigmaL = sigmaL0 / math.max(widthLeft, 0.1);
+    final sigmaR = sigmaR0 / math.max(widthRight, 0.1);
+
+    var dist = hour - mu;
+    if (dist > 12) dist -= 24;
+    if (dist < -12) dist += 24;
+    final sigma = dist <= 0 ? sigmaL : sigmaR;
+    final double y;
+    if (sigma <= 0.01) {
+      y = dist.abs() < 0.01 ? 1.0 : 0.0;
+    } else {
+      y = math.exp(-math.pow(dist.abs() / sigma, p));
+    }
+    final result = outMin + y * (outMax - outMin);
+    return result.clamp(math.min(outMin, outMax), math.max(outMin, outMax));
   }
 
   @override
