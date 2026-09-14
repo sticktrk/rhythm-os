@@ -81,6 +81,14 @@ fn main() -> Result<()> {
         }
         s.auto_update = false;
         s.managed_ha_lights = Some(selection::load(&data_dir)?);
+        // Generic factory reset can recreate settings with appliance defaults.
+        // An empty deployment-owned selection always starts paused.
+        if s.managed_ha_lights
+            .as_ref()
+            .is_some_and(|ids| ids.is_empty())
+        {
+            s.light_breaker_enabled = false;
+        }
         s.hub_credentials.clear();
         let credentials = rhythm_ha::provider::supervisor_credentials();
         s.hub_credentials
