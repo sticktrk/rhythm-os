@@ -2121,6 +2121,8 @@ impl Storage for FileStorage {
     fn clear_factory_reset_state(&self) -> Result<()> {
         for name in [
             "rooms.json",
+            "managed-ha-lights.json",
+            "managed-ha-lights.json.tmp",
             "light_profiles.json",
             "location.json",
             "settings.json",
