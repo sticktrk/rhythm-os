@@ -19,6 +19,21 @@ use std::time::{Duration, Instant};
 pub struct PairingRequestContext {
     accepted_at: Instant,
     cancelled: Arc<AtomicBool>,
+    progress: Option<PairingProgressReporter>,
+}
+
+/// Sink a transport uses to report what it is doing inside a long blocking
+/// pairing call (automatic retries, stack recovery) so the client never shows
+/// a stale stage while the server has moved on.
+#[derive(Clone)]
+pub struct PairingProgressReporter(Arc<PairingProgressFn>);
+
+type PairingProgressFn = dyn Fn(PairingStatus, PairingStage, &str) + Send + Sync;
+
+impl std::fmt::Debug for PairingProgressReporter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("PairingProgressReporter")
+    }
 }
 
 impl PairingRequestContext {
@@ -26,6 +41,26 @@ impl PairingRequestContext {
         Self {
             accepted_at,
             cancelled: Arc::new(AtomicBool::new(false)),
+            progress: None,
+        }
+    }
+
+    /// Attach a progress sink. The returned context shares this context's
+    /// deadline and cancellation flag.
+    pub fn with_progress_reporter(
+        &self,
+        reporter: impl Fn(PairingStatus, PairingStage, &str) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            progress: Some(PairingProgressReporter(Arc::new(reporter))),
+            ..self.clone()
+        }
+    }
+
+    /// Report an intermediate, non-terminal stage. No-op without a sink.
+    pub fn report_progress(&self, status: PairingStatus, stage: PairingStage, message: &str) {
+        if let Some(reporter) = &self.progress {
+            (reporter.0)(status, stage, message);
         }
     }
 
