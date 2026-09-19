@@ -892,6 +892,12 @@ impl ChipTransport {
                         == crate::transport::MatterCommissioningRendezvous::OnNetwork
                         && is_on_network_route_or_discovery_error(&error)) =>
             {
+                report_pairing_progress(
+                    pairing_context,
+                    rhythm_os::pairing::PairingStatus::Commissioning,
+                    rhythm_os::pairing::PairingStage::Connecting,
+                    "Device joined the network. Waiting for it to come online",
+                );
                 match self.recover_operational_discovery_failure(
                     request.node_id,
                     &error,
@@ -1526,6 +1532,18 @@ fn ble_recovery_cooldown(error: &anyhow::Error) -> Duration {
         .unwrap_or(BLE_RECOVERY_COOLDOWN)
 }
 
+/// Tell the waiting client what a long commissioning call is doing now.
+fn report_pairing_progress(
+    pairing_context: Option<&rhythm_os::pairing::PairingRequestContext>,
+    status: rhythm_os::pairing::PairingStatus,
+    stage: rhythm_os::pairing::PairingStage,
+    message: &str,
+) {
+    if let Some(context) = pairing_context {
+        context.report_progress(status, stage, message);
+    }
+}
+
 impl ChipTransport {
     fn commission_light_bounded(
         &self,
@@ -1545,6 +1563,12 @@ impl ChipTransport {
                 if uses_ble_commissioning(request)
                     && is_recoverable_ble_commissioning_error(&error) =>
             {
+                report_pairing_progress(
+                    pairing_context,
+                    rhythm_os::pairing::PairingStatus::Searching,
+                    rhythm_os::pairing::PairingStage::HubConnecting,
+                    "First attempt did not reach the device. Resetting Bluetooth on the Rhythm Box",
+                );
                 if let Err(recovery_error) =
                     self.recover_ble_commissioning_stack(&error, ble_recovery_cooldown(&error))
                 {
@@ -1576,6 +1600,12 @@ impl ChipTransport {
                     )));
                 }
 
+                report_pairing_progress(
+                    pairing_context,
+                    rhythm_os::pairing::PairingStatus::Commissioning,
+                    rhythm_os::pairing::PairingStage::Commissioning,
+                    "Trying again (attempt 2 of 2)",
+                );
                 match self.commission_light_once(request, pairing_context) {
                     Ok(device) => Ok(device),
                     Err(retry_error)
@@ -3758,10 +3788,31 @@ mod tests {
         let server = spawn_fake_server_multi(socket_path.clone(), 3, handler);
 
         let transport = ChipTransport::for_test(socket_path.clone());
+        let reported = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let sink = reported.clone();
+        let context = rhythm_os::pairing::PairingRequestContext::accepted_now()
+            .with_progress_reporter(move |_, stage, message| {
+                sink.lock().unwrap().push((stage, message.to_string()));
+            });
         let device = transport
-            .commission_light(&ble_commission_request())
+            .commission_light_with_context(&ble_commission_request(), &context)
             .expect("a transient BLE discovery timeout should be recovered by the automatic retry");
         assert_eq!(device.node_id, 106);
+        assert_eq!(
+            *reported.lock().unwrap(),
+            vec![
+                (
+                    rhythm_os::pairing::PairingStage::HubConnecting,
+                    "First attempt did not reach the device. Resetting Bluetooth on the Rhythm Box"
+                        .to_string()
+                ),
+                (
+                    rhythm_os::pairing::PairingStage::Commissioning,
+                    "Trying again (attempt 2 of 2)".to_string()
+                ),
+            ],
+            "the silent recovery and second attempt must be visible to the client"
+        );
         assert_eq!(
             transport.sidecar_health_for_test(),
             SidecarHealth::Ready,

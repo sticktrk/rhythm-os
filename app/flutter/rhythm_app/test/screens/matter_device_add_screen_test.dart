@@ -6,7 +6,11 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:provider/provider.dart';
 import 'package:rhythm_app/backend/backend.dart';
+import 'package:rhythm_app/providers/home_provider.dart';
+import 'package:rhythm_app/providers/room_provider.dart';
+import 'package:rhythm_app/providers/server_sync_provider.dart';
 import 'package:rhythm_app/screens/hubs/matter_add_method.dart';
 import 'package:rhythm_app/screens/hubs/matter_device_add_screen.dart';
 import 'package:rhythm_app/services/analytics_service.dart';
@@ -99,6 +103,107 @@ void main() {
       if (!releaseResponse.isCompleted) {
         releaseResponse.complete();
       }
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets('pairing screen follows the server\'s real stages',
+      (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+    final releaseResponse = Completer<void>();
+    final progress = StreamController<RhythmPairingProgress>.broadcast();
+    final connection = _ProgressConnection(progress.stream);
+    final roomProvider = RoomProvider();
+    final homeProvider = HomeProvider();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: homeProvider,
+    );
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(homeProvider.dispose);
+    addTearDown(progress.close);
+    try {
+      final api = _FakeRhythmMatterApi(
+        onPair: (_) async {
+          await releaseResponse.future;
+          return const RhythmMatterPairingResponse(
+            httpStatus: 200,
+            status: 'failed',
+            error: 'test failure',
+          );
+        },
+      );
+
+      await tester.pumpWidget(
+        ChangeNotifierProvider<ServerSyncProvider>.value(
+          value: serverSync,
+          child: MaterialApp(
+            home: MatterDeviceAddScreen(
+              endpoint: const HubEndpoint(host: '127.0.0.1', port: 0),
+              addMethod: MatterAddMethod.automatic,
+              pairingApi: api,
+            ),
+          ),
+        ),
+      );
+      await tester.enterText(find.byType(TextField), '34970112332');
+      await tester.pump();
+      await tester.ensureVisible(find.text('Add Device'));
+      await tester.tap(find.text('Add Device'));
+      await tester.pump();
+      final sessionId = api.sessionIds.single!;
+
+      Future<void> emit(
+        RhythmPairingStage stage,
+        String message, {
+        String? session,
+        bool useSession = true,
+      }) async {
+        progress.add(RhythmPairingProgress(
+          hubType: 'matter',
+          sessionId: useSession ? (session ?? sessionId) : null,
+          status: RhythmPairingStatus.searching,
+          stage: stage,
+          message: message,
+        ));
+        await tester.pump();
+      }
+
+      // Title and highlighted step name the same thing (title + step label).
+      expect(find.text('Contacting Rhythm Box'), findsNWidgets(2));
+
+      await emit(RhythmPairingStage.requested, 'Pairing request received');
+      expect(find.text('Contacting Rhythm Box'), findsNWidgets(2));
+      // The server message is shown once, not echoed as the subtitle too.
+      expect(find.text('Pairing request received'), findsOneWidget);
+
+      // Events from another attempt, or with no session, are not ours.
+      await emit(RhythmPairingStage.finalizing, 'other', session: 'other-1');
+      await emit(RhythmPairingStage.finalizing, 'anonymous', useSession: false);
+      expect(find.text('Contacting Rhythm Box'), findsNWidgets(2));
+
+      await emit(RhythmPairingStage.commissioning, 'Finding the device');
+      expect(find.text('Finding and pairing device'), findsNWidgets(2));
+
+      // The automatic retry explains itself without rewinding the timeline.
+      await emit(RhythmPairingStage.hubConnecting, 'Resetting Bluetooth');
+      expect(find.text('Finding and pairing device'), findsNWidgets(2));
+      expect(find.text('Resetting Bluetooth'), findsOneWidget);
+
+      // A terminal failure event never strands the user on a dead-end
+      // "failed" progress screen; the response brings the retry actions.
+      await emit(RhythmPairingStage.failed, 'Pairing failed');
+      expect(find.text('Finding and pairing device'), findsNWidgets(2));
+      expect(find.text('Try Again'), findsNothing);
+
+      releaseResponse.complete();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(find.text('Try Again'), findsOneWidget);
+    } finally {
+      if (!releaseResponse.isCompleted) releaseResponse.complete();
       debugDefaultTargetPlatformOverride = null;
     }
   });
@@ -425,7 +530,8 @@ void main() {
     }
   });
 
-  testWidgets('a Box failure offers the phone only when the handoff is supported',
+  testWidgets(
+      'a Box failure offers the phone only when the handoff is supported',
       (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.android;
     try {
@@ -771,6 +877,15 @@ void main() {
     expect(api.resultQueries, [phone.sessionIds.first]);
     expect(phone.setupPayloads.toSet(), {'MT:Y.K908OC16750648G00'});
   });
+}
+
+class _ProgressConnection extends RhythmConnection {
+  _ProgressConnection(this._progress);
+
+  final Stream<RhythmPairingProgress> _progress;
+
+  @override
+  Stream<RhythmPairingProgress> get pairingProgressEvents => _progress;
 }
 
 class _FakePhoneMatterCommissioner extends PhoneMatterCommissioner {
