@@ -201,6 +201,14 @@ configure_ipv6_ra_rio() {
     local failed=0
     local global_forwarding iface_forwarding
 
+    # The Raspberry Pi kernel builds IPv6 as a module that otherwise loads only
+    # when the first AF_INET6 socket opens, seconds after this script runs on a
+    # cold boot. Until then no IPv6 sysctl exists for any interface. Loading it
+    # registers the already-raised interface synchronously.
+    if [ ! -d "$IPV6_CONF_ROOT" ]; then
+        modprobe_logged ipv6
+    fi
+
     global_forwarding="$(cat "$IPV6_CONF_ROOT/all/forwarding" 2>/dev/null || true)"
     iface_forwarding="$(cat "$iface_root/forwarding" 2>/dev/null || true)"
     if [ "$global_forwarding" = "1" ] || [ "$iface_forwarding" = "1" ]; then
