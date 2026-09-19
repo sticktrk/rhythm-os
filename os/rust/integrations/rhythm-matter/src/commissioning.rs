@@ -278,6 +278,24 @@ pub fn pair_device_with_context(
     request_context: &PairingRequestContext,
 ) -> Result<PairingSession> {
     ensure_pairing_request_active(request_context)?;
+    // The transport blocks for minutes and may retry internally; let it
+    // surface those steps on this session instead of going silent.
+    let request_context = &{
+        let state = state.clone();
+        let session_id = request.session_id.clone();
+        request_context.with_progress_reporter(move |status, stage, message| {
+            rhythm_os::pairing::emit_pairing_progress(
+                &state,
+                "matter",
+                session_id.as_deref(),
+                status,
+                stage,
+                message,
+                None,
+                None,
+            );
+        })
+    };
     let recovery_targets = match registered_recovery_targets(
         state,
         &hub_data,
@@ -433,7 +451,19 @@ pub fn pair_device_with_context(
         request.session_id.as_deref(),
         PairingStatus::Commissioning,
         PairingStage::Commissioning,
-        "Commissioning Matter device",
+        // One blocking call covers discovery, the secure session, and the
+        // network join, so say all of it rather than a single vague verb.
+        match request.rendezvous {
+            crate::transport::MatterCommissioningRendezvous::OnNetwork => {
+                "Finding the device on your network and pairing with it"
+            }
+            crate::transport::MatterCommissioningRendezvous::Ble => {
+                "Finding the device over Bluetooth, then joining it to Wi-Fi. This can take a few minutes"
+            }
+            crate::transport::MatterCommissioningRendezvous::Auto => {
+                "Finding the device and joining it to your network. This can take a few minutes"
+            }
+        },
         None,
         None,
     );

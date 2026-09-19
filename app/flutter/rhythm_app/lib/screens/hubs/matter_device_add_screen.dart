@@ -151,6 +151,9 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
   String _inputMethod = 'manual_code';
   StreamSubscription<RhythmPairingProgress>? _progressSub;
   RhythmPairingProgress? _latestProgress;
+  // The server can step back to an earlier stage while it recovers and
+  // retries; the timeline only moves forward and the message explains.
+  int _furthestStageIndex = 0;
 
   @override
   void initState() {
@@ -206,12 +209,18 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     if (connection == null) return;
     _progressSub = connection.pairingProgressEvents.listen((event) {
       if (!mounted) return;
-      if (event.sessionId != null && event.sessionId != _pairingSessionId) {
-        return;
-      }
+      // Only this attempt's events may drive the timeline; an event without
+      // a session id could belong to another client's pairing.
+      if (event.sessionId != _pairingSessionId) return;
       if (event.hubType != 'matter') return;
+      // The pairing response owns the failure screen (message, retry
+      // actions) and arrives right behind this event. Showing "failed" here
+      // would leave a dead-end screen with no way forward.
+      if (event.stage == RhythmPairingStage.failed) return;
       setState(() {
         _latestProgress = event;
+        final index = _matterPairingStageIndex(event.stage);
+        if (index > _furthestStageIndex) _furthestStageIndex = index;
       });
     });
   }
@@ -220,6 +229,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     _progressSub?.cancel();
     _progressSub = null;
     _latestProgress = null;
+    _furthestStageIndex = 0;
   }
 
   bool get _supportsQrScan {
@@ -322,6 +332,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         _phase = _PairingPhase.pairing;
         _errorText = null;
         _latestProgress = null;
+        _furthestStageIndex = 0;
       });
 
       if (HueServiceLocator.isDemoMode) {
@@ -824,8 +835,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
 
   Widget _buildPairingPhase() {
     final progress = _latestProgress;
-    final activeIndex = _matterPairingActiveIndex(progress);
-    final activeMessage = _matterPairingActiveMessage(progress);
+    final activeIndex = _furthestStageIndex;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -848,7 +858,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         ),
         const SizedBox(height: 14),
         Text(
-          _matterPairingTitle(progress),
+          _matterPairingTitle(activeIndex),
           style: const TextStyle(
             color: CelestialColors.textPrimary,
             fontSize: 20,
@@ -858,20 +868,21 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         ),
         const SizedBox(height: 6),
         Text(
-          activeMessage ??
-              switch (_activeAddMethod) {
-                MatterAddMethod.automatic =>
-                  'Keep this screen open while Rhythm adds the device.',
-                MatterAddMethod.phoneCommissioning =>
-                  'Keep this phone near the device while it joins the network '
-                      'and the Rhythm Box finishes pairing.',
-                MatterAddMethod.onNetworkSetupCode =>
-                  'Keep this screen open while Rhythm finds the device and '
-                      'adds it.',
-                MatterAddMethod.bleWifiCommissioning =>
-                  'Keep this screen open while Rhythm completes setup and '
-                      'adds the device.',
-              },
+          // What the server is doing right now is shown once, under the active
+          // step. This line is only the standing instruction.
+          switch (_activeAddMethod) {
+            MatterAddMethod.automatic =>
+              'Keep this screen open while Rhythm adds the device.',
+            MatterAddMethod.phoneCommissioning =>
+              'Keep this phone near the device while it joins the network '
+                  'and the Rhythm Box finishes pairing.',
+            MatterAddMethod.onNetworkSetupCode =>
+              'Keep this screen open while Rhythm finds the device and '
+                  'adds it.',
+            MatterAddMethod.bleWifiCommissioning =>
+              'Keep this screen open while Rhythm completes setup and '
+                  'adds the device.',
+          },
           style: TextStyle(
             color: CelestialColors.textSecondary.withValues(alpha: 0.75),
             fontSize: 14,
@@ -894,27 +905,22 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
               StageTimelineItem(
                 label: _activeAddMethod.usesPhoneCommissioner
                     ? 'Phone setup'
-                    : 'Sending request',
+                    : 'Contacting Rhythm Box',
                 icon: _activeAddMethod.usesPhoneCommissioner
                     ? Icons.phone_android_outlined
                     : Icons.outbox_outlined,
               ),
               const StageTimelineItem(
-                label: 'Searching for device',
+                label: 'Finding and pairing device',
                 icon: Icons.radar_outlined,
               ),
               const StageTimelineItem(
-                label: 'Pairing',
-                icon: Icons.verified_user_outlined,
-              ),
-              const StageTimelineItem(
-                label: 'Finalizing',
+                label: 'Saving device',
                 icon: Icons.check_circle_outline,
               ),
             ],
             activeIndex: activeIndex,
-            activeMessage: progress?.message,
-            failed: progress?.stage == RhythmPairingStage.failed,
+            activeMessage: _matterPairingActiveMessage(progress),
             accent: _teal,
           ),
         ),
@@ -925,28 +931,26 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     );
   }
 
-  /// Map the server's `PairingStage` onto our 4-step UI timeline.
+  /// Map the server's `PairingStage` onto the UI timeline.
   ///
-  /// 0 = Sending request, 1 = Searching, 2 = Pairing, 3 = Finalizing.
-  /// Returns 4 (== stages.length) when complete.
-  int _matterPairingActiveIndex(RhythmPairingProgress? progress) {
-    if (progress == null) return 0;
-    return switch (progress.stage) {
+  /// 0 = Contacting Rhythm Box / Phone setup, 1 = Finding and pairing,
+  /// 2 = Saving. Returns 3 (== stages.length) when complete.
+  ///
+  /// The server commissions in one blocking call that covers discovery, the
+  /// secure session, and the network join, so those share a single step
+  /// instead of pretending to track each one.
+  int _matterPairingStageIndex(RhythmPairingStage stage) {
+    return switch (stage) {
       RhythmPairingStage.requested => 0,
-      RhythmPairingStage.hubConnecting => 1,
+      RhythmPairingStage.hubConnecting => 0,
       RhythmPairingStage.searching => 1,
       RhythmPairingStage.connecting => 1,
-      RhythmPairingStage.commissioning => 2,
-      RhythmPairingStage.finalizing => 3,
-      RhythmPairingStage.complete => 4,
-      RhythmPairingStage.failed => _matterFailureIndex(progress),
+      RhythmPairingStage.commissioning => 1,
+      RhythmPairingStage.finalizing => 2,
+      RhythmPairingStage.complete => 3,
+      // Never stored; the pairing response drives the failure screen.
+      RhythmPairingStage.failed => 0,
     };
-  }
-
-  int _matterFailureIndex(RhythmPairingProgress progress) {
-    // We don't know which specific stage failed, so attribute the failure to
-    // the most likely stage based on whether a device was found.
-    return progress.device != null ? 3 : 2;
   }
 
   String? _matterPairingActiveMessage(RhythmPairingProgress? progress) {
@@ -956,18 +960,15 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     return trimmed;
   }
 
-  String _matterPairingTitle(RhythmPairingProgress? progress) {
-    return switch (progress?.stage) {
-      RhythmPairingStage.commissioning => 'Pairing with device',
-      RhythmPairingStage.finalizing => 'Finalizing device',
-      RhythmPairingStage.complete => 'Device added',
-      RhythmPairingStage.failed => 'Pairing failed',
-      RhythmPairingStage.requested ||
-      RhythmPairingStage.hubConnecting ||
-      RhythmPairingStage.searching ||
-      RhythmPairingStage.connecting ||
-      null =>
-        'Searching for device',
+  /// Always names the same step the timeline highlights.
+  String _matterPairingTitle(int activeIndex) {
+    return switch (activeIndex) {
+      0 => _activeAddMethod.usesPhoneCommissioner
+          ? 'Setting up from this phone'
+          : 'Contacting Rhythm Box',
+      1 => 'Finding and pairing device',
+      2 => 'Saving device',
+      _ => 'Device added',
     };
   }
 
