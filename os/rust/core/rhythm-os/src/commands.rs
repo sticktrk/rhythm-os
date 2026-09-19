@@ -17559,7 +17559,15 @@ pub(crate) fn ensure_runtime_room_exists(
 /// after topology/manual mutations so integrations that discover devices
 /// without rooms do not depend on incidental room bootstrap paths.
 pub fn reconcile_runtime_from_state(state: &SharedState) -> Result<()> {
-    reconcile_runtime_from_state_with_group_sync(state, true)
+    reconcile_runtime_from_state_with_group_sync(state, GroupSync::Immediate)
+}
+
+/// Whether a runtime reconciliation schedules the external group projection
+/// itself or leaves it to a caller batching several reconciliations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GroupSync {
+    Immediate,
+    Deferred,
 }
 
 /// Bulk discovery updates the local runtime after each hub, then requests one
@@ -17567,7 +17575,7 @@ pub fn reconcile_runtime_from_state(state: &SharedState) -> Result<()> {
 /// the normal immediate scheduling through `reconcile_runtime_from_state`.
 pub(crate) fn reconcile_runtime_from_state_with_group_sync(
     state: &SharedState,
-    sync_groups: bool,
+    group_sync: GroupSync,
 ) -> Result<()> {
     let (has_any_hub, has_runtime_initializer, rooms, nodes) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
@@ -17698,7 +17706,7 @@ pub(crate) fn reconcile_runtime_from_state_with_group_sync(
     }
 
     rebuild_composite_routing(state);
-    if sync_groups {
+    if group_sync == GroupSync::Immediate {
         schedule_topology_group_sync_for_integrations(state);
     }
     apply_pending_mode_outputs_if_ready(state);
@@ -21318,6 +21326,58 @@ mod tests {
         #[test]
         fn projects_local_updates_even_when_authority_reconciliation_fails() {
             exercise_refresh(false, true);
+        }
+
+        /// A bulk refresh in which no hub reached local reconciliation must not
+        /// request a projection: it would only contend for the bridge and, on
+        /// failure, fence grouped authority that the refresh never touched.
+        fn exercise_refresh_without_local_updates(recovery_required: bool) {
+            let (state, _runtime, hub_key) = setup_state_with_empty_registry();
+            let fail = Arc::new(AtomicBool::new(!recovery_required));
+            let projections = Arc::new(AtomicUsize::new(0));
+            {
+                let mut app = state.lock().unwrap();
+                app.hubs.get_mut(&hub_key).unwrap().discovery = Some(Arc::new(RefreshDiscovery {
+                    room: "First room",
+                    fail: fail.clone(),
+                }));
+                app.authority_state_recovery_required = recovery_required;
+                let projections = projections.clone();
+                app.sync_topology_groups_fn = Some(Arc::new(move |_| {
+                    projections.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }));
+            }
+
+            let report = crate::room_sync::sync_all_hubs(&state).unwrap();
+            {
+                let app = state.lock().unwrap();
+                assert!(
+                    !app.topology_group_sync_pending && !app.topology_group_sync_in_progress,
+                    "a refresh that applied nothing must not queue a bridge-wide pass"
+                );
+            }
+            wait_for_topology_group_sync_idle(&state);
+            assert_eq!(report.rooms_added, 0);
+            assert_eq!(projections.load(Ordering::SeqCst), 0);
+
+            // The next refresh that does apply local updates publishes them.
+            fail.store(false, Ordering::SeqCst);
+            state.lock().unwrap().authority_state_recovery_required = false;
+            let report = crate::room_sync::sync_all_hubs(&state).unwrap();
+            wait_for_topology_group_sync_idle(&state);
+            assert_eq!(report.rooms_added, 1);
+            assert_eq!(projections.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn skips_projection_when_every_hub_fails_discovery() {
+            exercise_refresh_without_local_updates(false);
+        }
+
+        #[test]
+        fn skips_projection_while_authority_recovery_is_required() {
+            exercise_refresh_without_local_updates(true);
         }
     }
 
