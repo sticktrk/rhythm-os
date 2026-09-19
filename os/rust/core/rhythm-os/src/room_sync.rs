@@ -129,7 +129,7 @@ pub fn sync_all_hubs(state: &SharedState) -> Result<SyncReport> {
     let mut combined = SyncReport::default();
 
     for key in &hub_keys {
-        match sync_from_hub_for_key(state, key, discover_devices) {
+        match sync_from_hub_for_key_with_group_sync(state, key, discover_devices, false) {
             Ok(report) => {
                 info!(target: "room_sync", "Hub {} sync: +{} ~{} -{} devices={}",
                     key, report.rooms_added, report.rooms_updated,
@@ -143,6 +143,19 @@ pub fn sync_all_hubs(state: &SharedState) -> Result<SyncReport> {
                 warn!(target: "room_sync", "Hub {} sync failed: {}", key, e);
             }
         }
+    }
+
+    // A projection visits every integration and can hold the shared topology
+    // transaction through bridge I/O. Scheduling one after each hub repeats
+    // that work and competes with ordinary light commands. Publish once after
+    // the whole pass, including when another hub failed discovery or authority
+    // reconciliation after successful local updates.
+    let has_runtime = state
+        .lock()
+        .map(|state| state.hub_runtime().is_some())
+        .unwrap_or(false);
+    if has_runtime {
+        commands::schedule_topology_group_sync_for_integrations(state);
     }
 
     Ok(combined)
@@ -180,6 +193,15 @@ pub fn sync_from_hub_for_key(
     hub_key: &HubKey,
     discover_devices: bool,
 ) -> Result<SyncReport> {
+    sync_from_hub_for_key_with_group_sync(state, hub_key, discover_devices, true)
+}
+
+fn sync_from_hub_for_key_with_group_sync(
+    state: &SharedState,
+    hub_key: &HubKey,
+    discover_devices: bool,
+    sync_groups: bool,
+) -> Result<SyncReport> {
     let transaction_lock = state
         .lock()
         .map_err(|_| anyhow::anyhow!("lock"))?
@@ -198,6 +220,7 @@ pub fn sync_from_hub_for_key(
             hub_key,
             discover_devices,
             SyncFailurePolicy::BestEffort,
+            sync_groups,
         )?
     };
     reconcile_external_controller_authority_after_sync(state, hub_key)?;
@@ -232,6 +255,7 @@ pub fn sync_from_hub_for_key_before_authority(
         hub_key,
         discover_devices,
         SyncFailurePolicy::FailClosedBeforeAuthority,
+        true,
     )
 }
 
@@ -293,7 +317,7 @@ fn sync_from_hub_for_key_wait_with_policy(
             .lock()
             .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
         let _guard = acquire_hub_sync_guard_with_timeout(state, hub_key, timeout)?;
-        sync_from_hub_for_key_acquired(state, hub_key, discover_devices, failure_policy)?
+        sync_from_hub_for_key_acquired(state, hub_key, discover_devices, failure_policy, true)?
     };
     reconcile_external_controller_authority_after_sync(state, hub_key)?;
     Ok(report)
@@ -324,6 +348,7 @@ fn sync_from_hub_for_key_acquired(
     hub_key: &HubKey,
     discover_devices: bool,
     failure_policy: SyncFailurePolicy,
+    sync_groups: bool,
 ) -> Result<SyncReport> {
     if state
         .lock()
@@ -348,7 +373,7 @@ fn sync_from_hub_for_key_acquired(
         failure_policy,
     )?;
     commands::reconcile_room_binding_triage_best_effort(state);
-    commands::reconcile_runtime_from_state(state)?;
+    commands::reconcile_runtime_from_state_with_group_sync(state, sync_groups)?;
     Ok(report)
 }
 
