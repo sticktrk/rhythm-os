@@ -464,6 +464,10 @@ impl ChipTransport {
         }
 
         self.ensure_sidecar_locked()?;
+        // Restart/initialization is exclusive; the retried device RPC is not.
+        // Holding this lock through address resolution can consume another
+        // caller's entire pairing recovery budget after a shared restart.
+        drop(_lifecycle);
         self.decode_rpc_response(self.send_rpc_envelope(request)?)
             .with_context(|| {
                 format!(
@@ -508,6 +512,7 @@ impl ChipTransport {
                 first_error
             )
         })?;
+        drop(_lifecycle);
         self.decode_rpc_response(self.send_rpc_envelope(request)?)
             .with_context(|| {
                 format!(
@@ -545,6 +550,7 @@ impl ChipTransport {
             .with_context(|| {
                 format!("re-initializing CHIP controller after stuck-state error: {first_error:#}")
             })?;
+        drop(_lifecycle);
         self.decode_rpc_response(
             self.send_rpc_envelope_with_pairing_context(request, Some(context))?,
         )
@@ -624,6 +630,9 @@ impl ChipTransport {
                 self.chipd_status_hint()
             )
         })?;
+        if let ChipRpcRequest::ScanOperationalNode { node_id, .. } = &envelope.request {
+            tracing::info!(target: "pair", node_id, "Matter discovery recovery: operational scan RPC sent");
+        }
 
         let mut reader = BufReader::new(stream);
         let mut line = String::new();
@@ -805,11 +814,19 @@ impl ChipTransport {
         first_error: &anyhow::Error,
         pairing_context: Option<&rhythm_os::pairing::PairingRequestContext>,
     ) -> Result<Option<CommissionedDevice>> {
+        let recovery_started = Instant::now();
+        tracing::info!(target: "pair", node_id, "Matter discovery recovery: restarting controller");
         self.recover_commissioning_sidecar(first_error, "Matter operational discovery error")?;
         // The sidecar restart drops chipd's BLE connection to the bulb, so a
         // follow-up BLE pairing attempt needs the same BlueZ settle time as
         // the BLE recovery path.
         self.mark_ble_recovery_cooldown(ble_recovery_cooldown(first_error));
+
+        tracing::info!(
+            target: "pair", node_id,
+            recovery_elapsed_ms = recovery_started.elapsed().as_millis() as u64,
+            "Matter discovery recovery: controller ready; starting operational scan"
+        );
 
         let discovery = match pairing_context {
             Some(context) => self.call_with_pairing_context(
@@ -824,6 +841,12 @@ impl ChipTransport {
             )?,
             None => self.scan_operational_node(node_id, OPERATIONAL_RECOVERY_MDNS_SCAN_TIMEOUT)?,
         };
+        tracing::info!(
+            target: "pair", node_id,
+            recovery_elapsed_ms = recovery_started.elapsed().as_millis() as u64,
+            advertised = !discovery.fabrics.is_empty(),
+            "Matter discovery recovery: operational scan completed"
+        );
         if discovery.fabrics.is_empty() {
             return Ok(None);
         }
@@ -834,6 +857,11 @@ impl ChipTransport {
             }
             None => self.call(ChipRpcRequest::ProbeLight { node_id })?,
         };
+        tracing::info!(
+            target: "pair", node_id,
+            recovery_elapsed_ms = recovery_started.elapsed().as_millis() as u64,
+            "Matter discovery recovery: device probe completed"
+        );
         Ok(Some(response.device))
     }
 
@@ -3366,6 +3394,229 @@ mod tests {
         assert_eq!(transport.sidecar_generation.load(Ordering::SeqCst), 2);
 
         let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn slow_stale_retry_does_not_block_pairing_discovery_recovery() {
+        // A controller restart interrupts existing subscriptions. Their retry
+        // may spend a full address-resolution timeout on an unrelated node;
+        // pairing must still be able to reset, scan, and report its own result.
+        for closed_socket in [true, false] {
+            let socket_path = temp_socket_path("retry-pairing-contention");
+            let listener = UnixListener::bind(&socket_path).unwrap();
+            let transport = std::sync::Arc::new(ChipTransport::for_test(socket_path.clone()));
+            let server_transport = transport.clone();
+            let (retry_started_tx, retry_started_rx) = std::sync::mpsc::channel();
+            let (release_retry_tx, release_retry_rx) = std::sync::mpsc::channel();
+            let server = thread::spawn(move || {
+                let mut release_retry_rx = Some(release_retry_rx);
+                let mut retry_worker = None;
+                let mut requests = Vec::new();
+                while requests.len() < 6 {
+                    let index = requests.len();
+                    let (stream, _) = listener.accept().unwrap();
+                    let mut reader = BufReader::new(stream);
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap() == 0 {
+                        continue; // sidecar liveness probe
+                    }
+                    let request: ChipRpcRequestEnvelope = serde_json::from_str(&line).unwrap();
+                    let mut stream = reader.into_inner();
+                    let response = match &request.request {
+                        ChipRpcRequest::SubscribeOnOff { .. } if index == 0 => {
+                            // Model an in-flight RPC failing after another caller
+                            // already initialized the new controller generation.
+                            server_transport.sidecar_generation.store(1, Ordering::SeqCst);
+                            if closed_socket {
+                                requests.push(request);
+                                continue;
+                            }
+                            ChipRpcResponseEnvelope::error(request.id, "Controller not initialized")
+                        }
+                        ChipRpcRequest::SubscribeOnOff { .. } if index == 1 => {
+                            let release = release_retry_rx.take().unwrap();
+                            let retry_started_tx = retry_started_tx.clone();
+                            let id = request.id;
+                            retry_worker = Some(thread::spawn(move || {
+                                retry_started_tx.send(()).unwrap();
+                                release.recv_timeout(Duration::from_secs(10)).unwrap();
+                                serde_json::to_writer(
+                                    &mut stream,
+                                    &ChipRpcResponseEnvelope::ok(id, ChipRpcEmpty::new()),
+                                ).unwrap();
+                                stream.write_all(b"\n").unwrap();
+                            }));
+                            requests.push(request);
+                            continue;
+                        }
+                        ChipRpcRequest::CommissionLight(_) => ChipRpcResponseEnvelope::error(
+                            request.id,
+                            "commissioning Matter light: src/lib/address_resolve/AddressResolve_DefaultImpl.cpp:124: CHIP Error 0x00000032: Timeout",
+                        ),
+                        ChipRpcRequest::InitController(_) => ChipRpcResponseEnvelope::ok(
+                            request.id,
+                            ChipInitControllerResponse {
+                                fabric_id: "test".into(),
+                                operational_fabric_id: 1,
+                                compressed_fabric_id: None,
+                            },
+                        ),
+                        ChipRpcRequest::ScanOperationalNode { node_id, .. } => ChipRpcResponseEnvelope::ok(
+                            request.id,
+                            ChipRpcOperationalDiscoveryResponse { node_id: *node_id, fabrics: vec![] },
+                        ),
+                        ChipRpcRequest::SetOnOff { .. } => ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new()),
+                        other => panic!("unexpected recovery RPC: {other:?}"),
+                    };
+                    serde_json::to_writer(&mut stream, &response).unwrap();
+                    stream.write_all(b"\n").unwrap();
+                    requests.push(request);
+                }
+                retry_worker.unwrap().join().unwrap();
+                requests
+            });
+
+            let background_transport = transport.clone();
+            let background = thread::spawn(move || {
+                background_transport.subscribe_on_off(
+                    &[MatterSubscriptionTarget {
+                        node_id: 42,
+                        endpoint: 1,
+                    }],
+                    1,
+                    30,
+                )
+            });
+            retry_started_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+            let pairing_transport = transport.clone();
+            let (pairing_done_tx, pairing_done_rx) = std::sync::mpsc::channel();
+            let pairing = thread::spawn(move || {
+                let result = pairing_transport.commission_light_with_context(
+                    &ble_commission_request(),
+                    &rhythm_os::pairing::PairingRequestContext::accepted_now(),
+                );
+                pairing_done_tx.send(()).unwrap();
+                result
+            });
+            let recovered_while_retry_pending =
+                pairing_done_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+            // Always unblock/join both callers, including on the failing baseline.
+            release_retry_tx.send(()).unwrap();
+            background.join().unwrap().unwrap();
+            let error = pairing.join().unwrap().unwrap_err();
+            transport.set_on_off(43, 1, true).unwrap();
+            let requests = server.join().unwrap();
+            let _ = fs::remove_file(socket_path);
+            assert!(format!("{error:#}").contains("did not observe node advertising"));
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|r| matches!(r.request, ChipRpcRequest::InitController(_)))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                requests
+                    .iter()
+                    .filter(|r| matches!(r.request, ChipRpcRequest::CommissionLight(_)))
+                    .count(),
+                1
+            );
+            assert!(
+                recovered_while_retry_pending,
+                "pairing recovery waited for unrelated retry (closed_socket={closed_socket})"
+            );
+        }
+    }
+
+    #[test]
+    fn reinitialized_pairing_retry_allows_control_and_cancellation() {
+        let socket_path = temp_socket_path("pairing-retry-contention");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let (retry_started_tx, retry_started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let mut requests = Vec::new();
+            let mut pending_pairing = None;
+            while requests.len() < 4 {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap() == 0 {
+                    continue;
+                }
+                let request: ChipRpcRequestEnvelope = serde_json::from_str(&line).unwrap();
+                let mut stream = reader.into_inner();
+                let response = match &request.request {
+                    ChipRpcRequest::CommissionLight(_) if requests.is_empty() => {
+                        ChipRpcResponseEnvelope::error(request.id, "Controller not initialized")
+                    }
+                    ChipRpcRequest::InitController(_) => ChipRpcResponseEnvelope::ok(
+                        request.id,
+                        ChipInitControllerResponse {
+                            fabric_id: "test".into(),
+                            operational_fabric_id: 1,
+                            compressed_fabric_id: None,
+                        },
+                    ),
+                    ChipRpcRequest::CommissionLight(_) => {
+                        pending_pairing = Some(stream);
+                        requests.push(request);
+                        retry_started_tx.send(()).unwrap();
+                        continue;
+                    }
+                    ChipRpcRequest::SetOnOff { .. } => {
+                        ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new())
+                    }
+                    other => panic!("unexpected pairing retry RPC: {other:?}"),
+                };
+                serde_json::to_writer(&mut stream, &response).unwrap();
+                stream.write_all(b"\n").unwrap();
+                requests.push(request);
+            }
+            release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            drop(pending_pairing);
+            requests
+        });
+        let transport = std::sync::Arc::new(ChipTransport::for_test(socket_path.clone()));
+        let context = rhythm_os::pairing::PairingRequestContext::accepted_now();
+        let pairing_context = context.clone();
+        let pairing_transport = transport.clone();
+        let pairing = thread::spawn(move || {
+            pairing_transport
+                .commission_light_with_context(&on_network_commission_request(), &pairing_context)
+        });
+        retry_started_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        let (control_done_tx, control_done_rx) = std::sync::mpsc::channel();
+        let control = thread::spawn(move || {
+            let result = transport.set_on_off(43, 1, true);
+            control_done_tx.send(()).unwrap();
+            result
+        });
+        let controlled_while_pairing_pending =
+            control_done_rx.recv_timeout(Duration::from_secs(1)).is_ok();
+        context.cancel();
+        let error = pairing.join().unwrap().unwrap_err();
+        control.join().unwrap().unwrap();
+        release_tx.send(()).unwrap();
+        let requests = server.join().unwrap();
+        let _ = fs::remove_file(socket_path);
+        assert!(format!("{error:#}").contains("request was cancelled"));
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|r| matches!(r.request, ChipRpcRequest::InitController(_)))
+                .count(),
+            1
+        );
+        assert!(
+            controlled_while_pairing_pending,
+            "pairing retry blocked control of an unrelated light"
+        );
     }
 
     #[test]
