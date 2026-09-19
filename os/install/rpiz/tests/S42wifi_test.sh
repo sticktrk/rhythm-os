@@ -29,6 +29,30 @@ configure_ipv6_ra_rio wlan0
 grep -qx 2 "$IPV6_CONF_ROOT/wlan0/accept_ra"
 grep -q 'RIO prefixes through /64' "$LOGFILE"
 
+# Cold boot: the IPv6 module is not loaded yet, so the whole sysctl tree is
+# absent. Configuration must load it rather than report missing settings.
+COLD_ROOT="$TEST_ROOT/cold/ipv6/conf"
+IPV6_CONF_ROOT="$COLD_ROOT"
+MODPROBE_CALLS="$TEST_ROOT/modprobe-calls"
+modprobe_logged() {
+    printf '%s\n' "$1" >>"$MODPROBE_CALLS"
+    [ "$1" = ipv6 ] || return 0
+    mkdir -p "$COLD_ROOT/all" "$COLD_ROOT/wlan0"
+    printf '%s\n' 0 >"$COLD_ROOT/all/forwarding"
+    printf '%s\n' 0 >"$COLD_ROOT/wlan0/forwarding"
+    printf '%s\n' 0 >"$COLD_ROOT/wlan0/accept_ra"
+    printf '%s\n' 0 >"$COLD_ROOT/wlan0/accept_ra_rt_info_max_plen"
+}
+configure_ipv6_ra_rio wlan0
+grep -qx ipv6 "$MODPROBE_CALLS"
+grep -qx 1 "$COLD_ROOT/wlan0/accept_ra"
+grep -qx 64 "$COLD_ROOT/wlan0/accept_ra_rt_info_max_plen"
+
+# An already-loaded module is left alone.
+: >"$MODPROBE_CALLS"
+configure_ipv6_ra_rio wlan0
+test ! -s "$MODPROBE_CALLS"
+
 # Regressions for issues #515 and #557: the per-interface IPv6 sysctls may not
 # exist until wlan0 is up and wpa_supplicant has initialized it. The startup
 # path must enable Thread Route Information Option acceptance afterwards.
