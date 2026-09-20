@@ -2294,7 +2294,7 @@ mod tests {
                     },
                     MatterCommandStep::SetBrightness {
                         level: 76,
-                        transition_ms: None
+                        transition_ms: Some(0)
                     },
                 ]
             );
