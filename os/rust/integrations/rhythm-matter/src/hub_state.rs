@@ -19,13 +19,23 @@ use crate::transport::{
 
 const DECOMMISSION_SUPPRESSION_WINDOW: Duration = Duration::from_secs(120);
 
-pub(crate) const READBACK_GRACE: Duration = Duration::from_millis(500);
+const READBACK_GRACE: Duration = Duration::from_millis(500);
+// Allow only a proportional final sliver of the fade at a command handoff.
+const SETTLED_REMAINING_DIVISOR: u32 = 50;
+const SUPERSEDED_VERIFY_INTERVAL: Duration = Duration::from_secs(10 * 60);
 type ReadbackClock = Arc<dyn Fn() -> Instant + Send + Sync>;
 
 #[derive(Debug)]
 struct ScheduledReadback {
     due_at: Instant,
+    transition: Duration,
     plan: MatterEndpointCommandPlan,
+}
+
+#[derive(Default)]
+struct ReadbackWorkerState {
+    scheduled: Vec<ScheduledReadback>,
+    last_matched: HashMap<(u64, u16), Instant>,
 }
 
 enum ReadbackMessage {
@@ -36,7 +46,7 @@ enum ReadbackMessage {
     Schedule {
         plan: MatterEndpointCommandPlan,
         completed_at: Instant,
-        delay: Duration,
+        transition: Duration,
     },
 }
 
@@ -61,6 +71,11 @@ impl MatterReadbackCoordinator {
     }
 
     pub(crate) fn record_submitted(&self, plans: &[MatterEndpointCommandPlan]) {
+        let turn_on = plans
+            .iter()
+            .filter(|plan| crate::controller::plan_requests_turn_on(plan))
+            .cloned()
+            .collect();
         if let Ok(mut latest) = self.latest_command_ids.lock() {
             for plan in plans {
                 latest.insert((plan.node_id, plan.endpoint), plan.command_id);
@@ -70,7 +85,7 @@ impl MatterReadbackCoordinator {
                 // settled predecessor can be verified at this handoff, before
                 // pruning; waiting for the next acknowledgement would lose it.
                 let _ = sender.send(ReadbackMessage::Submitted {
-                    plans: plans.to_vec(),
+                    plans: turn_on,
                     at: (self.clock)(),
                 });
             }
@@ -82,7 +97,7 @@ impl MatterReadbackCoordinator {
         transport: Arc<dyn MatterTransport>,
         plan: MatterEndpointCommandPlan,
         needs_audition: Arc<Mutex<HashSet<(u64, u16)>>>,
-        delay: Duration,
+        transition: Duration,
     ) {
         let latest_command_ids = self.latest_command_ids.clone();
         let store_path = self.store_path.clone();
@@ -94,7 +109,7 @@ impl MatterReadbackCoordinator {
                 .name("matter-readback".to_string())
                 .spawn(move || {
                     readback_worker(
-                        &mut Vec::new(),
+                        &mut ReadbackWorkerState::default(),
                         receiver,
                         transport,
                         latest_command_ids,
@@ -112,7 +127,7 @@ impl MatterReadbackCoordinator {
             .send(ReadbackMessage::Schedule {
                 plan,
                 completed_at,
-                delay,
+                transition,
             })
             .is_err()
         {
@@ -148,7 +163,7 @@ impl ReadbackReceiver for mpsc::Receiver<ReadbackMessage> {
 }
 
 fn readback_worker(
-    scheduled: &mut Vec<ScheduledReadback>,
+    worker: &mut ReadbackWorkerState,
     receiver: impl ReadbackReceiver,
     transport: Arc<dyn MatterTransport>,
     latest_command_ids: Arc<Mutex<HashMap<(u64, u16), u64>>>,
@@ -156,6 +171,10 @@ fn readback_worker(
     store_path: Option<PathBuf>,
     clock: ReadbackClock,
 ) {
+    let ReadbackWorkerState {
+        scheduled,
+        last_matched,
+    } = worker;
     loop {
         scheduled.sort_by_key(|request| request.due_at);
         let message = match scheduled.first() {
@@ -181,10 +200,23 @@ fn readback_worker(
                             {
                                 continue;
                             }
+                            if last_matched.get(&key).is_some_and(|matched_at| {
+                                clock().saturating_duration_since(*matched_at)
+                                    < SUPERSEDED_VERIFY_INTERVAL
+                            }) && needs_audition
+                                .lock()
+                                .map(|warnings| !warnings.contains(&key))
+                                .unwrap_or(false)
+                            {
+                                continue;
+                            }
                             if let Some(index) = scheduled.iter().position(|pending| {
                                 (pending.plan.node_id, pending.plan.endpoint) == key
                                     && pending.plan.command_id != next.command_id
-                                    && at + READBACK_GRACE >= pending.due_at
+                                    && at
+                                        + READBACK_GRACE
+                                        + pending.transition / SETTLED_REMAINING_DIVISOR
+                                        >= pending.due_at
                             }) {
                                 settled.push((scheduled.remove(index).plan, next));
                             }
@@ -193,11 +225,12 @@ fn readback_worker(
                     ReadbackMessage::Schedule {
                         plan,
                         completed_at,
-                        delay,
+                        transition,
                     } => {
                         if latest.get(&(plan.node_id, plan.endpoint)) == Some(&plan.command_id) {
                             scheduled.push(ScheduledReadback {
-                                due_at: completed_at + delay,
+                                due_at: completed_at + transition + READBACK_GRACE,
+                                transition,
                                 plan,
                             });
                         }
@@ -211,7 +244,7 @@ fn readback_worker(
                 });
                 drop(latest);
                 for (old, next) in settled {
-                    verify_superseded(
+                    let result = verify_superseded(
                         transport.as_ref(),
                         &old,
                         &next,
@@ -219,6 +252,7 @@ fn readback_worker(
                         &needs_audition,
                         store_path.as_ref(),
                     );
+                    record_last_match(last_matched, (old.node_id, old.endpoint), &result, clock());
                 }
                 continue;
             }
@@ -241,12 +275,32 @@ fn readback_worker(
         if latest.get(&key) != Some(&request.plan.command_id) {
             continue;
         }
-        record_readback_result(
-            &request.plan,
-            crate::controller::turn_on_readback_mismatch(&request.plan, &reported),
-            &needs_audition,
-            store_path.as_ref(),
-        );
+        let mismatch = crate::controller::turn_on_readback_mismatch(&request.plan, &reported);
+        let changed = set_needs_audition(&needs_audition, key, mismatch.is_some());
+        let result =
+            crate::controller::superseded_readback_result(&request.plan, &request.plan, &reported);
+        record_last_match(last_matched, key, &result, clock());
+        // Keep the ordering check and memory update atomic, but never block a
+        // new light command behind logging or an SD-card write.
+        drop(latest);
+        record_readback_result(&request.plan, mismatch, changed, store_path.as_ref());
+    }
+}
+
+fn record_last_match(
+    last_matched: &mut HashMap<(u64, u16), Instant>,
+    key: (u64, u16),
+    result: &crate::controller::SupersededReadbackResult,
+    now: Instant,
+) {
+    match result {
+        crate::controller::SupersededReadbackResult::Matched => {
+            last_matched.insert(key, now);
+        }
+        crate::controller::SupersededReadbackResult::Mismatch(_) => {
+            last_matched.remove(&key);
+        }
+        crate::controller::SupersededReadbackResult::Inconclusive => {}
     }
 }
 
@@ -257,37 +311,39 @@ fn verify_superseded(
     latest_command_ids: &Mutex<HashMap<(u64, u16), u64>>,
     needs_audition: &Mutex<HashSet<(u64, u16)>>,
     store_path: Option<&PathBuf>,
-) {
+) -> crate::controller::SupersededReadbackResult {
+    use crate::controller::SupersededReadbackResult;
     let key = (next.node_id, next.endpoint);
     if !is_latest_command(latest_command_ids, key, next.command_id) {
-        return;
+        return SupersededReadbackResult::Inconclusive;
     }
     let Ok(reported) = transport.read_light_state(next.node_id, next.endpoint) else {
-        return;
+        return SupersededReadbackResult::Inconclusive;
     };
     let Ok(latest) = latest_command_ids.lock() else {
-        return;
+        return SupersededReadbackResult::Inconclusive;
     };
     if latest.get(&key) != Some(&next.command_id) {
-        return;
+        return SupersededReadbackResult::Inconclusive;
     }
     // A read can land partway through the *new* fade. Merely mismatching both
     // endpoints is not failure evidence; values between them are ambiguous.
-    match crate::controller::superseded_readback_result(old, next, &reported) {
-        crate::controller::SupersededReadbackResult::Matched => {
-            record_readback_result(old, None, needs_audition, store_path)
-        }
-        crate::controller::SupersededReadbackResult::Mismatch(field) => {
-            record_readback_result(old, Some(field), needs_audition, store_path)
-        }
-        crate::controller::SupersededReadbackResult::Inconclusive => {}
-    }
+    let result = crate::controller::superseded_readback_result(old, next, &reported);
+    let mismatch = match result {
+        SupersededReadbackResult::Matched => None,
+        SupersededReadbackResult::Mismatch(field) => Some(field),
+        SupersededReadbackResult::Inconclusive => return result,
+    };
+    let changed = set_needs_audition(needs_audition, key, mismatch.is_some());
+    drop(latest);
+    record_readback_result(old, mismatch, changed, store_path);
+    result
 }
 
 fn record_readback_result(
     plan: &MatterEndpointCommandPlan,
     mismatch: Option<&'static str>,
-    needs_audition: &Mutex<HashSet<(u64, u16)>>,
+    changed: bool,
     store_path: Option<&PathBuf>,
 ) {
     if let Some(mismatch_field) = mismatch {
@@ -298,19 +354,20 @@ fn record_readback_result(
             "Matter command completed but authoritative readback did not show the requested effect"
         );
     }
-    persist_needs_audition_change(
-        needs_audition,
-        store_path,
-        (plan.node_id, plan.endpoint),
-        mismatch.is_some(),
-    );
+    if changed {
+        persist_needs_audition_change(
+            store_path,
+            (plan.node_id, plan.endpoint),
+            mismatch.is_some(),
+        );
+    }
 }
 
 #[cfg(test)]
 pub(crate) struct ManualReadbackReceiver {
     receiver: mpsc::Receiver<ReadbackMessage>,
     clock: Arc<Mutex<Instant>>,
-    scheduled: std::cell::RefCell<Vec<ScheduledReadback>>,
+    worker: std::cell::RefCell<ReadbackWorkerState>,
     advance_time: std::cell::Cell<bool>,
 }
 
@@ -350,7 +407,7 @@ impl MatterReadbackCoordinator {
             ManualReadbackReceiver {
                 receiver,
                 clock,
-                scheduled: Default::default(),
+                worker: Default::default(),
                 advance_time: std::cell::Cell::new(true),
             },
         )
@@ -365,7 +422,7 @@ impl MatterReadbackCoordinator {
     ) {
         receiver.advance_time.set(advance_time);
         readback_worker(
-            &mut receiver.scheduled.borrow_mut(),
+            &mut receiver.worker.borrow_mut(),
             receiver,
             transport,
             self.latest_command_ids.clone(),
@@ -388,13 +445,12 @@ fn is_latest_command(
         == Some(command_id)
 }
 
-fn persist_needs_audition_change(
+fn set_needs_audition(
     needs_audition: &Mutex<HashSet<(u64, u16)>>,
-    store_path: Option<&PathBuf>,
     key: (u64, u16),
     value: bool,
-) {
-    let changed = needs_audition
+) -> bool {
+    needs_audition
         .lock()
         .map(|mut devices| {
             if value {
@@ -403,10 +459,10 @@ fn persist_needs_audition_change(
                 devices.remove(&key)
             }
         })
-        .unwrap_or(false);
-    if !changed {
-        return;
-    }
+        .unwrap_or(false)
+}
+
+fn persist_needs_audition_change(store_path: Option<&PathBuf>, key: (u64, u16), value: bool) {
     if let Some(path) = store_path {
         let device_id = crate::lifecycle::format_device_id(key.0, key.1);
         if let Err(error) =
@@ -513,12 +569,9 @@ impl MatterHubData {
     }
 
     pub(crate) fn set_needs_audition(&self, node_id: u64, endpoint: u16, value: bool) {
-        persist_needs_audition_change(
-            self.needs_audition.as_ref(),
-            self.readback.store_path(),
-            (node_id, endpoint),
-            value,
-        );
+        if set_needs_audition(self.needs_audition.as_ref(), (node_id, endpoint), value) {
+            persist_needs_audition_change(self.readback.store_path(), (node_id, endpoint), value);
+        }
     }
 
     pub(crate) fn observed_current_level(&self, node_id: u64, endpoint: u16) -> Option<u8> {
@@ -893,7 +946,7 @@ mod tests {
             transport.clone(),
             plan_a,
             needs_audition.clone(),
-            Duration::from_millis(10_500),
+            Duration::from_millis(10_000),
         );
         coordinator.record_submitted(std::slice::from_ref(&plan_b));
         coordinator.schedule(

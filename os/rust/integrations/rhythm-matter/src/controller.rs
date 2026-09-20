@@ -1290,7 +1290,7 @@ pub(crate) fn schedule_turn_on_readback(
         transport,
         plan,
         needs_audition,
-        Duration::from_millis(u64::from(transition_ms)) + crate::hub_state::READBACK_GRACE,
+        Duration::from_millis(u64::from(transition_ms)),
     );
 }
 
@@ -1867,6 +1867,24 @@ mod tests {
             .unwrap();
         }
 
+        fn submit_with_ack_latency(&self, command: LightingCommand, latency: Duration) {
+            let plans = self
+                .controller
+                .turn_on_plans(&["matter-42".to_string()], &command)
+                .unwrap();
+            self.controller.hub_data.readback.record_submitted(&plans);
+            *self.clock.lock().unwrap() += latency;
+            self.bulb.submit_endpoint_plans(&plans).unwrap();
+            for plan in plans {
+                schedule_turn_on_readback(
+                    self.bulb.clone(),
+                    plan,
+                    self.controller.hub_data.needs_audition.clone(),
+                    self.controller.hub_data.readback.clone(),
+                );
+            }
+        }
+
         fn run_readbacks(&self) {
             self.pump_readbacks(true);
         }
@@ -2136,7 +2154,10 @@ mod tests {
             *fixture.clock.lock().unwrap() += Duration::from_secs(10);
             fixture.submit(LightingCommand::with_transition(32, 2900, 10_000));
             fixture.run_readbacks_until_idle();
-            assert_eq!(fixture.bulb.reads.lock().unwrap().len(), 2);
+            assert_eq!(
+                fixture.bulb.reads.lock().unwrap().len(),
+                if honours_color { 1 } else { 2 }
+            );
             // The initially ignoring bulb is now on and executes the second
             // fade; even a continuous schedule must clear its persisted warning.
             assert!(!fixture.needs_audition());
@@ -2147,6 +2168,171 @@ mod tests {
                 *fixture.clock.lock().unwrap(),
                 fixture.started_at + Duration::from_secs(20)
             );
+        }
+    }
+
+    #[test]
+    fn readback_exact_interval_fades_verify_despite_ack_latency() {
+        for honours_color in [true, false] {
+            let store = RemoveOnDrop::new(if honours_color {
+                "ack-latency-success"
+            } else {
+                "ack-latency-recovery"
+            });
+            let fixture = ReadbackFixture::new(honours_color, Some(store.0.clone()));
+            for tick in 0..3 {
+                *fixture.clock.lock().unwrap() =
+                    fixture.started_at + Duration::from_secs(tick * 10);
+                fixture.submit_with_ack_latency(
+                    LightingCommand::with_transition(30, 2700 + tick as u16 * 100, 10_000),
+                    Duration::from_millis(200),
+                );
+                fixture.run_readbacks_until_idle();
+                let expected_reads = if honours_color { tick.min(1) } else { tick };
+                assert_eq!(
+                    fixture.bulb.reads.lock().unwrap().len(),
+                    expected_reads as usize
+                );
+                assert_eq!(fixture.needs_audition(), !honours_color && tick == 1);
+                if !honours_color && tick > 0 {
+                    let persisted: serde_json::Value =
+                        serde_json::from_slice(&std::fs::read(&store.0).unwrap()).unwrap();
+                    assert_eq!(
+                        persisted["devices"]["matter-42"]["needs_audition"]
+                            .as_bool()
+                            .unwrap_or(false),
+                        tick == 1
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn readback_near_settlement_slack_is_proportional_to_transition() {
+        for (duration, submitted_at, reads) in [
+            (10_000, 9_700, 0),
+            (10_000, 9_900, 1),
+            (500, 480, 0),
+            (500, 490, 1),
+        ] {
+            let fixture = ReadbackFixture::new(true, None);
+            fixture.submit(LightingCommand::with_transition(30, 2700, duration));
+            fixture.run_readbacks_until_idle();
+            *fixture.clock.lock().unwrap() += Duration::from_millis(submitted_at);
+            fixture.submit(LightingCommand::with_transition(30, 2800, duration));
+            fixture.run_readbacks_until_idle();
+            assert_eq!(
+                fixture.bulb.reads.lock().unwrap().len(),
+                reads,
+                "{submitted_at}/{duration}"
+            );
+            assert!(!fixture.needs_audition());
+        }
+    }
+
+    #[test]
+    fn readback_superseded_verification_is_throttled_when_clean() {
+        let fixture = ReadbackFixture::new(true, None);
+        for tick in 0..=62 {
+            *fixture.clock.lock().unwrap() = fixture.started_at + Duration::from_secs(tick * 10);
+            fixture.submit(LightingCommand::with_transition(30, 2700, 10_000));
+            fixture.run_readbacks_until_idle();
+            let expected_reads = match tick {
+                0 => 0,
+                1..=60 => 1,
+                _ => 2,
+            };
+            assert_eq!(
+                fixture.bulb.reads.lock().unwrap().len(),
+                expected_reads,
+                "tick {tick}"
+            );
+            assert!(!fixture.needs_audition());
+        }
+    }
+
+    #[test]
+    fn readback_warning_bypasses_throttle_until_recovery() {
+        let fixture = ReadbackFixture::new(true, None);
+        fixture.submit(LightingCommand::with_transition(30, 2700, 10_000));
+        fixture.run_readbacks_until_idle();
+        *fixture.clock.lock().unwrap() += Duration::from_secs(10);
+        fixture.submit(LightingCommand::with_transition(30, 2800, 10_000));
+        fixture.run_readbacks_until_idle();
+        assert_eq!(fixture.bulb.reads.lock().unwrap().len(), 1);
+        fixture
+            .controller
+            .hub_data
+            .needs_audition
+            .lock()
+            .unwrap()
+            .insert((42, 1));
+        *fixture.clock.lock().unwrap() += Duration::from_secs(10);
+        fixture.submit(LightingCommand::with_transition(30, 2900, 10_000));
+        fixture.run_readbacks_until_idle();
+        assert_eq!(
+            fixture.bulb.reads.lock().unwrap().len(),
+            2,
+            "a recent match cannot suppress warning recovery"
+        );
+        assert!(!fixture.needs_audition());
+        *fixture.clock.lock().unwrap() += Duration::from_secs(10);
+        fixture.submit(LightingCommand::with_transition(30, 3000, 10_000));
+        fixture.run_readbacks_until_idle();
+        assert_eq!(fixture.bulb.reads.lock().unwrap().len(), 2);
+
+        let fixture = ReadbackFixture::new(false, None);
+        for tick in 0..=5 {
+            *fixture.clock.lock().unwrap() = fixture.started_at + Duration::from_secs(tick * 10);
+            if tick <= 2 {
+                fixture.bulb.set_on_off(42, 1, false).unwrap();
+            }
+            fixture.submit(LightingCommand::with_transition(
+                30,
+                2700 + tick as u16 * 100,
+                10_000,
+            ));
+            fixture.run_readbacks_until_idle();
+            assert_eq!(
+                fixture.bulb.reads.lock().unwrap().len(),
+                tick.min(4) as usize
+            );
+            assert_eq!(fixture.needs_audition(), (1..=3).contains(&tick));
+        }
+    }
+
+    #[test]
+    fn readback_due_match_starts_throttle_and_due_mismatch_invalidates_it() {
+        for induce_mismatch in [false, true] {
+            let fixture = ReadbackFixture::new(false, None);
+            fixture.bulb.set_on_off(42, 1, true).unwrap();
+            fixture.submit(LightingCommand::new(30, 2700));
+            fixture.run_readbacks();
+            assert_eq!(fixture.bulb.reads.lock().unwrap().len(), 1);
+            if induce_mismatch {
+                fixture.bulb.set_on_off(42, 1, false).unwrap();
+                fixture.submit(LightingCommand::new(30, 6000));
+                fixture.run_readbacks();
+                assert!(fixture.needs_audition());
+                fixture
+                    .controller
+                    .hub_data
+                    .needs_audition
+                    .lock()
+                    .unwrap()
+                    .clear();
+            }
+            fixture.submit(LightingCommand::with_transition(30, 2700, 10_000));
+            fixture.run_readbacks_until_idle();
+            *fixture.clock.lock().unwrap() += Duration::from_secs(10);
+            fixture.submit(LightingCommand::with_transition(30, 2800, 10_000));
+            fixture.run_readbacks_until_idle();
+            assert_eq!(
+                fixture.bulb.reads.lock().unwrap().len(),
+                if induce_mismatch { 3 } else { 1 }
+            );
+            assert!(!fixture.needs_audition());
         }
     }
 
