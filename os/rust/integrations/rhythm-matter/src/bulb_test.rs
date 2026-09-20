@@ -2233,6 +2233,72 @@ mod tests {
     }
 
     #[test]
+    fn save_audition_with_color_switch_warning_applies_profile_and_survives_reload() {
+        use crate::transport::MatterCommandStep;
+        for warning in [
+            json!("color_mode_switch_requires_audition"),
+            json!({"other": "color_mode_switch_requires_audition"}),
+        ] {
+            let (state, hub_data, data_dir) = bulb_test_state();
+            let mut profile = crate::control_profile::MatterControlProfile::default();
+            profile.turn_on = crate::control_profile::MatterTurnOnStrategy::ExplicitOnFirst;
+            profile.source.turn_on = crate::control_profile::MatterProfileSource::Audition;
+            profile.supports_transition = false;
+            profile.source.supports_transition =
+                crate::control_profile::MatterProfileSource::Audition;
+            let result = crate::audition::save_audition_report(
+                &state,
+                &json!({
+                    "device_id": "matter-42",
+                    "inferred_quirks": ["needs_explicit_on", warning],
+                    "capability_hints": {"supports_transition": false},
+                    "control_profile": profile,
+                }),
+            )
+            .unwrap();
+            assert_eq!(result["applied_local"], true);
+            assert_eq!(
+                hub_data.device_profiles.lock().unwrap().get("matter-42"),
+                Some(&profile)
+            );
+            let restored = crate::local_quirks::load_overrides_for_state(&state);
+            assert_eq!(restored.control_profiles.get("matter-42"), Some(&profile));
+            assert_eq!(
+                restored.quirks.get("matter-42"),
+                Some(&vec![
+                    DeviceQuirk::NeedsExplicitOn,
+                    DeviceQuirk::Other("color_mode_switch_requires_audition".to_string()),
+                ])
+            );
+            let controller = crate::controller::MatterLightController::new(
+                hub_data.transport.get().unwrap().clone(),
+                hub_data.clone(),
+            );
+            let plans = controller
+                .turn_on_plans(
+                    &["matter-42".to_string()],
+                    &rhythm_core::lighting::LightingCommand::with_transition(30, 3000, 500),
+                )
+                .unwrap();
+            assert_eq!(
+                plans[0].steps,
+                vec![
+                    MatterCommandStep::SetOnOff { on: true },
+                    MatterCommandStep::SetColorTemperature {
+                        kelvin: 3000,
+                        transition_ms: None
+                    },
+                    MatterCommandStep::SetBrightness {
+                        level: 76,
+                        transition_ms: None
+                    },
+                ]
+            );
+            std::fs::remove_dir_all(data_dir).unwrap();
+        }
+    }
+
+    #[test]
     fn save_bulb_test_report_persists_and_applies_local_overrides() {
         let (state, hub_data, _data_dir) = bulb_test_state();
 

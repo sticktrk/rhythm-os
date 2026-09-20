@@ -369,6 +369,46 @@ void main() {
     expect(profile['source'], containsPair('color_route', 'try_with'));
   });
 
+  testWidgets(
+      'failed color switching saves a compatible warning with the profile',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(430, 1000));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final harness = _BulbAuditionHarness();
+    addTearDown(harness.dispose);
+    await harness.pump(tester, device);
+
+    for (final scenario in ['turn_on_from_off', 'color_to_white_and_back']) {
+      await selectStep(tester, scenario);
+      await tester.tap(find.text(scenario == 'turn_on_from_off'
+          ? 'Run real plan'
+          : 'Run mode changes'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('No'));
+      await tester.pumpAndSettle();
+    }
+    final save = find.text('Save Results');
+    await tester.scrollUntilVisible(
+      save,
+      500,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(save);
+    await tester.pumpAndSettle();
+
+    expect(harness.api.savedApplyLocal, isTrue);
+    expect(harness.api.savedReport!['inferred_quirks'], [
+      'needs_explicit_on',
+      {'other': 'color_mode_switch_requires_audition'},
+    ]);
+    expect(harness.api.savedReport!['control_profile']['turn_on'],
+        'explicit_on_first');
+    expect(
+        harness.api.savedReport!['visual_observations']
+            ['color_to_white_and_back']['worked'],
+        isFalse);
+  });
+
   testWidgets('Reported renders the authoritative 1500 ms readback',
       (tester) async {
     await tester.binding.setSurfaceSize(const Size(430, 1000));
