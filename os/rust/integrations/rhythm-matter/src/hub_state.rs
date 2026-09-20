@@ -30,6 +30,8 @@ pub(crate) struct MatterReadbackCoordinator {
     latest_command_ids: Arc<Mutex<HashMap<(u64, u16), u64>>>,
     sender: OnceLock<mpsc::Sender<ScheduledReadback>>,
     store_path: Option<PathBuf>,
+    #[cfg(test)]
+    clock: Option<Arc<Mutex<Instant>>>,
 }
 
 impl MatterReadbackCoordinator {
@@ -38,6 +40,8 @@ impl MatterReadbackCoordinator {
             latest_command_ids: Arc::new(Mutex::new(HashMap::new())),
             sender: OnceLock::new(),
             store_path,
+            #[cfg(test)]
+            clock: None,
         }
     }
 
@@ -78,13 +82,21 @@ impl MatterReadbackCoordinator {
         });
         if sender
             .send(ScheduledReadback {
-                due_at: Instant::now() + delay,
+                due_at: self.now() + delay,
                 plan,
             })
             .is_err()
         {
             log::warn!(target: "cmd", "Matter readback worker is unavailable");
         }
+    }
+
+    fn now(&self) -> Instant {
+        #[cfg(test)]
+        if let Some(clock) = &self.clock {
+            return *clock.lock().unwrap();
+        }
+        Instant::now()
     }
 
     fn store_path(&self) -> Option<&PathBuf> {
@@ -98,8 +110,30 @@ impl Default for MatterReadbackCoordinator {
     }
 }
 
+// Keep channel waiting and time at one boundary so tests can drive the actual
+// worker and authoritative readback with virtual time.
+trait ReadbackReceiver {
+    fn now(&self) -> Instant;
+    fn recv(&self) -> Result<ScheduledReadback, mpsc::RecvError>;
+    fn recv_timeout(&self, wait: Duration) -> Result<ScheduledReadback, mpsc::RecvTimeoutError>;
+}
+
+impl ReadbackReceiver for mpsc::Receiver<ScheduledReadback> {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn recv(&self) -> Result<ScheduledReadback, mpsc::RecvError> {
+        self.recv()
+    }
+
+    fn recv_timeout(&self, wait: Duration) -> Result<ScheduledReadback, mpsc::RecvTimeoutError> {
+        self.recv_timeout(wait)
+    }
+}
+
 fn readback_worker(
-    receiver: mpsc::Receiver<ScheduledReadback>,
+    receiver: impl ReadbackReceiver,
     transport: Arc<dyn MatterTransport>,
     latest_command_ids: Arc<Mutex<HashMap<(u64, u16), u64>>>,
     needs_audition: Arc<Mutex<HashSet<(u64, u16)>>>,
@@ -116,10 +150,26 @@ fn readback_worker(
         scheduled.sort_by_key(|request| request.due_at);
         let wait = scheduled[0]
             .due_at
-            .saturating_duration_since(Instant::now());
+            .saturating_duration_since(receiver.now());
         match receiver.recv_timeout(wait) {
             Ok(request) => {
-                scheduled.push(request);
+                // Long fades must not retain every superseded tick until its
+                // original deadline. Late acknowledgements cannot displace the
+                // latest plan for an endpoint.
+                scheduled.retain(|pending| {
+                    is_latest_command(
+                        &latest_command_ids,
+                        (pending.plan.node_id, pending.plan.endpoint),
+                        pending.plan.command_id,
+                    )
+                });
+                if is_latest_command(
+                    &latest_command_ids,
+                    (request.plan.node_id, request.plan.endpoint),
+                    request.plan.command_id,
+                ) {
+                    scheduled.push(request);
+                }
                 continue;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
@@ -155,6 +205,64 @@ fn readback_worker(
             store_path.as_ref(),
             key,
             mismatch.is_some(),
+        );
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct ManualReadbackReceiver {
+    receiver: mpsc::Receiver<ScheduledReadback>,
+    clock: Arc<Mutex<Instant>>,
+}
+
+#[cfg(test)]
+impl ReadbackReceiver for &ManualReadbackReceiver {
+    fn now(&self) -> Instant {
+        *self.clock.lock().unwrap()
+    }
+
+    fn recv(&self) -> Result<ScheduledReadback, mpsc::RecvError> {
+        self.receiver.try_recv().map_err(|_| mpsc::RecvError)
+    }
+
+    fn recv_timeout(&self, wait: Duration) -> Result<ScheduledReadback, mpsc::RecvTimeoutError> {
+        match self.receiver.try_recv() {
+            Ok(request) => Ok(request),
+            Err(_) => {
+                *self.clock.lock().unwrap() += wait;
+                Err(mpsc::RecvTimeoutError::Timeout)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+impl MatterReadbackCoordinator {
+    pub(crate) fn with_manual_clock(
+        clock: Arc<Mutex<Instant>>,
+        store_path: Option<PathBuf>,
+    ) -> (Self, ManualReadbackReceiver) {
+        let (sender, receiver) = mpsc::channel();
+        let coordinator = Self {
+            sender: OnceLock::from(sender),
+            clock: Some(clock.clone()),
+            ..Self::new(store_path)
+        };
+        (coordinator, ManualReadbackReceiver { receiver, clock })
+    }
+
+    pub(crate) fn run_scheduled(
+        &self,
+        receiver: &ManualReadbackReceiver,
+        transport: Arc<dyn MatterTransport>,
+        needs_audition: Arc<Mutex<HashSet<(u64, u16)>>>,
+    ) {
+        readback_worker(
+            receiver,
+            transport,
+            self.latest_command_ids.clone(),
+            needs_audition,
+            self.store_path.clone(),
         );
     }
 }

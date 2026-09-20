@@ -16,7 +16,9 @@
 //! `read_light_state` returns the same JSON shape as chipd so the runtime
 //! readback comparison runs unchanged against it.
 
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -62,11 +64,21 @@ impl Default for FakeBulbState {
     }
 }
 
+struct FakeTransition {
+    started_at: Instant,
+    duration: Duration,
+    from: u16,
+    to: u16,
+}
+
 pub(crate) struct FakeMatterBulb {
     node_id: u64,
     endpoint: u16,
     honours_execute_if_off: bool,
     state: Mutex<FakeBulbState>,
+    clock: Option<Arc<Mutex<Instant>>>,
+    transitions: Mutex<HashMap<&'static str, FakeTransition>>,
+    pub(crate) reads: Mutex<Vec<(Instant, FakeBulbState)>>,
 }
 
 impl FakeMatterBulb {
@@ -76,11 +88,57 @@ impl FakeMatterBulb {
             endpoint,
             honours_execute_if_off,
             state: Mutex::new(FakeBulbState::default()),
+            clock: None,
+            transitions: Mutex::new(HashMap::new()),
+            reads: Mutex::new(Vec::new()),
         }
     }
 
+    /// With a shared clock, attribute reports progress throughout each requested
+    /// transition. Existing plan-only fixtures keep their instantaneous behavior.
+    pub(crate) fn with_clock(mut self, clock: Arc<Mutex<Instant>>) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+
     pub(crate) fn state(&self) -> FakeBulbState {
-        self.state.lock().unwrap().clone()
+        let mut state = self.state.lock().unwrap().clone();
+        if let Some(clock) = &self.clock {
+            let now = *clock.lock().unwrap();
+            for (field, transition) in self.transitions.lock().unwrap().iter() {
+                let elapsed = now.saturating_duration_since(transition.started_at);
+                let fraction = (elapsed.as_secs_f64() / transition.duration.as_secs_f64()).min(1.0);
+                let value = (f64::from(transition.from)
+                    + (f64::from(transition.to) - f64::from(transition.from)) * fraction)
+                    .round() as u16;
+                match *field {
+                    "level" => state.level = value as u8,
+                    "mireds" => state.mireds = value,
+                    "x" => state.x = value,
+                    "y" => state.y = value,
+                    "hue" => state.hue = value as u8,
+                    "saturation" => state.saturation = value as u8,
+                    _ => unreachable!(),
+                }
+            }
+        }
+        state
+    }
+
+    fn transition(&self, field: &'static str, from: u16, to: u16, transition_ms: Option<u32>) {
+        let mut transitions = self.transitions.lock().unwrap();
+        transitions.remove(field);
+        if let (Some(clock), Some(duration)) = (&self.clock, transition_ms.filter(|ms| *ms > 0)) {
+            transitions.insert(
+                field,
+                FakeTransition {
+                    started_at: *clock.lock().unwrap(),
+                    duration: Duration::from_millis(u64::from(duration)),
+                    from,
+                    to,
+                },
+            );
+        }
     }
 
     fn check_target(&self, node_id: u64, endpoint: u16) -> Result<()> {
@@ -161,7 +219,7 @@ impl MatterTransport for FakeMatterBulb {
         node_id: u64,
         endpoint: u16,
         level: u8,
-        _transition_ms: Option<u32>,
+        transition_ms: Option<u32>,
     ) -> Result<()> {
         // The runtime's `SetBrightness` step is MoveToLevelWithOnOff.
         self.run_level_command(
@@ -170,7 +228,7 @@ impl MatterTransport for FakeMatterBulb {
             MatterLevelCommandVariant::MoveToLevelWithOnOff,
             level,
             None,
-            None,
+            transition_ms,
         )
     }
 
@@ -181,9 +239,10 @@ impl MatterTransport for FakeMatterBulb {
         command: MatterLevelCommandVariant,
         level_or_step: u8,
         step_mode: Option<MatterLevelStepMode>,
-        _transition_ms: Option<u32>,
+        transition_ms: Option<u32>,
     ) -> Result<()> {
         self.check_target(node_id, endpoint)?;
+        let current = self.state();
         let mut state = self.state.lock().unwrap();
         let with_on_off = matches!(
             command,
@@ -200,8 +259,8 @@ impl MatterTransport for FakeMatterBulb {
             | MatterLevelCommandVariant::MoveToLevelWithOnOff => level_or_step,
             MatterLevelCommandVariant::Step | MatterLevelCommandVariant::StepWithOnOff => {
                 match step_mode {
-                    Some(MatterLevelStepMode::Down) => state.level.saturating_sub(level_or_step),
-                    _ => state.level.saturating_add(level_or_step).min(254),
+                    Some(MatterLevelStepMode::Down) => current.level.saturating_sub(level_or_step),
+                    _ => current.level.saturating_add(level_or_step).min(254),
                 }
             }
         };
@@ -209,6 +268,12 @@ impl MatterTransport for FakeMatterBulb {
         if with_on_off {
             state.on = target > 0;
         }
+        self.transition(
+            "level",
+            u16::from(current.level),
+            u16::from(target),
+            transition_ms,
+        );
         Ok(())
     }
 
@@ -217,15 +282,17 @@ impl MatterTransport for FakeMatterBulb {
         node_id: u64,
         endpoint: u16,
         kelvin: u16,
-        _transition_ms: Option<u32>,
+        transition_ms: Option<u32>,
     ) -> Result<()> {
         self.check_target(node_id, endpoint)?;
+        let current = self.state();
         let mut state = self.state.lock().unwrap();
         if !self.colour_command_executes(&state) {
             return Ok(());
         }
         state.color_mode = FakeColorMode::ColorTemperature;
         state.mireds = (1_000_000 / u32::from(kelvin.max(1))) as u16;
+        self.transition("mireds", current.mireds, state.mireds, transition_ms);
         Ok(())
     }
 
@@ -235,9 +302,10 @@ impl MatterTransport for FakeMatterBulb {
         endpoint: u16,
         x: f32,
         y: f32,
-        _transition_ms: Option<u32>,
+        transition_ms: Option<u32>,
     ) -> Result<()> {
         self.check_target(node_id, endpoint)?;
+        let current = self.state();
         let mut state = self.state.lock().unwrap();
         if !self.colour_command_executes(&state) {
             return Ok(());
@@ -245,6 +313,8 @@ impl MatterTransport for FakeMatterBulb {
         state.color_mode = FakeColorMode::Xy;
         state.x = (x * 65_535.0).round() as u16;
         state.y = (y * 65_535.0).round() as u16;
+        self.transition("x", current.x, state.x, transition_ms);
+        self.transition("y", current.y, state.y, transition_ms);
         Ok(())
     }
 
@@ -254,9 +324,10 @@ impl MatterTransport for FakeMatterBulb {
         endpoint: u16,
         hue: u8,
         saturation: u8,
-        _transition_ms: Option<u32>,
+        transition_ms: Option<u32>,
     ) -> Result<()> {
         self.check_target(node_id, endpoint)?;
+        let current = self.state();
         let mut state = self.state.lock().unwrap();
         if !self.colour_command_executes(&state) {
             return Ok(());
@@ -264,6 +335,18 @@ impl MatterTransport for FakeMatterBulb {
         state.color_mode = FakeColorMode::HueSaturation;
         state.hue = hue;
         state.saturation = saturation;
+        self.transition(
+            "hue",
+            u16::from(current.hue),
+            u16::from(state.hue),
+            transition_ms,
+        );
+        self.transition(
+            "saturation",
+            u16::from(current.saturation),
+            u16::from(state.saturation),
+            transition_ms,
+        );
         Ok(())
     }
 
@@ -274,7 +357,13 @@ impl MatterTransport for FakeMatterBulb {
 
     fn read_light_state(&self, node_id: u64, endpoint: u16) -> Result<Value> {
         self.check_target(node_id, endpoint)?;
-        let state = self.state.lock().unwrap();
+        let state = self.state();
+        if let Some(clock) = &self.clock {
+            self.reads
+                .lock()
+                .unwrap()
+                .push((*clock.lock().unwrap(), state.clone()));
+        }
         Ok(json!({
             "onoff": read_value(state.on),
             "current_level": read_value(state.level),
