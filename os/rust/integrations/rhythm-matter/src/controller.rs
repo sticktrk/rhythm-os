@@ -1270,8 +1270,8 @@ pub(crate) fn schedule_turn_on_readback(
     // The shared coordinator emits `matter_command_ack_without_effect` and
     // persists the endpoint warning after its authoritative readback.
     // Command completion acknowledges execution, not the end of a physical
-    // fade. Never cap the requested transition; allow reports to catch up after
-    // its longest step, including native decisecond rounding.
+    // fade. Respect the wire maximum, then allow reports to catch up after
+    // the longest step, including native decisecond rounding.
     let transition_ms = plan
         .steps
         .iter()
@@ -1284,19 +1284,40 @@ pub(crate) fn schedule_turn_on_readback(
             MatterCommandStep::SetOnOff { .. } | MatterCommandStep::Identify { .. } => None,
         })
         .max()
+        .map(clusters::wire_transition_ms)
         .unwrap_or(0);
     readback.schedule(
         transport,
         plan,
         needs_audition,
-        Duration::from_millis(u64::from(transition_ms) + 500),
+        Duration::from_millis(u64::from(transition_ms)) + crate::hub_state::READBACK_GRACE,
     );
 }
 
-pub(crate) fn turn_on_readback_mismatch(
-    plan: &MatterEndpointCommandPlan,
-    reported: &serde_json::Value,
-) -> Option<&'static str> {
+struct ReadbackTarget {
+    field: &'static str,
+    value: u64,
+    tolerance: u64,
+    mismatch: &'static str,
+}
+
+impl ReadbackTarget {
+    fn reported(&self, reported: &serde_json::Value) -> Option<u64> {
+        if self.field == "onoff" {
+            reported_bool(reported, self.field).map(u64::from)
+        } else {
+            reported_u64(reported, self.field)
+        }
+    }
+
+    fn matches(&self, reported: &serde_json::Value) -> bool {
+        self.reported(reported)
+            .is_some_and(|value| value.abs_diff(self.value) <= self.tolerance)
+    }
+}
+
+fn readback_targets(plan: &MatterEndpointCommandPlan) -> Vec<ReadbackTarget> {
+    let mut targets = Vec::new();
     let requests_on = plan.steps.iter().rev().find_map(|step| match step {
         MatterCommandStep::SetOnOff { on } => Some(*on),
         MatterCommandStep::SetBrightness { .. } => Some(true),
@@ -1311,10 +1332,14 @@ pub(crate) fn turn_on_readback_mismatch(
         }
         _ => None,
     });
-    if requests_on == Some(true) && reported_bool(reported, "onoff") == Some(false) {
-        return Some("on_off");
+    if requests_on == Some(true) {
+        targets.push(ReadbackTarget {
+            field: "onoff",
+            value: 1,
+            tolerance: 0,
+            mismatch: "on_off",
+        });
     }
-
     let final_level = plan.steps.iter().rev().find_map(|step| match step {
         MatterCommandStep::SetBrightness { level, .. } => Some(*level),
         MatterCommandStep::RunLevel {
@@ -1326,57 +1351,99 @@ pub(crate) fn turn_on_readback_mismatch(
         } => Some(*level_or_step),
         _ => None,
     });
-    if let (Some(expected), Some(actual)) = (final_level, reported_u64(reported, "current_level")) {
-        if actual.abs_diff(u64::from(expected)) > 5 {
-            return Some("level");
-        }
+    if let Some(level) = final_level {
+        targets.push(ReadbackTarget {
+            field: "current_level",
+            value: u64::from(level),
+            tolerance: 5,
+            mismatch: "level",
+        });
     }
-
+    let mut color = |field, value, tolerance| {
+        targets.push(ReadbackTarget {
+            field,
+            value,
+            tolerance,
+            mismatch: "color",
+        })
+    };
     for step in plan.steps.iter().rev() {
         match step {
             MatterCommandStep::SetColorTemperature { kelvin, .. } if *kelvin > 0 => {
-                if let Some(actual) = reported_u64(reported, "color_temperature_mireds") {
-                    let expected = 1_000_000_u64 / u64::from(*kelvin);
-                    if actual.abs_diff(expected) > 10 {
-                        return Some("color");
-                    }
-                }
+                color(
+                    "color_temperature_mireds",
+                    1_000_000 / u64::from(*kelvin),
+                    10,
+                );
                 break;
             }
             MatterCommandStep::SetXy { x, y, .. } => {
-                let expected_x = (*x * 65_535.0).round() as u64;
-                let expected_y = (*y * 65_535.0).round() as u64;
-                if let (Some(actual_x), Some(actual_y)) = (
-                    reported_u64(reported, "current_x"),
-                    reported_u64(reported, "current_y"),
-                ) {
-                    if actual_x.abs_diff(expected_x) > 2_500
-                        || actual_y.abs_diff(expected_y) > 2_500
-                    {
-                        return Some("color");
-                    }
-                }
+                color("current_x", (*x * 65_535.0).round() as u64, 2_500);
+                color("current_y", (*y * 65_535.0).round() as u64, 2_500);
                 break;
             }
             MatterCommandStep::SetHueSaturation {
                 hue, saturation, ..
             } => {
-                if let (Some(actual_hue), Some(actual_saturation)) = (
-                    reported_u64(reported, "current_hue"),
-                    reported_u64(reported, "current_saturation"),
-                ) {
-                    if actual_hue.abs_diff(u64::from(*hue)) > 5
-                        || actual_saturation.abs_diff(u64::from(*saturation)) > 5
-                    {
-                        return Some("color");
-                    }
-                }
+                color("current_hue", u64::from(*hue), 5);
+                color("current_saturation", u64::from(*saturation), 5);
                 break;
             }
             _ => {}
         }
     }
-    None
+    targets
+}
+
+pub(crate) fn turn_on_readback_mismatch(
+    plan: &MatterEndpointCommandPlan,
+    reported: &serde_json::Value,
+) -> Option<&'static str> {
+    readback_targets(plan).into_iter().find_map(|target| {
+        target
+            .reported(reported)
+            .filter(|actual| actual.abs_diff(target.value) > target.tolerance)
+            .map(|_| target.mismatch)
+    })
+}
+
+pub(crate) enum SupersededReadbackResult {
+    Matched,
+    Mismatch(&'static str),
+    Inconclusive,
+}
+
+pub(crate) fn superseded_readback_result(
+    old: &MatterEndpointCommandPlan,
+    next: &MatterEndpointCommandPlan,
+    reported: &serde_json::Value,
+) -> SupersededReadbackResult {
+    let old_targets = readback_targets(old);
+    let next_targets = readback_targets(next);
+    // Missing attributes do not prove that the finished fade reached its target.
+    if !old_targets.is_empty() && old_targets.iter().all(|target| target.matches(reported)) {
+        return SupersededReadbackResult::Matched;
+    }
+    for old in &old_targets {
+        let Some(next) = next_targets.iter().find(|next| next.field == old.field) else {
+            continue;
+        };
+        // Hue can wrap in either direction. A changed hue (or a changed color
+        // route with no common attributes) gives no safe mismatch evidence.
+        if old.field == "current_hue" && old.value != next.value {
+            continue;
+        }
+        let Some(actual) = old.reported(reported) else {
+            continue;
+        };
+        let tolerance = old.tolerance.max(next.tolerance);
+        if actual < old.value.min(next.value).saturating_sub(tolerance)
+            || actual > old.value.max(next.value).saturating_add(tolerance)
+        {
+            return SupersededReadbackResult::Mismatch(old.mismatch);
+        }
+    }
+    SupersededReadbackResult::Inconclusive
 }
 
 fn reported_bool(reported: &serde_json::Value, field: &str) -> Option<bool> {
@@ -1720,6 +1787,23 @@ mod tests {
         }
     }
 
+    struct RemoveOnDrop(std::path::PathBuf);
+
+    impl RemoveOnDrop {
+        fn new(name: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("rhythm-{name}-{}.json", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            Self(path)
+        }
+    }
+
+    impl Drop for RemoveOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
     struct ReadbackFixture {
         controller: MatterLightController,
         bulb: Arc<crate::fake_bulb::FakeMatterBulb>,
@@ -1784,10 +1868,19 @@ mod tests {
         }
 
         fn run_readbacks(&self) {
+            self.pump_readbacks(true);
+        }
+
+        fn run_readbacks_until_idle(&self) {
+            self.pump_readbacks(false);
+        }
+
+        fn pump_readbacks(&self, advance_time: bool) {
             self.controller.hub_data.readback.run_scheduled(
                 &self.receiver,
                 self.bulb.clone(),
                 self.controller.hub_data.needs_audition.clone(),
+                advance_time,
             );
         }
 
@@ -1821,13 +1914,17 @@ mod tests {
 
     #[test]
     fn readback_waits_for_transitioning_bulb_before_deciding_audition() {
-        for duration in [
-            None,
-            Some(0),
-            Some(400),
-            Some(10_000),
-            Some(30_000),
-            Some(u32::MAX),
+        for (duration, wire_ms) in [
+            (None, 0),
+            (Some(0), 0),
+            (Some(1), 100),
+            (Some(101), 200),
+            (Some(400), 400),
+            (Some(10_000), 10_000),
+            (Some(30_000), 30_000),
+            (Some(6_553_500), 6_553_500),
+            (Some(6_553_501), 6_553_500),
+            (Some(u32::MAX), 6_553_500),
         ] {
             let fixture = ReadbackFixture::new(true, None);
             let mut command = LightingCommand::new(30, 2700);
@@ -1854,7 +1951,7 @@ mod tests {
             );
             assert_eq!(
                 reads[0].0.duration_since(fixture.started_at),
-                Duration::from_millis(u64::from(duration.unwrap_or(0)) + 500),
+                Duration::from_millis(wire_ms + 500),
                 "{duration:?}: keep the post-transition reporting grace period",
             );
         }
@@ -1929,10 +2026,8 @@ mod tests {
 
     #[test]
     fn readback_persists_post_settlement_mismatch_and_clears_it_after_recovery() {
-        let path = std::env::temp_dir().join(format!(
-            "rhythm-readback-transition-recovery-{}.json",
-            std::process::id(),
-        ));
+        let store = RemoveOnDrop::new("readback-transition-recovery");
+        let path = &store.0;
         let fixture = ReadbackFixture::new(false, Some(path.clone()));
         fixture.submit(LightingCommand::with_transition(30, 2700, 10_000));
         fixture.run_readbacks();
@@ -1946,7 +2041,7 @@ mod tests {
         assert!(reads[0].0 >= fixture.started_at + Duration::from_secs(10));
         drop(reads);
         let persisted: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         assert_eq!(persisted["devices"]["matter-42"]["needs_audition"], true);
 
         // Now on, this bulb accepts color commands. The next ordinary command
@@ -1955,9 +2050,8 @@ mod tests {
         fixture.run_readbacks();
         assert!(!fixture.needs_audition());
         let persisted: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         assert_ne!(persisted["devices"]["matter-42"]["needs_audition"], true);
-        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -1993,10 +2087,190 @@ mod tests {
                     reads[0].0 < fixture.started_at + Duration::from_secs(5),
                     "an older long fade must not delay the newer check"
                 );
-                assert!(
-                    *fixture.clock.lock().unwrap() < fixture.started_at + Duration::from_secs(5),
-                    "superseded fades must leave the pending queue"
+            }
+            assert!(
+                *fixture.clock.lock().unwrap() < fixture.started_at + Duration::from_secs(5),
+                "superseded fades must leave the pending queue"
+            );
+        }
+    }
+
+    #[test]
+    fn readback_back_to_back_fades_still_verify() {
+        for honours_color in [true, false] {
+            let store = RemoveOnDrop::new(if honours_color {
+                "continuous-fade-success"
+            } else {
+                "continuous-fade-failure"
+            });
+            let fixture = ReadbackFixture::new(honours_color, Some(store.0.clone()));
+            if honours_color {
+                fixture
+                    .controller
+                    .hub_data
+                    .needs_audition
+                    .lock()
+                    .unwrap()
+                    .insert((42, 1));
+                crate::local_quirks::save_needs_audition_at_path(&store.0, "matter-42", true)
+                    .unwrap();
+            }
+            fixture.submit(LightingCommand::with_transition(30, 2700, 10_000));
+            fixture.run_readbacks_until_idle();
+            assert!(fixture.bulb.reads.lock().unwrap().is_empty());
+
+            *fixture.clock.lock().unwrap() += Duration::from_secs(10);
+            fixture.submit(LightingCommand::with_transition(31, 2800, 10_000));
+            fixture.run_readbacks_until_idle();
+            assert_eq!(fixture.bulb.reads.lock().unwrap().len(), 1);
+            assert_eq!(fixture.needs_audition(), !honours_color);
+            let persisted: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&store.0).unwrap()).unwrap();
+            assert_eq!(
+                persisted["devices"]["matter-42"]["needs_audition"]
+                    .as_bool()
+                    .unwrap_or(false),
+                !honours_color
+            );
+
+            *fixture.clock.lock().unwrap() += Duration::from_secs(10);
+            fixture.submit(LightingCommand::with_transition(32, 2900, 10_000));
+            fixture.run_readbacks_until_idle();
+            assert_eq!(fixture.bulb.reads.lock().unwrap().len(), 2);
+            // The initially ignoring bulb is now on and executes the second
+            // fade; even a continuous schedule must clear its persisted warning.
+            assert!(!fixture.needs_audition());
+            let persisted: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&store.0).unwrap()).unwrap();
+            assert_ne!(persisted["devices"]["matter-42"]["needs_audition"], true);
+            assert_eq!(
+                *fixture.clock.lock().unwrap(),
+                fixture.started_at + Duration::from_secs(20)
+            );
+        }
+    }
+
+    #[test]
+    fn readback_superseded_fade_does_not_judge_intermediate_or_new_only_values() {
+        for warning in [false, true] {
+            for read_delay in [5, 10] {
+                let fixture = ReadbackFixture::new(true, None);
+                if warning {
+                    fixture
+                        .controller
+                        .hub_data
+                        .needs_audition
+                        .lock()
+                        .unwrap()
+                        .insert((42, 1));
+                }
+                fixture.submit(LightingCommand::with_transition(30, 2700, 10_000));
+                fixture.run_readbacks_until_idle();
+                *fixture.clock.lock().unwrap() += Duration::from_secs(10);
+                fixture.submit(LightingCommand::with_transition(80, 6000, 10_000));
+                // A busy worker can read after the new fade has moved far
+                // enough to mismatch both endpoints, or reached only the new one.
+                *fixture.clock.lock().unwrap() += Duration::from_secs(read_delay);
+                fixture.run_readbacks_until_idle();
+                let reads = fixture.bulb.reads.lock().unwrap();
+                assert_eq!(reads.len(), 1);
+                if read_delay == 5 {
+                    assert!(reads[0].1.mireds > 166 + 10 && reads[0].1.mireds < 370 - 10);
+                } else {
+                    assert_eq!(reads[0].1.mireds, 166);
+                }
+                assert_eq!(
+                    fixture.needs_audition(),
+                    warning,
+                    "an ambiguous old result must not change warning state"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn readback_early_supersession_stays_unverified_when_worker_is_delayed() {
+        let fixture = ReadbackFixture::new(true, None);
+        fixture.submit(LightingCommand::with_transition(30, 2700, 10_000));
+        fixture.run_readbacks_until_idle();
+        *fixture.clock.lock().unwrap() += Duration::from_secs(3);
+        fixture.submit(LightingCommand::with_transition(40, 3000, 20_000));
+        *fixture.clock.lock().unwrap() += Duration::from_secs(9);
+        fixture.run_readbacks_until_idle();
+        assert!(
+            fixture.bulb.reads.lock().unwrap().is_empty(),
+            "age at submission determines settlement, not age when the worker receives it"
+        );
+        assert!(!fixture.needs_audition());
+    }
+
+    #[test]
+    fn readback_submission_without_acknowledgement_prunes_pending_fade() {
+        let fixture = ReadbackFixture::new(true, None);
+        fixture.submit(LightingCommand::with_transition(30, 2700, 10_000));
+        fixture.run_readbacks_until_idle();
+        *fixture.clock.lock().unwrap() += Duration::from_secs(3);
+        let pending = fixture
+            .controller
+            .turn_on_plans(
+                &["matter-42".to_string()],
+                &LightingCommand::with_transition(40, 3000, 20_000),
+            )
+            .unwrap();
+        // Both failed submission and missing terminal outcome stop here: no
+        // Schedule message will arrive to trigger cleanup.
+        fixture
+            .controller
+            .hub_data
+            .readback
+            .record_submitted(&pending);
+        fixture.run_readbacks();
+        assert!(fixture.bulb.reads.lock().unwrap().is_empty());
+        assert_eq!(
+            *fixture.clock.lock().unwrap(),
+            fixture.started_at + Duration::from_secs(3)
+        );
+    }
+
+    #[test]
+    fn readback_superseded_fade_preserves_warning_on_read_failure_or_new_off() {
+        for warning in [false, true] {
+            for turn_off_during_read in [false, true] {
+                let fixture = ReadbackFixture::new(false, None);
+                if warning {
+                    fixture
+                        .controller
+                        .hub_data
+                        .needs_audition
+                        .lock()
+                        .unwrap()
+                        .insert((42, 1));
+                }
+                fixture.submit(LightingCommand::with_transition(30, 2700, 10_000));
+                fixture.run_readbacks_until_idle();
+                *fixture.clock.lock().unwrap() += Duration::from_secs(10);
+                fixture.submit(LightingCommand::with_transition(31, 2800, 10_000));
+                if turn_off_during_read {
+                    let hub_data = fixture.controller.hub_data.clone();
+                    let bulb = fixture.bulb.clone();
+                    let command_id = fixture.controller.next_command_id();
+                    *fixture.bulb.read_hook.lock().unwrap() = Some(Box::new(move || {
+                        hub_data
+                            .readback
+                            .record_submitted(&[MatterEndpointCommandPlan {
+                                command_id,
+                                node_id: 42,
+                                endpoint: 1,
+                                steps: vec![MatterCommandStep::SetOnOff { on: false }],
+                                inter_step_delay_ms: None,
+                            }]);
+                        bulb.set_on_off(42, 1, false).unwrap();
+                    }));
+                } else {
+                    fixture.bulb.fail_reads.store(true, Ordering::Relaxed);
+                }
+                fixture.run_readbacks_until_idle();
+                assert_eq!(fixture.needs_audition(), warning);
             }
         }
     }

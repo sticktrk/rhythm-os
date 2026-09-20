@@ -484,10 +484,20 @@ void AppendNullableReadObject(std::ostringstream & json, const char * name, CHIP
     json << '}';
 }
 
-uint16_t MillisecondsToTenths(uint32_t transitionMs)
+constexpr uint16_t MillisecondsToTenths(uint32_t transitionMs)
 {
-    return static_cast<uint16_t>(std::min<uint32_t>((transitionMs + 99) / 100, UINT16_MAX));
+    // Widen before rounding so an oversized duration clamps instead of wrapping
+    // to an immediate transition near UINT32_MAX.
+    return static_cast<uint16_t>(std::min<uint64_t>((uint64_t{ transitionMs } + 99) / 100, UINT16_MAX));
 }
+
+static_assert(MillisecondsToTenths(0) == 0);
+static_assert(MillisecondsToTenths(1) == 1);
+static_assert(MillisecondsToTenths(100) == 1);
+static_assert(MillisecondsToTenths(101) == 2);
+static_assert(MillisecondsToTenths(6553500) == UINT16_MAX);
+static_assert(MillisecondsToTenths(6553501) == UINT16_MAX);
+static_assert(MillisecondsToTenths(UINT32_MAX) == UINT16_MAX);
 
 uint16_t KelvinToMireds(uint16_t kelvin)
 {

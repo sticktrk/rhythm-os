@@ -1,5 +1,13 @@
 //! Small Matter lighting helpers shared by the typed controller paths.
 
+/// Matter TransitionTime is a u16 in deciseconds; chipd clamps to this limit.
+pub(crate) const MAX_WIRE_TRANSITION_MS: u32 = u16::MAX as u32 * 100;
+
+/// Match chipd's round-up to deciseconds without overflowing at u32::MAX.
+pub(crate) fn wire_transition_ms(requested_ms: u32) -> u32 {
+    requested_ms.min(MAX_WIRE_TRANSITION_MS).div_ceil(100) * 100
+}
+
 /// On/Off cluster ID.
 pub const CLUSTER_ON_OFF: u16 = 0x0006;
 /// On/Off cluster ID as carried in attribute reports.

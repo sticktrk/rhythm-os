@@ -17,6 +17,7 @@
 //! readback comparison runs unchanged against it.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -79,6 +80,8 @@ pub(crate) struct FakeMatterBulb {
     clock: Option<Arc<Mutex<Instant>>>,
     transitions: Mutex<HashMap<&'static str, FakeTransition>>,
     pub(crate) reads: Mutex<Vec<(Instant, FakeBulbState)>>,
+    pub(crate) fail_reads: AtomicBool,
+    pub(crate) read_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl FakeMatterBulb {
@@ -91,6 +94,8 @@ impl FakeMatterBulb {
             clock: None,
             transitions: Mutex::new(HashMap::new()),
             reads: Mutex::new(Vec::new()),
+            fail_reads: AtomicBool::new(false),
+            read_hook: Mutex::new(None),
         }
     }
 
@@ -133,7 +138,9 @@ impl FakeMatterBulb {
                 field,
                 FakeTransition {
                     started_at: *clock.lock().unwrap(),
-                    duration: Duration::from_millis(u64::from(duration)),
+                    duration: Duration::from_millis(u64::from(
+                        crate::clusters::wire_transition_ms(duration),
+                    )),
                     from,
                     to,
                 },
@@ -357,6 +364,14 @@ impl MatterTransport for FakeMatterBulb {
 
     fn read_light_state(&self, node_id: u64, endpoint: u16) -> Result<Value> {
         self.check_target(node_id, endpoint)?;
+        let hook = self.read_hook.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        anyhow::ensure!(
+            !self.fail_reads.load(Ordering::Relaxed),
+            "synthetic read failure"
+        );
         let state = self.state();
         if let Some(clock) = &self.clock {
             self.reads
