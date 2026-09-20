@@ -17559,6 +17559,24 @@ pub(crate) fn ensure_runtime_room_exists(
 /// after topology/manual mutations so integrations that discover devices
 /// without rooms do not depend on incidental room bootstrap paths.
 pub fn reconcile_runtime_from_state(state: &SharedState) -> Result<()> {
+    reconcile_runtime_from_state_with_group_sync(state, GroupSync::Immediate)
+}
+
+/// Whether a runtime reconciliation schedules the external group projection
+/// itself or leaves it to a caller batching several reconciliations.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum GroupSync {
+    Immediate,
+    Deferred,
+}
+
+/// Bulk discovery updates the local runtime after each hub, then requests one
+/// external group projection after the complete pass. Other callers retain
+/// the normal immediate scheduling through `reconcile_runtime_from_state`.
+pub(crate) fn reconcile_runtime_from_state_with_group_sync(
+    state: &SharedState,
+    group_sync: GroupSync,
+) -> Result<()> {
     let (has_any_hub, has_runtime_initializer, rooms, nodes) = {
         let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         let rooms = s
@@ -17688,7 +17706,9 @@ pub fn reconcile_runtime_from_state(state: &SharedState) -> Result<()> {
     }
 
     rebuild_composite_routing(state);
-    schedule_topology_group_sync_for_integrations(state);
+    if group_sync == GroupSync::Immediate {
+        schedule_topology_group_sync_for_integrations(state);
+    }
     apply_pending_mode_outputs_if_ready(state);
 
     Ok(())
@@ -17744,7 +17764,7 @@ fn run_topology_group_sync_for_integrations(state: &SharedState) {
     }
 }
 
-fn schedule_topology_group_sync_for_integrations(state: &SharedState) {
+pub(crate) fn schedule_topology_group_sync_for_integrations(state: &SharedState) {
     let should_spawn = {
         let Ok(mut state) = state.lock() else {
             return;
@@ -21145,6 +21165,219 @@ mod tests {
                 "topology group sync worker did not become idle within 2 seconds"
             );
             std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    mod bulk_hub_refresh {
+        use super::*;
+
+        struct RefreshDiscovery {
+            room: &'static str,
+            fail: Arc<AtomicBool>,
+        }
+
+        impl HubDiscovery for RefreshDiscovery {
+            fn discover_rooms(&self) -> Result<Vec<crate::discovery::DiscoveredRoom>> {
+                anyhow::ensure!(!self.fail.load(Ordering::SeqCst), "discovery unavailable");
+                Ok(vec![crate::discovery::DiscoveredRoom {
+                    id: self.room.to_string(),
+                    name: self.room.to_string(),
+                    grouped_light_id: format!("{}-group", self.room),
+                    device_ids: Vec::new(),
+                }])
+            }
+
+            fn discover_devices(&self) -> Result<Vec<crate::discovery::DiscoveredDevice>> {
+                Ok(Vec::new())
+            }
+        }
+
+        fn exercise_refresh(fail_second_hub: bool, fail_authority: bool) {
+            let (state, runtime, first_key) = setup_state_with_empty_registry();
+            let second_key = HubKey::new(HubType::new("other"), "second");
+            let fail = Arc::new(AtomicBool::new(fail_second_hub));
+            let projections = Arc::new(Mutex::new(Vec::new()));
+            let authority_calls = Arc::new(AtomicUsize::new(0));
+            let bulk_in_progress = Arc::new(AtomicBool::new(true));
+            {
+                let mut app = state.lock().unwrap();
+                app.hubs.get_mut(&first_key).unwrap().discovery = Some(Arc::new(RefreshDiscovery {
+                    room: "First room",
+                    fail: Arc::new(AtomicBool::new(false)),
+                }));
+                app.hubs.insert(
+                    second_key.clone(),
+                    ActiveHub {
+                        hub_type: second_key.hub_type.clone(),
+                        hub_key: second_key.clone(),
+                        runtime: None,
+                        hub_data: Box::new(()),
+                        registry: Some(Arc::new(Mutex::new(
+                            crate::registry::HubDeviceRegistry::new(),
+                        ))),
+                        discovery: Some(Arc::new(RefreshDiscovery {
+                            room: "Second room",
+                            fail: fail.clone(),
+                        })),
+                        shutdown: Default::default(),
+                    },
+                );
+                let projection_results = projections.clone();
+                app.sync_topology_groups_fn = Some(Arc::new(move |state| {
+                    let mut names = state
+                        .lock()
+                        .unwrap()
+                        .topology
+                        .rooms()
+                        .map(|room| room.name.clone())
+                        .collect::<Vec<_>>();
+                    names.sort();
+                    projection_results.lock().unwrap().push(names);
+                    Ok(())
+                }));
+                let authority_calls = authority_calls.clone();
+                let bulk_in_progress = bulk_in_progress.clone();
+                let projections = projections.clone();
+                let authority_failure_key = second_key.clone();
+                app.reconcile_external_controller_authority_fn =
+                    Some(Arc::new(move |state, hub_key| {
+                        let app = state.lock().unwrap();
+                        // Check the queued/running state as well as completed work,
+                        // so the regression does not depend on worker timing.
+                        if bulk_in_progress.load(Ordering::SeqCst) {
+                            assert!(
+                                !app.topology_group_sync_pending
+                                    && !app.topology_group_sync_in_progress,
+                                "bulk discovery must not queue a bridge-wide pass after each hub"
+                            );
+                            assert!(
+                                projections.lock().unwrap().is_empty(),
+                                "bulk discovery must not run a bridge-wide pass before all hubs finish"
+                            );
+                        }
+                        let transaction = app.external_topology_transaction_lock.clone();
+                        drop(app);
+                        let _guard = transaction
+                            .try_lock()
+                            .expect("authority must run outside the discovery transaction");
+                        authority_calls.fetch_add(1, Ordering::SeqCst);
+                        anyhow::ensure!(
+                            !fail_authority
+                                || !bulk_in_progress.load(Ordering::SeqCst)
+                                || hub_key != &authority_failure_key,
+                            "authority reconciliation unavailable"
+                        );
+                        Ok(())
+                    }));
+            }
+
+            let report = crate::room_sync::sync_all_hubs(&state).unwrap();
+            bulk_in_progress.store(false, Ordering::SeqCst);
+            wait_for_topology_group_sync_idle(&state);
+            let expected_rooms = if fail_second_hub {
+                vec!["First room"]
+            } else {
+                vec!["First room", "Second room"]
+            };
+            let expected_authority_calls = expected_rooms.len();
+            assert_eq!(
+                report.rooms_added,
+                if fail_second_hub || fail_authority {
+                    1
+                } else {
+                    2
+                }
+            );
+            assert_eq!(
+                authority_calls.load(Ordering::SeqCst),
+                expected_authority_calls
+            );
+            assert_eq!(
+                runtime.engine_all_room_snapshots().len(),
+                expected_rooms.len()
+            );
+            assert_eq!(*projections.lock().unwrap(), vec![expected_rooms]);
+
+            // A later standalone refresh must still publish its groups, also
+            // recovering the hub whose discovery failed during the bulk pass.
+            fail.store(false, Ordering::SeqCst);
+            crate::room_sync::sync_from_hub_for_key(&state, &second_key, true).unwrap();
+            wait_for_topology_group_sync_idle(&state);
+            let projections = projections.lock().unwrap();
+            assert_eq!(projections.len(), 2);
+            assert_eq!(projections[1], vec!["First room", "Second room"]);
+            assert_eq!(runtime.engine_all_room_snapshots().len(), 2);
+            assert_eq!(
+                authority_calls.load(Ordering::SeqCst),
+                expected_authority_calls + 1
+            );
+        }
+
+        #[test]
+        fn projects_all_hubs_once_after_local_refreshes() {
+            exercise_refresh(false, false);
+        }
+
+        #[test]
+        fn projects_successful_hubs_after_discovery_failure_and_recovers() {
+            exercise_refresh(true, false);
+        }
+
+        #[test]
+        fn projects_local_updates_even_when_authority_reconciliation_fails() {
+            exercise_refresh(false, true);
+        }
+
+        /// A bulk refresh in which no hub reached local reconciliation must not
+        /// request a projection: it would only contend for the bridge and, on
+        /// failure, fence grouped authority that the refresh never touched.
+        fn exercise_refresh_without_local_updates(recovery_required: bool) {
+            let (state, _runtime, hub_key) = setup_state_with_empty_registry();
+            let fail = Arc::new(AtomicBool::new(!recovery_required));
+            let projections = Arc::new(AtomicUsize::new(0));
+            {
+                let mut app = state.lock().unwrap();
+                app.hubs.get_mut(&hub_key).unwrap().discovery = Some(Arc::new(RefreshDiscovery {
+                    room: "First room",
+                    fail: fail.clone(),
+                }));
+                app.authority_state_recovery_required = recovery_required;
+                let projections = projections.clone();
+                app.sync_topology_groups_fn = Some(Arc::new(move |_| {
+                    projections.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }));
+            }
+
+            let report = crate::room_sync::sync_all_hubs(&state).unwrap();
+            {
+                let app = state.lock().unwrap();
+                assert!(
+                    !app.topology_group_sync_pending && !app.topology_group_sync_in_progress,
+                    "a refresh that applied nothing must not queue a bridge-wide pass"
+                );
+            }
+            wait_for_topology_group_sync_idle(&state);
+            assert_eq!(report.rooms_added, 0);
+            assert_eq!(projections.load(Ordering::SeqCst), 0);
+
+            // The next refresh that does apply local updates publishes them.
+            fail.store(false, Ordering::SeqCst);
+            state.lock().unwrap().authority_state_recovery_required = false;
+            let report = crate::room_sync::sync_all_hubs(&state).unwrap();
+            wait_for_topology_group_sync_idle(&state);
+            assert_eq!(report.rooms_added, 1);
+            assert_eq!(projections.load(Ordering::SeqCst), 1);
+        }
+
+        #[test]
+        fn skips_projection_when_every_hub_fails_discovery() {
+            exercise_refresh_without_local_updates(false);
+        }
+
+        #[test]
+        fn skips_projection_while_authority_recovery_is_required() {
+            exercise_refresh_without_local_updates(true);
         }
     }
 
