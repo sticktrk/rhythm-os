@@ -2240,12 +2240,16 @@ mod tests {
             json!({"other": "color_mode_switch_requires_audition"}),
         ] {
             let (state, hub_data, data_dir) = bulb_test_state();
-            let mut profile = crate::control_profile::MatterControlProfile::default();
-            profile.turn_on = crate::control_profile::MatterTurnOnStrategy::ExplicitOnFirst;
-            profile.source.turn_on = crate::control_profile::MatterProfileSource::Audition;
-            profile.supports_transition = false;
-            profile.source.supports_transition =
-                crate::control_profile::MatterProfileSource::Audition;
+            let profile = crate::control_profile::MatterControlProfile {
+                turn_on: crate::control_profile::MatterTurnOnStrategy::ExplicitOnFirst,
+                supports_transition: false,
+                source: crate::control_profile::MatterControlProfileSources {
+                    turn_on: crate::control_profile::MatterProfileSource::Audition,
+                    supports_transition: crate::control_profile::MatterProfileSource::Audition,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
             let result = crate::audition::save_audition_report(
                 &state,
                 &json!({
