@@ -56,6 +56,41 @@ void main() {
     }
   });
 
+  testWidgets('payload input fits a narrow screen with enlarged text',
+      (tester) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context)
+              .copyWith(textScaler: const TextScaler.linear(1.3)),
+          child: child!,
+        ),
+        home: const MatterDeviceAddScreen(
+          endpoint: HubEndpoint(host: '127.0.0.1', port: 0),
+          addMethod: MatterAddMethod.automatic,
+        ),
+      ),
+    );
+
+    expect(find.text('AWAITING INPUT'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    await tester.enterText(find.byType(TextField), 'invalid');
+    await tester.pump();
+    expect(find.text('UNVERIFIED'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    await tester.enterText(find.byType(TextField), '34970112332');
+    await tester.pump();
+    expect(find.text('READY'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('ignores duplicate transmit taps while request is in flight',
       (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.linux;

@@ -1549,6 +1549,7 @@ class _PayloadConsole extends StatelessWidget {
               ),
             ),
             child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 Container(
                   width: 5,
@@ -1559,26 +1560,37 @@ class _PayloadConsole extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(width: 8),
-                Text(
-                  'PAYLOAD · MT://',
-                  style: TextStyle(
-                    color:
-                        CelestialColors.textSecondary.withValues(alpha: 0.75),
-                    fontSize: 10.5,
-                    fontFamily: 'monospace',
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 1.5,
+                Flexible(
+                  child: Text(
+                    'PAYLOAD · MT://',
+                    maxLines: 1,
+                    softWrap: false,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color:
+                          CelestialColors.textSecondary.withValues(alpha: 0.75),
+                      fontSize: 10.5,
+                      fontFamily: 'monospace',
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 1.5,
+                    ),
                   ),
                 ),
-                const Spacer(),
-                Text(
-                  statusLabel,
-                  style: TextStyle(
-                    color: statusColor,
-                    fontSize: 10,
-                    fontFamily: 'monospace',
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 1.5,
+                const SizedBox(width: 8),
+                Flexible(
+                  child: Text(
+                    statusLabel,
+                    maxLines: 1,
+                    softWrap: false,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.end,
+                    style: TextStyle(
+                      color: statusColor,
+                      fontSize: 10,
+                      fontFamily: 'monospace',
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 1.5,
+                    ),
                   ),
                 ),
               ],
