@@ -1038,6 +1038,15 @@ class AnalyticsService {
     });
   }
 
+  /// Network evidence stays local; only entry and bounded outcomes are captured.
+  Future<void> logDeviceNetworkOpened() => logEvent('device_network_opened');
+
+  Future<void> logDeviceNetworkRefreshCompleted({required String outcome}) =>
+      logEvent('device_network_refresh_completed', {'outcome': outcome});
+
+  Future<void> logDeviceNetworkCopyCompleted({required String outcome}) =>
+      logEvent('device_network_copy_completed', {'outcome': outcome});
+
   /// Track the terminal result of a user-requested physical bulb identify.
   Future<void> logBulbIdentifyCompleted({
     required String source,

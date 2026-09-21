@@ -68,7 +68,18 @@ fn is_false(value: &bool) -> bool {
 }
 
 pub fn quirks_from_value(value: &serde_json::Value) -> Result<Vec<DeviceQuirk>> {
-    serde_json::from_value(value.clone()).context("invalid quirk list")
+    let mut value = value.clone();
+    // Earlier Bulb Audition clients sent this diagnostic as a unit variant.
+    // Preserve it as Other so replaying their reports can still apply the
+    // measured profile. Keep rejecting other unknown or malformed quirks.
+    if let Some(quirks) = value.as_array_mut() {
+        for quirk in quirks {
+            if quirk.as_str() == Some("color_mode_switch_requires_audition") {
+                *quirk = serde_json::json!({"other": "color_mode_switch_requires_audition"});
+            }
+        }
+    }
+    serde_json::from_value(value).context("invalid quirk list")
 }
 
 pub fn quirks_to_value(quirks: &[DeviceQuirk]) -> serde_json::Value {
@@ -396,6 +407,30 @@ mod tests {
     use rhythm_devices::LightType;
     use rhythm_os::state::AppState;
     use serde_json::json;
+
+    #[test]
+    fn report_quirk_compatibility_preserves_validation_and_existing_variants() {
+        let expected = vec![
+            DeviceQuirk::NeedsExplicitOn,
+            DeviceQuirk::CommandThrottleMs(250),
+            DeviceQuirk::Other("future_diagnostic".to_string()),
+        ];
+        assert_eq!(
+            quirks_from_value(&quirks_to_value(&expected)).unwrap(),
+            expected
+        );
+        for invalid in [
+            json!(["unrecognized_quirk"]),
+            json!(["command_throttle_ms"]),
+            json!([{"command_throttle_ms": "250"}]),
+            json!([{"other": 42}]),
+            json!([{"color_mode_switch_requires_audition": true}]),
+            json!("color_mode_switch_requires_audition"),
+            json!([null]),
+        ] {
+            assert!(quirks_from_value(&invalid).is_err(), "{invalid}");
+        }
+    }
 
     #[test]
     fn capability_override_clamps_and_applies() {

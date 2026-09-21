@@ -330,18 +330,26 @@ impl MatterLightController {
             } else {
                 None
             };
+            // Level Control interprets a null transition as the device's
+            // OnOffTransitionTime, not an immediate change. A profile that
+            // disables fades must explicitly request zero on the wire.
+            let level_transition_ms = if caps.supports_transition {
+                adapted.transition_ms
+            } else {
+                Some(0)
+            };
             let level_step = adapted.brightness.map(|brightness| {
                 let level = clusters::brightness_to_level(brightness);
                 match profile.level_command {
                     MatterLevelCommand::MoveToLevelWithOnOff => MatterCommandStep::SetBrightness {
                         level,
-                        transition_ms: adapted.transition_ms,
+                        transition_ms: level_transition_ms,
                     },
                     MatterLevelCommand::MoveToLevel => MatterCommandStep::RunLevel {
                         command: crate::transport::MatterLevelCommandVariant::MoveToLevel,
                         level_or_step: level,
                         step_mode: None,
-                        transition_ms: adapted.transition_ms,
+                        transition_ms: level_transition_ms,
                     },
                     MatterLevelCommand::StepWithOnOff => {
                         let current_level = self
@@ -363,7 +371,7 @@ impl MatterLightController {
                             command: crate::transport::MatterLevelCommandVariant::StepWithOnOff,
                             level_or_step: step_size,
                             step_mode: Some(step_mode),
-                            transition_ms: adapted.transition_ms,
+                            transition_ms: level_transition_ms,
                         }
                     }
                 }
@@ -4427,6 +4435,51 @@ mod tests {
     }
 
     #[test]
+    fn no_fade_profile_uses_explicit_zero_for_each_level_command() {
+        let (controller, _, _) = make_controller();
+        for level_command in [
+            MatterLevelCommand::MoveToLevelWithOnOff,
+            MatterLevelCommand::MoveToLevel,
+            MatterLevelCommand::StepWithOnOff,
+        ] {
+            for supports_transition in [false, true] {
+                for requested_transition in [None, Some(1200)] {
+                    let profile = MatterControlProfile {
+                        level_command,
+                        supports_transition,
+                        source: crate::control_profile::MatterControlProfileSources {
+                            supports_transition: MatterProfileSource::Audition,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    };
+                    let mut command = LightingCommand::new(50, 3000);
+                    command.transition_ms = requested_transition;
+                    let plans = controller
+                        .audition_turn_on_plans(&["matter-42".to_string()], &command, &profile)
+                        .unwrap();
+                    let level_transition = plans[0]
+                        .steps
+                        .iter()
+                        .find_map(|step| match step {
+                            MatterCommandStep::SetBrightness { transition_ms, .. }
+                            | MatterCommandStep::RunLevel { transition_ms, .. } => {
+                                Some(*transition_ms)
+                            }
+                            _ => None,
+                        })
+                        .expect("a level command");
+                    assert_eq!(
+                        level_transition,
+                        if supports_transition { requested_transition } else { Some(0) },
+                        "level={level_command:?}, supports_transition={supports_transition}, requested={requested_transition:?}",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn safe_default_profile_does_not_override_cached_transition_capability() {
         let (controller, _, _) = make_controller();
         set_device_capabilities(
@@ -4452,8 +4505,8 @@ mod tests {
         assert_eq!(plans.len(), 1);
         assert!(plans[0].steps.iter().all(|step| match step {
             MatterCommandStep::SetBrightness { transition_ms, .. }
-            | MatterCommandStep::RunLevel { transition_ms, .. }
-            | MatterCommandStep::SetColorTemperature { transition_ms, .. }
+            | MatterCommandStep::RunLevel { transition_ms, .. } => *transition_ms == Some(0),
+            MatterCommandStep::SetColorTemperature { transition_ms, .. }
             | MatterCommandStep::SetXy { transition_ms, .. }
             | MatterCommandStep::SetHueSaturation { transition_ms, .. } => {
                 transition_ms.is_none()
