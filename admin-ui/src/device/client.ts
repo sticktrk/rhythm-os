@@ -1,6 +1,7 @@
 import { runDeviceAdminProxy } from '../api';
 import type {
   DeviceAdminMethod,
+  DeviceAdminProxyRequest,
   DeviceAdminProxyResponse
 } from '../types';
 
@@ -75,10 +76,20 @@ export type DeviceRequestOptions = {
 };
 
 export class DeviceClient {
-  constructor(
-    private readonly accessToken: string,
-    readonly hubId: string
-  ) {}
+  readonly hubId?: string;
+  private readonly send: (request: DeviceAdminProxyRequest) => Promise<DeviceAdminProxyResponse>;
+
+  constructor(accessToken: string, hubId: string);
+  constructor(transport: (request: DeviceAdminProxyRequest) => Promise<DeviceAdminProxyResponse>);
+  constructor(accessTokenOrTransport: string | ((request: DeviceAdminProxyRequest) => Promise<DeviceAdminProxyResponse>), hubId?: string) {
+    this.hubId = hubId;
+    if (typeof accessTokenOrTransport === 'function') {
+      this.send = accessTokenOrTransport;
+    } else {
+      if (!hubId) throw new Error('A staff device client requires a hub identity.');
+      this.send = (request) => runDeviceAdminProxy(accessTokenOrTransport, hubId, request);
+    }
+  }
 
   async request<T = unknown>(
     method: DeviceAdminMethod,
@@ -94,7 +105,7 @@ export class DeviceClient {
     path: string,
     options: DeviceRequestOptions = {}
   ): Promise<DeviceAdminProxyResponse> {
-    const response = await runDeviceAdminProxy(this.accessToken, this.hubId, {
+    const response = await this.send({
       method,
       path,
       ...(options.query && Object.keys(options.query).length > 0

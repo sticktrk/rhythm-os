@@ -167,11 +167,20 @@ export async function runDeviceAdminProxy(
   hubId: string,
   request: DeviceAdminProxyRequest
 ): Promise<DeviceAdminProxyResponse> {
+  return runGuardedDeviceOperation(request, (operation) =>
+    runDeviceAdminProxyRaw(accessToken, hubId, operation));
+}
+
+/** Shared freshness/identity contract for staff and local transports. */
+export async function runGuardedDeviceOperation(
+  request: DeviceAdminProxyRequest,
+  send: (request: DeviceAdminProxyRequest) => Promise<DeviceAdminProxyResponse>
+): Promise<DeviceAdminProxyResponse> {
   let guardedRequest = request;
   if (isDeviceMutation(request)) {
     let serverInstanceId = request.expectedServerInstanceId;
     if (!serverInstanceId) {
-      const identity = await runDeviceAdminProxyRaw(accessToken, hubId, {
+      const identity = await send({
         method: 'GET',
         path: 'api/state'
       });
@@ -192,7 +201,7 @@ export async function runDeviceAdminProxy(
       normalizedDevicePath(request.path) === 'api/config' &&
       !resourcePrecondition
     ) {
-      const current = await runDeviceAdminProxyRaw(accessToken, hubId, {
+      const current = await send({
         method: 'GET',
         path: 'api/config',
         ...(request.query ? { query: request.query } : {})
@@ -217,7 +226,7 @@ export async function runDeviceAdminProxy(
     };
   }
 
-  return runDeviceAdminProxyRaw(accessToken, hubId, guardedRequest);
+  return send(guardedRequest);
 }
 
 function runDeviceAdminProxyRaw(

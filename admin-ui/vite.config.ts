@@ -14,6 +14,8 @@ export default defineConfig(({ mode }) => {
   });
 
   return {
+    base: mode === 'homeassistant' ? './' : '/',
+    build: mode === 'homeassistant' ? { outDir: 'dist-homeassistant', rolldownOptions: { input: 'local.html' } } : {},
     plugins: [react()],
     define: Object.fromEntries(
       Object.entries(browserEnv).map(([key, value]) => [

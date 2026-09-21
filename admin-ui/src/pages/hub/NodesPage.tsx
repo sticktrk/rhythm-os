@@ -48,6 +48,7 @@ import {
 } from '../../device/values';
 import { useDeviceCall } from '../../hooks/useDeviceCall';
 import { useDeviceClient } from '../../hooks/useDeviceClient';
+import { useLocalDevice } from '../../state/LocalDeviceContext';
 import { usePolling } from '../../hooks/usePolling';
 import { errorMessage } from '../../lib/format';
 import type { DeviceAdminProxyResponse } from '../../types';
@@ -261,6 +262,7 @@ export function NodeDetail({
   lightSettingsError: string | null;
 }) {
   const client = useDeviceClient();
+  const localDevice = useLocalDevice();
   const lightAddressable = isLightAddressableKind(node.kind);
 
   const [colorScope, setColorScope] = useState<'preview' | 'mood' | 'auto'>('auto');
@@ -341,7 +343,7 @@ export function NodeDetail({
         )}
       </SectionCard>
 
-      {isRoomKind(node.kind) ? (
+      {isRoomKind(node.kind) && !localDevice ? (
         <RoomRenameCard node={node} onWrite={onWrite} />
       ) : null}
 

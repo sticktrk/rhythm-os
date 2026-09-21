@@ -1,12 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:cryptography/cryptography.dart';
 import 'package:http/http.dart' as http;
 import 'package:rhythm_sdk/rhythm_sdk.dart'
     show RhythmDeviceType, RhythmDiagnosticsApi, RhythmHello;
 
 import 'models.dart';
+import 'device_json.dart';
 import 'supabase_rest_client.dart';
 import 'support_access_service.dart';
 
@@ -555,7 +555,7 @@ class DeviceProbeService {
             );
           }
           preconditionBodySha256 =
-              await _canonicalJsonSha256(current.success!.body);
+              await canonicalJsonSha256(current.success!.body);
           if (preconditionBodySha256 != resource.bodySha256) {
             return _ProxyJsonEndpointResult.preconditionFailed(
               'live resource hash did not match the reviewed proposal.',
@@ -635,7 +635,7 @@ class DeviceProbeService {
           requestId: request.requestId,
           verifiedServerInstanceId: verifiedServerInstanceId,
           bodySha256:
-              decoded == null ? null : await _canonicalJsonSha256(decoded),
+              decoded == null ? null : await canonicalJsonSha256(decoded),
           preconditionBodySha256: preconditionBodySha256,
         ),
       );
@@ -1309,27 +1309,6 @@ class _ProxyJsonEndpointResult {
   final bool authRequired;
   final bool preconditionFailed;
   final bool mutationDispatched;
-}
-
-Future<String> _canonicalJsonSha256(Object? value) async {
-  final canonical = _canonicalJsonValue(value);
-  final digest = await Sha256().hash(utf8.encode(jsonEncode(canonical)));
-  return digest.bytes
-      .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
-      .join();
-}
-
-Object? _canonicalJsonValue(Object? value) {
-  if (value is Map) {
-    final keys = value.keys.map((key) => key.toString()).toList()..sort();
-    return <String, Object?>{
-      for (final key in keys) key: _canonicalJsonValue(value[key]),
-    };
-  }
-  if (value is List) {
-    return value.map(_canonicalJsonValue).toList(growable: false);
-  }
-  return value;
 }
 
 class _JsonEndpointSuccess {

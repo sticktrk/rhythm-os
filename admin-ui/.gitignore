@@ -1,5 +1,6 @@
 node_modules/
 dist/
+dist-homeassistant/
 dist.new/
 dist.prev/
 .env

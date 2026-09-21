@@ -32,6 +32,7 @@ pub struct HaLightController<H: HaTransport> {
     client: H,
     registry: Arc<Mutex<HaDeviceRegistry>>,
     capability_state: Option<SharedState>,
+    managed_addon: bool,
     capability_hub_key: Option<HubKey>,
 }
 
@@ -42,6 +43,7 @@ impl<H: HaTransport> HaLightController<H> {
             client,
             registry,
             capability_state: None,
+            managed_addon: false,
             capability_hub_key: None,
         }
     }
@@ -49,9 +51,40 @@ impl<H: HaTransport> HaLightController<H> {
     /// Attach shared state so room capabilities can be derived from the
     /// canonical registry at command time.
     pub fn with_capability_source(mut self, state: SharedState, hub_key: HubKey) -> Self {
+        self.managed_addon = state
+            .lock()
+            .map(|s| s.platform_context == "ha_addon")
+            .unwrap_or(true);
         self.capability_state = Some(state);
         self.capability_hub_key = Some(hub_key);
         self
+    }
+
+    fn is_managed_addon(&self) -> LightControlResult<bool> {
+        Ok(self.managed_addon)
+    }
+
+    fn selected_devices(&self, ids: &[String]) -> LightControlResult<Vec<String>> {
+        if !self.managed_addon {
+            return Ok(ids.to_vec());
+        }
+        let state = self
+            .capability_state
+            .as_ref()
+            .ok_or_else(|| LightControlError::Internal("missing add-on policy".into()))?;
+        let s = state
+            .lock()
+            .map_err(|_| LightControlError::Internal("policy lock".into()))?;
+        Ok(ids
+            .iter()
+            .filter(|id| {
+                id.starts_with("light.")
+                    && s.managed_ha_lights
+                        .as_ref()
+                        .is_some_and(|allowed| allowed.contains(*id))
+            })
+            .cloned()
+            .collect())
     }
 
     fn adapt_group_command(
@@ -97,6 +130,14 @@ impl<H: HaTransport> HaLightController<H> {
         area_id: &str,
         command: LightingCommand,
     ) -> LightControlResult<()> {
+        if self.is_managed_addon()? {
+            let ids = self
+                .registry
+                .lock()
+                .map_err(|_| LightControlError::Internal("registry lock".into()))?
+                .get_light_entities(room_id);
+            return self.turn_on_devices(&ids, command);
+        }
         let (room_label, adapted) = self.adapt_group_command(room_id, &command);
         let fade_ms = adapted.transition_ms.unwrap_or(0) as u16;
 
@@ -185,6 +226,11 @@ impl<H: HaTransport> HaLightController<H> {
         native_ids: &[String],
         command: LightingCommand,
     ) -> LightControlResult<()> {
+        let selected = self.selected_devices(native_ids)?;
+        let native_ids = selected.as_slice();
+        if native_ids.is_empty() {
+            return Ok(());
+        }
         let adapted = self.adapt_device_command(native_ids, &command);
         let fade_ms = adapted.transition_ms.unwrap_or(0) as u16;
 
@@ -229,6 +275,14 @@ impl<H: HaTransport> HaLightController<H> {
         area_id: &str,
         transition_ms: Option<u32>,
     ) -> LightControlResult<()> {
+        if self.is_managed_addon()? {
+            let ids = self
+                .registry
+                .lock()
+                .map_err(|_| LightControlError::Internal("registry lock".into()))?
+                .get_light_entities(room_id);
+            return self.turn_off_devices(&ids, transition_ms);
+        }
         let room_label = rhythm_os::controller_helpers::format_room_label(&self.registry, room_id);
         let mut data = serde_json::json!({
             "area_id": area_id,
@@ -298,6 +352,11 @@ impl<H: HaTransport> HaLightController<H> {
         native_ids: &[String],
         transition_ms: Option<u32>,
     ) -> LightControlResult<()> {
+        let selected = self.selected_devices(native_ids)?;
+        let native_ids = selected.as_slice();
+        if native_ids.is_empty() {
+            return Ok(());
+        }
         let mut data = serde_json::json!({
             "entity_id": native_ids,
         });
@@ -522,6 +581,53 @@ mod tests {
             .upsert_room("living_room", "Living Room", "living_room", &[]);
         let controller = HaLightController::new(spy, registry.clone());
         (controller, registry)
+    }
+
+    #[test]
+    fn addon_area_and_direct_commands_only_send_selected_entities() {
+        let (controller, registry) = make_controller();
+        registry.lock().unwrap().set_area_lights(
+            "living_room",
+            vec!["light.selected".into(), "light.excluded".into()],
+        );
+        let state: SharedState = Arc::new(Mutex::new(rhythm_os::state::AppState::default()));
+        {
+            let mut s = state.lock().unwrap();
+            s.platform_context = "ha_addon";
+            s.managed_ha_lights = Some(["light.selected".into()].into());
+        }
+        let controller = controller.with_capability_source(
+            state.clone(),
+            HubKey::new(
+                rhythm_os::hub::HubType::new("homeassistant"),
+                "supervisor:80",
+            ),
+        );
+        block_on(controller.turn_on("living_room", LightingCommand::new(80, 4000))).unwrap();
+        block_on(controller.turn_off("living_room", None)).unwrap();
+        let calls = controller.client.calls();
+        assert_eq!(calls.len(), 2);
+        for call in calls {
+            assert_eq!(
+                call.data["entity_id"],
+                serde_json::json!(["light.selected"])
+            );
+            assert!(call.data.get("area_id").is_none());
+        }
+        registry.lock().unwrap().set_area_lights(
+            "living_room",
+            vec!["light.new".into(), "light.excluded".into()],
+        );
+        block_on(controller.turn_on("living_room", LightingCommand::new(80, 4000))).unwrap();
+        controller
+            .turn_off_devices(&["light.new".into()], None)
+            .unwrap();
+        assert_eq!(controller.client.calls().len(), 2);
+        state.lock().unwrap().managed_ha_lights = None; // Reset must fail closed.
+        controller
+            .turn_on_devices(&["light.selected".into()], LightingCommand::new(80, 4000))
+            .unwrap();
+        assert_eq!(controller.client.calls().len(), 2);
     }
 
     #[test]

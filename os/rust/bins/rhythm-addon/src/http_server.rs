@@ -5,12 +5,16 @@ use axum::routing::get;
 use axum::Router;
 use rhythm_os::logging;
 use rhythm_os::state::SharedState;
-use tower_http::cors::CorsLayer;
 
 /// Create the Axum router with all API routes.
 pub fn create_router(state: SharedState) -> Router {
     let auth_state = state.clone();
     let api = rhythm_os::axum_router::api_routes()
+        .route("/api/addon/status", get(crate::policy::status))
+        .route(
+            "/api/addon/lights",
+            get(crate::selection::get).put(crate::selection::put),
+        )
         // Legacy HA area sync alias (delegates to generic sync)
         .route(
             "/api/ha/sync-areas",
@@ -18,11 +22,15 @@ pub fn create_router(state: SharedState) -> Router {
         )
         .with_state(state)
         .layer(middleware::from_fn_with_state(
-            auth_state,
+            auth_state.clone(),
             rhythm_os::auth::require_api_auth_middleware,
+        ))
+        .layer(middleware::from_fn_with_state(
+            auth_state,
+            crate::policy::enforce,
         ));
 
-    logging::with_http_observability(api.layer(CorsLayer::permissive()))
+    logging::with_http_observability(api)
 }
 
 #[cfg(test)]

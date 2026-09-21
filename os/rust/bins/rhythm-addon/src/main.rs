@@ -5,6 +5,8 @@
 
 mod http_server;
 mod hub;
+mod policy;
+mod selection;
 
 use std::sync::{Arc, Mutex};
 
@@ -32,16 +34,17 @@ fn main() -> Result<()> {
 
     info!(target: "sys", "Rhythm Addon v{} starting...", VERSION);
 
-    // Detect addon mode vs standalone
-    let is_supervisor = std::env::var("SUPERVISOR_TOKEN").is_ok();
-    if is_supervisor {
-        info!(target: "sys", "Running in HA Supervisor mode");
-    } else {
-        info!(target: "sys", "Running in standalone mode");
-    }
+    anyhow::ensure!(
+        std::env::var("SUPERVISOR_TOKEN").is_ok_and(|token| !token.trim().is_empty()),
+        "Home Assistant Supervisor credentials are required"
+    );
+    let api_token_path = std::env::var("RHYTHM_ADDON_API_TOKEN_FILE")
+        .unwrap_or_else(|_| "/run/rhythm/api-token".into());
+    let api_token = std::fs::read_to_string(api_token_path)?;
 
     // Data directory: /data/ for addon, or RHYTHM_STATE_PATH for standalone
-    let data_dir = std::env::var("RHYTHM_STATE_PATH").unwrap_or_else(|_| "/data".to_string());
+    let data_dir =
+        std::env::var("RHYTHM_STATE_PATH").unwrap_or_else(|_| "/data/rhythm".to_string());
     std::fs::create_dir_all(&data_dir)?;
 
     // Create storage backend
@@ -59,10 +62,42 @@ fn main() -> Result<()> {
         s.listen_port = Some(port);
         s.data_dir = data_dir.clone();
         s.storage = Some(std::sync::Arc::new(file_storage));
+        if let Some(storage) = &s.storage {
+            storage.clear_activity_cloud_config()?;
+            storage.clear_remote_access_config()?;
+            storage.clear_api_auth()?;
+        }
         rhythm_os_runtime_modules::install_default_light_runtime_modules(&mut s)?;
 
         // Load persisted state
         rhythm_os::storage::load_persisted_state(&mut s);
+        // No external integration or durable bearer token can be restored into
+        // this deployment. Fresh installs remain paused until explicitly enabled.
+        if !std::path::Path::new(&data_dir)
+            .join("settings.json")
+            .exists()
+        {
+            s.light_breaker_enabled = false;
+        }
+        s.auto_update = false;
+        s.managed_ha_lights = Some(selection::load(&data_dir)?);
+        // Generic factory reset can recreate settings with appliance defaults.
+        // An empty deployment-owned selection always starts paused.
+        if s.managed_ha_lights
+            .as_ref()
+            .is_some_and(|ids| ids.is_empty())
+        {
+            s.light_breaker_enabled = false;
+        }
+        s.hub_credentials.clear();
+        let credentials = rhythm_ha::provider::supervisor_credentials();
+        s.hub_credentials
+            .insert(credentials.hub_key().expect("HA key"), credentials);
+        if let Some(storage) = &s.storage {
+            storage.save_all_hub_credentials(
+                &s.hub_credentials.values().cloned().collect::<Vec<_>>(),
+            )?;
+        }
 
         // Set integration-driven callbacks from the static registry
         let callbacks = rhythm_os::hub::integration_callbacks(hub::INTEGRATIONS);
@@ -97,18 +132,10 @@ fn main() -> Result<()> {
         s.request_hub_bootstrap_fn = Some(Arc::new(|state| {
             rhythm_os::hub::spawn_stored_hub_bootstrap(state.clone(), hub::INTEGRATIONS);
         }));
-        s.remote_access_controller = Some(Arc::new(
-            rhythm_os::remote_access::child_process_controller_from_env(),
-        ));
+        s.remote_access_controller = None;
     }
+    rhythm_os::auth::install_ephemeral_owner_token(&state, api_token.trim())?;
     rhythm_os::commands::reconcile_device_health(&state);
-    if let Err(error) = rhythm_os::remote_access::reconcile_remote_access_runtime(&state) {
-        warn!(
-            target: "sys",
-            "Remote access runtime did not reconcile at startup: {:#}",
-            error
-        );
-    }
     install_factory_reset_hook(&state)?;
 
     let (work_tx, work_rx) = std::sync::mpsc::sync_channel::<WorkItem>(64);
@@ -206,7 +233,7 @@ fn install_factory_reset_hook(state: &SharedState) -> Result<()> {
 async fn run_server(state: SharedState, port: u16) -> Result<()> {
     rhythm_os::state::capture_tokio_runtime_handle(&state);
 
-    let addr = format!("0.0.0.0:{}", port);
+    let addr = format!("127.0.0.1:{}", port);
     info!(target: "sys", "Starting HTTP server on {}", addr);
 
     let server = http_server::create_router(state.clone());
@@ -214,9 +241,6 @@ async fn run_server(state: SharedState, port: u16) -> Result<()> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to bind to {} — {}", addr, e))?;
     info!(target: "sys", "Rhythm Addon listening on http://{}", addr);
-
-    // Register mDNS service for auto-discovery by clients
-    let _mdns = rhythm_os::mdns::register_mdns_service(port, "addon", VERSION, "rhythm-addon");
 
     // Bootstrap configured hubs on a blocking background thread after the
     // listener is up so clients can connect immediately during hub sync.
