@@ -56,6 +56,41 @@ void main() {
     }
   });
 
+  testWidgets('payload input fits a narrow screen with enlarged text',
+      (tester) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context)
+              .copyWith(textScaler: const TextScaler.linear(1.3)),
+          child: child!,
+        ),
+        home: const MatterDeviceAddScreen(
+          endpoint: HubEndpoint(host: '127.0.0.1', port: 0),
+          addMethod: MatterAddMethod.automatic,
+        ),
+      ),
+    );
+
+    expect(find.text('AWAITING INPUT'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    await tester.enterText(find.byType(TextField), 'invalid');
+    await tester.pump();
+    expect(find.text('UNVERIFIED'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    await tester.enterText(find.byType(TextField), '34970112332');
+    await tester.pump();
+    expect(find.text('READY'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('ignores duplicate transmit taps while request is in flight',
       (tester) async {
     debugDefaultTargetPlatformOverride = TargetPlatform.linux;
@@ -109,6 +144,13 @@ void main() {
 
   testWidgets('pairing screen follows the server\'s real stages',
       (tester) async {
+    final screenshotDir =
+        Platform.environment['RHYTHM_MATTER_GUIDANCE_SCREENSHOTS'];
+    if (screenshotDir != null) await tester.runAsync(loadUiEvidenceFonts);
+    tester.view.physicalSize = const Size(390, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
     debugDefaultTargetPlatformOverride = TargetPlatform.linux;
     final releaseResponse = Completer<void>();
     final progress = StreamController<RhythmPairingProgress>.broadcast();
@@ -141,6 +183,12 @@ void main() {
         ChangeNotifierProvider<ServerSyncProvider>.value(
           value: serverSync,
           child: MaterialApp(
+            debugShowCheckedModeBanner: false,
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(context)
+                  .copyWith(textScaler: const TextScaler.linear(1.3)),
+              child: child!,
+            ),
             home: MatterDeviceAddScreen(
               endpoint: const HubEndpoint(host: '127.0.0.1', port: 0),
               addMethod: MatterAddMethod.automatic,
@@ -174,6 +222,9 @@ void main() {
 
       // Title and highlighted step name the same thing (title + step label).
       expect(find.text('Contacting Rhythm Box'), findsNWidgets(2));
+      expect(
+          find.textContaining('then finds it on your network'), findsOneWidget);
+      expect(find.textContaining('then finds it on Wi-Fi'), findsNothing);
 
       await emit(RhythmPairingStage.requested, 'Pairing request received');
       expect(find.text('Contacting Rhythm Box'), findsNWidgets(2));
@@ -187,6 +238,19 @@ void main() {
 
       await emit(RhythmPairingStage.commissioning, 'Finding the device');
       expect(find.text('Finding and pairing device'), findsNWidgets(2));
+
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(tester.takeException(), isNull);
+      if (screenshotDir != null) {
+        final wasUpdating = autoUpdateGoldenFiles;
+        autoUpdateGoldenFiles = true;
+        try {
+          await expectLater(find.byType(Overlay),
+              matchesGoldenFile('$screenshotDir/automatic-progress.png'));
+        } finally {
+          autoUpdateGoldenFiles = wasUpdating;
+        }
+      }
 
       // The automatic retry explains itself without rewinding the timeline.
       await emit(RhythmPairingStage.hubConnecting, 'Resetting Bluetooth');
@@ -261,6 +325,7 @@ void main() {
         'outcome': 'failed',
         'failure_stage': 'commissioning',
         'recovery_action': 'existing_node_recommission_failed',
+        'pairing_session_id': api.sessionIds.single,
       });
       expect(
         completed.properties.values,
@@ -351,7 +416,7 @@ void main() {
 
     expect(
       find.textContaining(
-          'The device stopped responding before setup finished'),
+          'Rhythm could not identify whether Bluetooth or network setup failed'),
       findsOneWidget,
     );
     expect(find.textContaining('BlueZ'), findsNothing);
@@ -389,6 +454,103 @@ void main() {
     expect(find.textContaining('CHIP sidecar'), findsNothing);
     expect(find.textContaining('chipd'), findsNothing);
   });
+
+  for (final stage in [
+    'matter_bluetooth',
+    'matter_network_discovery',
+    null,
+    'future_stage'
+  ]) {
+    testWidgets(
+        'renders evidence-based guidance for $stage and clears it on retry',
+        (tester) async {
+      final screenshotDir =
+          Platform.environment['RHYTHM_MATTER_GUIDANCE_SCREENSHOTS'];
+      if (screenshotDir != null) {
+        await tester.runAsync(loadUiEvidenceFonts);
+      }
+      tester.view.physicalSize = const Size(390, 700);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final api = _FakeRhythmMatterApi(
+          onPair: (_) async =>
+              RhythmMatterPairingResponse.fromHttp(statusCode: 200, data: {
+                'status': 'failed',
+                if (stage != null) 'failure_stage': stage,
+                'error': 'CHIP Error: MT:PRIVATE-SETUP 192.0.2.42',
+              }));
+      await tester.pumpWidget(MaterialApp(
+        debugShowCheckedModeBanner: false,
+        builder: (context, child) => MediaQuery(
+          data: MediaQuery.of(context)
+              .copyWith(textScaler: const TextScaler.linear(1.3)),
+          child: child!,
+        ),
+        home: MatterDeviceAddScreen(
+          endpoint: const HubEndpoint(host: '127.0.0.1', port: 0),
+          addMethod: MatterAddMethod.automatic,
+          initialSetupPayload: '3497-011-2332',
+          pairingApi: api,
+        ),
+      ));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      if (stage == 'matter_bluetooth') {
+        expect(find.textContaining('Bluetooth setup failed.'), findsOneWidget);
+        expect(
+            find.textContaining('Move the Rhythm Box closer'), findsOneWidget);
+        expect(find.textContaining('Check the device’s Wi-Fi'), findsNothing);
+      } else if (stage == 'matter_network_discovery') {
+        expect(
+            find.textContaining('Could not reach the device on the network.'),
+            findsOneWidget);
+        expect(find.textContaining('Check the device’s Wi-Fi connection'),
+            findsOneWidget);
+        expect(find.textContaining('Move the Rhythm Box closer'), findsNothing);
+      } else {
+        expect(
+            find.textContaining(
+                'could not identify whether Bluetooth or network setup failed'),
+            findsOneWidget);
+        expect(find.textContaining('Bluetooth setup failed.'), findsNothing);
+      }
+      expect(find.textContaining('CHIP Error'), findsNothing);
+      expect(find.textContaining('MT:PRIVATE'), findsNothing);
+      expect(tester.takeException(), isNull);
+      final completion = analyticsBackend.events
+          .where((event) => event.name == 'matter_pairing_completed')
+          .single;
+      expect(
+          completion.properties['failure_stage'],
+          stage == 'matter_bluetooth' || stage == 'matter_network_discovery'
+              ? stage
+              : 'commissioning');
+      expect(
+          completion.properties['pairing_session_id'], api.sessionIds.single);
+      expect(completion.properties.toString(), isNot(contains('MT:PRIVATE')));
+      expect(completion.properties.toString(), isNot(contains('192.0.2.42')));
+      if (screenshotDir != null) {
+        final wasUpdating = autoUpdateGoldenFiles;
+        autoUpdateGoldenFiles = true;
+        try {
+          await expectLater(find.byType(Overlay),
+              matchesGoldenFile('$screenshotDir/${stage ?? 'legacy'}.png'));
+        } finally {
+          autoUpdateGoldenFiles = wasUpdating;
+        }
+      }
+      await tester.ensureVisible(find.text('Try Again'));
+      await tester.tap(find.text('Try Again'));
+      await tester.pump(const Duration(milliseconds: 350));
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(find.textContaining('Bluetooth setup failed.'), findsNothing);
+      expect(find.textContaining('Could not reach the device on the network.'),
+          findsNothing);
+      expect(find.byType(TextField), findsOneWidget);
+      expect(api.sessionIds, hasLength(1));
+    });
+  }
 
   testWidgets('retry starts a new durable Matter pairing session',
       (tester) async {

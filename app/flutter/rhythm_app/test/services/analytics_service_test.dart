@@ -309,6 +309,29 @@ void main() {
     }
   });
 
+  test('Matter pairing completion joins only opaque attempt IDs', () async {
+    for (final id in [
+      'pair-01234567-89ab-cdef-0123-456789abcdef',
+      'MT:PRIVATE-CODE'
+    ]) {
+      await analytics.logMatterPairingCompleted(
+        journeyId: 'matter-test',
+        source: 'scanner',
+        inputMethod: 'camera',
+        addMethod: 'automatic',
+        attemptNumber: 1,
+        outcome: 'failed',
+        failureStage: 'matter_bluetooth',
+        pairingSessionId: id,
+      );
+    }
+    expect(backend.events.first.properties['pairing_session_id'],
+        'pair-01234567-89ab-cdef-0123-456789abcdef');
+    expect(backend.events.last.properties.containsKey('pairing_session_id'),
+        isFalse);
+    expect(backend.events.toString(), isNot(contains('MT:PRIVATE')));
+  });
+
   test('Matter pairing analytics allowlist repeat-pair recovery actions',
       () async {
     await analytics.logMatterPairingCompleted(

@@ -56,6 +56,32 @@ void main() {
       );
     });
 
+    test('retains bounded failure stages and tolerates old or future servers',
+        () {
+      for (final value in [
+        null,
+        'matter_bluetooth',
+        'matter_network_discovery',
+        'future_stage',
+        '',
+        42,
+        'MT:SECRET',
+        'x' * 65
+      ]) {
+        final response = RhythmMatterPairingResponse.fromHttp(
+          statusCode: 200,
+          data: {'status': 'failed', if (value != null) 'failure_stage': value},
+        );
+        expect(response.status, 'failed');
+        expect(
+            response.failureStage,
+            ['matter_bluetooth', 'matter_network_discovery', 'future_stage']
+                    .contains(value)
+                ? value
+                : null);
+      }
+    });
+
     test('keeps only bounded repeat-pair recovery actions', () {
       final recovered = RhythmMatterPairingResponse.fromHttp(
         statusCode: HttpStatus.ok,
