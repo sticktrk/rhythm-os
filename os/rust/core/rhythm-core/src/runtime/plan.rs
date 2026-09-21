@@ -310,10 +310,14 @@ where
             .engine()
             .write()
             .map_err(|e| RuntimeError::Internal(format!("Failed to lock engine: {}", e)))?;
-        let Some(node) = engine.rooms_mut().get_mut(node_id) else {
+        if !engine
+            .rooms()
+            .get(node_id)
+            .is_some_and(|node| node.kind == LightNodeKind::LightDevice)
+        {
             return Ok(false);
-        };
-        node.clear_off_states();
+        }
+        engine.clear_light_off_states(node_id);
         engine.invalidate_periodic_cache_for_room(node_id);
         Ok(true)
     }

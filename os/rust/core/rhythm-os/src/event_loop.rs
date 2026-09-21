@@ -554,11 +554,12 @@ pub fn turn_on_node_inline(state: &SharedState, node_id: &str) -> bool {
     let Some(runtime) = runtime else {
         return false;
     };
-    match runtime.turn_on_room(node_id) {
-        Ok(()) => {
+    match crate::light_runtime::turn_on_room_route_aware(state, runtime.as_ref(), node_id) {
+        Ok(dispatch_count) => {
             tracing::info!(
                 target: "evt",
                 event = "motion_turn_on_complete",
+                dispatch_count,
                 latency_ms = started.elapsed().as_millis(),
                 "Motion: turn_on node '{}'",
                 node_id
@@ -574,6 +575,14 @@ pub fn turn_on_node_inline(state: &SharedState, node_id: &str) -> bool {
             }
             crate::commands::update_lights_on_cache_for_runtime_node(
                 state, &runtime, node_id, true,
+            );
+            // The motion action wrapper emits the room and immediate children.
+            // Only changed nested descendants need supplemental events here.
+            crate::light_runtime::emit_activated_child_state_events(
+                state,
+                runtime.as_ref(),
+                node_id,
+                true,
             );
             true
         }
