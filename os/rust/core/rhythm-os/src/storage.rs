@@ -2942,6 +2942,16 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
         );
     }
 
+    let restored_light_nodes = if loaded_authority_snapshot || loaded_legacy_authority {
+        s.topology
+            .restore_missing_assigned_light_nodes(&s.canonical_registry)
+    } else {
+        0
+    };
+    if restored_light_nodes > 0 {
+        info!(target: "sys", "Restored {} missing assigned light topology nodes", restored_light_nodes);
+    }
+
     // A successful legacy load is migrated only after both files have been
     // considered and any legacy light-room bindings have moved. Likewise, a
     // migration of a valid combined snapshot is committed as one new record.
@@ -2980,7 +2990,8 @@ pub fn load_persisted_state(s: &mut crate::state::AppState) {
         || (loaded_authority_snapshot
             && (topology_migration.changed()
                 || external_automation_migration.changed()
-                || reconciled_room_bindings > 0));
+                || reconciled_room_bindings > 0
+                || restored_light_nodes > 0));
     if should_persist_authority_migration {
         if let Some(storage) = authority_storage.as_ref() {
             let migration_commit = (|| -> Result<()> {

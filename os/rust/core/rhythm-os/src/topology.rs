@@ -1345,6 +1345,34 @@ impl RoomTopologyStore {
         });
     }
 
+    /// Restore room membership omitted by older device reactivation paths.
+    /// An existing topology node remains authoritative, including an explicit
+    /// standalone placement. Archived/inactive devices must stay hidden.
+    pub(crate) fn restore_missing_assigned_light_nodes(
+        &mut self,
+        canonical_registry: &crate::canonical::registry::CanonicalRegistry,
+    ) -> usize {
+        let mut repairs = canonical_registry
+            .devices()
+            .filter(|device| {
+                device.device_type == DeviceType::Light
+                    && device.has_active_endpoint()
+                    && !self.device_nodes.contains_key(&device.id)
+            })
+            .filter_map(|device| {
+                let room_id = device.room_id.as_ref()?;
+                self.rooms
+                    .contains_key(room_id)
+                    .then(|| (device.id.clone(), room_id.clone()))
+            })
+            .collect::<Vec<_>>();
+        repairs.sort();
+        repairs
+            .into_iter()
+            .filter(|(device_id, room_id)| self.attach_device_user_override(room_id, device_id))
+            .count()
+    }
+
     /// Repair persisted state from versions that copied every hub room child
     /// into `light_device_ids`.
     ///

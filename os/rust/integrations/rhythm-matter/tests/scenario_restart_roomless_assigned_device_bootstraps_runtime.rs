@@ -5,6 +5,15 @@ mod harness;
 
 #[test]
 fn scenario_restart_roomless_assigned_device_bootstraps_runtime() {
+    exercise_restart(false);
+}
+
+#[test]
+fn scenario_restart_repairs_previously_restored_light_missing_from_topology() {
+    exercise_restart(true);
+}
+
+fn exercise_restart(missing_topology: bool) {
     let initial = harness::connect_rig_with_transport(None, |transport| {
         transport.add_device(200, "Vendor", "Lamp");
     });
@@ -27,9 +36,15 @@ fn scenario_restart_roomless_assigned_device_bootstraps_runtime() {
         state
             .canonical_registry
             .assign_room(&canonical_id, Some(&room_id));
-        assert!(state
-            .topology
-            .attach_device_user_override(&room_id, &canonical_id));
+        if missing_topology {
+            // Older pairing reactivated the canonical record without
+            // recreating the topology node removed by archive.
+            state.topology.remove_device_everywhere(&canonical_id);
+        } else {
+            assert!(state
+                .topology
+                .attach_device_user_override(&room_id, &canonical_id));
+        }
         rhythm_os::commands::save_authority_state(&state).unwrap();
         (canonical_id, room_id)
     };
