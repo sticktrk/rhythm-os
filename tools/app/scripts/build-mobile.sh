@@ -17,6 +17,7 @@
 #   --dmg              Create DMG for macOS distribution (implies --macos --release --no-run)
 #   --sign             Sign and notarize the DMG (implies --dmg)
 #   --build-number N   Override the Flutter build number
+#   --build-name X.Y.Z Override the app version (also RHYTHM_APP_VERSION)
 #   --no-run           Build only, don't run on device
 #   --codegen          Regenerate FRB bindings and sync FFI code (then exit)
 #   --clean            Clean build artifacts before building
@@ -26,6 +27,10 @@
 # all Play Store tracks, plus one. Explicit --build-number or RHYTHM_BUILD_NUMBER values override
 # this. Other release builds use common CI run-number variables, then the +build value in
 # flutter/rhythm_app/pubspec.yaml. The script does not generate timestamp build numbers.
+#
+# The app version (build name) comes from --build-name, then RHYTHM_APP_VERSION, then
+# pubspec.yaml. The tracked pubspec.yaml carries only the 0.0.0 development placeholder; the
+# publisher supplies the store version, so store uploads refuse the placeholder.
 #
 # First-time setup (iOS):
 #   1. Install CocoaPods: brew install cocoapods
@@ -97,6 +102,15 @@ pubspec_build_name() {
     echo "${version%%+*}"
 }
 
+# The publisher's version wins over the tracked development placeholder.
+app_build_name() {
+    if [ -n "$BUILD_NAME_OVERRIDE" ]; then
+        echo "$BUILD_NAME_OVERRIDE"
+    else
+        pubspec_build_name
+    fi
+}
+
 pubspec_build_number() {
     local version
     version="$(pubspec_version)"
@@ -115,7 +129,7 @@ write_store_build_receipt() {
     local source_commit
     local receipt_path
 
-    version="$(pubspec_build_name)"
+    version="$(app_build_name)"
     source_commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"
     receipt_path="${RHYTHM_APP_BUILD_RECEIPT_PATH:-${RHYTHM_APP_BUILD_EVIDENCE_ROOT:-$REPO_ROOT/.release-evidence/app-builds}/$version-$channel-$build_number.json}"
     "$BUILD_RECEIPT_WRITER" \
@@ -137,7 +151,7 @@ resolve_testflight_build_number() {
     local max_attempts="${RHYTHM_TESTFLIGHT_BUILD_NUMBER_ATTEMPTS:-3}"
     local retry_delay="${RHYTHM_TESTFLIGHT_BUILD_NUMBER_RETRY_DELAY_SECONDS:-10}"
 
-    build_name="$(pubspec_build_name)"
+    build_name="$(app_build_name)"
     if [ -z "$build_name" ]; then
         echo "Error: could not read app version from $FLUTTER_APP/pubspec.yaml."
         exit 1
@@ -382,6 +396,7 @@ RUN_APP=true
 RUN_CODEGEN=false
 CLEAN=false
 BUILD_NUMBER_OVERRIDE=""
+BUILD_NAME_OVERRIDE="${RHYTHM_APP_VERSION:-}"
 BUILD_NUMBER_SOURCE=""
 RESOLVED_BUILD_NUMBER=""
 BUILD_METADATA_ARGS=""
@@ -486,6 +501,14 @@ while [[ $# -gt 0 ]]; do
             BUILD_NUMBER_OVERRIDE="$2"
             shift 2
             ;;
+        --build-name)
+            if [ -z "${2:-}" ] || [[ "${2:-}" == --* ]]; then
+                echo "Error: --build-name requires an X.Y.Z value."
+                exit 1
+            fi
+            BUILD_NAME_OVERRIDE="$2"
+            shift 2
+            ;;
         --setup-signing)
             SETUP_SIGNING=true
             shift
@@ -525,6 +548,9 @@ if [ "$RELEASE_ALL" = true ]; then
     EXTRA_ARGS=()
     if [ -n "$BUILD_NUMBER_OVERRIDE" ]; then
         EXTRA_ARGS+=(--build-number "$BUILD_NUMBER_OVERRIDE")
+    fi
+    if [ -n "$BUILD_NAME_OVERRIDE" ]; then
+        EXTRA_ARGS+=(--build-name "$BUILD_NAME_OVERRIDE")
     fi
     if [ -n "$TESTFLIGHT_NOTES_FILE" ]; then
         EXTRA_ARGS+=(--testflight-notes-file "$TESTFLIGHT_NOTES_FILE")
@@ -581,6 +607,19 @@ echo ""
 if [ "$BUILD_IPA" = true ] && [ -f "$ASC_API_KEY_PATH" ] && \
    ! [[ "$TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]; then
     echo "Error: set TEAM_ID to your 10-character Apple Developer team ID for authenticated IPA builds."
+    exit 1
+fi
+
+if [ -n "$BUILD_NAME_OVERRIDE" ] && ! [[ "$BUILD_NAME_OVERRIDE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "Error: app version must use X.Y.Z format, got '$BUILD_NAME_OVERRIDE'."
+    exit 1
+fi
+
+if { [ "$UPLOAD_TESTFLIGHT" = true ] || [ "$UPLOAD_GOOGLEPLAY" = true ]; } && \
+   [ "$(app_build_name)" = "0.0.0" ]; then
+    echo "Error: store uploads need the publisher's app version."
+    echo "       Pass --build-name X.Y.Z or set RHYTHM_APP_VERSION; pubspec.yaml only"
+    echo "       carries the 0.0.0 development placeholder."
     exit 1
 fi
 
@@ -879,6 +918,10 @@ FLUTTER_BUILD_ARGS+=("--dart-define-from-file=$RHYTHM_APP_BUILD_DEFINE_FILE")
 echo "Using the configured app-build profile"
 if [ -n "$BUILD_METADATA_ARGS" ]; then
     FLUTTER_BUILD_ARGS+=("$BUILD_METADATA_ARGS")
+fi
+if [ -n "$BUILD_NAME_OVERRIDE" ]; then
+    FLUTTER_BUILD_ARGS+=("--build-name=$BUILD_NAME_OVERRIDE")
+    echo "Using app version: $BUILD_NAME_OVERRIDE"
 fi
 
 # Build/Run
