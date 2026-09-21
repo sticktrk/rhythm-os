@@ -3,12 +3,14 @@
 //! Wraps the standard server router with platform-specific Wi-Fi recovery
 //! endpoints for Linux appliances.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
 
 use axum::extract::Path;
 use axum::middleware;
-use axum::routing::{get, put};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use log::{info, warn};
 use rhythm_os::handlers::ApiResponse;
@@ -20,6 +22,26 @@ use crate::wifi;
 
 const WIFI_CHANGE_APPLY_DELAY: Duration = Duration::from_secs(1);
 const WIFI_CHANGE_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// One radio: a move and a saved-network check cannot overlap.
+static WIFI_RADIO_BUSY: AtomicBool = AtomicBool::new(false);
+
+/// The latest saved-network check. Memory only: a restart abandons the check
+/// and startup recovery returns the Box to its own network.
+static WIFI_VERIFICATION: Mutex<Option<WifiVerification>> = Mutex::new(None);
+
+struct WifiVerification {
+    operation_id: String,
+    /// `None` while the Box is away checking.
+    outcome: Option<Result<(), wifi::WifiVerifyFailure>>,
+}
+
+#[derive(serde::Deserialize)]
+struct WifiVerifyRequest {
+    operation_id: String,
+    ssid: String,
+    password: String,
+}
 
 pub fn create_router(
     state: SharedState,
@@ -81,10 +103,119 @@ pub fn create_router(
                 }
             }),
         )
+        // Prove a network before it is saved for accessories. The Box leaves
+        // its own network to do so, so the answer is collected afterwards.
+        .route(
+            "/api/wifi/verify",
+            post(|Json(request): Json<WifiVerifyRequest>| async move {
+                tokio::task::spawn_blocking(move || handle_post_wifi_verify(request))
+                    .await
+                    .unwrap_or_else(|e| {
+                        ApiResponse::server_error(format!("wifi verify task failed: {e}"))
+                    })
+            }),
+        )
+        .route(
+            "/api/wifi/verify/:operation_id",
+            get(|Path(id): Path<String>| async move { handle_get_wifi_verify(&id) }),
+        )
         .layer(middleware::from_fn_with_state(
             state.clone(),
             rhythm_os::auth::require_api_auth_middleware,
         ))
+}
+
+fn verification_body(
+    operation_id: &str,
+    outcome: Option<Result<(), wifi::WifiVerifyFailure>>,
+) -> String {
+    let (state, reason) = match outcome {
+        None => ("running", None),
+        Some(Ok(())) => ("passed", None),
+        Some(Err(failure)) => ("failed", Some(failure.as_str())),
+    };
+    serde_json::json!({ "operation_id": operation_id, "state": state, "reason": reason })
+        .to_string()
+}
+
+fn record_verification(operation_id: &str, outcome: Option<Result<(), wifi::WifiVerifyFailure>>) {
+    if let Ok(mut latest) = WIFI_VERIFICATION.lock() {
+        *latest = Some(WifiVerification {
+            operation_id: operation_id.to_string(),
+            outcome,
+        });
+    }
+}
+
+fn handle_post_wifi_verify(request: WifiVerifyRequest) -> ApiResponse {
+    if uuid::Uuid::parse_str(&request.operation_id).is_err() {
+        return ApiResponse::bad_request("A UUID operation_id is required");
+    }
+    let candidate = WifiCredentials {
+        ssid: request.ssid,
+        password: request.password,
+    };
+    if let Err(error) = wifi::validate_credentials(&candidate) {
+        return ApiResponse::bad_request(&format!("{:#}", error));
+    }
+    // Without a network of its own the Box has nowhere to return to.
+    let Ok(Some(previous)) = wifi::load_configured_credentials() else {
+        return ApiResponse::conflict(
+            "The Rhythm Box is not on Wi-Fi, so it cannot check a network",
+        );
+    };
+    let operation_id = request.operation_id;
+    // The Box is already living proof of its own network.
+    if previous.ssid == candidate.ssid && previous.password == candidate.password {
+        return ApiResponse::json_ok(verification_body(&operation_id, Some(Ok(()))));
+    }
+    if WIFI_RADIO_BUSY.swap(true, Ordering::SeqCst) {
+        return ApiResponse::conflict("The Rhythm Box is already changing or checking Wi-Fi");
+    }
+    record_verification(&operation_id, None);
+    let spawned = thread::Builder::new()
+        .name("wifi-verify".to_string())
+        .spawn({
+            let operation_id = operation_id.clone();
+            move || {
+                thread::sleep(WIFI_CHANGE_APPLY_DELAY);
+                let outcome = wifi::verify_credentials_then_restore(
+                    &candidate,
+                    &previous,
+                    WIFI_CHANGE_CONNECT_TIMEOUT,
+                );
+                info!(
+                    target: "sys",
+                    "Checked a saved network for accessories: {}",
+                    match outcome {
+                        Ok(()) => "passed",
+                        Err(failure) => failure.as_str(),
+                    }
+                );
+                record_verification(&operation_id, Some(outcome));
+                WIFI_RADIO_BUSY.store(false, Ordering::SeqCst);
+            }
+        });
+    match spawned {
+        Ok(_) => ApiResponse::json_ok(verification_body(&operation_id, None)),
+        Err(error) => {
+            WIFI_RADIO_BUSY.store(false, Ordering::SeqCst);
+            if let Ok(mut latest) = WIFI_VERIFICATION.lock() {
+                *latest = None;
+            }
+            ApiResponse::server_error(error)
+        }
+    }
+}
+
+fn handle_get_wifi_verify(operation_id: &str) -> ApiResponse {
+    match WIFI_VERIFICATION.lock() {
+        Ok(latest) => match latest.as_ref().filter(|v| v.operation_id == operation_id) {
+            Some(found) => ApiResponse::json_ok(verification_body(operation_id, found.outcome)),
+            None => ApiResponse::not_found("No such Wi-Fi check"),
+        },
+        Err(_) => ApiResponse::server_error("Wi-Fi check state is unavailable"),
+    }
 }
 
 fn handle_put_wifi_profile(state: SharedState, profile_id: &str) -> ApiResponse {
@@ -115,6 +246,9 @@ fn handle_put_wifi(state: SharedState, creds: WifiCredentials) -> ApiResponse {
         return ApiResponse::bad_request(&format!("{:#}", error));
     }
 
+    if WIFI_RADIO_BUSY.swap(true, Ordering::SeqCst) {
+        return ApiResponse::conflict("The Rhythm Box is already changing or checking Wi-Fi");
+    }
     let ssid = creds.ssid.clone();
     match thread::Builder::new()
         .name("wifi-change".to_string())
@@ -137,6 +271,7 @@ fn handle_put_wifi(state: SharedState, creds: WifiCredentials) -> ApiResponse {
                     error
                 ),
             }
+            WIFI_RADIO_BUSY.store(false, Ordering::SeqCst);
         }) {
         Ok(_) => {
             let body = serde_json::json!({
@@ -146,7 +281,10 @@ fn handle_put_wifi(state: SharedState, creds: WifiCredentials) -> ApiResponse {
             });
             ApiResponse::json_ok(body.to_string())
         }
-        Err(error) => ApiResponse::server_error(error),
+        Err(error) => {
+            WIFI_RADIO_BUSY.store(false, Ordering::SeqCst);
+            ApiResponse::server_error(error)
+        }
     }
 }
 
@@ -267,6 +405,54 @@ mod tests {
         let body = String::from_utf8_lossy(&body);
         assert!(!body.contains("FixtureHome") && !body.contains("fixture-password"));
         std::fs::remove_dir_all(data_dir).ok();
+    }
+
+    #[test]
+    fn wifi_check_reports_state_without_the_credential_and_never_leaves_without_a_way_back() {
+        let id = "00000000-0000-4000-8000-000000000001";
+        assert_eq!(handle_get_wifi_verify(id).status, 404);
+        assert_eq!(
+            handle_post_wifi_verify(WifiVerifyRequest {
+                operation_id: "not-a-uuid".into(),
+                ssid: "Garage".into(),
+                password: "fixture-password".into(),
+            })
+            .status,
+            400
+        );
+        // This host has no Box network to return to, so the radio is untouched.
+        let refused = handle_post_wifi_verify(WifiVerifyRequest {
+            operation_id: id.into(),
+            ssid: "Garage".into(),
+            password: "fixture-password".into(),
+        });
+        assert_eq!(refused.status, 409);
+        assert!(!WIFI_RADIO_BUSY.load(Ordering::SeqCst));
+        assert_eq!(handle_get_wifi_verify(id).status, 404);
+
+        for (outcome, state, reason) in [
+            (None, "running", serde_json::Value::Null),
+            (Some(Ok(())), "passed", serde_json::Value::Null),
+            (
+                Some(Err(wifi::WifiVerifyFailure::NotFound)),
+                "failed",
+                "not_found".into(),
+            ),
+            (
+                Some(Err(wifi::WifiVerifyFailure::JoinFailed)),
+                "failed",
+                "join_failed".into(),
+            ),
+        ] {
+            record_verification(id, outcome);
+            let response = handle_get_wifi_verify(id);
+            assert_eq!(response.status, 200);
+            let body: serde_json::Value = serde_json::from_str(&response.body).unwrap();
+            assert_eq!(body["state"], state);
+            assert_eq!(body["reason"], reason);
+            assert!(!response.body.contains("fixture-password"));
+        }
+        *WIFI_VERIFICATION.lock().unwrap() = None;
     }
 
     #[tokio::test]

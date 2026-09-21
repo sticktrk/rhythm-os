@@ -180,6 +180,74 @@ pub fn connect_with_credentials_or_restore(
     }
 }
 
+/// Why a saved-network check did not pass. Never carries the credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WifiVerifyFailure {
+    /// The Box could not see the network, so it never left its own.
+    NotFound,
+    /// The network was visible but the Box could not join it.
+    JoinFailed,
+}
+
+impl WifiVerifyFailure {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NotFound => "not_found",
+            Self::JoinFailed => "join_failed",
+        }
+    }
+}
+
+/// Whether a scan shows `ssid`. A failed or empty scan is not evidence of
+/// absence: only a scan that saw other networks can rule this one out.
+pub fn scan_rules_out(scan: &Result<Vec<WifiScanNetwork>>, ssid: &str) -> bool {
+    match scan {
+        Ok(networks) => !networks.is_empty() && !networks.iter().any(|n| n.ssid == ssid),
+        Err(_) => false,
+    }
+}
+
+/// Present while the Box is deliberately on a network it must not keep. A
+/// restart during the check would otherwise find the Box "connected" and leave
+/// it there.
+const VERIFY_PENDING_MARKER: &str = "/etc/wpa_supplicant.verify-pending";
+
+/// True once after a check was interrupted by a restart.
+pub fn take_interrupted_verification() -> bool {
+    fs::remove_file(VERIFY_PENDING_MARKER).is_ok()
+}
+
+/// Prove `candidate` by joining it, then always return to `previous`. The Box
+/// is unreachable for the duration. Two scans guard the cheap failure so an
+/// absent network never costs the owner their connection.
+pub fn verify_credentials_then_restore(
+    candidate: &WifiCredentials,
+    previous: &WifiCredentials,
+    timeout: Duration,
+) -> std::result::Result<(), WifiVerifyFailure> {
+    if scan_rules_out(&scan_networks(), &candidate.ssid)
+        && scan_rules_out(&scan_networks(), &candidate.ssid)
+    {
+        return Err(WifiVerifyFailure::NotFound);
+    }
+
+    if let Err(error) = fs::write(VERIFY_PENDING_MARKER, b"") {
+        log::warn!(target: "sys", "Could not mark the Wi-Fi check as pending: {error}");
+    }
+    let joined = write_wifi_credentials(candidate)
+        .and_then(|()| restart_wifi())
+        .and_then(|()| wait_for_ip_on(&candidate.ssid, timeout));
+    // A restore that needs a second try is still cheaper than a Box left off
+    // the owner's network.
+    if connect_with_credentials(previous, timeout).is_err() {
+        let _ = connect_with_credentials(previous, timeout);
+    }
+    let _ = fs::remove_file(VERIFY_PENDING_MARKER);
+    joined
+        .map(|_| ())
+        .map_err(|_| WifiVerifyFailure::JoinFailed)
+}
+
 pub fn clear_credentials_and_restart() -> Result<()> {
     clear_wifi_credentials()?;
     restart_wifi()
@@ -370,6 +438,25 @@ fn wait_for_ip(timeout: Duration) -> Result<String> {
         );
     }
     bail!("Wi-Fi did not get an IP on {} (state={})", iface, state)
+}
+
+/// Like `wait_for_ip`, but an address left over from another network is not
+/// proof that this one accepted the credential.
+fn wait_for_ip_on(ssid: &str, timeout: Duration) -> Result<String> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let status = status_snapshot();
+        // A wrong password still associates; only a finished handshake counts.
+        let joined = status.ssid.as_deref() == Some(ssid)
+            && status.wpa_state.as_deref() == Some("COMPLETED");
+        if joined {
+            if let Some(ip) = status.ip_address {
+                return Ok(ip);
+            }
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    bail!("Wi-Fi did not get an IP on the network being checked")
 }
 
 fn find_wifi_iface() -> Option<String> {
@@ -613,6 +700,27 @@ fn parse_wpa_quoted_scalar(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_scan_that_saw_other_networks_rules_a_network_out() {
+        let seen = |ssid: &str| WifiScanNetwork {
+            ssid: ssid.to_string(),
+            rssi: -50,
+            security: "WPA2".to_string(),
+            frequency: None,
+        };
+        assert!(scan_rules_out(&Ok(vec![seen("Other")]), "Garage"));
+        assert!(!scan_rules_out(
+            &Ok(vec![seen("Other"), seen("Garage")]),
+            "Garage"
+        ));
+        // No evidence: the join attempt decides.
+        assert!(!scan_rules_out(&Ok(vec![]), "Garage"));
+        assert!(!scan_rules_out(
+            &Err(anyhow::anyhow!("scan busy")),
+            "Garage"
+        ));
+    }
 
     #[test]
     fn escape_wpa_value_doubles_backslashes_and_escapes_quotes() {

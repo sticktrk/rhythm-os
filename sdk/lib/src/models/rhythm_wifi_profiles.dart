@@ -76,3 +76,27 @@ class RhythmWifiException implements Exception {
   @override
   String toString() => 'Wi-Fi request: $category';
 }
+
+/// The Box's answer about a network it was asked to prove by joining it.
+/// `unavailable` covers every Box that cannot check: older firmware, hosts
+/// without their own Wi-Fi, or a radio already in use.
+enum RhythmWifiCheckState { running, passed, failed, unavailable }
+
+class RhythmWifiCheck {
+  const RhythmWifiCheck(this.state, {this.reason});
+  final RhythmWifiCheckState state;
+
+  /// `not_found` or `join_failed` when [state] is failed.
+  final String? reason;
+  static const unavailable = RhythmWifiCheck(RhythmWifiCheckState.unavailable);
+  factory RhythmWifiCheck.fromJson(Map<String, dynamic> json) =>
+      switch (json['state']) {
+        'running' => const RhythmWifiCheck(RhythmWifiCheckState.running),
+        'passed' => const RhythmWifiCheck(RhythmWifiCheckState.passed),
+        'failed' => RhythmWifiCheck(
+          RhythmWifiCheckState.failed,
+          reason: json['reason'] as String?,
+        ),
+        _ => unavailable,
+      };
+}

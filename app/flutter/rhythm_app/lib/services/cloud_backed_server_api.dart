@@ -557,6 +557,14 @@ class CloudBackedServerApi {
           id: id,
           ssid: ssid,
           password: password);
+  Future<RhythmWifiCheck> startWifiCheck(
+          {required String operationId,
+          required String ssid,
+          required String password}) =>
+      _delegate.startWifiCheck(
+          operationId: operationId, ssid: ssid, password: password);
+  Future<RhythmWifiCheck?> getWifiCheck(String operationId) =>
+      _delegate.getWifiCheck(operationId);
   Future<RhythmCommissioningWifi> getWifiProfileCredentials(String id) =>
       _delegate.getWifiProfileCredentials(id);
   Future<RhythmWifiChangeReceipt> startMatterWifiChange(

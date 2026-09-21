@@ -151,4 +151,42 @@ void main() {
       'profile_id': 'profile',
     });
   });
+  test('a Box that cannot check a network never blocks saving it', () async {
+    Response<dynamic> reply(int status, [Object? data]) => Response(
+      requestOptions: RequestOptions(path: 'verify'),
+      statusCode: status,
+      data: data,
+    );
+    var status = 404;
+    Object? data;
+    when(
+      () => dio.post(
+        any(),
+        data: any(named: 'data'),
+        options: any(named: 'options'),
+      ),
+    ).thenAnswer((_) async => reply(status, data));
+    when(
+      () => dio.get(any(), options: any(named: 'options')),
+    ).thenAnswer((_) async => reply(status, data));
+    Future<RhythmWifiCheck> start() =>
+        api.startWifiCheck(operationId: 'op', ssid: 'Fixture', password: 'pw');
+
+    // Older firmware, a busy radio, or a host without its own Wi-Fi.
+    expect((await start()).state, RhythmWifiCheckState.unavailable);
+    status = 409;
+    expect((await start()).state, RhythmWifiCheckState.unavailable);
+    status = 200;
+    data = <String, dynamic>{'state': 'running', 'reason': null};
+    expect((await start()).state, RhythmWifiCheckState.running);
+    data = <String, dynamic>{'state': 'failed', 'reason': 'join_failed'};
+    final failed = await api.getWifiCheck('op');
+    expect(failed?.state, RhythmWifiCheckState.failed);
+    expect(failed?.reason, 'join_failed');
+    // The Box is offline while it checks: not an answer.
+    when(
+      () => dio.get(any(), options: any(named: 'options')),
+    ).thenThrow(DioException(requestOptions: RequestOptions(path: 'verify')));
+    expect(await api.getWifiCheck('op'), isNull);
+  });
 }

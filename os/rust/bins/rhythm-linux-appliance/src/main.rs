@@ -738,10 +738,13 @@ fn hydrate_persisted_wifi_credentials(state: &SharedState) {
         None
     };
 
+    // A restart during a saved-network check can leave the Box joined to the
+    // network it was only testing. That is not its connection.
+    let interrupted_check = wifi::take_interrupted_verification();
     let action = startup_wifi_restore_action(
         stored_credentials.is_some(),
         system_config_credentials.is_some(),
-        wifi::has_active_connection(),
+        wifi::has_active_connection() && !interrupted_check,
     );
 
     let creds = match action {
