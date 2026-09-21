@@ -5,16 +5,34 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 
 const STORE: &str = "matter/wifi-changes.json";
-pub(crate) static CHANGE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-static ACTIVE: AtomicBool = AtomicBool::new(false);
-static BOOT: OnceLock<String> = OnceLock::new();
-fn boot() -> &'static str {
-    BOOT.get_or_init(|| uuid::Uuid::new_v4().to_string())
+/// Per-appliance admission state. Owned by `AppState` so a process hosting
+/// several appliances (tests, simulators) never shares one fence.
+pub struct WifiChangeRuntime {
+    pub(crate) lock: Mutex<()>,
+    active: AtomicBool,
+    boot: String,
+}
+impl Default for WifiChangeRuntime {
+    fn default() -> Self {
+        Self {
+            lock: Mutex::new(()),
+            active: AtomicBool::new(false),
+            boot: uuid::Uuid::new_v4().to_string(),
+        }
+    }
+}
+pub(crate) fn runtime(state: &SharedState) -> Result<Arc<WifiChangeRuntime>> {
+    Ok(state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("state unavailable"))?
+        .wifi_change
+        .clone())
 }
 
+/// Arguments: state, native device ID, target network, remaining budget (ms).
 pub type WifiChangeFn = Arc<
     dyn Fn(&SharedState, &str, &WifiCredentials, u64) -> Result<WifiChangeOutcome> + Send + Sync,
 >;
@@ -76,7 +94,7 @@ fn storage(state: &SharedState) -> Result<Arc<dyn crate::storage::Storage>> {
         .clone()
         .ok_or_else(|| anyhow::anyhow!("durable storage unavailable"))
 }
-fn load(state: &SharedState) -> Result<Journal> {
+fn load(state: &SharedState, runtime: &WifiChangeRuntime) -> Result<Journal> {
     let raw = storage(state)?.load_integration_state_file(STORE)?;
     let mut journal: Journal = match raw {
         Some(raw) => serde_json::from_str(&raw)?,
@@ -90,7 +108,7 @@ fn load(state: &SharedState) -> Result<Journal> {
     }
     for entry in &mut journal.entries {
         if entry.receipt.status == "pending"
-            && (entry.boot != boot() || !ACTIVE.load(Ordering::SeqCst))
+            && (entry.boot != runtime.boot || !runtime.active.load(Ordering::SeqCst))
         {
             entry.receipt.status = "complete".into();
             entry.receipt.outcome = Some(WifiChangeOutcome::recovery_required());
@@ -122,10 +140,13 @@ fn conflict(message: &str) -> ApiResponse {
 }
 
 pub fn handle_status(state: &SharedState, operation_id: &str) -> ApiResponse {
-    let Ok(_guard) = CHANGE_LOCK.get_or_init(|| Mutex::new(())).lock() else {
+    let Ok(runtime) = runtime(state) else {
         return unavailable();
     };
-    match load(state) {
+    let Ok(_guard) = runtime.lock.lock() else {
+        return unavailable();
+    };
+    match load(state, &runtime) {
         Ok(journal) => match journal
             .entries
             .iter()
@@ -141,10 +162,13 @@ pub fn handle_status(state: &SharedState, operation_id: &str) -> ApiResponse {
 }
 
 pub fn handle_latest(state: &SharedState, device_id: &str) -> ApiResponse {
-    let Ok(_guard) = CHANGE_LOCK.get_or_init(|| Mutex::new(())).lock() else {
+    let Ok(runtime) = runtime(state) else {
         return unavailable();
     };
-    match load(state) {
+    let Ok(_guard) = runtime.lock.lock() else {
+        return unavailable();
+    };
+    match load(state, &runtime) {
         Ok(journal) => journal
             .entries
             .iter()
@@ -172,10 +196,13 @@ pub fn handle_start(state: &SharedState, body: &Value) -> ApiResponse {
             "A device, saved network, and UUID operation_id are required",
         );
     }
-    let Ok(_guard) = CHANGE_LOCK.get_or_init(|| Mutex::new(())).lock() else {
+    let Ok(runtime) = runtime(state) else {
         return unavailable();
     };
-    let mut journal = match load(state) {
+    let Ok(_guard) = runtime.lock.lock() else {
+        return unavailable();
+    };
+    let mut journal = match load(state, &runtime) {
         Ok(journal) => journal,
         Err(_) => return unavailable(),
     };
@@ -190,7 +217,7 @@ pub fn handle_start(state: &SharedState, body: &Value) -> ApiResponse {
         return response(&entry.receipt);
     }
     let now = crate::state::current_epoch_ms();
-    if ACTIVE.load(Ordering::SeqCst)
+    if runtime.active.load(Ordering::SeqCst)
         || journal
             .entries
             .iter()
@@ -225,12 +252,12 @@ pub fn handle_start(state: &SharedState, body: &Value) -> ApiResponse {
         receipt: receipt.clone(),
         device_id: device_id.into(),
         profile_id: profile_id.into(),
-        boot: boot().into(),
+        boot: runtime.boot.clone(),
     });
     if save(state, &journal).is_err() {
         return unavailable();
     }
-    ACTIVE.store(true, Ordering::SeqCst);
+    runtime.active.store(true, Ordering::SeqCst);
     let state = state.clone();
     let operation = operation_id.to_string();
     let device = device_id.to_string();
@@ -241,7 +268,10 @@ pub fn handle_start(state: &SharedState, body: &Value) -> ApiResponse {
         .name("matter-wifi-change".into())
         .spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                callback(&worker_state, &device, &wifi, expires_at_ms)
+                // A relative budget: the native owner measures it on its
+                // own monotonic clock, immune to a wall-clock step.
+                let budget_ms = expires_at_ms.saturating_sub(crate::state::current_epoch_ms());
+                callback(&worker_state, &device, &wifi, budget_ms)
             }));
             let outcome = result
                 .ok()
@@ -250,7 +280,7 @@ pub fn handle_start(state: &SharedState, body: &Value) -> ApiResponse {
             finish(&worker_state, &worker_id, outcome);
         });
     if spawned.is_err() {
-        ACTIVE.store(false, Ordering::SeqCst);
+        runtime.active.store(false, Ordering::SeqCst);
         if let Some(entry) = journal.entries.last_mut() {
             entry.receipt.status = "complete".into();
             entry.receipt.outcome = Some(WifiChangeOutcome::recovery_required());
@@ -262,11 +292,14 @@ pub fn handle_start(state: &SharedState, body: &Value) -> ApiResponse {
 }
 
 fn finish(state: &SharedState, operation_id: &str, outcome: WifiChangeOutcome) {
-    let Ok(_guard) = CHANGE_LOCK.get_or_init(|| Mutex::new(())).lock() else {
+    let Ok(runtime) = runtime(state) else {
+        return;
+    };
+    let Ok(_guard) = runtime.lock.lock() else {
         return;
     };
     let mut saved = false;
-    if let Ok(mut journal) = load(state) {
+    if let Ok(mut journal) = load(state, &runtime) {
         if let Some(entry) = journal
             .entries
             .iter_mut()
@@ -281,7 +314,7 @@ fn finish(state: &SharedState, operation_id: &str, outcome: WifiChangeOutcome) {
             saved = save(state, &journal).is_ok();
         }
     }
-    ACTIVE.store(false, Ordering::SeqCst);
+    runtime.active.store(false, Ordering::SeqCst);
     drop(_guard);
     if saved {
         let code = serde_json::to_value(&outcome.code)
@@ -293,15 +326,16 @@ fn finish(state: &SharedState, operation_id: &str, outcome: WifiChangeOutcome) {
 }
 
 /// Reset must not race a worker that could recreate a just-deleted receipt.
-pub fn ensure_idle_for_reset(state: &SharedState) -> Result<()> {
-    if ACTIVE.load(Ordering::SeqCst) {
+/// The caller holds the returned runtime's lock for the whole reset.
+pub fn ensure_idle_for_reset(state: &SharedState, runtime: &WifiChangeRuntime) -> Result<()> {
+    if runtime.active.load(Ordering::SeqCst) {
         bail!("Wait for the network change to finish before resetting");
     }
     // Restoring or resetting immediately after a process crash must not erase
     // the still-live device fail-safe fence along with its receipt.
     if state.lock().ok().and_then(|s| s.storage.clone()).is_some() {
         let now = crate::state::current_epoch_ms();
-        if load(state)?
+        if load(state, runtime)?
             .entries
             .iter()
             .any(|e| e.receipt.retry_after_ms > now)

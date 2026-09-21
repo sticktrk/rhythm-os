@@ -1,20 +1,46 @@
-# Saved provisioning networks and Matter Wi-Fi changes
+# Saved networks: Box connection, accessory provisioning and Matter Wi-Fi changes
 
-The Box owns up to 16 saved networks and exactly one default while the catalog is
-nonempty. The owner manages these in **Saved provisioning networks**. Provisioning
-can select another profile for one attempt without changing the default or the
-Box connection. Box Matter and Box/phone BLE Wi-Fi provisioning use this selection.
-Phone OS Matter commissioning controls its own network; an explicit saved-network
-selection cannot silently fall back to that path.
+The Box owns one catalog of up to 16 saved networks. Three consumers share it
+through two independent pointers:
 
-`commissioning_wifi.json` is an atomic, durable mode-0600 secret document. The
-legacy top-level `ssid` and `password` represent the default; `profile_schema: 1`,
-`revision`, `default_id`, and `profiles` carry the catalog. Legacy credentials seed
-one profile. A managed empty catalog stays empty. New Box network writes preserve
-managed profiles. Older software can read the default; an older credential writer
-replaces the catalog with one credential, so alternate profiles require re-entry
-after that downgrade. Old and current factory reset erase the entire file. There
-is no separate credential file to resurrect after rollback.
+| Pointer | Meaning | Written by |
+| --- | --- | --- |
+| `box_profile_id` | The network the Box itself joins and restores at startup | Only the Box connection path (BLE/API provisioning, startup sync, forget) |
+| `default_id` | The network new accessories receive during setup | Only the owner, in **Settings → Wi-Fi for new accessories** |
+
+Matter network changes name a profile explicitly. Pairing never asks for a
+network inline: every provisioning journey uses `default_id`. The API still
+accepts an optional `wifi_profile_id` on Box BLE commissioning for tooling.
+
+Choosing a default never moves the Box, and moving the Box never discards saved
+networks. When the Box joins a network, that network is upserted by SSID and
+`box_profile_id` moves to it. A default that was following the Box (unset, or
+equal to the previous Box network) keeps following it; an owner-chosen default
+stays. If the catalog is full, the new connection cannot be stored, so
+`box_profile_id` is cleared instead: startup recovery then uses the system network
+configuration and never rejoins the previous network. Forgetting the Box network
+clears only the pointer. The owner catalog cannot edit or remove the Box
+connection, cannot remove the default while another network exists (the Box never
+chooses where accessories go), and stores one entry per SSID.
+
+`commissioning_wifi.json` is an atomic, durable mode-0600 secret document owned by
+storage, which serializes every read-modify-write under its own lock. The legacy
+top-level `ssid` and `password` mirror the Box network, or the default when no Box
+network is known; `profile_schema: 1`, `revision`, `default_id`, `box_profile_id`
+and `profiles` carry the catalog. Older software restores the Box from that
+mirror, so a downgrade keeps the Box on its own network. A legacy credential was
+both roles and seeds one profile holding both pointers. A managed empty catalog
+stays empty. An older credential writer replaces the catalog with one credential,
+so other networks require re-entry after that downgrade.
+
+Owner-entered networks must be provisionable (open, 8–63 byte passphrase, or
+64-digit key). The Box connection is recorded as joined, so stored entries are
+checked only structurally. An unreadable or self-inconsistent document is moved to
+`commissioning_wifi.json.corrupt` and the platform seeds a working catalog again.
+A document with a newer `profile_schema` is never reinterpreted, replaced or
+quarantined: the catalog is unavailable, and the Box and accessories continue from
+its legacy mirror. Old and current factory reset erase the document and its
+quarantine.
 
 Neither backup mode exports saved networks. Restoring a backup retains the local
 Box's profiles; another Box needs credential re-entry. Profiles never enter normal
@@ -23,10 +49,10 @@ an owner token even on LAN, deny support tokens, and return `Cache-Control: no-s
 
 | Route | Contract |
 | --- | --- |
-| GET `/api/pairing/wifi-profiles` | Metadata only: revision, default ID, profile IDs and SSIDs |
+| GET `/api/pairing/wifi-profiles` | Metadata only: revision, `default_id`, `box_profile_id`, profile IDs and SSIDs |
 | PUT `/api/pairing/wifi-profiles` | Revision, UUID correlation ID, `save`/`remove`/`default`, optional profile ID; omitted password preserves it, empty password selects an open network |
 | GET `/api/pairing/wifi-profiles/:id/credentials` | Explicit uncached owner credential retrieval for phone BLE |
-| GET `/api/pairing/wifi-credentials` | Legacy default credential retrieval |
+| GET `/api/pairing/wifi-credentials` | Credentials of `default_id` for phone BLE provisioning |
 | POST `/api/matter/wifi-change` | UUID operation ID, saved profile ID, registered native Matter device ID; returns a receipt |
 | GET `/api/matter/wifi-change/:id` | Same receipt across retries and app reconnect |
 | GET `/api/matter/wifi-change?device_id=...` | Latest device receipt for reopening the screen after app restart |
@@ -36,30 +62,41 @@ pairing requests remain valid; an optional `wifi_profile_id` selects a profile.
 The API reports stale catalog edits as 409. Missing profiles, owner failures and
 uncertain transport delivery stay distinct in the SDK.
 
-Only one network change runs at a time. Native preflight checks authenticated
-reachability, a Wi-Fi Network Commissioning interface, a direct light endpoint and
-available network slots. It never removes a working network to free a slot. The
-transaction arms a 180-second device fail-safe, checks typed Add/Connect status,
-expires sessions for that node, establishes CASE again, and reads the connected
-network plus the light's OnOff attribute. It commits with typed
-CommissioningComplete and verifies again. No fabric, node, room, group, name or
-schedule writer participates.
+Only one network change runs at a time per appliance; the admission fence lives
+in `AppState`, not in process globals. Native preflight checks authenticated
+reachability, a Wi-Fi Network Commissioning interface and a direct light endpoint.
+The transaction arms a 180-second device fail-safe and stages everything under it:
+
+1. **Make room.** Most shipping bulbs hold one network. When no slot is free, the
+   connected network is staged for removal. The bulb stays on it until Connect,
+   and rollback or fail-safe expiry restores it. With a free slot nothing is removed.
+2. **Add, then Connect**, each with typed status.
+3. **Verify the target**: expire sessions for the node, establish CASE again, and
+   read the connected network plus the light's OnOff attribute. A bulb moving
+   networks over its operational session commonly cannot deliver the Connect
+   response, so a lost response is not treated as failure; only this authenticated
+   readback decides. A typed rejection still rolls back without it.
+4. **Commit** with typed CommissioningComplete and verify again.
+
+No fabric, node, room, group, name or schedule writer participates.
 
 Failure attempts fail-safe rollback and reports separately whether the old network
 was verified. A lost completion response remains recovery-required. Transport
 failure never replays the RPC. Durable receipts contain no credentials, retain a
 five-minute recovery fence, and resolve an interrupted process to recovery-required
-without replay. The receipt deadline reaches the native command owner; delayed
-work cannot arm a fail-safe that extends beyond that fence. Reopening the app reads the latest receipt. Unknown receipt status
+without replay. The remaining fence travels to the native command owner as a
+relative budget measured on monotonic clocks, including time queued behind another
+controller lifecycle operation, so neither delayed work nor a wall-clock step can
+arm a fail-safe that extends beyond the fence. The controller RPC waits for that
+budget plus a 30-second readback margin. Reopening the app reads the latest receipt. Unknown receipt status
 is not permission to repeat a request. Receipts are limited to 256 within 30 days;
 backup export excludes them and imports reject them. Reset/restore waits for an
 active operation or recovery fence to finish.
 
 The supported first slice requires the old and target networks to remain available
-and reachable from the Box. Thread, bridged devices and devices without a spare
-slot are rejected. An offline bulb may need its old network restored or a
-manufacturer-supported recovery procedure. Verify credential rejection, absent AP,
-rollback, power loss, reboot persistence and ordinary controls on representative
+and reachable from the Box. Thread and bridged devices are rejected. An offline bulb may need its old network restored or a
+manufacturer-supported recovery procedure. Verify one-slot replacement, a lost Connect response, credential rejection,
+absent AP, rollback, power loss, reboot persistence and ordinary controls on representative
 physical bulbs before publishing model-level reliability claims. Native header
 compilation and deterministic transaction tests do not substitute for those tests.
 

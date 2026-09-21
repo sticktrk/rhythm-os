@@ -27,7 +27,7 @@ pub trait ChipControllerBackend: Send + Sync {
         _node: u64,
         _endpoint: u16,
         _wifi: &rhythm_os::provisioning::WifiCredentials,
-        _expires_at_ms: u64,
+        _budget_ms: u64,
     ) -> Result<rhythm_os::wifi_change::WifiChangeOutcome> {
         Ok(rhythm_os::wifi_change::WifiChangeOutcome {
             code: rhythm_os::wifi_change::WifiChangeCode::Unsupported,
@@ -198,10 +198,10 @@ impl ChipControllerBackend for NativeChipBackend {
         node: u64,
         endpoint: u16,
         wifi: &rhythm_os::provisioning::WifiCredentials,
-        expires_at_ms: u64,
+        budget_ms: u64,
     ) -> Result<rhythm_os::wifi_change::WifiChangeOutcome> {
         self.controller_ref()?
-            .change_wifi(node, endpoint, wifi, expires_at_ms)
+            .change_wifi(node, endpoint, wifi, budget_ms)
     }
 
     fn probe_light(&self, node_id: u64) -> Result<CommissionedDevice> {

@@ -616,7 +616,7 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
         state: &SharedState,
         device_id: &str,
         wifi: &rhythm_os::provisioning::WifiCredentials,
-        expires_at_ms: u64,
+        budget_ms: u64,
     ) -> Result<rhythm_os::wifi_change::WifiChangeOutcome> {
         use rhythm_os::wifi_change::{WifiChangeCode, WifiChangeOutcome};
         let hub_key = HubKey::new(HubType::new("matter"), "local");
@@ -655,7 +655,7 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
         hub.transport
             .get()
             .ok_or_else(|| anyhow::anyhow!("Matter transport unavailable"))?
-            .change_wifi(node, endpoint, wifi, expires_at_ms)
+            .change_wifi(node, endpoint, wifi, budget_ms)
     }
 
     fn load_pairing_recovery(

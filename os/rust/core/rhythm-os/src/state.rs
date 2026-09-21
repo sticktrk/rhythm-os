@@ -930,10 +930,14 @@ pub struct AppState {
     /// missing. Integrations use this callback only as a fallback so they stay
     /// portable and do not read platform files directly.
     #[allow(clippy::type_complexity)]
-    pub change_wifi_fn: Option<crate::wifi_change::WifiChangeFn>,
     pub commissioning_wifi_credentials_provider: Option<
         Arc<dyn Fn() -> anyhow::Result<Option<crate::provisioning::WifiCredentials>> + Send + Sync>,
     >,
+
+    /// Moves one paired accessory to a saved network through its integration.
+    pub change_wifi_fn: Option<crate::wifi_change::WifiChangeFn>,
+    /// Admission fence and restart identity for accessory network changes.
+    pub wifi_change: Arc<crate::wifi_change::WifiChangeRuntime>,
 
     /// Optional platform-owned safety barrier for a full factory reset.
     ///
@@ -1143,8 +1147,9 @@ impl Default for AppState {
             save_device_test_report_fn: None,
             hub_credentials_interceptor: None,
             request_hub_bootstrap_fn: None,
-            change_wifi_fn: None,
             commissioning_wifi_credentials_provider: None,
+            change_wifi_fn: None,
+            wifi_change: Default::default(),
             before_factory_reset_fn: None,
             after_factory_reset_fn: None,
             factory_reset_recovery_fn: None,

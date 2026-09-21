@@ -882,7 +882,7 @@ pub trait ExternalLightHubIntegration: Send + Sync {
         _state: &SharedState,
         _device_id: &str,
         _wifi: &crate::provisioning::WifiCredentials,
-        _expires_at_ms: u64,
+        _budget_ms: u64,
     ) -> Result<crate::wifi_change::WifiChangeOutcome> {
         Ok(crate::wifi_change::WifiChangeOutcome {
             code: crate::wifi_change::WifiChangeCode::Unsupported,
@@ -2214,10 +2214,10 @@ pub fn integration_callbacks(
     );
 
     let change_wifi_fn: crate::wifi_change::WifiChangeFn =
-        Arc::new(move |state, device_id, wifi, expires_at_ms| {
+        Arc::new(move |state, device_id, wifi, budget_ms| {
             find_integration(integrations, "matter")
                 .ok_or_else(|| anyhow::anyhow!("Matter unavailable"))?
-                .change_wifi(state, device_id, wifi, expires_at_ms)
+                .change_wifi(state, device_id, wifi, budget_ms)
         });
 
     let load_pairing_recovery_fn = Arc::new(

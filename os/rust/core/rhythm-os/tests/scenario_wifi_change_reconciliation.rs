@@ -25,9 +25,9 @@ fn uncertain_requests_never_replay_and_restart_retains_recovery_fence() {
     let (release, gate) = std::sync::mpsc::channel();
     let gate = Arc::new(Mutex::new(gate));
     let count = calls.clone();
-    state.lock().unwrap().change_wifi_fn = Some(Arc::new(move |_, device, wifi, deadline| {
+    state.lock().unwrap().change_wifi_fn = Some(Arc::new(move |_, device, wifi, budget_ms| {
         assert_eq!(device, "matter-100");
-        assert!(deadline > chrono::Utc::now().timestamp_millis() as u64);
+        assert!((1..=300_000).contains(&budget_ms));
         assert_eq!(wifi.ssid, "FixtureTarget");
         count.fetch_add(1, Ordering::SeqCst);
         gate.lock().unwrap().recv().unwrap();

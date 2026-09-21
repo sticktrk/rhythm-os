@@ -5,9 +5,10 @@ use serde_json::{json, Value};
 fn saved_override_and_network_change_preserve_default_and_canonical_identity() {
     let rig = connect_rig();
     store_commissioning_wifi(&rig.state, "FixtureDefault", "default-password");
+    let seeded: Value = serde_json::from_str(&wifi_profiles::handle_list(&rig.state).body).unwrap();
     let catalog = wifi_profiles::handle_update(
         &rig.state,
-        &json!({"revision":0,"action":"save","ssid":"FixtureAlternate","password":"alternate-password","correlation_id":"12345678-1234-4234-8234-123456789abc"}),
+        &json!({"revision":seeded["revision"],"action":"save","ssid":"FixtureAlternate","password":"alternate-password","correlation_id":"12345678-1234-4234-8234-123456789abc"}),
     );
     assert_eq!(catalog.status, 200);
     let catalog: Value = serde_json::from_str(&catalog.body).unwrap();

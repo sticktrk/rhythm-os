@@ -18,9 +18,21 @@ WifiChangeResult ChangeWifi(Device & device)
     // The durable receipt bounds even work delayed by controller admission.
     if (!device.CanArm()) return {WifiChangeCode::RecoveryRequired, false};
     if (!device.Arm()) return {WifiChangeCode::FailSafeBusy, false};
-    code = device.Add();
-    if (code == WifiChangeCode::Success) code = device.Connect();
-    if (code == WifiChangeCode::Success && !device.VerifyTarget()) code = WifiChangeCode::VerificationFailed;
+    // Everything from here is staged under the fail-safe: rollback or expiry
+    // restores the previous configuration, including a network MakeRoom staged
+    // for removal on a bulb without a spare slot.
+    code = device.MakeRoom();
+    if (code == WifiChangeCode::Success) code = device.Add();
+    if (code == WifiChangeCode::Success) {
+        code = device.Connect();
+        // A bulb moving networks over its operational session commonly cannot
+        // deliver the Connect response. Delivery failure is therefore not
+        // evidence of failure: only authenticated readback on the target decides.
+        if (code == WifiChangeCode::Success)
+            code = device.VerifyTarget() ? WifiChangeCode::Success : WifiChangeCode::VerificationFailed;
+        else if (code == WifiChangeCode::RecoveryRequired && device.VerifyTarget())
+            code = WifiChangeCode::Success;
+    }
     if (code != WifiChangeCode::Success) {
         device.Rollback();
         return {code, device.VerifyOriginal()};

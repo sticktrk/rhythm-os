@@ -13424,11 +13424,12 @@ fn apply_backup_configuration(
 }
 
 pub fn do_backup_restore(state: &SharedState, bundle: BackupBundle) -> Result<String> {
-    let _network_guard = crate::wifi_change::CHANGE_LOCK
-        .get_or_init(|| std::sync::Mutex::new(()))
+    let network_changes = crate::wifi_change::runtime(state)?;
+    let _network_guard = network_changes
+        .lock
         .lock()
         .map_err(|_| anyhow::anyhow!("network change lock unavailable"))?;
-    crate::wifi_change::ensure_idle_for_reset(state)?;
+    crate::wifi_change::ensure_idle_for_reset(state, &network_changes)?;
     if !matches!(
         bundle.schema_version,
         LEGACY_BACKUP_SCHEMA_VERSION
@@ -21206,10 +21207,11 @@ mod tests {
             let bulk_in_progress = Arc::new(AtomicBool::new(true));
             {
                 let mut app = state.lock().unwrap();
-                app.hubs.get_mut(&first_key).unwrap().discovery = Some(Arc::new(RefreshDiscovery {
-                    room: "First room",
-                    fail: Arc::new(AtomicBool::new(false)),
-                }));
+                app.hubs.get_mut(&first_key).unwrap().discovery =
+                    Some(Arc::new(RefreshDiscovery {
+                        room: "First room",
+                        fail: Arc::new(AtomicBool::new(false)),
+                    }));
                 app.hubs.insert(
                     second_key.clone(),
                     ActiveHub {
@@ -21244,8 +21246,8 @@ mod tests {
                 let bulk_in_progress = bulk_in_progress.clone();
                 let projections = projections.clone();
                 let authority_failure_key = second_key.clone();
-                app.reconcile_external_controller_authority_fn =
-                    Some(Arc::new(move |state, hub_key| {
+                app.reconcile_external_controller_authority_fn = Some(Arc::new(
+                    move |state, hub_key| {
                         let app = state.lock().unwrap();
                         // Check the queued/running state as well as completed work,
                         // so the regression does not depend on worker timing.
@@ -21273,7 +21275,8 @@ mod tests {
                             "authority reconciliation unavailable"
                         );
                         Ok(())
-                    }));
+                    },
+                ));
             }
 
             let report = crate::room_sync::sync_all_hubs(&state).unwrap();
@@ -39003,7 +39006,11 @@ mod tests {
             serde_json::to_value(state.canonical_registry.triage()).unwrap()
         };
         let saved_before = storage.load_authority_state().unwrap().unwrap();
-        let transaction_lock = state.lock().unwrap().external_topology_transaction_lock.clone();
+        let transaction_lock = state
+            .lock()
+            .unwrap()
+            .external_topology_transaction_lock
+            .clone();
         let _transaction = transaction_lock.lock().unwrap();
         storage.inner.lock().unwrap().fail_save_authority_state = true;
         assert!(reconcile_room_binding_triage(&state)
@@ -39015,14 +39022,23 @@ mod tests {
             before
         );
         assert_eq!(
-            storage.load_authority_state().unwrap().unwrap().canonical_registry,
+            storage
+                .load_authority_state()
+                .unwrap()
+                .unwrap()
+                .canonical_registry,
             saved_before.canonical_registry
         );
 
         storage.inner.lock().unwrap().fail_save_authority_state = false;
         reconcile_room_binding_triage(&state).unwrap();
         assert_eq!(
-            state.lock().unwrap().canonical_registry.triage().pending_room_count(),
+            state
+                .lock()
+                .unwrap()
+                .canonical_registry
+                .triage()
+                .pending_room_count(),
             0
         );
         let saved = storage.load_authority_state().unwrap().unwrap();

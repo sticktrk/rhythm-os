@@ -128,8 +128,11 @@ fn handle_delete_wifi(state: &SharedState, provisioning: &ProvisioningManager) -
         Ok(()) => {
             if let Ok(state) = state.lock() {
                 if let Some(storage) = state.storage.as_ref() {
-                    if matches!(storage.load_wifi_profiles(), Ok(None)) {
-                        let _ = storage.clear_commissioning_wifi_credentials();
+                    // Forget only the Box pointer. Startup recovery must not
+                    // rejoin a network the owner removed; saved accessory
+                    // networks are not the Box's to erase.
+                    if let Err(error) = storage.clear_box_wifi_credentials() {
+                        warn!(target: "sys", "Failed to forget the Box network: {:#}", error);
                     }
                 }
             }

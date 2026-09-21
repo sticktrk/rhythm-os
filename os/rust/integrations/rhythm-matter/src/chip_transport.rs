@@ -88,6 +88,9 @@ impl std::fmt::Display for MatterPairingStopped {
 
 impl std::error::Error for MatterPairingStopped {}
 
+/// The durable receipt fence in `rhythm_os::wifi_change`.
+const WIFI_CHANGE_MAX_BUDGET_MS: u64 = 300_000;
+
 fn rpc_timeout_for_request(request: &ChipRpcRequest) -> Duration {
     match request {
         ChipRpcRequest::WaitControllerEvents { max_wait_ms, .. } => {
@@ -117,7 +120,13 @@ fn rpc_timeout_for_request(request: &ChipRpcRequest) -> Duration {
         // default deadline — reaching it means the sidecar itself is wedged and
         // the transport recovery path should restart it.
         ChipRpcRequest::SubscribeOnOff { .. } => RPC_TIMEOUT,
-        ChipRpcRequest::ChangeWifi { .. } => Duration::from_secs(600),
+        // The native owner refuses to arm once the budget cannot cover a full
+        // fail-safe, so the device is settled before the budget ends. The
+        // margin only covers the final readback and response.
+        ChipRpcRequest::ChangeWifi { budget_ms, .. } => {
+            Duration::from_millis((*budget_ms).min(WIFI_CHANGE_MAX_BUDGET_MS))
+                + Duration::from_secs(30)
+        }
         ChipRpcRequest::CommissionLight(_) => RPC_COMMISSION_TIMEOUT,
         _ => RPC_TIMEOUT,
     }
@@ -1786,7 +1795,7 @@ impl MatterTransport for ChipTransport {
         node_id: u64,
         endpoint: u16,
         wifi: &rhythm_os::provisioning::WifiCredentials,
-        expires_at_ms: u64,
+        budget_ms: u64,
     ) -> Result<rhythm_os::wifi_change::WifiChangeOutcome> {
         // Deliberately bypass call()'s transport recovery/replay. The durable
         // API receipt owns reconciliation after any uncertain delivery.
@@ -1795,7 +1804,7 @@ impl MatterTransport for ChipTransport {
             node_id,
             endpoint,
             wifi: wifi.clone(),
-            expires_at_ms,
+            budget_ms,
         })?)
     }
 
@@ -3878,8 +3887,9 @@ mod tests {
             node_id: 7,
             endpoint: 2,
             wifi: request,
-            expires_at_ms: u64::MAX,
+            budget_ms: u64::MAX,
         };
+        assert_eq!(rpc_timeout_for_request(&rpc), Duration::from_secs(330));
         assert!(!format!("{rpc:?}").contains("FixtureNetwork"));
         assert!(!format!("{rpc:?}").contains("fixture-secret"));
     }

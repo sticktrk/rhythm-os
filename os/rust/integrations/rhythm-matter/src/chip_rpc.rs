@@ -43,7 +43,9 @@ pub enum ChipRpcRequest {
         node_id: u64,
         endpoint: u16,
         wifi: rhythm_os::provisioning::WifiCredentials,
-        expires_at_ms: u64,
+        /// Remaining receipt budget. Relative, so neither side trusts the
+        /// other's wall clock across a time-sync step.
+        budget_ms: u64,
     },
     ListDevices,
     ProbeLight {

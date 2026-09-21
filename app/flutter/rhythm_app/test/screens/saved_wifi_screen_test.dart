@@ -14,84 +14,141 @@ class WifiApi extends CloudBackedServerApi {
   int starts = 0;
   String startError = 'unavailable';
   @override
-  Future<RhythmWifiProfiles> getWifiProfiles() async =>
-      const RhythmWifiProfiles(revision: 1, defaultId: 'main', profiles: [
-        RhythmWifiProfile(id: 'main', ssid: 'Main fixture'),
-        RhythmWifiProfile(id: 'ext', ssid: 'Extender fixture')
-      ]);
+  Future<RhythmWifiProfiles> getWifiProfiles() async => RhythmWifiProfiles(
+    revision: 1,
+    defaultId: defaultId,
+    boxProfileId: 'main',
+    profiles: const [
+      RhythmWifiProfile(id: 'main', ssid: 'Main fixture'),
+      RhythmWifiProfile(id: 'ext', ssid: 'Extender fixture'),
+      RhythmWifiProfile(id: 'spare', ssid: 'Spare fixture'),
+    ],
+  );
+  String defaultId = 'main';
   @override
-  Future<RhythmWifiProfiles> updateWifiProfile(
-      {required int revision,
-      required String action,
-      required String correlationId,
-      String? id,
-      String? ssid,
-      String? password}) async {
-    changes.add(action);
+  Future<RhythmWifiProfiles> updateWifiProfile({
+    required int revision,
+    required String action,
+    required String correlationId,
+    String? id,
+    String? ssid,
+    String? password,
+  }) async {
+    changes.add('$action:$id');
+    if (action == 'default') defaultId = id!;
     return getWifiProfiles();
   }
 
   @override
   Future<RhythmWifiChangeReceipt?> getLatestMatterWifiChange(
-      String deviceId) async {
+    String deviceId,
+  ) async {
     if (failStatus) throw StateError('offline');
     return receipt;
   }
 
   @override
   Future<RhythmWifiChangeReceipt> getMatterWifiChange(
-      String operationId) async {
+    String operationId,
+  ) async {
     if (failStatus) throw StateError('offline');
     return receipt!;
   }
 
   @override
-  Future<RhythmWifiChangeReceipt> startMatterWifiChange(
-      {required String operationId,
-      required String deviceId,
-      required String profileId}) async {
+  Future<RhythmWifiChangeReceipt> startMatterWifiChange({
+    required String operationId,
+    required String deviceId,
+    required String profileId,
+  }) async {
     starts++;
     throw RhythmWifiException(startError);
   }
 }
 
 void main() {
-  testWidgets('alternate selection does not change the default',
-      (tester) async {
+  testWidgets('settings choose the default without touching the Box network', (
+    tester,
+  ) async {
+    final api = WifiApi();
+    await tester.pumpWidget(MaterialApp(home: SavedWifiScreen(api: api)));
+    await tester.pumpAndSettle();
+    expect(
+      find.text('Default for new accessories · Rhythm Box connection'),
+      findsOneWidget,
+    );
+    // The Box connection follows the Box; it has no edit or remove menu.
+    expect(find.byKey(const ValueKey('wifi-profile-menu-main')), findsNothing);
+
+    await tester.tap(find.text('Extender fixture'));
+    await tester.pumpAndSettle();
+    expect(api.changes, ['default:ext']);
+    expect(find.text('Rhythm Box connection'), findsOneWidget);
+    expect(find.text('Default for new accessories'), findsOneWidget);
+    // Tapping the current default is not another write.
+    await tester.tap(find.text('Extender fixture'));
+    await tester.pumpAndSettle();
+    expect(api.changes, ['default:ext']);
+
+    // The default cannot be removed while another choice exists.
+    await tester.tap(find.byKey(const ValueKey('wifi-profile-menu-ext')));
+    await tester.pumpAndSettle();
+    expect(find.text('Remove saved network'), findsNothing);
+    await tester.tapAt(Offset.zero);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('wifi-profile-menu-spare')));
+    await tester.pumpAndSettle();
+    expect(find.text('Remove saved network'), findsOneWidget);
+  });
+  testWidgets('alternate selection does not change the default', (
+    tester,
+  ) async {
     final api = WifiApi();
     String? chosen;
-    await tester.pumpWidget(MaterialApp(
+    await tester.pumpWidget(
+      MaterialApp(
         home: Builder(
-            builder: (context) => Scaffold(
-                body: TextButton(
-                    onPressed: () async {
-                      chosen = await SavedWifiScreen.select(context, api);
-                    },
-                    child: const Text('Open'))))));
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () async {
+                chosen = await SavedWifiScreen.select(context, api);
+              },
+              child: const Text('Open'),
+            ),
+          ),
+        ),
+      ),
+    );
     await tester.tap(find.text('Open'));
     await tester.pumpAndSettle();
-    expect(find.text('Provisioning default'), findsOneWidget);
+    expect(find.textContaining('Default for new accessories'), findsOneWidget);
     await tester.tap(find.text('Extender fixture'));
     await tester.tap(find.byKey(const ValueKey('wifi-use')));
     await tester.pumpAndSettle();
     expect(chosen, 'ext');
     expect(api.changes, isEmpty);
   });
-  testWidgets('pending receipt resumes without repeating a change',
-      (tester) async {
+  testWidgets('pending receipt resumes without repeating a change', (
+    tester,
+  ) async {
     final api = WifiApi()
-      ..receipt =
-          const RhythmWifiChangeReceipt(operationId: 'old', status: 'pending');
-    await tester.pumpWidget(MaterialApp(
-        home: MatterWifiChangeScreen(api: api, deviceId: 'matter-1')));
+      ..receipt = const RhythmWifiChangeReceipt(
+        operationId: 'old',
+        status: 'pending',
+      );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: MatterWifiChangeScreen(api: api, deviceId: 'matter-1'),
+      ),
+    );
     await tester.pump();
     await tester.pump();
     expect(
-        tester
-            .widget<FilledButton>(
-                find.byKey(const ValueKey('wifi-change-start')))
-            .onPressed,
-        isNull);
+      tester
+          .widget<FilledButton>(find.byKey(const ValueKey('wifi-change-start')))
+          .onPressed,
+      isNull,
+    );
     api.failStatus = true;
     await tester.pump(const Duration(seconds: 4));
     await tester.pump();
@@ -99,11 +156,15 @@ void main() {
     expect(api.starts, 0);
     await tester.pumpWidget(const SizedBox());
   });
-  testWidgets('uncertain POST keeps status-only reconciliation',
-      (tester) async {
+  testWidgets('uncertain POST keeps status-only reconciliation', (
+    tester,
+  ) async {
     final api = WifiApi();
-    await tester.pumpWidget(MaterialApp(
-        home: MatterWifiChangeScreen(api: api, deviceId: 'matter-1')));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: MatterWifiChangeScreen(api: api, deviceId: 'matter-1'),
+      ),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('wifi-change-start')));
     await tester.pumpAndSettle();
@@ -114,17 +175,21 @@ void main() {
     expect(api.starts, 1);
     expect(find.textContaining('uncertain'), findsOneWidget);
     expect(
-        tester
-            .widget<FilledButton>(
-                find.byKey(const ValueKey('wifi-change-start')))
-            .onPressed,
-        isNull);
+      tester
+          .widget<FilledButton>(find.byKey(const ValueKey('wifi-change-start')))
+          .onPressed,
+      isNull,
+    );
   });
-  testWidgets('definitive rejection refreshes status without resending',
-      (tester) async {
+  testWidgets('definitive rejection refreshes status without resending', (
+    tester,
+  ) async {
     final api = WifiApi()..startError = 'conflict';
-    await tester.pumpWidget(MaterialApp(
-        home: MatterWifiChangeScreen(api: api, deviceId: 'matter-1')));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: MatterWifiChangeScreen(api: api, deviceId: 'matter-1'),
+      ),
+    );
     await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('wifi-change-start')));
     await tester.pumpAndSettle();
@@ -137,10 +202,10 @@ void main() {
     await tester.pumpAndSettle();
     expect(api.starts, 1);
     expect(
-        tester
-            .widget<FilledButton>(
-                find.byKey(const ValueKey('wifi-change-start')))
-            .onPressed,
-        isNotNull);
+      tester
+          .widget<FilledButton>(find.byKey(const ValueKey('wifi-change-start')))
+          .onPressed,
+      isNotNull,
+    );
   });
 }

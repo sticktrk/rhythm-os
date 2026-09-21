@@ -65,15 +65,15 @@ impl ChipFfiController {
         node: u64,
         endpoint: u16,
         wifi: &rhythm_os::provisioning::WifiCredentials,
-        expires_at_ms: u64,
+        budget_ms: u64,
     ) -> Result<rhythm_os::wifi_change::WifiChangeOutcome> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
-            ffi_probe::change_wifi(node, endpoint, wifi, expires_at_ms)
+            ffi_probe::change_wifi(node, endpoint, wifi, budget_ms)
         }
         #[cfg(not(rhythm_chipd_chip_ffi))]
         {
-            let _ = (node, endpoint, wifi, expires_at_ms);
+            let _ = (node, endpoint, wifi, budget_ms);
             Err(self.unsupported("change_wifi"))
         }
     }
@@ -1118,7 +1118,7 @@ mod ffi_probe {
         node: u64,
         endpoint: u16,
         wifi: &rhythm_os::provisioning::WifiCredentials,
-        expires_at_ms: u64,
+        budget_ms: u64,
     ) -> Result<rhythm_os::wifi_change::WifiChangeOutcome> {
         use rhythm_os::wifi_change::{WifiChangeCode as Code, WifiChangeOutcome};
         extern "C" {
@@ -1128,7 +1128,7 @@ mod ffi_probe {
                 ssid: *const std::os::raw::c_char,
                 password: *const std::os::raw::c_char,
                 rollback: *mut bool,
-                expires_at_ms: u64,
+                budget_ms: u64,
             ) -> u8;
         }
         rhythm_os::wifi_profiles::validate_credentials(wifi)?;
@@ -1144,7 +1144,7 @@ mod ffi_probe {
                 ssid.as_ptr(),
                 password.as_ptr(),
                 &mut rollback_verified,
-                expires_at_ms,
+                budget_ms,
             )
         };
         Ok(WifiChangeOutcome {

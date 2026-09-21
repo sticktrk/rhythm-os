@@ -55,7 +55,9 @@ pub fn load_accessory_wifi_credentials(
         )
     };
     if let Some(storage) = storage.as_ref() {
-        if let Some(store) = storage.load_wifi_profiles()? {
+        // The provisioning default, never the Box pointer. A document this
+        // version cannot interpret falls through to its legacy mirror.
+        if let Ok(Some(store)) = storage.load_wifi_profiles() {
             return store.credentials(None);
         }
         if let Some(credentials) = storage.load_commissioning_wifi_credentials()? {

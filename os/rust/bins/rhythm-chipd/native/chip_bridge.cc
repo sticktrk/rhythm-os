@@ -1399,7 +1399,7 @@ public:
         });
     }
 
-    rhythm::WifiChangeResult ChangeWifi(NodeId nodeId, EndpointId endpoint, const char * ssid, const char * password, uint64_t expiresAtMs)
+    rhythm::WifiChangeResult ChangeWifi(NodeId nodeId, EndpointId endpoint, const char * ssid, const char * password, uint64_t budgetMs)
     {
         using Code = rhythm::WifiChangeCode;
         struct Device {
@@ -1408,7 +1408,10 @@ public:
             EndpointId endpoint;
             std::string target, password, original;
             std::chrono::steady_clock::time_point armedAt;
-            uint64_t expiresAtMs;
+            // Remaining receipt budget on the monotonic clock: a wall-clock
+            // step (startup time sync) can neither admit late work nor starve it.
+            std::chrono::steady_clock::time_point deadline;
+            bool needsRoom = false;
 
             CHIP_ERROR Networks(std::vector<std::pair<std::string, bool>> & networks)
             {
@@ -1447,16 +1450,23 @@ public:
                     if (network.first == target) exists = true;
                 }
                 if (original.empty()) return Code::Offline;
-                // Never evict the working network to make room. One-slot bulbs
-                // require a separately verified replacement procedure.
-                if (!exists && networks.size() >= maximum) return Code::NetworkSlots;
+                if (maximum == 0) return Code::NetworkSlots;
+                // Most shipping bulbs hold one network. The staged replacement
+                // in MakeRoom() is the specified way to move them.
+                needsRoom = !exists && networks.size() >= maximum;
                 return Code::Success;
             }
             bool CanArm() {
-                const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::system_clock::now().time_since_epoch()).count();
-                return now >= 0 && expiresAtMs > static_cast<uint64_t>(now) &&
-                    expiresAtMs - static_cast<uint64_t>(now) > 190000;
+                return deadline - std::chrono::steady_clock::now() > std::chrono::seconds(190);
+            }
+            Code MakeRoom() {
+                if (!needsRoom) return Code::Success;
+                if (std::chrono::steady_clock::now() - armedAt >= std::chrono::seconds(150)) return Code::RecoveryRequired;
+                // Removal is staged: the bulb stays on this network until
+                // Connect, and rollback or fail-safe expiry restores it.
+                NetworkCommissioning::Commands::RemoveNetwork::Type command;
+                command.networkID = chip::ByteSpan(reinterpret_cast<const uint8_t *>(original.data()), original.size());
+                return owner->NetworkCommand(node, command);
             }
             bool Arm() {
                 GeneralCommissioning::Commands::ArmFailSafe::Type command;
@@ -1507,7 +1517,8 @@ public:
                 owner->CommissioningCommand(node, command);
             }
             bool VerifyOriginal() { return original != target && Verify(original); }
-        } device { this, nodeId, endpoint, ssid, password, {}, {}, expiresAtMs };
+        } device { this, nodeId, endpoint, ssid, password, {}, {},
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(std::min<uint64_t>(budgetMs, 3600000)) };
         return rhythm::ChangeWifi(device);
     }
 
@@ -3141,10 +3152,10 @@ bool rhythm_chip_bridge_commission_light(const struct rhythm_chip_bridge_commiss
 }
 
 uint8_t rhythm_chip_bridge_change_wifi(uint64_t node_id, uint16_t endpoint,
-    const char * ssid, const char * password, bool * rollback_verified, uint64_t expires_at_ms)
+    const char * ssid, const char * password, bool * rollback_verified, uint64_t budget_ms)
 {
     if (!ssid || !password || !rollback_verified) return 6;
-    auto result = gContext.ChangeWifi(node_id, endpoint, ssid, password, expires_at_ms);
+    auto result = gContext.ChangeWifi(node_id, endpoint, ssid, password, budget_ms);
     *rollback_verified = result.rollbackVerified;
     return static_cast<uint8_t>(result.code);
 }

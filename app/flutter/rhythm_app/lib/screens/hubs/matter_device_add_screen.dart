@@ -1,4 +1,3 @@
-import '../network/saved_wifi_screen.dart';
 import 'dart:async';
 import 'dart:math' as math;
 
@@ -293,8 +292,6 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     await _startPairing();
   }
 
-  String? _wifiProfileId;
-
   Future<void> _startPairing({MatterAddMethod? retryMethod}) async {
     final setupPayload = _setupPayload;
     if (!isLikelyMatterSetupPayload(setupPayload) || _pairingRequestInFlight) {
@@ -338,35 +335,12 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
         _furthestStageIndex = 0;
       });
 
-      final sync = context.read<ServerSyncProvider?>();
-      if (sync?.supportsSavedWifiProfiles == true &&
-          !_activeAddMethod.usesPhoneCommissioner &&
-          _activeAddMethod != MatterAddMethod.onNetworkSetupCode &&
-          _wifiProfileId == null) {
-        _wifiProfileId = await SavedWifiScreen.select(context, sync!.api);
-        if (!mounted) return;
-        if (_wifiProfileId == null) {
-          setState(() => _phase = _PairingPhase.input);
-          return;
-        }
-      }
-      if ((_activeAddMethod.usesPhoneCommissioner ||
-              _activeAddMethod == MatterAddMethod.onNetworkSetupCode) &&
-          _wifiProfileId != null) {
-        _showPairingError(
-            'The selected network requires setup through the Rhythm Box.',
-            detail:
-                'Move the bulb within Bluetooth range of the Box and retry. Phone and on-network setup keep the network already selected on the bulb.',
-            failureStage: 'wifi_preflight');
-        return;
-      }
-
       if (HueServiceLocator.isDemoMode) {
         await _simulateDemoPairing();
         return;
       }
 
-      if (_usesWifiCommissioningPreflight && _wifiProfileId == null) {
+      if (_usesWifiCommissioningPreflight) {
         final wifiStatus = await _pairingApi.getWifiStatus();
         if (!mounted) return;
 
@@ -402,7 +376,6 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
               setupPayload: setupPayload,
               rendezvous: _activeAddMethod.rendezvous,
               network: 'wifi',
-              wifiProfileId: _wifiProfileId,
               receiveTimeout: _pairingRequestTimeout,
               sessionId: _pairingSessionId,
             );

@@ -459,7 +459,7 @@ impl MatterTransport for SpyTransport {
         node_id: u64,
         endpoint: u16,
         wifi: &rhythm_os::provisioning::WifiCredentials,
-        _expires_at_ms: u64,
+        _budget_ms: u64,
     ) -> Result<rhythm_os::wifi_change::WifiChangeOutcome> {
         rhythm_os::wifi_profiles::validate_credentials(wifi)?;
         self.operations
