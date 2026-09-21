@@ -790,7 +790,9 @@ impl ExternalLightHubIntegration for MonsterIntegration {
                 &dsn,
                 &address,
                 &setup_token,
-                params.get("wifi_profile_id").and_then(Value::as_str),
+                params
+                    .get("wifi_profile_id")
+                    .and_then(serde_json::Value::as_str),
             ),
             LightPairingStage::Adopt {
                 credentials,
