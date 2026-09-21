@@ -38,3 +38,6 @@ pub mod transport;
 
 pub mod desktop_lifecycle;
 pub mod fabric;
+
+#[cfg(test)]
+mod wifi_change_tests;

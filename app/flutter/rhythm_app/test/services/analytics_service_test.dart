@@ -25,6 +25,38 @@ void main() {
     BackendProvider.resetForTesting();
   });
 
+  test('Wi-Fi analytics is bounded, private, and optional', () async {
+    await analytics.logWifiAction(
+        networkChange: false,
+        journeyId: 'opaque-journey',
+        action: 'save',
+        outcome: 'attempt');
+    await analytics.logWifiAction(
+        networkChange: true,
+        journeyId: 'opaque-journey',
+        action: 'change',
+        outcome: 'succeeded');
+    await analytics.logWifiAction(
+        networkChange: true,
+        journeyId: 'opaque-journey',
+        action: 'Fixture SSID',
+        outcome: 'password-secret');
+    expect(backend.events, hasLength(2));
+    for (final event in backend.events) {
+      expect(
+          event.properties.keys.toSet(), {'journey_id', 'action', 'outcome'});
+      expect(event.properties.toString(), isNot(contains('secret')));
+      expect(event.properties.toString(), isNot(contains('SSID')));
+    }
+    analytics.resetForTesting();
+    await analytics.logWifiAction(
+        networkChange: true,
+        journeyId: 'opaque-journey',
+        action: 'change',
+        outcome: 'failed');
+    expect(backend.events, hasLength(2));
+  });
+
   test('device network analytics contains outcomes only and is optional',
       () async {
     await analytics.logDeviceNetworkOpened();

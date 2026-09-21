@@ -391,9 +391,12 @@ fn discover(
     Ok(pairing::discover_session(&candidates))
 }
 
-fn load_wifi(state: &SharedState) -> Result<LightWifiConfig> {
-    let wifi = rhythm_os::provisioning::load_accessory_wifi_credentials(state)?
-        .ok_or_else(|| anyhow::anyhow!("No saved appliance Wi-Fi credentials are available"))?;
+fn load_wifi(state: &SharedState, profile_id: Option<&str>) -> Result<LightWifiConfig> {
+    let wifi = match profile_id {
+        Some(id) => Some(rhythm_os::wifi_profiles::selected_credentials(state, id)?),
+        None => rhythm_os::provisioning::load_accessory_wifi_credentials(state)?,
+    }
+    .ok_or_else(|| anyhow::anyhow!("No saved appliance Wi-Fi credentials are available"))?;
     let security = if wifi.password.is_empty() {
         LightWifiSecurity::Open
     } else {
@@ -412,8 +415,9 @@ fn provision(
     dsn: &str,
     address: &str,
     setup_token: &LightSecret,
+    profile_id: Option<&str>,
 ) -> Result<PairingSession> {
-    let wifi = match load_wifi(state) {
+    let wifi = match load_wifi(state, profile_id) {
         Ok(wifi) => wifi,
         Err(error) => {
             return Ok(fail(
@@ -780,7 +784,16 @@ impl ExternalLightHubIntegration for MonsterIntegration {
                 dsn,
                 address,
                 setup_token,
-            } => provision(state, session_id, &dsn, &address, &setup_token),
+            } => provision(
+                state,
+                session_id,
+                &dsn,
+                &address,
+                &setup_token,
+                params
+                    .get("wifi_profile_id")
+                    .and_then(serde_json::Value::as_str),
+            ),
             LightPairingStage::Adopt {
                 credentials,
                 name,

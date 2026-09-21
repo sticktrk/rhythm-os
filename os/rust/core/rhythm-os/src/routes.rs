@@ -292,6 +292,22 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["GET"],
     },
     SharedRoute {
+        path: "/api/matter/wifi-change",
+        methods: &["GET", "POST"],
+    },
+    SharedRoute {
+        path: "/api/matter/wifi-change/:id",
+        methods: &["GET"],
+    },
+    SharedRoute {
+        path: "/api/pairing/wifi-profiles",
+        methods: &["GET", "PUT"],
+    },
+    SharedRoute {
+        path: "/api/pairing/wifi-profiles/:id/credentials",
+        methods: &["GET"],
+    },
+    SharedRoute {
         path: "/api/pairing/wifi-credentials",
         methods: &["GET"],
     },

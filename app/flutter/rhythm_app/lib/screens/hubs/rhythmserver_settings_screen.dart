@@ -1,3 +1,5 @@
+import '../network/box_wifi_dialog.dart';
+import '../network/saved_wifi_screen.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -17,6 +19,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RhythmHubStartupRetry,
         RhythmHubStartupRetryStatus,
         RhythmRoom,
+        RhythmWifiProfiles,
         RoomModeState;
 import 'package:uuid/uuid.dart';
 import '../../widgets/solar_orbit.dart';
@@ -858,86 +861,123 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     return _buildSection(
       title: 'NETWORK',
       children: [
-        GestureDetector(
+        if (widget.homeManaged && syncProvider.supportsSavedWifiProfiles) ...[
+          _buildNetworkRow(
+            key: const ValueKey('saved-wifi-networks'),
+            icon: Icons.lightbulb_outline_rounded,
+            title: 'Wi-Fi for new accessories',
+            subtitle: 'Choose the network accessories join during setup',
+            accent: connected ? _teal : CelestialColors.textSecondary,
+            onTap: connected
+                ? () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => SavedWifiScreen(api: syncProvider.api),
+                      ),
+                    )
+                : null,
+          ),
+          const SizedBox(height: 10),
+        ],
+        _buildNetworkRow(
+          icon: Icons.wifi_rounded,
+          title: 'Change Wi-Fi',
+          subtitle: subtitle,
+          accent: accent,
+          busy: _isChangingWifi,
           onTap: canChange ? _handleChangeWifi : null,
-          behavior: HitTestBehavior.opaque,
-          child: AnimatedOpacity(
-            duration: const Duration(milliseconds: 150),
-            opacity: canChange || _isChangingWifi ? 1 : 0.55,
-            child: Container(
-              decoration: BoxDecoration(
-                color: CelestialColors.backgroundCard,
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(
-                  color: CelestialColors.orbitRing.withValues(alpha: 0.5),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildNetworkRow({
+    Key? key,
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required Color accent,
+    required VoidCallback? onTap,
+    bool busy = false,
+  }) {
+    return GestureDetector(
+      key: key,
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedOpacity(
+        duration: const Duration(milliseconds: 150),
+        opacity: onTap != null || busy ? 1 : 0.55,
+        child: Container(
+          decoration: BoxDecoration(
+            color: CelestialColors.backgroundCard,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: CelestialColors.orbitRing.withValues(alpha: 0.5),
+            ),
+          ),
+          child: Padding(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            child: Row(
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: accent.withValues(alpha: 0.16),
+                  ),
+                  child: Icon(
+                    icon,
+                    color: accent,
+                    size: 20,
+                  ),
                 ),
-              ),
-              child: Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: accent.withValues(alpha: 0.16),
-                      ),
-                      child: Icon(
-                        Icons.wifi_rounded,
-                        color: accent,
-                        size: 20,
-                      ),
-                    ),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            'Change Wi-Fi',
-                            style: TextStyle(
-                              color: CelestialColors.textPrimary,
-                              fontSize: 15,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            subtitle,
-                            style: const TextStyle(
-                              color: CelestialColors.textSecondary,
-                              fontSize: 13,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    if (_isChangingWifi)
-                      SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          valueColor: AlwaysStoppedAnimation(accent),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: const TextStyle(
+                          color: CelestialColors.textPrimary,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
                         ),
-                      )
-                    else
-                      Icon(
-                        Icons.chevron_right,
-                        color: CelestialColors.textSecondary
-                            .withValues(alpha: 0.5),
-                        size: 22,
                       ),
-                  ],
+                      const SizedBox(height: 4),
+                      Text(
+                        subtitle,
+                        style: const TextStyle(
+                          color: CelestialColors.textSecondary,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
+                const SizedBox(width: 12),
+                if (busy)
+                  SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation(accent),
+                    ),
+                  )
+                else
+                  Icon(
+                    Icons.chevron_right,
+                    color: CelestialColors.textSecondary
+                        .withValues(alpha: 0.5),
+                    size: 22,
+                  ),
+              ],
             ),
           ),
         ),
-      ],
+      ),
     );
   }
 
@@ -956,10 +996,13 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     setState(() => _isChangingWifi = true);
     try {
       final client = await _diagnosticsClient();
-      final result = await client.changeWifi(
-        ssid: credentials.ssid,
-        password: credentials.password,
-      );
+      final profileId = credentials.profileId;
+      final result = profileId != null
+          ? await client.changeWifiToSavedNetwork(profileId)
+          : await client.changeWifi(
+              ssid: credentials.ssid,
+              password: credentials.password ?? '',
+            );
       if (!mounted) return;
 
       if (result.accepted) {
@@ -985,92 +1028,23 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     }
   }
 
-  Future<({String ssid, String password})?> _showWifiCredentialsDialog() {
-    final ssidController = TextEditingController();
-    final passwordController = TextEditingController();
-
-    return showDialog<({String ssid, String password})>(
+  /// Saved networks let the Box move without the password leaving it. Any
+  /// failure to read them falls back to typed entry rather than blocking.
+  Future<BoxWifiChoice?> _showWifiCredentialsDialog() async {
+    RhythmWifiProfiles? catalog;
+    final sync = context.read<ServerSyncProvider>();
+    if (widget.homeManaged && sync.supportsSavedWifiProfiles) {
+      try {
+        catalog = await sync.api.getWifiProfiles();
+      } catch (_) {
+        catalog = null;
+      }
+    }
+    if (!mounted) return null;
+    return showDialog<BoxWifiChoice>(
       context: context,
-      builder: (ctx) {
-        return StatefulBuilder(
-          builder: (ctx, setDialogState) {
-            final canSubmit = ssidController.text.trim().isNotEmpty;
-
-            return AlertDialog(
-              backgroundColor: CelestialColors.backgroundCard,
-              title: const Text(
-                'Change Wi-Fi',
-                style: TextStyle(color: CelestialColors.textPrimary),
-              ),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextField(
-                    controller: ssidController,
-                    autofocus: true,
-                    textInputAction: TextInputAction.next,
-                    onChanged: (_) => setDialogState(() {}),
-                    style: const TextStyle(color: CelestialColors.textPrimary),
-                    decoration: const InputDecoration(
-                      labelText: 'Network name',
-                      prefixIcon: Icon(Icons.wifi_rounded),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: passwordController,
-                    obscureText: true,
-                    textInputAction: TextInputAction.done,
-                    onSubmitted: (_) {
-                      if (!canSubmit) return;
-                      Navigator.of(
-                        ctx,
-                        rootNavigator: true,
-                      ).pop((
-                        ssid: ssidController.text.trim(),
-                        password: passwordController.text,
-                      ));
-                    },
-                    style: const TextStyle(color: CelestialColors.textPrimary),
-                    decoration: const InputDecoration(
-                      labelText: 'Password',
-                      prefixIcon: Icon(Icons.lock_outline_rounded),
-                    ),
-                  ),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(
-                    ctx,
-                    rootNavigator: true,
-                  ).pop(),
-                  child: Text(
-                    'Cancel',
-                    style: TextStyle(color: CelestialColors.textSecondary),
-                  ),
-                ),
-                TextButton(
-                  onPressed: canSubmit
-                      ? () => Navigator.of(
-                            ctx,
-                            rootNavigator: true,
-                          ).pop((
-                            ssid: ssidController.text.trim(),
-                            password: passwordController.text,
-                          ))
-                      : null,
-                  child: const Text('Change'),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    ).whenComplete(() {
-      ssidController.dispose();
-      passwordController.dispose();
-    });
+      builder: (_) => BoxWifiDialog(catalog: catalog),
+    );
   }
 
   Future<void> _refreshAfterWifiChange() async {

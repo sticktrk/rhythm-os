@@ -88,6 +88,9 @@ impl std::fmt::Display for MatterPairingStopped {
 
 impl std::error::Error for MatterPairingStopped {}
 
+/// The durable receipt fence in `rhythm_os::wifi_change`.
+const WIFI_CHANGE_MAX_BUDGET_MS: u64 = 300_000;
+
 fn rpc_timeout_for_request(request: &ChipRpcRequest) -> Duration {
     match request {
         ChipRpcRequest::WaitControllerEvents { max_wait_ms, .. } => {
@@ -117,6 +120,13 @@ fn rpc_timeout_for_request(request: &ChipRpcRequest) -> Duration {
         // default deadline — reaching it means the sidecar itself is wedged and
         // the transport recovery path should restart it.
         ChipRpcRequest::SubscribeOnOff { .. } => RPC_TIMEOUT,
+        // The native owner refuses to arm once the budget cannot cover a full
+        // fail-safe, so the device is settled before the budget ends. The
+        // margin only covers the final readback and response.
+        ChipRpcRequest::ChangeWifi { budget_ms, .. } => {
+            Duration::from_millis((*budget_ms).min(WIFI_CHANGE_MAX_BUDGET_MS))
+                + Duration::from_secs(30)
+        }
         ChipRpcRequest::CommissionLight(_) => RPC_COMMISSION_TIMEOUT,
         _ => RPC_TIMEOUT,
     }
@@ -1778,6 +1788,24 @@ impl MatterTransport for ChipTransport {
     fn list_commissioned_devices(&self) -> Result<Vec<CommissionedDevice>> {
         let response: ChipRpcListDevicesResponse = self.call(ChipRpcRequest::ListDevices)?;
         Ok(response.commissioned_devices)
+    }
+
+    fn change_wifi(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+        wifi: &rhythm_os::provisioning::WifiCredentials,
+        budget_ms: u64,
+    ) -> Result<rhythm_os::wifi_change::WifiChangeOutcome> {
+        // Deliberately bypass call()'s transport recovery/replay. The durable
+        // API receipt owns reconciliation after any uncertain delivery.
+        self.ensure_sidecar()?;
+        self.decode_rpc_response(self.send_rpc_envelope(ChipRpcRequest::ChangeWifi {
+            node_id,
+            endpoint,
+            wifi: wifi.clone(),
+            budget_ms,
+        })?)
     }
 
     fn probe_light(&self, node_id: u64) -> Result<CommissionedDevice> {
@@ -3839,6 +3867,31 @@ mod tests {
         );
 
         let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn wifi_change_never_replays_after_uncertain_controller_error() {
+        let socket_path = temp_socket_path("wifi-change-no-replay");
+        let server = spawn_fake_server_multi(socket_path.clone(), 1, |request| {
+            assert!(matches!(request.request, ChipRpcRequest::ChangeWifi { .. }));
+            ChipRpcResponseEnvelope::error(request.id, "CHIP controller backend not initialized")
+        });
+        let transport = ChipTransport::for_test(socket_path);
+        let request = rhythm_os::provisioning::WifiCredentials {
+            ssid: "FixtureNetwork".into(),
+            password: "fixture-secret".into(),
+        };
+        assert!(transport.change_wifi(7, 2, &request, u64::MAX).is_err());
+        assert_eq!(server.join().unwrap().len(), 1);
+        let rpc = ChipRpcRequest::ChangeWifi {
+            node_id: 7,
+            endpoint: 2,
+            wifi: request,
+            budget_ms: u64::MAX,
+        };
+        assert_eq!(rpc_timeout_for_request(&rpc), Duration::from_secs(330));
+        assert!(!format!("{rpc:?}").contains("FixtureNetwork"));
+        assert!(!format!("{rpc:?}").contains("fixture-secret"));
     }
 
     /// Regression for issue #514: CHIP matched the device discriminator and

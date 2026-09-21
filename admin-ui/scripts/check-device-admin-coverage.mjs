@@ -21,6 +21,9 @@ const explicitExemptions = new Set([
   'GET api/matter/setup-code/{}',
   // Saved commissioning Wi-Fi credentials are likewise owner-only secrets.
   'GET api/pairing/wifi-credentials',
+  // Moving the Box with a stored owner secret is an owner-only saved-network
+  // operation; staff keep the typed PUT api/wifi.
+  'PUT api/wifi/profile/{}',
   // One-release bulb-test aliases remain SDK-callable for version skew but
   // the admin catalog exposes only the canonical Bulb Audition operations.
   'POST api/matter/bulb-test/run',

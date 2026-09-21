@@ -611,6 +611,53 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
         }
     }
 
+    fn change_wifi(
+        &self,
+        state: &SharedState,
+        device_id: &str,
+        wifi: &rhythm_os::provisioning::WifiCredentials,
+        budget_ms: u64,
+    ) -> Result<rhythm_os::wifi_change::WifiChangeOutcome> {
+        use rhythm_os::wifi_change::{WifiChangeCode, WifiChangeOutcome};
+        let hub_key = HubKey::new(HubType::new("matter"), "local");
+        let (native, hub) = {
+            let guard = state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("state unavailable"))?;
+            let endpoint = guard
+                .canonical_registry
+                .devices()
+                .flat_map(|d| d.endpoints.iter())
+                .find(|endpoint| endpoint.hub_key == hub_key && endpoint.native_id == device_id);
+            let Some(endpoint) = endpoint else {
+                return Ok(WifiChangeOutcome {
+                    code: WifiChangeCode::Unsupported,
+                    rollback_verified: false,
+                });
+            };
+            let hub = guard
+                .hubs
+                .get(&hub_key)
+                .and_then(|h| h.data::<Arc<MatterHubData>>())
+                .cloned();
+            (endpoint.native_id.clone(), hub)
+        };
+        let Some(hub) = hub else {
+            return Ok(WifiChangeOutcome {
+                code: WifiChangeCode::Offline,
+                rollback_verified: false,
+            });
+        };
+        let (node, endpoint) = crate::lifecycle::parse_device_id(&native)
+            .ok_or_else(|| anyhow::anyhow!("Invalid Matter device"))?;
+        // No topology, fabric, setup-recovery, group, room or node-store writer
+        // participates. The authenticated network operation changes only Wi-Fi.
+        hub.transport
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("Matter transport unavailable"))?
+            .change_wifi(node, endpoint, wifi, budget_ms)
+    }
+
     fn load_pairing_recovery(
         &self,
         state: &SharedState,

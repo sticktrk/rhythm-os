@@ -1100,6 +1100,7 @@ class _FakeRhythmMatterApi extends RhythmMatterApi {
     String rendezvous = 'auto',
     Duration receiveTimeout = const Duration(seconds: 45),
     String? sessionId,
+    String? wifiProfileId,
   }) {
     lastSetupPayload = setupPayload;
     lastRendezvous = rendezvous;

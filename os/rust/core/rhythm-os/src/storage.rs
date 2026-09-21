@@ -349,6 +349,25 @@ pub trait Storage: Send + Sync {
         Ok(())
     }
 
+    /// Managed catalogs are private and deliberately excluded from all backups.
+    fn load_wifi_profiles(&self) -> Result<Option<crate::wifi_profiles::WifiProfileStore>> {
+        Ok(None)
+    }
+    /// Read-modify-write the catalog under the storage-owned catalog lock.
+    /// The closure returns the document to persist, or `None` to leave it.
+    fn mutate_wifi_profiles(
+        &self,
+        _mutate: &mut dyn FnMut(
+            Option<crate::wifi_profiles::WifiProfileStore>,
+        ) -> Result<Option<crate::wifi_profiles::WifiProfileStore>>,
+    ) -> Result<()> {
+        anyhow::bail!("Saved networks require durable storage")
+    }
+    /// The Box forgot its own network. Saved accessory networks remain.
+    fn clear_box_wifi_credentials(&self) -> Result<()> {
+        self.clear_commissioning_wifi_credentials()
+    }
+
     /// Load stored appliance Wi-Fi credentials used for accessory commissioning.
     fn load_commissioning_wifi_credentials(
         &self,
@@ -710,6 +729,9 @@ pub struct StoredMotionTimerEntry {
 // FileStorage — filesystem backend (desktop targets only)
 // ---------------------------------------------------------------------------
 
+const WIFI_PROFILES_FILE: &str = "commissioning_wifi.json";
+const WIFI_PROFILES_QUARANTINE_FILE: &str = "commissioning_wifi.json.corrupt";
+
 /// Filesystem storage backend.
 ///
 /// Implements [`Storage`] using JSON files with atomic writes (write to .tmp,
@@ -717,6 +739,9 @@ pub struct StoredMotionTimerEntry {
 pub struct FileStorage {
     dir: std::path::PathBuf,
     write_lock: std::sync::Mutex<()>,
+    /// Serializes catalog read-modify-write cycles. Always taken before
+    /// `write_lock`.
+    wifi_profiles_lock: std::sync::Mutex<()>,
 }
 
 /// Integration state that is portable only together with its secret runtime
@@ -915,11 +940,70 @@ impl FileStorage {
         Ok(Self {
             dir,
             write_lock: std::sync::Mutex::new(()),
+            wifi_profiles_lock: std::sync::Mutex::new(()),
         })
     }
 
     fn file_path(&self, name: &str) -> std::path::PathBuf {
         self.dir.join(name)
+    }
+
+    fn lock_wifi_profiles(&self) -> Result<std::sync::MutexGuard<'_, ()>> {
+        self.wifi_profiles_lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Saved networks are unavailable"))
+    }
+
+    /// A legacy credential loads as an unpersisted one-profile catalog. An
+    /// unreadable or self-inconsistent document is quarantined so the platform
+    /// can seed a working catalog again; factory reset erases the quarantine.
+    /// A newer schema is an error: never reinterpret or replace it.
+    fn load_wifi_profiles_locked(&self) -> Result<Option<crate::wifi_profiles::WifiProfileStore>> {
+        use crate::wifi_profiles::WifiProfileStore;
+        let path = self.file_path(WIFI_PROFILES_FILE);
+        if !path.exists() {
+            return Ok(None);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        let parsed = self
+            .read_json::<serde_json::Value>(WIFI_PROFILES_FILE)
+            .ok()
+            .and_then(|value| match value.get("profile_schema") {
+                None => serde_json::from_value::<crate::provisioning::WifiCredentials>(value)
+                    .ok()
+                    .map(|legacy| Ok(WifiProfileStore::from_legacy(Some(legacy)))),
+                Some(schema) if schema.as_u64() != Some(1) => Some(Err(anyhow::anyhow!(
+                    "Saved network document is from a newer version"
+                ))),
+                Some(_) => serde_json::from_value::<WifiProfileStore>(value)
+                    .ok()
+                    .filter(|store| store.validate().is_ok())
+                    .map(|mut store| {
+                        store.persisted = true;
+                        Ok(store)
+                    }),
+            });
+        match parsed {
+            Some(result) => result.map(Some),
+            None => {
+                warn!(target: "sys", "Quarantining an unreadable saved network document");
+                std::fs::rename(&path, self.file_path(WIFI_PROFILES_QUARANTINE_FILE))
+                    .context("quarantining saved network document")?;
+                Ok(None)
+            }
+        }
+    }
+
+    fn save_wifi_profiles_locked(
+        &self,
+        store: &crate::wifi_profiles::WifiProfileStore,
+    ) -> Result<()> {
+        store.validate()?;
+        self.write_atomic_secret_durable(WIFI_PROFILES_FILE, &serde_json::to_vec(store)?)
     }
 
     fn sync_directory_chain(&self, start: &std::path::Path, required: bool) -> Result<()> {
@@ -1202,7 +1286,8 @@ fn should_skip_integration_backup_file(relative_path: &std::path::Path) -> bool 
     let Some(name) = relative_path.file_name().and_then(|name| name.to_str()) else {
         return true;
     };
-    name == "chip-controller.sock"
+    relative_path == std::path::Path::new("matter/wifi-changes.json")
+        || name == "chip-controller.sock"
         || name.ends_with(".sock")
         || name.ends_with(".tmp")
         || name.ends_with(".log")
@@ -1645,6 +1730,12 @@ impl Storage for FileStorage {
             .map(|file| validate_integration_backup_path(&file.path).map(|path| (path, file)))
             .collect::<Result<Vec<_>>>()?;
 
+        if files
+            .iter()
+            .any(|(path, _)| path == std::path::Path::new("matter/wifi-changes.json"))
+        {
+            anyhow::bail!("Network change receipts cannot be restored");
+        }
         self.clear_integration_state_dirs(BACKUP_INTEGRATION_SUBDIRS)?;
 
         for (relative_path, file) in files {
@@ -1664,6 +1755,9 @@ impl Storage for FileStorage {
         for file in files {
             let path = validate_integration_backup_path(&file.path)?;
             let normalized_path = normalized_relative_path(&path)?;
+            if normalized_path == "matter/wifi-changes.json" {
+                anyhow::bail!("Network change receipts cannot be restored");
+            }
             if file.path != normalized_path {
                 anyhow::bail!("integration backup path is not canonical");
             }
@@ -1901,49 +1995,89 @@ impl Storage for FileStorage {
         self.write_atomic("topology.json", json.as_bytes())
     }
 
+    fn load_wifi_profiles(&self) -> Result<Option<crate::wifi_profiles::WifiProfileStore>> {
+        let _guard = self.lock_wifi_profiles()?;
+        self.load_wifi_profiles_locked()
+    }
+
+    fn mutate_wifi_profiles(
+        &self,
+        mutate: &mut dyn FnMut(
+            Option<crate::wifi_profiles::WifiProfileStore>,
+        ) -> Result<Option<crate::wifi_profiles::WifiProfileStore>>,
+    ) -> Result<()> {
+        let _guard = self.lock_wifi_profiles()?;
+        match mutate(self.load_wifi_profiles_locked()?)? {
+            Some(store) => self.save_wifi_profiles_locked(&store),
+            None => Ok(()),
+        }
+    }
+
+    /// The Box's own network. A document written by a newer schema still
+    /// exposes its legacy mirror, so a downgrade never strands the Box.
     fn load_commissioning_wifi_credentials(
         &self,
     ) -> Result<Option<crate::provisioning::WifiCredentials>> {
-        let path = self.file_path("commissioning_wifi.json");
-        match self.read_json::<crate::provisioning::WifiCredentials>("commissioning_wifi.json") {
-            Ok(creds) => Ok(Some(creds)),
-            Err(e) => {
-                if path.exists() {
-                    warn!(
-                        target: "sys",
-                        "Failed to load commissioning Wi-Fi config {}: {}",
-                        path.display(),
-                        e
-                    );
-                } else {
-                    debug!(
-                        target: "sys",
-                        "No persisted commissioning Wi-Fi config at {}",
-                        path.display()
-                    );
+        let _guard = self.lock_wifi_profiles()?;
+        match self.load_wifi_profiles_locked() {
+            Ok(store) => Ok(store.and_then(|store| store.box_credentials())),
+            Err(error) => {
+                match self.read_json::<crate::provisioning::WifiCredentials>(WIFI_PROFILES_FILE) {
+                    Ok(legacy) if !legacy.ssid.is_empty() => Ok(Some(legacy)),
+                    _ => Err(error),
                 }
-                Ok(None)
             }
         }
     }
 
+    /// Record the network the Box joined without replacing saved networks.
     fn save_commissioning_wifi_credentials(
         &self,
         creds: &crate::provisioning::WifiCredentials,
     ) -> Result<()> {
-        let json = serde_json::to_string_pretty(creds)?;
-        self.write_atomic("commissioning_wifi.json", json.as_bytes())
+        use crate::wifi_profiles::{BoxNetworkUpdate, WifiProfileStore};
+        let _guard = self.lock_wifi_profiles()?;
+        let (mut store, fresh) = match self.load_wifi_profiles_locked()? {
+            Some(store) => (store, false),
+            None => (WifiProfileStore::from_legacy(None), true),
+        };
+        let update = store.set_box_network(creds)?;
+        if fresh || !store.persisted || update != BoxNetworkUpdate::Unchanged {
+            self.save_wifi_profiles_locked(&store)?;
+        }
+        if update == BoxNetworkUpdate::Dropped {
+            anyhow::bail!("The Box network could not be saved; remove a saved network");
+        }
+        Ok(())
+    }
+
+    fn clear_box_wifi_credentials(&self) -> Result<()> {
+        let _guard = self.lock_wifi_profiles()?;
+        match self.load_wifi_profiles_locked()? {
+            Some(mut store) => {
+                if store.clear_box_network()? || !store.persisted {
+                    self.save_wifi_profiles_locked(&store)?;
+                }
+                Ok(())
+            }
+            None => Ok(()),
+        }
     }
 
     fn clear_commissioning_wifi_credentials(&self) -> Result<()> {
-        let path = self.file_path("commissioning_wifi.json");
-        match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => {
-                Err(anyhow::anyhow!(e)).with_context(|| format!("removing {}", path.display()))
+        let _guard = self.lock_wifi_profiles()?;
+        for name in [WIFI_PROFILES_FILE, WIFI_PROFILES_QUARANTINE_FILE] {
+            let path = self.file_path(name);
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(anyhow::anyhow!(e))
+                        .with_context(|| format!("removing {}", path.display()))
+                }
             }
         }
+        Ok(())
     }
 
     fn load_server_metadata(&self) -> Result<Option<StoredServerMetadata>> {
@@ -2139,6 +2273,8 @@ impl Storage for FileStorage {
             "canonical_registry.json",
             "topology.json",
             "commissioning_wifi.json",
+            "commissioning_wifi.json.tmp",
+            "commissioning_wifi.json.corrupt",
             "auth.json",
             "support_bundle_jobs.json",
         ] {
@@ -6784,6 +6920,7 @@ mod tests {
                 .load_commissioning_wifi_credentials()
                 .unwrap()
                 .is_none());
+            assert!(path.join("commissioning_wifi.json.corrupt").exists());
             storage.clear_commissioning_wifi_credentials().unwrap();
             storage.clear_commissioning_wifi_credentials().unwrap();
 

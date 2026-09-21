@@ -22,6 +22,19 @@ mod chip_ffi;
 /// per-operation state, so concurrent callers are safe. Only controller
 /// (re)initialization is exclusive.
 pub trait ChipControllerBackend: Send + Sync {
+    fn change_wifi(
+        &self,
+        _node: u64,
+        _endpoint: u16,
+        _wifi: &rhythm_os::provisioning::WifiCredentials,
+        _budget_ms: u64,
+    ) -> Result<rhythm_os::wifi_change::WifiChangeOutcome> {
+        Ok(rhythm_os::wifi_change::WifiChangeOutcome {
+            code: rhythm_os::wifi_change::WifiChangeCode::Unsupported,
+            rollback_verified: false,
+        })
+    }
+
     fn init_controller(
         &mut self,
         state: &CommissioningState,
@@ -178,6 +191,17 @@ impl ChipControllerBackend for NativeChipBackend {
 
     fn commission_light(&self, request: &MatterCommissionRequest) -> Result<CommissionedDevice> {
         self.controller_ref()?.commission_light(request)
+    }
+
+    fn change_wifi(
+        &self,
+        node: u64,
+        endpoint: u16,
+        wifi: &rhythm_os::provisioning::WifiCredentials,
+        budget_ms: u64,
+    ) -> Result<rhythm_os::wifi_change::WifiChangeOutcome> {
+        self.controller_ref()?
+            .change_wifi(node, endpoint, wifi, budget_ms)
     }
 
     fn probe_light(&self, node_id: u64) -> Result<CommissionedDevice> {

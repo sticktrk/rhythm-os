@@ -1,3 +1,4 @@
+import '../screens/network/matter_wifi_change_screen.dart';
 import 'device_details_loader.dart';
 import 'device_network_diagnostics.dart';
 import 'dart:async';
@@ -1204,6 +1205,10 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
         if (!_loading && _canonicalData != null) ...[
           if (isLight && _matterNativeId != null) ...[
             const SizedBox(height: 12),
+            if (context.read<ServerSyncProvider>().supportsMatterWifiChange) ...[
+              _buildMatterWifiChangeButton(context, _matterNativeId!),
+              const SizedBox(height: 12),
+            ],
             if (canRecoverMatterSetupCode) ...[
               _buildMatterSetupCodeButton(context, _matterNativeId!),
               const SizedBox(height: 12),
@@ -1616,6 +1621,54 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                     ),
                   ],
                 ],
+              ),
+            ),
+            const Icon(
+              Icons.chevron_right,
+              color: CelestialColors.textSecondary,
+              size: 20,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMatterWifiChangeButton(BuildContext context, String nativeId) {
+    return GestureDetector(
+      key: const ValueKey('matter-wifi-change'),
+      onTap: () => Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => MatterWifiChangeScreen(
+            api: context.read<ServerSyncProvider>().api,
+            deviceId: nativeId,
+          ),
+        ),
+      ),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+        decoration: BoxDecoration(
+          color: CelestialColors.backgroundDark.withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: CelestialColors.orbitRing.withValues(alpha: 0.3),
+          ),
+        ),
+        child: Row(
+          children: [
+            Icon(
+              Icons.wifi_rounded,
+              color: CelestialColors.sunWarm.withValues(alpha: 0.9),
+              size: 20,
+            ),
+            const SizedBox(width: 12),
+            const Expanded(
+              child: Text(
+                'Change bulb Wi-Fi',
+                style: TextStyle(
+                  color: CelestialColors.textPrimary,
+                  fontSize: 15,
+                ),
               ),
             ),
             const Icon(

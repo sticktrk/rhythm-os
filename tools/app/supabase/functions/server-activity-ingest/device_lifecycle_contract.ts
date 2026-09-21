@@ -46,7 +46,7 @@ export function rowForDeviceLifecycle({
   const epochMs = epochMillis(event.epoch_ms)
   if (
     !eventId || !hubType || !outcome || epochMs == null ||
-    (action !== 'pair' && action !== 'unpair')
+    !['pair', 'unpair', 'wifi_profile', 'wifi_change'].includes(action ?? '')
   ) return null
 
   const rawDeviceType = boundedToken(event.device_type, 16)

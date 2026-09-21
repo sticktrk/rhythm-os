@@ -934,6 +934,11 @@ pub struct AppState {
         Arc<dyn Fn() -> anyhow::Result<Option<crate::provisioning::WifiCredentials>> + Send + Sync>,
     >,
 
+    /// Moves one paired accessory to a saved network through its integration.
+    pub change_wifi_fn: Option<crate::wifi_change::WifiChangeFn>,
+    /// Admission fence and restart identity for accessory network changes.
+    pub wifi_change: Arc<crate::wifi_change::WifiChangeRuntime>,
+
     /// Optional platform-owned safety barrier for a full factory reset.
     ///
     /// Shared reset logic calls this hook before disconnecting integrations or
@@ -1143,6 +1148,8 @@ impl Default for AppState {
             hub_credentials_interceptor: None,
             request_hub_bootstrap_fn: None,
             commissioning_wifi_credentials_provider: None,
+            change_wifi_fn: None,
+            wifi_change: Default::default(),
             before_factory_reset_fn: None,
             after_factory_reset_fn: None,
             factory_reset_recovery_fn: None,

@@ -278,6 +278,19 @@ pub struct MatterCommissionRequest {
 
 /// Platform-agnostic typed interface to a Matter light controller.
 pub trait MatterTransport: Send + Sync {
+    fn change_wifi(
+        &self,
+        _node_id: u64,
+        _endpoint: u16,
+        _wifi: &rhythm_os::provisioning::WifiCredentials,
+        _budget_ms: u64,
+    ) -> Result<rhythm_os::wifi_change::WifiChangeOutcome> {
+        Ok(rhythm_os::wifi_change::WifiChangeOutcome {
+            code: rhythm_os::wifi_change::WifiChangeCode::Unsupported,
+            rollback_verified: false,
+        })
+    }
+
     /// Submit complete desired-state plans for controller-owned execution.
     ///
     /// Compatibility transports execute inline. Native chipd overrides this

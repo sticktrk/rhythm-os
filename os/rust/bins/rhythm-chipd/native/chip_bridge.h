@@ -40,6 +40,10 @@ struct rhythm_chip_bridge_commission_request
     uint32_t on_network_setup_pin_code;
 };
 
+// Returns a bounded WifiChangeCode; never returns raw network/debug text.
+uint8_t rhythm_chip_bridge_change_wifi(uint64_t node_id, uint16_t endpoint,
+    const char * ssid, const char * password, bool * rollback_verified, uint64_t budget_ms);
+
 struct rhythm_chip_bridge_device
 {
     uint64_t node_id;

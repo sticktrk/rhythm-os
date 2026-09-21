@@ -802,6 +802,12 @@ fn pairing_storage(
 pub fn clear_persisted_state_for_factory_reset(
     state: &crate::state::SharedState,
 ) -> anyhow::Result<()> {
+    let network_changes = crate::wifi_change::runtime(state)?;
+    let _network_guard = network_changes
+        .lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("network change lock unavailable"))?;
+    crate::wifi_change::ensure_idle_for_reset(state, &network_changes)?;
     let storage = state
         .lock()
         .map_err(|_| anyhow::anyhow!("pairing state lock poisoned"))?

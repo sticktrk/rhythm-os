@@ -1,4 +1,5 @@
 #include "chip_bridge.h"
+#include "wifi_change_transaction.h"
 #include "phone_commissioning_discovery.h"
 
 #include <app-common/zap-generated/cluster-objects.h>
@@ -701,8 +702,9 @@ template <typename RequestT>
 class BlockingInvokeCommandOperation final : public DeviceConnectionOperation
 {
 public:
-    BlockingInvokeCommandOperation(NodeId nodeId, EndpointId endpoint, const RequestT & request) :
-        DeviceConnectionOperation(nodeId), mEndpoint(endpoint), mRequest(request)
+    using ResponseFn = std::function<void(const typename RequestT::ResponseType &)>;
+    BlockingInvokeCommandOperation(NodeId nodeId, EndpointId endpoint, const RequestT & request, ResponseFn response = {}) :
+        DeviceConnectionOperation(nodeId), mEndpoint(endpoint), mRequest(request), mResponse(std::move(response))
     {
         SetOperationLabel("invoke-command");
     }
@@ -717,9 +719,9 @@ protected:
 private:
     static void OnSuccess(void * context, const typename RequestT::ResponseType & response)
     {
-        (void) response;
         auto * self = static_cast<BlockingInvokeCommandOperation *>(context);
         VerifyOrReturn(self != nullptr);
+        if (self->mResponse) self->mResponse(response);
         self->Finish(CHIP_NO_ERROR);
     }
 
@@ -732,6 +734,7 @@ private:
 
     EndpointId mEndpoint;
     RequestT mRequest;
+    ResponseFn mResponse;
 };
 
 template <typename AttributeInfo>
@@ -1394,6 +1397,129 @@ public:
         return ExecuteOnMatterThread([this, &outErr, nodeId, &setupPayload, &commissioningParams]() {
             outErr = mCommissioner->PairDevice(nodeId, setupPayload.c_str(), commissioningParams, DiscoveryType::kAll);
         });
+    }
+
+    rhythm::WifiChangeResult ChangeWifi(NodeId nodeId, EndpointId endpoint, const char * ssid, const char * password, uint64_t budgetMs)
+    {
+        using Code = rhythm::WifiChangeCode;
+        struct Device {
+            ChipBridgeContext * owner;
+            NodeId node;
+            EndpointId endpoint;
+            std::string target, password, original;
+            std::chrono::steady_clock::time_point armedAt;
+            // Remaining receipt budget on the monotonic clock: a wall-clock
+            // step (startup time sync) can neither admit late work nor starve it.
+            std::chrono::steady_clock::time_point deadline;
+            bool needsRoom = false;
+
+            CHIP_ERROR Networks(std::vector<std::pair<std::string, bool>> & networks)
+            {
+                CHIP_ERROR decode = CHIP_NO_ERROR;
+                auto error = owner->ReadAttribute<NetworkCommissioning::Attributes::Networks::TypeInfo>(node, 0,
+                    [&](const auto & list) {
+                        auto iter = list.begin();
+                        while (iter.Next()) {
+                            const auto & value = iter.GetValue();
+                            networks.emplace_back(std::string(reinterpret_cast<const char *>(value.networkID.data()),
+                                value.networkID.size()), value.connected);
+                        }
+                        decode = iter.GetStatus();
+                    });
+                return error == CHIP_NO_ERROR ? decode : error;
+            }
+            Code Preflight()
+            {
+                bool on = false;
+                if (owner->ReadOnOff(node, endpoint, on) != CHIP_NO_ERROR) return Code::Offline;
+                uint32_t features = 0;
+                if (owner->ReadValueAttribute<NetworkCommissioning::Attributes::FeatureMap::TypeInfo>(node, 0, features) != CHIP_NO_ERROR)
+                    return Code::Unsupported;
+                if ((features & 1) == 0 || (features & 2) != 0) return Code::Unsupported;
+                std::vector<ClusterId> clusters;
+                if (owner->ReadClusterListAttribute<Descriptor::Attributes::ServerList::TypeInfo>(node, endpoint, clusters) != CHIP_NO_ERROR)
+                    return Code::Offline;
+                if (std::find(clusters.begin(), clusters.end(), BridgedDeviceBasicInformation::Id) != clusters.end()) return Code::Unsupported;
+                std::vector<std::pair<std::string, bool>> networks;
+                uint8_t maximum = 0;
+                if (Networks(networks) != CHIP_NO_ERROR || owner->ReadValueAttribute<NetworkCommissioning::Attributes::MaxNetworks::TypeInfo>(node, 0, maximum) != CHIP_NO_ERROR)
+                    return Code::Offline;
+                bool exists = false;
+                for (const auto & network : networks) {
+                    if (network.second) original = network.first;
+                    if (network.first == target) exists = true;
+                }
+                if (original.empty()) return Code::Offline;
+                if (maximum == 0) return Code::NetworkSlots;
+                // Most shipping bulbs hold one network. The staged replacement
+                // in MakeRoom() is the specified way to move them.
+                needsRoom = !exists && networks.size() >= maximum;
+                return Code::Success;
+            }
+            bool CanArm() {
+                return deadline - std::chrono::steady_clock::now() > std::chrono::seconds(190);
+            }
+            Code MakeRoom() {
+                if (!needsRoom) return Code::Success;
+                if (std::chrono::steady_clock::now() - armedAt >= std::chrono::seconds(150)) return Code::RecoveryRequired;
+                // Removal is staged: the bulb stays on this network until
+                // Connect, and rollback or fail-safe expiry restores it.
+                NetworkCommissioning::Commands::RemoveNetwork::Type command;
+                command.networkID = chip::ByteSpan(reinterpret_cast<const uint8_t *>(original.data()), original.size());
+                return owner->NetworkCommand(node, command);
+            }
+            bool Arm() {
+                GeneralCommissioning::Commands::ArmFailSafe::Type command;
+                command.expiryLengthSeconds = 180;
+                command.breadcrumb = 0;
+                armedAt = std::chrono::steady_clock::now();
+                return owner->CommissioningCommand(node, command);
+            }
+            Code Add() {
+                if (std::chrono::steady_clock::now() - armedAt >= std::chrono::seconds(150)) return Code::RecoveryRequired;
+                NetworkCommissioning::Commands::AddOrUpdateWiFiNetwork::Type command;
+                command.ssid = chip::ByteSpan(reinterpret_cast<const uint8_t *>(target.data()), target.size());
+                command.credentials = chip::ByteSpan(reinterpret_cast<const uint8_t *>(password.data()), password.size());
+                return owner->NetworkCommand(node, command);
+            }
+            Code Connect() {
+                if (std::chrono::steady_clock::now() - armedAt >= std::chrono::seconds(150)) return Code::RecoveryRequired;
+                NetworkCommissioning::Commands::ConnectNetwork::Type command;
+                command.networkID = chip::ByteSpan(reinterpret_cast<const uint8_t *>(target.data()), target.size());
+                return owner->NetworkCommand(node, command);
+            }
+            bool Verify(const std::string & expected) {
+                if (ExecuteOnMatterThread([&]() {
+                    const auto peer = owner->mCommissioner->GetPeerScopedId(node);
+                    owner->mCommissioner->CASESessionMgr()->ReleaseSession(peer);
+                    owner->mCommissioner->SessionMgr()->ExpireAllSessions(peer);
+                }) != CHIP_NO_ERROR) return false;
+                std::vector<std::pair<std::string, bool>> networks;
+                if (Networks(networks) != CHIP_NO_ERROR) return false;
+                bool connected = false;
+                for (const auto & network : networks) if (network.first == expected && network.second) connected = true;
+                bool on = false;
+                return connected && owner->ReadOnOff(node, endpoint, on) == CHIP_NO_ERROR;
+            }
+            bool VerifyTarget() { return Verify(target); }
+            bool Complete() {
+                // Leave headroom for completion; a readback after failsafe expiry
+                // is never sufficient to commit this transaction.
+                if (std::chrono::steady_clock::now() - armedAt >= std::chrono::seconds(150)) return false;
+                GeneralCommissioning::Commands::CommissioningComplete::Type command;
+                return owner->CommissioningCommand(node, command);
+            }
+            void Rollback() {
+                if (std::chrono::steady_clock::now() - armedAt >= std::chrono::seconds(150)) return;
+                GeneralCommissioning::Commands::ArmFailSafe::Type command;
+                command.expiryLengthSeconds = 0;
+                command.breadcrumb = 0;
+                owner->CommissioningCommand(node, command);
+            }
+            bool VerifyOriginal() { return original != target && Verify(original); }
+        } device { this, nodeId, endpoint, ssid, password, {}, {},
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(std::min<uint64_t>(budgetMs, 3600000)) };
+        return rhythm::ChangeWifi(device);
     }
 
     CHIP_ERROR ProbeLight(NodeId nodeId, rhythm_chip_bridge_device & device)
@@ -2487,6 +2613,31 @@ private:
         return RunConnectionOperation(operation);
     }
 
+    template <typename RequestT>
+    bool CommissioningCommand(NodeId node, const RequestT & request) {
+        bool accepted = false;
+        BlockingInvokeCommandOperation<RequestT> operation(node, 0, request, [&](const auto & response) {
+            accepted = response.errorCode == GeneralCommissioning::CommissioningErrorEnum::kOk;
+        });
+        return RunConnectionOperation(operation) == CHIP_NO_ERROR && accepted;
+    }
+
+    template <typename RequestT>
+    rhythm::WifiChangeCode NetworkCommand(NodeId node, const RequestT & request) {
+        using Code = rhythm::WifiChangeCode;
+        Code result = Code::RecoveryRequired;
+        BlockingInvokeCommandOperation<RequestT> operation(node, 0, request, [&](const auto & response) {
+            switch (response.networkingStatus) {
+                case NetworkCommissioning::NetworkCommissioningStatusEnum::kSuccess: result = Code::Success; break;
+                case NetworkCommissioning::NetworkCommissioningStatusEnum::kNetworkNotFound: result = Code::NetworkNotFound; break;
+                case NetworkCommissioning::NetworkCommissioningStatusEnum::kBoundsExceeded: result = Code::NetworkSlots; break;
+                case NetworkCommissioning::NetworkCommissioningStatusEnum::kAuthFailure: result = Code::CredentialsRejected; break;
+                default: result = Code::Rejected; break;
+            }
+        });
+        return RunConnectionOperation(operation) == CHIP_NO_ERROR ? result : Code::RecoveryRequired;
+    }
+
     template <typename AttributeInfo>
     CHIP_ERROR WriteAttribute(NodeId nodeId, EndpointId endpoint, const typename AttributeInfo::Type & value)
     {
@@ -2998,6 +3149,15 @@ bool rhythm_chip_bridge_commission_light(const struct rhythm_chip_bridge_commiss
 
     return HandleBridgeResult(gContext.CommissionLight(*request, *device), error_message, error_message_size,
                               "commissioning Matter light");
+}
+
+uint8_t rhythm_chip_bridge_change_wifi(uint64_t node_id, uint16_t endpoint,
+    const char * ssid, const char * password, bool * rollback_verified, uint64_t budget_ms)
+{
+    if (!ssid || !password || !rollback_verified) return 6;
+    auto result = gContext.ChangeWifi(node_id, endpoint, ssid, password, budget_ms);
+    *rollback_verified = result.rollbackVerified;
+    return static_cast<uint8_t>(result.code);
 }
 
 bool rhythm_chip_bridge_probe_light(uint64_t node_id, struct rhythm_chip_bridge_device * device, char * error_message,

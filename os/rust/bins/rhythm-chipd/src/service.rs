@@ -132,6 +132,33 @@ impl ChipControllerService {
                     device,
                 })?)
             }
+            ChipRpcRequest::ChangeWifi {
+                node_id,
+                endpoint,
+                wifi,
+                budget_ms,
+            } => {
+                self.require_initialized()?;
+                // Time spent queued behind another lifecycle operation is
+                // charged to the receipt budget on the monotonic clock.
+                let admitted = std::time::Instant::now();
+                let _lifecycle = self.lifecycle_lock.lock();
+                let budget_ms = budget_ms
+                    .saturating_sub(admitted.elapsed().as_millis().min(u64::MAX as u128) as u64);
+                if !self
+                    .device_store()
+                    .devices()
+                    .iter()
+                    .any(|d| d.node_id == node_id && d.light_endpoint == endpoint)
+                {
+                    anyhow::bail!("Unknown commissioned light");
+                }
+                rhythm_os::wifi_profiles::validate_credentials(&wifi)?;
+                Ok(serde_json::to_value(
+                    self.backend()
+                        .change_wifi(node_id, endpoint, &wifi, budget_ms)?,
+                )?)
+            }
             ChipRpcRequest::ListDevices => {
                 let store = self.device_store();
                 Ok(serde_json::to_value(ChipRpcListDevicesResponse {

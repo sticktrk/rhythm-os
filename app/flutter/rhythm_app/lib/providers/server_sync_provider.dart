@@ -1204,6 +1204,10 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Host capabilities from the last server hello, if the server advertises them.
   RhythmCapabilities? get serverCapabilities => _capabilities;
+  bool get supportsSavedWifiProfiles =>
+      _capabilities?.supportsFeature(RhythmFeature.savedWifiProfiles) == true;
+  bool get supportsMatterWifiChange =>
+      _capabilities?.supportsFeature(RhythmFeature.matterWifiChange) == true;
 
   /// Hue configuration is destructive on legacy servers because they can
   /// seize bridge automation authority without a room review. New app builds

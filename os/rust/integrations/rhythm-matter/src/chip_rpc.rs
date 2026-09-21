@@ -39,6 +39,14 @@ pub struct ChipInitControllerResponse {
 pub enum ChipRpcRequest {
     InitController(ChipInitControllerRequest),
     CommissionLight(MatterCommissionRequest),
+    ChangeWifi {
+        node_id: u64,
+        endpoint: u16,
+        wifi: rhythm_os::provisioning::WifiCredentials,
+        /// Remaining receipt budget. Relative, so neither side trusts the
+        /// other's wall clock across a time-sync step.
+        budget_ms: u64,
+    },
     ListDevices,
     ProbeLight {
         node_id: u64,

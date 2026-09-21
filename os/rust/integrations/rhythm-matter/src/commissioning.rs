@@ -59,6 +59,7 @@ pub struct MatterPairingParams {
     pub rendezvous: MatterCommissioningRendezvous,
     /// Short-lived platform handoff used only by phone-assisted commissioning.
     pub phone_handoff: Option<PhoneCommissioningHandoff>,
+    pub wifi_profile_id: Option<String>,
 }
 
 /// Transient result supplied by the phone's platform Matter commissioner.
@@ -174,12 +175,17 @@ impl MatterPairingParams {
             None
         };
 
+        let wifi_profile_id = optional_non_empty_string(params, "wifi_profile_id");
+        if wifi_profile_id.is_some() && rendezvous == MatterCommissioningRendezvous::OnNetwork {
+            anyhow::bail!("A saved network override requires Box BLE commissioning");
+        }
         Ok(Self {
             setup_payload: setup_payload.to_string(),
             session_id,
             network,
             rendezvous,
             phone_handoff,
+            wifi_profile_id,
         })
     }
 
@@ -672,6 +678,13 @@ fn commissioning_wifi_credentials(
     request: &MatterPairingParams,
 ) -> Result<MatterCommissioningWifiCredentials> {
     if request.needs_wifi_credentials() {
+        if let Some(id) = &request.wifi_profile_id {
+            let wifi = rhythm_os::wifi_profiles::selected_credentials(state, id)?;
+            return Ok(MatterCommissioningWifiCredentials {
+                ssid: wifi.ssid,
+                password: wifi.password,
+            });
+        }
         load_commissioning_wifi_credentials(state)
     } else {
         Ok(MatterCommissioningWifiCredentials {

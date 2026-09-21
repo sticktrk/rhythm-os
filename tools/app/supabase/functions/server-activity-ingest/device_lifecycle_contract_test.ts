@@ -118,6 +118,20 @@ Deno.test('device lifecycle row accepts only bounded commissioner values', () =>
   assert(invalid.commissioner == null, 'invalid commissioner must be omitted')
 })
 
+Deno.test('Wi-Fi lifecycle outcomes exclude all network and credential data', () => {
+  for (const action of ['wifi_profile', 'wifi_change']) {
+    const row = rowForDeviceLifecycle({userId: 'user-1', homeId: 'home-1', hubId: 'hub-1', serverInstanceId: null,
+      event: {id: 'wifi-event-1', epoch_ms: 1786277600000, action, hub_type: 'matter', outcome: 'succeeded',
+        correlation_id: 'opaque-journey', ssid: 'PrivateNetwork', password: 'PrivatePassword', profile_id: 'PrivateProfile',
+        debugText: 'PrivateError', device_id: 'PrivateDevice'}})
+    assert(row !== null && row.action === action, 'new lifecycle action must be accepted')
+    const wire = JSON.stringify(row)
+    for (const secret of ['PrivateNetwork','PrivatePassword','PrivateProfile','PrivateError','PrivateDevice']) {
+      assert(!wire.includes(secret), 'private data must be excluded')
+    }
+  }
+})
+
 Deno.test('Matter failure stages reach lifecycle rows without raw diagnostics', () => {
   for (const stage of ['matter_bluetooth', 'matter_network_discovery']) {
     const row = rowForDeviceLifecycle({
