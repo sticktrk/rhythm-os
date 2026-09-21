@@ -434,21 +434,29 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     }
 
     if (result.status == 'failed') {
+      const wifiSetupGuidance = 'Check the selected Wi-Fi network, its saved '
+          'credentials, and the signal where the device is installed, then try again.';
       // Only structured, recognized server evidence can diagnose a transport.
       // Older appliances and future stages retain the generic failure path.
       final stage = switch (result.failureStage) {
         'matter_bluetooth' => 'matter_bluetooth',
         'matter_network_discovery' => 'matter_network_discovery',
+        'matter_wifi_setup' => 'matter_wifi_setup',
         _ => 'commissioning',
       };
       _showPairingError(
         switch (stage) {
           'matter_bluetooth' => 'Bluetooth setup failed.',
+          'matter_wifi_setup' => 'Could not join Wi-Fi.',
           'matter_network_discovery' =>
             'Could not reach the device on the network.',
           _ => 'Pairing failed.',
         },
         detail: switch (stage) {
+          'matter_wifi_setup' =>
+            _userFacingMatterPairingDetail(result.error,
+                    technicalFallback: wifiSetupGuidance) ??
+                wifiSetupGuidance,
           'matter_bluetooth' =>
             'Move the Rhythm Box closer to the device, put the device back '
                 'in pairing mode, and try again.',
@@ -501,7 +509,8 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     );
   }
 
-  String? _userFacingMatterPairingDetail(String? detail) {
+  String? _userFacingMatterPairingDetail(String? detail,
+      {String? technicalFallback}) {
     final trimmed = detail?.trim();
     if (trimmed == null || trimmed.isEmpty) return null;
 
@@ -516,6 +525,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       'chip rpc',
     ];
     if (technicalMarkers.any(lower.contains)) {
+      if (technicalFallback != null) return technicalFallback;
       if (_activeAddMethod == MatterAddMethod.onNetworkSetupCode) {
         return 'Rhythm could not reach the device over your local Matter '
             'network. Keep its sharing window open and check that the Rhythm '

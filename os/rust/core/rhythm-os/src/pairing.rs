@@ -356,6 +356,8 @@ pub enum PairingFailureStage {
     MatterBluetooth,
     /// Matter reached IP discovery, but could not resolve the device.
     MatterNetworkDiscovery,
+    /// Matter failed while configuring or joining the device to Wi-Fi.
+    MatterWifiSetup,
     Transport,
     /// A stage added by a newer server. Older readers retain a safe marker
     /// instead of rejecting the complete durable pairing document.
@@ -374,6 +376,7 @@ impl PairingFailureStage {
             Self::CandidateCleanup => "candidate_cleanup",
             Self::MatterBluetooth => "matter_bluetooth",
             Self::MatterNetworkDiscovery => "matter_network_discovery",
+            Self::MatterWifiSetup => "matter_wifi_setup",
             Self::Transport => "transport",
             Self::Unknown => "unknown",
         }
@@ -2542,6 +2545,7 @@ mod tests {
         for stage in [
             PairingFailureStage::MatterBluetooth,
             PairingFailureStage::MatterNetworkDiscovery,
+            PairingFailureStage::MatterWifiSetup,
         ] {
             let directory = test_directory(stage.as_str());
             let state = state_with_storage(&directory);

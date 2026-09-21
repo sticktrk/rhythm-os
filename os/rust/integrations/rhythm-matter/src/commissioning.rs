@@ -587,6 +587,14 @@ fn summarize_commissioning_error_for_rendezvous(
     }
 
     match commissioning_failure_stage(error, rendezvous) {
+        Some(PairingFailureStage::MatterWifiSetup) => {
+            return match commissioning_wifi_failure(error).and_then(|failure| failure.network_status) {
+                Some(5) => "The device could not find the selected Wi-Fi network. Check the saved network name and that a network supported by the device is available where it is installed, then try again.",
+                Some(7) => "The device could not authenticate with the selected Wi-Fi network. Check its saved password and the network's security settings, then try again.",
+                Some(8) => "The device does not support the selected Wi-Fi network's security settings. Choose a compatible network and try again.",
+                _ => "The device could not complete Wi-Fi setup. Check the selected network, its saved credentials, and the signal where the device is installed, then try again.",
+            }.to_string();
+        }
         Some(PairingFailureStage::MatterBluetooth) => {
             return "Bluetooth setup did not complete. Move the Rhythm Box closer to the device, put the device back in pairing mode, and try again.".to_string();
         }
@@ -620,6 +628,9 @@ fn commissioning_failure_stage(
         || lower.contains("matter pairing request exceeded its server deadline")
     {
         return None;
+    }
+    if commissioning_wifi_failure(error).is_some() {
+        return Some(PairingFailureStage::MatterWifiSetup);
     }
     let kind = error.downcast_ref::<ChipRpcError>().map(|error| error.kind);
     // Operational discovery wins over earlier BLE context on the error chain.
@@ -657,6 +668,34 @@ fn commissioning_failure_stage(
         return Some(PairingFailureStage::MatterBluetooth);
     }
     None
+}
+
+/// The native bridge emits these bounded SDK fields before the RPC waiter is
+/// released. Legacy errors have neither field: never infer a Wi-Fi failure
+/// from a generic CHIP internal error or the requested rendezvous mode.
+struct WifiCommissioningFailure {
+    network_status: Option<u8>,
+}
+
+fn commissioning_wifi_failure(error: &anyhow::Error) -> Option<WifiCommissioningFailure> {
+    error.chain().find_map(|cause| {
+        let detail = cause.to_string();
+        let fields: Vec<_> = detail
+            .split_whitespace()
+            .map(|field| field.trim_end_matches(':'))
+            .collect();
+        let is_wifi = fields.iter().any(|field| {
+            matches!(
+                *field,
+                "commissioning_stage=WiFiNetworkSetup" | "commissioning_stage=WiFiNetworkEnable"
+            )
+        });
+        is_wifi.then(|| WifiCommissioningFailure {
+            network_status: fields
+                .iter()
+                .find_map(|field| field.strip_prefix("network_status=")?.parse().ok()),
+        })
+    })
 }
 
 fn load_commissioning_wifi_credentials(
@@ -2115,6 +2154,82 @@ mod tests {
         assert_eq!(hub_data.next_node_id.load(Ordering::SeqCst), next_node_id);
 
         std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn device_reported_wifi_network_not_found_is_actionable() {
+        let detail = "commissioning Matter light commissioning_stage=WiFiNetworkEnable network_status=5: CHIP Error 0x000000AC: Internal error";
+        let (state, path) = state_with_storage("wifi-network-not-found");
+        save_wifi(&path, &wifi("PairNet", "pair-secret"));
+        let (hub_data, _event_rx) = hub_data();
+        let transport = Arc::new(FakeMatterTransport::with_commission_error(detail));
+        let session = pair_device(
+            &state,
+            transport.clone() as Arc<dyn MatterTransport>,
+            hub_data.clone(),
+            &pairing_request(),
+        )
+        .unwrap();
+        assert_eq!(session.status, PairingStatus::Failed);
+        assert_eq!(
+            session.failure_stage,
+            Some(PairingFailureStage::MatterWifiSetup)
+        );
+        assert!(session
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("could not find the selected Wi-Fi network"));
+        assert!(!session.error.as_deref().unwrap().contains("CHIP"));
+        assert!(session.device.is_none());
+        assert!(hub_data.commissioned.lock().unwrap().is_empty());
+        assert_eq!(
+            state.lock().unwrap().canonical_registry.devices().count(),
+            0
+        );
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn wifi_setup_evidence_survives_rpc_and_retry_context_without_guessing() {
+        use crate::chip_rpc::ChipRpcResponseEnvelope;
+        for (status, expected) in [
+            ("5", "could not find the selected Wi-Fi network"),
+            ("7", "could not authenticate"),
+            ("8", "does not support"),
+            ("9", "could not complete Wi-Fi setup"),
+            ("200", "could not complete Wi-Fi setup"),
+        ] {
+            let message = format!("commissioning Matter light commissioning_stage=WiFiNetworkEnable network_status={status}: CHIP Error 0x000000AC: Internal error");
+            let wire = serde_json::to_string(&ChipRpcResponseEnvelope::error(1, message)).unwrap();
+            let response: ChipRpcResponseEnvelope = serde_json::from_str(&wire).unwrap();
+            let error = response
+                .into_result::<serde_json::Value>()
+                .unwrap_err()
+                .context("Matter BLE commissioning failed after automatic retry");
+            assert_eq!(
+                commissioning_failure_stage(&error, MatterCommissioningRendezvous::Auto),
+                Some(PairingFailureStage::MatterWifiSetup)
+            );
+            assert!(summarize_commissioning_error(&error).contains(expected));
+        }
+        for detail in [
+            "CHIP Error 0x000000AC: Internal error",
+            "commissioning_stage=ThreadNetworkEnable network_status=5: CHIP Error 0x000000AC: Internal error",
+            "commissioning_stage=FutureStage network_status=5: CHIP Error 0x000000AC: Internal error",
+        ] {
+            assert!(commissioning_wifi_failure(&anyhow::anyhow!(detail)).is_none());
+        }
+        let error =
+            anyhow::anyhow!("commissioning_stage=WiFiNetworkSetup: CHIP Error 0x00000032: Timeout");
+        assert!(summarize_commissioning_error(&error).contains("could not complete Wi-Fi setup"));
+        assert_eq!(
+            commissioning_failure_stage(
+                &error.context("Matter pairing request was cancelled"),
+                MatterCommissioningRendezvous::Auto
+            ),
+            None
+        );
     }
 
     #[test]

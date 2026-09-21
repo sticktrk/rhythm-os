@@ -18,6 +18,7 @@ fn main() {
     println!("cargo:rerun-if-changed={BRIDGE_HEADER}");
     println!("cargo:rerun-if-changed={BRIDGE_SOURCE}");
     println!("cargo:rerun-if-changed=native/phone_commissioning_discovery.h");
+    println!("cargo:rerun-if-changed=native/blocking_pairing_delegate.h");
     for key in [
         "RHYTHM_CHIP_ROOT",
         "RHYTHM_CHIP_OUT_DIR",
