@@ -1,4 +1,5 @@
 import 'device_details_loader.dart';
+import 'device_network_diagnostics.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -731,6 +732,9 @@ class DeviceDetailSheet extends StatefulWidget {
 class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   Map<String, dynamic>? _canonicalData;
   bool _loading = true;
+  bool _refreshingNetwork = false;
+  bool _networkLoadFailed = false;
+  DateTime? _networkFetchedAt;
   bool _moving = false;
   bool _loadingMatterSetupCode = false;
   bool _matterNeedsAudition = false;
@@ -746,6 +750,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
   Future<void> _loadCanonicalData() async {
     final http = context.read<ServerSyncProvider>().api;
     final data = await http.getCanonicalDevice(widget.device.id);
+    final fetchedAt = data == null ? null : DateTime.now();
     var needsAudition = false;
     final endpoints = data?['endpoints'] as List<dynamic>? ?? const [];
     String? matterNativeId;
@@ -767,9 +772,60 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     if (mounted) {
       setState(() {
         _canonicalData = data;
+        _networkFetchedAt = fetchedAt;
+        _networkLoadFailed = data == null;
         _matterNeedsAudition = needsAudition;
         _loading = false;
       });
+    }
+  }
+
+  Future<void> _refreshNetwork() async {
+    if (_loading ||
+        _refreshingNetwork ||
+        _removingEndpoint != null ||
+        _moving) {
+      return;
+    }
+    final previous = _canonicalData;
+    final sync = context.read<ServerSyncProvider>();
+    final ownerGeneration = sync.deviceDetailsOwnerGeneration;
+    final api = sync.api;
+    setState(() => _refreshingNetwork = true);
+    Map<String, dynamic>? data;
+    try {
+      // A registry read only: do not run audition, Identify, or discovery.
+      data = await api.getCanonicalDevice(widget.device.id);
+    } catch (_) {
+      // Custom API implementations can throw instead of returning null.
+    }
+    if (!mounted) return;
+    final superseded = !identical(previous, _canonicalData) ||
+        !identical(sync, context.read<ServerSyncProvider>()) ||
+        ownerGeneration != sync.deviceDetailsOwnerGeneration;
+    setState(() {
+      _refreshingNetwork = false;
+      if (superseded) return;
+      _networkLoadFailed = data == null;
+      if (data != null) {
+        _canonicalData = data;
+        _networkFetchedAt = DateTime.now();
+      }
+    });
+    unawaited(AnalyticsService().logDeviceNetworkRefreshCompleted(
+      outcome: superseded
+          ? 'superseded'
+          : data == null
+              ? 'failed'
+              : 'succeeded',
+    ));
+  }
+
+  void _selectTab(_DeviceTab tab) {
+    if (tab == _selectedTab) return;
+    setState(() => _selectedTab = tab);
+    if (tab == _DeviceTab.network) {
+      unawaited(AnalyticsService().logDeviceNetworkOpened());
     }
   }
 
@@ -906,7 +962,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                 padding: const EdgeInsets.symmetric(horizontal: 20),
                 child: SegmentedTabBar<_DeviceTab>(
                   selected: _selectedTab,
-                  onChanged: (tab) => setState(() => _selectedTab = tab),
+                  onChanged: _selectTab,
                   tabs: const [
                     SegmentedTab('Settings', _DeviceTab.settings),
                     SegmentedTab('Network', _DeviceTab.network),
@@ -1135,8 +1191,17 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       children: [
         if (_loading)
           _tabLoadingIndicator()
-        else if (_canonicalData != null) ...[
-          _buildConnectionsSection(),
+        else
+          DeviceNetworkDiagnostics(
+            device: _canonicalData,
+            hubs: context.watch<ServerSyncProvider>().serverHubInfos,
+            fetchedAt: _networkFetchedAt,
+            refreshing: _refreshingNetwork,
+            failed: _networkLoadFailed,
+            onRefresh:
+                _removingEndpoint != null || _moving ? null : _refreshNetwork,
+          ),
+        if (!_loading && _canonicalData != null) ...[
           if (isLight && _matterNativeId != null) ...[
             const SizedBox(height: 12),
             if (canRecoverMatterSetupCode) ...[
@@ -1167,8 +1232,7 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
                   !hasMultipleConnections,
             ),
           ],
-        ] else
-          _tabHint('No connection info available.'),
+        ],
       ],
     );
   }
@@ -1235,20 +1299,6 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
             child: CircularProgressIndicator(
               strokeWidth: 2,
               color: CelestialColors.sunWarm,
-            ),
-          ),
-        ),
-      );
-
-  Widget _tabHint(String text) => Padding(
-        padding: const EdgeInsets.all(20),
-        child: Center(
-          child: Text(
-            text,
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              color: CelestialColors.textSecondary.withValues(alpha: 0.5),
-              fontSize: 13,
             ),
           ),
         ),
@@ -1339,20 +1389,6 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       };
     });
     syncProvider.api.triggerSync();
-  }
-
-  Widget _buildConnectionsSection() {
-    final endpoints = (_canonicalData?['endpoints'] as List<dynamic>?) ?? [];
-    if (endpoints.isEmpty) return const SizedBox.shrink();
-
-    return _buildGroup('Connections', [
-      for (final ep in endpoints)
-        _ConnectionRow(
-          hubKey: (ep['hub_key'] as Map<String, dynamic>?) ?? {},
-          nativeId: ep['native_id'] as String? ?? '',
-          preferred: ep['preferred'] as bool? ?? false,
-        ),
-    ]);
   }
 
   Widget _buildMoveButton(BuildContext context) {
@@ -2720,86 +2756,4 @@ class _FlashHaloPainter extends CustomPainter {
       old.progress != progress ||
       old.intensity != intensity ||
       old.color != color;
-}
-
-class _ConnectionRow extends StatelessWidget {
-  final Map<String, dynamic> hubKey;
-  final String nativeId;
-  final bool preferred;
-
-  const _ConnectionRow({
-    required this.hubKey,
-    required this.nativeId,
-    required this.preferred,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hubType = hubKey['hub_type']?.toString() ?? 'unknown';
-    final address = hubKey['address'] as String? ?? '';
-    final displayHub = switch (hubType) {
-      'hue' => 'Hue Bridge',
-      'hue_ble' => 'Hue Bluetooth',
-      'local_ble' => 'Local Bluetooth',
-      'ha' || 'homeassistant' || 'home_assistant' => 'Home Assistant',
-      'matter' => 'Matter',
-      _ => hubType,
-    };
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-      child: Row(
-        children: [
-          Icon(
-            switch (hubType) {
-              'hue' || 'hue_ble' => Icons.lightbulb,
-              'local_ble' => Icons.bluetooth_rounded,
-              'matter' => Icons.memory_outlined,
-              _ => Icons.home,
-            },
-            color: CelestialColors.sunWarm.withValues(alpha: 0.7),
-            size: 18,
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  displayHub,
-                  style: const TextStyle(
-                    color: CelestialColors.textPrimary,
-                    fontSize: 14,
-                  ),
-                ),
-                Text(
-                  address,
-                  style: TextStyle(
-                    color: CelestialColors.textSecondary.withValues(alpha: 0.6),
-                    fontSize: 11,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          if (preferred)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-              decoration: BoxDecoration(
-                color: CelestialColors.sunWarm.withValues(alpha: 0.15),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: const Text(
-                'Preferred',
-                style: TextStyle(
-                  color: CelestialColors.sunWarm,
-                  fontSize: 10,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
 }
