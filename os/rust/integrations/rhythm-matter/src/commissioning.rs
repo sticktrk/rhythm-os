@@ -10,7 +10,8 @@ use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_os::canonical::identity::{HardwareId, HubKey};
 use rhythm_os::hub::HubType;
 use rhythm_os::pairing::{
-    PairedDeviceInfo, PairingRequestContext, PairingSession, PairingStage, PairingStatus,
+    PairedDeviceInfo, PairingFailureStage, PairingRequestContext, PairingSession, PairingStage,
+    PairingStatus,
 };
 use rhythm_os::state::SharedState;
 use serde_json::Value;
@@ -491,7 +492,7 @@ pub fn pair_device_with_context(
                     &error,
                     request.rendezvous,
                 )),
-                failure_stage: None,
+                failure_stage: commissioning_failure_stage(&error, request.rendezvous),
                 warnings: Vec::new(),
                 details: None,
             })
@@ -551,7 +552,7 @@ fn failed_recovery_session(
             message,
             summarize_commissioning_error_for_rendezvous(error, rendezvous)
         )),
-        failure_stage: None,
+        failure_stage: commissioning_failure_stage(error, rendezvous),
         warnings: Vec::new(),
         details: Some(serde_json::json!({
             "recovery_action": RECOVERY_ACTION_NODE_RECOMMISSION_FAILED,
@@ -579,63 +580,76 @@ fn summarize_commissioning_error_for_rendezvous(
         return "Matter pairing stopped at the server deadline and released its resources. Reopen the device's pairing window and try again.".to_string();
     }
 
-    if rendezvous == MatterCommissioningRendezvous::OnNetwork
-        && (lower.contains("network unreachable")
-            || lower.contains("os error 0x02000065")
-            || (lower.contains("discovery timed out")
-                && !lower.contains("operational discovery failed")))
-    {
-        return "On-network Matter pairing could not reach the device over local IPv6/IP. Keep its multi-admin pairing window open and verify the Rhythm Box accepts the Thread border router's IPv6 route; Bluetooth proximity or a factory reset will not repair a missing route.".to_string();
-    }
-
-    if lower.contains("addressresolve") || lower.contains("operational discovery failed") {
-        return "The light joined the Wi-Fi network, but Rhythm could not discover it over mDNS afterwards. Rhythm reset its Matter controller to recover; wait a few seconds and retry pairing without factory-resetting the light.".to_string();
-    }
-
-    if lower.contains("gatt write characteristic operation failed") {
-        return "Matter BLE commissioning reached the bulb, but macOS CoreBluetooth failed the GATT write. This matches the current official Matter controller behavior on this host. Try Linux/BlueZ or the appliance target for real commissioning.".to_string();
-    }
-
-    if lower.contains("pasesession.cpp") {
-        return "Matter BLE pairing reached the device, but the BLE connection was lost during secure setup. Rhythm reset the Matter controller; wait a few seconds, keep the light close, and retry pairing.".to_string();
-    }
-
-    if lower.contains("connectiondelegate timeout")
-        || lower.contains("discovery timed out")
-        || lower.contains("blemanagerimpl.cpp")
-        || lower.contains("chip error 0x00000032: timeout")
-    {
-        return "Matter BLE commissioning timed out while discovering the bulb from this host. Factory-reset the bulb, keep it close to the machine, and if it still fails, try Linux/BlueZ or the appliance target.".to_string();
-    }
-
-    if is_linux_ble_stack_error(&lower)
-        || lower.contains("chip error 0x000000ac")
-        || lower.contains("ble device doesn't seem to support chip")
-    {
-        return "Pairing lost its Bluetooth connection before setup finished. Rhythm reset the Matter controller; put the light back in pairing mode, keep it near the Rhythm Box, wait a few seconds, and try again.".to_string();
+    match commissioning_failure_stage(error, rendezvous) {
+        Some(PairingFailureStage::MatterBluetooth) => {
+            return "Bluetooth setup did not complete. Move the Rhythm Box closer to the device, put the device back in pairing mode, and try again.".to_string();
+        }
+        Some(PairingFailureStage::MatterNetworkDiscovery) => {
+            return "Rhythm could not find the device on the network. Check that the device and Rhythm Box can reach each other on the same local network, then try again. For a Thread device, also check its border router. A network discovery timeout does not confirm that the device joined Wi-Fi.".to_string();
+        }
+        _ => {}
     }
 
     if lower.contains("matter wi-fi commissioning requires stored appliance wi-fi credentials") {
         return "Matter pairing needs stored appliance Wi-Fi credentials on the server before a light can be commissioned.".to_string();
     }
 
-    detail
+    if rendezvous == MatterCommissioningRendezvous::OnNetwork {
+        return "Matter setup did not complete over the local network. Keep the device's sharing window open and check its network connection, then try again.".to_string();
+    }
+    "Matter setup did not complete. Rhythm could not identify whether Bluetooth or network setup failed. Check that the device is in pairing mode and try again.".to_string()
 }
 
-fn is_linux_ble_stack_error(lower_detail: &str) -> bool {
-    [
-        "matter ble commissioning failed",
-        "blemanagerimpl.cpp",
-        "bluezendpoint.cpp",
-        "bluezobjectmanager.cpp",
-        "pasesession.cpp",
-        "chipoble",
-        "ble adapter unavailable",
-        "d-bus system bus",
-        "operation was cancelled",
-    ]
-    .iter()
-    .any(|needle| lower_detail.contains(needle))
+/// Only report a radio stage when the controller's evidence supports it.
+/// Generic timeout/PASE failures can occur on either transport. On-network
+/// rendezvous never becomes a Bluetooth diagnosis, even with stale BLE context.
+fn commissioning_failure_stage(
+    error: &anyhow::Error,
+    rendezvous: MatterCommissioningRendezvous,
+) -> Option<PairingFailureStage> {
+    use crate::chip_rpc::{ChipRpcError, ChipRpcErrorKind};
+
+    let lower = format!("{error:#}").to_ascii_lowercase();
+    if lower.contains("matter pairing request was cancelled")
+        || lower.contains("matter pairing request exceeded its server deadline")
+    {
+        return None;
+    }
+    let kind = error.downcast_ref::<ChipRpcError>().map(|error| error.kind);
+    // Operational discovery wins over earlier BLE context on the error chain.
+    if kind == Some(ChipRpcErrorKind::OperationalDiscovery)
+        || lower.contains("addressresolve")
+        || lower.contains("operational discovery failed")
+        || (rendezvous == MatterCommissioningRendezvous::OnNetwork
+            && (lower.contains("network unreachable")
+                || lower.contains("os error 0x02000065")
+                || lower.contains("discovery timed out")))
+    {
+        return Some(PairingFailureStage::MatterNetworkDiscovery);
+    }
+    if rendezvous != MatterCommissioningRendezvous::OnNetwork
+        && (kind == Some(ChipRpcErrorKind::BleCommissioningStack)
+            || [
+                "connectiondelegate timeout",
+                "gatt write characteristic operation failed",
+                "blemanagerimpl.cpp",
+                "bluezconnection.cpp",
+                "bluezendpoint.cpp",
+                "bluezobjectmanager.cpp",
+                "chipoble",
+                "ble adapter unavailable",
+                "ble device doesn't seem to support chip",
+            ]
+            .iter()
+            .any(|marker| lower.contains(marker))
+            || (lower.contains("matter ble commissioning failed")
+                && lower.contains("d-bus system bus"))
+            || (rendezvous == MatterCommissioningRendezvous::Ble
+                && lower.contains("pasesession.cpp")))
+    {
+        return Some(PairingFailureStage::MatterBluetooth);
+    }
+    None
 }
 
 fn load_commissioning_wifi_credentials(
@@ -1538,8 +1552,8 @@ mod tests {
 
         let message = summarize_commissioning_error(&error);
 
-        assert!(message.contains("CoreBluetooth failed the GATT write"));
-        assert!(message.contains("Linux/BlueZ"));
+        assert!(message.contains("Bluetooth setup did not complete"));
+        assert!(message.contains("Move the Rhythm Box closer"));
     }
 
     #[test]
@@ -1548,7 +1562,7 @@ mod tests {
 
         let message = summarize_commissioning_error(&error);
 
-        assert!(message.contains("timed out while discovering the bulb"));
+        assert!(message.contains("Bluetooth setup did not complete"));
     }
 
     #[test]
@@ -1562,9 +1576,9 @@ mod tests {
                 MatterCommissioningRendezvous::OnNetwork,
             );
 
-            assert!(message.contains("local IPv6/IP"));
-            assert!(message.contains("Thread border router's IPv6 route"));
-            assert!(message.contains("Bluetooth proximity"));
+            assert!(message.contains("could not find the device on the network"));
+            assert!(message.contains("Thread device"));
+            assert!(!message.contains("Bluetooth"));
             assert!(!message.contains("keep it close"));
         }
     }
@@ -1597,22 +1611,25 @@ mod tests {
 
         let message = summarize_commissioning_error(&error);
 
-        assert!(message.contains("could not discover it over mDNS"));
-        assert!(message.contains("retry pairing"));
+        assert!(message.contains("could not find the device on the network"));
+        assert!(message.contains("try again"));
         assert!(!message.contains("Factory-reset the bulb"));
         assert!(!message.contains("AddressResolve_DefaultImpl.cpp"));
     }
 
     #[test]
-    fn commissioning_error_summarizes_linux_chip_timeouts() {
+    fn ambiguous_secure_session_timeout_does_not_claim_bluetooth() {
         let error = anyhow::anyhow!(
             "commissioning Matter light: src/protocols/secure_channel/PASESession.cpp:310: CHIP Error 0x00000032: Timeout"
         );
 
         let message = summarize_commissioning_error(&error);
 
-        assert!(message.contains("reached the device"));
-        assert!(message.contains("lost during secure setup"));
+        assert!(message.contains("could not identify whether Bluetooth or network setup failed"));
+        assert_eq!(
+            commissioning_failure_stage(&error, MatterCommissioningRendezvous::Auto),
+            None
+        );
         assert!(!message.contains("PASESession.cpp"));
     }
 
@@ -1628,8 +1645,8 @@ mod tests {
 
             let message = summarize_commissioning_error(&error);
 
-            assert!(message.contains("lost its Bluetooth connection"));
-            assert!(message.contains("put the light back in pairing mode"));
+            assert!(message.contains("Bluetooth setup did not complete"));
+            assert!(message.contains("put the device back in pairing mode"));
             assert!(!message.contains("BlueZ"));
             assert!(!message.contains("CHIP"));
             assert!(message.contains("try again"));
@@ -1644,7 +1661,7 @@ mod tests {
 
         let message = summarize_commissioning_error(&error);
 
-        assert!(message.contains("lost its Bluetooth connection"));
+        assert!(message.contains("Bluetooth setup did not complete"));
         assert!(!message.contains("BlueZ"));
         assert!(!message.contains("CHIP"));
         assert!(!message.contains("BluezEndpoint.cpp"));
@@ -2087,32 +2104,104 @@ mod tests {
     }
 
     #[test]
-    fn pair_device_failure_reports_summarized_error_without_recording_device() {
-        let (state, path) = state_with_storage("pair-failure");
-        save_wifi(&path, &wifi("PairNet", "pair-secret"));
-        let (hub_data, _event_rx) = hub_data();
-        let transport = Arc::new(FakeMatterTransport::with_commission_error(
-            "ConnectionDelegate timeout",
-        ));
+    fn pair_device_failure_reports_stage_without_recording_device() {
+        for (detail, expected) in [
+            (
+                "ConnectionDelegate timeout",
+                Some(PairingFailureStage::MatterBluetooth),
+            ),
+            (
+                "Matter operational discovery failed: timeout",
+                Some(PairingFailureStage::MatterNetworkDiscovery),
+            ),
+            ("CHIP Error 0x00000032: Timeout", None),
+        ] {
+            let (state, path) = state_with_storage("pair-failure");
+            save_wifi(&path, &wifi("PairNet", "pair-secret"));
+            let (hub_data, _event_rx) = hub_data();
+            let transport = Arc::new(FakeMatterTransport::with_commission_error(detail));
+            let session = pair_device(
+                &state,
+                transport.clone() as Arc<dyn MatterTransport>,
+                hub_data.clone(),
+                &pairing_request(),
+            )
+            .unwrap();
+            assert_eq!(session.status, PairingStatus::Failed);
+            assert_eq!(session.failure_stage, expected);
+            assert!(session.device.is_none());
+            assert!(!session.error.as_deref().unwrap().contains("CHIP"));
+            assert_eq!(transport.commission_requests.lock().unwrap().len(), 1);
+            assert!(hub_data.commissioned.lock().unwrap().is_empty());
+            std::fs::remove_dir_all(path).ok();
+        }
+    }
 
-        let session = pair_device(
-            &state,
-            transport.clone() as Arc<dyn MatterTransport>,
-            hub_data.clone(),
-            &pairing_request(),
-        )
-        .unwrap();
-
-        assert_eq!(session.status, PairingStatus::Failed);
-        assert!(session.device.is_none());
-        assert!(session
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("timed out while discovering the bulb"));
-        assert_eq!(transport.commission_requests.lock().unwrap().len(), 1);
-        assert!(hub_data.commissioned.lock().unwrap().is_empty());
-
-        std::fs::remove_dir_all(path).ok();
+    #[test]
+    fn failure_stage_prefers_network_evidence_and_never_guesses_ble_on_network() {
+        use crate::chip_rpc::{ChipRpcError, ChipRpcErrorKind};
+        for (kind, expected) in [
+            (
+                ChipRpcErrorKind::BleCommissioningStack,
+                Some(PairingFailureStage::MatterBluetooth),
+            ),
+            (
+                ChipRpcErrorKind::OperationalDiscovery,
+                Some(PairingFailureStage::MatterNetworkDiscovery),
+            ),
+            (ChipRpcErrorKind::ControllerUninitialized, None),
+        ] {
+            let error = anyhow::Error::new(ChipRpcError {
+                message: "opaque controller failure".into(),
+                kind,
+                recoverable: false,
+                requires_restart: false,
+                retry_after_ms: None,
+            })
+            .context("commissioning failed");
+            assert_eq!(
+                commissioning_failure_stage(&error, MatterCommissioningRendezvous::Auto),
+                expected
+            );
+            let on_network =
+                commissioning_failure_stage(&error, MatterCommissioningRendezvous::OnNetwork);
+            assert_ne!(on_network, Some(PairingFailureStage::MatterBluetooth));
+        }
+        for detail in [
+            "CHIP Error 0x00000032: Timeout",
+            "PASESession.cpp: Timeout",
+            "Operation was cancelled",
+            "Discovery timed out",
+            // This wrapper describes the whole attempt, including Wi-Fi setup.
+            "Matter BLE commissioning failed after automatic retry: CHIP Error 0x00000032: Timeout",
+        ] {
+            assert_eq!(
+                commissioning_failure_stage(
+                    &anyhow::anyhow!(detail),
+                    MatterCommissioningRendezvous::Auto
+                ),
+                None
+            );
+        }
+        let error = anyhow::anyhow!(
+            "Matter BLE commissioning failed: operational discovery failed: timeout"
+        );
+        assert_eq!(
+            commissioning_failure_stage(&error, MatterCommissioningRendezvous::Auto),
+            Some(PairingFailureStage::MatterNetworkDiscovery)
+        );
+        let recovery = failed_recovery_session(
+            &error,
+            MatterCommissioningRendezvous::Auto,
+            "Recovery failed.",
+        );
+        assert_eq!(
+            recovery.failure_stage,
+            Some(PairingFailureStage::MatterNetworkDiscovery)
+        );
+        assert_eq!(
+            recovery.details.unwrap()["recovery_action"],
+            RECOVERY_ACTION_NODE_RECOMMISSION_FAILED
+        );
     }
 }

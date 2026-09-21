@@ -1248,6 +1248,7 @@ class AnalyticsService {
     required String outcome,
     String? failureStage,
     String? recoveryAction,
+    String? pairingSessionId,
   }) async {
     final boundedRecoveryAction = switch (recoveryAction) {
       'existing_connection_recovered' => 'existing_connection_recovered',
@@ -1258,6 +1259,9 @@ class AnalyticsService {
     };
     await logEvent('matter_pairing_completed', {
       'journey_id': journeyId,
+      if (pairingSessionId != null &&
+          RegExp(r'^pair-[0-9a-f-]{36}$').hasMatch(pairingSessionId))
+        'pairing_session_id': pairingSessionId,
       'source': source,
       'input_method': inputMethod,
       'add_method': addMethod,

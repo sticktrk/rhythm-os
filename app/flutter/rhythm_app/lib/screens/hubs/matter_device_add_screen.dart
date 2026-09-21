@@ -434,10 +434,31 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     }
 
     if (result.status == 'failed') {
+      // Only structured, recognized server evidence can diagnose a transport.
+      // Older appliances and future stages retain the generic failure path.
+      final stage = switch (result.failureStage) {
+        'matter_bluetooth' => 'matter_bluetooth',
+        'matter_network_discovery' => 'matter_network_discovery',
+        _ => 'commissioning',
+      };
       _showPairingError(
-        'Pairing failed.',
-        detail: _userFacingMatterPairingDetail(result.error),
-        failureStage: 'commissioning',
+        switch (stage) {
+          'matter_bluetooth' => 'Bluetooth setup failed.',
+          'matter_network_discovery' =>
+            'Could not reach the device on the network.',
+          _ => 'Pairing failed.',
+        },
+        detail: switch (stage) {
+          'matter_bluetooth' =>
+            'Move the Rhythm Box closer to the device, put the device back '
+                'in pairing mode, and try again.',
+          'matter_network_discovery' =>
+            'Check the device’s Wi-Fi connection and the Rhythm Box’s local '
+                'network connection. For Thread devices, check the border '
+                'router. Then try again.',
+          _ => _userFacingMatterPairingDetail(result.error),
+        },
+        failureStage: stage,
         recoveryAction: result.recoveryAction,
       );
       return;
@@ -495,14 +516,15 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       'chip rpc',
     ];
     if (technicalMarkers.any(lower.contains)) {
-      if (widget.addMethod == MatterAddMethod.onNetworkSetupCode) {
+      if (_activeAddMethod == MatterAddMethod.onNetworkSetupCode) {
         return 'Rhythm could not reach the device over your local Matter '
             'network. Keep its sharing window open and check that the Rhythm '
             'Box can use your Thread border router\'s IPv6 route, then try '
             'again.';
       }
-      return 'The device stopped responding before setup finished. Put it '
-          'back in pairing mode, keep it near the Rhythm Box, and try again.';
+      return 'Rhythm could not identify whether Bluetooth or network setup '
+          'failed. Check that the device is in pairing mode and the Rhythm '
+          'Box is connected, then try again.';
     }
 
     return trimmed;
@@ -553,6 +575,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       outcome: outcome,
       failureStage: failureStage,
       recoveryAction: recoveryAction,
+      pairingSessionId: _pairingSessionId,
     );
   }
 
@@ -872,7 +895,8 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
           // step. This line is only the standing instruction.
           switch (_activeAddMethod) {
             MatterAddMethod.automatic =>
-              'Keep this screen open while Rhythm adds the device.',
+              'For a new device, the Rhythm Box uses Bluetooth first, then '
+                  'finds it on Wi-Fi. Keep the Box near the device during setup.',
             MatterAddMethod.phoneCommissioning =>
               'Keep this phone near the device while it joins the network '
                   'and the Rhythm Box finishes pairing.',
@@ -880,8 +904,8 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
               'Keep this screen open while Rhythm finds the device and '
                   'adds it.',
             MatterAddMethod.bleWifiCommissioning =>
-              'Keep this screen open while Rhythm completes setup and '
-                  'adds the device.',
+              'The Rhythm Box uses Bluetooth first, then finds the device '
+                  'on Wi-Fi. Keep the Box near the device during setup.',
           },
           style: TextStyle(
             color: CelestialColors.textSecondary.withValues(alpha: 0.75),
