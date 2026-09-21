@@ -2585,7 +2585,18 @@ mod tests {
                 pairing_history_entry_for_pair("hue", &params, &session).correlation_id,
                 None
             );
-            assert_eq!(pairing_history_entry_for_pair("matter", &serde_json::json!({"session_id": "pair-stage-test", "correlation_id": "explicit-journey"}), &session).correlation_id.as_deref(), Some("explicit-journey"));
+            let explicit_journey = pairing_history_entry_for_pair(
+                "matter",
+                &serde_json::json!({
+                    "session_id": "pair-stage-test",
+                    "correlation_id": "explicit-journey",
+                }),
+                &session,
+            );
+            assert_eq!(
+                explicit_journey.correlation_id.as_deref(),
+                Some("explicit-journey")
+            );
             std::fs::remove_dir_all(directory).ok();
         }
     }
