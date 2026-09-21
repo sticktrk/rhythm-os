@@ -415,12 +415,35 @@ impl<C: LightController> RhythmEngine<C> {
         self.plan_non_periodic_turn_off_target(room_id, room_id, transition_ms)
     }
 
-    pub(crate) fn plan_turn_on(&mut self, room_id: &str, current_hour: f32) -> ManualDispatchPlan {
-        {
+    fn activate_node_for_turn_on(&mut self, room_id: &str) {
+        let is_room = {
             let room = self.rooms.get_or_create(room_id, room_id);
             room.enable_rhythm();
             room.clear_off_states();
+            room.kind.is_room()
         };
+        if is_room {
+            // A grouped command activates these lights physically too. Clear
+            // their saved off states even while grouped routing hides them;
+            // a later individual fallback must not reapply stale Standby.
+            // Keep device preferences, offsets and Rhythm opt-outs intact.
+            let light_ids: Vec<_> = self
+                .rooms
+                .child_iter(room_id)
+                .filter(|child| child.kind == crate::room::LightNodeKind::LightDevice)
+                .map(|child| child.id.clone())
+                .collect();
+            for id in light_ids {
+                if let Some(child) = self.rooms.get_mut(&id) {
+                    child.clear_off_states();
+                }
+                self.clear_periodic_dedupe_room(&id);
+            }
+        }
+    }
+
+    pub(crate) fn plan_turn_on(&mut self, room_id: &str, current_hour: f32) -> ManualDispatchPlan {
+        self.activate_node_for_turn_on(room_id);
         let effective = self.effective_room_state(room_id);
         let offset_minutes = effective.time_offset_minutes;
         let brightness_offset = effective.brightness_offset;
@@ -1205,12 +1228,7 @@ impl<C: LightController> RhythmEngine<C> {
     /// * `room_id` - The ID of the room
     /// * `current_hour` - Current time in hours (0-24)
     pub async fn turn_on(&mut self, room_id: &str, current_hour: f32) -> LightControlResult<()> {
-        // Get or create room and enable rhythm
-        {
-            let room = self.rooms.get_or_create(room_id, room_id);
-            room.enable_rhythm();
-            room.clear_off_states();
-        };
+        self.activate_node_for_turn_on(room_id);
         let effective = self.effective_room_state(room_id);
         let offset_minutes = effective.time_offset_minutes;
         let brightness_offset = effective.brightness_offset;
@@ -2632,6 +2650,108 @@ mod tests {
             PeriodicTickResult::Updated
         ));
         assert_eq!(spy.turn_on_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn turn_on_clears_attached_light_states_but_preserves_preferences_and_other_nodes() {
+        use crate::room::LightNodeKind;
+
+        let (mut engine, spy) = spy_engine();
+        engine
+            .rooms_mut()
+            .get_or_create("room", "Room")
+            .set_standby();
+        for (id, kind, parent) in [
+            ("standby", LightNodeKind::LightDevice, Some("room")),
+            ("hard-off", LightNodeKind::LightDevice, Some("room")),
+            ("mood", LightNodeKind::LightDevice, Some("room")),
+            ("opted-out", LightNodeKind::LightDevice, Some("room")),
+            ("sensor", LightNodeKind::MotionSensor, Some("room")),
+            ("nested-room", LightNodeKind::Room, Some("room")),
+            (
+                "other-light",
+                LightNodeKind::LightDevice,
+                Some("other-room"),
+            ),
+            ("standalone", LightNodeKind::LightDevice, None),
+        ] {
+            let node =
+                engine
+                    .rooms_mut()
+                    .get_or_create_node(id, id, kind, parent.map(str::to_string));
+            node.rhythm_enabled = id != "opted-out";
+            node.disabled = id == "opted-out";
+            node.time_offset_minutes = 15.0;
+            node.brightness_offset = -4.0;
+            node.profile_settings.fade_ms = Some(crate::TimerSetting::Fixed { value: 4321 });
+            match id {
+                "hard-off" => node.set_hard_off(),
+                "mood" => node.set_mood(),
+                _ => node.set_standby(),
+            }
+        }
+        spy.set_any_lights_on(true);
+        // Populate the child's old periodic cache before the parent activates.
+        engine.periodic_tick_node("standby", "standby", 12.0).await;
+        spy.reset();
+        engine.turn_on("room", 12.0).await.unwrap();
+
+        for id in ["standby", "hard-off", "mood", "opted-out"] {
+            let child = engine.rooms().get(id).unwrap();
+            assert!(
+                !child.soft_off && !child.hard_off && !child.mood_active,
+                "{id}"
+            );
+            assert_eq!(child.rhythm_enabled, id != "opted-out");
+            assert_eq!(child.disabled, id == "opted-out");
+            assert_eq!(child.time_offset_minutes, 15.0);
+            assert_eq!(child.brightness_offset, -4.0);
+            assert_eq!(
+                child.profile_settings.fade_ms,
+                Some(crate::TimerSetting::Fixed { value: 4321 })
+            );
+        }
+        for id in ["sensor", "nested-room", "other-light", "standalone"] {
+            assert!(
+                engine.rooms().get(id).unwrap().soft_off,
+                "{id} must remain unchanged"
+            );
+        }
+        assert!(matches!(
+            engine.periodic_tick_node("standby", "standby", 12.0).await,
+            PeriodicTickResult::Updated
+        ));
+        assert!(spy.last_command_for("standby").unwrap().brightness > 1);
+        assert!(matches!(
+            engine
+                .periodic_tick_node("opted-out", "opted-out", 12.0)
+                .await,
+            PeriodicTickResult::Skipped
+        ));
+        assert!(spy.last_command_for("opted-out").is_none());
+    }
+
+    #[tokio::test]
+    async fn turning_on_one_light_preserves_parent_and_sibling_off_states() {
+        use crate::room::LightNodeKind;
+
+        let (mut engine, spy) = spy_engine();
+        engine
+            .rooms_mut()
+            .get_or_create("room", "Room")
+            .set_hard_off();
+        for id in ["one", "two"] {
+            engine
+                .rooms_mut()
+                .get_or_create_node(id, id, LightNodeKind::LightDevice, Some("room".into()))
+                .set_standby();
+        }
+        engine.turn_on("one", 12.0).await.unwrap();
+        assert!(!engine.rooms().get("one").unwrap().soft_off);
+        assert!(engine.rooms().get("two").unwrap().soft_off);
+        assert!(engine.rooms().get("room").unwrap().hard_off);
+        assert_eq!(spy.turn_on_calls().len(), 1);
+        assert!(spy.last_command_for("one").is_some());
     }
 
     #[tokio::test]

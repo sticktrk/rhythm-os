@@ -1626,6 +1626,122 @@ mod tests {
     }
 
     #[test]
+    fn motion_activation_survives_group_to_device_fallback() {
+        let fixture = mixed_hue_matter_fixture(true);
+        let group_key = HubKey::new(HubType::new("hue"), "bridge");
+        let grouped_child = fixture
+            .runtime
+            .engine_all_node_snapshots()
+            .into_iter()
+            .find(|node| node.name == "Grouped lamp")
+            .unwrap();
+        let mut child_state = RestoredNodeState::from(&grouped_child);
+        child_state.rhythm_enabled = true;
+        child_state.soft_off = true;
+        fixture
+            .runtime
+            .restore_node_state(&grouped_child.id, child_state);
+        let parent = fixture.runtime.engine_node_snapshot("hallway").unwrap();
+        let mut parent_state = RestoredNodeState::from(&parent);
+        parent_state.rhythm_enabled = true;
+        parent_state.soft_off = true;
+        parent_state.standby_enabled = true;
+        fixture.runtime.restore_node_state("hallway", parent_state);
+
+        assert!(crate::event_loop::turn_on_node_inline(
+            &fixture.state,
+            "hallway"
+        ));
+        let initial = fixture.group_controller.wait_for_turn_on_calls(1);
+        assert_eq!(initial.len(), 1);
+        assert!(initial[0].1.brightness > 31);
+
+        // Topology reconciliation temporarily fences grouped control. The
+        // next periodic tick must render the same active state per light.
+        let (route, routing) = {
+            let mut app = fixture.state.lock().unwrap();
+            app.topology
+                .set_external_grouped_dispatch_suspended(&group_key, true);
+            let route = app
+                .topology
+                .periodic_light_nodes(&app.canonical_registry)
+                .into_iter()
+                .find(|route| route.source_node_id == grouped_child.id)
+                .expect("grouped light should acquire an individual fallback route");
+            (
+                route,
+                app.topology.composite_routing(&app.canonical_registry),
+            )
+        };
+        fixture.composite.update_routing(routing);
+        let report = run_selected_light_runtime_event(
+            &fixture.state,
+            RuntimeEvent::PeriodicTick(TickContext {
+                node_id: route.id,
+                hour: 12.0,
+                epoch_ms: None,
+                metadata: BTreeMap::from([(
+                    "source_node_id".to_string(),
+                    json!(route.source_node_id),
+                )]),
+            }),
+        )
+        .unwrap();
+        assert_eq!(report.dispatch_count, 1);
+        let after_fallback = fixture.group_controller.wait_for_turn_on_calls(2);
+        assert_eq!(after_fallback.len(), 2);
+        assert_eq!(after_fallback[1].0, "hue-group-light");
+        assert_eq!(
+            after_fallback[1].1.brightness, initial[0].1.brightness,
+            "a motion-activated room must not revert to a child's saved Standby level"
+        );
+        assert!(
+            !fixture
+                .runtime
+                .engine_node_snapshot(&grouped_child.id)
+                .unwrap()
+                .soft_off
+        );
+        let backup = crate::commands::build_backup_bundle_dto(&fixture.state, false).unwrap();
+        let saved_child = backup.installation.rooms.get(&grouped_child.id).unwrap();
+        assert!(!saved_child.soft_off && !saved_child.hard_off);
+        let saved_direct_child = backup
+            .installation
+            .rooms
+            .get(&fixture.matter_light_id)
+            .unwrap();
+        assert!(!saved_direct_child.hard_off);
+        assert_eq!(
+            saved_direct_child.profile_settings.profile_overrides[rhythm_core::RHYTHM_PROFILE_ID]
+                .max_brightness,
+            Some(31)
+        );
+
+        // A later explicit Standby still wins over the motion activation.
+        crate::commands::do_node_preferences_set(
+            &fixture.state,
+            "hallway",
+            None,
+            None,
+            None,
+            Some(rhythm_core::RoomModeState::Standby),
+            None,
+            false,
+        )
+        .unwrap();
+        let after_standby = fixture.group_controller.wait_for_turn_on_calls(3);
+        assert_eq!(after_standby.len(), 3);
+        assert!(after_standby[2].1.brightness < initial[0].1.brightness);
+        assert!(
+            fixture
+                .runtime
+                .engine_effective_node_snapshot(&grouped_child.id)
+                .unwrap()
+                .soft_off
+        );
+    }
+
+    #[test]
     fn app_room_reset_activates_hard_off_direct_child_with_profile_override() {
         let fixture = mixed_hue_matter_fixture(true);
         let state = fixture.state;
