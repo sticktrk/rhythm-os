@@ -1348,6 +1348,11 @@ impl RoomTopologyStore {
     /// Restore room membership omitted by older device reactivation paths.
     /// An existing topology node remains authoritative, including an explicit
     /// standalone placement. Archived/inactive devices must stay hidden.
+    ///
+    /// A light that a hub source room still reports belongs to hub sync: it is
+    /// restored as `HubDefault` only into the room that reports it, and left
+    /// for the next sync otherwise. Recording a `UserOverride` there would pin
+    /// the light against later hub-side moves without any user action.
     pub(crate) fn restore_missing_assigned_light_nodes(
         &mut self,
         canonical_registry: &crate::canonical::registry::CanonicalRegistry,
@@ -1356,21 +1361,56 @@ impl RoomTopologyStore {
             .devices()
             .filter(|device| {
                 device.device_type == DeviceType::Light
+                    && !device.is_removed()
                     && device.has_active_endpoint()
                     && !self.device_nodes.contains_key(&device.id)
             })
             .filter_map(|device| {
                 let room_id = device.room_id.as_ref()?;
-                self.rooms
-                    .contains_key(room_id)
-                    .then(|| (device.id.clone(), room_id.clone()))
+                if !self.rooms.contains_key(room_id) {
+                    return None;
+                }
+                let reporting_room_ids = self.hub_reported_light_room_ids(device);
+                let placement = if reporting_room_ids.is_empty() {
+                    DevicePlacement::UserOverride
+                } else if reporting_room_ids.contains(room_id) {
+                    DevicePlacement::HubDefault
+                } else {
+                    return None;
+                };
+                Some((device.id.clone(), room_id.clone(), placement))
             })
             .collect::<Vec<_>>();
-        repairs.sort();
+        repairs.sort_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
         repairs
             .into_iter()
-            .filter(|(device_id, room_id)| self.attach_device_user_override(room_id, device_id))
+            .filter(|(device_id, room_id, placement)| match placement {
+                DevicePlacement::HubDefault => self.attach_device_hub_default(room_id, device_id),
+                _ => self.attach_device_user_override(room_id, device_id),
+            })
             .count()
+    }
+
+    /// Rhythm rooms whose hub source-room bindings currently list one of this
+    /// device's active endpoints. Device-scoped bindings, whose room ID is the
+    /// native device ID, are individual routes rather than hub room membership.
+    fn hub_reported_light_room_ids(
+        &self,
+        device: &crate::canonical::identity::CanonicalDevice,
+    ) -> HashSet<String> {
+        self.rooms
+            .iter()
+            .filter(|(_, room)| {
+                room.hub_room_bindings.iter().any(|binding| {
+                    device.active_endpoints().any(|endpoint| {
+                        binding.hub_key == endpoint.hub_key
+                            && binding.hub_room_id != endpoint.native_id
+                            && binding.light_device_ids.contains(&endpoint.native_id)
+                    })
+                })
+            })
+            .map(|(room_id, _)| room_id.clone())
+            .collect()
     }
 
     /// Repair persisted state from versions that copied every hub room child

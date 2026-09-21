@@ -4,10 +4,19 @@ use rhythm_os::canonical::registry::ResolveResult;
 use rhythm_os::hub::HubType;
 use rhythm_os::state::AppState;
 use rhythm_os::storage::{load_persisted_state, FileStorage, Storage};
-use rhythm_os::topology::DevicePlacement;
+use rhythm_os::topology::{DevicePlacement, HubRoomBinding};
 use std::sync::Arc;
 
 fn light(state: &mut AppState, native_id: &str, room_id: Option<&str>) -> String {
+    light_on(state, "matter", native_id, room_id)
+}
+
+fn light_on(
+    state: &mut AppState,
+    hub_type: &str,
+    native_id: &str,
+    room_id: Option<&str>,
+) -> String {
     let identity = DiscoveredIdentity {
         native_id: native_id.into(),
         room_id: None,
@@ -20,7 +29,7 @@ fn light(state: &mut AppState, native_id: &str, room_id: Option<&str>) -> String
     };
     let id = match state.canonical_registry.resolve(
         &identity,
-        &HubKey::new(HubType::new("matter"), "local"),
+        &HubKey::new(HubType::new(hub_type), "local"),
         1,
     ) {
         ResolveResult::Created { canonical_id } => canonical_id,
@@ -72,6 +81,26 @@ fn exercise_restart(legacy: bool) {
     let unassigned = light(&mut state, "matter-7", None);
     let deleted = light(&mut state, "matter-8", Some(&room));
     state.canonical_registry.remove_device(&deleted);
+    // A hub source room owns placement for the lights it reports. The repair
+    // must not turn that membership into a user override, and must leave a
+    // light reported elsewhere for the next hub sync.
+    let hub_reported = light_on(&mut state, "hue", "hue-1", Some(&room));
+    let hub_reported_elsewhere = light_on(&mut state, "hue", "hue-2", Some(&room));
+    for (room_id, hub_room_id, native_id) in [
+        (&room, "hue-room-1", "hue-1"),
+        (&other_room, "hue-room-2", "hue-2"),
+    ] {
+        state
+            .topology
+            .get_mut(room_id)
+            .unwrap()
+            .upsert_hub_room_binding(HubRoomBinding {
+                hub_key: HubKey::new(HubType::new("hue"), "local"),
+                hub_room_id: hub_room_id.into(),
+                control_id: format!("{hub_room_id}-group"),
+                light_device_ids: vec![native_id.into()],
+            });
+    }
     if legacy {
         storage
             .save_canonical_registry(&serde_json::to_value(&state.canonical_registry).unwrap())
@@ -92,8 +121,26 @@ fn exercise_restart(legacy: bool) {
             restarted.topology.device_parent_room_id(&restored),
             Some(room.as_str())
         );
-        assert_eq!(restarted.topology.get(&room).unwrap().devices.len(), 1);
-        for id in [&archived, &inactive, &deleted_room, &unassigned, &deleted] {
+        assert_eq!(restarted.topology.get(&room).unwrap().devices.len(), 2);
+        assert_eq!(
+            restarted
+                .topology
+                .get_device_node(&restored)
+                .unwrap()
+                .placement,
+            DevicePlacement::UserOverride
+        );
+        let hub_node = restarted.topology.get_device_node(&hub_reported).unwrap();
+        assert_eq!(hub_node.parent_id.as_deref(), Some(room.as_str()));
+        assert_eq!(hub_node.placement, DevicePlacement::HubDefault);
+        for id in [
+            &archived,
+            &inactive,
+            &deleted_room,
+            &unassigned,
+            &deleted,
+            &hub_reported_elsewhere,
+        ] {
             assert!(restarted.topology.get_device_node(id).is_none());
         }
         let node = restarted.topology.get_device_node(&standalone).unwrap();
