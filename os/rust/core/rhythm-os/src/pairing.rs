@@ -352,6 +352,10 @@ pub enum PairingFailureStage {
     CandidateServiceDiscovery,
     CandidateServiceMismatch,
     CandidateCleanup,
+    /// Matter failed while establishing its Bluetooth commissioning connection.
+    MatterBluetooth,
+    /// Matter reached IP discovery, but could not resolve the device.
+    MatterNetworkDiscovery,
     Transport,
     /// A stage added by a newer server. Older readers retain a safe marker
     /// instead of rejecting the complete durable pairing document.
@@ -368,6 +372,8 @@ impl PairingFailureStage {
             Self::CandidateServiceDiscovery => "candidate_service_discovery",
             Self::CandidateServiceMismatch => "candidate_service_mismatch",
             Self::CandidateCleanup => "candidate_cleanup",
+            Self::MatterBluetooth => "matter_bluetooth",
+            Self::MatterNetworkDiscovery => "matter_network_discovery",
             Self::Transport => "transport",
             Self::Unknown => "unknown",
         }
@@ -705,9 +711,10 @@ pub struct PairingHistoryEntry {
     /// "pair" or "unpair".
     pub kind: String,
     pub hub_type: String,
-    /// App-generated privacy-safe journey correlation. This deliberately does
-    /// not fall back to the transport session ID because retries have their
-    /// own session IDs while one user journey owns the lifecycle outcome.
+    /// App-generated privacy-safe journey correlation. Matter callers that
+    /// supply no journey use their opaque attempt ID, also recorded as the
+    /// app completion event's pairing_session_id. Explicit journeys win;
+    /// other integrations retain their existing journey-only contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub correlation_id: Option<String>,
     /// Canonical device class involved in the lifecycle attempt.
@@ -1602,7 +1609,15 @@ pub fn pairing_history_entry_for_pair(
         epoch_ms: crate::state::current_epoch_ms(),
         kind: "pair".to_string(),
         hub_type: hub_type.to_string(),
-        correlation_id: bounded_correlation_id(params),
+        correlation_id: bounded_correlation_id(params).or_else(|| {
+            // The same opaque attempt ID joins app completion, terminal receipt,
+            // local history and cloud evidence, including native phone handoff.
+            (hub_type == "matter")
+                .then(|| params.get("session_id").and_then(serde_json::Value::as_str))
+                .flatten()
+                .filter(|id| validate_pairing_session_id(id).is_ok())
+                .map(str::to_string)
+        }),
         device_type: completed_devices
             .first()
             .map(|device| device_type_label(&device.device_type).to_string())
@@ -2520,6 +2535,76 @@ mod tests {
             BeginPairingResult::Cancelled
         ));
         std::fs::remove_dir_all(directory).ok();
+    }
+
+    #[test]
+    fn matter_failure_stage_survives_receipt_and_history_restart() {
+        for stage in [
+            PairingFailureStage::MatterBluetooth,
+            PairingFailureStage::MatterNetworkDiscovery,
+        ] {
+            let directory = test_directory(stage.as_str());
+            let state = state_with_storage(&directory);
+            let fingerprint = test_fingerprint("matter");
+            let lease =
+                match begin_pairing_result(&state, "pair-stage-test", "matter", &fingerprint)
+                    .unwrap()
+                {
+                    BeginPairingResult::Started(lease) => lease,
+                    other => panic!("unexpected reservation: {other:?}"),
+                };
+            let session = PairingSession {
+                hub_type: "matter".into(),
+                status: PairingStatus::Failed,
+                device: None,
+                devices: vec![],
+                error: Some("Setup failed".into()),
+                failure_stage: Some(stage),
+                warnings: vec![],
+                details: None,
+            };
+            complete_pairing_result(&state, "pair-stage-test", "matter", &session).unwrap();
+            drop(lease);
+            let params = serde_json::json!({"session_id": "pair-stage-test"});
+            let entry = pairing_history_entry_for_pair("matter", &params, &session);
+            assert_eq!(entry.correlation_id.as_deref(), Some("pair-stage-test"));
+            record_pairing_history(&state, entry);
+            let restarted = state_with_storage(&directory);
+            let result = lookup_pairing_result(&restarted, "pair-stage-test")
+                .unwrap()
+                .unwrap();
+            assert_eq!(result.result.unwrap().failure_stage, Some(stage));
+            let storage = crate::storage::FileStorage::new(directory.to_str().unwrap()).unwrap();
+            use crate::storage::Storage;
+            let history = storage.load_pairing_history().unwrap().unwrap();
+            assert_eq!(history.entries.last().unwrap().failure_stage, Some(stage));
+            assert_eq!(
+                pairing_history_entry_for_pair(
+                    "matter",
+                    &serde_json::json!({"session_id": "MT:PRIVATE CODE"}),
+                    &session
+                )
+                .correlation_id,
+                None
+            );
+            assert_eq!(
+                pairing_history_entry_for_pair("hue", &params, &session).correlation_id,
+                None
+            );
+            let explicit_journey = pairing_history_entry_for_pair(
+                "matter",
+                &serde_json::json!({
+                    "session_id": "pair-stage-test",
+                    "correlation_id": "explicit-journey",
+                }),
+                &session,
+            );
+            assert_eq!(
+                explicit_journey.correlation_id.as_deref(),
+                Some("explicit-journey")
+            );
+            std::fs::remove_dir_all(directory).ok();
+        }
     }
 
     #[test]

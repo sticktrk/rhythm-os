@@ -50,13 +50,18 @@ void main() {
                   'name': 'Test bulb',
                   'device_type': 'light',
                 },
-              if (status == 'failed') 'error': 'Handoff failed',
+              if (status == 'failed') ...{
+                'error': 'Handoff failed',
+                'failure_stage': 'matter_network_discovery',
+              },
               if (status == 'complete')
                 'warnings': ['Recovery code was not saved.'],
             },
           };
           final receipt = await api.getPairingResult('attempt-1');
           expect(receipt?.status, status);
+          expect(receipt?.failureStage,
+              status == 'failed' ? 'matter_network_discovery' : null);
           expect(
               receipt?.warnings,
               status == 'complete'

@@ -1164,6 +1164,29 @@ mod tests {
     }
 
     #[test]
+    fn matter_failure_stage_is_in_the_privacy_safe_cloud_event() {
+        for stage in [
+            crate::pairing::PairingFailureStage::MatterBluetooth,
+            crate::pairing::PairingFailureStage::MatterNetworkDiscovery,
+        ] {
+            let mut entry = test_device_lifecycle_entry();
+            entry.kind = "pair".into();
+            entry.hub_type = "matter".into();
+            entry.status = "failed".into();
+            entry.correlation_id = Some("pair-stage-test".into());
+            entry.failure_stage = Some(stage);
+            let event = device_lifecycle_cloud_event(&entry).unwrap();
+            assert_eq!(event.failure_stage.as_deref(), Some(stage.as_str()));
+            assert_eq!(event.correlation_id.as_deref(), Some("pair-stage-test"));
+            assert_eq!(event.outcome, "failed");
+            assert_eq!(event, device_lifecycle_cloud_event(&entry).unwrap());
+            let json = serde_json::to_string(&event).unwrap();
+            assert!(!json.contains("private"));
+            assert!(!json.contains("Private Switch Name"));
+        }
+    }
+
+    #[test]
     fn matter_device_lifecycle_records_only_the_bounded_commissioner() {
         let mut entry = test_device_lifecycle_entry();
         entry.kind = "pair".into();

@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::controller::{LightControlResult, LightController};
+use crate::controller::{LightControlError, LightControlResult, LightController};
 use crate::lighting::LightingCommand;
 use crate::room::Room;
 
@@ -50,6 +50,7 @@ pub struct SpyLightController {
     /// Configurable response for `any_lights_on`. Default: false.
     any_lights_on_response: Mutex<bool>,
     delays: Mutex<SpyControllerDelays>,
+    fail_next_turn_off: Mutex<bool>,
     turn_on_room_delays: Mutex<HashMap<String, Duration>>,
 }
 
@@ -66,6 +67,7 @@ impl SpyLightController {
             calls: Mutex::new(Vec::new()),
             any_lights_on_response: Mutex::new(false),
             delays: Mutex::new(SpyControllerDelays::default()),
+            fail_next_turn_off: Mutex::new(false),
             turn_on_room_delays: Mutex::new(HashMap::new()),
         }
     }
@@ -73,6 +75,11 @@ impl SpyLightController {
     /// Set the response for `any_lights_on` calls.
     pub fn set_any_lights_on(&self, on: bool) {
         *self.any_lights_on_response.lock().unwrap() = on;
+    }
+
+    /// Fail the next Off after recording the attempted command.
+    pub fn fail_next_turn_off(&self) {
+        *self.fail_next_turn_off.lock().unwrap() = true;
     }
 
     /// Add a blocking delay before `turn_on` returns.
@@ -224,6 +231,11 @@ impl LightController for SpyLightController {
             room_id: room_id.to_string(),
             transition_ms,
         });
+        if std::mem::take(&mut *self.fail_next_turn_off.lock().unwrap()) {
+            return Err(LightControlError::CommandFailed(
+                "synthetic Off failure".into(),
+            ));
+        }
         Ok(())
     }
 

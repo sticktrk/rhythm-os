@@ -42,6 +42,7 @@ class RhythmMatterPairingResponse {
     this.device,
     this.error,
     this.recoveryAction,
+    this.failureStage,
     this.warnings = const <String>[],
   });
 
@@ -59,6 +60,7 @@ class RhythmMatterPairingResponse {
             : null,
         error: (json['error'] ?? json['message']) as String?,
         recoveryAction: _readRecoveryAction(json['details']),
+        failureStage: _readFailureStage(json['failure_stage']),
         warnings: _readWarnings(json['warnings']),
       );
     }
@@ -79,7 +81,16 @@ class RhythmMatterPairingResponse {
   final Map<String, dynamic>? device;
   final String? error;
   final String? recoveryAction;
+
+  /// Optional evidence from the commissioner. Missing/future values must not
+  /// prevent a terminal result from being handled.
+  final String? failureStage;
   final List<String> warnings;
+
+  static String? _readFailureStage(Object? value) =>
+      value is String && RegExp(r'^[a-z][a-z0-9_]{0,63}$').hasMatch(value)
+          ? value
+          : null;
 
   static String? _readRecoveryAction(Object? details) {
     if (details is! Map) return null;
