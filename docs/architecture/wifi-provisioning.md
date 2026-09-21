@@ -56,6 +56,7 @@ an owner token even on LAN, deny support tokens, and return `Cache-Control: no-s
 | PUT `/api/pairing/wifi-profiles` | Revision, UUID correlation ID, `save`/`remove`/`default`, optional profile ID; omitted password preserves it, empty password selects an open network |
 | GET `/api/pairing/wifi-profiles/:id/credentials` | Explicit uncached owner credential retrieval for phone BLE |
 | PUT `/api/wifi/profile/:id` (appliance) | Move the Box to a saved network. Owner-only on LAN and remotely; the password never leaves the Box. Same accepted/scheduled contract as PUT `/api/wifi`; an unknown profile is 404 with no detail |
+| GET `/api/wifi` (appliance) | Adds `last_change`: `{ssid, state}` with `running`/`succeeded`/`failed`, or null. `failed` is recorded only after the Box is back on its previous network, so the app can show that a move was rejected. Memory only |
 | POST `/api/wifi/verify` (appliance) | UUID operation ID, SSID and password. The Box scans, joins the network for up to 30 s, then always returns to its own. 200 with `state` `running` or `passed` (already the Box network); 409 when the Box has no Wi-Fi of its own or the radio is busy. Nothing is saved |
 | GET `/api/wifi/verify/:operation_id` (appliance) | `state` `running`/`passed`/`failed`, with `reason` `not_found` or `join_failed`. Held in memory only; 404 after a restart. Clients treat 404/409 as "cannot check" and still allow the save |
 | GET `/api/pairing/wifi-credentials` | Credentials of `default_id` for phone BLE provisioning |

@@ -30,6 +30,24 @@ static WIFI_RADIO_BUSY: AtomicBool = AtomicBool::new(false);
 /// and startup recovery returns the Box to its own network.
 static WIFI_VERIFICATION: Mutex<Option<WifiVerification>> = Mutex::new(None);
 
+/// How the latest Box move ended. The app asks once it can reach the Box
+/// again; a rejected network otherwise looks like nothing happened. Memory
+/// only, and never the credential.
+static WIFI_LAST_CHANGE: Mutex<Option<(String, &'static str)>> = Mutex::new(None);
+
+fn record_wifi_change(ssid: &str, state: &'static str) {
+    if let Ok(mut last) = WIFI_LAST_CHANGE.lock() {
+        *last = Some((ssid.to_string(), state));
+    }
+}
+
+fn last_wifi_change() -> serde_json::Value {
+    match WIFI_LAST_CHANGE.lock().ok().and_then(|last| last.clone()) {
+        Some((ssid, state)) => serde_json::json!({ "ssid": ssid, "state": state }),
+        None => serde_json::Value::Null,
+    }
+}
+
 struct WifiVerification {
     operation_id: String,
     /// `None` while the Box is away checking.
@@ -237,6 +255,7 @@ fn handle_get_wifi(provisioning: &ProvisioningManager) -> ApiResponse {
         "wpa_state": status.wpa_state,
         "provisioning_active": provisioning.is_running(),
         "provisioning_forced": provisioning.force_enabled(),
+        "last_change": last_wifi_change(),
     });
     ApiResponse::json_ok(body.to_string())
 }
@@ -250,6 +269,7 @@ fn handle_put_wifi(state: SharedState, creds: WifiCredentials) -> ApiResponse {
         return ApiResponse::conflict("The Rhythm Box is already changing or checking Wi-Fi");
     }
     let ssid = creds.ssid.clone();
+    record_wifi_change(&ssid, "running");
     match thread::Builder::new()
         .name("wifi-change".to_string())
         .spawn(move || {
@@ -257,6 +277,7 @@ fn handle_put_wifi(state: SharedState, creds: WifiCredentials) -> ApiResponse {
             match wifi::connect_with_credentials_or_restore(&creds, WIFI_CHANGE_CONNECT_TIMEOUT) {
                 Ok(ip) => {
                     persist_commissioning_wifi_credentials(&state, &creds);
+                    record_wifi_change(&creds.ssid, "succeeded");
                     info!(
                         target: "sys",
                         "Changed appliance Wi-Fi credentials for SSID '{}' (ip={})",
@@ -264,12 +285,16 @@ fn handle_put_wifi(state: SharedState, creds: WifiCredentials) -> ApiResponse {
                         ip
                     );
                 }
-                Err(error) => warn!(
-                    target: "sys",
-                    "Failed to change appliance Wi-Fi credentials for SSID '{}'; restored previous Wi-Fi config when available: {:#}",
-                    creds.ssid,
-                    error
-                ),
+                Err(error) => {
+                    // Recorded once the Box is back where the app can ask.
+                    record_wifi_change(&creds.ssid, "failed");
+                    warn!(
+                        target: "sys",
+                        "Failed to change appliance Wi-Fi credentials for SSID '{}'; restored previous Wi-Fi config when available: {:#}",
+                        creds.ssid,
+                        error
+                    )
+                }
             }
             WIFI_RADIO_BUSY.store(false, Ordering::SeqCst);
         }) {
@@ -283,6 +308,9 @@ fn handle_put_wifi(state: SharedState, creds: WifiCredentials) -> ApiResponse {
         }
         Err(error) => {
             WIFI_RADIO_BUSY.store(false, Ordering::SeqCst);
+            if let Ok(mut last) = WIFI_LAST_CHANGE.lock() {
+                *last = None;
+            }
             ApiResponse::server_error(error)
         }
     }
@@ -405,6 +433,18 @@ mod tests {
         let body = String::from_utf8_lossy(&body);
         assert!(!body.contains("FixtureHome") && !body.contains("fixture-password"));
         std::fs::remove_dir_all(data_dir).ok();
+    }
+
+    #[test]
+    fn a_rejected_box_move_is_reported_without_the_credential() {
+        assert_eq!(last_wifi_change(), serde_json::Value::Null);
+        record_wifi_change("Garage", "running");
+        record_wifi_change("Garage", "failed");
+        assert_eq!(
+            last_wifi_change(),
+            serde_json::json!({ "ssid": "Garage", "state": "failed" })
+        );
+        *WIFI_LAST_CHANGE.lock().unwrap() = None;
     }
 
     #[test]

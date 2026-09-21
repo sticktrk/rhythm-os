@@ -1007,7 +1007,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
       if (result.accepted) {
         _showSnackBar('Wi-Fi change started. Reconnecting shortly.');
-        unawaited(_refreshAfterWifiChange());
+        unawaited(_refreshAfterWifiChange(client, result.ssid));
       } else {
         _showSnackBar(result.error ?? 'Could not change Wi-Fi.',
             backgroundColor: Colors.red.shade400);
@@ -1047,9 +1047,25 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     );
   }
 
-  Future<void> _refreshAfterWifiChange() async {
+  Future<void> _refreshAfterWifiChange(
+      RhythmDiagnosticsApi client, String? ssid) async {
     await Future<void>.delayed(const Duration(seconds: 35));
+    // A rejected network sends the Box back to its old one, where it can say
+    // so. That takes up to 30 s to try and another 30 s to return.
+    String? outcome;
+    for (var i = 0; i < 12 && mounted && ssid != null; i++) {
+      outcome = await client.getLastWifiChangeState(ssid);
+      if (outcome == 'succeeded' || outcome == 'failed') break;
+      await Future<void>.delayed(const Duration(seconds: 5));
+    }
     if (!mounted) return;
+    if (outcome == 'failed') {
+      _showSnackBar(
+        'Your Rhythm Box could not join "$ssid" and is back on its previous '
+        'network. Check the network name and password.',
+        backgroundColor: Colors.red.shade400,
+      );
+    }
     await _checkHealth();
     if (!mounted) return;
     if (widget.homeManaged) {

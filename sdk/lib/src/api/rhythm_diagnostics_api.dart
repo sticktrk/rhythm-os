@@ -396,6 +396,20 @@ class RhythmDiagnosticsApi {
     }
   }
 
+  /// How the latest Box move ended: `running`, `succeeded` or `failed`, for
+  /// [ssid] only. Null when the Box cannot be reached, restarted since, runs
+  /// older firmware, or last moved to another network.
+  Future<String?> getLastWifiChangeState(String ssid) async {
+    try {
+      final response = await _dio.get('api/wifi');
+      final last = response.data is Map ? response.data['last_change'] : null;
+      if (last is Map && last['ssid'] == ssid && last['state'] is String) {
+        return last['state'] as String;
+      }
+    } catch (_) {}
+    return null;
+  }
+
   /// Move the appliance to a saved network. Owner-only; the password stays on
   /// the Box. Requires the `saved_wifi_profiles_v1` capability.
   Future<RhythmWifiChangeResponse> changeWifiToSavedNetwork(
