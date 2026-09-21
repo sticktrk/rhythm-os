@@ -1545,7 +1545,7 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
       quirks.add('needs_explicit_on');
     }
     if (_observations['color_to_white_and_back']?.worked == false) {
-      quirks.add('color_mode_switch_requires_audition');
+      quirks.add({'other': 'color_mode_switch_requires_audition'});
     }
     return quirks;
   }
@@ -1562,6 +1562,10 @@ class _MatterBulbTesterScreenState extends State<MatterBulbTesterScreen> {
   }
 
   String _quirkLabel(dynamic quirk) {
+    if (quirk is Map &&
+        quirk['other'] == 'color_mode_switch_requires_audition') {
+      return 'Colour switching needs review';
+    }
     if (quirk == 'needs_explicit_on') return 'Explicit On';
     if (quirk == 'needs_xy_not_ct') return 'Prefer XY';
     if (quirk is Map && quirk['command_throttle_ms'] != null) {
