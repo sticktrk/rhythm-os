@@ -533,6 +533,24 @@ pub(crate) fn apply_runtime_plan_to_handle_with_child_activation(
     plan: &RuntimePlan,
     activate_direct_children: bool,
 ) -> Result<RuntimePlanApplyReport> {
+    apply_runtime_plan_with_notifications(
+        state,
+        runtime_id,
+        runtime,
+        plan,
+        activate_direct_children,
+        true,
+    )
+}
+
+fn apply_runtime_plan_with_notifications(
+    state: &SharedState,
+    runtime_id: &str,
+    runtime: &dyn RuntimeHandle,
+    plan: &RuntimePlan,
+    activate_direct_children: bool,
+    notify_all_nodes: bool,
+) -> Result<RuntimePlanApplyReport> {
     emit_diagnostics(runtime_id, &plan.diagnostics);
 
     let mut dispatch_count = 0;
@@ -578,7 +596,11 @@ pub(crate) fn apply_runtime_plan_to_handle_with_child_activation(
             // refresh. A slow Matter read must never delay a healthy Hue
             // enqueue, and one rejected route must not suppress its siblings.
             for accepted_command in &accepted_commands {
-                update_host_state_after_expanded_dispatch(state, accepted_command);
+                update_host_state_after_expanded_dispatch(
+                    state,
+                    accepted_command,
+                    notify_all_nodes,
+                );
                 dispatch_count += 1;
             }
 
@@ -599,11 +621,11 @@ pub(crate) fn apply_runtime_plan_to_handle_with_child_activation(
                 // Synthetic group route IDs are intentionally hidden, while
                 // direct children update their own cache. Also update the
                 // public parent whose room action produced this fan-out.
-                update_host_state_after_dispatch(state, runtime, command);
+                update_host_state_after_dispatch(state, runtime, command, notify_all_nodes);
             }
         } else {
             apply_dispatch_command(runtime, command)?;
-            update_host_state_after_dispatch(state, runtime, command);
+            update_host_state_after_dispatch(state, runtime, command, notify_all_nodes);
             dispatch_count += 1;
         }
     }
@@ -615,6 +637,116 @@ pub(crate) fn apply_runtime_plan_to_handle_with_child_activation(
         state_write_count,
         diagnostic_count: plan.diagnostics.len(),
     })
+}
+
+/// Motion uses the same direct-child planning and best-effort dispatch as
+/// button/app On. A raw composite room command already includes direct lights,
+/// so following it with child refreshes would send the wrong brightness first.
+/// Keep the existing fast path for rooms without active direct routes.
+pub(crate) fn turn_on_room_route_aware(
+    state: &SharedState,
+    runtime: &dyn RuntimeHandle,
+    room_id: &str,
+) -> Result<usize> {
+    // Share the host's room-action gate with app/button/preference writes:
+    // planning and sibling dispatch must retain their mutation order.
+    let action_lock = {
+        let mut app = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+        app.node_preference_write_locks
+            .entry(room_id.to_string())
+            .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
+            .clone()
+    };
+    let _action_guard = action_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("node action lock"))?;
+    let is_room = runtime
+        .engine_node_snapshot(room_id)
+        .is_some_and(|node| node.kind.is_room());
+    let has_direct_routes = {
+        let app = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+        is_room
+            && app.composite_controller.as_ref().is_some_and(|composite| {
+                app.topology
+                    .periodic_light_nodes(&app.canonical_registry)
+                    .iter()
+                    .any(|route| {
+                        route.emit_node_id == room_id
+                            && route.source_node_id != room_id
+                            && composite.has_active_route(&route.id)
+                    })
+            })
+    };
+    if !has_direct_routes {
+        runtime.turn_on_room(room_id)?;
+        return Ok(1);
+    }
+    let event = rhythm_core::InputEvent::new(room_id, rhythm_core::ButtonAction::OnPress);
+    let rhythm_core::RhythmInputPlanOutcome::Plan {
+        plan,
+        dispatch_records,
+        ..
+    } = runtime.plan_input_event(&event, Some(true))?
+    else {
+        return Err(anyhow::anyhow!(
+            "motion On unexpectedly required a light-state check"
+        ));
+    };
+    // The common adapter enqueues groups before direct children, attempts all
+    // siblings before power observations, and isolates rejected routes.
+    // Motion emits only actual child-state changes after the whole activation.
+    let report = apply_runtime_plan_with_notifications(
+        state,
+        RHYTHM_ADAPTIVE_RUNTIME_ID,
+        runtime,
+        &plan,
+        true,
+        false,
+    )?;
+    runtime.record_rhythm_dispatches(&dispatch_records)?;
+    Ok(report.dispatch_count)
+}
+
+/// Emit changed desired states once, scoped to this activation's subtree.
+/// Existing manual room events already contain the parent and immediate
+/// children; only deeper changed descendants need supplemental notifications.
+pub(crate) fn emit_activated_child_state_events(
+    state: &SharedState,
+    runtime: &dyn RuntimeHandle,
+    node_id: &str,
+    parent_already_emitted: bool,
+) {
+    let changed = match runtime.take_recently_activated_children(node_id) {
+        Ok(changed) => changed,
+        Err(error) => {
+            log::warn!(target: "light_runtime", "activation state notification failed for {}: {}", node_id, error);
+            return;
+        }
+    };
+    if changed.is_empty() {
+        return;
+    }
+    let Some(host_runtime) = state.lock().ok().and_then(|app| app.hub_runtime()) else {
+        return;
+    };
+    for id in changed {
+        if crate::topology::is_internal_light_node_id(&id) {
+            continue;
+        }
+        if parent_already_emitted
+            && (id == node_id
+                || runtime
+                    .engine_node_snapshot(&id)
+                    .is_some_and(|node| node.parent_id.as_deref() == Some(node_id)))
+        {
+            continue;
+        }
+        crate::commands::emit_node_state_event_after_apply(state, &host_runtime, &id);
+    }
 }
 
 fn expand_route_aware_room_turn_on(
@@ -981,7 +1113,13 @@ fn update_host_state_after_dispatch(
     state: &SharedState,
     runtime: &dyn RuntimeHandle,
     command: &DispatchCommand,
+    notify_all_nodes: bool,
 ) {
+    // Motion performs the parent refresh and changed-child notifications once
+    // after all sibling commands have been enqueued.
+    if !notify_all_nodes {
+        return;
+    }
     match command {
         DispatchCommand::TurnOn {
             target: DispatchTarget::Node { node_id },
@@ -993,9 +1131,16 @@ fn update_host_state_after_dispatch(
         } => update_host_node_after_dispatch(state, runtime, node_id, false),
         DispatchCommand::TurnOn { .. } | DispatchCommand::TurnOff { .. } => {}
     }
+    if let Some(node_id) = dispatch_node_id(command) {
+        emit_activated_child_state_events(state, runtime, node_id, true);
+    }
 }
 
-fn update_host_state_after_expanded_dispatch(state: &SharedState, command: &DispatchCommand) {
+fn update_host_state_after_expanded_dispatch(
+    state: &SharedState,
+    command: &DispatchCommand,
+    notify_all_nodes: bool,
+) {
     let (node_id, lights_on) = match command {
         DispatchCommand::TurnOn {
             target: DispatchTarget::Node { node_id },
@@ -1019,7 +1164,9 @@ fn update_host_state_after_expanded_dispatch(state: &SharedState, command: &Disp
         crate::commands::update_lights_on_cache_for_runtime_node_without_parent_refresh(
             state, &runtime, node_id, lights_on,
         );
-        crate::commands::emit_node_state_event_after_apply(state, &runtime, node_id);
+        if notify_all_nodes {
+            crate::commands::emit_node_state_event_after_apply(state, &runtime, node_id);
+        }
     }
 }
 
@@ -1738,6 +1885,171 @@ mod tests {
                 .engine_effective_node_snapshot(&grouped_child.id)
                 .unwrap()
                 .soft_off
+        );
+    }
+
+    #[test]
+    fn motion_activation_dispatches_hard_off_direct_child_immediately() {
+        let fixture = mixed_hue_matter_fixture(true);
+        assert!(crate::event_loop::turn_on_node_inline(
+            &fixture.state,
+            "hallway"
+        ));
+        let group = fixture.group_controller.wait_for_turn_on_calls(1);
+        let direct = fixture.matter_controller.wait_for_turn_on_calls(1);
+        assert_eq!(group.len(), 1);
+        assert_eq!(
+            direct.len(),
+            1,
+            "motion must send the direct lamp before any periodic tick"
+        );
+        assert_eq!(direct[0].1.brightness, 31);
+    }
+
+    #[test]
+    fn motion_activation_emits_changed_child_state_once() {
+        use crate::server_event::ServerEvent;
+        let fixture = mixed_hue_matter_fixture(true);
+        let grouped = fixture
+            .runtime
+            .engine_all_node_snapshots()
+            .into_iter()
+            .find(|node| node.name == "Grouped lamp")
+            .unwrap();
+        let mut saved = RestoredNodeState::from(&grouped);
+        saved.soft_off = true;
+        saved.rhythm_enabled = true;
+        fixture.runtime.restore_node_state(&grouped.id, saved);
+        let (tx, mut rx) = tokio::sync::broadcast::channel(64);
+        fixture.state.lock().unwrap().event_tx = Some(tx);
+        for expected in [1, 0] {
+            assert!(crate::event_loop::turn_on_node_inline(
+                &fixture.state,
+                "hallway"
+            ));
+            let mut child_events = Vec::new();
+            while let Ok(event) = rx.try_recv() {
+                if let ServerEvent::NodeState { nodes } = event {
+                    child_events.extend(nodes.into_iter().filter(|node| node.id == grouped.id));
+                }
+            }
+            assert_eq!(
+                child_events.len(),
+                expected,
+                "only changed grouped-child state should be emitted"
+            );
+            for event in child_events {
+                assert!(!event.standby_active);
+                assert_eq!(event.state, rhythm_core::RoomModeState::Active);
+            }
+        }
+    }
+
+    #[test]
+    fn motion_activation_preserves_direct_child_opt_out() {
+        let fixture = mixed_hue_matter_fixture(true);
+        let mut saved = RestoredNodeState::from(
+            &fixture
+                .runtime
+                .engine_node_snapshot(&fixture.matter_light_id)
+                .unwrap(),
+        );
+        saved.rhythm_enabled = false;
+        fixture
+            .runtime
+            .restore_node_state(&fixture.matter_light_id, saved);
+        assert!(crate::event_loop::turn_on_node_inline(
+            &fixture.state,
+            "hallway"
+        ));
+        assert_eq!(fixture.group_controller.wait_for_turn_on_calls(1).len(), 1);
+        assert!(fixture.matter_controller.turn_on_calls().is_empty());
+        assert!(
+            !fixture
+                .runtime
+                .engine_node_snapshot(&fixture.matter_light_id)
+                .unwrap()
+                .rhythm_enabled
+        );
+    }
+
+    #[test]
+    fn room_activation_emits_nested_light_state_without_overriding_nested_standby() {
+        use crate::server_event::ServerEvent;
+        let fixture = mixed_hue_matter_fixture(true);
+        for (id, kind, parent) in [
+            ("nested-room", rhythm_core::LightNodeKind::Room, "hallway"),
+            (
+                "nested-light",
+                rhythm_core::LightNodeKind::LightDevice,
+                "nested-room",
+            ),
+        ] {
+            fixture.runtime.add_node(id, id, kind, Some(parent.into()));
+            let mut saved =
+                RestoredNodeState::from(&fixture.runtime.engine_node_snapshot(id).unwrap());
+            saved.rhythm_enabled = true;
+            saved.soft_off = true;
+            fixture.runtime.restore_node_state(id, saved);
+        }
+        let (tx, mut rx) = tokio::sync::broadcast::channel(64);
+        fixture.state.lock().unwrap().event_tx = Some(tx);
+        crate::commands::do_node_action(&fixture.state, "hallway", "reset", false).unwrap();
+        let mut nested_events = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            if let ServerEvent::NodeState { nodes } = event {
+                nested_events.extend(nodes.into_iter().filter(|node| node.id == "nested-light"));
+            }
+        }
+        assert_eq!(nested_events.len(), 1);
+        assert!(
+            !fixture
+                .runtime
+                .engine_node_snapshot("nested-light")
+                .unwrap()
+                .soft_off
+        );
+        assert!(
+            nested_events[0].standby_active,
+            "nested room's Standby remains inherited"
+        );
+    }
+
+    #[test]
+    fn motion_direct_child_rejection_preserves_group_dispatch() {
+        let fixture = mixed_hue_matter_fixture(true);
+        fixture
+            .composite
+            .remove_controller(&fixture.matter_key.to_string());
+        fixture
+            .matter_controller
+            .set_turn_on_delay(std::time::Duration::from_millis(200));
+        let mut policy = HubDispatchPolicy::for_hub_key(&fixture.matter_key.to_string());
+        policy.dispatch_timeout = std::time::Duration::from_millis(25);
+        policy.timeout_cooldown = std::time::Duration::from_secs(2);
+        fixture.composite.register_controller_with_policy(
+            &fixture.matter_key.to_string(),
+            fixture.matter_controller.clone(),
+            policy,
+        );
+        fixture
+            .runtime
+            .apply_room_command(
+                &fixture.matter_light_id,
+                rhythm_core::LightingCommand::new(10, 2700),
+            )
+            .unwrap();
+        assert_eq!(fixture.matter_controller.wait_for_turn_on_calls(1).len(), 1);
+        std::thread::sleep(std::time::Duration::from_millis(75));
+        assert!(crate::event_loop::turn_on_node_inline(
+            &fixture.state,
+            "hallway"
+        ));
+        assert_eq!(fixture.group_controller.wait_for_turn_on_calls(1).len(), 1);
+        assert_eq!(
+            fixture.matter_controller.turn_on_calls().len(),
+            1,
+            "rejected direct refresh must not suppress the healthy group"
         );
     }
 

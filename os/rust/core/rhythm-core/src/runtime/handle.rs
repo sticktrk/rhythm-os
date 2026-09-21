@@ -73,6 +73,12 @@ pub trait RuntimeHandle: Send + Sync {
         Ok(false)
     }
 
+    /// Drain changed light states belonging to this node's activation subtree.
+    /// This is in-process host bookkeeping, not a persisted or wire contract.
+    fn take_recently_activated_children(&self, _node_id: &str) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+
     /// Plan an immediate refresh for a routed node without periodic de-dupe.
     ///
     /// Room-level manual actions use this for direct child routes so each
@@ -536,6 +542,14 @@ where
         Ok(RhythmRuntime::prepare_node_for_parent_activation(
             self, node_id,
         )?)
+    }
+
+    fn take_recently_activated_children(&self, node_id: &str) -> Result<Vec<String>> {
+        let mut engine = self
+            .engine()
+            .write()
+            .map_err(|e| anyhow::anyhow!("Failed to lock engine: {}", e))?;
+        Ok(engine.take_recently_activated_children(node_id))
     }
 
     fn record_rhythm_dispatches(

@@ -11,7 +11,7 @@ extern crate alloc;
 use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::controller::{LightControlResult, LightController};
 use crate::light_profile::{
@@ -162,6 +162,9 @@ pub struct RhythmEngine<C: LightController> {
 
     /// Last periodic command sent per source-room/target pair.
     periodic_command_cache: HashMap<PeriodicCommandCacheKey, PeriodicCommandCacheEntry>,
+
+    /// Changed light states awaiting host notification; never persisted.
+    recently_activated_children: HashSet<String>,
 }
 
 impl<C: LightController> RhythmEngine<C> {
@@ -175,6 +178,7 @@ impl<C: LightController> RhythmEngine<C> {
             rooms: RoomManager::new(),
             power_save: DEFAULT_POWER_SAVE,
             periodic_command_cache: HashMap::new(),
+            recently_activated_children: HashSet::new(),
         }
     }
 
@@ -193,6 +197,7 @@ impl<C: LightController> RhythmEngine<C> {
             rooms: RoomManager::new(),
             power_save: DEFAULT_POWER_SAVE,
             periodic_command_cache: HashMap::new(),
+            recently_activated_children: HashSet::new(),
         }
     }
 
@@ -415,31 +420,95 @@ impl<C: LightController> RhythmEngine<C> {
         self.plan_non_periodic_turn_off_target(room_id, room_id, transition_ms)
     }
 
-    fn activate_node_for_turn_on(&mut self, room_id: &str) {
-        let is_room = {
-            let room = self.rooms.get_or_create(room_id, room_id);
-            room.enable_rhythm();
-            room.clear_off_states();
-            room.kind.is_room()
-        };
-        if is_room {
-            // A grouped command activates these lights physically too. Clear
-            // their saved off states even while grouped routing hides them;
-            // a later individual fallback must not reapply stale Standby.
-            // Keep device preferences, offsets and Rhythm opt-outs intact.
-            let light_ids: Vec<_> = self
-                .rooms
-                .child_iter(room_id)
-                .filter(|child| child.kind == crate::room::LightNodeKind::LightDevice)
-                .map(|child| child.id.clone())
-                .collect();
-            for id in light_ids {
-                if let Some(child) = self.rooms.get_mut(&id) {
-                    child.clear_off_states();
+    /// Light descendants only: nested room preferences remain authoritative.
+    fn attached_light_ids(&self, room_id: &str) -> HashSet<String> {
+        if !self
+            .rooms
+            .get(room_id)
+            .is_some_and(|node| node.kind.is_room())
+        {
+            return HashSet::new();
+        }
+        let mut lights = HashSet::new();
+        let mut visited = HashSet::new();
+        let mut rooms = vec![room_id.to_string()];
+        while let Some(id) = rooms.pop() {
+            if !visited.insert(id.clone()) {
+                continue;
+            }
+            for child in self.rooms.child_iter(&id) {
+                if child.kind == crate::room::LightNodeKind::LightDevice {
+                    lights.insert(child.id.clone());
+                } else if child.kind.is_room() {
+                    rooms.push(child.id.clone());
                 }
-                self.clear_periodic_dedupe_room(&id);
             }
         }
+        lights
+    }
+
+    /// The single definition of which light state activation clears. Cache
+    /// invalidation is separate so a room can invalidate all children once.
+    pub(crate) fn clear_light_off_states(&mut self, node_id: &str) -> bool {
+        let Some(light) = self
+            .rooms
+            .get_mut(node_id)
+            .filter(|node| node.kind == crate::room::LightNodeKind::LightDevice)
+        else {
+            return false;
+        };
+        let changed = light.soft_off || light.hard_off || light.mood_active || light.warning_active;
+        light.clear_off_states();
+        if changed {
+            self.recently_activated_children.insert(node_id.to_string());
+        }
+        changed
+    }
+
+    /// Clear saved off states on lights below an activating room, preserving
+    /// preferences and opt-outs, and invalidate their periodic cache in one pass.
+    fn clear_attached_light_off_states(&mut self, room_id: &str) -> Vec<String> {
+        let ids = self.attached_light_ids(room_id);
+        let mut changed = Vec::new();
+        for id in &ids {
+            if self.clear_light_off_states(id) {
+                changed.push(id.clone());
+            }
+        }
+        if !ids.is_empty() {
+            self.periodic_command_cache
+                .retain(|key, _| !ids.contains(&key.source_room_id));
+        }
+        changed.sort();
+        changed
+    }
+
+    /// Drain only this activation's subtree, leaving other rooms' pending
+    /// notifications intact. Events use current effective state if a later
+    /// command superseded an activation before the host could emit it.
+    pub(crate) fn take_recently_activated_children(&mut self, room_id: &str) -> Vec<String> {
+        let mut ids = self.attached_light_ids(room_id);
+        ids.insert(room_id.to_string());
+        let mut changed = Vec::new();
+        self.recently_activated_children.retain(|id| {
+            if self.rooms.get(id).is_none() {
+                return false;
+            }
+            if ids.contains(id) {
+                changed.push(id.clone());
+                return false;
+            }
+            true
+        });
+        changed.sort();
+        changed
+    }
+
+    fn activate_node_for_turn_on(&mut self, room_id: &str) {
+        let room = self.rooms.get_or_create(room_id, room_id);
+        room.enable_rhythm();
+        room.clear_off_states();
+        self.clear_attached_light_off_states(room_id);
     }
 
     pub(crate) fn plan_turn_on(&mut self, room_id: &str, current_hour: f32) -> ManualDispatchPlan {
@@ -472,6 +541,7 @@ impl<C: LightController> RhythmEngine<C> {
             // clears the flag.
             room.warning_active = factor < 0.999;
         };
+        self.clear_attached_light_off_states(room_id);
         let effective = self.effective_room_state(room_id);
         let offset_minutes = effective.time_offset_minutes;
         let brightness_offset = effective.brightness_offset;
@@ -576,6 +646,7 @@ impl<C: LightController> RhythmEngine<C> {
         if let Some(room) = self.rooms.get_mut(room_id) {
             room.clear_off_states();
         }
+        self.clear_attached_light_off_states(room_id);
 
         let (current_offset, profile_settings) = self
             .rooms
@@ -606,6 +677,7 @@ impl<C: LightController> RhythmEngine<C> {
             room.clear_off_states();
             room.apply_brightness_offset(amount);
         };
+        self.clear_attached_light_off_states(room_id);
         let effective = self.effective_room_state(room_id);
         let offset_minutes = effective.time_offset_minutes;
         let brightness_offset = effective.brightness_offset;
@@ -629,6 +701,7 @@ impl<C: LightController> RhythmEngine<C> {
             let room = self.rooms.get_or_create(room_id, room_id);
             room.clear_off_states();
         };
+        self.clear_attached_light_off_states(room_id);
         let effective = self.effective_room_state(room_id);
         let offset_minutes = effective.time_offset_minutes;
         let profile_settings = effective.profile_settings;
@@ -704,6 +777,7 @@ impl<C: LightController> RhythmEngine<C> {
                     .clamp(-100.0, 100.0);
             }
         }
+        self.clear_attached_light_off_states(room_id);
 
         let brightness_offset = self.effective_room_state(room_id).brightness_offset;
         let brightness =
@@ -761,6 +835,7 @@ impl<C: LightController> RhythmEngine<C> {
             room.clear_off_states();
             room.enable_rhythm();
         };
+        self.clear_attached_light_off_states(room_id);
         let profile_settings = self.effective_room_state(room_id).profile_settings;
 
         let ctx = self.create_context(current_hour);
@@ -787,6 +862,13 @@ impl<C: LightController> RhythmEngine<C> {
                 RoomModeState::HardOff => room.set_hard_off(),
                 RoomModeState::Wake | RoomModeState::Warning => room.clear_off_states(),
             }
+        }
+
+        if matches!(
+            target_state,
+            RoomModeState::Active | RoomModeState::Wake | RoomModeState::Warning
+        ) {
+            self.clear_attached_light_off_states(room_id);
         }
 
         let dispatch = match target_state {
@@ -1272,6 +1354,7 @@ impl<C: LightController> RhythmEngine<C> {
             room.clear_off_states();
             room.warning_active = factor < 0.999;
         };
+        self.clear_attached_light_off_states(room_id);
         let effective = self.effective_room_state(room_id);
         let offset_minutes = effective.time_offset_minutes;
         let brightness_offset = effective.brightness_offset;
@@ -1380,6 +1463,7 @@ impl<C: LightController> RhythmEngine<C> {
         if let Some(room) = self.rooms.get_mut(room_id) {
             room.clear_off_states();
         }
+        self.clear_attached_light_off_states(room_id);
 
         // Get the room's current time offset
         let (current_offset, profile_settings) = self
@@ -1458,6 +1542,7 @@ impl<C: LightController> RhythmEngine<C> {
             room.clear_off_states();
             room.apply_brightness_offset(amount);
         };
+        self.clear_attached_light_off_states(room_id);
         let effective = self.effective_room_state(room_id);
         let offset_minutes = effective.time_offset_minutes;
         let brightness_offset = effective.brightness_offset;
@@ -1497,6 +1582,7 @@ impl<C: LightController> RhythmEngine<C> {
             let room = self.rooms.get_or_create(room_id, room_id);
             room.clear_off_states();
         };
+        self.clear_attached_light_off_states(room_id);
         let effective = self.effective_room_state(room_id);
         let offset_minutes = effective.time_offset_minutes;
         let profile_settings = effective.profile_settings;
@@ -1586,6 +1672,7 @@ impl<C: LightController> RhythmEngine<C> {
             room.clear_off_states();
             room.enable_rhythm();
         };
+        self.clear_attached_light_off_states(room_id);
         let profile_settings = self.effective_room_state(room_id).profile_settings;
 
         // Apply current values using the active module
@@ -2669,6 +2756,11 @@ mod tests {
             ("sensor", LightNodeKind::MotionSensor, Some("room")),
             ("nested-room", LightNodeKind::Room, Some("room")),
             (
+                "nested-light",
+                LightNodeKind::LightDevice,
+                Some("nested-room"),
+            ),
+            (
                 "other-light",
                 LightNodeKind::LightDevice,
                 Some("other-room"),
@@ -2696,7 +2788,7 @@ mod tests {
         spy.reset();
         engine.turn_on("room", 12.0).await.unwrap();
 
-        for id in ["standby", "hard-off", "mood", "opted-out"] {
+        for id in ["standby", "hard-off", "mood", "opted-out", "nested-light"] {
             let child = engine.rooms().get(id).unwrap();
             assert!(
                 !child.soft_off && !child.hard_off && !child.mood_active,
@@ -2717,6 +2809,18 @@ mod tests {
                 "{id} must remain unchanged"
             );
         }
+        assert!(
+            engine
+                .rooms()
+                .effective_state("nested-light")
+                .unwrap()
+                .soft_off,
+            "the nested room's explicit Standby still dominates its light"
+        );
+        // Restored parent cycles must not make descendant activation loop.
+        engine.rooms_mut().get_mut("room").unwrap().parent_id = Some("nested-room".into());
+        engine.turn_on("room", 12.0).await.unwrap();
+        engine.rooms_mut().get_mut("room").unwrap().parent_id = None;
         assert!(matches!(
             engine.periodic_tick_node("standby", "standby", 12.0).await,
             PeriodicTickResult::Updated
@@ -2729,6 +2833,195 @@ mod tests {
             PeriodicTickResult::Skipped
         ));
         assert!(spy.last_command_for("opted-out").is_none());
+    }
+
+    #[tokio::test]
+    async fn every_room_activation_clears_attached_light_off_states() {
+        use crate::room::LightNodeKind;
+        let mut stale_cases = Vec::new();
+        for action in [
+            "plan_dim",
+            "plan_step",
+            "plan_brightness",
+            "plan_reset",
+            "plan_restore",
+            "plan_warning",
+            "dim_to_factor",
+            "set_brightness",
+            "reset",
+            "step_up",
+            "dim_up",
+            "color_temperature",
+            "mode_active",
+            "mode_wake",
+            "mode_warning",
+        ] {
+            let (mut engine, spy) = spy_engine();
+            engine
+                .rooms_mut()
+                .get_or_create("room", "Room")
+                .rhythm_enabled = true;
+            for id in ["standby", "opted-out"] {
+                let child = engine.rooms_mut().get_or_create_node(
+                    id,
+                    id,
+                    LightNodeKind::LightDevice,
+                    Some("room".into()),
+                );
+                child.rhythm_enabled = id != "opted-out";
+                child.disabled = id == "opted-out";
+                child.time_offset_minutes = 15.0;
+                child.brightness_offset = -4.0;
+                child.profile_settings.fade_ms = Some(crate::TimerSetting::Fixed { value: 4321 });
+            }
+            spy.set_any_lights_on(true);
+            // Cache the active command first. Restored flags do not change
+            // that cache; activation must invalidate it even if output matches.
+            engine.periodic_tick_node("standby", "standby", 12.0).await;
+            engine.rooms_mut().get_mut("room").unwrap().set_standby();
+            engine.rooms_mut().get_mut("standby").unwrap().set_standby();
+            engine
+                .rooms_mut()
+                .get_mut("opted-out")
+                .unwrap()
+                .set_hard_off();
+            let profile = engine
+                .rooms()
+                .get("standby")
+                .unwrap()
+                .profile_settings
+                .clone();
+            match action {
+                "plan_dim" => {
+                    engine.plan_dim("room", 12.0, 20.0);
+                }
+                "plan_step" => {
+                    engine.plan_step("room", 12.0, StepAction::Brighten);
+                }
+                "plan_brightness" => {
+                    engine.plan_set_brightness("room", 12.0, 60);
+                }
+                "plan_reset" => {
+                    engine.plan_reset("room", 12.0);
+                }
+                "plan_restore" => {
+                    engine.plan_dim_to_factor("room", 12.0, 1.0);
+                }
+                "plan_warning" => {
+                    engine.plan_dim_to_factor("room", 12.0, 0.5);
+                }
+                "dim_to_factor" => {
+                    engine.dim_to_factor("room", 12.0, 1.0).await.unwrap();
+                }
+                "set_brightness" => {
+                    engine.set_brightness("room", 12.0, 60).await.unwrap();
+                }
+                "reset" => {
+                    engine.reset("room", 12.0).await.unwrap();
+                }
+                "step_up" => {
+                    engine.step_up("room", 12.0).await.unwrap();
+                }
+                "dim_up" => {
+                    engine.dim_up("room", 12.0, Some(20.0)).await.unwrap();
+                }
+                "color_temperature" => {
+                    engine
+                        .plan_set_curve_color_temperature("room", 12.0, 4000, true)
+                        .unwrap();
+                }
+                _ => {
+                    let mut mode = ModeConfig::default_for_mode(crate::RhythmMode::Day);
+                    mode.room_defaults = vec![crate::RoomModeDefault {
+                        room_id: "room".into(),
+                        state: match action {
+                            "mode_active" => RoomModeState::Active,
+                            "mode_wake" => RoomModeState::Wake,
+                            _ => RoomModeState::Warning,
+                        },
+                    }];
+                    engine.set_mode_configs([mode]);
+                    engine.plan_reset_to_mode_default("room", 12.0);
+                }
+            }
+            let stale = ["standby", "opted-out"].iter().any(|id| {
+                let child = engine.rooms().get(id).unwrap();
+                child.soft_off || child.hard_off || child.mood_active || child.warning_active
+            });
+            if stale {
+                stale_cases.push(action);
+                continue;
+            }
+            for id in ["standby", "opted-out"] {
+                let child = engine.rooms().get(id).unwrap();
+                assert_eq!(child.rhythm_enabled, id != "opted-out", "{action}");
+                assert_eq!(child.disabled, id == "opted-out", "{action}");
+                assert_eq!(child.time_offset_minutes, 15.0, "{action}");
+                assert_eq!(child.brightness_offset, -4.0, "{action}");
+                assert_eq!(child.profile_settings, profile, "{action}");
+            }
+            if action == "plan_warning" {
+                assert!(
+                    engine
+                        .rooms()
+                        .effective_state("standby")
+                        .unwrap()
+                        .warning_active
+                );
+                assert!(
+                    matches!(
+                        engine.periodic_tick_node("standby", "standby", 12.0).await,
+                        PeriodicTickResult::Skipped
+                    ),
+                    "warning must not be overwritten by periodic output"
+                );
+                engine.plan_dim_to_factor("room", 12.0, 1.0);
+            }
+            assert!(
+                matches!(
+                    engine.periodic_tick_node("standby", "standby", 12.0).await,
+                    PeriodicTickResult::Updated
+                ),
+                "{action}"
+            );
+            assert!(
+                spy.last_command_for("standby").unwrap().brightness > 1,
+                "{action}"
+            );
+        }
+        assert!(
+            stale_cases.is_empty(),
+            "activation paths left stale child states: {stale_cases:?}"
+        );
+    }
+
+    #[test]
+    fn inactive_mode_defaults_preserve_child_off_states() {
+        for state in [
+            RoomModeState::Standby,
+            RoomModeState::Mood,
+            RoomModeState::HardOff,
+        ] {
+            let mut engine = test_engine();
+            engine.rooms_mut().get_or_create("room", "Room");
+            engine
+                .rooms_mut()
+                .get_or_create_node(
+                    "child",
+                    "Child",
+                    crate::room::LightNodeKind::LightDevice,
+                    Some("room".into()),
+                )
+                .set_hard_off();
+            let mut mode = ModeConfig::default_for_mode(crate::RhythmMode::Day);
+            mode.room_defaults = vec![crate::RoomModeDefault {
+                room_id: "room".into(),
+                state,
+            }];
+            engine.set_mode_configs([mode]);
+            engine.plan_reset_to_mode_default("room", 12.0);
+            assert!(engine.rooms().get("child").unwrap().hard_off, "{state:?}");
+        }
     }
 
     #[tokio::test]
