@@ -121,6 +121,7 @@ impl LocalBleAssociationEvidence {
             PairingFailureStage::TargetNotObserved
             | PairingFailureStage::MatterBluetooth
             | PairingFailureStage::MatterNetworkDiscovery
+            | PairingFailureStage::MatterWifiSetup
             | PairingFailureStage::Transport
             | PairingFailureStage::Unknown => {}
         }
@@ -172,6 +173,7 @@ fn candidate_stage_rank(stage: PairingFailureStage) -> u8 {
         PairingFailureStage::TargetNotObserved
         | PairingFailureStage::MatterBluetooth
         | PairingFailureStage::MatterNetworkDiscovery
+        | PairingFailureStage::MatterWifiSetup
         | PairingFailureStage::Transport
         | PairingFailureStage::Unknown => 0,
     }
@@ -219,6 +221,7 @@ impl LocalBleAssociationError {
             }
             PairingFailureStage::MatterBluetooth
             | PairingFailureStage::MatterNetworkDiscovery
+            | PairingFailureStage::MatterWifiSetup
             | PairingFailureStage::Transport
             | PairingFailureStage::Unknown => {
                 "The Rhythm Box Bluetooth service was unavailable. Restart the Rhythm Box and try again."

@@ -16,6 +16,7 @@ import '../../services/matter_setup_payload.dart';
 import '../../services/phone_matter_commissioner.dart';
 import '../../widgets/solar_orbit.dart';
 import '../../widgets/stage_timeline.dart';
+import '../network/saved_wifi_screen.dart';
 import 'matter_add_method.dart';
 import 'device_pairing_scanner_screen.dart';
 
@@ -58,6 +59,7 @@ class MatterDeviceAddScreen extends StatefulWidget {
     this.phoneCommissioningAvailable = false,
     @visibleForTesting this.pairingApi,
     @visibleForTesting this.phoneCommissioner,
+    @visibleForTesting this.onReviewSavedNetworks,
   });
 
   final HubEndpoint endpoint;
@@ -69,6 +71,7 @@ class MatterDeviceAddScreen extends StatefulWidget {
   final String? journeyId;
   final RhythmMatterApi? pairingApi;
   final PhoneMatterCommissioner? phoneCommissioner;
+  final VoidCallback? onReviewSavedNetworks;
 
   /// Whether this Box and phone support the phone-assisted handoff. It is
   /// offered only as recovery after a Box attempt fails.
@@ -146,6 +149,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
 
   _PairingPhase _phase = _PairingPhase.input;
   String? _errorText;
+  String? _failedStage;
   bool _hasFailedOnce = false;
   bool get _pairingRequestInFlight => _flow.isRunning;
   String _inputMethod = 'manual_code';
@@ -605,6 +609,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     setState(() {
       _phase = _PairingPhase.failed;
       _hasFailedOnce = true;
+      _failedStage = failureStage;
       _errorText =
           detail == null || detail.isEmpty ? message : '$message\n\n$detail';
     });
@@ -616,6 +621,21 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       _phase = _PairingPhase.input;
       _errorText = null;
     });
+  }
+
+  /// A rejected Wi-Fi join is the first proof a saved network is wrong, so
+  /// the failure leads straight to where the owner can correct it.
+  VoidCallback? get _reviewSavedNetworks {
+    if (_failedStage != 'matter_wifi_setup') return null;
+    if (widget.onReviewSavedNetworks != null) {
+      return widget.onReviewSavedNetworks;
+    }
+    final sync = context.read<ServerSyncProvider?>();
+    if (sync == null || !sync.supportsSavedWifiProfiles) return null;
+    return () => Navigator.of(context).push(
+          MaterialPageRoute<void>(
+              builder: (_) => SavedWifiScreen(api: sync.api)),
+        );
   }
 
   void _retryFromRhythmBox() {
@@ -1091,6 +1111,13 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
           enabled: true,
           onTap: _resetToInput,
         ),
+        if (_reviewSavedNetworks != null) ...[
+          const SizedBox(height: 12),
+          _SecondaryGhostButton(
+            label: 'Review saved networks',
+            onTap: _reviewSavedNetworks!,
+          ),
+        ],
         if (_activeAddMethod.usesPhoneCommissioner) ...[
           const SizedBox(height: 12),
           _SecondaryGhostButton(

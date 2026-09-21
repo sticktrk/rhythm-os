@@ -476,12 +476,16 @@ void main() {
             addMethod: MatterAddMethod.automatic,
             initialSetupPayload: '3497-011-2332',
             pairingApi: api,
+            onReviewSavedNetworks: () {},
           ),
         ),
       );
       await tester.pump();
       await tester.pump(const Duration(milliseconds: 350));
       expect(find.textContaining(message), findsOneWidget);
+      // Only a Wi-Fi rejection points the owner at the saved networks.
+      expect(find.text('Review saved networks'),
+          stage != null ? findsOneWidget : findsNothing);
       if (stage != null) {
         expect(find.textContaining('Could not join Wi-Fi.'), findsOneWidget);
       }

@@ -133,7 +133,7 @@ Deno.test('Wi-Fi lifecycle outcomes exclude all network and credential data', ()
 })
 
 Deno.test('Matter failure stages reach lifecycle rows without raw diagnostics', () => {
-  for (const stage of ['matter_bluetooth', 'matter_network_discovery']) {
+  for (const stage of ['matter_bluetooth', 'matter_network_discovery', 'matter_wifi_setup']) {
     const row = rowForDeviceLifecycle({
       userId: 'user-1', homeId: 'home-1', hubId: 'hub-1', serverInstanceId: null,
       event: {

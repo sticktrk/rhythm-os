@@ -1168,6 +1168,7 @@ mod tests {
         for stage in [
             crate::pairing::PairingFailureStage::MatterBluetooth,
             crate::pairing::PairingFailureStage::MatterNetworkDiscovery,
+            crate::pairing::PairingFailureStage::MatterWifiSetup,
         ] {
             let mut entry = test_device_lifecycle_entry();
             entry.kind = "pair".into();

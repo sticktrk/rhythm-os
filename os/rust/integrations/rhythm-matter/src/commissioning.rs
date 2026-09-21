@@ -589,7 +589,7 @@ fn summarize_commissioning_error_for_rendezvous(
     match commissioning_failure_stage(error, rendezvous) {
         Some(PairingFailureStage::MatterWifiSetup) => {
             return match commissioning_wifi_failure(error).and_then(|failure| failure.network_status) {
-                Some(5) => "The device could not find the selected Wi-Fi network. Check the saved network name and that a network supported by the device is available where it is installed, then try again.",
+                Some(5) => "The device could not find the selected Wi-Fi network. Check the saved network name, and make sure a 2.4 GHz network with that name reaches the spot where the device is installed, then try again.",
                 Some(7) => "The device could not authenticate with the selected Wi-Fi network. Check its saved password and the network's security settings, then try again.",
                 Some(8) => "The device does not support the selected Wi-Fi network's security settings. Choose a compatible network and try again.",
                 _ => "The device could not complete Wi-Fi setup. Check the selected network, its saved credentials, and the signal where the device is installed, then try again.",
