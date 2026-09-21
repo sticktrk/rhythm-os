@@ -25,5 +25,10 @@ fn scenario_pair_ble_wifi_bad_code() {
         .unwrap();
 
     assert_eq!(session.status, rhythm_os::pairing::PairingStatus::Failed);
-    assert!(session.error.unwrap().contains("invalid setup payload"));
+    // A rejection without transport evidence is never diagnosed as a Bluetooth
+    // or network failure, and raw controller text never reaches the owner.
+    assert_eq!(session.failure_stage, None);
+    let error = session.error.unwrap();
+    assert!(error.contains("could not identify whether Bluetooth or network setup failed"));
+    assert!(!error.contains("invalid setup payload"));
 }
