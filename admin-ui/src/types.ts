@@ -220,16 +220,16 @@ export type DeviceAdminProxyRequest = {
 };
 
 export type DeviceAdminProxyResponse = {
-  hubId: string;
+  hubId?: string;
   route: 'remote' | 'local';
-  baseUrl: string;
+  baseUrl?: string;
   method: DeviceAdminMethod;
   path: string;
   queryParameters?: Record<string, string>;
   statusCode: number;
   completedAt: string;
-  tokenAvailable: boolean;
-  hasEncryptedToken: boolean;
+  tokenAvailable?: boolean;
+  hasEncryptedToken?: boolean;
   requestId?: string;
   verifiedServerInstanceId?: string;
   bodySha256?: string;

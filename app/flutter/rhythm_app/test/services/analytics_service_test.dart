@@ -25,6 +25,40 @@ void main() {
     BackendProvider.resetForTesting();
   });
 
+  test('device network analytics contains outcomes only and is optional',
+      () async {
+    await analytics.logDeviceNetworkOpened();
+    await analytics.logDeviceNetworkRefreshCompleted(outcome: 'succeeded');
+    await analytics.logDeviceNetworkRefreshCompleted(outcome: 'failed');
+    await analytics.logDeviceNetworkCopyCompleted(outcome: 'succeeded');
+    expect(backend.events.map((event) => event.name), [
+      'device_network_opened',
+      'device_network_refresh_completed',
+      'device_network_refresh_completed',
+      'device_network_copy_completed',
+    ]);
+    expect(backend.events.first.properties, isEmpty);
+    for (final event in backend.events.skip(1)) {
+      expect(event.properties.keys, ['outcome']);
+    }
+    analytics.resetForTesting();
+    await analytics.logDeviceNetworkOpened();
+    await analytics.logDeviceNetworkRefreshCompleted(outcome: 'failed');
+    expect(backend.events, hasLength(4));
+  });
+
+  test('device network analytics failure does not block the caller', () async {
+    final unavailable = _UnavailableAnalyticsBackend();
+    await unavailable.initialize();
+    BackendProvider.setInstanceForTesting(
+      auth: OfflineAuthBackend(),
+      analytics: unavailable,
+    );
+    await analytics.logDeviceNetworkOpened();
+    await analytics.logDeviceNetworkRefreshCompleted(outcome: 'succeeded');
+    await analytics.logDeviceNetworkCopyCompleted(outcome: 'failed');
+  });
+
   test('recent feature events use stable privacy-safe properties', () async {
     await analytics.logRoomDeviceAddMethodSelected(
       source: 'room_settings_light',
@@ -894,4 +928,11 @@ void main() {
       isNot(containsAll(['device_id', 'native_id', 'hub_address', 'name'])),
     );
   });
+}
+
+class _UnavailableAnalyticsBackend extends CapturingAnalyticsBackend {
+  @override
+  Future<void> logEvent(String name, [Map<String, Object>? params]) async {
+    throw StateError('Analytics unavailable');
+  }
 }

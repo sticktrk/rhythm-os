@@ -176,6 +176,8 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   bool renameCanonicalDeviceResult = true;
   int triggerSyncCalls = 0;
   final Map<String, Map<String, dynamic>?> canonicalDevices = {};
+  int getCanonicalDeviceCalls = 0;
+  Completer<Map<String, dynamic>?>? canonicalDeviceCompleter;
   int getCanonicalDevicesCalls = 0;
   bool getCanonicalDevicesFails = false;
   final List<
@@ -967,6 +969,10 @@ class _FakeRhythmServerApi extends RhythmServerApi {
 
   @override
   Future<Map<String, dynamic>?> getCanonicalDevice(String id) async {
+    getCanonicalDeviceCalls++;
+    if (canonicalDeviceCompleter != null) {
+      return canonicalDeviceCompleter!.future;
+    }
     return canonicalDevices[id];
   }
 
@@ -10169,6 +10175,104 @@ void main() {
     expect(connection.reconnectCalls, 1);
     expect(find.text('Assigned Desk Lamp to Office'), findsOneWidget);
   });
+
+  for (final initiallyAvailable in [true, false]) {
+    testWidgets(
+        'device network refresh recovers and clears stale data '
+        '(initially available: $initiallyAvailable)', (tester) async {
+      _registerWidgetCleanup(tester);
+      final roomProvider = RoomProvider();
+      final api = _FakeRhythmServerApi();
+      final connection = _HelloRhythmConnection(api);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      addTearDown(roomProvider.dispose);
+      addTearDown(connection.dispose);
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await tester.binding.setSurfaceSize(const Size(390, 900));
+      final snapshot = <String, dynamic>{
+        'id': 'light-1',
+        'endpoints': [
+          {
+            'hub_key': {'hub_type': 'hue', 'address': '192.0.2.1'},
+            'native_id': 'synthetic-native-id',
+            'preferred': true,
+          },
+        ],
+      };
+      api.canonicalDevices['light-1'] = initiallyAvailable ? snapshot : null;
+      await tester.pumpWidget(_buildTestApp(
+        roomProvider: roomProvider,
+        provider: provider,
+        child: const DeviceDetailSheet(
+          device: RhythmDevice(id: 'light-1', type: RhythmDeviceType.light),
+          roomId: '',
+        ),
+      ));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Network'));
+      await tester.pumpAndSettle();
+      expect(api.getCanonicalDeviceCalls, 1);
+      if (!initiallyAvailable) {
+        expect(find.textContaining('Tap Refresh to retry'), findsOneWidget);
+        api.canonicalDevices['light-1'] = snapshot;
+        await tester.tap(find.byKey(const ValueKey('device-network-refresh')));
+        await tester.pumpAndSettle();
+      }
+      expect(find.text('Hue Bridge'), findsOneWidget);
+      final previousCalls = api.getCanonicalDeviceCalls;
+      api.canonicalDeviceCompleter = Completer<Map<String, dynamic>?>();
+      await tester.tap(find.byKey(const ValueKey('device-network-refresh')));
+      await tester.pump();
+      expect(find.text('Refreshing…'), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('device-network-refresh')));
+      expect(api.getCanonicalDeviceCalls, previousCalls + 1);
+      api.canonicalDeviceCompleter!.complete(null);
+      await tester.pumpAndSettle();
+      expect(find.text('Hue Bridge'), findsOneWidget);
+      expect(find.textContaining('Showing the last loaded snapshot'),
+          findsOneWidget);
+      api.canonicalDeviceCompleter = null;
+      api.canonicalDevices['light-1'] = {'id': 'light-1', 'endpoints': []};
+      await tester.tap(find.byKey(const ValueKey('device-network-refresh')));
+      await tester.pumpAndSettle();
+      expect(find.text('No connections reported.'), findsOneWidget);
+      expect(find.text('Hue Bridge'), findsNothing);
+      expect(find.byKey(const ValueKey('device-network-error')), findsNothing);
+      expect(api.flashCanonicalDeviceCalls, 0);
+      expect(api.unpairCalls, isEmpty);
+      expect(api.triggerSyncCalls, 0);
+      // A canonical edit supersedes a pending snapshot instead of being undone.
+      api.canonicalDeviceCompleter = Completer<Map<String, dynamic>?>();
+      await tester.tap(find.byKey(const ValueKey('device-network-refresh')));
+      await tester.pump();
+      await tester.tap(find.text('Info'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Name'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'Updated device name');
+      await tester.tap(find.text('Rename'));
+      await tester.pumpAndSettle();
+      api.canonicalDeviceCompleter!.complete(snapshot);
+      await tester.pumpAndSettle();
+      expect(find.text('Updated device name'), findsNWidgets(2));
+      await tester.tap(find.text('Network'));
+      await tester.pumpAndSettle();
+      expect(find.text('No connections reported.'), findsOneWidget);
+      // Closing the sheet while a refresh is pending must not update disposed state.
+      api.canonicalDeviceCompleter = Completer<Map<String, dynamic>?>();
+      await tester.tap(find.byKey(const ValueKey('device-network-refresh')));
+      await tester.pump();
+      await tester.pumpWidget(const SizedBox());
+      api.canonicalDeviceCompleter!.complete(snapshot);
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    });
+  }
 
   testWidgets('device detail header centers long device names', (tester) async {
     _registerWidgetCleanup(tester);

@@ -37,7 +37,10 @@ pub fn fetch_ha_config(state: &SharedState, transport: &dyn HaTransport) {
 
     let tz_name = ha_config.get("time_zone").and_then(|v| v.as_str());
 
-    let location_already_set = state.lock().map(|s| s.latitude.is_some()).unwrap_or(false);
+    let location_already_set = state
+        .lock()
+        .map(|s| s.platform_context != "ha_addon" && s.latitude.is_some())
+        .unwrap_or(false);
 
     // Build StoredLocation from HA config
     let loc = if !location_already_set {
@@ -238,6 +241,27 @@ mod tests {
             std::fs::remove_dir_all(&path).unwrap();
         }
         FileStorage::new(path.to_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn addon_refreshes_home_assistant_owned_location() {
+        let state = shared_state();
+        {
+            let mut s = state.lock().unwrap();
+            s.platform_context = "ha_addon";
+            s.latitude = Some(12.0);
+            s.longitude = Some(34.0);
+        }
+        fetch_ha_config(
+            &state,
+            &FakeTransport::ok(
+                json!({"latitude": 51.5, "longitude": -0.12, "time_zone": "Europe/London"}),
+            ),
+        );
+        let s = state.lock().unwrap();
+        assert_eq!(s.latitude, Some(51.5));
+        assert_eq!(s.longitude, Some(-0.12));
+        assert_eq!(s.timezone_name.as_deref(), Some("Europe/London"));
     }
 
     #[test]

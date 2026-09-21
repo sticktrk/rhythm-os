@@ -19,17 +19,45 @@ use crate::transport::{
 
 const DECOMMISSION_SUPPRESSION_WINDOW: Duration = Duration::from_secs(120);
 
+const READBACK_GRACE: Duration = Duration::from_millis(500);
+// Allow only a proportional final sliver of the fade at a command handoff.
+const SETTLED_REMAINING_DIVISOR: u32 = 50;
+const SUPERSEDED_VERIFY_INTERVAL: Duration = Duration::from_secs(10 * 60);
+type ReadbackClock = Arc<dyn Fn() -> Instant + Send + Sync>;
+
 #[derive(Debug)]
 struct ScheduledReadback {
     due_at: Instant,
+    transition: Duration,
     plan: MatterEndpointCommandPlan,
+}
+
+#[derive(Default)]
+struct ReadbackWorkerState {
+    scheduled: Vec<ScheduledReadback>,
+    last_matched: HashMap<(u64, u16), Instant>,
+}
+
+enum ReadbackMessage {
+    Submitted {
+        plans: Vec<MatterEndpointCommandPlan>,
+        at: Instant,
+    },
+    Schedule {
+        plan: MatterEndpointCommandPlan,
+        completed_at: Instant,
+        transition: Duration,
+    },
 }
 
 /// One scheduler and worker for all delayed authoritative command readbacks.
 pub(crate) struct MatterReadbackCoordinator {
     latest_command_ids: Arc<Mutex<HashMap<(u64, u16), u64>>>,
-    sender: OnceLock<mpsc::Sender<ScheduledReadback>>,
+    sender: OnceLock<mpsc::Sender<ReadbackMessage>>,
     store_path: Option<PathBuf>,
+    // Submission/completion timestamps and worker waits share one clock. The
+    // worker can be busy reading another endpoint when a message is sent.
+    clock: ReadbackClock,
 }
 
 impl MatterReadbackCoordinator {
@@ -38,13 +66,28 @@ impl MatterReadbackCoordinator {
             latest_command_ids: Arc::new(Mutex::new(HashMap::new())),
             sender: OnceLock::new(),
             store_path,
+            clock: Arc::new(Instant::now),
         }
     }
 
     pub(crate) fn record_submitted(&self, plans: &[MatterEndpointCommandPlan]) {
+        let turn_on = plans
+            .iter()
+            .filter(|plan| crate::controller::plan_requests_turn_on(plan))
+            .cloned()
+            .collect();
         if let Ok(mut latest) = self.latest_command_ids.lock() {
             for plan in plans {
                 latest.insert((plan.node_id, plan.endpoint), plan.command_id);
+            }
+            if let Some(sender) = self.sender.get() {
+                // Wake even for off, failed or never-acknowledged commands. A
+                // settled predecessor can be verified at this handoff, before
+                // pruning; waiting for the next acknowledgement would lose it.
+                let _ = sender.send(ReadbackMessage::Submitted {
+                    plans: turn_on,
+                    at: (self.clock)(),
+                });
             }
         }
     }
@@ -54,21 +97,25 @@ impl MatterReadbackCoordinator {
         transport: Arc<dyn MatterTransport>,
         plan: MatterEndpointCommandPlan,
         needs_audition: Arc<Mutex<HashSet<(u64, u16)>>>,
-        delay: Duration,
+        transition: Duration,
     ) {
         let latest_command_ids = self.latest_command_ids.clone();
         let store_path = self.store_path.clone();
+        let clock = self.clock.clone();
+        let completed_at = clock();
         let sender = self.sender.get_or_init(|| {
             let (sender, receiver) = mpsc::channel();
             let spawn_result = std::thread::Builder::new()
                 .name("matter-readback".to_string())
                 .spawn(move || {
                     readback_worker(
+                        &mut ReadbackWorkerState::default(),
                         receiver,
                         transport,
                         latest_command_ids,
                         needs_audition,
                         store_path,
+                        clock,
                     )
                 });
             if let Err(error) = spawn_result {
@@ -77,9 +124,10 @@ impl MatterReadbackCoordinator {
             sender
         });
         if sender
-            .send(ScheduledReadback {
-                due_at: Instant::now() + delay,
+            .send(ReadbackMessage::Schedule {
                 plan,
+                completed_at,
+                transition,
             })
             .is_err()
         {
@@ -98,28 +146,114 @@ impl Default for MatterReadbackCoordinator {
     }
 }
 
+// Only channel waiting differs in tests; all timestamps use the shared clock.
+trait ReadbackReceiver {
+    fn recv(&self) -> Result<ReadbackMessage, mpsc::RecvError>;
+    fn recv_timeout(&self, wait: Duration) -> Result<ReadbackMessage, mpsc::RecvTimeoutError>;
+}
+
+impl ReadbackReceiver for mpsc::Receiver<ReadbackMessage> {
+    fn recv(&self) -> Result<ReadbackMessage, mpsc::RecvError> {
+        self.recv()
+    }
+
+    fn recv_timeout(&self, wait: Duration) -> Result<ReadbackMessage, mpsc::RecvTimeoutError> {
+        self.recv_timeout(wait)
+    }
+}
+
 fn readback_worker(
-    receiver: mpsc::Receiver<ScheduledReadback>,
+    worker: &mut ReadbackWorkerState,
+    receiver: impl ReadbackReceiver,
     transport: Arc<dyn MatterTransport>,
     latest_command_ids: Arc<Mutex<HashMap<(u64, u16), u64>>>,
     needs_audition: Arc<Mutex<HashSet<(u64, u16)>>>,
     store_path: Option<PathBuf>,
+    clock: ReadbackClock,
 ) {
-    let mut scheduled = Vec::<ScheduledReadback>::new();
+    let ReadbackWorkerState {
+        scheduled,
+        last_matched,
+    } = worker;
     loop {
-        if scheduled.is_empty() {
-            let Ok(request) = receiver.recv() else {
-                return;
-            };
-            scheduled.push(request);
-        }
         scheduled.sort_by_key(|request| request.due_at);
-        let wait = scheduled[0]
-            .due_at
-            .saturating_duration_since(Instant::now());
-        match receiver.recv_timeout(wait) {
-            Ok(request) => {
-                scheduled.push(request);
+        let message = match scheduled.first() {
+            Some(request) => {
+                receiver.recv_timeout(request.due_at.saturating_duration_since(clock()))
+            }
+            None => receiver
+                .recv()
+                .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+        };
+        match message {
+            Ok(message) => {
+                let mut settled = Vec::new();
+                let Ok(latest) = latest_command_ids.lock() else {
+                    continue;
+                };
+                match message {
+                    ReadbackMessage::Submitted { plans, at } => {
+                        for next in plans {
+                            let key = (next.node_id, next.endpoint);
+                            if latest.get(&key) != Some(&next.command_id)
+                                || !crate::controller::plan_requests_turn_on(&next)
+                            {
+                                continue;
+                            }
+                            if last_matched.get(&key).is_some_and(|matched_at| {
+                                clock().saturating_duration_since(*matched_at)
+                                    < SUPERSEDED_VERIFY_INTERVAL
+                            }) && needs_audition
+                                .lock()
+                                .map(|warnings| !warnings.contains(&key))
+                                .unwrap_or(false)
+                            {
+                                continue;
+                            }
+                            if let Some(index) = scheduled.iter().position(|pending| {
+                                (pending.plan.node_id, pending.plan.endpoint) == key
+                                    && pending.plan.command_id != next.command_id
+                                    && at
+                                        + READBACK_GRACE
+                                        + pending.transition / SETTLED_REMAINING_DIVISOR
+                                        >= pending.due_at
+                            }) {
+                                settled.push((scheduled.remove(index).plan, next));
+                            }
+                        }
+                    }
+                    ReadbackMessage::Schedule {
+                        plan,
+                        completed_at,
+                        transition,
+                    } => {
+                        if latest.get(&(plan.node_id, plan.endpoint)) == Some(&plan.command_id) {
+                            scheduled.push(ScheduledReadback {
+                                due_at: completed_at + transition + READBACK_GRACE,
+                                transition,
+                                plan,
+                            });
+                        }
+                    }
+                }
+                // One lock/snapshot per message, including submissions that
+                // never produce a readback. Do not hold it across device I/O.
+                scheduled.retain(|pending| {
+                    latest.get(&(pending.plan.node_id, pending.plan.endpoint))
+                        == Some(&pending.plan.command_id)
+                });
+                drop(latest);
+                for (old, next) in settled {
+                    let result = verify_superseded(
+                        transport.as_ref(),
+                        &old,
+                        &next,
+                        &latest_command_ids,
+                        &needs_audition,
+                        store_path.as_ref(),
+                    );
+                    record_last_match(last_matched, (old.node_id, old.endpoint), &result, clock());
+                }
                 continue;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
@@ -135,26 +269,166 @@ fn readback_worker(
         else {
             continue;
         };
-        if !is_latest_command(&latest_command_ids, key, request.plan.command_id) {
+        let Ok(latest) = latest_command_ids.lock() else {
+            continue;
+        };
+        if latest.get(&key) != Some(&request.plan.command_id) {
             continue;
         }
         let mismatch = crate::controller::turn_on_readback_mismatch(&request.plan, &reported);
-        if let Some(mismatch_field) = mismatch {
-            tracing::warn!(
-                target: "cmd",
-                event = "matter_command_ack_without_effect",
-                node_id = request.plan.node_id,
-                endpoint = request.plan.endpoint,
-                command_id = request.plan.command_id,
-                mismatch_field,
-                "Matter command completed but authoritative readback did not show the requested effect"
-            );
+        let changed = set_needs_audition(&needs_audition, key, mismatch.is_some());
+        let result =
+            crate::controller::superseded_readback_result(&request.plan, &request.plan, &reported);
+        record_last_match(last_matched, key, &result, clock());
+        // Keep the ordering check and memory update atomic, but never block a
+        // new light command behind logging or an SD-card write.
+        drop(latest);
+        record_readback_result(&request.plan, mismatch, changed, store_path.as_ref());
+    }
+}
+
+fn record_last_match(
+    last_matched: &mut HashMap<(u64, u16), Instant>,
+    key: (u64, u16),
+    result: &crate::controller::SupersededReadbackResult,
+    now: Instant,
+) {
+    match result {
+        crate::controller::SupersededReadbackResult::Matched => {
+            last_matched.insert(key, now);
         }
+        crate::controller::SupersededReadbackResult::Mismatch(_) => {
+            last_matched.remove(&key);
+        }
+        crate::controller::SupersededReadbackResult::Inconclusive => {}
+    }
+}
+
+fn verify_superseded(
+    transport: &dyn MatterTransport,
+    old: &MatterEndpointCommandPlan,
+    next: &MatterEndpointCommandPlan,
+    latest_command_ids: &Mutex<HashMap<(u64, u16), u64>>,
+    needs_audition: &Mutex<HashSet<(u64, u16)>>,
+    store_path: Option<&PathBuf>,
+) -> crate::controller::SupersededReadbackResult {
+    use crate::controller::SupersededReadbackResult;
+    let key = (next.node_id, next.endpoint);
+    if !is_latest_command(latest_command_ids, key, next.command_id) {
+        return SupersededReadbackResult::Inconclusive;
+    }
+    let Ok(reported) = transport.read_light_state(next.node_id, next.endpoint) else {
+        return SupersededReadbackResult::Inconclusive;
+    };
+    let Ok(latest) = latest_command_ids.lock() else {
+        return SupersededReadbackResult::Inconclusive;
+    };
+    if latest.get(&key) != Some(&next.command_id) {
+        return SupersededReadbackResult::Inconclusive;
+    }
+    // A read can land partway through the *new* fade. Merely mismatching both
+    // endpoints is not failure evidence; values between them are ambiguous.
+    let result = crate::controller::superseded_readback_result(old, next, &reported);
+    let mismatch = match result {
+        SupersededReadbackResult::Matched => None,
+        SupersededReadbackResult::Mismatch(field) => Some(field),
+        SupersededReadbackResult::Inconclusive => return result,
+    };
+    let changed = set_needs_audition(needs_audition, key, mismatch.is_some());
+    drop(latest);
+    record_readback_result(old, mismatch, changed, store_path);
+    result
+}
+
+fn record_readback_result(
+    plan: &MatterEndpointCommandPlan,
+    mismatch: Option<&'static str>,
+    changed: bool,
+    store_path: Option<&PathBuf>,
+) {
+    if let Some(mismatch_field) = mismatch {
+        tracing::warn!(
+            target: "cmd", event = "matter_command_ack_without_effect",
+            node_id = plan.node_id, endpoint = plan.endpoint, command_id = plan.command_id,
+            mismatch_field,
+            "Matter command completed but authoritative readback did not show the requested effect"
+        );
+    }
+    if changed {
         persist_needs_audition_change(
-            &needs_audition,
-            store_path.as_ref(),
-            key,
+            store_path,
+            (plan.node_id, plan.endpoint),
             mismatch.is_some(),
+        );
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct ManualReadbackReceiver {
+    receiver: mpsc::Receiver<ReadbackMessage>,
+    clock: Arc<Mutex<Instant>>,
+    worker: std::cell::RefCell<ReadbackWorkerState>,
+    advance_time: std::cell::Cell<bool>,
+}
+
+#[cfg(test)]
+impl ReadbackReceiver for &ManualReadbackReceiver {
+    fn recv(&self) -> Result<ReadbackMessage, mpsc::RecvError> {
+        self.receiver.try_recv().map_err(|_| mpsc::RecvError)
+    }
+
+    fn recv_timeout(&self, wait: Duration) -> Result<ReadbackMessage, mpsc::RecvTimeoutError> {
+        match self.receiver.try_recv() {
+            Ok(message) => Ok(message),
+            Err(_) if self.advance_time.get() || wait.is_zero() => {
+                *self.clock.lock().unwrap() += wait;
+                Err(mpsc::RecvTimeoutError::Timeout)
+            }
+            Err(_) => Err(mpsc::RecvTimeoutError::Disconnected),
+        }
+    }
+}
+
+#[cfg(test)]
+impl MatterReadbackCoordinator {
+    pub(crate) fn with_manual_clock(
+        clock: Arc<Mutex<Instant>>,
+        store_path: Option<PathBuf>,
+    ) -> (Self, ManualReadbackReceiver) {
+        let (sender, receiver) = mpsc::channel();
+        let worker_clock = clock.clone();
+        let coordinator = Self {
+            sender: OnceLock::from(sender),
+            clock: Arc::new(move || *worker_clock.lock().unwrap()),
+            ..Self::new(store_path)
+        };
+        (
+            coordinator,
+            ManualReadbackReceiver {
+                receiver,
+                clock,
+                worker: Default::default(),
+                advance_time: std::cell::Cell::new(true),
+            },
+        )
+    }
+
+    pub(crate) fn run_scheduled(
+        &self,
+        receiver: &ManualReadbackReceiver,
+        transport: Arc<dyn MatterTransport>,
+        needs_audition: Arc<Mutex<HashSet<(u64, u16)>>>,
+        advance_time: bool,
+    ) {
+        receiver.advance_time.set(advance_time);
+        readback_worker(
+            &mut receiver.worker.borrow_mut(),
+            receiver,
+            transport,
+            self.latest_command_ids.clone(),
+            needs_audition,
+            self.store_path.clone(),
+            self.clock.clone(),
         );
     }
 }
@@ -171,13 +445,12 @@ fn is_latest_command(
         == Some(command_id)
 }
 
-fn persist_needs_audition_change(
+fn set_needs_audition(
     needs_audition: &Mutex<HashSet<(u64, u16)>>,
-    store_path: Option<&PathBuf>,
     key: (u64, u16),
     value: bool,
-) {
-    let changed = needs_audition
+) -> bool {
+    needs_audition
         .lock()
         .map(|mut devices| {
             if value {
@@ -186,10 +459,10 @@ fn persist_needs_audition_change(
                 devices.remove(&key)
             }
         })
-        .unwrap_or(false);
-    if !changed {
-        return;
-    }
+        .unwrap_or(false)
+}
+
+fn persist_needs_audition_change(store_path: Option<&PathBuf>, key: (u64, u16), value: bool) {
     if let Some(path) = store_path {
         let device_id = crate::lifecycle::format_device_id(key.0, key.1);
         if let Err(error) =
@@ -296,12 +569,9 @@ impl MatterHubData {
     }
 
     pub(crate) fn set_needs_audition(&self, node_id: u64, endpoint: u16, value: bool) {
-        persist_needs_audition_change(
-            self.needs_audition.as_ref(),
-            self.readback.store_path(),
-            (node_id, endpoint),
-            value,
-        );
+        if set_needs_audition(self.needs_audition.as_ref(), (node_id, endpoint), value) {
+            persist_needs_audition_change(self.readback.store_path(), (node_id, endpoint), value);
+        }
     }
 
     pub(crate) fn observed_current_level(&self, node_id: u64, endpoint: u16) -> Option<u8> {
@@ -664,7 +934,11 @@ mod tests {
             }),
         );
         let needs_audition = Arc::new(Mutex::new(HashSet::new()));
-        let plan_a = level_plan(1, 76);
+        let mut plan_a = level_plan(1, 76);
+        plan_a.steps = vec![MatterCommandStep::SetBrightness {
+            level: 76,
+            transition_ms: Some(10_000),
+        }];
         let plan_b = level_plan(2, 203);
 
         coordinator.record_submitted(std::slice::from_ref(&plan_a));
@@ -672,7 +946,7 @@ mod tests {
             transport.clone(),
             plan_a,
             needs_audition.clone(),
-            Duration::from_millis(20),
+            Duration::from_millis(10_000),
         );
         coordinator.record_submitted(std::slice::from_ref(&plan_b));
         coordinator.schedule(

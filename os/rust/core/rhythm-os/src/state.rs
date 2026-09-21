@@ -634,6 +634,10 @@ pub struct AppState {
     pub api_auth: StoredApiAuth,
     /// Whether HTTP API requests require a local API bearer token.
     pub require_api_auth: bool,
+    /// Deployment-owned HA entity opt-in. None preserves ordinary appliance
+    /// behavior; Some(empty) denies every light command in the local add-on.
+    /// Loaded separately by the add-on and never accepted by generic imports.
+    pub managed_ha_lights: Option<std::collections::BTreeSet<String>>,
 
     // ---- Storage ----
     /// Platform-specific storage backend.
@@ -1097,6 +1101,7 @@ impl Default for AppState {
             light_activity: Vec::new(),
             api_auth: StoredApiAuth::default(),
             require_api_auth: false,
+            managed_ha_lights: None,
             storage: None,
             light_runtime_state: StoredLightRuntimeState::new(),
             light_runtime_registry: LightRuntimeRegistry::default(),

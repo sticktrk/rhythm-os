@@ -29,6 +29,15 @@ pub fn ha_token(creds: &HubCredentials) -> Option<&str> {
     creds.get_str("token")
 }
 
+/// Durable connection identity; the Supervisor bearer token remains in memory.
+pub fn supervisor_credentials() -> HubCredentials {
+    HubCredentials::new(
+        "homeassistant",
+        "supervisor:80",
+        serde_json::json!({"credential_source": "supervisor"}),
+    )
+}
+
 /// Shared credential validation and state setup for HA hubs.
 ///
 /// Delegates to `rhythm_os::lifecycle::configure_hub` with HA-specific
@@ -87,6 +96,13 @@ pub fn config_from_credentials(
     address: &str,
     credentials: &HubCredentials,
 ) -> Result<HaConnectionConfig> {
+    if credentials.get_str("credential_source") == Some("supervisor") {
+        anyhow::ensure!(
+            address == "supervisor:80" && credentials.address == address,
+            "Supervisor credentials can only target the internal proxy"
+        );
+        return HaConnectionConfig::for_supervisor();
+    }
     let token = ha_token(credentials)
         .ok_or_else(|| anyhow::anyhow!("HA token not found in credentials"))?
         .to_string();
@@ -128,6 +144,15 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
     use std::sync::{mpsc, Arc, Mutex};
+
+    #[test]
+    fn supervisor_marker_is_secret_free_and_cannot_target_an_external_host() {
+        let credentials = supervisor_credentials();
+        let serialized = serde_json::to_string(&credentials).unwrap();
+        assert!(!serialized.contains("access_token"));
+        assert_eq!(credentials.get_str("credential_source"), Some("supervisor"));
+        assert!(config_from_credentials("attacker.local:80", &credentials).is_err());
+    }
 
     use rhythm_os::canonical::identity::HubKey;
     use rhythm_os::hub::{ActiveHub, HubType};

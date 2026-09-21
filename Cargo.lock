@@ -1866,8 +1866,6 @@ dependencies = [
  "log",
  "reqwest",
  "rhythm-ha",
- "rhythm-hue",
- "rhythm-matter",
  "rhythm-os",
  "rhythm-os-runtime-modules",
  "serde",
