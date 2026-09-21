@@ -13205,7 +13205,7 @@ fn apply_backup_configuration_room_preferences(
             };
 
             let patch = imported_room_profile_patch(imported_room);
-            if let Err(e) = do_node_preferences_set(
+            if let Err(e) = do_node_preferences_set_inner(
                 state,
                 &room_id,
                 Some(imported_room.rhythm_enabled),
@@ -13214,6 +13214,7 @@ fn apply_backup_configuration_room_preferences(
                 Some(imported_room.state),
                 Some(&patch),
                 false,
+                false, // Configuration import does not reassert unchanged state.
             ) {
                 skipped_rooms += 1;
                 warn!(
@@ -16872,6 +16873,31 @@ pub fn do_node_preferences_set(
     room_profile: Option<&RoomProfileSettingsPatch>,
     persist: bool,
 ) -> Result<String> {
+    do_node_preferences_set_inner(
+        state,
+        node_id,
+        rhythm_enabled,
+        disabled,
+        standby_enabled,
+        target_state,
+        room_profile,
+        persist,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn do_node_preferences_set_inner(
+    state: &SharedState,
+    node_id: &str,
+    rhythm_enabled: Option<bool>,
+    disabled: Option<bool>,
+    standby_enabled: Option<bool>,
+    target_state: Option<RoomModeState>,
+    room_profile: Option<&RoomProfileSettingsPatch>,
+    persist: bool,
+    reassert_unchanged_state: bool,
+) -> Result<String> {
     let node_write_lock = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
         s.node_preference_write_locks
@@ -17138,8 +17164,15 @@ pub fn do_node_preferences_set(
             profile_settings: profile_settings.clone(),
         },
     );
+    // Saved intent is not physical completion. Interactive controls reassert
+    // their requested state; configuration import does not opt into reassertion.
+    // Settings without a state request retain their existing output behavior.
+    let reassert_state = explicit_state_request && reassert_unchanged_state;
+    let dispatch_hard_off = hard_off && (!prev_hard_off || reassert_state);
+    let left_hard_off = !hard_off && prev_hard_off;
+
     clear_room_mode_transition(state, node_id);
-    if explicit_state_request || standby_toggle_state_request {
+    if dispatch_hard_off || explicit_state_request || standby_toggle_state_request {
         queue_motion_timer_clear(state, node_id);
     }
     if motion_timeout_before != motion_timeout_after {
@@ -17152,18 +17185,14 @@ pub fn do_node_preferences_set(
         queue_motion_timer_clear(state, node_id);
     }
 
-    let entered_hard_off = hard_off && !prev_hard_off;
-    let left_hard_off = !hard_off && prev_hard_off;
-
     // State-changing commands already tell us the intended power state. Do
     // not immediately read the integration after enqueueing the write: the
     // read can race session establishment, contend with the command, and
     // return the pre-command value while dispatch is still pending.
     let mut commanded_lights_on = None;
 
-    if entered_hard_off {
-        info!(target: "cmd", "node_preferences_set: {} entering hard_off", node_id);
-        queue_motion_timer_clear(state, node_id);
+    if dispatch_hard_off {
+        info!(target: "cmd", "node_preferences_set: {} applying hard_off explicit={} previously_hard_off={}", node_id, explicit_state_request, prev_hard_off);
         let event = InputEvent::new(node_id, ButtonAction::LightsOff);
         if let Err(e) = runtime.handle_event(&event) {
             warn!(target: "cmd", "lights_off for '{}' failed: {}", node_id, e);
@@ -17197,40 +17226,16 @@ pub fn do_node_preferences_set(
         } else {
             commanded_lights_on = Some(true);
         }
-    } else if left_hard_off {
-        match persistent_state {
-            RoomModeState::Active => {
-                info!(target: "cmd", "node_preferences_set: {} leaving hard_off to active", node_id);
-                if let Err(e) = runtime.turn_on_room(node_id) {
-                    warn!(target: "cmd", "turn_on for '{}' failed: {}", node_id, e);
-                } else {
-                    commanded_lights_on = Some(true);
-                }
-            }
-            RoomModeState::Mood => {
-                info!(target: "cmd", "node_preferences_set: {} leaving hard_off to mood", node_id);
-                if let Err(e) = apply_mood_scene_or_tick(
-                    state,
-                    &runtime,
-                    node_id,
-                    profile_settings.mood_scene_id.as_deref(),
-                    false,
-                ) {
-                    warn!(target: "cmd", "mood apply for '{}' failed: {}", node_id, e);
-                } else {
-                    commanded_lights_on = Some(true);
-                }
-            }
-            RoomModeState::Standby => {
-                info!(target: "cmd", "node_preferences_set: {} leaving hard_off to standby", node_id);
-                if let Err(e) = runtime.soft_off_tick_room(node_id) {
-                    warn!(target: "cmd", "standby_tick for '{}' failed: {}", node_id, e);
-                } else {
-                    commanded_lights_on = Some(true);
-                }
-            }
-            RoomModeState::HardOff | RoomModeState::Wake | RoomModeState::Warning => {}
-        }
+    } else if left_hard_off || reassert_state {
+        // Both a transition out of Off and an unchanged explicit state use
+        // the same state-specific dispatch, including bound Mood scenes.
+        commanded_lights_on = dispatch_persistent_on_state(
+            state,
+            &runtime,
+            node_id,
+            persistent_state,
+            profile_settings.mood_scene_id.as_deref(),
+        );
     } else if lighting_output_settings_touched {
         match persistent_state {
             RoomModeState::Mood => {
@@ -17285,6 +17290,33 @@ pub fn do_node_preferences_set(
     build_node_state(state, node_id).and_then(|node_state| {
         serde_json::to_string(&node_state).map_err(|e| anyhow::anyhow!("serialize: {}", e))
     })
+}
+
+// Share transition and explicit reassertion behavior without changing state-less
+// settings application or adding physical reads before dispatch.
+fn dispatch_persistent_on_state(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    node_id: &str,
+    target: RoomModeState,
+    mood_scene_id: Option<&str>,
+) -> Option<bool> {
+    info!(target: "cmd", "node_preferences_set: {} applying {:?}", node_id, target);
+    let result = match target {
+        RoomModeState::Active => runtime.turn_on_room(node_id),
+        RoomModeState::Mood => {
+            apply_mood_scene_or_tick(state, runtime, node_id, mood_scene_id, false)
+        }
+        RoomModeState::Standby => runtime.soft_off_tick_room(node_id),
+        RoomModeState::HardOff | RoomModeState::Wake | RoomModeState::Warning => return None,
+    };
+    match result {
+        Ok(()) => Some(true),
+        Err(error) => {
+            warn!(target: "cmd", "state apply for '{}' ({:?}) failed: {}", node_id, target, error);
+            None
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -17403,7 +17435,7 @@ pub fn queue_node_preferences_set(
 
 pub fn queue_node_preferences_batch(
     state: &SharedState,
-    updates: Vec<QueuedNodePreferencesPatch>,
+    mut updates: Vec<QueuedNodePreferencesPatch>,
     persist_after: bool,
     dispatch_spacing: Duration,
 ) -> Result<()> {
@@ -17422,6 +17454,37 @@ pub fn queue_node_preferences_batch(
         )
     };
     let runtime = runtime.ok_or_else(|| anyhow::anyhow!("No runtime available"))?;
+
+    if updates.len() > 1
+        && updates
+            .iter()
+            .all(|update| update.target_state == Some(RoomModeState::HardOff))
+    {
+        // Use one cached observation snapshot, never a bridge read. Keep the
+        // caller's order within each priority and for every mixed-state batch.
+        let snapshots: Vec<_> = updates
+            .iter()
+            .filter_map(|update| runtime.engine_node_snapshot(&update.node_id))
+            .collect();
+        let on_nodes: HashSet<_> = {
+            let app = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+            snapshots
+                .iter()
+                .filter(|snapshot| {
+                    lights_on_from_observed_cache(
+                        &app,
+                        &app.room_observed_power,
+                        &snapshot.id,
+                        snapshot.kind,
+                        snapshot.parent_id.as_deref(),
+                        None,
+                    )
+                })
+                .map(|snapshot| snapshot.id.clone())
+                .collect()
+        };
+        updates.sort_by_key(|update| !on_nodes.contains(&update.node_id));
+    }
 
     let mut work_items = Vec::with_capacity(updates.len() + usize::from(persist_after));
     for update in updates {
@@ -30641,6 +30704,40 @@ mod tests {
             expected.profile.light_schedules
         );
         assert_eq!(bundle.profile.scenes, expected.profile.scenes);
+    }
+
+    #[test]
+    fn backup_room_import_does_not_reassert_unchanged_off_but_dispatches_transitions() {
+        for already_off in [true, false] {
+            let mut snapshot = make_snapshot("room", false, false);
+            snapshot.hard_off = already_off;
+            let (state, runtime) = setup_state(vec![snapshot]);
+            set_observed_lights_on(&state, "room", true);
+            let imported = BackupConfigurationRoom {
+                id: "room".into(),
+                name: "Room".into(),
+                rhythm_enabled: true,
+                disabled: false,
+                state: RoomModeState::HardOff,
+                room_profile: RoomProfileSettings::default(),
+            };
+            assert_eq!(
+                apply_backup_configuration_room_preferences(&state, &[imported]),
+                (1, 0)
+            );
+            if already_off {
+                assert!(
+                    runtime.events().is_empty(),
+                    "configuration import must not resend Off"
+                );
+            } else {
+                assert_eq!(
+                    runtime.events(),
+                    vec![("room".into(), ButtonAction::LightsOff)]
+                );
+            }
+            assert!(runtime.engine_node_snapshot("room").unwrap().hard_off);
+        }
     }
 
     #[test]
