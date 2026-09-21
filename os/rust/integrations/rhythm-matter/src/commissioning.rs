@@ -627,23 +627,24 @@ fn commissioning_failure_stage(
     {
         return Some(PairingFailureStage::MatterNetworkDiscovery);
     }
+    // BleCommissioningStack is a recovery hint, not proof of the transport
+    // that failed: legacy RPC normalization also assigns it to PASE timeouts
+    // and generic cancellations. Require explicit Bluetooth source evidence.
     if rendezvous != MatterCommissioningRendezvous::OnNetwork
-        && (kind == Some(ChipRpcErrorKind::BleCommissioningStack)
-            || [
-                "connectiondelegate timeout",
-                "gatt write characteristic operation failed",
-                "blemanagerimpl.cpp",
-                "bluezconnection.cpp",
-                "bluezendpoint.cpp",
-                "bluezobjectmanager.cpp",
-                "chipoble",
-                "ble adapter unavailable",
-                "ble device doesn't seem to support chip",
-            ]
-            .iter()
-            .any(|marker| lower.contains(marker))
-            || (lower.contains("matter ble commissioning failed")
-                && lower.contains("d-bus system bus"))
+        && ([
+            "connectiondelegate timeout",
+            "gatt write characteristic operation failed",
+            "blemanagerimpl.cpp",
+            "bluezconnection.cpp",
+            "bluezendpoint.cpp",
+            "bluezobjectmanager.cpp",
+            "chipoble",
+            "ble adapter unavailable",
+            "d-bus system bus",
+            "ble device doesn't seem to support chip",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker))
             || (rendezvous == MatterCommissioningRendezvous::Ble
                 && lower.contains("pasesession.cpp")))
     {
@@ -2141,10 +2142,7 @@ mod tests {
     fn failure_stage_prefers_network_evidence_and_never_guesses_ble_on_network() {
         use crate::chip_rpc::{ChipRpcError, ChipRpcErrorKind};
         for (kind, expected) in [
-            (
-                ChipRpcErrorKind::BleCommissioningStack,
-                Some(PairingFailureStage::MatterBluetooth),
-            ),
+            (ChipRpcErrorKind::BleCommissioningStack, None),
             (
                 ChipRpcErrorKind::OperationalDiscovery,
                 Some(PairingFailureStage::MatterNetworkDiscovery),
@@ -2181,6 +2179,46 @@ mod tests {
                     MatterCommissioningRendezvous::Auto
                 ),
                 None
+            );
+        }
+        // Production chipd failures are typed, including messages normalized
+        // by older sidecars. Recovery classification is broader than evidence
+        // that can justify a user-facing Bluetooth diagnosis.
+        for (message, auto, ble) in [
+            (
+                "commissioning Matter light: src/protocols/secure_channel/PASESession.cpp:310: CHIP Error 0x00000032: Timeout",
+                None,
+                Some(PairingFailureStage::MatterBluetooth),
+            ),
+            ("commissioning Matter light: Operation was cancelled: timeout", None, None),
+            (
+                "commissioning Matter light: src/platform/Linux/bluez/BluezEndpoint.cpp:623: CHIP Error 0x000000AC: Internal error",
+                Some(PairingFailureStage::MatterBluetooth),
+                Some(PairingFailureStage::MatterBluetooth),
+            ),
+            (
+                "FAIL: Get D-Bus system bus: Could not connect: Connection refused",
+                Some(PairingFailureStage::MatterBluetooth),
+                Some(PairingFailureStage::MatterBluetooth),
+            ),
+        ] {
+            let rpc_error = ChipRpcError::from_message(message);
+            assert_eq!(rpc_error.kind, ChipRpcErrorKind::BleCommissioningStack);
+            let error = anyhow::Error::new(rpc_error).context("commissioning failed");
+            assert_eq!(
+                commissioning_failure_stage(&error, MatterCommissioningRendezvous::Auto),
+                auto,
+                "automatic rendezvous: {message}",
+            );
+            assert_eq!(
+                commissioning_failure_stage(&error, MatterCommissioningRendezvous::Ble),
+                ble,
+                "BLE rendezvous: {message}",
+            );
+            assert_ne!(
+                commissioning_failure_stage(&error, MatterCommissioningRendezvous::OnNetwork),
+                Some(PairingFailureStage::MatterBluetooth),
+                "on-network rendezvous: {message}",
             );
         }
         let error = anyhow::anyhow!(
