@@ -109,6 +109,13 @@ void main() {
 
   testWidgets('pairing screen follows the server\'s real stages',
       (tester) async {
+    final screenshotDir =
+        Platform.environment['RHYTHM_MATTER_GUIDANCE_SCREENSHOTS'];
+    if (screenshotDir != null) await tester.runAsync(loadUiEvidenceFonts);
+    tester.view.physicalSize = const Size(390, 700);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
     debugDefaultTargetPlatformOverride = TargetPlatform.linux;
     final releaseResponse = Completer<void>();
     final progress = StreamController<RhythmPairingProgress>.broadcast();
@@ -141,6 +148,12 @@ void main() {
         ChangeNotifierProvider<ServerSyncProvider>.value(
           value: serverSync,
           child: MaterialApp(
+            debugShowCheckedModeBanner: false,
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(context)
+                  .copyWith(textScaler: const TextScaler.linear(1.3)),
+              child: child!,
+            ),
             home: MatterDeviceAddScreen(
               endpoint: const HubEndpoint(host: '127.0.0.1', port: 0),
               addMethod: MatterAddMethod.automatic,
@@ -174,6 +187,9 @@ void main() {
 
       // Title and highlighted step name the same thing (title + step label).
       expect(find.text('Contacting Rhythm Box'), findsNWidgets(2));
+      expect(
+          find.textContaining('then finds it on your network'), findsOneWidget);
+      expect(find.textContaining('then finds it on Wi-Fi'), findsNothing);
 
       await emit(RhythmPairingStage.requested, 'Pairing request received');
       expect(find.text('Contacting Rhythm Box'), findsNWidgets(2));
@@ -187,6 +203,19 @@ void main() {
 
       await emit(RhythmPairingStage.commissioning, 'Finding the device');
       expect(find.text('Finding and pairing device'), findsNWidgets(2));
+
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(tester.takeException(), isNull);
+      if (screenshotDir != null) {
+        final wasUpdating = autoUpdateGoldenFiles;
+        autoUpdateGoldenFiles = true;
+        try {
+          await expectLater(find.byType(Overlay),
+              matchesGoldenFile('$screenshotDir/automatic-progress.png'));
+        } finally {
+          autoUpdateGoldenFiles = wasUpdating;
+        }
+      }
 
       // The automatic retry explains itself without rewinding the timeline.
       await emit(RhythmPairingStage.hubConnecting, 'Resetting Bluetooth');

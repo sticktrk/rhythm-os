@@ -896,7 +896,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
           switch (_activeAddMethod) {
             MatterAddMethod.automatic =>
               'For a new device, the Rhythm Box uses Bluetooth first, then '
-                  'finds it on Wi-Fi. Keep the Box near the device during setup.',
+                  'finds it on your network. Keep the Box near the device during setup.',
             MatterAddMethod.phoneCommissioning =>
               'Keep this phone near the device while it joins the network '
                   'and the Rhythm Box finishes pairing.',
