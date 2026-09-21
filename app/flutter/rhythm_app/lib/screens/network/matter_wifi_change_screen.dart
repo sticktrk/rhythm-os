@@ -4,6 +4,8 @@ import 'package:rhythm_sdk/rhythm_sdk.dart';
 import 'package:uuid/uuid.dart';
 import '../../services/analytics_service.dart';
 import '../../services/cloud_backed_server_api.dart';
+import '../../widgets/solar_orbit.dart';
+import 'network_ui.dart';
 import 'saved_wifi_screen.dart';
 
 class MatterWifiChangeScreen extends StatefulWidget {
@@ -93,14 +95,21 @@ class _MatterWifiChangeScreenState extends State<MatterWifiChangeScreen> {
     final confirm = await showDialog<bool>(
         context: context,
         builder: (context) => AlertDialog(
-                title: const Text('Move this bulb to the selected network?'),
+                backgroundColor: CelestialColors.backgroundCard,
+                title: const Text('Move this bulb?',
+                    style: TextStyle(color: CelestialColors.textPrimary)),
                 content: const Text(
-                    'Keep the bulb powered on and both networks available. The Rhythm Box must be able to reach devices on both networks. Do not move the Box or reset the bulb during the change.'),
+                    'Keep the bulb powered on and both networks available. Do not move the Rhythm Box or reset the bulb until the change finishes.',
+                    style: TextStyle(
+                        color: CelestialColors.textSecondary, height: 1.4)),
                 actions: [
                   TextButton(
                       onPressed: () => Navigator.pop(context, false),
-                      child: const Text('Cancel')),
-                  FilledButton(
+                      child: const Text('Cancel',
+                          style:
+                              TextStyle(color: CelestialColors.textSecondary))),
+                  TextButton(
+                      style: TextButton.styleFrom(foregroundColor: networkTeal),
                       onPressed: () => Navigator.pop(context, true),
                       child: const Text('Change network'))
                 ]));
@@ -156,7 +165,7 @@ class _MatterWifiChangeScreenState extends State<MatterWifiChangeScreen> {
   String get _message {
     final receipt = _receipt;
     if (receipt == null) {
-      return 'Move one reachable Matter Wi-Fi bulb. Thread devices, bridges and offline bulbs cannot use this action.';
+      return 'Move this bulb to another saved network. Its name, room and schedules stay the same. Works with Matter Wi-Fi bulbs that are online; Thread and bridged devices cannot be moved.';
     }
     if (receipt.isPending) {
       return 'Changing network and verifying the same bulb. You can leave this screen and check the result later.';
@@ -185,6 +194,38 @@ class _MatterWifiChangeScreenState extends State<MatterWifiChangeScreen> {
     return '$reason ${receipt.rollbackVerified ? 'The original network connection was verified.' : 'If it stays offline, restore the old network or follow the manufacturer’s recovery instructions.'}';
   }
 
+  ({IconData icon, Color color, String title}) get _status {
+    final receipt = _receipt;
+    if (receipt == null) {
+      return (
+        icon: Icons.wifi_rounded,
+        color: networkTeal,
+        title: 'Move this bulb'
+      );
+    }
+    if (receipt.isPending) {
+      return (
+        icon: Icons.sync_rounded,
+        color: networkTeal,
+        title: 'Changing network…'
+      );
+    }
+    if (receipt.succeeded) {
+      return (
+        icon: Icons.check_rounded,
+        color: const Color(0xFF22C55E),
+        title: 'Network changed'
+      );
+    }
+    return (
+      icon: Icons.priority_high_rounded,
+      color: CelestialColors.warning,
+      title: receipt.rollbackVerified
+          ? 'Network not changed'
+          : 'Network change not confirmed'
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final canStart = _loaded &&
@@ -193,27 +234,89 @@ class _MatterWifiChangeScreenState extends State<MatterWifiChangeScreen> {
         _receipt?.isPending != true &&
         (_receipt?.retryAfterMs ?? 0) == 0 &&
         (_operation == null || _receipt != null);
-    return Scaffold(
-        appBar: AppBar(title: const Text('Change bulb Wi-Fi')),
-        body: ListView(padding: const EdgeInsets.all(24), children: [
-          if (_busy || _receipt?.isPending == true)
-            const LinearProgressIndicator(),
-          const SizedBox(height: 20),
-          Text(_message, key: const ValueKey('wifi-change-status')),
-          if (_error != null)
-            Padding(
-                padding: const EdgeInsets.only(top: 16), child: Text(_error!)),
-          const SizedBox(height: 20),
+    final status = _status;
+    return NetworkScaffold(
+        title: 'Change bulb Wi-Fi',
+        busy: _busy || _receipt?.isPending == true,
+        footer: Column(mainAxisSize: MainAxisSize.min, children: [
           FilledButton(
               key: const ValueKey('wifi-change-start'),
+              style: networkPrimaryButtonStyle,
               onPressed: canStart ? _start : null,
               child: const Text('Choose network')),
+          const SizedBox(height: 4),
           TextButton(
               onPressed: _busy ? null : _refresh,
+              style: TextButton.styleFrom(foregroundColor: networkTeal),
               child: const Text('Check status')),
+        ]),
+        children: [
+          Container(
+              padding: const EdgeInsets.all(20),
+              decoration: BoxDecoration(
+                  color: CelestialColors.backgroundCard,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                      color: CelestialColors.orbitRing.withValues(alpha: 0.5))),
+              child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(children: [
+                      Container(
+                          width: 40,
+                          height: 40,
+                          decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: status.color.withValues(alpha: 0.16)),
+                          child:
+                              Icon(status.icon, color: status.color, size: 20)),
+                      const SizedBox(width: 14),
+                      Expanded(
+                          child: Text(status.title,
+                              style: const TextStyle(
+                                  color: CelestialColors.textPrimary,
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w600))),
+                    ]),
+                    const SizedBox(height: 14),
+                    Text(_message,
+                        key: const ValueKey('wifi-change-status'),
+                        style: const TextStyle(
+                            color: CelestialColors.textSecondary,
+                            fontSize: 14,
+                            height: 1.45)),
+                  ])),
+          if (_error != null) NetworkNotice(text: _error!),
           if ((_receipt?.retryAfterMs ?? 0) > 0)
-            const Text(
-                'Waiting for the device fail-safe recovery window before another attempt.'),
-        ]));
+            const NetworkNotice(
+                text:
+                    'Waiting for the bulb\u2019s recovery window to close before another attempt.'),
+          if (_receipt == null) ...[
+            const NetworkSectionHeader('BEFORE YOU START'),
+            for (final (icon, text) in const [
+              (Icons.power_rounded, 'Keep the bulb powered on.'),
+              (
+                Icons.router_rounded,
+                'Keep both networks available until the change finishes.'
+              ),
+              (
+                Icons.hub_outlined,
+                'The Rhythm Box must be able to reach devices on both networks.'
+              ),
+            ])
+              Padding(
+                  padding: const EdgeInsets.fromLTRB(4, 0, 4, 12),
+                  child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Icon(icon,
+                            size: 18,
+                            color: CelestialColors.textSecondary
+                                .withValues(alpha: 0.8)),
+                        const SizedBox(width: 12),
+                        Expanded(child: NetworkBodyText(text)),
+                      ])),
+          ],
+        ]);
   }
 }

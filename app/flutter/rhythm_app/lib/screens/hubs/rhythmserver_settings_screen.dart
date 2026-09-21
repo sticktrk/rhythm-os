@@ -51,7 +51,7 @@ String factoryResetFailureMessage({
   final resetStoppedBeforeChanges = httpStatus == 400;
   return switch ((
     resetStoppedBeforeChanges,
-    normalizedError?.isNotEmpty == true,
+    normalizedError?.isNotEmpty == true
   )) {
     (true, true) => 'Factory reset stopped safely: $normalizedError',
     (true, false) =>
@@ -65,7 +65,8 @@ String factoryResetFailureMessage({
 bool removedMatterRecoveryAvailable(
   String hubType,
   Map<String, dynamic> device,
-) => hubType == 'matter' && device['recovery_available'] == true;
+) =>
+    hubType == 'matter' && device['recovery_available'] == true;
 
 @visibleForTesting
 String removedDeviceRecoveryStatus(
@@ -193,10 +194,10 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
       };
 
   IconData get _heroIcon => switch (_serverContext) {
-    'ha_addon' => Icons.home_outlined,
-    'server' || 'rpiz' => Icons.dns_outlined,
-    _ => Icons.developer_board,
-  };
+        'ha_addon' => Icons.home_outlined,
+        'server' || 'rpiz' => Icons.dns_outlined,
+        _ => Icons.developer_board,
+      };
 
   Hub get _currentHub {
     if (!widget.homeManaged) return widget.hub;
@@ -261,7 +262,9 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     _lastHandledOtaState = _otaService.state;
 
     if (_otaService.state == OtaState.complete) {
-      AnalyticsService().logOtaUpdateCompleted(_otaService.currentVersion);
+      AnalyticsService().logOtaUpdateCompleted(
+        _otaService.currentVersion,
+      );
       // Force a full reconnect so the sync provider picks up the new
       // firmware version from GET /api/state (the poll endpoint doesn't
       // include version info).
@@ -280,15 +283,12 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   Future<void> _loadOtaSupport() async {
     final syncProvider = context.read<ServerSyncProvider>();
     final resolved = await _resolveServerEndpoint();
-    String? fallbackCurrentVersion = widget.homeManaged
-        ? syncProvider.firmwareVersion
-        : null;
-    String? fallbackPlatformType = widget.homeManaged
-        ? syncProvider.serverPlatformType
-        : null;
-    String? fallbackPlatformContext = widget.homeManaged
-        ? syncProvider.serverPlatformContext
-        : null;
+    String? fallbackCurrentVersion =
+        widget.homeManaged ? syncProvider.firmwareVersion : null;
+    String? fallbackPlatformType =
+        widget.homeManaged ? syncProvider.serverPlatformType : null;
+    String? fallbackPlatformContext =
+        widget.homeManaged ? syncProvider.serverPlatformContext : null;
 
     if (!widget.homeManaged) {
       try {
@@ -552,16 +552,14 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     final connState = widget.homeManaged
         ? http.connectionState
         : _isOnline
-        ? RhythmConnectionState.connected
-        : RhythmConnectionState.disconnected;
-    final fullyOffline = widget.homeManaged
-        ? !http.connected && !_isOnline
-        : !_isOnline;
+            ? RhythmConnectionState.connected
+            : RhythmConnectionState.disconnected;
+    final fullyOffline =
+        widget.homeManaged ? !http.connected && !_isOnline : !_isOnline;
     final statusText = _connectionStatusText(connState);
     final statusColor = _connectionStatusColor(connState);
     final isLive = connState == RhythmConnectionState.connected;
-    final isWorking =
-        connState == RhythmConnectionState.connecting ||
+    final isWorking = connState == RhythmConnectionState.connecting ||
         connState == RhythmConnectionState.reconnecting;
 
     return AnimatedBuilder(
@@ -603,8 +601,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                         shape: BoxShape.circle,
                         border: Border.all(
                           color: statusColor.withValues(
-                            alpha: isWorking ? 0.55 : (isLive ? 0.45 : 0.2),
-                          ),
+                              alpha: isWorking ? 0.55 : (isLive ? 0.45 : 0.2)),
                           width: 1.2,
                         ),
                       ),
@@ -659,10 +656,9 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                               ? [
                                   BoxShadow(
                                     color: statusColor.withValues(
-                                      alpha: isWorking
-                                          ? _glowAnimation.value
-                                          : 0.6,
-                                    ),
+                                        alpha: isWorking
+                                            ? _glowAnimation.value
+                                            : 0.6),
                                     blurRadius: 8,
                                     spreadRadius: 1,
                                   ),
@@ -856,106 +852,130 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     final subtitle = _isChangingWifi
         ? 'Saving new network...'
         : canChange
-        ? 'Move this server to another network'
-        : 'Unavailable while offline';
+            ? 'Move this server to another network'
+            : 'Unavailable while offline';
     final accent = canChange ? _teal : CelestialColors.textSecondary;
 
     return _buildSection(
       title: 'NETWORK',
       children: [
-        if (widget.homeManaged && syncProvider.supportsSavedWifiProfiles)
-          ListTile(
+        if (widget.homeManaged && syncProvider.supportsSavedWifiProfiles) ...[
+          _buildNetworkRow(
             key: const ValueKey('saved-wifi-networks'),
-            leading: const Icon(Icons.wifi),
-            title: const Text('Wi-Fi for new accessories'),
-            subtitle: const Text(
-              'Choose the default network accessories join during setup',
-            ),
-            onTap: () => Navigator.of(context).push(
-              MaterialPageRoute(
-                builder: (_) => SavedWifiScreen(api: syncProvider.api),
-              ),
+            icon: Icons.lightbulb_outline_rounded,
+            title: 'Wi-Fi for new accessories',
+            subtitle: 'Choose the network accessories join during setup',
+            accent: connected ? _teal : CelestialColors.textSecondary,
+            onTap: connected
+                ? () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => SavedWifiScreen(api: syncProvider.api),
+                      ),
+                    )
+                : null,
+          ),
+          const SizedBox(height: 10),
+        ],
+        _buildNetworkRow(
+          icon: Icons.wifi_rounded,
+          title: 'Change Wi-Fi',
+          subtitle: subtitle,
+          accent: accent,
+          busy: _isChangingWifi,
+          onTap: canChange ? _handleChangeWifi : null,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildNetworkRow({
+    Key? key,
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required Color accent,
+    required VoidCallback? onTap,
+    bool busy = false,
+  }) {
+    return GestureDetector(
+      key: key,
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: AnimatedOpacity(
+        duration: const Duration(milliseconds: 150),
+        opacity: onTap != null || busy ? 1 : 0.55,
+        child: Container(
+          decoration: BoxDecoration(
+            color: CelestialColors.backgroundCard,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: CelestialColors.orbitRing.withValues(alpha: 0.5),
             ),
           ),
-        GestureDetector(
-          onTap: canChange ? _handleChangeWifi : null,
-          behavior: HitTestBehavior.opaque,
-          child: AnimatedOpacity(
-            duration: const Duration(milliseconds: 150),
-            opacity: canChange || _isChangingWifi ? 1 : 0.55,
-            child: Container(
-              decoration: BoxDecoration(
-                color: CelestialColors.backgroundCard,
-                borderRadius: BorderRadius.circular(14),
-                border: Border.all(
-                  color: CelestialColors.orbitRing.withValues(alpha: 0.5),
+          child: Padding(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            child: Row(
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: accent.withValues(alpha: 0.16),
+                  ),
+                  child: Icon(
+                    icon,
+                    color: accent,
+                    size: 20,
+                  ),
                 ),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 14,
-                ),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: accent.withValues(alpha: 0.16),
-                      ),
-                      child: Icon(Icons.wifi_rounded, color: accent, size: 20),
-                    ),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const Text(
-                            'Change Wi-Fi',
-                            style: TextStyle(
-                              color: CelestialColors.textPrimary,
-                              fontSize: 15,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            subtitle,
-                            style: const TextStyle(
-                              color: CelestialColors.textSecondary,
-                              fontSize: 13,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    if (_isChangingWifi)
-                      SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          valueColor: AlwaysStoppedAnimation(accent),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: const TextStyle(
+                          color: CelestialColors.textPrimary,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
                         ),
-                      )
-                    else
-                      Icon(
-                        Icons.chevron_right,
-                        color: CelestialColors.textSecondary.withValues(
-                          alpha: 0.5,
-                        ),
-                        size: 22,
                       ),
-                  ],
+                      const SizedBox(height: 4),
+                      Text(
+                        subtitle,
+                        style: const TextStyle(
+                          color: CelestialColors.textSecondary,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
+                const SizedBox(width: 12),
+                if (busy)
+                  SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      valueColor: AlwaysStoppedAnimation(accent),
+                    ),
+                  )
+                else
+                  Icon(
+                    Icons.chevron_right,
+                    color: CelestialColors.textSecondary
+                        .withValues(alpha: 0.5),
+                    size: 22,
+                  ),
+              ],
             ),
           ),
         ),
-      ],
+      ),
     );
   }
 
@@ -984,10 +1004,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
         _showSnackBar('Wi-Fi change started. Reconnecting shortly.');
         unawaited(_refreshAfterWifiChange());
       } else {
-        _showSnackBar(
-          result.error ?? 'Could not change Wi-Fi.',
-          backgroundColor: Colors.red.shade400,
-        );
+        _showSnackBar(result.error ?? 'Could not change Wi-Fi.',
+            backgroundColor: Colors.red.shade400);
       }
     } catch (error, stackTrace) {
       debugPrint('RhythmServerSettings: Wi-Fi change failed: $error');
@@ -1043,7 +1061,10 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                     textInputAction: TextInputAction.done,
                     onSubmitted: (_) {
                       if (!canSubmit) return;
-                      Navigator.of(ctx, rootNavigator: true).pop((
+                      Navigator.of(
+                        ctx,
+                        rootNavigator: true,
+                      ).pop((
                         ssid: ssidController.text.trim(),
                         password: passwordController.text,
                       ));
@@ -1058,7 +1079,10 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
               ),
               actions: [
                 TextButton(
-                  onPressed: () => Navigator.of(ctx, rootNavigator: true).pop(),
+                  onPressed: () => Navigator.of(
+                    ctx,
+                    rootNavigator: true,
+                  ).pop(),
                   child: Text(
                     'Cancel',
                     style: TextStyle(color: CelestialColors.textSecondary),
@@ -1066,10 +1090,13 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                 ),
                 TextButton(
                   onPressed: canSubmit
-                      ? () => Navigator.of(ctx, rootNavigator: true).pop((
-                          ssid: ssidController.text.trim(),
-                          password: passwordController.text,
-                        ))
+                      ? () => Navigator.of(
+                            ctx,
+                            rootNavigator: true,
+                          ).pop((
+                            ssid: ssidController.text.trim(),
+                            password: passwordController.text,
+                          ))
                       : null,
                   child: const Text('Change'),
                 ),
@@ -1130,19 +1157,16 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
             children: [
               // Current version row
               Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 12,
-                ),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     Text(
                       'Current Version',
                       style: TextStyle(
-                        color: CelestialColors.textSecondary.withValues(
-                          alpha: 0.8,
-                        ),
+                        color: CelestialColors.textSecondary
+                            .withValues(alpha: 0.8),
                         fontSize: 14,
                       ),
                     ),
@@ -1169,9 +1193,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                     children: [
                       Icon(
                         Icons.history_rounded,
-                        color: CelestialColors.textSecondary.withValues(
-                          alpha: 0.5,
-                        ),
+                        color: CelestialColors.textSecondary
+                            .withValues(alpha: 0.5),
                         size: 14,
                       ),
                       const SizedBox(width: 6),
@@ -1180,9 +1203,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                           'Update to ${_formatOtaVersion(_otaService.lastRollback!.version)} '
                           'was rolled back after a failed install.',
                           style: TextStyle(
-                            color: CelestialColors.textSecondary.withValues(
-                              alpha: 0.6,
-                            ),
+                            color: CelestialColors.textSecondary
+                                .withValues(alpha: 0.6),
                             fontSize: 12,
                           ),
                         ),
@@ -1204,18 +1226,16 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                     children: [
                       Icon(
                         Icons.info_outline_rounded,
-                        color: CelestialColors.textSecondary.withValues(
-                          alpha: 0.5,
-                        ),
+                        color: CelestialColors.textSecondary
+                            .withValues(alpha: 0.5),
                         size: 16,
                       ),
                       const SizedBox(width: 8),
                       Text(
                         'Updates managed by Home Assistant',
                         style: TextStyle(
-                          color: CelestialColors.textSecondary.withValues(
-                            alpha: 0.6,
-                          ),
+                          color: CelestialColors.textSecondary
+                              .withValues(alpha: 0.6),
                           fontSize: 13,
                         ),
                       ),
@@ -1285,9 +1305,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                           Text(
                             subtitle,
                             style: TextStyle(
-                              color: CelestialColors.textSecondary.withValues(
-                                alpha: 0.7,
-                              ),
+                              color: CelestialColors.textSecondary
+                                  .withValues(alpha: 0.7),
                               fontSize: 13,
                               height: 1.3,
                             ),
@@ -1308,9 +1327,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                     else
                       Icon(
                         Icons.chevron_right,
-                        color: CelestialColors.textSecondary.withValues(
-                          alpha: 0.5,
-                        ),
+                        color: CelestialColors.textSecondary
+                            .withValues(alpha: 0.5),
                         size: 22,
                       ),
                   ],
@@ -1332,9 +1350,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
         serverHub: _currentHub,
         localServerOnly: !widget.homeManaged,
         serverVersionOverride: widget.homeManaged ? null : _serverVersion,
-        serverPlatformContextOverride: widget.homeManaged
-            ? null
-            : _serverContext,
+        serverPlatformContextOverride:
+            widget.homeManaged ? null : _serverContext,
       );
     } finally {
       if (mounted) {
@@ -1406,7 +1423,11 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
 
       case OtaState.checking:
         return [
-          _buildOtaButton(label: 'Checking...', icon: null, isLoading: true),
+          _buildOtaButton(
+            label: 'Checking...',
+            icon: null,
+            isLoading: true,
+          ),
         ];
 
       case OtaState.upToDate:
@@ -1415,11 +1436,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
             child: Row(
               children: [
-                const Icon(
-                  Icons.check_circle_outline,
-                  color: Color(0xFF22C55E),
-                  size: 18,
-                ),
+                const Icon(Icons.check_circle_outline,
+                    color: Color(0xFF22C55E), size: 18),
                 const SizedBox(width: 8),
                 Text(
                   'Up to date',
@@ -1439,8 +1457,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
         final targetVersionLabel = _formatOtaVersion(release.version);
         final updateMessage =
             release.updateReason == OtaUpdateReason.componentDrift
-            ? 'A repair bundle is ready to install.'
-            : 'A new update is ready to install.';
+                ? 'A repair bundle is ready to install.'
+                : 'A new update is ready to install.';
         return [
           Divider(
             height: 1,
@@ -1499,9 +1517,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                     Text(
                       'Updating To',
                       style: TextStyle(
-                        color: CelestialColors.textSecondary.withValues(
-                          alpha: 0.75,
-                        ),
+                        color: CelestialColors.textSecondary
+                            .withValues(alpha: 0.75),
                         fontSize: 12,
                         fontWeight: FontWeight.w500,
                         letterSpacing: 0.3,
@@ -1524,8 +1541,9 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
           _buildOtaButton(
             label: 'Install Update',
             icon: Icons.download_rounded,
-            onTap: () =>
-                unawaited(_startOtaUpdate(currentVersion, release.version)),
+            onTap: () => unawaited(
+              _startOtaUpdate(currentVersion, release.version),
+            ),
           ),
         ];
 
@@ -1649,11 +1667,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             child: Row(
               children: [
-                const Icon(
-                  Icons.check_circle,
-                  color: Color(0xFF22C55E),
-                  size: 20,
-                ),
+                const Icon(Icons.check_circle,
+                    color: Color(0xFF22C55E), size: 20),
                 const SizedBox(width: 10),
                 Expanded(
                   child: const Text(
@@ -1691,7 +1706,10 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                 Expanded(
                   child: Text(
                     'The update did not finish. Please try again.',
-                    style: TextStyle(color: Colors.red.shade400, fontSize: 13),
+                    style: TextStyle(
+                      color: Colors.red.shade400,
+                      fontSize: 13,
+                    ),
                   ),
                 ),
               ],
@@ -1723,15 +1741,16 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     final resolved = await _resolveServerEndpoint();
     if (!mounted) return;
 
-    AnalyticsService().logOtaUpdateStarted(currentVersion, targetVersion);
-    unawaited(
-      _otaService.startUpdate(
-        resolved.endpoint.host,
-        port: resolved.endpoint.port,
-        useSsl: resolved.endpoint.useSsl,
-        authToken: resolved.hub.token,
-      ),
+    AnalyticsService().logOtaUpdateStarted(
+      currentVersion,
+      targetVersion,
     );
+    unawaited(_otaService.startUpdate(
+      resolved.endpoint.host,
+      port: resolved.endpoint.port,
+      useSsl: resolved.endpoint.useSsl,
+      authToken: resolved.hub.token,
+    ));
     OtaUpdateOverlay.show(
       context,
       otaService: _otaService,
@@ -1755,7 +1774,9 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(10),
           color: _teal.withValues(alpha: 0.08),
-          border: Border.all(color: _teal.withValues(alpha: 0.2)),
+          border: Border.all(
+            color: _teal.withValues(alpha: 0.2),
+          ),
         ),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -1787,42 +1808,41 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   }
 
   static String _hubLabel(String type) => switch (type) {
-    'hue' => 'Philips Hue',
-    'hue_ble' => 'Hue Bluetooth',
-    'local_ble' => 'Local Bluetooth',
-    'homeassistant' || 'home_assistant' || 'ha' => 'Home Assistant',
-    'matter' => 'Matter',
-    'zigbee' => 'Zigbee',
-    'third_party' => HubDeviceScope.thirdPartyLabel,
-    _ when type.isEmpty => 'Hub',
-    _ =>
-      type
-          .split('_')
-          .where((part) => part.isNotEmpty)
-          .map((part) => '${part[0].toUpperCase()}${part.substring(1)}')
-          .join(' '),
-  };
+        'hue' => 'Philips Hue',
+        'hue_ble' => 'Hue Bluetooth',
+        'local_ble' => 'Local Bluetooth',
+        'homeassistant' || 'home_assistant' || 'ha' => 'Home Assistant',
+        'matter' => 'Matter',
+        'zigbee' => 'Zigbee',
+        'third_party' => HubDeviceScope.thirdPartyLabel,
+        _ when type.isEmpty => 'Hub',
+        _ => type
+            .split('_')
+            .where((part) => part.isNotEmpty)
+            .map((part) => '${part[0].toUpperCase()}${part.substring(1)}')
+            .join(' '),
+      };
 
   static Color _hubColor(String type) => switch (type) {
-    'hue' || 'hue_ble' => const Color(0xFFFFB900),
-    'homeassistant' || 'home_assistant' || 'ha' => const Color(0xFF42A5F5),
-    'matter' => const Color(0xFF26A69A),
-    _ => _teal,
-  };
+        'hue' || 'hue_ble' => const Color(0xFFFFB900),
+        'homeassistant' || 'home_assistant' || 'ha' => const Color(0xFF42A5F5),
+        'matter' => const Color(0xFF26A69A),
+        _ => _teal,
+      };
 
   static IconData _hubIcon(String type) => switch (type) {
-    'hue' => Icons.lightbulb_outline,
-    'hue_ble' || 'local_ble' => Icons.bluetooth_rounded,
-    'homeassistant' || 'home_assistant' || 'ha' => Icons.home_outlined,
-    'matter' => Icons.memory_outlined,
-    'zigbee' => Icons.hub_outlined,
-    _ => Icons.hub_outlined,
-  };
+        'hue' => Icons.lightbulb_outline,
+        'hue_ble' || 'local_ble' => Icons.bluetooth_rounded,
+        'homeassistant' || 'home_assistant' || 'ha' => Icons.home_outlined,
+        'matter' => Icons.memory_outlined,
+        'zigbee' => Icons.hub_outlined,
+        _ => Icons.hub_outlined,
+      };
 
   static bool _hubHasBetaBadge(String type) => switch (type) {
-    'homeassistant' || 'home_assistant' || 'ha' || 'matter' => true,
-    _ => false,
-  };
+        'homeassistant' || 'home_assistant' || 'ha' || 'matter' => true,
+        _ => false,
+      };
 
   static const Color _connectedGreen = Color(0xFF22C55E);
   static const Color _warningAmber = Color(0xFFE8A54B);
@@ -1886,9 +1906,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
   }
 
   static String _formatRetryEta(int epochMs) {
-    final remaining = DateTime.fromMillisecondsSinceEpoch(
-      epochMs,
-    ).difference(DateTime.now());
+    final remaining =
+        DateTime.fromMillisecondsSinceEpoch(epochMs).difference(DateTime.now());
     if (remaining.inSeconds <= 0) return 'again shortly';
     if (remaining.inMinutes < 1) return 'in ${remaining.inSeconds}s';
     if (remaining.inHours < 1) return 'in ${remaining.inMinutes}m';
@@ -2001,7 +2020,11 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                 ),
               )
             else
-              Icon(Icons.power_settings_new, color: buttonColor, size: 18),
+              Icon(
+                Icons.power_settings_new,
+                color: buttonColor,
+                size: 18,
+              ),
             const SizedBox(width: 10),
             Text(
               _isRebooting ? 'Rebooting...' : 'Reboot $_headerTitle',
@@ -2027,7 +2050,9 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(14),
           color: Colors.red.shade400.withValues(alpha: 0.1),
-          border: Border.all(color: Colors.red.shade400.withValues(alpha: 0.3)),
+          border: Border.all(
+            color: Colors.red.shade400.withValues(alpha: 0.3),
+          ),
         ),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -2042,7 +2067,11 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                 ),
               )
             else
-              Icon(Icons.link_off_rounded, color: buttonColor, size: 20),
+              Icon(
+                Icons.link_off_rounded,
+                color: buttonColor,
+                size: 20,
+              ),
             const SizedBox(width: 10),
             Text(
               _isRemovingFromHome ? 'Removing...' : 'Remove from Home',
@@ -2083,14 +2112,10 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                 shape: BoxShape.circle,
                 color: Colors.red.shade400.withValues(alpha: 0.15),
                 border: Border.all(
-                  color: Colors.red.shade400.withValues(alpha: 0.4),
-                ),
+                    color: Colors.red.shade400.withValues(alpha: 0.4)),
               ),
-              child: Icon(
-                Icons.warning_amber_rounded,
-                color: Colors.red.shade400,
-                size: 20,
-              ),
+              child: Icon(Icons.warning_amber_rounded,
+                  color: Colors.red.shade400, size: 20),
             ),
             const SizedBox(width: 12),
             const Expanded(
@@ -2199,8 +2224,7 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-            '$hubName factory reset. It will reappear in setup mode shortly.',
-          ),
+              '$hubName factory reset. It will reappear in setup mode shortly.'),
           behavior: SnackBarBehavior.floating,
         ),
       );
@@ -2220,9 +2244,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
             backgroundColor: CelestialColors.backgroundCard,
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(20),
-              side: BorderSide(
-                color: Colors.red.shade400.withValues(alpha: 0.4),
-              ),
+              side:
+                  BorderSide(color: Colors.red.shade400.withValues(alpha: 0.4)),
             ),
             title: const Text(
               'Confirm factory reset',
@@ -2261,9 +2284,8 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                   decoration: InputDecoration(
                     hintText: phrase,
                     hintStyle: TextStyle(
-                      color: CelestialColors.textSecondary.withValues(
-                        alpha: 0.4,
-                      ),
+                      color:
+                          CelestialColors.textSecondary.withValues(alpha: 0.4),
                       letterSpacing: 2,
                       fontFamily: 'monospace',
                     ),
@@ -2272,14 +2294,12 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
                     enabledBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(10),
                       borderSide: BorderSide(
-                        color: Colors.red.shade400.withValues(alpha: 0.3),
-                      ),
+                          color: Colors.red.shade400.withValues(alpha: 0.3)),
                     ),
                     focusedBorder: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(10),
                       borderSide: BorderSide(
-                        color: Colors.red.shade400.withValues(alpha: 0.7),
-                      ),
+                          color: Colors.red.shade400.withValues(alpha: 0.7)),
                     ),
                   ),
                   onChanged: (_) => setLocal(() {}),
@@ -2497,7 +2517,11 @@ class _RhythmServerAdvancedSettingsScreenState
                   width: 1,
                 ),
               ),
-              child: const Icon(Icons.chevron_left, color: _teal, size: 24),
+              child: const Icon(
+                Icons.chevron_left,
+                color: _teal,
+                size: 24,
+              ),
             ),
           ),
           const Expanded(
@@ -2528,8 +2552,8 @@ class _RhythmServerAdvancedSettingsScreenState
     final statusColor = !connected
         ? CelestialColors.textSecondary.withValues(alpha: 0.6)
         : enabled
-        ? _enabledGreen
-        : _disabledRed;
+            ? _enabledGreen
+            : _disabledRed;
     final serverHub = homeProvider.activeServerHub;
     final canUseRemoteAccess = _canUseRemoteAccess();
     final remoteAccessEnabled = serverHub?.remoteEndpoint != null;
@@ -2537,17 +2561,17 @@ class _RhythmServerAdvancedSettingsScreenState
     final remoteAccessStatusText = _isTogglingRemoteAccess
         ? 'Updating...'
         : remoteAccessEnabled
-        ? 'On'
-        : remoteAccessAvailable
-        ? 'Off'
-        : 'Unavailable';
+            ? 'On'
+            : remoteAccessAvailable
+                ? 'Off'
+                : 'Unavailable';
     final remoteAccessStatusColor = _isTogglingRemoteAccess
         ? Colors.amber
         : !remoteAccessAvailable
-        ? CelestialColors.textSecondary.withValues(alpha: 0.6)
-        : remoteAccessEnabled
-        ? _enabledGreen
-        : _disabledRed;
+            ? CelestialColors.textSecondary.withValues(alpha: 0.6)
+            : remoteAccessEnabled
+                ? _enabledGreen
+                : _disabledRed;
 
     return _buildSection(
       title: 'SERVER',
@@ -2663,8 +2687,8 @@ class _RhythmServerAdvancedSettingsScreenState
       _showSnackBar(
         enabled
             ? routeVerified
-                  ? 'Remote access enabled.'
-                  : 'Remote access is starting in the background.'
+                ? 'Remote access enabled.'
+                : 'Remote access is starting in the background.'
             : 'Remote access disabled.',
       );
     } catch (error, stackTrace) {
@@ -2725,7 +2749,11 @@ class _RhythmServerAdvancedSettingsScreenState
                 shape: BoxShape.circle,
                 color: iconColor.withValues(alpha: 0.16),
               ),
-              child: Icon(icon, color: iconColor, size: 20),
+              child: Icon(
+                icon,
+                color: iconColor,
+                size: 20,
+              ),
             ),
             const SizedBox(width: 14),
             Expanded(
@@ -2895,10 +2923,8 @@ class _RhythmServerHubManagementSectionState
     }
 
     if (widget.showAddOptions) {
-      final addHubSection = _buildHubPairingSuggestions(
-        syncProvider,
-        configuredHubs,
-      );
+      final addHubSection =
+          _buildHubPairingSuggestions(syncProvider, configuredHubs);
       if (addHubSection != null) {
         if (sections.isNotEmpty) {
           sections.add(const SizedBox(height: 12));
@@ -2991,9 +3017,8 @@ class _RhythmServerHubManagementSectionState
 
       final summaries = <String, String>{
         for (final scope in scopes)
-          scope.identity: HubDeviceScope.summarize(
-            devices.where(scope.containsDevice),
-          ),
+          scope.identity:
+              HubDeviceScope.summarize(devices.where(scope.containsDevice)),
       };
 
       setState(() {
@@ -3025,8 +3050,7 @@ class _RhythmServerHubManagementSectionState
   }
 
   Widget? _buildConfiguredHubsSection(
-    List<Map<String, dynamic>> configuredHubs,
-  ) {
+      List<Map<String, dynamic>> configuredHubs) {
     if (configuredHubs.isEmpty) return null;
     final scopes = HubDeviceScope.group(configuredHubs);
 
@@ -3079,15 +3103,15 @@ class _RhythmServerHubManagementSectionState
     ];
 
     Container card(List<Widget> children) => Container(
-      decoration: BoxDecoration(
-        color: CelestialColors.backgroundCard,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(
-          color: CelestialColors.orbitRing.withValues(alpha: 0.5),
-        ),
-      ),
-      child: Column(children: children),
-    );
+          decoration: BoxDecoration(
+            color: CelestialColors.backgroundCard,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: CelestialColors.orbitRing.withValues(alpha: 0.5),
+            ),
+          ),
+          child: Column(children: children),
+        );
 
     if (directPairingOptions.isEmpty && configuredHubs.isEmpty) return null;
 
@@ -3198,7 +3222,10 @@ class _RhythmServerHubManagementSectionState
   }
 
   Future<void> _startMatterAddFlow() async {
-    await startMatterPairingFlow(context, analyticsSource: 'device_settings');
+    await startMatterPairingFlow(
+      context,
+      analyticsSource: 'device_settings',
+    );
     if (!mounted) return;
     await _refreshHubSummaries();
   }
@@ -3220,20 +3247,16 @@ class _RhythmServerHubManagementSectionState
     final label = _RhythmServerSettingsScreenState._hubLabel(type);
     final hubColor = _RhythmServerSettingsScreenState._hubColor(type);
     final connected = hubInfo['connected'] as bool? ?? false;
-    final statusColor = _RhythmServerSettingsScreenState._hubConnectionColor(
-      hubInfo,
-    );
-    final deviceSummary =
-        _hubSummaries[identity] ??
+    final statusColor =
+        _RhythmServerSettingsScreenState._hubConnectionColor(hubInfo);
+    final deviceSummary = _hubSummaries[identity] ??
         (_hubSummaryFailures.contains(identity)
             ? 'Devices unavailable'
             : 'Loading...');
     final subtitle = scope.isThirdParty
         ? deviceSummary
         : _RhythmServerSettingsScreenState._hubRowSubtitle(
-            hubInfo,
-            deviceSummary,
-          );
+            hubInfo, deviceSummary);
 
     return GestureDetector(
       key: scope.isThirdParty ? const ValueKey('third-party-hubs') : null,
@@ -3246,8 +3269,7 @@ class _RhythmServerHubManagementSectionState
             Icon(
               _RhythmServerSettingsScreenState._hubIcon(type),
               color: hubColor.withValues(
-                alpha: scope.isThirdParty || connected ? 1.0 : 0.5,
-              ),
+                  alpha: scope.isThirdParty || connected ? 1.0 : 0.5),
               size: 20,
             ),
             const SizedBox(width: 12),
@@ -3277,9 +3299,8 @@ class _RhythmServerHubManagementSectionState
                   Text(
                     subtitle,
                     style: TextStyle(
-                      color: CelestialColors.textSecondary.withValues(
-                        alpha: 0.6,
-                      ),
+                      color:
+                          CelestialColors.textSecondary.withValues(alpha: 0.6),
                       fontSize: 12,
                     ),
                   ),
@@ -3433,9 +3454,8 @@ class _RhythmServerHubManagementSectionState
                 Text(
                   subtitle,
                   style: TextStyle(
-                    color: CelestialColors.textSecondary.withValues(
-                      alpha: 0.58,
-                    ),
+                    color:
+                        CelestialColors.textSecondary.withValues(alpha: 0.58),
                     fontSize: 13,
                     height: 1.35,
                   ),
@@ -3468,8 +3488,10 @@ class _RebootOverlay extends StatefulWidget {
     final result = await Navigator.of(context, rootNavigator: true).push<bool>(
       PageRouteBuilder(
         opaque: true,
-        pageBuilder: (_, __, ___) =>
-            _RebootOverlay(client: client, headerTitle: headerTitle),
+        pageBuilder: (_, __, ___) => _RebootOverlay(
+          client: client,
+          headerTitle: headerTitle,
+        ),
         transitionsBuilder: (_, animation, __, child) {
           return FadeTransition(opacity: animation, child: child);
         },
@@ -3592,17 +3614,16 @@ class _RebootOverlayState extends State<_RebootOverlay>
               ),
               boxShadow: [
                 BoxShadow(
-                  color: _teal.withValues(alpha: _pulseAnimation.value * 0.28),
+                  color: _teal.withValues(
+                    alpha: _pulseAnimation.value * 0.28,
+                  ),
                   blurRadius: 32,
                   spreadRadius: 4,
                 ),
               ],
             ),
-            child: const Icon(
-              Icons.restart_alt_rounded,
-              color: _teal,
-              size: 38,
-            ),
+            child:
+                const Icon(Icons.restart_alt_rounded, color: _teal, size: 38),
           ),
         ),
         const SizedBox(height: 28),
@@ -3622,7 +3643,10 @@ class _RebootOverlayState extends State<_RebootOverlay>
               ? 'Waiting for ${widget.headerTitle} to come back online...'
               : 'Powering down...',
           textAlign: TextAlign.center,
-          style: TextStyle(color: _teal.withValues(alpha: 0.75), fontSize: 14),
+          style: TextStyle(
+            color: _teal.withValues(alpha: 0.75),
+            fontSize: 14,
+          ),
         ),
         const SizedBox(height: 28),
         Row(
@@ -3678,7 +3702,10 @@ class _RebootOverlayState extends State<_RebootOverlay>
           '${widget.headerTitle} did not come back online within '
           '${_deadline.inSeconds}s.',
           textAlign: TextAlign.center,
-          style: TextStyle(color: Colors.red.shade400, fontSize: 14),
+          style: TextStyle(
+            color: Colors.red.shade400,
+            fontSize: 14,
+          ),
         ),
         const SizedBox(height: 40),
         GestureDetector(
@@ -3779,7 +3806,9 @@ class _RhythmServerDiagnosticsScreenState
         duration: const Duration(seconds: 2),
         behavior: SnackBarBehavior.floating,
         margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(10),
+        ),
       ),
     );
   }
@@ -3837,7 +3866,9 @@ class _RhythmServerDiagnosticsScreenState
               height: 1,
               color: CelestialColors.orbitRing.withValues(alpha: 0.2),
             ),
-            Expanded(child: _buildLogsTab()),
+            Expanded(
+              child: _buildLogsTab(),
+            ),
           ],
         ),
       ),
@@ -3945,9 +3976,7 @@ class _RhythmServerDiagnosticsScreenState
                           },
                           child: Container(
                             padding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 6,
-                            ),
+                                horizontal: 12, vertical: 6),
                             decoration: BoxDecoration(
                               borderRadius: BorderRadius.circular(8),
                               color: isSelected
@@ -3956,9 +3985,8 @@ class _RhythmServerDiagnosticsScreenState
                               border: Border.all(
                                 color: isSelected
                                     ? _teal.withValues(alpha: 0.4)
-                                    : CelestialColors.textSecondary.withValues(
-                                        alpha: 0.15,
-                                      ),
+                                    : CelestialColors.textSecondary
+                                        .withValues(alpha: 0.15),
                               ),
                             ),
                             child: Text(
@@ -3985,16 +4013,13 @@ class _RhythmServerDiagnosticsScreenState
                       onTap: _copyAllLogs,
                       child: Container(
                         padding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 6,
-                        ),
+                            horizontal: 10, vertical: 6),
                         decoration: BoxDecoration(
                           borderRadius: BorderRadius.circular(8),
                           color: Colors.white.withValues(alpha: 0.04),
                           border: Border.all(
-                            color: CelestialColors.textSecondary.withValues(
-                              alpha: 0.15,
-                            ),
+                            color: CelestialColors.textSecondary
+                                .withValues(alpha: 0.15),
                           ),
                         ),
                         child: Row(
@@ -4041,23 +4066,24 @@ class _RhythmServerDiagnosticsScreenState
                   ),
                 )
               : _logs == null || _logs!.isEmpty
-              ? Center(
-                  child: Text(
-                    _logs == null ? 'Failed to load logs' : 'No log entries',
-                    style: TextStyle(
-                      color: CelestialColors.textSecondary.withValues(
-                        alpha: 0.6,
+                  ? Center(
+                      child: Text(
+                        _logs == null
+                            ? 'Failed to load logs'
+                            : 'No log entries',
+                        style: TextStyle(
+                          color: CelestialColors.textSecondary
+                              .withValues(alpha: 0.6),
+                          fontSize: 14,
+                        ),
                       ),
-                      fontSize: 14,
+                    )
+                  : ListView.builder(
+                      padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
+                      itemCount: _logs!.length,
+                      itemBuilder: (context, index) =>
+                          _buildLogEntry(_logs![index]),
                     ),
-                  ),
-                )
-              : ListView.builder(
-                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 24),
-                  itemCount: _logs!.length,
-                  itemBuilder: (context, index) =>
-                      _buildLogEntry(_logs![index]),
-                ),
         ),
       ],
     );
@@ -4135,10 +4161,8 @@ class _HubDetailScreen extends StatefulWidget {
 
   const _HubDetailScreen({required this.scope});
 
-  static Future<void> show(
-    BuildContext context, {
-    required HubDeviceScope scope,
-  }) {
+  static Future<void> show(BuildContext context,
+      {required HubDeviceScope scope}) {
     return Navigator.of(context).push(
       PageRouteBuilder(
         opaque: false,
@@ -4242,9 +4266,8 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
     }
 
     final parentNodeIdByDeviceId = <String, String?>{
-      for (final node in syncProvider.topologyNodes.where(
-        (node) => node.isDevice,
-      ))
+      for (final node
+          in syncProvider.topologyNodes.where((node) => node.isDevice))
         node.id: node.parentId,
     };
 
@@ -4256,50 +4279,43 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
       final parentNodeId = deviceId == null || deviceId.isEmpty
           ? d['parent_id'] as String? ?? d['room_id'] as String?
           : parentNodeIdByDeviceId[deviceId] ??
-                d['parent_id'] as String? ??
-                d['room_id'] as String?;
+              d['parent_id'] as String? ??
+              d['room_id'] as String?;
       (byRoom[parentNodeId] ??= []).add(d);
     }
 
     final parsedRooms = <RhythmRoom>[];
     for (final entry in byRoom.entries) {
       final roomDevices = entry.value
-          .map(
-            (d) => RhythmDevice(
-              id: d['id'] as String? ?? '',
-              type: RhythmDeviceType.fromString(
-                d['device_type'] as String? ?? 'light',
-              ),
-              name: d['name'] as String?,
-              manufacturer: d['manufacturer'] as String?,
-              model: d['model'] as String?,
-            ),
-          )
+          .map((d) => RhythmDevice(
+                id: d['id'] as String? ?? '',
+                type: RhythmDeviceType.fromString(
+                    d['device_type'] as String? ?? 'light'),
+                name: d['name'] as String?,
+                manufacturer: d['manufacturer'] as String?,
+                model: d['model'] as String?,
+              ))
           .toList();
       final roomId = entry.key;
-      parsedRooms.add(
-        RhythmRoom(
-          id: roomId ?? '',
-          name: (roomId != null ? roomNames[roomId] : null) ?? 'Unassigned',
-          groupedLightId: '',
-          state: RoomModeState.active,
-          rhythmEnabled: false,
-          disabled: false,
-          timeOffset: 0,
-          brightnessOffset: 0,
-          hubTypes: widget.scope.hubs
-              .map((hub) => hub['type'] as String)
-              .toSet()
-              .toList(),
-          devices: roomDevices,
-        ),
-      );
+      parsedRooms.add(RhythmRoom(
+        id: roomId ?? '',
+        name: (roomId != null ? roomNames[roomId] : null) ?? 'Unassigned',
+        groupedLightId: '',
+        state: RoomModeState.active,
+        rhythmEnabled: false,
+        disabled: false,
+        timeOffset: 0,
+        brightnessOffset: 0,
+        hubTypes: widget.scope.hubs
+            .map((hub) => hub['type'] as String)
+            .toSet()
+            .toList(),
+        devices: roomDevices,
+      ));
     }
 
-    final summary = HubDeviceScope.summarize(
-      hubDevices,
-      roomCount: parsedRooms.length,
-    );
+    final summary =
+        HubDeviceScope.summarize(hubDevices, roomCount: parsedRooms.length);
 
     setState(() {
       _canonicalRooms = parsedRooms;
@@ -4339,31 +4355,28 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
         _RhythmServerSettingsScreenState._hubConnectionLabel(hubInfo);
     final connectionColor =
         _RhythmServerSettingsScreenState._hubConnectionColor(hubInfo);
-    final retrySummary = _RhythmServerSettingsScreenState._hubRetrySummary(
-      hubInfo,
-    );
+    final retrySummary =
+        _RhythmServerSettingsScreenState._hubRetrySummary(hubInfo);
     final retryActionEnabled =
         !_RhythmServerSettingsScreenState._hubIsAutoRetrying(hubInfo);
     final retryActionLabel = connected
         ? 'Reconnect'
         : _RhythmServerSettingsScreenState._hubIsAutoRetrying(hubInfo)
-        ? 'Retrying Automatically'
-        : 'Retry';
+            ? 'Retrying Automatically'
+            : 'Retry';
     final retryActionColor =
         _RhythmServerSettingsScreenState._hubIsAutoRetrying(hubInfo)
-        ? _RhythmServerSettingsScreenState._warningAmber
-        : _teal;
+            ? _RhythmServerSettingsScreenState._warningAmber
+            : _teal;
     final rooms = _canonicalRooms ?? [];
-    final deviceSummary = _canonicalLoading
-        ? 'Loading...'
-        : (_canonicalSummary ?? 'No devices');
+    final deviceSummary =
+        _canonicalLoading ? 'Loading...' : (_canonicalSummary ?? 'No devices');
     final label = _RhythmServerSettingsScreenState._hubLabel(_type);
     final hubColor = _RhythmServerSettingsScreenState._hubColor(_type);
     final hubIcon = _RhythmServerSettingsScreenState._hubIcon(_type);
     final canAddMatter = syncProvider.canAddMatterDevice;
     final canAddHueBle = syncProvider.canAddHueBleDevice;
-    final canAddHueBridge =
-        connected &&
+    final canAddHueBridge = connected &&
         _type == 'hue' &&
         syncProvider.canAddHueBridgeDeviceBySerial;
     final canAddHueBridgeButton =
@@ -4395,15 +4408,17 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                           width: 1,
                         ),
                       ),
-                      child: Icon(Icons.arrow_back, color: hubColor, size: 20),
+                      child: Icon(
+                        Icons.arrow_back,
+                        color: hubColor,
+                        size: 20,
+                      ),
                     ),
                   ),
                   Expanded(
                     child: Center(
-                      child:
-                          _RhythmServerSettingsScreenState._hubHasBetaBadge(
-                            _type,
-                          )
+                      child: _RhythmServerSettingsScreenState._hubHasBetaBadge(
+                              _type)
                           ? BetaLabel(
                               label: label,
                               style: TextStyle(
@@ -4447,15 +4462,13 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                             radius: 1.2,
                             colors: [
                               hubColor.withValues(
-                                alpha: connected ? 0.08 : 0.03,
-                              ),
+                                  alpha: connected ? 0.08 : 0.03),
                               CelestialColors.backgroundCard,
                             ],
                           ),
                           border: Border.all(
                             color: hubColor.withValues(
-                              alpha: connected ? 0.2 : 0.1,
-                            ),
+                                alpha: connected ? 0.2 : 0.1),
                             width: 1,
                           ),
                         ),
@@ -4467,14 +4480,12 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                               decoration: BoxDecoration(
                                 shape: BoxShape.circle,
                                 color: hubColor.withValues(
-                                  alpha: connected ? 0.2 : 0.1,
-                                ),
+                                    alpha: connected ? 0.2 : 0.1),
                               ),
                               child: Icon(
                                 hubIcon,
                                 color: hubColor.withValues(
-                                  alpha: connected ? 1.0 : 0.5,
-                                ),
+                                    alpha: connected ? 1.0 : 0.5),
                                 size: 28,
                               ),
                             ),
@@ -4529,9 +4540,8 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                             Text(
                               deviceSummary,
                               style: TextStyle(
-                                color: CelestialColors.textSecondary.withValues(
-                                  alpha: 0.6,
-                                ),
+                                color: CelestialColors.textSecondary
+                                    .withValues(alpha: 0.6),
                                 fontSize: 12,
                               ),
                             ),
@@ -4541,21 +4551,17 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                     const SizedBox(height: 20),
                     // The aggregate destination opens directly onto devices.
                     if (widget.scope.isThirdParty) ...[
-                      Text(
-                        deviceSummary,
-                        style: const TextStyle(
-                          color: CelestialColors.textSecondary,
-                        ),
-                      ),
+                      Text(deviceSummary,
+                          style: const TextStyle(
+                              color: CelestialColors.textSecondary)),
                       const SizedBox(height: 12),
                     ],
                     _buildSectionHeader('DEVICES'),
                     const SizedBox(height: 8),
                     if (_canonicalLoadFailed)
                       TextButton.icon(
-                        onPressed: _canonicalLoading
-                            ? null
-                            : _fetchCanonicalDevices,
+                        onPressed:
+                            _canonicalLoading ? null : _fetchCanonicalDevices,
                         icon: const Icon(Icons.refresh),
                         label: const Text('Retry loading devices'),
                       ),
@@ -4709,33 +4715,27 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                 for (final (index, room) in rooms.indexed) ...[
                   if (index > 0)
                     Divider(
-                      height: 1,
-                      color: CelestialColors.orbitRing.withValues(alpha: 0.2),
-                    ),
+                        height: 1,
+                        color:
+                            CelestialColors.orbitRing.withValues(alpha: 0.2)),
                   // Room header
                   Padding(
                     padding: const EdgeInsets.only(
-                      left: 16,
-                      right: 16,
-                      top: 12,
-                      bottom: 4,
-                    ),
+                        left: 16, right: 16, top: 12, bottom: 4),
                     child: Row(
                       children: [
                         Icon(
                           Icons.meeting_room_outlined,
-                          color: CelestialColors.textSecondary.withValues(
-                            alpha: 0.4,
-                          ),
+                          color: CelestialColors.textSecondary
+                              .withValues(alpha: 0.4),
                           size: 14,
                         ),
                         const SizedBox(width: 6),
                         Text(
                           room.name,
                           style: TextStyle(
-                            color: CelestialColors.textSecondary.withValues(
-                              alpha: 0.6,
-                            ),
+                            color: CelestialColors.textSecondary
+                                .withValues(alpha: 0.6),
                             fontSize: 12,
                             fontWeight: FontWeight.w600,
                             letterSpacing: 0.3,
@@ -4745,9 +4745,8 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                         Text(
                           room.deviceSummary,
                           style: TextStyle(
-                            color: CelestialColors.textSecondary.withValues(
-                              alpha: 0.4,
-                            ),
+                            color: CelestialColors.textSecondary
+                                .withValues(alpha: 0.4),
                             fontSize: 11,
                           ),
                         ),
@@ -4761,9 +4760,8 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                       child: Text(
                         '${room.deviceIds.length} device${room.deviceIds.length != 1 ? 's' : ''} (untyped)',
                         style: TextStyle(
-                          color: CelestialColors.textSecondary.withValues(
-                            alpha: 0.4,
-                          ),
+                          color: CelestialColors.textSecondary
+                              .withValues(alpha: 0.4),
                           fontSize: 12,
                         ),
                       ),
@@ -4874,10 +4872,8 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
               key: ValueKey('purge-removed-bulb-$id'),
               tooltip: 'Delete permanently',
               onPressed: () => _purgeRemovedDevice(device),
-              icon: Icon(
-                Icons.delete_forever_outlined,
-                color: Colors.red.shade300,
-              ),
+              icon: Icon(Icons.delete_forever_outlined,
+                  color: Colors.red.shade300),
             ),
           ],
         ],
@@ -4906,8 +4902,7 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text(
-              'No saved Matter setup code is available. You can delete this entry and add the bulb with its code.',
-            ),
+                'No saved Matter setup code is available. You can delete this entry and add the bulb with its code.'),
           ),
         );
         return;
@@ -4932,8 +4927,7 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Could not start Matter recovery. Try again.'),
-          ),
+              content: Text('Could not start Matter recovery. Try again.')),
         );
       }
     } finally {
@@ -4968,10 +4962,8 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
           ),
           TextButton(
             onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: Text(
-              'Delete Forever',
-              style: TextStyle(color: Colors.red.shade300),
-            ),
+            child: Text('Delete Forever',
+                style: TextStyle(color: Colors.red.shade300)),
           ),
         ],
       ),
@@ -4996,8 +4988,8 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Could not permanently delete this bulb. Try again.'),
-        ),
+            content:
+                Text('Could not permanently delete this bulb. Try again.')),
       );
     }
     if (mounted) setState(() => _removedDeviceBusy.remove(id));
@@ -5040,9 +5032,8 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
                     Text(
                       device.productInfo!,
                       style: TextStyle(
-                        color: CelestialColors.textSecondary.withValues(
-                          alpha: 0.5,
-                        ),
+                        color: CelestialColors.textSecondary
+                            .withValues(alpha: 0.5),
                         fontSize: 11,
                       ),
                       maxLines: 1,
@@ -5123,35 +5114,36 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
   }
 
   List<RhythmDevice> _sortDevices(List<RhythmDevice> devices) {
-    return List<RhythmDevice>.from(devices)..sort((a, b) {
-      const order = {
-        RhythmDeviceType.light: 0,
-        RhythmDeviceType.button: 1,
-        RhythmDeviceType.motion: 2,
-        RhythmDeviceType.contact: 3,
-      };
-      return (order[a.type] ?? 3).compareTo(order[b.type] ?? 3);
-    });
+    return List<RhythmDevice>.from(devices)
+      ..sort((a, b) {
+        const order = {
+          RhythmDeviceType.light: 0,
+          RhythmDeviceType.button: 1,
+          RhythmDeviceType.motion: 2,
+          RhythmDeviceType.contact: 3,
+        };
+        return (order[a.type] ?? 3).compareTo(order[b.type] ?? 3);
+      });
   }
 
   (IconData, Color) _iconForDeviceType(RhythmDeviceType type) => switch (type) {
-    RhythmDeviceType.light => (
-      Icons.lightbulb_outline,
-      const Color(0xFFFFB74D),
-    ),
-    RhythmDeviceType.button => (
-      Icons.touch_app_outlined,
-      const Color(0xFF64B5F6),
-    ),
-    RhythmDeviceType.motion => (
-      Icons.sensors_outlined,
-      const Color(0xFF81C784),
-    ),
-    RhythmDeviceType.contact => (
-      Icons.sensor_door_outlined,
-      const Color(0xFFFFB74D),
-    ),
-  };
+        RhythmDeviceType.light => (
+            Icons.lightbulb_outline,
+            const Color(0xFFFFB74D)
+          ),
+        RhythmDeviceType.button => (
+            Icons.touch_app_outlined,
+            const Color(0xFF64B5F6)
+          ),
+        RhythmDeviceType.motion => (
+            Icons.sensors_outlined,
+            const Color(0xFF81C784)
+          ),
+        RhythmDeviceType.contact => (
+            Icons.sensor_door_outlined,
+            const Color(0xFFFFB74D)
+          ),
+      };
 
   Map<String, dynamic> _currentHubInfo(ServerSyncProvider syncProvider) {
     final address = _address;
@@ -5168,9 +5160,8 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
     if (_reviewingHueAutomation) return;
     setState(() => _reviewingHueAutomation = true);
     try {
-      final authority = await context
-          .read<ServerSyncProvider>()
-          .fetchHueAuthority();
+      final authority =
+          await context.read<ServerSyncProvider>().fetchHueAuthority();
       if (!mounted) return;
       final bridge = _matchingHueBridge(authority?.bridges ?? const []);
       if (bridge == null) {
@@ -5183,14 +5174,20 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
         );
         return;
       }
-      await HueAuthorityScreen.show(context, bridge, source: 'hub_settings');
+      await HueAuthorityScreen.show(
+        context,
+        bridge,
+        source: 'hub_settings',
+      );
     } catch (error, stackTrace) {
       debugPrint(
         'HubDetailScreen: Hue authority load failed: $error\n$stackTrace',
       );
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not load Hue room automation.')),
+          const SnackBar(
+            content: Text('Could not load Hue room automation.'),
+          ),
         );
       }
     } finally {
@@ -5235,25 +5232,20 @@ class _HubDetailScreenState extends State<_HubDetailScreen> {
         context: context,
         builder: (ctx) => AlertDialog(
           backgroundColor: CelestialColors.backgroundCard,
-          title: const Text(
-            'Remove Matter Hub?',
-            style: TextStyle(color: CelestialColors.textPrimary),
-          ),
+          title: const Text('Remove Matter Hub?',
+              style: TextStyle(color: CelestialColors.textPrimary)),
           content: const Text(
             'This will remove all commissioned Matter devices. You will need to re-pair them to use them again.',
             style: TextStyle(color: CelestialColors.textSecondary),
           ),
           actions: [
             TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Cancel'),
-            ),
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel')),
             TextButton(
               onPressed: () => Navigator.pop(ctx, true),
-              child: Text(
-                'Remove',
-                style: TextStyle(color: Colors.red.shade400),
-              ),
+              child:
+                  Text('Remove', style: TextStyle(color: Colors.red.shade400)),
             ),
           ],
         ),
