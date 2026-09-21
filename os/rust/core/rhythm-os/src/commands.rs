@@ -17152,7 +17152,10 @@ pub fn do_node_preferences_set(
         queue_motion_timer_clear(state, node_id);
     }
 
-    let entered_hard_off = hard_off && !prev_hard_off;
+    // Saved HardOff is intent, not proof that the devices are off. Reassert an
+    // explicit Off through the normal dispatch path after a failed command or
+    // external power change; unrelated preference saves must stay side-effect free.
+    let dispatch_hard_off = hard_off && (!prev_hard_off || explicit_state_request);
     let left_hard_off = !hard_off && prev_hard_off;
 
     // State-changing commands already tell us the intended power state. Do
@@ -17161,8 +17164,8 @@ pub fn do_node_preferences_set(
     // return the pre-command value while dispatch is still pending.
     let mut commanded_lights_on = None;
 
-    if entered_hard_off {
-        info!(target: "cmd", "node_preferences_set: {} entering hard_off", node_id);
+    if dispatch_hard_off {
+        info!(target: "cmd", "node_preferences_set: {} applying hard_off explicit={} previously_hard_off={}", node_id, explicit_state_request, prev_hard_off);
         queue_motion_timer_clear(state, node_id);
         let event = InputEvent::new(node_id, ButtonAction::LightsOff);
         if let Err(e) = runtime.handle_event(&event) {
