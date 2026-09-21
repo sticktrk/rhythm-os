@@ -648,20 +648,6 @@ pub(crate) fn turn_on_room_route_aware(
     runtime: &dyn RuntimeHandle,
     room_id: &str,
 ) -> Result<usize> {
-    // Share the host's room-action gate with app/button/preference writes:
-    // planning and sibling dispatch must retain their mutation order.
-    let action_lock = {
-        let mut app = state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
-        app.node_preference_write_locks
-            .entry(room_id.to_string())
-            .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
-            .clone()
-    };
-    let _action_guard = action_lock
-        .lock()
-        .map_err(|_| anyhow::anyhow!("node action lock"))?;
     let is_room = runtime
         .engine_node_snapshot(room_id)
         .is_some_and(|node| node.kind.is_room());
@@ -685,6 +671,20 @@ pub(crate) fn turn_on_room_route_aware(
         runtime.turn_on_room(room_id)?;
         return Ok(1);
     }
+    // Share the host's room-action gate with app/button/preference writes:
+    // planning and sibling dispatch must retain their mutation order.
+    let action_lock = {
+        let mut app = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("state lock poisoned"))?;
+        app.node_preference_write_locks
+            .entry(room_id.to_string())
+            .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
+            .clone()
+    };
+    let _action_guard = action_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("node action lock"))?;
     let event = rhythm_core::InputEvent::new(room_id, rhythm_core::ButtonAction::OnPress);
     let rhythm_core::RhythmInputPlanOutcome::Plan {
         plan,
@@ -712,8 +712,8 @@ pub(crate) fn turn_on_room_route_aware(
 }
 
 /// Emit changed desired states once, scoped to this activation's subtree.
-/// Existing manual room events already contain the parent and immediate
-/// children; only deeper changed descendants need supplemental notifications.
+/// Manual and motion room events contain the parent and immediate children;
+/// only deeper changed descendants need supplemental notifications.
 pub(crate) fn emit_activated_child_state_events(
     state: &SharedState,
     runtime: &dyn RuntimeHandle,
@@ -1906,9 +1906,82 @@ mod tests {
         assert_eq!(direct[0].1.brightness, 31);
     }
 
+    fn check_motion_node_action_lock(register_direct_route: bool) {
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        use std::time::Duration;
+
+        let fixture = mixed_hue_matter_fixture(register_direct_route);
+        let action_lock = {
+            let mut app = fixture.state.lock().unwrap();
+            app.node_preference_write_locks
+                .entry("hallway".to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let guard = action_lock.lock().unwrap();
+        let state = fixture.state.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (completed_tx, completed_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            completed_tx
+                .send(crate::event_loop::turn_on_node_inline(&state, "hallway"))
+                .unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let while_locked = completed_rx.recv_timeout(Duration::from_millis(500));
+        let groups_while_locked = if while_locked == Ok(true) {
+            fixture.group_controller.wait_for_turn_on_calls(1).len()
+        } else {
+            fixture.group_controller.turn_on_calls().len()
+        };
+        // Release and join before asserting so the failing baseline also exits cleanly.
+        drop(guard);
+        let after_release = if while_locked.is_err() {
+            Some(completed_rx.recv_timeout(Duration::from_secs(2)).unwrap())
+        } else {
+            None
+        };
+        worker.join().unwrap();
+
+        if register_direct_route {
+            assert_eq!(while_locked, Err(RecvTimeoutError::Timeout));
+            assert_eq!(groups_while_locked, 0);
+            assert_eq!(after_release, Some(true));
+            let direct = fixture.matter_controller.wait_for_turn_on_calls(1);
+            assert_eq!(direct.len(), 1);
+            assert_eq!(direct[0].1.brightness, 31);
+        } else {
+            assert_eq!(
+                while_locked,
+                Ok(true),
+                "group-only motion must bypass app actions"
+            );
+            assert_eq!(groups_while_locked, 1);
+        }
+        assert_eq!(fixture.group_controller.wait_for_turn_on_calls(1).len(), 1);
+    }
+
+    #[test]
+    fn motion_fast_path_does_not_wait_for_node_action_lock() {
+        check_motion_node_action_lock(false);
+    }
+
+    #[test]
+    fn motion_direct_routes_wait_for_node_action_lock() {
+        check_motion_node_action_lock(true);
+    }
+
     #[test]
     fn motion_activation_emits_changed_child_state_once() {
+        use crate::canonical::identity::DiscoveredIdentity;
+        use crate::canonical::registry::ResolveResult;
+        use crate::event_loop::{handle_hub_event, MotionTimerState};
+        use crate::hub::HubEvent;
         use crate::server_event::ServerEvent;
+        use rhythm_core::runtime::hub_registry::DeviceType;
+        use std::time::{Duration, Instant};
+
         let fixture = mixed_hue_matter_fixture(true);
         let grouped = fixture
             .runtime
@@ -1916,33 +1989,119 @@ mod tests {
             .into_iter()
             .find(|node| node.name == "Grouped lamp")
             .unwrap();
-        let mut saved = RestoredNodeState::from(&grouped);
-        saved.soft_off = true;
-        saved.rhythm_enabled = true;
-        fixture.runtime.restore_node_state(&grouped.id, saved);
+        fixture.runtime.add_node(
+            "nested-room",
+            "Nested room",
+            rhythm_core::LightNodeKind::Room,
+            Some("hallway".into()),
+        );
+        fixture.runtime.add_node(
+            "nested-light",
+            "Nested lamp",
+            rhythm_core::LightNodeKind::LightDevice,
+            Some("nested-room".into()),
+        );
+        for id in ["hallway", grouped.id.as_str(), "nested-light"] {
+            let mut saved =
+                RestoredNodeState::from(&fixture.runtime.engine_node_snapshot(id).unwrap());
+            saved.soft_off = true;
+            saved.rhythm_enabled = true;
+            fixture.runtime.restore_node_state(id, saved);
+        }
+        let hub_key = {
+            let mut app = fixture.state.lock().unwrap();
+            app.topology
+                .replace_external_room_automation_decisions(
+                    &HubKey::new(HubType::new("hue"), "bridge"),
+                    &[(
+                        "hallway".into(),
+                        crate::topology::ExternalRoomAutomationOwner::Rhythm,
+                    )],
+                )
+                .unwrap();
+            let hub_key = app.hubs.keys().next().cloned().unwrap();
+            let sensor = DiscoveredIdentity {
+                native_id: "motion-sensor".to_string(),
+                room_id: Some("hallway-native".to_string()),
+                room_name: Some("Hallway".to_string()),
+                name: "Motion sensor".to_string(),
+                device_type: DeviceType::Motion,
+                hardware_ids: Vec::new(),
+                manufacturer: None,
+                model: None,
+            };
+            let ResolveResult::Created { canonical_id } =
+                app.canonical_registry.resolve(&sensor, &hub_key, 1_000)
+            else {
+                panic!("synthetic motion sensor should be new");
+            };
+            assert!(app
+                .canonical_registry
+                .assign_room(&canonical_id, Some("hallway")));
+            assert!(app
+                .topology
+                .attach_device_user_override("hallway", &canonical_id));
+            hub_key
+        };
         let (tx, mut rx) = tokio::sync::broadcast::channel(64);
         fixture.state.lock().unwrap().event_tx = Some(tx);
-        for expected in [1, 0] {
-            assert!(crate::event_loop::turn_on_node_inline(
-                &fixture.state,
-                "hallway"
-            ));
-            let mut child_events = Vec::new();
-            while let Ok(event) = rx.try_recv() {
-                if let ServerEvent::NodeState { nodes } = event {
-                    child_events.extend(nodes.into_iter().filter(|node| node.id == grouped.id));
-                }
-            }
-            assert_eq!(
-                child_events.len(),
-                expected,
-                "only changed grouped-child state should be emitted"
+        let mut motion = MotionTimerState::new();
+        let motion_event = || HubEvent::Motion {
+            hub_key: Some(hub_key.clone()),
+            room_id: "hallway".into(),
+            sensor_id: "motion-sensor".into(),
+            detected: true,
+        };
+        handle_hub_event(&fixture.state, motion_event(), &mut motion);
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut child_events = Vec::new();
+        loop {
+            assert!(
+                Instant::now() < deadline,
+                "production motion action must complete"
             );
-            for event in child_events {
-                assert!(!event.standby_active);
-                assert_eq!(event.state, rhythm_core::RoomModeState::Active);
+            if let Ok(ServerEvent::NodeState { nodes }) = rx.try_recv() {
+                // Only the wrapper's final room event includes both immediate lights.
+                // Wait for it, not merely the earlier controller dispatch.
+                let complete = nodes.iter().any(|node| node.id == grouped.id)
+                    && nodes.iter().any(|node| node.id == fixture.matter_light_id);
+                child_events.extend(
+                    nodes
+                        .into_iter()
+                        .filter(|node| node.id == grouped.id || node.id == "nested-light"),
+                );
+                if complete {
+                    break;
+                }
+            } else {
+                std::thread::sleep(Duration::from_millis(5));
             }
         }
+        for id in [grouped.id.as_str(), "nested-light"] {
+            let events: Vec<_> = child_events.iter().filter(|node| node.id == id).collect();
+            assert_eq!(events.len(), 1, "one production activation event for {id}");
+            assert!(!events[0].standby_active);
+            assert_eq!(events[0].state, rhythm_core::RoomModeState::Active);
+        }
+
+        // Continued occupancy must not start another action or repeat child state.
+        handle_hub_event(&fixture.state, motion_event(), &mut motion);
+        let deadline = Instant::now() + Duration::from_millis(200);
+        while Instant::now() < deadline {
+            if let Ok(ServerEvent::NodeState { nodes }) = rx.try_recv() {
+                assert!(
+                    !nodes
+                        .iter()
+                        .any(|node| { node.id == grouped.id || node.id == "nested-light" }),
+                    "continued motion must not duplicate child notifications"
+                );
+            } else {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        assert_eq!(fixture.group_controller.wait_for_turn_on_calls(1).len(), 1);
+        assert_eq!(fixture.matter_controller.wait_for_turn_on_calls(1).len(), 1);
     }
 
     #[test]

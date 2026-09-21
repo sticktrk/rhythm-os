@@ -576,11 +576,13 @@ pub fn turn_on_node_inline(state: &SharedState, node_id: &str) -> bool {
             crate::commands::update_lights_on_cache_for_runtime_node(
                 state, &runtime, node_id, true,
             );
+            // The motion action wrapper emits the room and immediate children.
+            // Only changed nested descendants need supplemental events here.
             crate::light_runtime::emit_activated_child_state_events(
                 state,
                 runtime.as_ref(),
                 node_id,
-                false,
+                true,
             );
             true
         }
