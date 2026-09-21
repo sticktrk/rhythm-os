@@ -798,7 +798,9 @@ fn forbidden(message: &str) -> Response {
 
 fn support_token_forbidden_reason(method: &Method, uri: &Uri) -> Option<&'static str> {
     let path = uri.path();
-    if path.starts_with("/api/pairing/wifi-profiles") || path.starts_with("/api/matter/wifi-change")
+    if path.starts_with("/api/pairing/wifi-profiles")
+        || path.starts_with("/api/matter/wifi-change")
+        || path.starts_with("/api/wifi/profile/")
     {
         return Some("Network provisioning is owner-only");
     }
@@ -850,6 +852,8 @@ fn support_token_forbidden_reason(method: &Method, uri: &Uri) -> Option<&'static
 fn owner_token_required(method: &Method, uri: &Uri) -> bool {
     if uri.path().starts_with("/api/pairing/wifi-profiles")
         || uri.path().starts_with("/api/matter/wifi-change")
+        // Moving the Box with a stored secret is a saved-network operation.
+        || uri.path().starts_with("/api/wifi/profile/")
     {
         return true;
     }

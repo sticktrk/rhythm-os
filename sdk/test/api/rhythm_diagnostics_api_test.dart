@@ -234,6 +234,25 @@ void main() {
       ]);
     });
 
+    test('changeWifiToSavedNetwork sends only the profile identity', () async {
+      server = await _FakeDiagnosticsServer.start();
+      final api = RhythmDiagnosticsApi(
+        host: '127.0.0.1',
+        port: server!.port,
+      );
+
+      final result = await api.changeWifiToSavedNetwork('profile-1');
+
+      expect(result.accepted, isTrue);
+      expect(result.ssid, 'Saved Network');
+      expect(server!.requests, ['/api/wifi/profile/profile-1']);
+      expect(server!.wifiBodies, isEmpty);
+
+      final missing = await api.changeWifiToSavedNetwork('gone');
+      expect(missing.accepted, isFalse);
+      expect(missing.httpStatus, HttpStatus.notFound);
+    });
+
     test('factoryReset posts the shared reset endpoint', () async {
       server = await _FakeDiagnosticsServer.start();
       final api = RhythmDiagnosticsApi(
@@ -424,6 +443,18 @@ class _FakeDiagnosticsServer {
         'status': 'accepted',
         'message': 'Wi-Fi change scheduled',
         'ssid': wifiBodies.last['ssid'],
+      });
+      return;
+    }
+
+    if (request.method == 'PUT' &&
+        request.uri.path == '/api/wifi/profile/profile-1') {
+      final body = await utf8.decoder.bind(request).join();
+      if (body.isNotEmpty) wifiBodies.add({'unexpected': body});
+      await _writeJson(request.response, {
+        'status': 'accepted',
+        'message': 'Wi-Fi change scheduled',
+        'ssid': 'Saved Network',
       });
       return;
     }

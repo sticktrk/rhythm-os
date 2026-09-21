@@ -19,7 +19,10 @@ equal to the previous Box network) keeps following it; an owner-chosen default
 stays. If the catalog is full, the new connection cannot be stored, so
 `box_profile_id` is cleared instead: startup recovery then uses the system network
 configuration and never rejoins the previous network. Forgetting the Box network
-clears only the pointer. The owner catalog cannot edit or remove the Box
+clears only the pointer. The Box's **Change Wi-Fi** dialog lists the other saved
+networks and moves the Box by profile ID, so a saved password is never re-typed or
+sent by the app; a new network is still typed, and joins the catalog once the Box
+connects. The owner catalog cannot edit or remove the Box
 connection, cannot remove the default while another network exists (the Box never
 chooses where accessories go), and stores one entry per SSID.
 
@@ -52,6 +55,7 @@ an owner token even on LAN, deny support tokens, and return `Cache-Control: no-s
 | GET `/api/pairing/wifi-profiles` | Metadata only: revision, `default_id`, `box_profile_id`, profile IDs and SSIDs |
 | PUT `/api/pairing/wifi-profiles` | Revision, UUID correlation ID, `save`/`remove`/`default`, optional profile ID; omitted password preserves it, empty password selects an open network |
 | GET `/api/pairing/wifi-profiles/:id/credentials` | Explicit uncached owner credential retrieval for phone BLE |
+| PUT `/api/wifi/profile/:id` (appliance) | Move the Box to a saved network. Owner-only on LAN and remotely; the password never leaves the Box. Same accepted/scheduled contract as PUT `/api/wifi`; an unknown profile is 404 with no detail |
 | GET `/api/pairing/wifi-credentials` | Credentials of `default_id` for phone BLE provisioning |
 | POST `/api/matter/wifi-change` | UUID operation ID, saved profile ID, registered native Matter device ID; returns a receipt |
 | GET `/api/matter/wifi-change/:id` | Same receipt across retries and app reconnect |

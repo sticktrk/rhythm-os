@@ -1,3 +1,4 @@
+import '../network/box_wifi_dialog.dart';
 import '../network/saved_wifi_screen.dart';
 import 'dart:async';
 
@@ -18,6 +19,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
         RhythmHubStartupRetry,
         RhythmHubStartupRetryStatus,
         RhythmRoom,
+        RhythmWifiProfiles,
         RoomModeState;
 import 'package:uuid/uuid.dart';
 import '../../widgets/solar_orbit.dart';
@@ -994,10 +996,13 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     setState(() => _isChangingWifi = true);
     try {
       final client = await _diagnosticsClient();
-      final result = await client.changeWifi(
-        ssid: credentials.ssid,
-        password: credentials.password,
-      );
+      final profileId = credentials.profileId;
+      final result = profileId != null
+          ? await client.changeWifiToSavedNetwork(profileId)
+          : await client.changeWifi(
+              ssid: credentials.ssid,
+              password: credentials.password ?? '',
+            );
       if (!mounted) return;
 
       if (result.accepted) {
@@ -1023,92 +1028,23 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     }
   }
 
-  Future<({String ssid, String password})?> _showWifiCredentialsDialog() {
-    final ssidController = TextEditingController();
-    final passwordController = TextEditingController();
-
-    return showDialog<({String ssid, String password})>(
+  /// Saved networks let the Box move without the password leaving it. Any
+  /// failure to read them falls back to typed entry rather than blocking.
+  Future<BoxWifiChoice?> _showWifiCredentialsDialog() async {
+    RhythmWifiProfiles? catalog;
+    final sync = context.read<ServerSyncProvider>();
+    if (widget.homeManaged && sync.supportsSavedWifiProfiles) {
+      try {
+        catalog = await sync.api.getWifiProfiles();
+      } catch (_) {
+        catalog = null;
+      }
+    }
+    if (!mounted) return null;
+    return showDialog<BoxWifiChoice>(
       context: context,
-      builder: (ctx) {
-        return StatefulBuilder(
-          builder: (ctx, setDialogState) {
-            final canSubmit = ssidController.text.trim().isNotEmpty;
-
-            return AlertDialog(
-              backgroundColor: CelestialColors.backgroundCard,
-              title: const Text(
-                'Change Wi-Fi',
-                style: TextStyle(color: CelestialColors.textPrimary),
-              ),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextField(
-                    controller: ssidController,
-                    autofocus: true,
-                    textInputAction: TextInputAction.next,
-                    onChanged: (_) => setDialogState(() {}),
-                    style: const TextStyle(color: CelestialColors.textPrimary),
-                    decoration: const InputDecoration(
-                      labelText: 'Network name',
-                      prefixIcon: Icon(Icons.wifi_rounded),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: passwordController,
-                    obscureText: true,
-                    textInputAction: TextInputAction.done,
-                    onSubmitted: (_) {
-                      if (!canSubmit) return;
-                      Navigator.of(
-                        ctx,
-                        rootNavigator: true,
-                      ).pop((
-                        ssid: ssidController.text.trim(),
-                        password: passwordController.text,
-                      ));
-                    },
-                    style: const TextStyle(color: CelestialColors.textPrimary),
-                    decoration: const InputDecoration(
-                      labelText: 'Password',
-                      prefixIcon: Icon(Icons.lock_outline_rounded),
-                    ),
-                  ),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(
-                    ctx,
-                    rootNavigator: true,
-                  ).pop(),
-                  child: Text(
-                    'Cancel',
-                    style: TextStyle(color: CelestialColors.textSecondary),
-                  ),
-                ),
-                TextButton(
-                  onPressed: canSubmit
-                      ? () => Navigator.of(
-                            ctx,
-                            rootNavigator: true,
-                          ).pop((
-                            ssid: ssidController.text.trim(),
-                            password: passwordController.text,
-                          ))
-                      : null,
-                  child: const Text('Change'),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    ).whenComplete(() {
-      ssidController.dispose();
-      passwordController.dispose();
-    });
+      builder: (_) => BoxWifiDialog(catalog: catalog),
+    );
   }
 
   Future<void> _refreshAfterWifiChange() async {

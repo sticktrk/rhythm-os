@@ -396,6 +396,32 @@ class RhythmDiagnosticsApi {
     }
   }
 
+  /// Move the appliance to a saved network. Owner-only; the password stays on
+  /// the Box. Requires the `saved_wifi_profiles_v1` capability.
+  Future<RhythmWifiChangeResponse> changeWifiToSavedNetwork(
+    String profileId,
+  ) async {
+    try {
+      final response = await _dio.put(
+        'api/wifi/profile/${Uri.encodeComponent(profileId)}',
+        options: Options(validateStatus: (_) => true),
+      );
+      return RhythmWifiChangeResponse.fromHttp(
+        statusCode: response.statusCode,
+        data: response.data,
+      );
+    } on DioException catch (error) {
+      return RhythmWifiChangeResponse(
+        httpStatus: error.response?.statusCode,
+        error: _responseBodyText(error.response?.data) ??
+            _networkErrorText(error) ??
+            error.message,
+      );
+    } catch (error) {
+      return RhythmWifiChangeResponse(error: error.toString());
+    }
+  }
+
   /// Full factory reset via the shared cross-platform endpoint.
   /// Wipes paired hubs and configuration back to defaults on every platform.
   Future<bool> factoryReset({
