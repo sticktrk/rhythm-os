@@ -277,3 +277,77 @@ fn backup_restore_then_first_sync_preserves_halloween_shuffle_binding() {
         .any(|room| room.room_profile.mood_scene_palette_seed == seed));
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn matter_failure_diagnostics_do_not_enter_backups_or_replay_after_restore() {
+    use rhythm_os::pairing::{
+        pairing_history_entry_for_pair, record_pairing_history, PairingFailureStage,
+        PairingSession, PairingStatus,
+    };
+    use rhythm_os::storage::FileStorage;
+    use std::sync::Arc;
+
+    let directory = std::env::temp_dir().join(format!(
+        "rhythm-backup-pairing-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let harness = TestHarness::new().with_discovery(
+        vec![room("mock-kitchen", "Kitchen")],
+        vec![light("lamp-1", "mock-kitchen")],
+    );
+    harness.sync();
+    harness.state.lock().unwrap().storage = Some(Arc::new(
+        FileStorage::new(directory.to_str().unwrap()).unwrap(),
+    ));
+    let failure = PairingSession {
+        hub_type: "matter".into(),
+        status: PairingStatus::Failed,
+        device: None,
+        devices: vec![],
+        error: Some("Network discovery failed".into()),
+        failure_stage: Some(PairingFailureStage::MatterNetworkDiscovery),
+        warnings: vec![],
+        details: None,
+    };
+    record_pairing_history(
+        &harness.state,
+        pairing_history_entry_for_pair(
+            "matter",
+            &serde_json::json!({"session_id": "pair-backup-test"}),
+            &failure,
+        ),
+    );
+    for include_secrets in [false, true] {
+        let bundle = commands::build_backup_bundle_dto(&harness.state, include_secrets).unwrap();
+        let serialized = serde_json::to_string(&bundle).unwrap();
+        assert!(!serialized.contains("matter_network_discovery"));
+        assert!(!serialized.contains("pair-backup-test"));
+        let mut restored = TestHarness::new();
+        commands::do_backup_restore(&restored.state, bundle).unwrap();
+        let key = restored.add_hub("mock", "192.168.1.100");
+        restored.set_hub_discovery(
+            &key,
+            vec![room("mock-kitchen", "Kitchen")],
+            vec![light("lamp-1", "mock-kitchen")],
+        );
+        restored.sync_all();
+        assert_eq!(
+            restored
+                .state
+                .lock()
+                .unwrap()
+                .canonical_registry
+                .device_count(),
+            1
+        );
+        let exported = commands::build_backup_bundle_dto(&restored.state, include_secrets).unwrap();
+        assert!(!serde_json::to_string(&exported)
+            .unwrap()
+            .contains("pair-backup-test"));
+    }
+    std::fs::remove_dir_all(directory).ok();
+}

@@ -117,3 +117,21 @@ Deno.test('device lifecycle row accepts only bounded commissioner values', () =>
   assert(invalid != null, 'invalid optional commissioner should not reject event')
   assert(invalid.commissioner == null, 'invalid commissioner must be omitted')
 })
+
+Deno.test('Matter failure stages reach lifecycle rows without raw diagnostics', () => {
+  for (const stage of ['matter_bluetooth', 'matter_network_discovery']) {
+    const row = rowForDeviceLifecycle({
+      userId: 'user-1', homeId: 'home-1', hubId: 'hub-1', serverInstanceId: null,
+      event: {
+        id: 'device-lifecycle-failed', epoch_ms: 1, action: 'pair',
+        hub_type: 'matter', outcome: 'failed', failure_stage: stage,
+        correlation_id: 'pair-stage-test', commissioner: 'server',
+        error: 'MT:PRIVATE-SETUP', address: '192.0.2.42',
+      },
+    })
+    assert(row?.failure_stage === stage, 'stage should survive ingestion')
+    assert(row?.correlation_id === 'pair-stage-test', 'attempt should be joinable')
+    assert(!JSON.stringify(row).includes('MT:PRIVATE'), 'raw diagnostics must be excluded')
+    assert(!JSON.stringify(row).includes('192.0.2.42'), 'address must be excluded')
+  }
+})
