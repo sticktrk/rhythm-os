@@ -58,3 +58,5 @@ export 'src/rhythm_logger.dart' show RhythmSdk, rhythmLogger;
 
 // Real-time
 export 'src/realtime/rhythm_connection.dart';
+
+export 'src/models/rhythm_wifi_profiles.dart';

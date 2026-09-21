@@ -877,6 +877,19 @@ pub trait ExternalLightHubIntegration: Send + Sync {
         ))
     }
 
+    fn change_wifi(
+        &self,
+        _state: &SharedState,
+        _device_id: &str,
+        _wifi: &crate::provisioning::WifiCredentials,
+        _expires_at_ms: u64,
+    ) -> Result<crate::wifi_change::WifiChangeOutcome> {
+        Ok(crate::wifi_change::WifiChangeOutcome {
+            code: crate::wifi_change::WifiChangeCode::Unsupported,
+            rollback_verified: false,
+        })
+    }
+
     /// Load owner-visible recovery material for a native paired device.
     ///
     /// Integrations that do not retain pairing secrets return `None`. Callers
@@ -1813,6 +1826,7 @@ pub struct IntegrationCallbacks {
             + Sync,
     >,
     /// Load secret pairing recovery material through the owning integration.
+    pub change_wifi_fn: crate::wifi_change::WifiChangeFn,
     pub load_pairing_recovery_fn: Arc<
         dyn Fn(&SharedState, &str, &str) -> Result<Option<crate::pairing::PairingRecoverySecret>>
             + Send
@@ -2199,6 +2213,13 @@ pub fn integration_callbacks(
         },
     );
 
+    let change_wifi_fn: crate::wifi_change::WifiChangeFn =
+        Arc::new(move |state, device_id, wifi, expires_at_ms| {
+            find_integration(integrations, "matter")
+                .ok_or_else(|| anyhow::anyhow!("Matter unavailable"))?
+                .change_wifi(state, device_id, wifi, expires_at_ms)
+        });
+
     let load_pairing_recovery_fn = Arc::new(
         move |state: &SharedState,
               hub_type: &str,
@@ -2255,6 +2276,7 @@ pub fn integration_callbacks(
         start_pairing_fn,
         reconcile_pairing_results_fn,
         start_unpairing_fn,
+        change_wifi_fn,
         load_pairing_recovery_fn,
         purge_pairing_recovery_fn,
         run_device_test_fn,

@@ -44,3 +44,6 @@ pub mod topology;
 
 pub mod axum_router;
 pub mod server_event;
+
+pub mod wifi_change;
+pub mod wifi_profiles;

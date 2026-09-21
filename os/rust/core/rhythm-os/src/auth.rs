@@ -798,6 +798,10 @@ fn forbidden(message: &str) -> Response {
 
 fn support_token_forbidden_reason(method: &Method, uri: &Uri) -> Option<&'static str> {
     let path = uri.path();
+    if path.starts_with("/api/pairing/wifi-profiles") || path.starts_with("/api/matter/wifi-change")
+    {
+        return Some("Network provisioning is owner-only");
+    }
     if (*method == Method::GET || *method == Method::HEAD)
         && path == "/api/pairing/wifi-credentials"
     {
@@ -844,6 +848,11 @@ fn support_token_forbidden_reason(method: &Method, uri: &Uri) -> Option<&'static
 }
 
 fn owner_token_required(method: &Method, uri: &Uri) -> bool {
+    if uri.path().starts_with("/api/pairing/wifi-profiles")
+        || uri.path().starts_with("/api/matter/wifi-change")
+    {
+        return true;
+    }
     ((*method == Method::GET || *method == Method::HEAD)
         && uri.path() == "/api/pairing/wifi-credentials")
         || (*method == Method::GET && uri.path().starts_with("/api/matter/setup-code/"))
@@ -1284,6 +1293,52 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn saved_networks_and_changes_require_owner_on_lan_and_remote() {
+        let state = test_state();
+        let owner = issue_local_owner_token(&state, Some("fixture".into())).unwrap();
+        let support = issue_local_support_token(&state, Some("fixture".into())).unwrap();
+        let app = auth_test_router(state);
+        for (method, path) in [
+            (Method::GET, "/api/pairing/wifi-profiles"),
+            (Method::PUT, "/api/pairing/wifi-profiles"),
+            (
+                Method::GET,
+                "/api/pairing/wifi-profiles/fixture/credentials",
+            ),
+            (Method::GET, "/api/matter/wifi-change/fixture"),
+            (Method::GET, "/api/matter/wifi-change?device_id=matter-100"),
+            (Method::POST, "/api/matter/wifi-change"),
+        ] {
+            for peer in [
+                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 42)),
+                IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)),
+            ] {
+                for (token, expected) in [
+                    (None, StatusCode::UNAUTHORIZED),
+                    (Some(support.token.clone()), StatusCode::FORBIDDEN),
+                    (Some(owner.token.clone()), StatusCode::OK),
+                ] {
+                    let mut req = request_with_peer(method.clone(), path, peer, Body::from("{}"));
+                    req.headers_mut()
+                        .insert("content-type", "application/json".parse().unwrap());
+                    if let Some(token) = token {
+                        req.headers_mut()
+                            .insert(AUTHORIZATION, format!("Bearer {token}").parse().unwrap());
+                    }
+                    let response = app.clone().oneshot(req).await.unwrap();
+                    if expected == StatusCode::OK {
+                        assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+                        assert_ne!(response.status(), StatusCode::FORBIDDEN);
+                        assert_eq!(response.headers()["cache-control"], "no-store");
+                    } else {
+                        assert_eq!(response.status(), expected, "{path}");
+                    }
+                }
+            }
+        }
     }
 
     #[tokio::test]

@@ -28,10 +28,16 @@ pub const PROVISIONING_WIFI_SCAN_REQUEST_UUID: u128 = 0x72797468_6d05_1000_8000_
 pub const PROVISIONING_WIFI_SCAN_RESULT_UUID: u128 = 0x72797468_6d06_1000_8000_00805f9b34fb;
 
 /// Wi-Fi credentials received from a provisioning frontend.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WifiCredentials {
     pub ssid: String,
     pub password: String,
+}
+
+impl std::fmt::Debug for WifiCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("WifiCredentials(<redacted>)")
+    }
 }
 
 /// Use the same credential authority for Box and phone accessory commissioning.
@@ -49,6 +55,9 @@ pub fn load_accessory_wifi_credentials(
         )
     };
     if let Some(storage) = storage.as_ref() {
+        if let Some(store) = storage.load_wifi_profiles()? {
+            return store.credentials(None);
+        }
         if let Some(credentials) = storage.load_commissioning_wifi_credentials()? {
             return Ok(Some(credentials));
         }

@@ -132,6 +132,30 @@ impl ChipControllerService {
                     device,
                 })?)
             }
+            ChipRpcRequest::ChangeWifi {
+                node_id,
+                endpoint,
+                wifi,
+                expires_at_ms,
+            } => {
+                self.require_initialized()?;
+                let _lifecycle = self.lifecycle_lock.lock();
+                if !self
+                    .device_store()
+                    .devices()
+                    .iter()
+                    .any(|d| d.node_id == node_id && d.light_endpoint == endpoint)
+                {
+                    anyhow::bail!("Unknown commissioned light");
+                }
+                rhythm_os::wifi_profiles::validate_credentials(&wifi)?;
+                Ok(serde_json::to_value(self.backend().change_wifi(
+                    node_id,
+                    endpoint,
+                    &wifi,
+                    expires_at_ms,
+                )?)?)
+            }
             ChipRpcRequest::ListDevices => {
                 let store = self.device_store();
                 Ok(serde_json::to_value(ChipRpcListDevicesResponse {

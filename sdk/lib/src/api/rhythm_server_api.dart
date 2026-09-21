@@ -5,6 +5,7 @@ import 'package:logging/logging.dart';
 import '../json_parsing.dart';
 import '../models/rhythm_assistant.dart';
 import '../models/rhythm_commissioning_wifi.dart';
+import '../models/rhythm_wifi_profiles.dart';
 import '../models/rhythm_curve_config.dart';
 import '../models/rhythm_curve_data.dart';
 import '../models/rhythm_device_attention.dart';
@@ -1700,6 +1701,93 @@ class RhythmServerApi {
     }
     return null;
   }
+
+  Future<Map<String, dynamic>> _wifiRequest(String path, String method,
+      [Map<String, dynamic>? data]) async {
+    try {
+      final response = await _dio.request(path,
+          data: data,
+          options: Options(
+              method: method,
+              headers: {'Cache-Control': 'no-store'},
+              validateStatus: (_) => true));
+      if (response.statusCode == 409) {
+        throw const RhythmWifiException('conflict');
+      }
+      if (response.statusCode == 401 || response.statusCode == 403) {
+        throw const RhythmWifiException('owner_required');
+      }
+      if (response.statusCode == 404) {
+        throw const RhythmWifiException('not_found');
+      }
+      if (response.statusCode == 400) {
+        throw const RhythmWifiException('rejected');
+      }
+      if (response.statusCode != 200 ||
+          response.data is! Map<String, dynamic>) {
+        throw const RhythmWifiException('unavailable');
+      }
+      return response.data as Map<String, dynamic>;
+    } on RhythmWifiException {
+      rethrow;
+    } catch (_) {
+      throw const RhythmWifiException('unavailable');
+    }
+  }
+
+  Future<RhythmWifiProfiles> getWifiProfiles() async =>
+      RhythmWifiProfiles.fromJson(
+          await _wifiRequest('api/pairing/wifi-profiles', 'GET'));
+
+  Future<RhythmWifiProfiles> updateWifiProfile(
+          {required int revision,
+          required String action,
+          required String correlationId,
+          String? id,
+          String? ssid,
+          String? password}) async =>
+      RhythmWifiProfiles.fromJson(
+          await _wifiRequest('api/pairing/wifi-profiles', 'PUT', {
+        'revision': revision,
+        'action': action,
+        'correlation_id': correlationId,
+        if (id != null) 'id': id,
+        if (ssid != null) 'ssid': ssid,
+        if (password != null) 'password': password,
+      }));
+
+  Future<RhythmCommissioningWifi> getWifiProfileCredentials(String id) async =>
+      RhythmCommissioningWifi.fromJson(await _wifiRequest(
+          'api/pairing/wifi-profiles/${Uri.encodeComponent(id)}/credentials',
+          'GET'));
+
+  Future<RhythmWifiChangeReceipt> startMatterWifiChange(
+          {required String operationId,
+          required String deviceId,
+          required String profileId}) async =>
+      RhythmWifiChangeReceipt.fromJson(
+          await _wifiRequest('api/matter/wifi-change', 'POST', {
+        'operation_id': operationId,
+        'device_id': deviceId,
+        'profile_id': profileId,
+      }));
+
+  Future<RhythmWifiChangeReceipt?> getLatestMatterWifiChange(
+      String deviceId) async {
+    try {
+      return RhythmWifiChangeReceipt.fromJson(await _wifiRequest(
+          'api/matter/wifi-change?device_id=${Uri.encodeQueryComponent(deviceId)}',
+          'GET'));
+    } on RhythmWifiException catch (e) {
+      if (e.category == 'not_found') return null;
+      rethrow;
+    }
+  }
+
+  Future<RhythmWifiChangeReceipt> getMatterWifiChange(
+          String operationId) async =>
+      RhythmWifiChangeReceipt.fromJson(await _wifiRequest(
+          'api/matter/wifi-change/${Uri.encodeComponent(operationId)}', 'GET'));
 
   /// Owner-only, uncached credentials for a phone provisioning journey.
   /// Null means no saved credentials. Auth/transport failures never become a

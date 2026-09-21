@@ -128,7 +128,9 @@ fn handle_delete_wifi(state: &SharedState, provisioning: &ProvisioningManager) -
         Ok(()) => {
             if let Ok(state) = state.lock() {
                 if let Some(storage) = state.storage.as_ref() {
-                    let _ = storage.clear_commissioning_wifi_credentials();
+                    if matches!(storage.load_wifi_profiles(), Ok(None)) {
+                        let _ = storage.clear_commissioning_wifi_credentials();
+                    }
                 }
             }
             if let Err(e) = provisioning.ensure_running("api-delete-wifi") {

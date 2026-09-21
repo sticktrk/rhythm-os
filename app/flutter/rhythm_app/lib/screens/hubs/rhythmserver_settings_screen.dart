@@ -1,3 +1,4 @@
+import '../network/saved_wifi_screen.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -858,6 +859,14 @@ class _RhythmServerSettingsScreenState extends State<RhythmServerSettingsScreen>
     return _buildSection(
       title: 'NETWORK',
       children: [
+        if (widget.homeManaged && syncProvider.supportsSavedWifiProfiles)
+          ListTile(
+              key: const ValueKey('saved-wifi-networks'),
+              leading: const Icon(Icons.wifi),
+              title: const Text('Saved provisioning networks'),
+              subtitle: const Text('Choose the default for new accessories'),
+              onTap: () => Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => SavedWifiScreen(api: syncProvider.api)))),
         GestureDetector(
           onTap: canChange ? _handleChangeWifi : null,
           behavior: HitTestBehavior.opaque,

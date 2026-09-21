@@ -542,6 +542,34 @@ class CloudBackedServerApi {
     return _delegate.getCanonicalDevice(id);
   }
 
+  Future<RhythmWifiProfiles> getWifiProfiles() => _delegate.getWifiProfiles();
+  Future<RhythmWifiProfiles> updateWifiProfile(
+          {required int revision,
+          required String action,
+          required String correlationId,
+          String? id,
+          String? ssid,
+          String? password}) =>
+      _delegate.updateWifiProfile(
+          revision: revision,
+          action: action,
+          correlationId: correlationId,
+          id: id,
+          ssid: ssid,
+          password: password);
+  Future<RhythmCommissioningWifi> getWifiProfileCredentials(String id) =>
+      _delegate.getWifiProfileCredentials(id);
+  Future<RhythmWifiChangeReceipt> startMatterWifiChange(
+          {required String operationId,
+          required String deviceId,
+          required String profileId}) =>
+      _delegate.startMatterWifiChange(
+          operationId: operationId, deviceId: deviceId, profileId: profileId);
+  Future<RhythmWifiChangeReceipt> getMatterWifiChange(String operationId) =>
+      _delegate.getMatterWifiChange(operationId);
+  Future<RhythmWifiChangeReceipt?> getLatestMatterWifiChange(String deviceId) =>
+      _delegate.getLatestMatterWifiChange(deviceId);
+
   Future<RhythmCommissioningWifi?> getCommissioningWifiCredentials() async {
     return _delegate.getCommissioningWifiCredentials();
   }

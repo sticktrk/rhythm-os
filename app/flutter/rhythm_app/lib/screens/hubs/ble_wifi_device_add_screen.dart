@@ -1,3 +1,4 @@
+import '../network/saved_wifi_screen.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
@@ -158,6 +159,7 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
   bool _usePhone = false;
   PhoneBleWifiService? get _phone => _usePhone ? _phoneService : null;
   RhythmCommissioningWifi? _wifi;
+  String? _wifiProfileId;
   String get _commissioner => _phone == null ? 'server' : 'phone';
 
   String? _retainedDsn;
@@ -231,6 +233,7 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
     final request = widget.pairingRequest;
     final body = {
       'stage': stage,
+      if (_wifiProfileId != null) 'wifi_profile_id': _wifiProfileId,
       'rendezvous': _commissioner,
       'correlation_id': _journeyId,
       if (_family.profileId != null) 'profile_id': _family.profileId,
@@ -290,6 +293,13 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
       resumed: _provisioned,
     );
     try {
+      final sync = context.read<ServerSyncProvider?>();
+      if (!_provisioned &&
+          sync?.supportsSavedWifiProfiles == true &&
+          _wifiProfileId == null) {
+        _wifiProfileId = await SavedWifiScreen.select(context, sync!.api);
+        if (!mounted || _wifiProfileId == null) return;
+      }
       final broker = _family.cloudBroker;
       if (broker == null) {
         _fail(
@@ -347,12 +357,17 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
         _message = 'Getting the saved Wi-Fi details from your Rhythm Box.');
     try {
       final loader = widget.wifiCredentials;
-      _wifi = await (loader != null
-          ? loader()
-          : context
+      _wifi = _wifiProfileId != null
+          ? await context
               .read<ServerSyncProvider>()
               .api
-              .getCommissioningWifiCredentials());
+              .getWifiProfileCredentials(_wifiProfileId!)
+          : await (loader != null
+              ? loader()
+              : context
+                  .read<ServerSyncProvider>()
+                  .api
+                  .getCommissioningWifiCredentials());
       if (!mounted) return false;
       _wifi ??= await showDialog<RhythmCommissioningWifi>(
         context: context,
@@ -945,8 +960,7 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
                   else
                     OutlinedButton.icon(
                       key: const ValueKey('ble-wifi-phone-fallback'),
-                      onPressed:
-                          _running ? null : () => _start(usePhone: true),
+                      onPressed: _running ? null : () => _start(usePhone: true),
                       icon: const Icon(Icons.phone_android_rounded),
                       label: const Text('Try from phone'),
                     ),

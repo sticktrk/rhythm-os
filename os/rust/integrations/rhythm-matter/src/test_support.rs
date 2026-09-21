@@ -16,6 +16,10 @@ use crate::transport::{
 /// A recorded typed controller operation for test assertions.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RecordedOperation {
+    ChangeWifi {
+        node_id: u64,
+        endpoint: u16,
+    },
     SetOnOff {
         node_id: u64,
         endpoint: u16,
@@ -450,6 +454,24 @@ impl Default for SpyTransport {
 }
 
 impl MatterTransport for SpyTransport {
+    fn change_wifi(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+        wifi: &rhythm_os::provisioning::WifiCredentials,
+        _expires_at_ms: u64,
+    ) -> Result<rhythm_os::wifi_change::WifiChangeOutcome> {
+        rhythm_os::wifi_profiles::validate_credentials(wifi)?;
+        self.operations
+            .lock()
+            .unwrap()
+            .push(RecordedOperation::ChangeWifi { node_id, endpoint });
+        Ok(rhythm_os::wifi_change::WifiChangeOutcome {
+            code: rhythm_os::wifi_change::WifiChangeCode::Succeeded,
+            rollback_verified: false,
+        })
+    }
+
     fn commission_light(&self, request: &MatterCommissionRequest) -> Result<CommissionedDevice> {
         self.commission_requests
             .lock()

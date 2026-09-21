@@ -930,6 +930,7 @@ pub struct AppState {
     /// missing. Integrations use this callback only as a fallback so they stay
     /// portable and do not read platform files directly.
     #[allow(clippy::type_complexity)]
+    pub change_wifi_fn: Option<crate::wifi_change::WifiChangeFn>,
     pub commissioning_wifi_credentials_provider: Option<
         Arc<dyn Fn() -> anyhow::Result<Option<crate::provisioning::WifiCredentials>> + Send + Sync>,
     >,
@@ -1142,6 +1143,7 @@ impl Default for AppState {
             save_device_test_report_fn: None,
             hub_credentials_interceptor: None,
             request_hub_bootstrap_fn: None,
+            change_wifi_fn: None,
             commissioning_wifi_credentials_provider: None,
             before_factory_reset_fn: None,
             after_factory_reset_fn: None,

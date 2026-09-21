@@ -349,6 +349,14 @@ pub trait Storage: Send + Sync {
         Ok(())
     }
 
+    /// Managed catalogs are private and deliberately excluded from all backups.
+    fn load_wifi_profiles(&self) -> Result<Option<crate::wifi_profiles::WifiProfileStore>> {
+        Ok(None)
+    }
+    fn save_wifi_profiles(&self, _store: &crate::wifi_profiles::WifiProfileStore) -> Result<()> {
+        anyhow::bail!("Saved networks require durable storage")
+    }
+
     /// Load stored appliance Wi-Fi credentials used for accessory commissioning.
     fn load_commissioning_wifi_credentials(
         &self,
@@ -1202,7 +1210,8 @@ fn should_skip_integration_backup_file(relative_path: &std::path::Path) -> bool 
     let Some(name) = relative_path.file_name().and_then(|name| name.to_str()) else {
         return true;
     };
-    name == "chip-controller.sock"
+    relative_path == std::path::Path::new("matter/wifi-changes.json")
+        || name == "chip-controller.sock"
         || name.ends_with(".sock")
         || name.ends_with(".tmp")
         || name.ends_with(".log")
@@ -1645,6 +1654,12 @@ impl Storage for FileStorage {
             .map(|file| validate_integration_backup_path(&file.path).map(|path| (path, file)))
             .collect::<Result<Vec<_>>>()?;
 
+        if files
+            .iter()
+            .any(|(path, _)| path == std::path::Path::new("matter/wifi-changes.json"))
+        {
+            anyhow::bail!("Network change receipts cannot be restored");
+        }
         self.clear_integration_state_dirs(BACKUP_INTEGRATION_SUBDIRS)?;
 
         for (relative_path, file) in files {
@@ -1664,6 +1679,9 @@ impl Storage for FileStorage {
         for file in files {
             let path = validate_integration_backup_path(&file.path)?;
             let normalized_path = normalized_relative_path(&path)?;
+            if normalized_path == "matter/wifi-changes.json" {
+                anyhow::bail!("Network change receipts cannot be restored");
+            }
             if file.path != normalized_path {
                 anyhow::bail!("integration backup path is not canonical");
             }
@@ -1901,38 +1919,61 @@ impl Storage for FileStorage {
         self.write_atomic("topology.json", json.as_bytes())
     }
 
+    fn load_wifi_profiles(&self) -> Result<Option<crate::wifi_profiles::WifiProfileStore>> {
+        let path = self.file_path("commissioning_wifi.json");
+        if !path.exists() {
+            return Ok(None);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        let value: serde_json::Value = self
+            .read_json("commissioning_wifi.json")
+            .map_err(|_| anyhow::anyhow!("Saved network document is unreadable"))?;
+        if value.get("profile_schema").is_none() {
+            return Ok(None);
+        }
+        let store: crate::wifi_profiles::WifiProfileStore = serde_json::from_value(value)
+            .map_err(|_| anyhow::anyhow!("Saved network document is invalid"))?;
+        store.validate()?;
+        Ok(Some(store))
+    }
+
+    fn save_wifi_profiles(&self, store: &crate::wifi_profiles::WifiProfileStore) -> Result<()> {
+        store.validate()?;
+        self.write_atomic_secret_durable("commissioning_wifi.json", &serde_json::to_vec(store)?)
+    }
+
     fn load_commissioning_wifi_credentials(
         &self,
     ) -> Result<Option<crate::provisioning::WifiCredentials>> {
-        let path = self.file_path("commissioning_wifi.json");
-        match self.read_json::<crate::provisioning::WifiCredentials>("commissioning_wifi.json") {
-            Ok(creds) => Ok(Some(creds)),
-            Err(e) => {
-                if path.exists() {
-                    warn!(
-                        target: "sys",
-                        "Failed to load commissioning Wi-Fi config {}: {}",
-                        path.display(),
-                        e
-                    );
-                } else {
-                    debug!(
-                        target: "sys",
-                        "No persisted commissioning Wi-Fi config at {}",
-                        path.display()
-                    );
-                }
-                Ok(None)
-            }
+        if let Some(store) = self.load_wifi_profiles()? {
+            return store.credentials(None);
         }
+        if !self.file_path("commissioning_wifi.json").exists() {
+            return Ok(None);
+        }
+        self.read_json("commissioning_wifi.json")
+            .map(Some)
+            .map_err(|_| anyhow::anyhow!("Saved network document is unreadable"))
     }
 
     fn save_commissioning_wifi_credentials(
         &self,
         creds: &crate::provisioning::WifiCredentials,
     ) -> Result<()> {
-        let json = serde_json::to_string_pretty(creds)?;
-        self.write_atomic("commissioning_wifi.json", json.as_bytes())
+        // Changing the Box connection must not replace an explicitly managed
+        // provisioning catalog. Legacy installs still seed the initial default.
+        let _guard = crate::wifi_profiles::PROFILE_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Saved networks are unavailable"))?;
+        if self.load_wifi_profiles()?.is_some() {
+            return Ok(());
+        }
+        self.write_atomic_secret_durable("commissioning_wifi.json", &serde_json::to_vec(creds)?)
     }
 
     fn clear_commissioning_wifi_credentials(&self) -> Result<()> {
@@ -2139,6 +2180,7 @@ impl Storage for FileStorage {
             "canonical_registry.json",
             "topology.json",
             "commissioning_wifi.json",
+            "commissioning_wifi.json.tmp",
             "auth.json",
             "support_bundle_jobs.json",
         ] {
@@ -6780,10 +6822,7 @@ mod tests {
                 .unwrap()
                 .is_none());
             std::fs::write(path.join("commissioning_wifi.json"), "{").unwrap();
-            assert!(storage
-                .load_commissioning_wifi_credentials()
-                .unwrap()
-                .is_none());
+            assert!(storage.load_commissioning_wifi_credentials().is_err());
             storage.clear_commissioning_wifi_credentials().unwrap();
             storage.clear_commissioning_wifi_credentials().unwrap();
 

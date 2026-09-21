@@ -121,6 +121,30 @@ class AnalyticsService {
     }
   }
 
+  /// Record bounded provisioning outcomes without network or credential data.
+  Future<void> logWifiAction(
+      {required bool networkChange,
+      required String journeyId,
+      required String action,
+      required String outcome}) async {
+    const actions = {'entry', 'save', 'remove', 'default', 'select', 'change'};
+    const outcomes = {
+      'opened',
+      'attempt',
+      'succeeded',
+      'failed',
+      'cancelled',
+      'recovery_required'
+    };
+    if (!actions.contains(action) || !outcomes.contains(outcome)) return;
+    await logEvent(
+        networkChange ? 'matter_wifi_change' : 'wifi_profile_action', {
+      'journey_id': journeyId,
+      'action': action,
+      'outcome': outcome,
+    });
+  }
+
   /// Log a screen view event.
   Future<void> logScreenView(String screenName) async {
     if (!_initialized || _analytics == null) return;

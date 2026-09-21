@@ -6,6 +6,7 @@ license.workspace = true
 description = "Platform-agnostic business logic for Rhythm OS controllers"
 
 [dependencies]
+uuid = { version = "1", features = ["v4"] }
 rhythm-core = { path = "../rhythm-core" }
 rhythm-devices = { path = "../rhythm-devices" }
 rhythm-profile = { path = "../rhythm-profile" }
@@ -31,6 +32,7 @@ tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 
 [dev-dependencies]
+tempfile = "3"
 async-trait = { workspace = true }
 tower = { version = "0.4", features = ["util"] }
 rhythm-core = { path = "../rhythm-core", features = ["test-support"] }

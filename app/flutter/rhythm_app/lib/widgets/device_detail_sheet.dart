@@ -1,3 +1,4 @@
+import '../screens/network/matter_wifi_change_screen.dart';
 import 'device_details_loader.dart';
 import 'device_network_diagnostics.dart';
 import 'dart:async';
@@ -1203,6 +1204,16 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
           ),
         if (!_loading && _canonicalData != null) ...[
           if (isLight && _matterNativeId != null) ...[
+            if (context.read<ServerSyncProvider>().supportsMatterWifiChange)
+              ListTile(
+                  key: const ValueKey('matter-wifi-change'),
+                  leading: const Icon(Icons.wifi),
+                  title: const Text('Change bulb Wi-Fi'),
+                  subtitle: const Text('For a reachable direct Wi-Fi bulb'),
+                  onTap: () => Navigator.of(context).push(MaterialPageRoute(
+                      builder: (_) => MatterWifiChangeScreen(
+                          api: context.read<ServerSyncProvider>().api,
+                          deviceId: _matterNativeId!)))),
             const SizedBox(height: 12),
             if (canRecoverMatterSetupCode) ...[
               _buildMatterSetupCodeButton(context, _matterNativeId!),

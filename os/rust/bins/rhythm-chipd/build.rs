@@ -12,6 +12,7 @@ const CHIP_FILE_ATTESTATION_TRUST_STORE_SOURCE: &str =
     "src/credentials/attestation_verifier/FileAttestationTrustStore.cpp";
 
 fn main() {
+    println!("cargo:rerun-if-changed=native/wifi_change_transaction.h");
     println!("cargo:rustc-check-cfg=cfg(rhythm_chipd_chip_ffi)");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={BRIDGE_HEADER}");

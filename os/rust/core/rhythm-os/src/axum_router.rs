@@ -289,6 +289,19 @@ fn shared_routes() -> Router<SharedState> {
         .route("/api/matter/captures/:id", get(get_matter_capture))
         .route("/api/matter/setup-code/:id", get(get_matter_setup_code))
         .route("/api/pairing/wifi-credentials", get(get_commissioning_wifi))
+        .route(
+            "/api/matter/wifi-change",
+            post(post_wifi_change).get(get_latest_wifi_change),
+        )
+        .route("/api/matter/wifi-change/:id", get(get_wifi_change))
+        .route(
+            "/api/pairing/wifi-profiles",
+            get(get_wifi_profiles).put(put_wifi_profiles),
+        )
+        .route(
+            "/api/pairing/wifi-profiles/:id/credentials",
+            get(get_wifi_profile_credentials),
+        )
         .route("/api/matter/audition/run", post(post_matter_audition_run))
         .route(
             "/api/matter/audition/report",
@@ -1412,6 +1425,70 @@ pub async fn get_matter_capture(
     Path(id): Path<String>,
 ) -> ApiResponse {
     handlers::handle_get_matter_capture(&state, &id)
+}
+
+fn private_network_response(response: ApiResponse) -> Response {
+    let mut response = response.into_response();
+    response
+        .headers_mut()
+        .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+pub async fn get_latest_wifi_change(
+    State(state): State<SharedState>,
+    Query(query): Query<HashMap<String, String>>,
+) -> Response {
+    private_network_response(
+        run_blocking(move || {
+            crate::wifi_change::handle_latest(
+                &state,
+                query.get("device_id").map(String::as_str).unwrap_or(""),
+            )
+        })
+        .await,
+    )
+}
+pub async fn post_wifi_change(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> Response {
+    private_network_response(
+        run_blocking(move || crate::wifi_change::handle_start(&state, &body)).await,
+    )
+}
+pub async fn get_wifi_change(State(state): State<SharedState>, Path(id): Path<String>) -> Response {
+    private_network_response(
+        run_blocking(move || crate::wifi_change::handle_status(&state, &id)).await,
+    )
+}
+
+pub async fn get_wifi_profiles(State(state): State<SharedState>) -> Response {
+    private_network_response(run_blocking(move || crate::wifi_profiles::handle_list(&state)).await)
+}
+
+pub async fn put_wifi_profiles(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> Response {
+    private_network_response(
+        run_blocking(move || crate::wifi_profiles::handle_update(&state, &body)).await,
+    )
+}
+
+pub async fn get_wifi_profile_credentials(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> Response {
+    private_network_response(
+        run_blocking(
+            move || match crate::wifi_profiles::selected_credentials(&state, &id) {
+                Ok(wifi) => ApiResponse::json_ok(serde_json::to_string(&wifi).unwrap()),
+                Err(_) => ApiResponse::not_found("Saved network is unavailable"),
+            },
+        )
+        .await,
+    )
 }
 
 pub async fn get_commissioning_wifi(State(state): State<SharedState>) -> Response {

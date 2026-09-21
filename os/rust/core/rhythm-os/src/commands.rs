@@ -13424,6 +13424,11 @@ fn apply_backup_configuration(
 }
 
 pub fn do_backup_restore(state: &SharedState, bundle: BackupBundle) -> Result<String> {
+    let _network_guard = crate::wifi_change::CHANGE_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .map_err(|_| anyhow::anyhow!("network change lock unavailable"))?;
+    crate::wifi_change::ensure_idle_for_reset(state)?;
     if !matches!(
         bundle.schema_version,
         LEGACY_BACKUP_SCHEMA_VERSION

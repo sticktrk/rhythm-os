@@ -559,7 +559,7 @@ fn privacy_safe_token(value: &str, max_len: usize) -> Option<String> {
 
 fn device_lifecycle_cloud_event(entry: &PairingHistoryEntry) -> Option<DeviceLifecycleCloudEvent> {
     let action = match entry.kind.as_str() {
-        "pair" | "unpair" => entry.kind.clone(),
+        "pair" | "unpair" | "wifi_profile" | "wifi_change" => entry.kind.clone(),
         _ => return None,
     };
     let hub_type = privacy_safe_token(&entry.hub_type, 64)?;

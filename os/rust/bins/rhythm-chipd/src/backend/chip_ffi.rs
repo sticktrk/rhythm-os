@@ -60,6 +60,24 @@ impl ChipFfiController {
         }
     }
 
+    pub fn change_wifi(
+        &self,
+        node: u64,
+        endpoint: u16,
+        wifi: &rhythm_os::provisioning::WifiCredentials,
+        expires_at_ms: u64,
+    ) -> Result<rhythm_os::wifi_change::WifiChangeOutcome> {
+        #[cfg(rhythm_chipd_chip_ffi)]
+        {
+            ffi_probe::change_wifi(node, endpoint, wifi, expires_at_ms)
+        }
+        #[cfg(not(rhythm_chipd_chip_ffi))]
+        {
+            let _ = (node, endpoint, wifi, expires_at_ms);
+            Err(self.unsupported("change_wifi"))
+        }
+    }
+
     pub fn probe_light(&self, node_id: u64) -> Result<CommissionedDevice> {
         #[cfg(rhythm_chipd_chip_ffi)]
         {
@@ -1094,6 +1112,56 @@ mod ffi_probe {
         }
 
         Ok(trimmed.parse::<u16>()?)
+    }
+
+    pub fn change_wifi(
+        node: u64,
+        endpoint: u16,
+        wifi: &rhythm_os::provisioning::WifiCredentials,
+        expires_at_ms: u64,
+    ) -> Result<rhythm_os::wifi_change::WifiChangeOutcome> {
+        use rhythm_os::wifi_change::{WifiChangeCode as Code, WifiChangeOutcome};
+        extern "C" {
+            fn rhythm_chip_bridge_change_wifi(
+                node: u64,
+                endpoint: u16,
+                ssid: *const std::os::raw::c_char,
+                password: *const std::os::raw::c_char,
+                rollback: *mut bool,
+                expires_at_ms: u64,
+            ) -> u8;
+        }
+        rhythm_os::wifi_profiles::validate_credentials(wifi)?;
+        let ssid = CString::new(wifi.ssid.as_str())
+            .map_err(|_| anyhow::anyhow!("Invalid network name"))?;
+        let password = CString::new(wifi.password.as_str())
+            .map_err(|_| anyhow::anyhow!("Invalid network credential"))?;
+        let mut rollback_verified = false;
+        let code = unsafe {
+            rhythm_chip_bridge_change_wifi(
+                node,
+                endpoint,
+                ssid.as_ptr(),
+                password.as_ptr(),
+                &mut rollback_verified,
+                expires_at_ms,
+            )
+        };
+        Ok(WifiChangeOutcome {
+            code: match code {
+                0 => Code::Succeeded,
+                1 => Code::Unsupported,
+                2 => Code::Offline,
+                3 => Code::NetworkSlots,
+                4 => Code::CredentialsRejected,
+                5 => Code::NetworkNotFound,
+                6 => Code::Rejected,
+                7 => Code::FailSafeBusy,
+                8 => Code::VerificationFailed,
+                _ => Code::RecoveryRequired,
+            },
+            rollback_verified,
+        })
     }
 
     pub fn probe_light(node_id: u64) -> Result<CommissionedDevice> {
