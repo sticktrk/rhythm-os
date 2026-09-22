@@ -1,4 +1,5 @@
 #include "chip_bridge.h"
+#include "blocking_pairing_delegate.h"
 #include "wifi_change_transaction.h"
 #include "phone_commissioning_discovery.h"
 
@@ -1077,85 +1078,15 @@ struct LightStateSubscriptionEntry
     std::unique_ptr<LightStateSubscriptionOperation> operation;
 };
 
-class BlockingPairingDelegate final : public DevicePairingDelegate
-{
-public:
-    void Begin(NodeId nodeId)
-    {
-        std::lock_guard<std::mutex> lock(mMutex);
-        mActive         = true;
-        mDone           = false;
-        mExpectedNodeId = nodeId;
-        mStatus         = CHIP_NO_ERROR;
-    }
-
-    void Cancel(CHIP_ERROR error)
-    {
-        Complete(mExpectedNodeId, error);
-    }
-
-    CHIP_ERROR WaitForCompletion(std::chrono::seconds timeout)
-    {
-        std::unique_lock<std::mutex> lock(mMutex);
-        if (!mCondition.wait_for(lock, timeout, [this] { return mDone; }))
-        {
-            mActive = false;
-            return CHIP_ERROR_TIMEOUT;
-        }
-
-        mActive = false;
-        return mStatus;
-    }
-
-    void OnPairingComplete(CHIP_ERROR error) override
-    {
-        if (error != CHIP_NO_ERROR)
-        {
-            Complete(mExpectedNodeId, error);
-        }
-    }
-
-    void OnCommissioningComplete(NodeId nodeId, CHIP_ERROR error) override
-    {
-        Complete(nodeId, error);
-    }
-
-    void OnCommissioningFailure(PeerId peerId, CHIP_ERROR error, Controller::CommissioningStage stageFailed,
-                                Optional<Credentials::AttestationVerificationResult> additionalErrorInfo) override
-    {
-        ChipLogError(Controller,
-                     "Matter commissioning failed: node=" ChipLogFormatX64 " stage=%u error=%" CHIP_ERROR_FORMAT
-                     " attestation=%d",
-                     ChipLogValueX64(peerId.GetNodeId()), static_cast<unsigned>(stageFailed), error.Format(),
-                     additionalErrorInfo.HasValue() ? static_cast<int>(additionalErrorInfo.Value()) : -1);
-        Complete(peerId.GetNodeId(), error);
-    }
-
-private:
-    void Complete(NodeId nodeId, CHIP_ERROR error)
-    {
-        std::lock_guard<std::mutex> lock(mMutex);
-        if (!mActive || mDone || (mExpectedNodeId != kUndefinedNodeId && nodeId != mExpectedNodeId))
-        {
-            return;
-        }
-
-        mStatus = error;
-        mDone   = true;
-        mCondition.notify_all();
-    }
-
-    std::mutex mMutex;
-    std::condition_variable mCondition;
-    bool mActive         = false;
-    bool mDone           = false;
-    NodeId mExpectedNodeId = kUndefinedNodeId;
-    CHIP_ERROR mStatus   = CHIP_NO_ERROR;
-};
+using rhythm::matter::BlockingPairingDelegate;
 
 class ChipBridgeContext
 {
 public:
+    ChipBridgeContext() : mPairingDelegate([this] {
+        return mCommissioner->GetCommissioningParameters().GetCompletionStatus();
+    }) {}
+
     CHIP_ERROR Init(const char * storagePath, const char * fabricId, uint64_t operationalFabricId, const char * ipkHex,
                     bool hasBleController, uint16_t bleController, uint16_t controllerVendorId)
     {
@@ -1210,7 +1141,8 @@ public:
         return mCompressedFabricId;
     }
 
-    CHIP_ERROR CommissionLight(const rhythm_chip_bridge_commission_request & request, rhythm_chip_bridge_device & device)
+    CHIP_ERROR CommissionLight(const rhythm_chip_bridge_commission_request & request, rhythm_chip_bridge_device & device,
+                               std::string & failureContext)
     {
         VerifyOrReturnError(mCommissioner != nullptr, CHIP_ERROR_INCORRECT_STATE);
         VerifyOrReturnError(request.setup_payload != nullptr, CHIP_ERROR_INVALID_ARGUMENT);
@@ -1281,7 +1213,7 @@ public:
             return err;
         }
 
-        ReturnErrorOnFailure(mPairingDelegate.WaitForCompletion(kCommissioningTimeout));
+        ReturnErrorOnFailure(mPairingDelegate.WaitForCompletion(kCommissioningTimeout, failureContext));
         // The node is paired again: lift any unpair tombstone so subscriptions
         // can be installed for it.
         const NodeId commissionedNodeId = request.node_id;
@@ -3147,8 +3079,11 @@ bool rhythm_chip_bridge_commission_light(const struct rhythm_chip_bridge_commiss
         return false;
     }
 
-    return HandleBridgeResult(gContext.CommissionLight(*request, *device), error_message, error_message_size,
-                              "commissioning Matter light");
+    std::string failureContext;
+    const auto err = gContext.CommissionLight(*request, *device, failureContext);
+    const auto context = failureContext.empty() ? "commissioning Matter light" :
+                                                 "commissioning Matter light " + failureContext;
+    return HandleBridgeResult(err, error_message, error_message_size, context);
 }
 
 uint8_t rhythm_chip_bridge_change_wifi(uint64_t node_id, uint16_t endpoint,

@@ -3678,6 +3678,38 @@ mod tests {
     }
 
     #[test]
+    fn device_wifi_rejection_does_not_restart_or_retry_and_preserves_control() {
+        let socket_path = temp_socket_path("wifi-rejected");
+        let server = spawn_fake_server_multi(socket_path.clone(), 2, |request| {
+            match &request.request {
+                ChipRpcRequest::CommissionLight(_) => ChipRpcResponseEnvelope::error(
+                    request.id,
+                    "commissioning Matter light commissioning_stage=WiFiNetworkEnable network_status=5: CHIP Error 0x000000AC: Internal error",
+                ),
+                ChipRpcRequest::SetOnOff { .. } => ChipRpcResponseEnvelope::ok(request.id, ChipRpcEmpty::new()),
+                other => panic!("Wi-Fi rejection must not restart or rediscover: {other:?}"),
+            }
+        });
+        let transport = ChipTransport::for_test(socket_path.clone());
+        let error = transport
+            .commission_light(&ble_commission_request())
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("network_status=5"));
+        assert!(!is_recoverable_ble_commissioning_error(&error));
+        transport.set_on_off(102, 1, true).unwrap();
+        let requests = server.join().unwrap();
+        assert!(matches!(
+            requests[0].request,
+            ChipRpcRequest::CommissionLight(_)
+        ));
+        assert!(matches!(
+            requests[1].request,
+            ChipRpcRequest::SetOnOff { .. }
+        ));
+        let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
     fn ble_commissioning_error_retries_once_then_reinitializes_controller() {
         const BLUEZ_ENDPOINT_ERROR: &str = concat!(
             "commissioning Matter light: ",
