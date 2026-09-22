@@ -784,7 +784,7 @@ fn build_success_session(
         );
     }
     register_canonical_identity(state, &hub_key, &device, &device_id, &device_name)?;
-    materialize_unassigned_canonical_device(state, &hub_key, &device_id)?;
+    materialize_paired_canonical_device(state, &hub_key, &device_id)?;
 
     let mut warnings = Vec::new();
     if let Err(error) = crate::setup_recovery::save_setup_payload(
@@ -1048,16 +1048,16 @@ fn register_canonical_identity(
     Ok(())
 }
 
-fn materialize_unassigned_canonical_device(
+fn materialize_paired_canonical_device(
     state: &SharedState,
     hub_key: &HubKey,
     device_id: &str,
 ) -> Result<()> {
     let state_guard = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    let (canonical_id, already_assigned) = state_guard
+    let (canonical_id, room_id) = state_guard
         .canonical_registry
         .find_by_native_id(hub_key, device_id)
-        .map(|device| (device.id.clone(), device.room_id.is_some()))
+        .map(|device| (device.id.clone(), device.room_id.clone()))
         .ok_or_else(|| {
             anyhow::anyhow!(
                 "Canonical device missing after Matter pairing: {}",
@@ -1065,12 +1065,20 @@ fn materialize_unassigned_canonical_device(
             )
         })?;
 
+    let has_topology_node = state_guard
+        .topology
+        .get_device_node(&canonical_id)
+        .is_some();
+    // Archive retains the canonical room but removes its topology node. A
+    // runtime rebuild only projects existing topology; it cannot restore that
+    // missing membership. The remembered room may also have been deleted.
+    let room_id = room_id.filter(|id| state_guard.topology.get(id).is_some());
     drop(state_guard);
 
-    if already_assigned {
+    if room_id.is_some() && has_topology_node {
         rhythm_os::commands::reconcile_runtime_from_state(state)?;
     } else {
-        rhythm_os::commands::do_canonical_assign_room(state, &canonical_id, None)?;
+        rhythm_os::commands::do_canonical_assign_room(state, &canonical_id, room_id.as_deref())?;
     }
 
     Ok(())
@@ -1375,7 +1383,7 @@ mod tests {
         hub_data.record_commissioned_device(&device);
         store_device_metadata(hub_data, &device, &device_id);
         register_canonical_identity(state, &hub_key, &device, &device_id, &device_name).unwrap();
-        materialize_unassigned_canonical_device(state, &hub_key, &device_id).unwrap();
+        materialize_paired_canonical_device(state, &hub_key, &device_id).unwrap();
         crate::setup_recovery::save_setup_payload(
             state,
             &hub_data.fabric_id,
