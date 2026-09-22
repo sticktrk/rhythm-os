@@ -127,7 +127,15 @@ class AnalyticsService {
       required String journeyId,
       required String action,
       required String outcome}) async {
-    const actions = {'entry', 'save', 'remove', 'default', 'select', 'change'};
+    const actions = {
+      'entry',
+      'save',
+      'remove',
+      'default',
+      'select',
+      'change',
+      'check'
+    };
     const outcomes = {
       'opened',
       'attempt',

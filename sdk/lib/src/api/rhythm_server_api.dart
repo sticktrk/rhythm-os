@@ -1756,6 +1756,46 @@ class RhythmServerApi {
         if (password != null) 'password': password,
       }));
 
+  /// Ask the Box to prove a network by joining it. The Box is offline while it
+  /// tries, so the answer is collected with [getWifiCheck].
+  Future<RhythmWifiCheck> startWifiCheck(
+      {required String operationId,
+      required String ssid,
+      required String password}) async {
+    try {
+      final response = await _dio.post('api/wifi/verify',
+          data: {
+            'operation_id': operationId,
+            'ssid': ssid,
+            'password': password
+          },
+          options: Options(
+              headers: {'Cache-Control': 'no-store'},
+              validateStatus: (_) => true));
+      if (response.statusCode == 200 &&
+          response.data is Map<String, dynamic>) {
+        return RhythmWifiCheck.fromJson(response.data as Map<String, dynamic>);
+      }
+    } catch (_) {}
+    return RhythmWifiCheck.unavailable;
+  }
+
+  /// Null while the Box cannot be reached, which is expected mid-check.
+  Future<RhythmWifiCheck?> getWifiCheck(String operationId) async {
+    try {
+      final response = await _dio.get(
+          'api/wifi/verify/${Uri.encodeComponent(operationId)}',
+          options: Options(validateStatus: (_) => true));
+      if (response.statusCode == 200 &&
+          response.data is Map<String, dynamic>) {
+        return RhythmWifiCheck.fromJson(response.data as Map<String, dynamic>);
+      }
+      // The Box restarted and forgot the check.
+      if (response.statusCode == 404) return RhythmWifiCheck.unavailable;
+    } catch (_) {}
+    return null;
+  }
+
   Future<RhythmCommissioningWifi> getWifiProfileCredentials(String id) async =>
       RhythmCommissioningWifi.fromJson(await _wifiRequest(
           'api/pairing/wifi-profiles/${Uri.encodeComponent(id)}/credentials',

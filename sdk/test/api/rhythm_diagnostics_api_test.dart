@@ -253,6 +253,22 @@ void main() {
       expect(missing.httpStatus, HttpStatus.notFound);
     });
 
+    test('a rejected Box move is reported only for the network it was for',
+        () async {
+      server = await _FakeDiagnosticsServer.start();
+      final api = RhythmDiagnosticsApi(
+        host: '127.0.0.1',
+        port: server!.port,
+      );
+
+      expect(await api.getLastWifiChangeState('Rejected Network'), 'failed');
+      // An older outcome says nothing about this move.
+      expect(await api.getLastWifiChangeState('Other Network'), isNull);
+      // Unreachable is expected while the Box is between networks.
+      final away = RhythmDiagnosticsApi(host: '192.0.2.1', port: 1);
+      expect(await away.getLastWifiChangeState('Rejected Network'), isNull);
+    });
+
     test('factoryReset posts the shared reset endpoint', () async {
       server = await _FakeDiagnosticsServer.start();
       final api = RhythmDiagnosticsApi(
@@ -428,6 +444,14 @@ class _FakeDiagnosticsServer {
       );
       request.response.add([1, 2, 3, 4]);
       await request.response.close();
+      return;
+    }
+
+    if (request.method == 'GET' && request.uri.path == '/api/wifi') {
+      await _writeJson(request.response, {
+        'connected': true,
+        'last_change': {'ssid': 'Rejected Network', 'state': 'failed'},
+      });
       return;
     }
 

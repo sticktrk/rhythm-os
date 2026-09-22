@@ -8,9 +8,15 @@ import '../../widgets/solar_orbit.dart';
 import 'network_ui.dart';
 
 class SavedWifiScreen extends StatefulWidget {
-  const SavedWifiScreen({super.key, required this.api, this.choose = false});
+  const SavedWifiScreen({
+    super.key,
+    required this.api,
+    this.choose = false,
+    @visibleForTesting this.checkPollInterval = const Duration(seconds: 3),
+  });
   final CloudBackedServerApi api;
   final bool choose;
+  final Duration checkPollInterval;
   static Future<String?> select(
     BuildContext context,
     CloudBackedServerApi api,
@@ -27,6 +33,7 @@ class _SavedWifiScreenState extends State<SavedWifiScreen> {
   RhythmWifiProfiles? _catalog;
   String? _selection;
   String? _error;
+  String? _checking;
   bool _busy = true;
   final _journey = const Uuid().v4();
   bool _usedEntryJourney = false;
@@ -68,14 +75,14 @@ class _SavedWifiScreenState extends State<SavedWifiScreen> {
     }
   }
 
-  Future<void> _write(
+  Future<bool> _write(
     String action, {
     String? id,
     String? ssid,
     String? password,
   }) async {
     final catalog = _catalog;
-    if (_busy || catalog == null) return;
+    if (_busy || catalog == null) return false;
     setState(() {
       _busy = true;
       _error = null;
@@ -105,7 +112,7 @@ class _SavedWifiScreenState extends State<SavedWifiScreen> {
         ssid: ssid,
         password: password,
       );
-      if (!mounted) return;
+      if (!mounted) return true;
       setState(() {
         _catalog = updated;
         if (action == 'save' && id == null) {
@@ -121,6 +128,7 @@ class _SavedWifiScreenState extends State<SavedWifiScreen> {
         action: action,
         outcome: 'succeeded',
       );
+      return true;
     } catch (_) {
       if (mounted) {
         setState(
@@ -134,9 +142,123 @@ class _SavedWifiScreenState extends State<SavedWifiScreen> {
         action: action,
         outcome: 'failed',
       );
+      return false;
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  Future<bool> _confirm(String title, String body, String yes) async =>
+      await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          backgroundColor: CelestialColors.backgroundCard,
+          title: Text(title,
+              style: const TextStyle(color: CelestialColors.textPrimary)),
+          content: NetworkBodyText(body),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('Cancel',
+                    style: TextStyle(color: CelestialColors.textSecondary))),
+            TextButton(
+                style: TextButton.styleFrom(foregroundColor: networkTeal),
+                onPressed: () => Navigator.pop(context, true),
+                child: Text(yes)),
+          ],
+        ),
+      ) ??
+      false;
+
+  /// A saved network is otherwise first proven by a failed pairing. Whether to
+  /// save: true once the Box joined it, or the owner chose to keep it unproven.
+  Future<bool> _proves(String ssid, String password) async {
+    if (!await _confirm(
+        'Check this network?',
+        'Your Rhythm Box will join "$ssid" to prove the password, then return to its own network. It is offline for about a minute, and lights will not respond to Rhythm until it is back.',
+        'Check network')) {
+      return false;
+    }
+    if (!mounted) return false;
+    setState(() {
+      _busy = true;
+      _error = null;
+      _checking = ssid;
+    });
+    final operation = const Uuid().v4();
+    var check = await widget.api
+        .startWifiCheck(operationId: operation, ssid: ssid, password: password);
+    // The Box needs up to 30 s to try and another 30 s to come home.
+    final deadline = DateTime.now().add(const Duration(seconds: 100));
+    while (check.state == RhythmWifiCheckState.running &&
+        mounted &&
+        DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(widget.checkPollInterval);
+      check = await widget.api.getWifiCheck(operation) ?? check;
+    }
+    if (!mounted) return false;
+    setState(() {
+      _busy = false;
+      _checking = null;
+    });
+    AnalyticsService().logWifiAction(
+      networkChange: false,
+      journeyId: _journey,
+      action: 'check',
+      outcome: check.state == RhythmWifiCheckState.passed
+          ? 'succeeded'
+          : check.state == RhythmWifiCheckState.unavailable
+              ? 'cancelled'
+              : 'failed',
+    );
+    return switch (check.state) {
+      RhythmWifiCheckState.passed => true,
+      // A Box that cannot check is no reason to refuse the network.
+      RhythmWifiCheckState.unavailable => true,
+      RhythmWifiCheckState.failed => _confirm(
+          'Could not join "$ssid"',
+          check.reason == 'not_found'
+              ? 'Your Rhythm Box could not see this network. Check the name, and that it is a 2.4 GHz network. If it only reaches another part of your home, you can still save it.'
+              : 'Your Rhythm Box could see this network but could not join it. The password is probably wrong.',
+          'Save anyway'),
+      RhythmWifiCheckState.running => _confirm(
+          'Could not confirm "$ssid"',
+          'Your Rhythm Box did not report back in time. Make sure it is back online before adding accessories.',
+          'Save anyway'),
+    };
+  }
+
+  /// Removing the default would otherwise leave new accessories without a
+  /// network, so the owner names its successor first.
+  Future<void> _remove(RhythmWifiProfile profile) async {
+    final catalog = _catalog!;
+    final others = catalog.profiles.where((p) => p.id != profile.id).toList();
+    if (catalog.defaultId == profile.id && others.isNotEmpty) {
+      final successor = await showDialog<String>(
+        context: context,
+        builder: (context) => SimpleDialog(
+          backgroundColor: CelestialColors.backgroundCard,
+          title: Text('Remove "${profile.ssid}"',
+              style: const TextStyle(color: CelestialColors.textPrimary)),
+          children: [
+            const Padding(
+                padding: EdgeInsets.fromLTRB(24, 0, 24, 8),
+                child: NetworkBodyText(
+                    'Choose the network new accessories should join instead.')),
+            for (final other in others)
+              SimpleDialogOption(
+                  key: ValueKey('wifi-successor-${other.id}'),
+                  onPressed: () => Navigator.pop(context, other.id),
+                  child: Text(other.ssid,
+                      style:
+                          const TextStyle(color: CelestialColors.textPrimary))),
+          ],
+        ),
+      );
+      if (successor == null || !mounted) return;
+      if (!await _write('default', id: successor)) return;
+    }
+    await _write('remove', id: profile.id);
   }
 
   String? _roles(RhythmWifiProfile profile) {
@@ -152,7 +274,11 @@ class _SavedWifiScreenState extends State<SavedWifiScreen> {
       context: context,
       builder: (_) => _WifiEditor(profile: profile),
     );
-    if (result != null && mounted) {
+    if (result == null || !mounted) return;
+    // Keeping the stored password leaves nothing new to prove.
+    final password = result.password;
+    if (password != null && !await _proves(result.ssid, password)) return;
+    if (mounted) {
       await _write(
         'save',
         id: profile?.id,
@@ -167,8 +293,6 @@ class _SavedWifiScreenState extends State<SavedWifiScreen> {
     final selected = widget.choose
         ? _selection == profile.id
         : catalog.defaultId == profile.id;
-    final removable =
-        catalog.defaultId != profile.id || catalog.profiles.length == 1;
     return Row(mainAxisSize: MainAxisSize.min, children: [
       Icon(
         selected
@@ -196,7 +320,7 @@ class _SavedWifiScreenState extends State<SavedWifiScreen> {
               if (action == 'edit') {
                 _edit(profile);
               } else {
-                _write(action, id: profile.id);
+                _remove(profile);
               }
             },
             itemBuilder: (_) => [
@@ -205,13 +329,10 @@ class _SavedWifiScreenState extends State<SavedWifiScreen> {
                       child: Text('Edit',
                           style:
                               TextStyle(color: CelestialColors.textPrimary))),
-                  // Removing the default would pick the network for new
-                  // accessories on the owner's behalf.
-                  if (removable)
-                    const PopupMenuItem(
-                        value: 'remove',
-                        child: Text('Remove saved network',
-                            style: TextStyle(color: Color(0xFFEF4444))))
+                  const PopupMenuItem(
+                      value: 'remove',
+                      child: Text('Remove saved network',
+                          style: TextStyle(color: Color(0xFFEF4444))))
                 ]),
     ]);
   }
@@ -242,6 +363,11 @@ class _SavedWifiScreenState extends State<SavedWifiScreen> {
           NetworkBodyText(widget.choose
               ? 'Choose the network this bulb should move to. Your default for new accessories does not change.'
               : 'New accessories join the default network during setup. Changing the default does not move your Rhythm Box or accessories you already added.'),
+          if (_checking != null)
+            NetworkNotice(
+                key: const ValueKey('wifi-checking'),
+                text:
+                    'Checking "$_checking". Your Rhythm Box is offline while it tries to join, and returns to its own network either way.'),
           if (_error != null)
             NetworkNotice(
                 key: const ValueKey('wifi-error'),

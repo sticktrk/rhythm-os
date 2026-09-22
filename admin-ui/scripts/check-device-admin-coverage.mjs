@@ -24,6 +24,10 @@ const explicitExemptions = new Set([
   // Moving the Box with a stored owner secret is an owner-only saved-network
   // operation; staff keep the typed PUT api/wifi.
   'PUT api/wifi/profile/{}',
+  // Proving a network takes the Box off its own for a minute; the owner
+  // accepts that from the saved-network screen.
+  'POST api/wifi/verify',
+  'GET api/wifi/verify/{}',
   // One-release bulb-test aliases remain SDK-callable for version skew but
   // the admin catalog exposes only the canonical Bulb Audition operations.
   'POST api/matter/bulb-test/run',

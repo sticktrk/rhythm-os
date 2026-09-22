@@ -12,18 +12,36 @@ class WifiApi extends CloudBackedServerApi {
   RhythmWifiChangeReceipt? receipt;
   bool failStatus = false;
   int starts = 0;
+  // Saved-network check: the Box is unreachable (null) before it answers.
+  List<RhythmWifiCheck?> checkAnswers = [];
+  final checked = <String>[];
+  @override
+  Future<RhythmWifiCheck> startWifiCheck({
+    required String operationId,
+    required String ssid,
+    required String password,
+  }) async {
+    checked.add(ssid);
+    return checkAnswers.isEmpty
+        ? RhythmWifiCheck.unavailable
+        : const RhythmWifiCheck(RhythmWifiCheckState.running);
+  }
+
+  @override
+  Future<RhythmWifiCheck?> getWifiCheck(String operationId) async =>
+      checkAnswers.removeAt(0);
   String startError = 'unavailable';
   @override
   Future<RhythmWifiProfiles> getWifiProfiles() async => RhythmWifiProfiles(
-    revision: 1,
-    defaultId: defaultId,
-    boxProfileId: 'main',
-    profiles: const [
-      RhythmWifiProfile(id: 'main', ssid: 'Main fixture'),
-      RhythmWifiProfile(id: 'ext', ssid: 'Extender fixture'),
-      RhythmWifiProfile(id: 'spare', ssid: 'Spare fixture'),
-    ],
-  );
+        revision: 1,
+        defaultId: defaultId,
+        boxProfileId: 'main',
+        profiles: const [
+          RhythmWifiProfile(id: 'main', ssid: 'Main fixture'),
+          RhythmWifiProfile(id: 'ext', ssid: 'Extender fixture'),
+          RhythmWifiProfile(id: 'spare', ssid: 'Spare fixture'),
+        ],
+      );
   String defaultId = 'main';
   @override
   Future<RhythmWifiProfiles> updateWifiProfile({
@@ -90,16 +108,84 @@ void main() {
     await tester.pumpAndSettle();
     expect(api.changes, ['default:ext']);
 
-    // The default cannot be removed while another choice exists.
+    // Removing the default asks for its successor first, so new accessories
+    // are never left without a network and the owner makes the choice.
     await tester.tap(find.byKey(const ValueKey('wifi-profile-menu-ext')));
     await tester.pumpAndSettle();
-    expect(find.text('Remove saved network'), findsNothing);
-    await tester.tapAt(Offset.zero);
+    await tester.tap(find.text('Remove saved network'));
     await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('wifi-profile-menu-spare')));
+    expect(api.changes, ['default:ext']);
+    await tester.tap(find.byKey(const ValueKey('wifi-successor-spare')));
     await tester.pumpAndSettle();
-    expect(find.text('Remove saved network'), findsOneWidget);
+    expect(api.changes, ['default:ext', 'default:spare', 'remove:ext']);
+    // Any other saved network is removed directly.
+    await tester.tap(find.byKey(const ValueKey('wifi-profile-menu-ext')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Remove saved network'));
+    await tester.pumpAndSettle();
+    expect(api.changes.last, 'remove:ext');
+    expect(api.changes.length, 4);
   });
+  for (final (answers, dialog, saves) in [
+    // Offline mid-check, then proven.
+    (
+      <RhythmWifiCheck?>[
+        null,
+        const RhythmWifiCheck(RhythmWifiCheckState.passed)
+      ],
+      null,
+      true
+    ),
+    (
+      <RhythmWifiCheck?>[
+        const RhythmWifiCheck(RhythmWifiCheckState.failed,
+            reason: 'join_failed')
+      ],
+      'password is probably wrong',
+      false
+    ),
+    (
+      <RhythmWifiCheck?>[
+        const RhythmWifiCheck(RhythmWifiCheckState.failed, reason: 'not_found')
+      ],
+      'could not see this network',
+      true
+    ),
+    // A Box that cannot check never blocks the save.
+    (<RhythmWifiCheck?>[], null, true),
+  ]) {
+    testWidgets('a new network is proven before it is saved: $dialog $saves', (
+      tester,
+    ) async {
+      final api = WifiApi()..checkAnswers = answers;
+      await tester.pumpWidget(MaterialApp(
+          home: SavedWifiScreen(
+              api: api, checkPollInterval: const Duration(milliseconds: 10))));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('wifi-add')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField).first, 'Garage fixture');
+      await tester.enterText(find.byType(TextField).last, 'fixture-password');
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+      // Nothing happens to the Box until the owner accepts the downtime.
+      expect(api.checked, isEmpty);
+      await tester.tap(find.text('Check network'));
+      await tester.pump();
+      if (answers.isNotEmpty) {
+        expect(find.byKey(const ValueKey('wifi-checking')), findsOneWidget);
+      }
+      await tester.pumpAndSettle();
+      expect(api.checked, ['Garage fixture']);
+      if (dialog != null) {
+        expect(find.textContaining(dialog), findsOneWidget);
+        await tester.tap(find.text(saves ? 'Save anyway' : 'Cancel'));
+        await tester.pumpAndSettle();
+      }
+      expect(api.changes, saves ? ['save:null'] : isEmpty);
+      expect(find.byKey(const ValueKey('wifi-checking')), findsNothing);
+    });
+  }
   testWidgets('alternate selection does not change the default', (
     tester,
   ) async {
