@@ -455,9 +455,48 @@ void main() {
     expect(find.textContaining('chipd'), findsNothing);
   });
 
+  for (final stage in ['matter_wifi_setup', null]) {
+    testWidgets('preserves safe Wi-Fi explanation with stage $stage',
+        (tester) async {
+      const message = 'The device could not find the selected Wi-Fi network.';
+      final api = _FakeRhythmMatterApi(
+        onPair: (_) async => RhythmMatterPairingResponse.fromHttp(
+          statusCode: 200,
+          data: {
+            'status': 'failed',
+            if (stage != null) 'failure_stage': stage,
+            'error': message,
+          },
+        ),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: MatterDeviceAddScreen(
+            endpoint: const HubEndpoint(host: '127.0.0.1', port: 0),
+            addMethod: MatterAddMethod.automatic,
+            initialSetupPayload: '3497-011-2332',
+            pairingApi: api,
+            onReviewSavedNetworks: () {},
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 350));
+      expect(find.textContaining(message), findsOneWidget);
+      // Only a Wi-Fi rejection points the owner at the saved networks.
+      expect(find.text('Review saved networks'),
+          stage != null ? findsOneWidget : findsNothing);
+      if (stage != null) {
+        expect(find.textContaining('Could not join Wi-Fi.'), findsOneWidget);
+      }
+      expect(tester.takeException(), isNull);
+    });
+  }
+
   for (final stage in [
     'matter_bluetooth',
     'matter_network_discovery',
+    'matter_wifi_setup',
     null,
     'future_stage'
   ]) {
@@ -501,6 +540,11 @@ void main() {
         expect(
             find.textContaining('Move the Rhythm Box closer'), findsOneWidget);
         expect(find.textContaining('Check the device’s Wi-Fi'), findsNothing);
+      } else if (stage == 'matter_wifi_setup') {
+        expect(find.textContaining('Could not join Wi-Fi.'), findsOneWidget);
+        expect(find.textContaining('Check the selected Wi-Fi network'),
+            findsOneWidget);
+        expect(find.textContaining('Bluetooth setup failed.'), findsNothing);
       } else if (stage == 'matter_network_discovery') {
         expect(
             find.textContaining('Could not reach the device on the network.'),
@@ -523,7 +567,9 @@ void main() {
           .single;
       expect(
           completion.properties['failure_stage'],
-          stage == 'matter_bluetooth' || stage == 'matter_network_discovery'
+          stage == 'matter_bluetooth' ||
+                  stage == 'matter_network_discovery' ||
+                  stage == 'matter_wifi_setup'
               ? stage
               : 'commissioning');
       expect(
