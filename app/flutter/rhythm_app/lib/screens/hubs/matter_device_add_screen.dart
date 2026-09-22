@@ -16,6 +16,7 @@ import '../../services/matter_setup_payload.dart';
 import '../../services/phone_matter_commissioner.dart';
 import '../../widgets/solar_orbit.dart';
 import '../../widgets/stage_timeline.dart';
+import '../network/saved_wifi_screen.dart';
 import 'matter_add_method.dart';
 import 'device_pairing_scanner_screen.dart';
 
@@ -58,6 +59,7 @@ class MatterDeviceAddScreen extends StatefulWidget {
     this.phoneCommissioningAvailable = false,
     @visibleForTesting this.pairingApi,
     @visibleForTesting this.phoneCommissioner,
+    @visibleForTesting this.onReviewSavedNetworks,
   });
 
   final HubEndpoint endpoint;
@@ -69,6 +71,7 @@ class MatterDeviceAddScreen extends StatefulWidget {
   final String? journeyId;
   final RhythmMatterApi? pairingApi;
   final PhoneMatterCommissioner? phoneCommissioner;
+  final VoidCallback? onReviewSavedNetworks;
 
   /// Whether this Box and phone support the phone-assisted handoff. It is
   /// offered only as recovery after a Box attempt fails.
@@ -146,6 +149,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
 
   _PairingPhase _phase = _PairingPhase.input;
   String? _errorText;
+  String? _failedStage;
   bool _hasFailedOnce = false;
   bool get _pairingRequestInFlight => _flow.isRunning;
   String _inputMethod = 'manual_code';
@@ -434,21 +438,29 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     }
 
     if (result.status == 'failed') {
+      const wifiSetupGuidance = 'Check the selected Wi-Fi network, its saved '
+          'credentials, and the signal where the device is installed, then try again.';
       // Only structured, recognized server evidence can diagnose a transport.
       // Older appliances and future stages retain the generic failure path.
       final stage = switch (result.failureStage) {
         'matter_bluetooth' => 'matter_bluetooth',
         'matter_network_discovery' => 'matter_network_discovery',
+        'matter_wifi_setup' => 'matter_wifi_setup',
         _ => 'commissioning',
       };
       _showPairingError(
         switch (stage) {
           'matter_bluetooth' => 'Bluetooth setup failed.',
+          'matter_wifi_setup' => 'Could not join Wi-Fi.',
           'matter_network_discovery' =>
             'Could not reach the device on the network.',
           _ => 'Pairing failed.',
         },
         detail: switch (stage) {
+          'matter_wifi_setup' =>
+            _userFacingMatterPairingDetail(result.error,
+                    technicalFallback: wifiSetupGuidance) ??
+                wifiSetupGuidance,
           'matter_bluetooth' =>
             'Move the Rhythm Box closer to the device, put the device back '
                 'in pairing mode, and try again.',
@@ -501,7 +513,8 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     );
   }
 
-  String? _userFacingMatterPairingDetail(String? detail) {
+  String? _userFacingMatterPairingDetail(String? detail,
+      {String? technicalFallback}) {
     final trimmed = detail?.trim();
     if (trimmed == null || trimmed.isEmpty) return null;
 
@@ -516,6 +529,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       'chip rpc',
     ];
     if (technicalMarkers.any(lower.contains)) {
+      if (technicalFallback != null) return technicalFallback;
       if (_activeAddMethod == MatterAddMethod.onNetworkSetupCode) {
         return 'Rhythm could not reach the device over your local Matter '
             'network. Keep its sharing window open and check that the Rhythm '
@@ -595,6 +609,7 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
     setState(() {
       _phase = _PairingPhase.failed;
       _hasFailedOnce = true;
+      _failedStage = failureStage;
       _errorText =
           detail == null || detail.isEmpty ? message : '$message\n\n$detail';
     });
@@ -606,6 +621,21 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
       _phase = _PairingPhase.input;
       _errorText = null;
     });
+  }
+
+  /// A rejected Wi-Fi join is the first proof a saved network is wrong, so
+  /// the failure leads straight to where the owner can correct it.
+  VoidCallback? get _reviewSavedNetworks {
+    if (_failedStage != 'matter_wifi_setup') return null;
+    if (widget.onReviewSavedNetworks != null) {
+      return widget.onReviewSavedNetworks;
+    }
+    final sync = context.read<ServerSyncProvider?>();
+    if (sync == null || !sync.supportsSavedWifiProfiles) return null;
+    return () => Navigator.of(context).push(
+          MaterialPageRoute<void>(
+              builder: (_) => SavedWifiScreen(api: sync.api)),
+        );
   }
 
   void _retryFromRhythmBox() {
@@ -1081,6 +1111,13 @@ class _MatterDeviceAddScreenState extends State<MatterDeviceAddScreen>
           enabled: true,
           onTap: _resetToInput,
         ),
+        if (_reviewSavedNetworks != null) ...[
+          const SizedBox(height: 12),
+          _SecondaryGhostButton(
+            label: 'Review saved networks',
+            onTap: _reviewSavedNetworks!,
+          ),
+        ],
         if (_activeAddMethod.usesPhoneCommissioner) ...[
           const SizedBox(height: 12),
           _SecondaryGhostButton(

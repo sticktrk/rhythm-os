@@ -62,6 +62,7 @@ void main() {
         null,
         'matter_bluetooth',
         'matter_network_discovery',
+        'matter_wifi_setup',
         'future_stage',
         '',
         42,
@@ -75,8 +76,12 @@ void main() {
         expect(response.status, 'failed');
         expect(
             response.failureStage,
-            ['matter_bluetooth', 'matter_network_discovery', 'future_stage']
-                    .contains(value)
+            [
+              'matter_bluetooth',
+              'matter_network_discovery',
+              'matter_wifi_setup',
+              'future_stage'
+            ].contains(value)
                 ? value
                 : null);
       }

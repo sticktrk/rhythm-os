@@ -19,6 +19,7 @@
 # Exit code is clang++'s (0 = clean).
 # Pass --test-phone-discovery to compile/run the focused discovery regression
 # against this same SDK's host library and headers.
+# Pass --test-pairing-delegate to run commissioning failure/lifecycle coverage.
 
 set -euo pipefail
 
@@ -64,14 +65,22 @@ if command -v pkg-config >/dev/null 2>&1; then
 fi
 
 echo "Checking $BRIDGE_DIR/chip_bridge.cc against $CHIP_ROOT ($(git -C "$CHIP_ROOT" describe --tags --always 2>/dev/null || echo unknown))"
-if [ "${1:-}" = "--test-phone-discovery" ]; then
+if [ "${1:-}" = "--test-phone-discovery" ] || [ "${1:-}" = "--test-pairing-delegate" ]; then
+    TEST_LINK_FLAGS=()
+    case "$(uname -s)" in
+        Darwin) TEST_LINK_FLAGS+=(-framework Foundation) ;;
+    esac
+    TEST_SOURCE=phone_commissioning_discovery_test.cc
+    if [ "$1" = "--test-pairing-delegate" ]; then
+        TEST_SOURCE=blocking_pairing_delegate_test.cc
+    fi
     shift
-    TEST_BINARY="$(mktemp "${TMPDIR:-/tmp}/phone-discovery.XXXXXX")"
+    TEST_BINARY="$(mktemp "${TMPDIR:-/tmp}/chip-bridge-test.XXXXXX")"
     trap 'rm -f "$TEST_BINARY"' EXIT
     "$CXX" -std=c++17 -fno-rtti -DCHIP_HAVE_CONFIG_H=1 -DOPENSSL_NO_ASM=1 \
         "${INCLUDES[@]}" "${PKG_FLAGS[@]}" "$@" \
-        "$BRIDGE_DIR/tests/phone_commissioning_discovery_test.cc" \
-        "$CHIP_OUT_DIR/lib/libCHIP.a" -o "$TEST_BINARY"
+        "$BRIDGE_DIR/tests/$TEST_SOURCE" \
+        "$CHIP_OUT_DIR/lib/libCHIP.a" "${TEST_LINK_FLAGS[@]}" -o "$TEST_BINARY"
     "$TEST_BINARY"
     exit 0
 fi
