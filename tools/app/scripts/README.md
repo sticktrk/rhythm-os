@@ -92,8 +92,13 @@ RHYTHM_APP_VERSION=1.2.3 ./tools/app/scripts/build-mobile.sh --ipa  # Supply the
 
 The app version is the publisher's decision and is not tracked in this repository.
 `flutter/rhythm_app/pubspec.yaml` carries only the `0.0.0+1` development placeholder. The script
-uses `--build-name X.Y.Z`, then `RHYTHM_APP_VERSION`, then the placeholder. `--testflight` and
-`--googleplay` stop before any build or store call while the version is still `0.0.0`.
+uses `--build-name X.Y.Z`, then `RHYTHM_APP_VERSION`, then pubspec. When pubspec is the
+placeholder, `--ipa` and `--testflight` discover the version of the latest iOS TestFlight
+upload using the configured App Store Connect API key. The discovered version is passed
+to Flutter, the build-number lookup, and the upload receipt. This continues the existing
+version; use `--build-name X.Y.Z` to start a new version or make the first upload.
+Lookup failures stop before building. `--googleplay` still requires an explicit version
+when pubspec is the placeholder.
 
 IPA/TestFlight builds auto-inject the next Apple build number. The script uses `--build-number`,
 then `RHYTHM_BUILD_NUMBER`, then the latest TestFlight build for the supplied app version

@@ -30,7 +30,8 @@
 #
 # The app version (build name) comes from --build-name, then RHYTHM_APP_VERSION, then
 # pubspec.yaml. The tracked pubspec.yaml carries only the 0.0.0 development placeholder; the
-# publisher supplies the store version, so store uploads refuse the placeholder.
+# IPA/TestFlight builds resolve the latest uploaded iOS version when no version is supplied.
+# Other store uploads require an explicit publisher version instead of the placeholder.
 #
 # First-time setup (iOS):
 #   1. Install CocoaPods: brew install cocoapods
@@ -140,6 +141,34 @@ write_store_build_receipt() {
         --commit "$source_commit" \
         --artifact "$artifact" \
         --output "$receipt_path"
+}
+
+resolve_testflight_app_version() {
+    local output
+    if ! command -v fastlane &> /dev/null; then
+        echo "Error: fastlane is required to discover the TestFlight app version."
+        echo "Install with: brew install fastlane"
+        exit 1
+    fi
+    if [ ! -f "$ASC_API_KEY_PATH" ]; then
+        echo "Error: App Store Connect API key not configured."
+        echo "Run: ./tools/app/scripts/build-mobile.sh --setup-testflight"
+        exit 1
+    fi
+    echo "Discovering app version from the latest TestFlight upload..."
+    if ! output="$(cd "$FLUTTER_APP" && FASTLANE_DISABLE_COLORS=1 FASTLANE_SKIP_UPDATE_CHECK=1 \
+        fastlane app_build_testflight_version api_key_path:"$ASC_API_KEY_PATH" \
+        app_identifier:"$IOS_APP_IDENTIFIER" 2>&1)"; then
+        echo "Error: could not discover the TestFlight app version. Check App Store Connect access,"
+        echo "       or pass --build-name X.Y.Z to select a version explicitly."
+        exit 1
+    fi
+    BUILD_NAME_OVERRIDE="$(printf '%s\n' "$output" | sed -nE 's/.*RHYTHM_TESTFLIGHT_VERSION=([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' | tail -1)"
+    if [ -z "$BUILD_NAME_OVERRIDE" ] || [ "$BUILD_NAME_OVERRIDE" = "0.0.0" ]; then
+        echo "Error: no usable TestFlight version found. Pass --build-name X.Y.Z for the first upload."
+        exit 1
+    fi
+    echo "Using app version: $BUILD_NAME_OVERRIDE (latest TestFlight upload)"
 }
 
 resolve_testflight_build_number() {
@@ -542,6 +571,11 @@ done
 # Build numbers are resolved per-platform (TestFlight latest+1, Play latest+1)
 # unless an explicit override was passed.
 if [ "$RELEASE_ALL" = true ]; then
+    # Google Play still needs a publisher version. Reject before either upload.
+    if [ "$(app_build_name)" = "0.0.0" ]; then
+        echo "Error: --release-all requires --build-name X.Y.Z or RHYTHM_APP_VERSION for both stores."
+        exit 1
+    fi
     echo "Release all: TestFlight + Google Play"
     echo ""
 
@@ -613,6 +647,11 @@ fi
 if [ -n "$BUILD_NAME_OVERRIDE" ] && ! [[ "$BUILD_NAME_OVERRIDE" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     echo "Error: app version must use X.Y.Z format, got '$BUILD_NAME_OVERRIDE'."
     exit 1
+fi
+
+if [ "$BUILD_IPA" = true ] && [ -z "$BUILD_NAME_OVERRIDE" ] && \
+   [ "$(pubspec_build_name)" = "0.0.0" ]; then
+    resolve_testflight_app_version
 fi
 
 if { [ "$UPLOAD_TESTFLIGHT" = true ] || [ "$UPLOAD_GOOGLEPLAY" = true ]; } && \
