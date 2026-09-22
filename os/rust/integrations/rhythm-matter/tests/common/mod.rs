@@ -124,12 +124,14 @@ pub fn set_platform_commissioning_wifi_provider(state: &SharedState, ssid: &str,
 }
 
 fn unique_data_dir() -> PathBuf {
+    // Wall-clock resolution can give parallel fixtures the same timestamp.
+    // Keep their persisted authority state separate within each test process.
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let sequence = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let base = std::env::temp_dir().join(format!("rhythm-matter-test-{}", std::process::id()));
-    base.join(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-            .to_string(),
-    )
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    base.join(format!("{timestamp}-{sequence}"))
 }
