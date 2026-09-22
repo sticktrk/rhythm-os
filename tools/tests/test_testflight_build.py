@@ -53,7 +53,9 @@ args = sys.argv[1:]
 with open(os.environ['FIXTURE_LOG'], 'a') as output:
     output.write(json.dumps([name, args]) + '\\n')
 def value(flag): return args[args.index(flag) + 1]
-if name == 'fastlane' and args[0] == 'run':
+if name == 'fastlane' and args[0] == 'app_build_testflight_version':
+    print('RHYTHM_TESTFLIGHT_VERSION=3.2.1')
+elif name == 'fastlane' and args[0] == 'run':
     print('Result: 15')
 elif name == 'flutter' and args[:2] == ['build', 'ios']:
     assert '--config-only' in args and '--no-codesign' in args
@@ -123,11 +125,22 @@ elif name == 'flutter' and args[:2] == ['build', 'ipa']:
         self.assertTrue(any(name == 'flutter' and '--build-name=9.9.0' in args
                             for name, args in self.calls()))
 
-    def test_store_upload_refuses_the_development_placeholder(self):
+    def test_store_upload_discovers_version_and_records_it(self):
         (self.app/'pubspec.yaml').write_text('version: 0.0.0+1\n')
-        result = self.build('--testflight', success=False)
-        self.assertIn("publisher's app version", result.stdout)
-        self.assertEqual(self.calls(), [])
+        self.build('--testflight')
+        calls = self.calls()
+        self.assertTrue(any(name == 'fastlane' and 'version:3.2.1' in args for name, args in calls))
+        self.assertTrue(any(name == 'flutter' and '--build-name=3.2.1' in args for name, args in calls))
+        receipt, = (self.path/'evidence').glob('*.json')
+        self.assertEqual(json.loads(receipt.read_text())['version'], '3.2.1')
+        self.assertEqual((self.app/'pubspec.yaml').read_text(), 'version: 0.0.0+1\n')
+
+    def test_explicit_build_number_still_discovers_version(self):
+        (self.app/'pubspec.yaml').write_text('version: 0.0.0+1\n')
+        self.build('--ipa', '--build-number', '16')
+        self.assertTrue(any(name == 'flutter' and '--build-name=3.2.1' in args
+                            for name, args in self.calls()))
+        self.assertFalse(any(name == 'fastlane' and args[0] == 'run' for name, args in self.calls()))
 
     def test_malformed_publisher_version_stops_before_any_call(self):
         self.env['RHYTHM_APP_VERSION'] = '9.8'

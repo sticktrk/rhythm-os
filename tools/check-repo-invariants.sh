@@ -34,6 +34,7 @@ bash tools/app/scripts/tests/deploy-supabase-test.sh
 python3 -m unittest tools/tests/test_release_publication.py
 python3 -m unittest tools/tests/test_testflight_build.py
 python3 tools/config/test_rhythm_env.py
+python3 tools/app/scripts/tests/testflight-version-test.py
 for fixture in \
     tools/ci/test-detect-changed-surfaces.sh \
     tools/ci/test-extract-zip-preserving-permissions.sh \

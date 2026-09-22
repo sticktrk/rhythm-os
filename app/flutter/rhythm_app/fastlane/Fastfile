@@ -211,6 +211,20 @@ def google_play_release_status(plan)
   }
 end
 
+desc "Read the app version from the latest iOS TestFlight upload"
+lane :app_build_testflight_version do |options|
+  latest_testflight_build_number(
+    api_key_path: options[:api_key_path],
+    app_identifier: options[:app_identifier],
+    platform: "ios",
+    initial_build_number: 0
+  )
+  version = lane_context[SharedValues::LATEST_TESTFLIGHT_VERSION].to_s
+  UI.user_error!("No usable TestFlight version; pass --build-name X.Y.Z for the first upload") unless
+    version.match?(/\A[0-9]+\.[0-9]+\.[0-9]+\z/) && version != "0.0.0"
+  UI.message("RHYTHM_TESTFLIGHT_VERSION=#{version}")
+end
+
 desc "Read-only validation of an exact Apple and/or Google Play production candidate"
 lane :app_release_preflight do |options|
   plan = release_plan(options)
