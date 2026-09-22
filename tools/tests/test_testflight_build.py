@@ -108,6 +108,33 @@ elif name == 'flutter' and args[:2] == ['build', 'ipa']:
         self.assertFalse(list(self.path.glob('.app-build.env.build.*')))
         self.assertFalse((self.repo/'.release-evidence').exists())
 
+    def test_publisher_version_overrides_the_tracked_placeholder(self):
+        self.env['RHYTHM_APP_VERSION'] = '9.8.7'
+        self.build('--testflight')
+        calls = self.calls()
+        self.assertTrue(any(name == 'fastlane' and 'version:9.8.7' in args for name, args in calls))
+        self.assertTrue(any(name == 'flutter' and '--build-name=9.8.7' in args for name, args in calls))
+        receipt, = (self.path/'evidence').glob('*.json')
+        self.assertEqual(json.loads(receipt.read_text())['version'], '9.8.7')
+
+    def test_build_name_flag_wins_over_environment(self):
+        self.env['RHYTHM_APP_VERSION'] = '9.8.7'
+        self.build('--ipa', '--build-number', '16', '--build-name', '9.9.0')
+        self.assertTrue(any(name == 'flutter' and '--build-name=9.9.0' in args
+                            for name, args in self.calls()))
+
+    def test_store_upload_refuses_the_development_placeholder(self):
+        (self.app/'pubspec.yaml').write_text('version: 0.0.0+1\n')
+        result = self.build('--testflight', success=False)
+        self.assertIn("publisher's app version", result.stdout)
+        self.assertEqual(self.calls(), [])
+
+    def test_malformed_publisher_version_stops_before_any_call(self):
+        self.env['RHYTHM_APP_VERSION'] = '9.8'
+        result = self.build('--testflight', success=False)
+        self.assertIn('X.Y.Z', result.stdout)
+        self.assertEqual(self.calls(), [])
+
     def test_missing_team_stops_before_clean_or_remote_calls(self):
         self.env.pop('TEAM_ID')
         result = self.build('--testflight', success=False)

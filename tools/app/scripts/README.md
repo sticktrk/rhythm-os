@@ -87,11 +87,17 @@ is supplied. Use your own bundle identifiers for store distribution.
 ./tools/app/scripts/build-mobile.sh --dmg             # Create macOS DMG
 ./tools/app/scripts/build-mobile.sh --sign            # Signed + notarized DMG
 RHYTHM_BUILD_NUMBER=123 ./tools/app/scripts/build-mobile.sh --ipa  # Override build number
+RHYTHM_APP_VERSION=1.2.3 ./tools/app/scripts/build-mobile.sh --ipa  # Supply the app version
 ```
 
+The app version is the publisher's decision and is not tracked in this repository.
+`flutter/rhythm_app/pubspec.yaml` carries only the `0.0.0+1` development placeholder. The script
+uses `--build-name X.Y.Z`, then `RHYTHM_APP_VERSION`, then the placeholder. `--testflight` and
+`--googleplay` stop before any build or store call while the version is still `0.0.0`.
+
 IPA/TestFlight builds auto-inject the next Apple build number. The script uses `--build-number`,
-then `RHYTHM_BUILD_NUMBER`, then the latest TestFlight build for the current
-`flutter/rhythm_app/pubspec.yaml` version plus one. Other release builds use common CI run-number
+then `RHYTHM_BUILD_NUMBER`, then the latest TestFlight build for the supplied app version
+plus one. Other release builds use common CI run-number
 variables, then the `+build` value from `pubspec.yaml`. It does not fall back to the current time.
 If TestFlight has no builds for the current version, the first build number is `1`.
 When an App Store Connect API key is configured, IPA builds require `TEAM_ID`.

@@ -2,7 +2,9 @@ name: rhythm_app
 description: Rhythm Lighting - Adaptive lighting curve configuration app
 publish_to: 'none'
 
-version: 4.0.308+1
+# Development placeholder. Store builds take their version from the publisher
+# (build-mobile.sh --build-name / RHYTHM_APP_VERSION); do not bump this line.
+version: 0.0.0+1
 
 environment:
   sdk: '>=3.4.0 <4.0.0'
