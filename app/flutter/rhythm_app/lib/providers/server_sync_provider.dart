@@ -1553,6 +1553,38 @@ class ServerSyncProvider extends ChangeNotifier {
   ) =>
       nodeById(nodeId)?.lightCapabilities?.colorTemperature;
 
+  /// Whether moving along this node's active curve can change its white point.
+  ///
+  /// The server sends effective profile settings, including inherited settings
+  /// and the resolved named-schedule mode. Use those instead of the global Day
+  /// curve. Unknown/older payloads keep the existing control available.
+  bool? curveColorTemperatureAdjustableForNode(String nodeId) {
+    final settings = nodeById(nodeId)?.profileSettings;
+    final scheduledMode = settings?.lightScheduleMode;
+    if (scheduledMode == null &&
+        settings?.roomSchedule?.source == RhythmRoomScheduleSource.followTime) {
+      // Legacy schedules do not advertise their resolved mode. The phone's
+      // clock/timezone is not authority for the appliance's schedule.
+      return null;
+    }
+    final mode = scheduledMode ?? _activeMode;
+    final defaultProfileId =
+        mode == null ? _activeProfileId : _activeProfileIdForMode(mode);
+    final requestedProfileId = settings?.profileId ?? defaultProfileId;
+    final profile =
+        _profiles.where((p) => p.id == requestedProfileId).firstOrNull ??
+            _profiles.where((p) => p.id == defaultProfileId).firstOrNull;
+    if (profile == null) return null;
+    final effective =
+        settings?.profileOverrides[profile.id]?.applyTo(profile) ?? profile;
+    return switch (effective.curve) {
+      RhythmConstantCurve() || RhythmPaletteCurve() => false,
+      RhythmSuperGaussianCurve(:final directColor) when directColor != null =>
+        false,
+      _ => effective.maxColorTemp > effective.minColorTemp,
+    };
+  }
+
   bool standbyEnabledForNode(String nodeId) =>
       nodeById(nodeId)?.standbyEnabled ?? false;
 

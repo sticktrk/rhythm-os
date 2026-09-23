@@ -255,6 +255,7 @@ class _TestRhythmConnection extends RhythmConnection {
   final _FakeRhythmServerApi api;
 
   final _helloController = StreamController<RhythmHello>.broadcast();
+  final _rhythmStates = StreamController<RhythmRoomState>.broadcast();
   final _dispatchFailures = StreamController<RhythmDispatchFailure>.broadcast();
 
   @override
@@ -263,6 +264,11 @@ class _TestRhythmConnection extends RhythmConnection {
   @override
   Stream<RhythmDispatchFailure> get dispatchFailureEvents =>
       _dispatchFailures.stream;
+
+  @override
+  Stream<RhythmRoomState> get rhythmStateEvents => _rhythmStates.stream;
+
+  void emitRhythmState(RhythmRoomState state) => _rhythmStates.add(state);
 
   void emitHello(RhythmHello hello) {
     _helloController.add(hello);
@@ -290,6 +296,7 @@ class _TestRhythmConnection extends RhythmConnection {
   @override
   void dispose() {
     _helloController.close();
+    _rhythmStates.close();
     _dispatchFailures.close();
     super.dispose();
   }
@@ -3161,6 +3168,245 @@ void main() {
     expect(call.nodeId, 'room-1');
     expect(call.kelvin, 3200);
     expect(call.preserveBrightness, isTrue);
+  });
+
+  testWidgets('named Sleep schedule disables an unreachable color slider',
+      (tester) async {
+    final screenshotPath =
+        Platform.environment['RHYTHM_ROOM_CARD_FIXED_COLOR_SCREENSHOT'];
+    if (screenshotPath != null && screenshotPath.isNotEmpty) {
+      await tester.runAsync(loadUiEvidenceFonts);
+    }
+    final roomProvider = RoomProvider();
+    final connection = _TestRhythmConnection();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _FakeHomeProvider(),
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    void emitSchedule(String mode) {
+      connection.emitHello(RhythmHello.fromJson({
+        'mode': {
+          'active': 'day',
+          'configs': [
+            {'mode': 'day', 'active_profile_id': 'rhythm'},
+            {'mode': 'sleep', 'active_profile_id': 'sleep'},
+          ],
+        },
+        'profiles': [
+          const RhythmCurveConfig(id: 'rhythm', name: 'Day').toJson(),
+          const RhythmCurveConfig(
+            id: 'sleep',
+            name: 'Sleep',
+            minColorTemp: 1800,
+            maxColorTemp: 1800,
+            curve: RhythmConstantCurve(brightness: 0, colorTemp: 0),
+          ).toJson(),
+        ],
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Entry',
+            'kind': 'room',
+            'hub_types': ['hue'],
+            'state': 'active',
+            'rhythm_enabled': true,
+            'lights_on': true,
+            'brightness': 75,
+            'kelvin': mode == 'sleep' ? 1800 : 3200,
+            'profile_settings': {
+              'light_schedule': {
+                'kind': 'named',
+                'schedule_id': 'evening',
+                'active_mode': mode,
+              },
+            },
+          },
+        ],
+      }));
+    }
+
+    emitSchedule('sleep');
+    await tester.pump();
+    await tester.pumpWidget(MultiProvider(
+      providers: [
+        ChangeNotifierProvider<RoomProvider>.value(value: roomProvider),
+        ChangeNotifierProvider<ServerSyncProvider>.value(value: serverSync),
+      ],
+      child: MaterialApp(
+        home: Scaffold(
+          body: RoomCard(
+            roomId: 'room-1',
+            globalConfig: defaultCurveConfig,
+            curveData: _curveDataWithKelvins([2000, 5500, 2000]),
+          ),
+        ),
+      ),
+    ));
+
+    final color = tester.getSemantics(_colorControl()).getSemanticsData();
+    expect(color.hasAction(SemanticsAction.tap), isFalse);
+    expect(color.value, '1800 kelvin');
+    expect(color.hint, contains('Light settings'));
+    await tester.tap(_roomSegment('Color'));
+    expect(_cctSlider(), findsNothing);
+    expect(connection.api.nodeCurveColorTemperatureCalls, isEmpty);
+    if (screenshotPath != null && screenshotPath.isNotEmpty) {
+      await tester.longPress(_roomSegment('Color'));
+      await tester.pumpAndSettle();
+      await expectLater(
+          find.byType(MaterialApp), matchesGoldenFile(screenshotPath));
+      Tooltip.dismissAllToolTips();
+      await tester.pumpAndSettle();
+    }
+
+    // Brightness remains independent of the fixed-temperature curve.
+    await _tapRoomSegment(tester, 'Brightness');
+    tester.widget<Slider>(_brightnessSlider()).onChanged!(85);
+    await tester.pump();
+    tester.widget<Slider>(_brightnessSlider()).onChangeEnd!(85);
+    await tester.pump();
+    expect(connection.api.nodeCurveBrightnessCalls.single.brightness, 85);
+
+    // A server schedule transition restores control without remounting.
+    emitSchedule('day');
+    await tester.pump();
+    await _tapRoomSegment(tester, 'Color');
+    expect(_cctSlider(), findsOneWidget);
+    tester.widget<Slider>(_cctSlider()).onChanged!(4500);
+    await tester.pump();
+    tester.widget<Slider>(_cctSlider()).onChangeEnd!(4500);
+    await tester.pump();
+    expect(connection.api.nodeCurveColorTemperatureCalls.single.kelvin, 4500);
+
+    // Ordinary state events also close the slider and drop its local value;
+    // this must not depend on a new hello or reconnect.
+    connection.emitRhythmState(RhythmRoomState.fromJson({
+      'node_id': 'room-1',
+      'state': 'active',
+      'rhythm_enabled': true,
+      'lights_on': true,
+      'brightness': 85,
+      'kelvin': 1800,
+      'profile_settings': {
+        'light_schedule': {
+          'kind': 'named',
+          'schedule_id': 'evening',
+          'active_mode': 'sleep',
+        },
+      },
+    }));
+    await tester.pumpAndSettle();
+    expect(_cctSlider(), findsNothing);
+    expect(tester.getSemantics(_colorControl()).value, '1800 kelvin');
+  });
+
+  testWidgets('color availability uses effective profiles with legacy fallback',
+      (tester) async {
+    final roomProvider = RoomProvider();
+    final connection = _TestRhythmConnection();
+    final serverSync = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _FakeHomeProvider(),
+    );
+    addTearDown(roomProvider.dispose);
+    addTearDown(serverSync.dispose);
+    addTearDown(connection.dispose);
+
+    const variable = RhythmCurveConfig(id: 'custom', name: 'Custom');
+    for (final scenario in <({
+      String name,
+      RhythmCurveConfig? profile,
+      Map<String, dynamic> settings,
+      bool? adjustable,
+    })>[
+      (name: 'variable', profile: variable, settings: {}, adjustable: true),
+      (
+        name: 'fixed white override',
+        profile: variable,
+        settings: {
+          'profile_overrides': {
+            'custom': {'min_color_temp': 3000, 'max_color_temp': 3000},
+          },
+        },
+        adjustable: false,
+      ),
+      (
+        name: 'constant shape with distinct bounds',
+        profile: variable.copyWith(
+          curve: const RhythmConstantCurve(brightness: 50, colorTemp: 50),
+        ),
+        settings: {},
+        adjustable: false,
+      ),
+      (
+        name: 'direct color override',
+        profile: variable,
+        settings: {
+          'profile_overrides': {
+            'custom': {
+              'curve': {
+                'type': 'super-gaussian',
+                'direct_color': {
+                  'rgb': {'r': 20, 'g': 40, 'b': 80},
+                  'xy': {'x': 0.2, 'y': 0.3},
+                },
+              },
+            },
+          },
+        },
+        adjustable: false,
+      ),
+      (
+        name: 'unknown selected profile falls back to mode profile',
+        profile: variable,
+        settings: {'profile_id': 'missing'},
+        adjustable: true,
+      ),
+      (
+        name: 'legacy schedule lacks an authoritative mode',
+        profile: variable,
+        settings: {
+          'room_schedule': {'source': 'follow_time'},
+        },
+        adjustable: null,
+      ),
+      (
+        name: 'older payload without profile metadata',
+        profile: null,
+        settings: {},
+        adjustable: null,
+      ),
+    ]) {
+      connection.emitHello(RhythmHello.fromJson({
+        'mode': {
+          'active': 'day',
+          'configs': [
+            {'mode': 'day', 'active_profile_id': 'custom'},
+          ],
+        },
+        'profiles': [if (scenario.profile != null) scenario.profile!.toJson()],
+        'nodes': [
+          {
+            'id': 'room-1',
+            'name': 'Study',
+            'kind': 'room',
+            'state': 'active',
+            'lights_on': true,
+            'profile_settings': scenario.settings,
+          },
+        ],
+      }));
+      await tester.pump();
+      expect(serverSync.curveColorTemperatureAdjustableForNode('room-1'),
+          scenario.adjustable,
+          reason: scenario.name);
+    }
   });
 
   testWidgets('extended-capability bulb control reaches 20000 kelvin',
