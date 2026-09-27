@@ -868,6 +868,14 @@ class _RoomCardState extends State<RoomCard> {
           final range = capabilities.colorTemperature;
           return range != null && range.maxKelvin > range.minKelvin;
         });
+        final curveColorTemperatureAdjustable =
+            context.select<ServerSyncProvider, bool?>((provider) =>
+                provider.curveColorTemperatureAdjustableForNode(widget.roomId));
+        if (curveColorTemperatureAdjustable == false) {
+          // A schedule/profile change can make a previously adjustable curve
+          // fixed. Do not keep showing the last locally dragged white point.
+          _sliderKelvin = null;
+        }
         final profileOverride = context.select<
                 ServerSyncProvider,
                 ({
@@ -1037,7 +1045,8 @@ class _RoomCardState extends State<RoomCard> {
             !isDispatchPending;
         final brightnessControlAvailable = mode != RoomMode.off;
         final colorControlAvailable = adaptiveControlsAvailable &&
-            deviceColorTemperatureSupported != false;
+            deviceColorTemperatureSupported != false &&
+            curveColorTemperatureAdjustable != false;
         if ((_expandedControl == _RoomDetailControl.brightness &&
                 !brightnessControlAvailable) ||
             (_expandedControl == _RoomDetailControl.color &&
@@ -1459,17 +1468,21 @@ class _RoomCardState extends State<RoomCard> {
                                     cctRange.maxKelvin,
                                   ),
                                   semanticsValue:
-                                      '${cctRange.clampKelvin(_sliderKelvin ?? kelvin)} kelvin',
+                                      '${_sliderKelvin ?? kelvin} kelvin',
                                   semanticsHint: mode == RoomMode.mood
                                       ? 'Color temperature is unavailable while Scenes is active'
                                       : deviceColorTemperatureSupported == false
                                           ? 'This light supports brightness only'
-                                          : !colorControlAvailable
-                                              ? 'Turn the room on to adjust color temperature'
-                                              : _expandedControl ==
-                                                      _RoomDetailControl.color
-                                                  ? 'Hide color temperature control'
-                                                  : 'Show color temperature control',
+                                          : curveColorTemperatureAdjustable ==
+                                                  false
+                                              ? 'Color follows this room’s light profile. Change it in Light settings.'
+                                              : !colorControlAvailable
+                                                  ? 'Turn the room on to adjust color temperature'
+                                                  : _expandedControl ==
+                                                          _RoomDetailControl
+                                                              .color
+                                                      ? 'Hide color temperature control'
+                                                      : 'Show color temperature control',
                                   onPressed: () => _toggleExpandedControl(
                                     _RoomDetailControl.color,
                                     mode: mode,
@@ -2774,7 +2787,9 @@ class _RoomDetailJewelState extends State<_RoomDetailJewel> {
         hint: widget.semanticsHint,
         onTap: widget.enabled ? widget.onPressed : null,
         child: Tooltip(
-          message: '${widget.label} · ${widget.semanticsValue}',
+          message: widget.enabled
+              ? '${widget.label} · ${widget.semanticsValue}'
+              : widget.semanticsHint,
           child: GestureDetector(
             key: ValueKey(
               'room-card-segment-${widget.roomId}-${widget.control.name}',
