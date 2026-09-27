@@ -3,11 +3,28 @@
 type Env = (name: string) => string | undefined;
 type Json = Record<string, any>;
 type AylaApp = { appId: string; appSecret: string };
+type SetupProbeResult = {
+  status?: number;
+  lan_ip_present?: boolean;
+  registration_type?: string;
+};
+type SetupProbe = {
+  token_length: number;
+  full: SetupProbeResult;
+  prefix8: SetupProbeResult;
+};
+export type MonsterBrokerFailure = {
+  stage: string;
+  status: number;
+  upstream_status?: number;
+  setup_probe?: SetupProbe;
+};
 type Dependencies = {
   env: Env;
   fetch: typeof fetch;
   now?: () => number;
   ayla?: AylaApp;
+  reportFailure?: (failure: MonsterBrokerFailure) => void;
 };
 const DEVICE = "https://ads-field.aylanetworks.com";
 // Vendor application identity is public; its credential is deployment configuration.
@@ -15,7 +32,12 @@ const AYLA_APP_ID = "RGBIC-yQ-id";
 const encoder = new TextEncoder();
 const dsnPattern = /^[A-Za-z0-9]{8,32}$/;
 class Failure extends Error {
-  constructor(readonly stage: string, readonly status = 502) {
+  setupProbe?: SetupProbe;
+  constructor(
+    readonly stage: string,
+    readonly status = 502,
+    readonly upstreamStatus?: number,
+  ) {
     super(stage);
   }
 }
@@ -117,7 +139,7 @@ export function createMonsterBroker(deps: Dependencies) {
       if (!res.ok) {
         if (res.status === 401) cached = undefined;
         await res.body?.cancel();
-        throw new Failure(stage);
+        throw new Failure(stage, 502, res.status);
       }
       return JSON.parse(await boundedText(res.body, 2 * 1024 * 1024));
     } catch (e) {
@@ -213,11 +235,24 @@ export function createMonsterBroker(deps: Dependencies) {
       ["sign", "verify"],
     );
   }
-  async function issueTicket(userId: string, dsn: string) {
-    const token = Array.from(
-      crypto.getRandomValues(new Uint8Array(16)),
-      (b) => b.toString(16).padStart(2, "0"),
-    ).join("");
+  async function issueTicket(userId: string, dsn: string, tokenLength: 8 | 32) {
+    // Match the vendor app's eight-character alphanumeric setup proof. Older
+    // clients validate exactly 32 hex characters, so they must opt in first.
+    const alphabet =
+      "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    let token = "";
+    if (tokenLength === 8) {
+      while (token.length < 8) {
+        for (const byte of crypto.getRandomValues(new Uint8Array(16))) {
+          if (byte < 248 && token.length < 8) token += alphabet[byte % 62];
+        }
+      }
+    } else {
+      token = Array.from(
+        crypto.getRandomValues(new Uint8Array(16)),
+        (b) => b.toString(16).padStart(2, "0"),
+      ).join("");
+    }
     const data = encoder.encode(
       JSON.stringify({
         user_id: userId,
@@ -250,7 +285,8 @@ export function createMonsterBroker(deps: Dependencies) {
         ticket.user_id !== userId || ticket.dsn !== dsn ||
         typeof ticket.expires !== "number" || ticket.expires <= now() ||
         ticket.expires > now() + 600000 ||
-        !/^[a-f0-9]{32}$/.test(ticket.setup_token)
+        typeof ticket.setup_token !== "string" ||
+        !/^(?:[A-Za-z0-9]{8}|[a-f0-9]{32})$/.test(ticket.setup_token)
       ) throw new Error();
       return ticket.setup_token;
     } catch {
@@ -273,6 +309,40 @@ export function createMonsterBroker(deps: Dependencies) {
     return devices.map((row) => row?.device).find((device) =>
       device?.dsn === dsn
     );
+  }
+  async function probeSetupToken(
+    dsn: string,
+    token: string,
+    signal: AbortSignal,
+  ): Promise<SetupProbeResult> {
+    try {
+      // The vendor SDK uses this read-only endpoint before registration. It
+      // generates eight-character tokens; compare that format without changing
+      // the proof submitted by the current client or attempting another claim.
+      const query = new URLSearchParams({ dsn, setup_token: token });
+      const result = await request(
+        `${DEVICE}/apiv1/devices/connected.json?${query}`,
+        "setup_probe",
+        signal,
+        undefined,
+        "none",
+      );
+      const device = result?.device;
+      const registrationType = device?.registration_type;
+      return {
+        status: 200,
+        lan_ip_present: typeof device?.lan_ip === "string" &&
+          privateIp(device.lan_ip),
+        ...(["AP-Mode", "Same-LAN", "Button-Push", "Dsn", "Display", "Node"]
+            .includes(registrationType)
+          ? { registration_type: registrationType }
+          : {}),
+      };
+    } catch (error) {
+      return error instanceof Failure && error.upstreamStatus !== undefined
+        ? { status: error.upstreamStatus }
+        : {};
+    }
   }
   async function credentials(
     device: Json,
@@ -358,6 +428,12 @@ export function createMonsterBroker(deps: Dependencies) {
         !body || typeof body.dsn !== "string" || !dsnPattern.test(body.dsn) ||
         !["begin", "complete", "key"].includes(body.action)
       ) return response({ error: "invalid_request" }, 400);
+      if (
+        body.action === "begin" && body.setup_token_length !== undefined &&
+        body.setup_token_length !== 8 && body.setup_token_length !== 32
+      ) {
+        return response({ error: "invalid_request" }, 400);
+      }
       aylaApp(); // Reject incomplete deployment configuration before any vendor call.
       const signal = AbortSignal.timeout(35000);
       let setupToken: string | undefined;
@@ -369,18 +445,43 @@ export function createMonsterBroker(deps: Dependencies) {
       // spends a BLE provisioning attempt on a ticket it can never complete.
       const auth = `auth_token ${await authenticate(signal)}`;
       if (body.action === "begin") {
-        return response(await issueTicket(userId, body.dsn));
+        return response(
+          await issueTicket(userId, body.dsn, body.setup_token_length ?? 32),
+        );
       }
       let device = await ownedDevice(body.dsn, auth, signal);
       if (!device && setupToken) {
         // setup_token is proof provisioned into the exact DSN over BLE.
-        const registered = await request(
-          `${DEVICE}/apiv1/devices.json`,
-          "register",
-          signal,
-          { device: { dsn: body.dsn, setup_token: setupToken } },
-          auth,
-        );
+        let registered;
+        try {
+          registered = await request(
+            `${DEVICE}/apiv1/devices.json`,
+            "register",
+            signal,
+            { device: { dsn: body.dsn, setup_token: setupToken } },
+            auth,
+          );
+        } catch (error) {
+          if (
+            error instanceof Failure && error.upstreamStatus === 404 &&
+            deps.reportFailure && !signal.aborted
+          ) {
+            const probeSignal = AbortSignal.any([
+              signal,
+              AbortSignal.timeout(2500),
+            ]);
+            const [full, prefix8] = await Promise.all([
+              probeSetupToken(body.dsn, setupToken, probeSignal),
+              probeSetupToken(body.dsn, setupToken.slice(0, 8), probeSignal),
+            ]);
+            error.setupProbe = {
+              token_length: setupToken.length,
+              full,
+              prefix8,
+            };
+          }
+          throw error;
+        }
         if (registered?.device?.dsn !== body.dsn) {
           throw new Failure("registration_identity");
         }
@@ -390,6 +491,20 @@ export function createMonsterBroker(deps: Dependencies) {
       return response(await credentials(device, body.dsn, auth, signal));
     } catch (e) {
       const failure = e instanceof Failure ? e : new Failure("internal", 500);
+      // Only bounded, broker-owned stage names and HTTP status codes. Never
+      // include request data, provider bodies, exception messages or URLs.
+      try {
+        deps.reportFailure?.({
+          stage: failure.stage,
+          status: failure.status,
+          ...(failure.upstreamStatus === undefined
+            ? {}
+            : { upstream_status: failure.upstreamStatus }),
+          ...(failure.setupProbe ? { setup_probe: failure.setupProbe } : {}),
+        });
+      } catch {
+        // Observability must not change the client's retry/recovery contract.
+      }
       return response({ error: failure.stage }, failure.status);
     }
   };

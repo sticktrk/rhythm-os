@@ -39,6 +39,13 @@ completion or its ten-minute expiry; retry `credentials(dsn, Some(ticket))` if
 cloud registration or LAN-IP propagation is still pending, without reprovisioning
 Wi-Fi. For a device already on the account, use `credentials(dsn, None)`.
 
+The phone Ayla adapter requests `setup_token_length: 8` on `begin`, matching the
+vendor app's eight-character alphanumeric BLE token. The broker binds that exact
+token into the signed ticket and submits it unchanged at registration. Callers
+that omit the field retain the legacy 32-character hex format; the phone accepts
+both formats to tolerate an older broker. The Box path retains its existing
+format because older appliance versions require 32 characters.
+
 The app must close its GATT connection on success, error and cancellation, and
 support a complete 105-byte GATT write-with-response. The BlueZ fallback runs a
 bounded admitted operation and disconnects before completion. Cancelling an

@@ -1,4 +1,8 @@
-import { createMonsterBroker, privateIp } from "./broker.ts";
+import {
+  createMonsterBroker,
+  type MonsterBrokerFailure,
+  privateIp,
+} from "./broker.ts";
 function assert(
   condition: unknown,
   message = "assertion failed",
@@ -20,6 +24,10 @@ function fixture(
     model?: string;
     env?: Record<string, string | undefined>;
     ayla?: { appId: string; appSecret: string };
+    rejectRegistration?: boolean;
+    registrationStatus?: number;
+    setupProbe?: "prefix8" | "unavailable";
+    reportFailure?: (failure: MonsterBrokerFailure) => void;
   } = {},
 ) {
   const env = { ...secrets, ...options.env };
@@ -63,13 +71,36 @@ function fixture(
       assert(body.app_id === fixtureAyla.appId);
       assert(body.app_secret === fixtureAyla.appSecret);
       result = { access_token: "ayla-token", expires_in: 300 };
+    } else if (url.includes("/devices/connected.json?")) {
+      assert(headers.get("Authorization") === "none");
+      assert(body === undefined, "setup probes must be read-only");
+      const query = new URL(url).searchParams;
+      assert(query.get("dsn") === DSN);
+      if (options.setupProbe === "unavailable") {
+        throw new Error("private transport details");
+      }
+      if (query.get("setup_token")?.length !== 8) {
+        return new Response("private setup proof details", { status: 404 });
+      }
+      result = {
+        device: {
+          lan_ip: "192.168.5.200",
+          registration_type: "AP-Mode",
+          private_data: "must not be logged",
+        },
+      };
     } else {
       assert(headers.get("Authorization") === "auth_token ayla-token");
       if (url.endsWith("/devices.json")) {
         if (body) {
+          if (options.rejectRegistration) {
+            return new Response("private device and setup token details", {
+              status: options.registrationStatus ?? 422,
+            });
+          }
           assert(
             body.device.dsn === DSN &&
-              /^[0-9a-f]{32}$/.test(body.device.setup_token),
+              /^(?:[A-Za-z0-9]{8}|[0-9a-f]{32})$/.test(body.device.setup_token),
           );
           owned = true;
           result = { device: { dsn: DSN, lan_ip: "192.168.5.200" } };
@@ -97,6 +128,7 @@ function fixture(
     fetch: fetcher,
     now: () => clock,
     ayla: options.ayla ?? fixtureAyla,
+    reportFailure: options.reportFailure,
   });
   const call = (body: unknown, user = "owner") =>
     handle(
@@ -208,6 +240,52 @@ Deno.test("begin/complete binds setup proof to owner DSN expiry and idempotent r
       .status === 400,
   );
 });
+Deno.test("capable clients commission with an unchanged eight-character proof", async () => {
+  const f = fixture({ owned: false });
+  const begin = await f.call({
+    action: "begin",
+    dsn: DSN,
+    setup_token_length: 8,
+  });
+  assert(begin.status === 200);
+  const ticket = await begin.json();
+  assert(/^[A-Za-z0-9]{8}$/.test(ticket.setup_token));
+  const completed = await f.call({
+    action: "complete",
+    dsn: DSN,
+    ticket: ticket.ticket,
+  });
+  assert(completed.status === 200);
+  assert(
+    f.calls.find((c) => c.url.endsWith("/devices.json") && c.body)?.body.device
+      .setup_token === ticket.setup_token,
+  );
+  const expired = fixture({ owned: false });
+  const expiring = await (await expired.call({
+    action: "begin",
+    dsn: DSN,
+    setup_token_length: 8,
+  })).json();
+  expired.advance();
+  assert(
+    (await expired.call({
+      action: "complete",
+      dsn: DSN,
+      ticket: expiring.ticket,
+    })).status === 400,
+  );
+  assert(!expired.calls.some((c) => c.url.endsWith("/devices.json") && c.body));
+});
+Deno.test("invalid token length requests make no vendor calls", async () => {
+  const f = fixture();
+  for (const length of [0, 7, 9, 16, 33, "8", null]) {
+    assert(
+      (await f.call({ action: "begin", dsn: DSN, setup_token_length: length }))
+        .status === 400,
+    );
+  }
+  assert(f.calls.length === 0);
+});
 Deno.test("unowned key lookup never registers and provider failures are sanitized", async () => {
   const unowned = fixture({ owned: false });
   assert((await unowned.call({ action: "key", dsn: DSN })).status === 404);
@@ -216,6 +294,123 @@ Deno.test("unowned key lookup never registers and provider failures are sanitize
   const response = await f.call({ action: "key", dsn: DSN });
   const text = await response.text();
   assert(response.status === 502 && text === '{"error":"monster_login"}');
+});
+Deno.test("registration rejection reports only its stage and upstream status", async () => {
+  const failures: MonsterBrokerFailure[] = [];
+  const f = fixture({
+    owned: false,
+    rejectRegistration: true,
+    reportFailure: (failure) => failures.push(failure),
+  });
+  const ticket = await (await f.call({ action: "begin", dsn: DSN })).json();
+  assert(failures.length === 0);
+  const result = await f.call({
+    action: "complete",
+    dsn: DSN,
+    ticket: ticket.ticket,
+  });
+  assert(result.status === 502);
+  assert(await result.text() === '{"error":"register"}');
+  assert(
+    JSON.stringify(failures) ===
+      '[{"stage":"register","status":502,"upstream_status":422}]',
+  );
+});
+Deno.test("registration 404 probes token formats without a second claim or secret logging", async () => {
+  const failures: MonsterBrokerFailure[] = [];
+  const f = fixture({
+    owned: false,
+    rejectRegistration: true,
+    registrationStatus: 404,
+    setupProbe: "prefix8",
+    reportFailure: (failure) => failures.push(failure),
+  });
+  const ticket = await (await f.call({ action: "begin", dsn: DSN })).json();
+  const result = await f.call({
+    action: "complete",
+    dsn: DSN,
+    ticket: ticket.ticket,
+  });
+  assert(
+    result.status === 502 && await result.text() === '{"error":"register"}',
+  );
+  assert(
+    f.calls.filter((c) => c.url.endsWith("/devices.json") && c.body).length ===
+      1,
+  );
+  const probes = f.calls.filter((c) =>
+    c.url.includes("/devices/connected.json?")
+  );
+  assert(probes.length === 2);
+  assert(
+    new URL(probes[0].url).searchParams.get("setup_token") ===
+      ticket.setup_token,
+  );
+  assert(
+    new URL(probes[1].url).searchParams.get("setup_token") ===
+      ticket.setup_token.slice(0, 8),
+  );
+  assert(
+    JSON.stringify(failures) === JSON.stringify([{
+      stage: "register",
+      status: 502,
+      upstream_status: 404,
+      setup_probe: {
+        token_length: 32,
+        full: { status: 404 },
+        prefix8: {
+          status: 200,
+          lan_ip_present: true,
+          registration_type: "AP-Mode",
+        },
+      },
+    }]),
+  );
+});
+Deno.test("failed setup probes preserve the original registration error", async () => {
+  const failures: MonsterBrokerFailure[] = [];
+  const f = fixture({
+    owned: false,
+    rejectRegistration: true,
+    registrationStatus: 404,
+    setupProbe: "unavailable",
+    reportFailure: (failure) => failures.push(failure),
+  });
+  const ticket = await (await f.call({ action: "begin", dsn: DSN })).json();
+  const result = await f.call({
+    action: "complete",
+    dsn: DSN,
+    ticket: ticket.ticket,
+  });
+  assert(
+    result.status === 502 && await result.text() === '{"error":"register"}',
+  );
+  assert(
+    JSON.stringify(failures[0].setup_probe) ===
+      '{"token_length":32,"full":{},"prefix8":{}}',
+  );
+});
+Deno.test("invalid provider data reports the stage without inventing an upstream error", async () => {
+  const failures: MonsterBrokerFailure[] = [];
+  const f = fixture({
+    missingKey: true,
+    reportFailure: (failure) => failures.push(failure),
+  });
+  const result = await f.call({ action: "key", dsn: DSN });
+  assert(result.status === 502);
+  assert(await result.text() === '{"error":"lan_key"}');
+  assert(JSON.stringify(failures) === '[{"stage":"lan_key","status":502}]');
+});
+Deno.test("a failed diagnostic sink preserves the sanitized failure response", async () => {
+  const f = fixture({
+    fail: "/auth/login",
+    reportFailure: () => {
+      throw new Error("sink unavailable");
+    },
+  });
+  const result = await f.call({ action: "key", dsn: DSN });
+  assert(result.status === 502);
+  assert(await result.text() === '{"error":"monster_login"}');
 });
 Deno.test("vendor configuration fails closed and tickets bind the account credentials", async () => {
   // Unpinned Ayla app credentials fail closed instead of sending a login.
@@ -274,11 +469,22 @@ Deno.test("unsupported model and missing key fail closed", async () => {
 Deno.test("missing vendor application credential makes no provider requests", async () => {
   let calls = 0;
   const handler = createMonsterBroker({
-    env: (name) => ({ MONSTER_EMAIL: "fixture@example.invalid", MONSTER_PASSWORD: "fixture-password" } as Record<string, string>)[name],
-    fetch: async () => { calls++; throw new Error("unexpected provider request"); },
+    env: (name) =>
+      ({
+        MONSTER_EMAIL: "fixture@example.invalid",
+        MONSTER_PASSWORD: "fixture-password",
+      } as Record<string, string>)[name],
+    fetch: async () => {
+      calls++;
+      throw new Error("unexpected provider request");
+    },
   });
-  const result = await handler(new Request("https://example.invalid", {
-    method: "POST", body: JSON.stringify({ action: "key", dsn: DSN }),
-  }), "fixture-user");
+  const result = await handler(
+    new Request("https://example.invalid", {
+      method: "POST",
+      body: JSON.stringify({ action: "key", dsn: DSN }),
+    }),
+    "fixture-user",
+  );
   assert(result.status === 503 && calls === 0);
 });

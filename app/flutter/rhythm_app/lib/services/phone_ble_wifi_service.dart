@@ -43,6 +43,8 @@ abstract interface class PhoneWifiTransport {
 }
 
 abstract interface class PhoneBleWifiService {
+  int get setupTokenLength;
+
   /// [knownSerials] are upper-cased serials Rhythm already owns. A device that
   /// keeps advertising after setup is never offered as a new candidate.
   Future<List<BleWifiDiscoveredCandidate>> discover(
@@ -71,6 +73,9 @@ class AylaPhoneBleWifiService implements PhoneBleWifiService {
     this.statusPollDelay = const Duration(milliseconds: 500),
     this.statusPollLimit = 120,
   }) : _transport = transport ?? FlutterPhoneWifiTransport();
+
+  @override
+  int get setupTokenLength => 8;
 
   static const protocol = 'ayla_v1';
   static const maxCandidates = 4;
@@ -182,7 +187,7 @@ class AylaPhoneBleWifiService implements PhoneBleWifiService {
       String setupToken, RhythmCommissioningWifi wifi) async {
     _checkActive();
     final payload = encodeWifi(wifi);
-    if (!RegExp(r'^[a-fA-F0-9]{32}$').hasMatch(setupToken)) {
+    if (!RegExp(r'^(?:[a-zA-Z0-9]{8}|[a-fA-F0-9]{32})$').hasMatch(setupToken)) {
       payload.fillRange(0, payload.length, 0);
       throw const PhoneBleWifiFailure(
           'The setup session is invalid. Start over.');

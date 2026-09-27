@@ -10,7 +10,7 @@ const candidate = BleWifiDiscoveredCandidate(
     dsn: 'ACFIXTURE123456', address: 'ios-opaque-uuid');
 const wifi = RhythmCommissioningWifi(
     ssid: 'Fixture Wi-Fi', password: 'fixture-password');
-const token = '0123456789abcdef0123456789abcdef';
+const token = 'Ab3dE6gH';
 
 class FakeGatt implements PhoneWifiGatt {
   String dsn = candidate.dsn;
@@ -128,6 +128,28 @@ void main() {
             .having((e) => e.uncertain, 'uncertain', false)));
     expect(transport.gatt.writes, isEmpty);
     expect(transport.gatt.disconnects, 1);
+  });
+
+  test('accepts a legacy broker token without rewriting it', () async {
+    final transport = FakeTransport();
+    final service = AylaPhoneBleWifiService(transport: transport);
+    const legacy = '0123456789abcdef0123456789abcdef';
+    expect(service.setupTokenLength, 8);
+    await service.provision(candidate, legacy, wifi);
+    expect(transport.gatt.writes.first.$3, utf8.encode(legacy));
+  });
+
+  test('invalid setup tokens make no Bluetooth connection or writes', () async {
+    for (final invalid in ['short', '123456789', '1234567!', 'é2345678']) {
+      final transport = FakeTransport();
+      final service = AylaPhoneBleWifiService(transport: transport);
+      await expectLater(
+        service.provision(candidate, invalid, wifi),
+        throwsA(isA<PhoneBleWifiFailure>()),
+      );
+      expect(transport.addresses, isEmpty);
+      expect(transport.gatt.writes, isEmpty);
+    }
   });
 
   for (final failure in ['write', 'status', 'wrong_network']) {
