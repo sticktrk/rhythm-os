@@ -4798,8 +4798,24 @@ class ServerSyncProvider extends ChangeNotifier {
     if (_resetNodeAction(modeDefault: modeDefault) == 'reset') {
       return RoomModeState.active;
     }
-    final mode = _activeMode ?? RhythmMode.day;
+    final mode = scheduleModeForNode(nodeId) ?? _activeMode ?? RhythmMode.day;
     return RoomModeState.fromString(roomDefaultStateForMode(nodeId, mode));
+  }
+
+  /// The mode currently driving [nodeId]'s schedule, or null when unknown.
+  ///
+  /// The server sends effective profile settings, including inherited
+  /// assignments and the resolved named-schedule mode. Legacy wall-clock
+  /// schedules do not advertise their resolved mode, and the phone's clock is
+  /// not authority for the appliance's schedule.
+  RhythmMode? scheduleModeForNode(String nodeId) {
+    final settings = nodeById(nodeId)?.profileSettings;
+    final scheduledMode = settings?.lightScheduleMode;
+    if (scheduledMode == null &&
+        settings?.roomSchedule?.source == RhythmRoomScheduleSource.followTime) {
+      return null;
+    }
+    return scheduledMode ?? _activeMode;
   }
 
   String _resetNodeAction({required bool modeDefault}) => modeDefault &&
@@ -4853,10 +4869,13 @@ class ServerSyncProvider extends ChangeNotifier {
       _onRhythmState(result.state!, fromActionResponse: true);
     }
     if (result.ack == RhythmWriteAck.accepted) {
+      // The server resolves the node's schedule mode; its readback outranks
+      // the local prediction, which cannot see wall-clock schedule modes.
+      final acceptedState = result.state?.state ?? targetState;
       _roomProvider.acknowledgeOptimisticNodeState(
         nodeId,
-        state: targetState,
-        lightsOn: lightsOn,
+        state: acceptedState,
+        lightsOn: acceptedState != RoomModeState.hardOff,
       );
     }
     _roomProvider.bumpResetGeneration();
