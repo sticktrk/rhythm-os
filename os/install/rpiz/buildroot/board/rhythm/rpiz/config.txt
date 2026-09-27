@@ -1,5 +1,6 @@
 kernel=kernel.img
-dtoverlay=miniuart-bt
+# Keep Bluetooth on its default PL011 UART (with hardware flow control).
+# The mini UART can lose HCI bytes under load and wedge discovery.
 # Reserve persistent RAM for the prior boot's panic/oops console. Rhythm
 # copies any resulting /sys/fs/pstore records into the next debug bundle.
 dtoverlay=ramoops

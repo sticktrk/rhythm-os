@@ -16,6 +16,17 @@ NETWORK_WAIT_ATTEMPTS="${RHYTHM_BOOTSTATE_NETWORK_WAIT_ATTEMPTS:-15}"
 NETWORK_WAIT_SLEEP_SECS="${RHYTHM_BOOTSTATE_NETWORK_WAIT_SLEEP_SECS:-1}"
 CMDLINE_FILE="${RHYTHM_CMDLINE_FILE:-${BOOT_MOUNT}/cmdline.txt}"
 PROC_CMDLINE="${RHYTHM_PROC_CMDLINE:-/proc/cmdline}"
+BOARD_MODEL_FILE="${RHYTHM_BOARD_MODEL_FILE:-/proc/device-tree/model}"
+PROC_MOUNTS="${RHYTHM_PROC_MOUNTS:-/proc/mounts}"
+BLUETOOTH_UART_CONFIG="${BOOT_MOUNT}/config.txt"
+BLUETOOTH_UART_BACKUP="${BLUETOOTH_UART_CONFIG}.pre-bluetooth-uart"
+BLUETOOTH_UART_ORIGINAL="${BLUETOOTH_UART_BACKUP}.orig"
+BLUETOOTH_UART_PENDING="${BOOT_MOUNT}/rhythm-bluetooth-uart.pending"
+BLUETOOTH_UART_REBOOTS="${DATA_STATE_DIR}/bluetooth-uart-migration-reboots"
+BLUETOOTH_UART_MAX_REBOOTS=2
+# The one definition of the legacy directive: detection, removal and the
+# post-removal verification must never disagree about what it matches.
+BLUETOOTH_UART_DIRECTIVE='^[[:space:]]*dtoverlay[[:space:]]*=[[:space:]]*miniuart-bt[[:space:]]*(#.*)?$'
 HASH_HEADER_PREFIX="# RHYTHM_BOOTSTATE_HASH="
 
 now_ms() {
@@ -367,7 +378,214 @@ reboot_now() {
     if [ -n "${RHYTHM_BOOTSTATE_REBOOT_DRY_RUN:-}" ]; then
         return 0
     fi
+    if [ -n "${RHYTHM_BOOTSTATE_REBOOT_BIN:-}" ]; then
+        "$RHYTHM_BOOTSTATE_REBOOT_BIN"
+        return
+    fi
     /sbin/reboot 2>/dev/null || reboot
+}
+
+is_regular_file() {
+    [ -f "$1" ] && [ ! -L "$1" ]
+}
+
+remount_if_mounted() {
+    local mode="$1"
+    local path="$2"
+
+    grep -qs "[[:space:]]${path}[[:space:]]" "$PROC_MOUNTS" 2>/dev/null || return 0
+    mount -o "remount,${mode}" "$path" 2>/dev/null || true
+}
+
+# A forced reboot skips rcK and "umount -a -r". Flush and freeze the writable
+# filesystems first so neither the rewritten boot partition nor /data is left
+# dirty by the migration.
+force_reboot_cleanly() {
+    sync
+    remount_if_mounted ro "$BOOT_MOUNT"
+    remount_if_mounted ro "$DATA_DIR"
+    sync
+    if [ -n "${RHYTHM_BOOTSTATE_REBOOT_BIN:-}" ]; then
+        "$RHYTHM_BOOTSTATE_REBOOT_BIN" -f || true
+    elif ! /sbin/reboot -f 2>/dev/null; then
+        reboot -f || true
+    fi
+    # Only reached when the reboot did not happen; the boot continues.
+    remount_if_mounted rw "$BOOT_MOUNT"
+    remount_if_mounted rw "$DATA_DIR"
+}
+
+count_lines() {
+    grep -c '' "$1" 2>/dev/null || true
+}
+
+clear_bluetooth_uart_reboots() {
+    [ -e "$BLUETOOTH_UART_REBOOTS" ] || return 0
+    rm -f "$BLUETOOTH_UART_REBOOTS" 2>/dev/null || true
+}
+
+# Bounds migration reboots. The counter lives on /data, not /boot: if the boot
+# partition silently fails to persist the rewrite, a marker beside it would be
+# lost in the same way and the appliance would reboot forever.
+record_bluetooth_uart_reboot() {
+    local count
+
+    count="$(cat "$BLUETOOTH_UART_REBOOTS" 2>/dev/null || true)"
+    case "$count" in
+        ""|*[!0-9]*) count=0 ;;
+    esac
+    [ "$count" -lt "$BLUETOOTH_UART_MAX_REBOOTS" ] || return 1
+    atomic_write_text "$BLUETOOTH_UART_REBOOTS" "$((count + 1))" 2>/dev/null
+}
+
+# Rootfs-slot OTA deliberately preserves the shared boot partition. Migrate
+# only our old, unparameterized mini-UART directive; replacing config.txt with
+# the image template would discard unrelated boot settings.
+#
+# $1 is "<slot>:<version>" when this boot is an unproven OTA candidate, which
+# ties the change to its probation: success commits it and rollback restores
+# the previous config.txt, so the prior image resumes exactly the boot
+# configuration it was qualified with.
+# Returns 10 only after a durable change, 0 for no change, 1 on failure.
+migrate_bluetooth_uart() {
+    local candidate="${1:-}"
+    local model config backup tmp backup_tmp source total matched remaining
+
+    [ -r "$BOARD_MODEL_FILE" ] || return 0
+    model="$(tr -d '\000' < "$BOARD_MODEL_FILE" 2>/dev/null || true)"
+    case "$model" in
+        "Raspberry Pi Zero W"|"Raspberry Pi Zero W "*) ;;
+        *) return 0 ;;
+    esac
+
+    config="$BLUETOOTH_UART_CONFIG"
+    backup="$BLUETOOTH_UART_BACKUP"
+    tmp="${config}.tmp.$$"
+    backup_tmp="${backup}.tmp.$$"
+
+    if [ -L "$backup" ] || { [ -e "$backup" ] && [ ! -f "$backup" ]; }; then
+        printf 'S41bootstate: refusing non-regular Bluetooth UART backup\n' >&2
+        return 1
+    fi
+
+    if [ ! -e "$config" ] && [ ! -L "$config" ]; then
+        # FAT cannot replace a file atomically. If power was lost while
+        # config.txt was being swapped, rebuild it from our own backup.
+        [ -s "$backup" ] || return 0
+        printf 'S41bootstate: config.txt is missing; rebuilding it from the Bluetooth UART backup\n' >&2
+        source="$backup"
+    elif is_regular_file "$config"; then
+        if ! grep -Eq "$BLUETOOTH_UART_DIRECTIVE" "$config"; then
+            clear_bluetooth_uart_reboots
+            return 0
+        fi
+        source="$config"
+    else
+        return 0
+    fi
+
+    if ! sed -E "/${BLUETOOTH_UART_DIRECTIVE}/d" "$source" > "$tmp"; then
+        rm -f "$tmp"
+        printf 'S41bootstate: failed to migrate Bluetooth UART; inspect config.txt and its pre-bluetooth-uart backup\n' >&2
+        return 1
+    fi
+
+    # Prove the rewrite before committing to a reboot: the directive is gone
+    # and every other line survived. A rewrite that changed nothing would
+    # otherwise reboot on every boot.
+    total="$(count_lines "$source")"
+    matched="$(grep -Ec "$BLUETOOTH_UART_DIRECTIVE" "$source" 2>/dev/null || true)"
+    remaining="$(count_lines "$tmp")"
+    if grep -Eq "$BLUETOOTH_UART_DIRECTIVE" "$tmp" \
+        || [ -z "$total" ] || [ -z "$matched" ] || [ -z "$remaining" ] \
+        || [ "$remaining" -ne "$((total - matched))" ]; then
+        rm -f "$tmp"
+        printf 'S41bootstate: Bluetooth UART rewrite failed verification; leaving config.txt unchanged\n' >&2
+        return 1
+    fi
+
+    if [ "$source" = "$config" ]; then
+        # Keep the first config.txt we ever replaced: a repeated migration
+        # refreshes the rollback copy but must not destroy the original.
+        if [ -s "$backup" ] && [ ! -e "$BLUETOOTH_UART_ORIGINAL" ] \
+            && [ ! -L "$BLUETOOTH_UART_ORIGINAL" ] \
+            && ! cmp -s "$backup" "$config"; then
+            if ! cp "$backup" "${BLUETOOTH_UART_ORIGINAL}.tmp.$$" \
+                || ! sync_path "${BLUETOOTH_UART_ORIGINAL}.tmp.$$" \
+                || ! mv -f "${BLUETOOTH_UART_ORIGINAL}.tmp.$$" "$BLUETOOTH_UART_ORIGINAL" \
+                || ! sync_parent "$BLUETOOTH_UART_ORIGINAL"; then
+                rm -f "$tmp" "${BLUETOOTH_UART_ORIGINAL}.tmp.$$"
+                printf 'S41bootstate: failed to preserve the original Bluetooth UART backup\n' >&2
+                return 1
+            fi
+        fi
+        if ! cp "$config" "$backup_tmp" \
+            || ! sync_path "$backup_tmp" \
+            || ! mv -f "$backup_tmp" "$backup" \
+            || ! sync_parent "$backup"; then
+            rm -f "$tmp" "$backup_tmp"
+            printf 'S41bootstate: failed to migrate Bluetooth UART; inspect config.txt and its pre-bluetooth-uart backup\n' >&2
+            return 1
+        fi
+    fi
+
+    if [ -n "$candidate" ]; then
+        if ! atomic_write_text "$BLUETOOTH_UART_PENDING" "$candidate"; then
+            rm -f "$tmp"
+            printf 'S41bootstate: failed to record the pending Bluetooth UART migration\n' >&2
+            return 1
+        fi
+    fi
+
+    if ! sync_path "$tmp" \
+        || ! mv -f "$tmp" "$config" \
+        || ! sync_parent "$config"; then
+        rm -f "$tmp"
+        printf 'S41bootstate: failed to migrate Bluetooth UART; inspect config.txt and its pre-bluetooth-uart backup\n' >&2
+        return 1
+    fi
+    return 10
+}
+
+# The migration is proven once its candidate passes probation (or when it ran
+# on an already trusted slot); nothing may undo it after that.
+commit_bluetooth_uart_migration() {
+    [ -e "$BLUETOOTH_UART_PENDING" ] || [ -L "$BLUETOOTH_UART_PENDING" ] || return 0
+    rm -f "$BLUETOOTH_UART_PENDING" 2>/dev/null || return 1
+    sync_parent "$BLUETOOTH_UART_PENDING"
+}
+
+# Undo only the change made by the candidate that is being rolled back. Never
+# fatal: a failed restore must not keep the appliance on a bad candidate, and
+# the default routing is still a bootable configuration.
+restore_bluetooth_uart_before_rollback() {
+    local candidate="$1"
+    local recorded tmp
+
+    is_regular_file "$BLUETOOTH_UART_PENDING" || return 0
+    recorded="$(sed -n '1p' "$BLUETOOTH_UART_PENDING" 2>/dev/null || true)"
+    if [ "$recorded" != "$candidate" ]; then
+        # Left behind by an earlier candidate that has since been decided.
+        commit_bluetooth_uart_migration || true
+        return 0
+    fi
+    if ! is_regular_file "$BLUETOOTH_UART_BACKUP" || [ ! -s "$BLUETOOTH_UART_BACKUP" ]; then
+        printf 'S41bootstate: no Bluetooth UART backup to restore; keeping the default routing\n' >&2
+        return 1
+    fi
+
+    tmp="${BLUETOOTH_UART_CONFIG}.tmp.$$"
+    if ! cp "$BLUETOOTH_UART_BACKUP" "$tmp" \
+        || ! sync_path "$tmp" \
+        || ! mv -f "$tmp" "$BLUETOOTH_UART_CONFIG" \
+        || ! sync_parent "$BLUETOOTH_UART_CONFIG"; then
+        rm -f "$tmp"
+        printf 'S41bootstate: failed to restore config.txt from the Bluetooth UART backup\n' >&2
+        return 1
+    fi
+    clear_bluetooth_uart_reboots
+    commit_bluetooth_uart_migration || true
+    printf 'S41bootstate: restored the previous Bluetooth UART routing for rollback\n'
 }
 
 rollback_pending_boot() {
@@ -387,6 +605,7 @@ rollback_pending_boot() {
     # instead of handing sensitive state to the previous binary.
     restore_hue_before_rollback
     scrub_local_ble_rollback_state
+    restore_bluetooth_uart_before_rollback "${slot}:${rollback_version}" || true
     rewrite_cmdline_slot "$rollback_to"
 
     RHYTHM_ACTIVE_SLOT="$slot"
@@ -403,7 +622,7 @@ rollback_pending_boot() {
 }
 
 start() {
-    local slot active_version
+    local slot active_version uart_migration_status uart_candidate
 
     slot="$(current_slot || true)"
     [ -n "$slot" ] || return 0
@@ -418,7 +637,35 @@ start() {
                 return 0
                 ;;
         esac
+    fi
 
+    # A failed candidate must still roll back above. For a fresh candidate,
+    # activate the boot-only change BEFORE marking it booting: the migration
+    # reboot must not look like a failed probation boot. Removing the directive
+    # makes this idempotent even if power is lost before the reboot call.
+    uart_candidate=""
+    if [ "${RHYTHM_PENDING_SLOT:-}" = "$slot" ]; then
+        uart_candidate="${slot}:${RHYTHM_PENDING_VERSION:-}"
+    fi
+    uart_migration_status=0
+    migrate_bluetooth_uart "$uart_candidate" || uart_migration_status=$?
+    if [ "$uart_migration_status" -eq 10 ]; then
+        if record_bluetooth_uart_reboot; then
+            printf 'S41bootstate: restored default PL011 Bluetooth routing; rebooting before OTA probation\n'
+            sync
+            if [ -n "${RHYTHM_BOOTSTATE_REBOOT_DRY_RUN:-}" ]; then
+                return 0
+            fi
+            # Early boot, before network/server startup. A direct reboot avoids
+            # launching a candidate against the old UART while init shuts down.
+            force_reboot_cleanly
+            printf 'S41bootstate: Bluetooth UART reboot returned; continuing boot with correction pending\n' >&2
+        else
+            printf 'S41bootstate: Bluetooth UART migration reboot limit reached or unrecordable; continuing boot with correction pending\n' >&2
+        fi
+    fi
+
+    if [ "${RHYTHM_PENDING_SLOT:-}" = "$slot" ]; then
         RHYTHM_ACTIVE_SLOT="$slot"
         [ -n "${RHYTHM_LAST_GOOD_SLOT:-}" ] || RHYTHM_LAST_GOOD_SLOT="$slot"
         RHYTHM_ACTIVE_VERSION="$active_version"
@@ -436,6 +683,8 @@ start() {
     RHYTHM_BOOT_STATUS="idle"
     write_state
     mirror_state
+    # No candidate is on probation, so no migration can still be undone.
+    commit_bluetooth_uart_migration || true
 }
 
 success() {
@@ -465,6 +714,7 @@ success() {
     RHYTHM_BOOT_STATUS="idle"
     write_state
     mirror_state
+    commit_bluetooth_uart_migration || true
 }
 
 fail() {
