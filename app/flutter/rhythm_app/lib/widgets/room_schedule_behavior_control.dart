@@ -363,10 +363,18 @@ class RoomScheduleBehaviorSegments extends StatelessWidget {
     this.enabled = true,
     this.keyPrefix = 'room-schedule-presets',
     this.analyticsSource = 'room_schedule_tab',
+    this.wakeTitle = 'Wake',
+    this.sleepTitle = 'Sleep',
   });
 
   final String roomId;
   final bool enabled;
+
+  /// What fires each preset, as the room's schedule names it: "Wake" and
+  /// "Sleep" when the room follows the home, otherwise the trigger itself
+  /// ("Sunrise", "22:30").
+  final String wakeTitle;
+  final String sleepTitle;
   final String keyPrefix;
   final String analyticsSource;
 
@@ -385,7 +393,7 @@ class RoomScheduleBehaviorSegments extends StatelessWidget {
               key: ValueKey('$keyPrefix-day-$roomId'),
               roomId: roomId,
               mode: RhythmMode.day,
-              title: 'Wake',
+              title: wakeTitle,
               icon: Icons.wb_sunny_rounded,
               accent: const Color(0xFFF9A825),
               state: defaults.$1,
@@ -398,7 +406,7 @@ class RoomScheduleBehaviorSegments extends StatelessWidget {
               key: ValueKey('$keyPrefix-night-$roomId'),
               roomId: roomId,
               mode: RhythmMode.sleep,
-              title: 'Sleep',
+              title: sleepTitle,
               icon: Icons.bedtime_rounded,
               accent: const Color(0xFF7C83FF),
               state: defaults.$2,
@@ -451,13 +459,17 @@ class _BehaviorSegmentRow extends StatelessWidget {
               children: [
                 Icon(icon, size: 13, color: accent),
                 const SizedBox(width: 6),
-                Text(
-                  title.toUpperCase(),
-                  style: TextStyle(
-                    color: accent,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.6,
+                Flexible(
+                  child: Text(
+                    title.toUpperCase(),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: accent,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.6,
+                    ),
                   ),
                 ),
               ],
