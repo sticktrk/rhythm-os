@@ -278,6 +278,16 @@ pub struct MatterCommissionRequest {
 
 /// Platform-agnostic typed interface to a Matter light controller.
 pub trait MatterTransport: Send + Sync {
+    fn read_wifi_network(
+        &self,
+        _node_id: u64,
+        _endpoint: u16,
+    ) -> Result<rhythm_os::wifi_network::WifiNetwork> {
+        Ok(rhythm_os::wifi_network::WifiNetwork::unknown(
+            rhythm_os::wifi_network::WifiNetworkStatus::Unsupported,
+        ))
+    }
+
     fn change_wifi(
         &self,
         _node_id: u64,

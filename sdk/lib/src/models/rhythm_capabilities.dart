@@ -43,6 +43,7 @@ abstract final class RhythmDeviceProfileId {
 /// Stable feature IDs advertised by `/api/state.capabilities.features`.
 abstract final class RhythmFeature {
   static const String savedWifiProfiles = 'saved_wifi_profiles_v1';
+  static const String matterWifiNetwork = 'matter_wifi_network_v1';
   static const String matterWifiChange = 'matter_wifi_change_v1';
   static const String stateIncludesV1 = 'state_includes_v1';
   static const String asyncDebugBundleUpload = 'async_debug_bundle_upload';

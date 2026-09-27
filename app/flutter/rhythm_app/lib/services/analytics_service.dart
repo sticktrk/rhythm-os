@@ -126,7 +126,8 @@ class AnalyticsService {
       {required bool networkChange,
       required String journeyId,
       required String action,
-      required String outcome}) async {
+      required String outcome,
+      String? reason}) async {
     const actions = {
       'entry',
       'save',
@@ -150,6 +151,10 @@ class AnalyticsService {
       'journey_id': journeyId,
       'action': action,
       'outcome': outcome,
+      if (reason != null &&
+          {'change_in_progress', 'device_recovering', 'request_rejected'}
+              .contains(reason))
+        'reason': reason,
     });
   }
 

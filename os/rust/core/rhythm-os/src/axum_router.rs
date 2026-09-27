@@ -294,6 +294,7 @@ fn shared_routes() -> Router<SharedState> {
             post(post_wifi_change).get(get_latest_wifi_change),
         )
         .route("/api/matter/wifi-change/:id", get(get_wifi_change))
+        .route("/api/matter/wifi-network/:id", get(get_wifi_network))
         .route(
             "/api/pairing/wifi-profiles",
             get(get_wifi_profiles).put(put_wifi_profiles),
@@ -1433,6 +1434,15 @@ fn private_network_response(response: ApiResponse) -> Response {
         .headers_mut()
         .insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
+}
+
+pub async fn get_wifi_network(
+    State(state): State<SharedState>,
+    Path(id): Path<String>,
+) -> Response {
+    private_network_response(
+        run_blocking(move || crate::wifi_network::handle_read(&state, &id)).await,
+    )
 }
 
 pub async fn get_latest_wifi_change(

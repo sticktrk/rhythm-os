@@ -1,6 +1,7 @@
 #include "chip_bridge.h"
 #include "blocking_pairing_delegate.h"
 #include "wifi_change_transaction.h"
+#include "wifi_network_observation.h"
 #include "phone_commissioning_discovery.h"
 
 #include <app-common/zap-generated/cluster-objects.h>
@@ -1329,6 +1330,32 @@ public:
         return ExecuteOnMatterThread([this, &outErr, nodeId, &setupPayload, &commissioningParams]() {
             outErr = mCommissioner->PairDevice(nodeId, setupPayload.c_str(), commissioningParams, DiscoveryType::kAll);
         });
+    }
+
+    uint8_t ReadWifiNetwork(NodeId node, EndpointId endpoint, std::string & ssid)
+    {
+        uint32_t features = 0;
+        if (ReadValueAttribute<NetworkCommissioning::Attributes::FeatureMap::TypeInfo>(node, 0, features) != CHIP_NO_ERROR)
+            return 2;
+        if ((features & 1) == 0 || (features & 2) != 0) return 1;
+        std::vector<ClusterId> clusters;
+        if (ReadClusterListAttribute<Descriptor::Attributes::ServerList::TypeInfo>(node, endpoint, clusters) != CHIP_NO_ERROR)
+            return 2;
+        if (std::find(clusters.begin(), clusters.end(), BridgedDeviceBasicInformation::Id) != clusters.end()) return 1;
+        std::vector<std::pair<std::string, bool>> networks;
+        CHIP_ERROR decode = CHIP_NO_ERROR;
+        auto error = ReadAttribute<NetworkCommissioning::Attributes::Networks::TypeInfo>(node, 0,
+            [&](const auto & list) {
+                auto iter = list.begin();
+                while (iter.Next()) {
+                    const auto & value = iter.GetValue();
+                    networks.emplace_back(std::string(reinterpret_cast<const char *>(value.networkID.data()),
+                        value.networkID.size()), value.connected);
+                }
+                decode = iter.GetStatus();
+            });
+        if (error != CHIP_NO_ERROR || decode != CHIP_NO_ERROR) return 2;
+        return rhythm::ConnectedWifiNetwork(networks, ssid) ? 0 : 3;
     }
 
     rhythm::WifiChangeResult ChangeWifi(NodeId nodeId, EndpointId endpoint, const char * ssid, const char * password, uint64_t budgetMs)
@@ -3084,6 +3111,19 @@ bool rhythm_chip_bridge_commission_light(const struct rhythm_chip_bridge_commiss
     const auto context = failureContext.empty() ? "commissioning Matter light" :
                                                  "commissioning Matter light " + failureContext;
     return HandleBridgeResult(err, error_message, error_message_size, context);
+}
+
+uint8_t rhythm_chip_bridge_read_wifi_network(uint64_t node_id, uint16_t endpoint, uint8_t * ssid, size_t * length)
+{
+    if (!ssid || !length) return 3;
+    *length = 0;
+    std::string network;
+    const auto code = gContext.ReadWifiNetwork(node_id, endpoint, network);
+    if (code == 0) {
+        std::copy(network.begin(), network.end(), ssid);
+        *length = network.size();
+    }
+    return code;
 }
 
 uint8_t rhythm_chip_bridge_change_wifi(uint64_t node_id, uint16_t endpoint,

@@ -39,6 +39,10 @@ pub struct ChipInitControllerResponse {
 pub enum ChipRpcRequest {
     InitController(ChipInitControllerRequest),
     CommissionLight(MatterCommissionRequest),
+    ReadWifiNetwork {
+        node_id: u64,
+        endpoint: u16,
+    },
     ChangeWifi {
         node_id: u64,
         endpoint: u16,

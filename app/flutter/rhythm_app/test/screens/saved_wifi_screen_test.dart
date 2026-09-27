@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -8,6 +9,15 @@ import 'package:rhythm_app/screens/network/matter_wifi_change_screen.dart';
 
 class WifiApi extends CloudBackedServerApi {
   WifiApi() : super(delegate: RhythmServerApi(Dio()));
+  Future<RhythmWifiNetwork>? networkRead;
+  int networkReads = 0;
+  @override
+  Future<RhythmWifiNetwork> getMatterWifiNetwork(String deviceId) {
+    networkReads++;
+    return networkRead ??
+        Future.value(const RhythmWifiNetwork('unsupported_server'));
+  }
+
   final changes = <String>[];
   RhythmWifiChangeReceipt? receipt;
   bool failStatus = false;
@@ -31,6 +41,8 @@ class WifiApi extends CloudBackedServerApi {
   Future<RhythmWifiCheck?> getWifiCheck(String operationId) async =>
       checkAnswers.removeAt(0);
   String startError = 'unavailable';
+  String? startReason;
+  int retryAfterMs = 0;
   @override
   Future<RhythmWifiProfiles> getWifiProfiles() async => RhythmWifiProfiles(
         revision: 1,
@@ -80,11 +92,30 @@ class WifiApi extends CloudBackedServerApi {
     required String profileId,
   }) async {
     starts++;
-    throw RhythmWifiException(startError);
+    throw RhythmWifiException(startError,
+        reason: startReason, retryAfterMs: retryAfterMs);
   }
 }
 
 void main() {
+  testWidgets('loading an old receipt preserves the initial network read',
+      (tester) async {
+    final read = Completer<RhythmWifiNetwork>();
+    final api = WifiApi()
+      ..networkRead = read.future
+      ..receipt = const RhythmWifiChangeReceipt(
+          operationId: 'old', status: 'complete', code: 'succeeded');
+    await tester.pumpWidget(MaterialApp(
+        home: MatterWifiChangeScreen(api: api, deviceId: 'matter-1')));
+    await tester.pumpAndSettle();
+    expect(api.networkReads, 1);
+    read.complete(
+        const RhythmWifiNetwork('connected', ssid: 'Observed fixture'));
+    await tester.pumpAndSettle();
+    expect(find.text('Observed fixture'), findsOneWidget);
+    expect(api.networkReads, 1);
+  });
+
   testWidgets('settings choose the default without touching the Box network', (
     tester,
   ) async {
@@ -293,5 +324,48 @@ void main() {
           .onPressed,
       isNotNull,
     );
+  });
+  testWidgets(
+      'recovery shows the remaining wait and permits no automatic replay',
+      (tester) async {
+    final api = WifiApi()
+      ..receipt = const RhythmWifiChangeReceipt(
+          operationId: 'old',
+          status: 'complete',
+          code: 'recovery_required',
+          retryAfterMs: 120000);
+    await tester.pumpWidget(MaterialApp(
+        home: MatterWifiChangeScreen(api: api, deviceId: 'matter-1')));
+    await tester.pump();
+    await tester.pump();
+    expect(find.textContaining('120 seconds'), findsOneWidget);
+    expect(
+        tester
+            .widget<FilledButton>(
+                find.byKey(const ValueKey('wifi-change-start')))
+            .onPressed,
+        isNull);
+    expect(api.starts, 0);
+    await tester.pumpWidget(const SizedBox());
+  });
+  testWidgets(
+      'active changes explain the rejection instead of blaming access or credentials',
+      (tester) async {
+    final api = WifiApi()
+      ..startError = 'conflict'
+      ..startReason = 'change_in_progress';
+    await tester.pumpWidget(MaterialApp(
+        home: MatterWifiChangeScreen(api: api, deviceId: 'matter-1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('wifi-change-start')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('wifi-use')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Change network'));
+    await tester.pumpAndSettle();
+    expect(
+        find.textContaining('Another bulb’s network change is still running'),
+        findsOneWidget);
+    expect(api.starts, 1);
   });
 }

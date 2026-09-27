@@ -35,6 +35,28 @@ fn saved_override_and_network_change_preserve_default_and_canonical_identity() {
         let guard = rig.state.lock().unwrap();
         serde_json::to_value(&guard.canonical_registry).unwrap()
     };
+    let observed = crate::desktop_lifecycle::INTEGRATION
+        .read_wifi_network(&rig.state, &native)
+        .unwrap();
+    assert_eq!(observed.ssid.as_deref(), Some("Observed fixture network"));
+    let unknown_read = crate::desktop_lifecycle::INTEGRATION
+        .read_wifi_network(&rig.state, "matter-999999")
+        .unwrap();
+    assert_eq!(
+        unknown_read.status,
+        rhythm_os::wifi_network::WifiNetworkStatus::Unsupported
+    );
+    assert_eq!(
+        rig.transport
+            .operations()
+            .iter()
+            .filter(|op| matches!(
+                op,
+                crate::test_support::RecordedOperation::ReadWifiNetwork { .. }
+            ))
+            .count(),
+        1
+    );
     let wifi = wifi_profiles::selected_credentials(&rig.state, id).unwrap();
     let result = crate::desktop_lifecycle::INTEGRATION
         .change_wifi(&rig.state, &native, &wifi, u64::MAX)

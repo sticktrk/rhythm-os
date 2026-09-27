@@ -611,6 +611,42 @@ impl rhythm_os::hub::ExternalLightHubIntegration for MatterIntegration {
         }
     }
 
+    fn read_wifi_network(
+        &self,
+        state: &SharedState,
+        device_id: &str,
+    ) -> Result<rhythm_os::wifi_network::WifiNetwork> {
+        use rhythm_os::wifi_network::{WifiNetwork, WifiNetworkStatus};
+        let key = HubKey::new(HubType::new("matter"), "local");
+        let hub = {
+            let guard = state
+                .lock()
+                .map_err(|_| anyhow::anyhow!("State unavailable"))?;
+            if !guard
+                .canonical_registry
+                .devices()
+                .flat_map(|d| d.endpoints.iter())
+                .any(|e| e.hub_key == key && e.native_id == device_id)
+            {
+                return Ok(WifiNetwork::unknown(WifiNetworkStatus::Unsupported));
+            }
+            guard
+                .hubs
+                .get(&key)
+                .and_then(|h| h.data::<Arc<MatterHubData>>())
+                .cloned()
+        };
+        let Some(hub) = hub else {
+            return Ok(WifiNetwork::unknown(WifiNetworkStatus::Offline));
+        };
+        let (node, endpoint) = crate::lifecycle::parse_device_id(device_id)
+            .ok_or_else(|| anyhow::anyhow!("Invalid Matter device"))?;
+        hub.transport
+            .get()
+            .ok_or_else(|| anyhow::anyhow!("Matter unavailable"))?
+            .read_wifi_network(node, endpoint)
+    }
+
     fn change_wifi(
         &self,
         state: &SharedState,
