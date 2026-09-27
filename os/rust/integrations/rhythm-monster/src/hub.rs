@@ -34,7 +34,7 @@ use crate::pairing::{
     STAGE_PROVISION,
 };
 use crate::store::{now_epoch_secs, LightDeviceRecord, LightDeviceStore};
-use crate::{LightError, LightProperty, LightSecret};
+use crate::{LightError, LightSecret};
 
 pub const HUB_TYPE: &str = pairing::HUB_TYPE;
 pub const HUB_ADDRESS: &str = "local";
@@ -45,7 +45,6 @@ pub const NEON_FLOW_DISPLAY_NAME: &str = "Monster Neon Flow";
 pub const CLOUD_BROKER_FUNCTION: &str = "monster-device";
 const ADAPTER_ADMISSION_TIMEOUT: Duration = Duration::from_secs(5);
 const PAIRING_SERVER_SLA: Duration = Duration::from_secs(150);
-const ADOPT_READBACK_BUDGET: Duration = Duration::from_secs(20);
 
 pub static INTEGRATION: MonsterIntegration = MonsterIntegration;
 
@@ -549,17 +548,26 @@ fn adopt(
         }
     };
     // The pairing handler is synchronous; give the LAN client its own small
-    // runtime for the one authoritative readback.
+    // runtime for the bounded wait for an authoritative readback.
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .context("starting Monster readback runtime")?;
-    let readback = runtime.block_on(async {
-        tokio::time::timeout(ADOPT_READBACK_BUDGET, client.read(LightProperty::Power))
-            .await
-            .map_err(|_| LightError::Timeout)
-            .and_then(|result| result)
-    });
+    let mut attempts = 0;
+    let readback = runtime.block_on(pairing::wait_for_adoption_readback(
+        client.as_ref(),
+        |error| {
+            attempts += 1;
+            info!(target: "pair", "Monster LAN adoption pending: attempt={attempts}, reason={error}");
+            progress(
+                state,
+                session_id,
+                PairingStatus::Commissioning,
+                PairingStage::Finalizing,
+                "Waiting for the strip to answer on your network",
+            );
+        },
+    ));
     if let Err(error) = readback {
         let message = match error {
             LightError::Authentication | LightError::Integrity => {

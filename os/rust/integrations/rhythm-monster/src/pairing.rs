@@ -10,15 +10,17 @@
 //! Every response carries `details.stage`; a failed `provision` also carries
 //! `details.uncertain` so the caller never retries provisioning blindly.
 use crate::{
+    lan::LightTransport,
     store::{display_name_for, LightDeviceRecord},
     types::validate_dsn,
-    LightCredentials, LightSecret,
+    LightCredentials, LightError, LightProperty, LightResult, LightSecret,
 };
 use anyhow::{bail, Result};
 use rhythm_core::runtime::hub_registry::DeviceType;
 use rhythm_os::hub::HubType;
 use rhythm_os::pairing::{PairedDeviceInfo, PairingSession, PairingStatus};
 use serde_json::{json, Value};
+use std::time::Duration;
 
 pub const HUB_TYPE: &str = HubType::MONSTER;
 pub const STAGE_DISCOVER: &str = "discover";
@@ -29,6 +31,30 @@ pub const MAX_SCAN_SECS: u64 = 20;
 pub const MAX_CANDIDATES: usize = 4;
 pub const MANUFACTURER: &str = "Monster";
 pub const DEFAULT_MODEL: &str = "xt-16ft-hw-neon-led-rgbic";
+
+/// Require a signed LAN readback before the caller persists or adopts a light.
+/// Cloud registration can finish before the device answers local requests.
+/// Keep retries inside one adoption request and below the app's 75-second
+/// request timeout. Authentication, identity and integrity errors fail at once.
+pub async fn wait_for_adoption_readback(
+    transport: &dyn LightTransport,
+    mut on_retry: impl FnMut(LightError),
+) -> LightResult<()> {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            match transport.read(LightProperty::Power).await {
+                Ok(_) => return Ok(()),
+                Err(error @ (LightError::Unavailable | LightError::Timeout)) => {
+                    on_retry(error);
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    })
+    .await
+    .map_err(|_| LightError::Timeout)?
+}
 
 #[derive(Clone)]
 pub enum LightPairingStage {
