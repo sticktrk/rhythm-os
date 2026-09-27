@@ -3,11 +3,17 @@
 type Env = (name: string) => string | undefined;
 type Json = Record<string, any>;
 type AylaApp = { appId: string; appSecret: string };
+export type MonsterBrokerFailure = {
+  stage: string;
+  status: number;
+  upstream_status?: number;
+};
 type Dependencies = {
   env: Env;
   fetch: typeof fetch;
   now?: () => number;
   ayla?: AylaApp;
+  reportFailure?: (failure: MonsterBrokerFailure) => void;
 };
 const DEVICE = "https://ads-field.aylanetworks.com";
 // Vendor application identity is public; its credential is deployment configuration.
@@ -15,7 +21,11 @@ const AYLA_APP_ID = "RGBIC-yQ-id";
 const encoder = new TextEncoder();
 const dsnPattern = /^[A-Za-z0-9]{8,32}$/;
 class Failure extends Error {
-  constructor(readonly stage: string, readonly status = 502) {
+  constructor(
+    readonly stage: string,
+    readonly status = 502,
+    readonly upstreamStatus?: number,
+  ) {
     super(stage);
   }
 }
@@ -117,7 +127,7 @@ export function createMonsterBroker(deps: Dependencies) {
       if (!res.ok) {
         if (res.status === 401) cached = undefined;
         await res.body?.cancel();
-        throw new Failure(stage);
+        throw new Failure(stage, 502, res.status);
       }
       return JSON.parse(await boundedText(res.body, 2 * 1024 * 1024));
     } catch (e) {
@@ -390,6 +400,19 @@ export function createMonsterBroker(deps: Dependencies) {
       return response(await credentials(device, body.dsn, auth, signal));
     } catch (e) {
       const failure = e instanceof Failure ? e : new Failure("internal", 500);
+      // Only bounded, broker-owned stage names and HTTP status codes. Never
+      // include request data, provider bodies, exception messages or URLs.
+      try {
+        deps.reportFailure?.({
+          stage: failure.stage,
+          status: failure.status,
+          ...(failure.upstreamStatus === undefined
+            ? {}
+            : { upstream_status: failure.upstreamStatus }),
+        });
+      } catch {
+        // Observability must not change the client's retry/recovery contract.
+      }
       return response({ error: failure.stage }, failure.status);
     }
   };

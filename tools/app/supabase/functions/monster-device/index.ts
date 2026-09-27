@@ -3,6 +3,10 @@ import { createMonsterBroker } from "./broker.ts";
 const broker = createMonsterBroker({
   env: (name) => Deno.env.get(name),
   fetch,
+  reportFailure: (failure) =>
+    console.warn(
+      JSON.stringify({ event: "monster_broker_failure", ...failure }),
+    ),
 });
 Deno.serve((req) =>
   withAuthenticatedRequest(req, async ({ userId }) => {

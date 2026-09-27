@@ -1,4 +1,8 @@
-import { createMonsterBroker, privateIp } from "./broker.ts";
+import {
+  createMonsterBroker,
+  type MonsterBrokerFailure,
+  privateIp,
+} from "./broker.ts";
 function assert(
   condition: unknown,
   message = "assertion failed",
@@ -20,6 +24,8 @@ function fixture(
     model?: string;
     env?: Record<string, string | undefined>;
     ayla?: { appId: string; appSecret: string };
+    rejectRegistration?: boolean;
+    reportFailure?: (failure: MonsterBrokerFailure) => void;
   } = {},
 ) {
   const env = { ...secrets, ...options.env };
@@ -67,6 +73,11 @@ function fixture(
       assert(headers.get("Authorization") === "auth_token ayla-token");
       if (url.endsWith("/devices.json")) {
         if (body) {
+          if (options.rejectRegistration) {
+            return new Response("private device and setup token details", {
+              status: 422,
+            });
+          }
           assert(
             body.device.dsn === DSN &&
               /^[0-9a-f]{32}$/.test(body.device.setup_token),
@@ -97,6 +108,7 @@ function fixture(
     fetch: fetcher,
     now: () => clock,
     ayla: options.ayla ?? fixtureAyla,
+    reportFailure: options.reportFailure,
   });
   const call = (body: unknown, user = "owner") =>
     handle(
@@ -216,6 +228,49 @@ Deno.test("unowned key lookup never registers and provider failures are sanitize
   const response = await f.call({ action: "key", dsn: DSN });
   const text = await response.text();
   assert(response.status === 502 && text === '{"error":"monster_login"}');
+});
+Deno.test("registration rejection reports only its stage and upstream status", async () => {
+  const failures: MonsterBrokerFailure[] = [];
+  const f = fixture({
+    owned: false,
+    rejectRegistration: true,
+    reportFailure: (failure) => failures.push(failure),
+  });
+  const ticket = await (await f.call({ action: "begin", dsn: DSN })).json();
+  assert(failures.length === 0);
+  const result = await f.call({
+    action: "complete",
+    dsn: DSN,
+    ticket: ticket.ticket,
+  });
+  assert(result.status === 502);
+  assert(await result.text() === '{"error":"register"}');
+  assert(
+    JSON.stringify(failures) ===
+      '[{"stage":"register","status":502,"upstream_status":422}]',
+  );
+});
+Deno.test("invalid provider data reports the stage without inventing an upstream error", async () => {
+  const failures: MonsterBrokerFailure[] = [];
+  const f = fixture({
+    missingKey: true,
+    reportFailure: (failure) => failures.push(failure),
+  });
+  const result = await f.call({ action: "key", dsn: DSN });
+  assert(result.status === 502);
+  assert(await result.text() === '{"error":"lan_key"}');
+  assert(JSON.stringify(failures) === '[{"stage":"lan_key","status":502}]');
+});
+Deno.test("a failed diagnostic sink preserves the sanitized failure response", async () => {
+  const f = fixture({
+    fail: "/auth/login",
+    reportFailure: () => {
+      throw new Error("sink unavailable");
+    },
+  });
+  const result = await f.call({ action: "key", dsn: DSN });
+  assert(result.status === 502);
+  assert(await result.text() === '{"error":"monster_login"}');
 });
 Deno.test("vendor configuration fails closed and tickets bind the account credentials", async () => {
   // Unpinned Ayla app credentials fail closed instead of sending a login.
