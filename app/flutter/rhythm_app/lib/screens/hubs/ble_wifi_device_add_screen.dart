@@ -61,9 +61,9 @@ abstract final class BleWifiPairingStage {
 }
 
 /// Drives staged Bluetooth-to-Wi-Fi onboarding for any family the appliance
-/// advertises: the Rhythm Box finds the device and joins it to Wi-Fi over
-/// Bluetooth first; when the profile advertises a phone protocol, a supported
-/// phone can be tried as recovery using the Box’s saved credentials. The app
+/// advertises: a supported phone finds the device and joins it to Wi-Fi using
+/// the Box's saved credentials. The Box handles Bluetooth when phone setup is
+/// unsupported or explicitly selected after a failed phone attempt. The app
 /// brokers registration through the family's cloud broker, and the Box adopts
 /// the LAN credentials only after a signed readback. Nothing here is specific
 /// to one manufacturer.
@@ -153,9 +153,9 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
   late final PhoneBleWifiService? _phoneService = PhoneBleWifiServices.create(
       _family.phoneProvisioningProtocol,
       service: widget.phoneService);
-  // The Rhythm Box is always the first attempt; a supported phone is offered
-  // only as explicit recovery, and the person can switch back.
-  bool _usePhone = false;
+  // Prefer the phone only when its platform and the advertised protocol are
+  // supported. Explicit fallback choices remain selected across retries.
+  late bool _usePhone = _phoneService != null;
   PhoneBleWifiService? get _phone => _usePhone ? _phoneService : null;
   RhythmCommissioningWifi? _wifi;
   String get _commissioner => _phone == null ? 'server' : 'phone';
