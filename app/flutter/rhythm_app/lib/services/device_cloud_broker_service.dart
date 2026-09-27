@@ -83,8 +83,13 @@ class DeviceCloudBrokerService {
         !auth.isAnonymous;
   }
 
-  Future<DeviceCloudBrokerResponse> begin(String functionName, String dsn) =>
-      _call(functionName, {'action': 'begin', 'dsn': dsn});
+  Future<DeviceCloudBrokerResponse> begin(String functionName, String dsn,
+          {int? setupTokenLength}) =>
+      _call(functionName, {
+        'action': 'begin',
+        'dsn': dsn,
+        if (setupTokenLength != null) 'setup_token_length': setupTokenLength,
+      });
 
   Future<DeviceCloudBrokerResponse> complete(
     String functionName,

@@ -310,7 +310,8 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
         if (!mounted) return;
         final candidate = await _discover();
         if (candidate == null || !mounted) return;
-        final begin = await _cloud.begin(broker, candidate.dsn);
+        final begin = await _cloud.begin(broker, candidate.dsn,
+            setupTokenLength: _phone?.setupTokenLength);
         if (!mounted) return;
         if (!begin.ok || begin.setupToken == null || begin.ticket == null) {
           _fail(

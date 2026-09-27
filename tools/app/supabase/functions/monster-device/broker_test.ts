@@ -100,7 +100,7 @@ function fixture(
           }
           assert(
             body.device.dsn === DSN &&
-              /^[0-9a-f]{32}$/.test(body.device.setup_token),
+              /^(?:[A-Za-z0-9]{8}|[0-9a-f]{32})$/.test(body.device.setup_token),
           );
           owned = true;
           result = { device: { dsn: DSN, lan_ip: "192.168.5.200" } };
@@ -239,6 +239,52 @@ Deno.test("begin/complete binds setup proof to owner DSN expiry and idempotent r
     (await f.call({ action: "complete", dsn: DSN, ticket: ticket.ticket }))
       .status === 400,
   );
+});
+Deno.test("capable clients commission with an unchanged eight-character proof", async () => {
+  const f = fixture({ owned: false });
+  const begin = await f.call({
+    action: "begin",
+    dsn: DSN,
+    setup_token_length: 8,
+  });
+  assert(begin.status === 200);
+  const ticket = await begin.json();
+  assert(/^[A-Za-z0-9]{8}$/.test(ticket.setup_token));
+  const completed = await f.call({
+    action: "complete",
+    dsn: DSN,
+    ticket: ticket.ticket,
+  });
+  assert(completed.status === 200);
+  assert(
+    f.calls.find((c) => c.url.endsWith("/devices.json") && c.body)?.body.device
+      .setup_token === ticket.setup_token,
+  );
+  const expired = fixture({ owned: false });
+  const expiring = await (await expired.call({
+    action: "begin",
+    dsn: DSN,
+    setup_token_length: 8,
+  })).json();
+  expired.advance();
+  assert(
+    (await expired.call({
+      action: "complete",
+      dsn: DSN,
+      ticket: expiring.ticket,
+    })).status === 400,
+  );
+  assert(!expired.calls.some((c) => c.url.endsWith("/devices.json") && c.body));
+});
+Deno.test("invalid token length requests make no vendor calls", async () => {
+  const f = fixture();
+  for (const length of [0, 7, 9, 16, 33, "8", null]) {
+    assert(
+      (await f.call({ action: "begin", dsn: DSN, setup_token_length: length }))
+        .status === 400,
+    );
+  }
+  assert(f.calls.length === 0);
 });
 Deno.test("unowned key lookup never registers and provider failures are sanitized", async () => {
   const unowned = fixture({ owned: false });

@@ -15,6 +15,7 @@ import '../helpers/capturing_analytics_backend.dart';
 const _dsn = 'ACFIXTURE123456';
 const _address = 'AA:BB:CC:DD:EE:FF';
 const _setupToken = '0123456789abcdef0123456789abcdef';
+const _shortSetupToken = 'Ab3dE6gH';
 
 /// A profile-described family; the screen must never assume a vendor.
 final stripFamily = NearbyBleFamily.fromProfile(
@@ -31,6 +32,8 @@ final stripFamily = NearbyBleFamily.fromProfile(
 );
 
 class _Phone implements PhoneBleWifiService {
+  @override
+  int get setupTokenLength => 8;
   int discoveries = 0;
   int provisions = 0;
   int disposed = 0;
@@ -57,7 +60,7 @@ class _Phone implements PhoneBleWifiService {
       RhythmCommissioningWifi wifi) async {
     provisions++;
     expect(candidate.address, 'phone-uuid');
-    expect(token, _setupToken);
+    expect(token, _shortSetupToken);
     expect(wifi.ssid, 'Saved network');
     expect(wifi.password, 'saved-password');
     if (uncertain) {
@@ -111,6 +114,7 @@ class _Fixture {
   final pairStages = <String>[];
   final pairParams = <Map<String, dynamic>>[];
   final cloudCalls = <String>[];
+  final requestedTokenLengths = <Object?>[];
   int completeCalls = 0;
 
   Future<Map<String, dynamic>?> pair({
@@ -178,9 +182,11 @@ class _Fixture {
           switch (action) {
             case 'begin':
               expect(body['dsn'], _dsn);
-              return const DeviceCloudBrokerResponse(
+              requestedTokenLengths.add(body['setup_token_length']);
+              return DeviceCloudBrokerResponse(
                 status: 200,
-                setupToken: _setupToken,
+                setupToken: body['setup_token_length'] == 8
+                    ? _shortSetupToken : _setupToken,
                 ticket: 'fixture-ticket',
               );
             case 'complete':
@@ -310,6 +316,7 @@ void main() {
     expect(result, isNotNull);
     expect(phone.discoveries, 0);
     expect(phone.provisions, 0);
+    expect(fixture.requestedTokenLengths, [null]);
     expect(fixture.pairStages, ['discover', 'provision', 'adopt']);
     expect(fixture.pairParams.map((p) => p['rendezvous']).toSet(), {'server'});
     final events = analyticsBackend.events
@@ -350,6 +357,7 @@ void main() {
     });
     expect(result, isNotNull);
     expect(credentialReads, 1);
+    expect(fixture.requestedTokenLengths, [8]);
     expect(phone.discoveries, 1);
     expect(phone.provisions, 1);
     expect(fixture.pairStages, ['discover', 'adopt']);

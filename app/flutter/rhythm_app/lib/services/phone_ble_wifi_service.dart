@@ -38,6 +38,7 @@ abstract interface class PhoneWifiTransport {
 }
 
 abstract interface class PhoneBleWifiService {
+  int get setupTokenLength;
   Future<List<BleWifiDiscoveredCandidate>> discover();
   Future<void> provision(BleWifiDiscoveredCandidate candidate,
       String setupToken, RhythmCommissioningWifi wifi);
@@ -63,6 +64,9 @@ class AylaPhoneBleWifiService implements PhoneBleWifiService {
     this.statusPollDelay = const Duration(milliseconds: 500),
     this.statusPollLimit = 120,
   }) : _transport = transport ?? FlutterPhoneWifiTransport();
+
+  @override
+  int get setupTokenLength => 8;
 
   static const protocol = 'ayla_v1';
   static const idService = '0000fe28-0000-1000-8000-00805f9b34fb';
@@ -165,7 +169,7 @@ class AylaPhoneBleWifiService implements PhoneBleWifiService {
       String setupToken, RhythmCommissioningWifi wifi) async {
     _checkActive();
     final payload = encodeWifi(wifi);
-    if (!RegExp(r'^[a-fA-F0-9]{32}$').hasMatch(setupToken)) {
+    if (!RegExp(r'^(?:[a-zA-Z0-9]{8}|[a-fA-F0-9]{32})$').hasMatch(setupToken)) {
       payload.fillRange(0, payload.length, 0);
       throw const PhoneBleWifiFailure(
           'The setup session is invalid. Start over.');

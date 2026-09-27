@@ -235,11 +235,24 @@ export function createMonsterBroker(deps: Dependencies) {
       ["sign", "verify"],
     );
   }
-  async function issueTicket(userId: string, dsn: string) {
-    const token = Array.from(
-      crypto.getRandomValues(new Uint8Array(16)),
-      (b) => b.toString(16).padStart(2, "0"),
-    ).join("");
+  async function issueTicket(userId: string, dsn: string, tokenLength: 8 | 32) {
+    // Match the vendor app's eight-character alphanumeric setup proof. Older
+    // clients validate exactly 32 hex characters, so they must opt in first.
+    const alphabet =
+      "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+    let token = "";
+    if (tokenLength === 8) {
+      while (token.length < 8) {
+        for (const byte of crypto.getRandomValues(new Uint8Array(16))) {
+          if (byte < 248 && token.length < 8) token += alphabet[byte % 62];
+        }
+      }
+    } else {
+      token = Array.from(
+        crypto.getRandomValues(new Uint8Array(16)),
+        (b) => b.toString(16).padStart(2, "0"),
+      ).join("");
+    }
     const data = encoder.encode(
       JSON.stringify({
         user_id: userId,
@@ -272,7 +285,8 @@ export function createMonsterBroker(deps: Dependencies) {
         ticket.user_id !== userId || ticket.dsn !== dsn ||
         typeof ticket.expires !== "number" || ticket.expires <= now() ||
         ticket.expires > now() + 600000 ||
-        !/^[a-f0-9]{32}$/.test(ticket.setup_token)
+        typeof ticket.setup_token !== "string" ||
+        !/^(?:[A-Za-z0-9]{8}|[a-f0-9]{32})$/.test(ticket.setup_token)
       ) throw new Error();
       return ticket.setup_token;
     } catch {
@@ -414,6 +428,12 @@ export function createMonsterBroker(deps: Dependencies) {
         !body || typeof body.dsn !== "string" || !dsnPattern.test(body.dsn) ||
         !["begin", "complete", "key"].includes(body.action)
       ) return response({ error: "invalid_request" }, 400);
+      if (
+        body.action === "begin" && body.setup_token_length !== undefined &&
+        body.setup_token_length !== 8 && body.setup_token_length !== 32
+      ) {
+        return response({ error: "invalid_request" }, 400);
+      }
       aylaApp(); // Reject incomplete deployment configuration before any vendor call.
       const signal = AbortSignal.timeout(35000);
       let setupToken: string | undefined;
@@ -425,7 +445,9 @@ export function createMonsterBroker(deps: Dependencies) {
       // spends a BLE provisioning attempt on a ticket it can never complete.
       const auth = `auth_token ${await authenticate(signal)}`;
       if (body.action === "begin") {
-        return response(await issueTicket(userId, body.dsn));
+        return response(
+          await issueTicket(userId, body.dsn, body.setup_token_length ?? 32),
+        );
       }
       let device = await ownedDevice(body.dsn, auth, signal);
       if (!device && setupToken) {

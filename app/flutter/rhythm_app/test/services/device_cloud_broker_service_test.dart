@@ -82,6 +82,10 @@ void main() {
       final rejected = await service.begin('Bad Name!', 'ACFIXTURE123456');
       expect(rejected.error, 'invalid_broker');
       expect(calls.length, 3, reason: 'unsafe function names are never sent');
+      await service.begin('vendor-device', 'ACFIXTURE123456', setupTokenLength: 8);
+      expect(bodies.last, {
+        'action': 'begin', 'dsn': 'ACFIXTURE123456', 'setup_token_length': 8,
+      });
     },
   );
 }
