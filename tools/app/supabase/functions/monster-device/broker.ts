@@ -3,10 +3,21 @@
 type Env = (name: string) => string | undefined;
 type Json = Record<string, any>;
 type AylaApp = { appId: string; appSecret: string };
+type SetupProbeResult = {
+  status?: number;
+  lan_ip_present?: boolean;
+  registration_type?: string;
+};
+type SetupProbe = {
+  token_length: number;
+  full: SetupProbeResult;
+  prefix8: SetupProbeResult;
+};
 export type MonsterBrokerFailure = {
   stage: string;
   status: number;
   upstream_status?: number;
+  setup_probe?: SetupProbe;
 };
 type Dependencies = {
   env: Env;
@@ -21,6 +32,7 @@ const AYLA_APP_ID = "RGBIC-yQ-id";
 const encoder = new TextEncoder();
 const dsnPattern = /^[A-Za-z0-9]{8,32}$/;
 class Failure extends Error {
+  setupProbe?: SetupProbe;
   constructor(
     readonly stage: string,
     readonly status = 502,
@@ -284,6 +296,40 @@ export function createMonsterBroker(deps: Dependencies) {
       device?.dsn === dsn
     );
   }
+  async function probeSetupToken(
+    dsn: string,
+    token: string,
+    signal: AbortSignal,
+  ): Promise<SetupProbeResult> {
+    try {
+      // The vendor SDK uses this read-only endpoint before registration. It
+      // generates eight-character tokens; compare that format without changing
+      // the proof submitted by the current client or attempting another claim.
+      const query = new URLSearchParams({ dsn, setup_token: token });
+      const result = await request(
+        `${DEVICE}/apiv1/devices/connected.json?${query}`,
+        "setup_probe",
+        signal,
+        undefined,
+        "none",
+      );
+      const device = result?.device;
+      const registrationType = device?.registration_type;
+      return {
+        status: 200,
+        lan_ip_present: typeof device?.lan_ip === "string" &&
+          privateIp(device.lan_ip),
+        ...(["AP-Mode", "Same-LAN", "Button-Push", "Dsn", "Display", "Node"]
+            .includes(registrationType)
+          ? { registration_type: registrationType }
+          : {}),
+      };
+    } catch (error) {
+      return error instanceof Failure && error.upstreamStatus !== undefined
+        ? { status: error.upstreamStatus }
+        : {};
+    }
+  }
   async function credentials(
     device: Json,
     dsn: string,
@@ -384,13 +430,36 @@ export function createMonsterBroker(deps: Dependencies) {
       let device = await ownedDevice(body.dsn, auth, signal);
       if (!device && setupToken) {
         // setup_token is proof provisioned into the exact DSN over BLE.
-        const registered = await request(
-          `${DEVICE}/apiv1/devices.json`,
-          "register",
-          signal,
-          { device: { dsn: body.dsn, setup_token: setupToken } },
-          auth,
-        );
+        let registered;
+        try {
+          registered = await request(
+            `${DEVICE}/apiv1/devices.json`,
+            "register",
+            signal,
+            { device: { dsn: body.dsn, setup_token: setupToken } },
+            auth,
+          );
+        } catch (error) {
+          if (
+            error instanceof Failure && error.upstreamStatus === 404 &&
+            deps.reportFailure && !signal.aborted
+          ) {
+            const probeSignal = AbortSignal.any([
+              signal,
+              AbortSignal.timeout(2500),
+            ]);
+            const [full, prefix8] = await Promise.all([
+              probeSetupToken(body.dsn, setupToken, probeSignal),
+              probeSetupToken(body.dsn, setupToken.slice(0, 8), probeSignal),
+            ]);
+            error.setupProbe = {
+              token_length: setupToken.length,
+              full,
+              prefix8,
+            };
+          }
+          throw error;
+        }
         if (registered?.device?.dsn !== body.dsn) {
           throw new Failure("registration_identity");
         }
@@ -409,6 +478,7 @@ export function createMonsterBroker(deps: Dependencies) {
           ...(failure.upstreamStatus === undefined
             ? {}
             : { upstream_status: failure.upstreamStatus }),
+          ...(failure.setupProbe ? { setup_probe: failure.setupProbe } : {}),
         });
       } catch {
         // Observability must not change the client's retry/recovery contract.
