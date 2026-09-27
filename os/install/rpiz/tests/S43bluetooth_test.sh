@@ -16,6 +16,54 @@ BLUETOOTH_STATE_TARGET="$TEST_ROOT/legacy"
 BLUETOOTH_MIGRATION_MARKER="$TEST_ROOT/migrated"
 LOGFILE="$TEST_ROOT/bluetooth.log"
 
+# With no /dev/serial1 symlink the Bluetooth UART is resolved from the board
+# alias through sysfs, whatever number the kernel gave the port.
+PL011=/soc/serial@7e201000
+MINI=/soc/serial@7e215040
+DEV_DIR="$TEST_ROOT/dev"
+SYSFS_TTY_DIR="$TEST_ROOT/sys/class/tty"
+DT_BASE="$TEST_ROOT/dt"
+mkdir -p "$DEV_DIR" "$SYSFS_TTY_DIR" "$DT_BASE$PL011" "$DT_BASE$MINI"
+
+fake_tty() {
+    # $1 tty name, $2 device-tree node, $3 levels between tty and UART device
+    mkdir -p "$TEST_ROOT/devices/$1$3"
+    ln -s "$DT_BASE$2" "$TEST_ROOT/devices/$1/of_node"
+    mkdir -p "$SYSFS_TTY_DIR/$1"
+    ln -s "$TEST_ROOT/devices/$1$3" "$SYSFS_TTY_DIR/$1/device"
+    ln -s /dev/null "$DEV_DIR/$1"
+}
+
+# No tty at all (for example the kernel serdev driver owns the port).
+if bluetooth_uart_device "$PL011" "$PL011" >/dev/null; then
+    echo "resolved a Bluetooth UART that does not exist" >&2
+    exit 1
+fi
+
+# Legacy names are used only when sysfs cannot answer, and only for the
+# matching UART type.
+ln -s /dev/null "$DEV_DIR/ttyS0"
+if bluetooth_uart_device "$PL011" "$PL011" >/dev/null; then
+    echo "attached the PL011 route to the mini UART" >&2
+    exit 1
+fi
+test "$(bluetooth_uart_device "$PL011" "$MINI")" = "$DEV_DIR/ttyS0"
+test "$(bluetooth_uart_device '' '')" = "$DEV_DIR/ttyS0"
+ln -s /dev/null "$DEV_DIR/ttyAMA0"
+test "$(bluetooth_uart_device "$PL011" "$PL011")" = "$DEV_DIR/ttyAMA0"
+rm -f "$DEV_DIR/ttyS0" "$DEV_DIR/ttyAMA0"
+
+# Alias-numbered PL011 behind serial-core port devices, mini UART directly.
+fake_tty ttyAMA1 "$PL011" /port/port0
+fake_tty ttyS0 "$MINI" ""
+test "$(resolve_uart_tty "$PL011")" = ttyAMA1
+test "$(bluetooth_uart_device "$PL011" "$PL011")" = "$DEV_DIR/ttyAMA1"
+test "$(bluetooth_uart_device "$PL011" "$MINI")" = "$DEV_DIR/ttyS0"
+if resolve_uart_tty /soc/serial@missing >/dev/null; then
+    echo "resolved a UART node that does not exist" >&2
+    exit 1
+fi
+
 mkdir -p \
     "$BLUETOOTH_STATE_SOURCE/adapter/device-one" \
     "$BLUETOOTH_STATE_TARGET/adapter/device-one" \
