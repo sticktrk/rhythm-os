@@ -16,6 +16,7 @@ NETWORK_WAIT_ATTEMPTS="${RHYTHM_BOOTSTATE_NETWORK_WAIT_ATTEMPTS:-15}"
 NETWORK_WAIT_SLEEP_SECS="${RHYTHM_BOOTSTATE_NETWORK_WAIT_SLEEP_SECS:-1}"
 CMDLINE_FILE="${RHYTHM_CMDLINE_FILE:-${BOOT_MOUNT}/cmdline.txt}"
 PROC_CMDLINE="${RHYTHM_PROC_CMDLINE:-/proc/cmdline}"
+BOARD_MODEL_FILE="${RHYTHM_BOARD_MODEL_FILE:-/proc/device-tree/model}"
 HASH_HEADER_PREFIX="# RHYTHM_BOOTSTATE_HASH="
 
 now_ms() {
@@ -370,6 +371,48 @@ reboot_now() {
     /sbin/reboot 2>/dev/null || reboot
 }
 
+# Rootfs-slot OTA deliberately preserves the shared boot partition. Migrate
+# only our old, unparameterized mini-UART directive; replacing config.txt with
+# the image template would discard unrelated boot settings. Both the old and
+# new rootfs support the board's default PL011 Bluetooth routing.
+# Returns 10 only after a durable change, 0 for no change, 1 on write failure.
+migrate_bluetooth_uart() {
+    local model config backup tmp backup_tmp
+
+    [ -r "$BOARD_MODEL_FILE" ] || return 0
+    model="$(tr -d '\000' < "$BOARD_MODEL_FILE" 2>/dev/null || true)"
+    case "$model" in
+        "Raspberry Pi Zero W"|"Raspberry Pi Zero W "*) ;;
+        *) return 0 ;;
+    esac
+
+    config="${BOOT_MOUNT}/config.txt"
+    backup="${config}.pre-bluetooth-uart"
+    tmp="${config}.tmp.$$"
+    backup_tmp="${backup}.tmp.$$"
+    [ -f "$config" ] && [ ! -L "$config" ] || return 0
+    grep -Eq '^[[:space:]]*dtoverlay[[:space:]]*=[[:space:]]*miniuart-bt[[:space:]]*(#.*)?$' "$config" || return 0
+    if [ -L "$backup" ] || { [ -e "$backup" ] && [ ! -f "$backup" ]; }; then
+        printf 'S41bootstate: refusing non-regular Bluetooth UART backup\n' >&2
+        return 1
+    fi
+
+    if ! sed '/^[[:space:]]*dtoverlay[[:space:]]*=[[:space:]]*miniuart-bt[[:space:]]*\(#.*\)\{0,1\}$/d' "$config" > "$tmp" \
+        || ! cp "$config" "$backup_tmp" \
+        || ! sync_path "$backup_tmp" \
+        || ! mv -f "$backup_tmp" "$backup" \
+        || ! sync_parent "$backup" \
+        || ! sync_path "$tmp" \
+        || ! mv -f "$tmp" "$config" \
+        || ! sync_parent "$config"; then
+        rm -f "$tmp" "$backup_tmp"
+        printf 'S41bootstate: failed to migrate Bluetooth UART; inspect config.txt and its pre-bluetooth-uart backup\n' >&2
+        return 1
+    fi
+    printf 'S41bootstate: restored default PL011 Bluetooth routing; rebooting before OTA probation\n'
+    return 10
+}
+
 rollback_pending_boot() {
     local slot="$1"
     local active_version="$2"
@@ -403,7 +446,7 @@ rollback_pending_boot() {
 }
 
 start() {
-    local slot active_version
+    local slot active_version uart_migration_status
 
     slot="$(current_slot || true)"
     [ -n "$slot" ] || return 0
@@ -418,7 +461,28 @@ start() {
                 return 0
                 ;;
         esac
+    fi
 
+    # A failed candidate must still roll back above. For a fresh candidate,
+    # activate the boot-only change BEFORE marking it booting: the migration
+    # reboot must not look like a failed probation boot. Removing the directive
+    # makes this idempotent even if power is lost before the reboot call.
+    uart_migration_status=0
+    migrate_bluetooth_uart || uart_migration_status=$?
+    if [ "$uart_migration_status" -eq 10 ]; then
+        sync
+        if [ -n "${RHYTHM_BOOTSTATE_REBOOT_DRY_RUN:-}" ]; then
+            return 0
+        fi
+        # Early boot, before network/server startup. A direct reboot avoids
+        # launching a candidate against the old UART while init shuts down.
+        if ! /sbin/reboot -f 2>/dev/null; then
+            reboot -f || true
+        fi
+        printf 'S41bootstate: Bluetooth UART reboot returned; continuing boot with correction pending\n' >&2
+    fi
+
+    if [ "${RHYTHM_PENDING_SLOT:-}" = "$slot" ]; then
         RHYTHM_ACTIVE_SLOT="$slot"
         [ -n "${RHYTHM_LAST_GOOD_SLOT:-}" ] || RHYTHM_LAST_GOOD_SLOT="$slot"
         RHYTHM_ACTIVE_VERSION="$active_version"

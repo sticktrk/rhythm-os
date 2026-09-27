@@ -200,6 +200,29 @@ If your board is the original Pi Zero without onboard Wi-Fi, the Wi-Fi flags abo
 
 ## BLE provisioning
 
+The Zero W keeps onboard Bluetooth on the default PL011 UART with hardware
+flow control. Do not add `dtoverlay=miniuart-bt`: it moves HCI traffic to the
+mini UART, where receive overruns can corrupt frames and leave discovery stuck
+even though BlueZ reports the adapter powered on. See the
+[Raspberry Pi UART documentation](https://www.raspberrypi.com/documentation/computers/configuration.html#configure-uarts).
+
+Rootfs OTA preserves the shared boot partition. On the first boot of an updated
+Zero W image, `S41bootstate` backs up an old `config.txt` to
+`config.txt.pre-bluetooth-uart`, removes the bare `dtoverlay=miniuart-bt` directive,
+and reboots once before arming OTA probation. Other settings and `/data` are
+preserved. Parameterized custom overlays and other board models are left alone.
+A failed candidate still rolls back normally; the default UART routing works
+with the previous image too. This migration requires an image update, not just
+a server binary update. If the backup/write fails, startup continues with a
+diagnostic on the console and retries the correction on a later boot.
+
+For field verification after that reboot, `serial1` should resolve to UART0
+(`serial@7e201000`) and the PL011 receive count should advance during BLE scans.
+Debug bundles include bounded passive UART aliases and counters in
+`shared_ble_runtime.json` (`uart`); `oe` in the counters records receive overruns.
+Check scan health and counter growth under normal traffic before promoting an
+image. No pairing database reset is needed for this change.
+
 The rpiz image now includes a BlueZ-based BLE provisioning sidecar that reuses
 the shared Rhythm provisioning GATT contract.
 

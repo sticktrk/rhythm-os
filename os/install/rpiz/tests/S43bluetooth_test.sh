@@ -16,6 +16,12 @@ BLUETOOTH_STATE_TARGET="$TEST_ROOT/legacy"
 BLUETOOTH_MIGRATION_MARKER="$TEST_ROOT/migrated"
 LOGFILE="$TEST_ROOT/bluetooth.log"
 
+# With no /dev/serial1 symlink, default routing uses the PL011 while legacy
+# mini-UART images retain their ttyS0 fallback.
+test "$(bluetooth_uart_fallback /soc/serial@7e201000 /soc/serial@7e201000)" = /dev/ttyAMA0
+test "$(bluetooth_uart_fallback /soc/serial@7e201000 /soc/serial@7e215040)" = /dev/ttyS0
+test "$(bluetooth_uart_fallback '' '')" = /dev/ttyS0
+
 mkdir -p \
     "$BLUETOOTH_STATE_SOURCE/adapter/device-one" \
     "$BLUETOOTH_STATE_TARGET/adapter/device-one" \

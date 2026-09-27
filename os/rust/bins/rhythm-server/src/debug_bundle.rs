@@ -1731,8 +1731,38 @@ fn build_shared_ble_runtime_json(generated_at: DateTime<Utc>) -> Result<String> 
         "generated_at": generated_at.to_rfc3339(),
         "status": status,
         "runtime": runtime,
+        "uart": bluetooth_uart_snapshot(Path::new("/")),
     }))
     .context("serializing shared Bluetooth runtime snapshot")
+}
+
+// Passive evidence: UART receive overruns can corrupt HCI frames while BlueZ
+// still reports Powered=true. Never open the tty or initialize the BLE runtime
+// just to export a bundle. DT aliases explain which UART the image selected.
+#[cfg(any(target_os = "linux", test))]
+fn bluetooth_uart_snapshot(root: &Path) -> serde_json::Value {
+    fn read(root: &Path, relative: &str) -> Option<String> {
+        let mut bytes = Vec::new();
+        fs::File::open(root.join(relative))
+            .ok()?
+            .take(4096)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        Some(
+            String::from_utf8_lossy(&bytes)
+                .trim_matches(['\0', '\n', '\r'])
+                .to_string(),
+        )
+    }
+
+    serde_json::json!({
+        "serial0": read(root, "proc/device-tree/aliases/serial0"),
+        "serial1": read(root, "proc/device-tree/aliases/serial1"),
+        "uart0": read(root, "proc/device-tree/aliases/uart0"),
+        "uart1": read(root, "proc/device-tree/aliases/uart1"),
+        "mini_uart_counters": read(root, "proc/tty/driver/serial"),
+        "pl011_counters": read(root, "proc/tty/driver/ttyAMA"),
+    })
 }
 
 fn build_hue_controller_debug_json(
@@ -3741,6 +3771,30 @@ mod tests {
         assert_eq!(hubs[0]["diagnostics"]["schema_version"], 1);
         assert_eq!(hubs[0]["diagnostics"]["commands"], serde_json::json!([]));
         assert_eq!(hubs[1]["hub_key"], "matter@fabric-b");
+    }
+
+    #[test]
+    fn bluetooth_uart_snapshot_preserves_overruns_and_bounds_passive_reads() {
+        let root = unique_test_dir("bluetooth-uart");
+        fs::create_dir_all(root.join("proc/device-tree/aliases")).unwrap();
+        fs::create_dir_all(root.join("proc/tty/driver")).unwrap();
+        fs::write(
+            root.join("proc/device-tree/aliases/serial1"),
+            "/soc/serial@7e215040\0",
+        )
+        .unwrap();
+        let counters = "0: uart:16550 tx:100 rx:200 oe:7 RTS|CTS\n";
+        fs::write(root.join("proc/tty/driver/serial"), counters).unwrap();
+        fs::write(root.join("proc/tty/driver/ttyAMA"), "x".repeat(8000)).unwrap();
+
+        let snapshot = bluetooth_uart_snapshot(&root);
+        assert_eq!(snapshot["serial1"], "/soc/serial@7e215040");
+        assert_eq!(snapshot["mini_uart_counters"], counters.trim());
+        assert_eq!(snapshot["pl011_counters"].as_str().unwrap().len(), 4096);
+        assert!(snapshot["uart0"].is_null());
+        // Optional kernel interfaces can be unavailable without failing export.
+        assert!(bluetooth_uart_snapshot(&root.join("missing"))["mini_uart_counters"].is_null());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(target_os = "linux")]

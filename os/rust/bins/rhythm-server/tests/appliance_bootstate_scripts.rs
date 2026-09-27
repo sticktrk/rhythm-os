@@ -150,6 +150,7 @@ fn run_bootstate_with_data_dir(root: &Path, action: &str, data_dir: PathBuf) -> 
         .arg(bootstate_script())
         .arg(action)
         .env("RHYTHM_BOOT_MOUNT", root.join("boot"))
+        .env("RHYTHM_BOARD_MODEL_FILE", root.join("board-model"))
         .env("RHYTHM_BOOTSTATE_DATA_DIR", root.join("data/ota"))
         .env(
             "RHYTHM_BOOTSTATE_ROLLBACK_REQUIRED_LATCH",
@@ -176,6 +177,200 @@ fn assert_success(output: Output) {
         output.status.code(),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+const LEGACY_BLUETOOTH_CONFIG: &str =
+    "kernel=kernel.img\ndtoverlay=miniuart-bt\ncore_freq=250\nenable_uart=1\ndtoverlay=ramoops\n# custom setting\ndisable_splash=1\n";
+
+fn bluetooth_uart_boot_fixture(name: &str, status: &str) -> PathBuf {
+    let root = unique_dir(name);
+    write_fake_server(&root, "0.4.2");
+    fs::write(root.join("board-model"), "Raspberry Pi Zero W Rev 1.1\0").unwrap();
+    fs::write(root.join("boot/config.txt"), LEGACY_BLUETOOTH_CONFIG).unwrap();
+    let cmdline = "console=tty1 root=/dev/mmcblk0p3 rootwait rw\n";
+    fs::write(root.join("boot/cmdline.txt"), cmdline).unwrap();
+    fs::write(root.join("proc_cmdline"), cmdline).unwrap();
+    write_bootstate(&root, &pending_bootstate_body(status));
+    root
+}
+
+#[test]
+fn bluetooth_uart_migration_reboots_before_probation_and_preserves_device_state() {
+    let root = bluetooth_uart_boot_fixture("uart-upgrade", "pending");
+    let pending = read_bootstate(&root);
+    for path in [
+        "bluetooth/adapter/bond/info",
+        "local_ble/devices.json",
+        "topology.json",
+    ] {
+        let path = root.join("data").join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "keep").unwrap();
+    }
+
+    let output = run_bootstate(&root, "start");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("rebooting before OTA probation"));
+    assert_success(output);
+    assert_eq!(read_bootstate(&root), pending);
+    let migrated = LEGACY_BLUETOOTH_CONFIG.replace("dtoverlay=miniuart-bt\n", "");
+    assert_eq!(
+        fs::read_to_string(root.join("boot/config.txt")).unwrap(),
+        migrated
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("boot/config.txt.pre-bluetooth-uart")).unwrap(),
+        LEGACY_BLUETOOTH_CONFIG
+    );
+
+    // Also models a power loss after the atomic replacement but before reboot:
+    // no marker can get out of sync and no second migration reboot is needed.
+    let output = run_bootstate(&root, "start");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("rebooting"));
+    assert_success(output);
+    assert_eq!(
+        bootstate_value(&read_bootstate(&root), "RHYTHM_BOOT_STATUS"),
+        Some("booting")
+    );
+    assert_success(run_bootstate(&root, "success"));
+    let healthy = read_bootstate(&root);
+    assert_eq!(
+        bootstate_value(&healthy, "RHYTHM_BOOT_STATUS"),
+        Some("idle")
+    );
+    assert_eq!(
+        bootstate_value(&healthy, "RHYTHM_LAST_GOOD_SLOT"),
+        Some("b")
+    );
+    for path in [
+        "bluetooth/adapter/bond/info",
+        "local_ble/devices.json",
+        "topology.json",
+    ] {
+        assert_eq!(
+            fs::read_to_string(root.join("data").join(path)).unwrap(),
+            "keep"
+        );
+    }
+    assert!(fs::read_to_string(root.join("boot/cmdline.txt"))
+        .unwrap()
+        .contains("root=/dev/mmcblk0p3"));
+}
+
+#[test]
+fn bluetooth_uart_migration_does_not_mask_a_failed_candidate_or_change_rollback_policy() {
+    for status in ["booting", "rollback_required"] {
+        let root = bluetooth_uart_boot_fixture(&format!("uart-rollback-{status}"), status);
+        assert_success(run_bootstate(&root, "start"));
+        assert_eq!(
+            fs::read_to_string(root.join("boot/config.txt")).unwrap(),
+            LEGACY_BLUETOOTH_CONFIG
+        );
+        assert!(!root.join("boot/config.txt.pre-bluetooth-uart").exists());
+        assert!(fs::read_to_string(root.join("boot/cmdline.txt"))
+            .unwrap()
+            .contains("root=/dev/mmcblk0p2"));
+    }
+
+    // If probation fails after the migration, the previous rootfs still uses
+    // the board's default PL011 route; the correction survives slot rollback.
+    let root = bluetooth_uart_boot_fixture("uart-rollback-after-migration", "pending");
+    assert_success(run_bootstate(&root, "start"));
+    let migrated = fs::read_to_string(root.join("boot/config.txt")).unwrap();
+    assert_success(run_bootstate(&root, "start"));
+    assert_success(run_bootstate(&root, "start"));
+    assert_eq!(
+        fs::read_to_string(root.join("boot/config.txt")).unwrap(),
+        migrated
+    );
+    assert!(fs::read_to_string(root.join("boot/cmdline.txt"))
+        .unwrap()
+        .contains("root=/dev/mmcblk0p2"));
+}
+
+#[test]
+fn bluetooth_uart_backup_failure_keeps_original_config_and_arms_normal_probation() {
+    let root = bluetooth_uart_boot_fixture("uart-backup-failure", "pending");
+    fs::create_dir(root.join("boot/config.txt.pre-bluetooth-uart")).unwrap();
+    let output = run_bootstate(&root, "start");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("refusing non-regular"));
+    assert_success(output);
+    assert_eq!(
+        fs::read_to_string(root.join("boot/config.txt")).unwrap(),
+        LEGACY_BLUETOOTH_CONFIG
+    );
+    assert_eq!(
+        bootstate_value(&read_bootstate(&root), "RHYTHM_BOOT_STATUS"),
+        Some("booting")
+    );
+}
+
+#[test]
+fn bluetooth_uart_migration_leaves_other_boards_and_custom_overlay_parameters_alone() {
+    let fresh =
+        fs::read_to_string(repo_root().join("install/rpiz/buildroot/board/rhythm/rpiz/config.txt"))
+            .unwrap();
+    assert!(!fresh
+        .lines()
+        .any(|line| line.trim().starts_with("dtoverlay=miniuart-bt")));
+    for (name, model, config) in [
+        (
+            "other-board",
+            "Raspberry Pi 4 Model B\0",
+            LEGACY_BLUETOOTH_CONFIG,
+        ),
+        ("unknown-board", "", LEGACY_BLUETOOTH_CONFIG),
+        ("fresh-image", "Raspberry Pi Zero W\0", fresh.as_str()),
+        (
+            "custom-overlay",
+            "Raspberry Pi Zero W\0",
+            "dtoverlay=miniuart-bt,krnbt=off\n# dtoverlay=miniuart-bt\n",
+        ),
+    ] {
+        let root = bluetooth_uart_boot_fixture(name, "pending");
+        fs::write(root.join("board-model"), model).unwrap();
+        fs::write(root.join("boot/config.txt"), config).unwrap();
+        let output = run_bootstate(&root, "start");
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("rebooting"));
+        assert_success(output);
+        assert_eq!(
+            fs::read_to_string(root.join("boot/config.txt")).unwrap(),
+            config
+        );
+        assert!(!root.join("boot/config.txt.pre-bluetooth-uart").exists());
+        assert_eq!(
+            bootstate_value(&read_bootstate(&root), "RHYTHM_BOOT_STATUS"),
+            Some("booting")
+        );
+    }
+}
+
+#[test]
+fn bluetooth_uart_migration_handles_whitespace_and_an_idle_legacy_slot_once() {
+    let root = bluetooth_uart_boot_fixture("uart-idle", "idle");
+    write_bootstate(
+        &root,
+        "RHYTHM_ACTIVE_SLOT=b\nRHYTHM_LAST_GOOD_SLOT=b\nRHYTHM_BOOT_STATUS=idle\n",
+    );
+    fs::write(root.join("board-model"), "Raspberry Pi Zero W\0").unwrap();
+    fs::write(
+        root.join("boot/config.txt"),
+        "kernel=kernel.img\n dtoverlay = miniuart-bt  # legacy\r\ncore_freq=250\n",
+    )
+    .unwrap();
+    let output = run_bootstate(&root, "start");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("rebooting before OTA probation"));
+    assert_success(output);
+    assert_eq!(
+        fs::read_to_string(root.join("boot/config.txt")).unwrap(),
+        "kernel=kernel.img\ncore_freq=250\n"
+    );
+    let output = run_bootstate(&root, "start");
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("rebooting"));
+    assert_success(output);
+    assert_eq!(
+        bootstate_value(&read_bootstate(&root), "RHYTHM_BOOT_STATUS"),
+        Some("idle")
     );
 }
 

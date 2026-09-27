@@ -86,18 +86,17 @@ attach_controller() {
         return 0
     fi
 
+    uart0="$(read_dt_value /proc/device-tree/aliases/uart0)"
+    serial1="$(read_dt_value /proc/device-tree/aliases/serial1)"
+
     serial_dev=/dev/serial1
     if [ ! -c "$serial_dev" ]; then
-        if [ -c /dev/ttyS0 ]; then
-            serial_dev=/dev/ttyS0
-        else
+        serial_dev="$(bluetooth_uart_fallback "$uart0" "$serial1")"
+        if [ ! -c "$serial_dev" ]; then
             log "no serial device found for Bluetooth UART attach"
             return 1
         fi
     fi
-
-    uart0="$(read_dt_value /proc/device-tree/aliases/uart0)"
-    serial1="$(read_dt_value /proc/device-tree/aliases/serial1)"
 
     if [ "$uart0" = "$serial1" ] && [ -n "$uart0" ]; then
         uart0_pins="$(wc -c /proc/device-tree/soc/gpio@7e200000/uart0_pins/brcm,pins 2>/dev/null | cut -d ' ' -f1)"
@@ -119,6 +118,16 @@ attach_controller() {
         "$HCIATTACH" "$serial_dev" bcm43xx "$speed" "$flow" - "$bdaddr" >>"$LOGFILE" 2>&1
     else
         "$HCIATTACH" "$serial_dev" bcm43xx "$speed" "$flow" - >>"$LOGFILE" 2>&1
+    fi
+}
+
+bluetooth_uart_fallback() {
+    # Minimal /dev managers may omit serial1. Follow the board alias instead
+    # of assuming Bluetooth was moved to ttyS0 by miniuart-bt.
+    if [ -n "$1" ] && [ "$1" = "$2" ]; then
+        printf '/dev/ttyAMA0\n'
+    else
+        printf '/dev/ttyS0\n'
     fi
 }
 
