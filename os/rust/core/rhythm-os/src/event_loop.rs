@@ -2455,24 +2455,31 @@ fn motion_timeout_mode_default(
     state: &SharedState,
     target_node_id: &str,
 ) -> Option<rhythm_core::RoomModeState> {
-    let (mode_default, runtime) = {
+    let (global_mode, mode_configs, runtime) = {
         let s = state.lock().ok()?;
-        let active_mode = s.active_mode;
-        let mode_default = s
-            .mode_configs()
-            .into_iter()
-            .find(|config| config.mode == active_mode)?
-            .room_defaults
-            .into_iter()
-            .find(|default| default.room_id == target_node_id)
-            .map(|default| default.state);
-        (mode_default, s.hub_runtime())
+        (s.active_mode, s.mode_configs(), s.hub_runtime())
     };
+    // The restore target follows the node's effective schedule mode, the same
+    // authority reset and rendering use, not the global mode.
+    let snapshot = runtime
+        .as_ref()
+        .and_then(|runtime| runtime.engine_effective_node_snapshot(target_node_id));
+    let mode = match (&runtime, &snapshot) {
+        (Some(runtime), Some(snapshot)) => snapshot
+            .profile_settings
+            .schedule_mode(global_mode, runtime.current_hour()),
+        _ => global_mode,
+    };
+    let mode_default = mode_configs
+        .into_iter()
+        .find(|config| config.mode == mode)?
+        .room_defaults
+        .into_iter()
+        .find(|default| default.room_id == target_node_id)
+        .map(|default| default.state);
 
     if matches!(mode_default, Some(rhythm_core::RoomModeState::Standby))
-        && runtime
-            .and_then(|runtime| runtime.engine_node_snapshot(target_node_id))
-            .is_some_and(|snapshot| !snapshot.standby_enabled)
+        && snapshot.is_some_and(|snapshot| !snapshot.standby_enabled)
     {
         return Some(rhythm_core::RoomModeState::HardOff);
     }
@@ -9045,6 +9052,56 @@ mod tests {
             events[0].action,
             ButtonAction::LightsOff,
             "an explicit HardOff default must not degrade to OffPress/standby"
+        );
+    }
+
+    #[test]
+    fn motion_timeout_restores_node_schedule_mode_default() {
+        let mut snapshot = room_snapshot_with_flags("room_a", false, false);
+        snapshot.profile_settings.light_schedule =
+            Some(rhythm_core::LightScheduleAssignment::Named {
+                schedule_id: "late-shift".into(),
+                active_mode: rhythm_core::RhythmMode::Sleep,
+            });
+        let runtime = Arc::new(RecordingRuntime::with_snapshots(vec![snapshot]));
+        let button_events = runtime.events.clone();
+        let state = make_state_with_runtime(runtime);
+        {
+            let mut s = state.lock().unwrap();
+            s.light_breaker_enabled = true;
+            s.active_mode = rhythm_core::RhythmMode::Day;
+            s.default_motion_timeout_secs = 120;
+            let mut sleep =
+                rhythm_core::ModeConfig::default_for_mode(rhythm_core::RhythmMode::Sleep);
+            sleep.room_defaults = vec![rhythm_core::RoomModeDefault {
+                room_id: "room_a".into(),
+                state: rhythm_core::RoomModeState::HardOff,
+            }];
+            s.set_mode_configs(vec![
+                rhythm_core::ModeConfig::default_for_mode(rhythm_core::RhythmMode::Day),
+                sleep,
+            ]);
+        }
+
+        let mut motion = MotionTimerState::new();
+        motion.sensors.insert(
+            "s1".into(),
+            motion_source(
+                "s1",
+                "room_a",
+                Some(Instant::now() - Duration::from_secs(2_000)),
+            ),
+        );
+        motion.motion_owned.insert("room_a".into());
+
+        check_motion_timers(&state, &mut motion);
+
+        let events = button_events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].action,
+            ButtonAction::LightsOff,
+            "the node's Sleep schedule default must outrank the global Day mode"
         );
     }
 

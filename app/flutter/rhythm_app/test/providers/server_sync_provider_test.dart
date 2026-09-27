@@ -124,6 +124,18 @@ class _TestHomeProvider extends HomeProvider {
 class _FakeRhythmServerApi extends RhythmServerApi {
   _FakeRhythmServerApi() : super(Dio());
 
+  ({RhythmWriteAck ack, RhythmRoomState? state})? nodeActionCheckedResult;
+
+  @override
+  Future<({RhythmWriteAck ack, RhythmRoomState? state})> nodeActionChecked({
+    required String nodeId,
+    required String action,
+  }) async =>
+      nodeActionCheckedResult ?? await super.nodeActionChecked(
+        nodeId: nodeId,
+        action: action,
+      );
+
   List<RhythmCurveConfig> profileConfigs = const [];
   RhythmModeResource? profileMode;
   bool profileConfigSetResult = true;
@@ -4965,6 +4977,85 @@ void main() {
       connection.dispose();
     });
 
+    test('reset acknowledges the server-resolved wall-clock default',
+        () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      Map<String, dynamic> node(String state, {bool pending = false}) => {
+            'id': 'room-1',
+            'name': 'Studio',
+            'kind': 'room',
+            'hub_types': ['hue'],
+            'state': state,
+            'rhythm_enabled': true,
+            'disabled': false,
+            'lights_on': state != 'hard_off',
+            'pending_dispatch': pending,
+            'time_offset': 0.0,
+            'brightness_offset': 0.0,
+            // A wall-clock schedule does not advertise its resolved mode.
+            'profile_settings': {
+              'room_schedule': {
+                'source': 'follow_time',
+                'wake_time': '22:00',
+                'sleep_time': '06:00',
+              },
+            },
+          };
+      connection.emitHello(
+        RhythmHello.fromJson({
+          'capabilities': {
+            'api_schema_version': 2,
+            'features': [RhythmFeature.resetToModeDefault],
+            'hubs': <dynamic>[],
+          },
+          'mode': {
+            'active': 'day',
+            'configs': [
+              {
+                'mode': 'day',
+                'active_profile_id': 'rhythm',
+                'room_defaults': const <Map<String, dynamic>>[],
+              },
+              {
+                'mode': 'sleep',
+                'active_profile_id': 'sleep',
+                'room_defaults': [
+                  {'room_id': 'room-1', 'state': 'hard_off'},
+                ],
+              },
+            ],
+          },
+          'nodes': [node('active')],
+          'location': const <String, dynamic>{},
+        }),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(provider.scheduleModeForNode('room-1'), isNull);
+
+      api.nodeActionCheckedResult = (
+        ack: RhythmWriteAck.accepted,
+        state: RhythmRoomState.fromJson(node('hard_off', pending: true)),
+      );
+      expect(
+        await provider.dispatchResetNodeChecked('room-1'),
+        RhythmWriteAck.accepted,
+      );
+      expect(roomProvider.getRoomState('room-1'), RoomModeState.hardOff);
+
+      // A pre-command snapshot must not replace the accepted server state
+      // while physical delivery is pending.
+      connection.emitRhythmState(
+        RhythmRoomState.fromJson(node('active', pending: true)),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(roomProvider.getRoomState('room-1'), RoomModeState.hardOff);
+    });
+
     test('bootstraps motion timer state from hello nodes', () async {
       final provider = ServerSyncProvider(
         connection: connection,
@@ -9348,6 +9439,143 @@ void main() {
       roomProvider.dispose();
       connection.dispose();
     });
+
+    for (final scenario in [
+      (
+        name: 'named Sleep',
+        kind: 'named',
+        mode: 'sleep',
+        global: 'day',
+        expected: RoomModeState.active,
+        supported: true,
+      ),
+      (
+        name: 'named Day',
+        kind: 'named',
+        mode: 'day',
+        global: 'sleep',
+        expected: RoomModeState.hardOff,
+        supported: true,
+      ),
+      (
+        name: 'unscheduled Sleep',
+        kind: 'unscheduled',
+        mode: 'sleep',
+        global: 'day',
+        expected: RoomModeState.active,
+        supported: true,
+      ),
+      (
+        name: 'global fallback',
+        kind: null,
+        mode: 'sleep',
+        global: 'day',
+        expected: RoomModeState.hardOff,
+        supported: true,
+      ),
+      (
+        name: 'legacy active reset',
+        kind: 'named',
+        mode: 'day',
+        global: 'day',
+        expected: RoomModeState.active,
+        supported: false,
+      ),
+    ]) {
+      testWidgets('reset uses ${scenario.name} defaults', (tester) async {
+        DemoServerApi.instance.ensureSeeded();
+        final provider = ServerSyncProvider(
+          connection: connection,
+          roomProvider: roomProvider,
+          homeProvider: _TestHomeProvider(const []),
+        );
+        addTearDown(provider.dispose);
+        connection.emitHello(
+          RhythmHello.fromJson({
+            'state_scope': {
+              'schema_version': 1,
+              'included': ['base', 'controls', 'configuration'],
+              'nodes': 'controls',
+            },
+            'active_profile': <String, dynamic>{},
+            'location': <String, dynamic>{},
+            'review': <String, dynamic>{},
+            'transitions': <dynamic>[],
+            'profiles': <dynamic>[],
+            'scenes': <dynamic>[],
+            'input_bindings': <dynamic>[],
+            'capabilities': {
+              'api_schema_version': 2,
+              'features': [
+                if (scenario.supported) RhythmFeature.resetToModeDefault,
+              ],
+              'hubs': <dynamic>[],
+            },
+            'mode': {
+              'active': scenario.global,
+              'configs': [
+                {
+                  'mode': 'day',
+                  'active_profile_id': 'rhythm',
+                  'room_defaults': [
+                    {'room_id': 'room-1', 'state': 'hard_off'},
+                  ],
+                },
+                {
+                  'mode': 'sleep',
+                  'active_profile_id': 'sleep',
+                  'room_defaults': [
+                    {'room_id': 'room-1', 'state': 'active'},
+                  ],
+                },
+              ],
+            },
+            'nodes': [
+              {
+                'id': 'room-1', 'name': 'Studio', 'kind': 'room',
+                'hub_types': ['hue'], 'state': 'mood', 'rhythm_enabled': true,
+                'disabled': false, 'lights_on': true,
+                'time_offset': 45.0, 'brightness_offset': 20.0,
+                // Effective settings also represent an inherited assignment;
+                // the client must not re-resolve parent or registry authority.
+                'profile_settings': {
+                  if (scenario.kind != null)
+                    'light_schedule': {
+                      'kind': scenario.kind,
+                      if (scenario.kind == 'named') 'schedule_id': 'late-shift',
+                      'active_mode': scenario.mode,
+                    },
+                },
+                'room_profile': <String, dynamic>{},
+              },
+            ],
+          }),
+        );
+        await tester.pump();
+
+        expect(
+          await provider.dispatchResetNodeChecked('room-1'),
+          RhythmWriteAck.accepted,
+        );
+        await tester.pump();
+        expect(roomProvider.getRoomState('room-1'), scenario.expected);
+        expect(
+          roomProvider.getRoom('room-1')!.lightsOn,
+          scenario.expected != RoomModeState.hardOff,
+        );
+        expect(roomProvider.getRoom('room-1')!.timeOffsetMinutes, 0);
+        expect(roomProvider.getRoom('room-1')!.brightnessOffset, 0);
+
+        await provider.dispatchResetActiveNodeChecked('room-1');
+        await tester.pump();
+        expect(roomProvider.getRoomState('room-1'), RoomModeState.active);
+        expect(roomProvider.getRoom('room-1')!.lightsOn, isTrue);
+
+        await provider.dispatchBatchResetNodesResult(['room-1']);
+        await tester.pump();
+        expect(roomProvider.getRoomState('room-1'), scenario.expected);
+      });
+    }
 
     test('populates topology and triage data from the shared demo state',
         () async {

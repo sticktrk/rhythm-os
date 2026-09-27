@@ -850,7 +850,13 @@ impl<C: LightController> RhythmEngine<C> {
         room_id: &str,
         current_hour: f32,
     ) -> ManualActionPlan {
-        let target_state = self.profile_registry.active_mode_room_default(room_id);
+        // Defaults and rendered values must use the same schedule authority,
+        // including inherited assignments and per-node materialized modes.
+        let mode = self
+            .effective_room_state(room_id)
+            .profile_settings
+            .schedule_mode(self.profile_registry.active_mode(), current_hour);
+        let target_state = self.profile_registry.room_default_for_mode(room_id, mode);
         {
             let room = self.rooms.get_or_create(room_id, room_id);
             room.reset_offsets();
@@ -2231,6 +2237,87 @@ mod tests {
         let room = engine.rooms.get("living_room").unwrap();
         assert_eq!(room.brightness_offset, 10.0);
         assert!(!room.rhythm_enabled);
+    }
+
+    #[test]
+    fn reset_default_respects_inherited_and_legacy_schedule_authority() {
+        use crate::{LightScheduleAssignment, ModeConfig, RhythmMode, RoomModeDefault};
+
+        for authority in [
+            "inherited",
+            "materialized",
+            "unscheduled",
+            "wall-clock",
+            "global",
+            "missing-default",
+        ] {
+            let mut engine = test_engine();
+            let mut day = ModeConfig::default_for_mode(RhythmMode::Day);
+            day.room_defaults = vec![RoomModeDefault {
+                room_id: "target".into(),
+                state: RoomModeState::HardOff,
+            }];
+            let mut sleep = ModeConfig::default_for_mode(RhythmMode::Sleep);
+            if authority != "missing-default" {
+                sleep.room_defaults = vec![RoomModeDefault {
+                    room_id: "target".into(),
+                    state: RoomModeState::Standby,
+                }];
+            }
+            engine.set_mode_configs([day, sleep]);
+            let parent = engine.rooms.get_or_create("parent", "Parent");
+            parent.profile_settings.light_schedule = Some(LightScheduleAssignment::Named {
+                schedule_id: "night-shift".into(),
+                active_mode: if authority == "materialized" {
+                    RhythmMode::Day
+                } else {
+                    RhythmMode::Sleep
+                },
+            });
+            let target = engine.rooms.get_or_create("target", "Target");
+            match authority {
+                "inherited" | "materialized" | "missing-default" => {
+                    target.parent_id = Some("parent".into());
+                    if authority == "materialized" {
+                        target
+                            .profile_settings
+                            .light_schedule_modes
+                            .insert("night-shift".into(), RhythmMode::Sleep);
+                    }
+                }
+                "unscheduled" => {
+                    target.profile_settings.light_schedule =
+                        Some(LightScheduleAssignment::Unscheduled {
+                            active_mode: RhythmMode::Sleep,
+                        });
+                }
+                "wall-clock" => {
+                    target.profile_settings.room_schedule = Some(crate::RoomScheduleConfig {
+                        source: crate::RoomScheduleSource::FollowTime,
+                        wake_time: crate::ModeTransitionTime::parse("22:00").unwrap(),
+                        sleep_time: crate::ModeTransitionTime::parse("06:00").unwrap(),
+                    });
+                }
+                _ => {}
+            }
+            target.set_mood();
+            target.time_offset_minutes = 45.0;
+            target.brightness_offset = 20.0;
+            let settings = target.profile_settings.clone();
+            engine.plan_button_action("target", ButtonAction::ResetToModeDefault, 12.0, None);
+            let target = engine.rooms.get("target").unwrap();
+            assert_eq!(target.hard_off, authority == "global", "{authority}");
+            assert_eq!(
+                target.soft_off,
+                !matches!(authority, "global" | "missing-default"),
+                "{authority}"
+            );
+            assert!(!target.mood_active);
+            assert!(target.rhythm_enabled);
+            assert_eq!(target.time_offset_minutes, 0.0);
+            assert_eq!(target.brightness_offset, 0.0);
+            assert_eq!(target.profile_settings, settings);
+        }
     }
 
     #[tokio::test]
