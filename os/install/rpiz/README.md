@@ -211,10 +211,34 @@ Zero W image, `S41bootstate` backs up an old `config.txt` to
 `config.txt.pre-bluetooth-uart`, removes the bare `dtoverlay=miniuart-bt` directive,
 and reboots once before arming OTA probation. Other settings and `/data` are
 preserved. Parameterized custom overlays and other board models are left alone.
-A failed candidate still rolls back normally; the default UART routing works
-with the previous image too. This migration requires an image update, not just
-a server binary update. If the backup/write fails, startup continues with a
-diagnostic on the console and retries the correction on a later boot.
+This migration requires an image update, not just a server binary update.
+
+The change belongs to the candidate that made it:
+
+- The rewrite is verified before anything is replaced: the directive must be
+  gone and every other line must survive, otherwise `config.txt` is left
+  untouched and no reboot is requested.
+- While the candidate is on probation, `rhythm-bluetooth-uart.pending` on the
+  boot partition records it. `S41bootstate success` commits the migration. If
+  the candidate rolls back, `config.txt` is restored from the backup first, so
+  the previous image resumes the boot configuration it was qualified with; the
+  next update attempt migrates again.
+- Migration reboots are limited to two in a row
+  (`/data/ota/bluetooth-uart-migration-reboots`). If the boot partition keeps
+  presenting the directive, the appliance stays up and reports it on the
+  console instead of rebooting forever.
+- The forced reboot remounts `/boot` and `/data` read-only first.
+- If `config.txt` is missing and the backup exists (power lost while FAT was
+  replacing the file), it is rebuilt from the backup.
+- The first replaced `config.txt` is kept as
+  `config.txt.pre-bluetooth-uart.orig` if a later migration refreshes the backup.
+- If a backup or write fails, startup continues with a diagnostic on the
+  console and retries the correction on a later boot.
+
+The kernel attaches the controller itself (`brcm,bcm43438-bt` under the UART
+that `bluetooth` aliases). The `hciattach` fallback in `S43bluetooth` resolves
+the tty behind `serial1` through sysfs rather than assuming a device name,
+because PL011 ports are numbered from the serial aliases.
 
 For field verification after that reboot, `serial1` should resolve to UART0
 (`serial@7e201000`) and the PL011 receive count should advance during BLE scans.

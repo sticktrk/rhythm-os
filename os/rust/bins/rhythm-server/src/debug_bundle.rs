@@ -1738,7 +1738,8 @@ fn build_shared_ble_runtime_json(generated_at: DateTime<Utc>) -> Result<String> 
 
 // Passive evidence: UART receive overruns can corrupt HCI frames while BlueZ
 // still reports Powered=true. Never open the tty or initialize the BLE runtime
-// just to export a bundle. DT aliases explain which UART the image selected.
+// just to export a bundle. DT aliases explain which UART the image selected
+// and which node the kernel Bluetooth driver is bound to.
 #[cfg(any(target_os = "linux", test))]
 fn bluetooth_uart_snapshot(root: &Path) -> serde_json::Value {
     fn read(root: &Path, relative: &str) -> Option<String> {
@@ -1760,6 +1761,7 @@ fn bluetooth_uart_snapshot(root: &Path) -> serde_json::Value {
         "serial1": read(root, "proc/device-tree/aliases/serial1"),
         "uart0": read(root, "proc/device-tree/aliases/uart0"),
         "uart1": read(root, "proc/device-tree/aliases/uart1"),
+        "bluetooth": read(root, "proc/device-tree/aliases/bluetooth"),
         "mini_uart_counters": read(root, "proc/tty/driver/serial"),
         "pl011_counters": read(root, "proc/tty/driver/ttyAMA"),
     })
@@ -3783,12 +3785,18 @@ mod tests {
             "/soc/serial@7e215040\0",
         )
         .unwrap();
+        fs::write(
+            root.join("proc/device-tree/aliases/bluetooth"),
+            "/soc/serial@7e215040/bluetooth\0",
+        )
+        .unwrap();
         let counters = "0: uart:16550 tx:100 rx:200 oe:7 RTS|CTS\n";
         fs::write(root.join("proc/tty/driver/serial"), counters).unwrap();
         fs::write(root.join("proc/tty/driver/ttyAMA"), "x".repeat(8000)).unwrap();
 
         let snapshot = bluetooth_uart_snapshot(&root);
         assert_eq!(snapshot["serial1"], "/soc/serial@7e215040");
+        assert_eq!(snapshot["bluetooth"], "/soc/serial@7e215040/bluetooth");
         assert_eq!(snapshot["mini_uart_counters"], counters.trim());
         assert_eq!(snapshot["pl011_counters"].as_str().unwrap().len(), 4096);
         assert!(snapshot["uart0"].is_null());

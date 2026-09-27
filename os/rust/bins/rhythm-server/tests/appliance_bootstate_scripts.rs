@@ -125,6 +125,62 @@ fn run_bootstate(root: &Path, action: &str) -> Output {
 }
 
 fn run_bootstate_with_data_dir(root: &Path, action: &str, data_dir: PathBuf) -> Output {
+    bootstate_command(root, action, data_dir)
+        .env("RHYTHM_BOOTSTATE_REBOOT_DRY_RUN", "1")
+        .output()
+        .unwrap()
+}
+
+/// Runs without the dry-run switch. Reboots go to a recording stand-in that
+/// returns, which is what the script sees when a reboot request fails.
+fn run_bootstate_with_fake_reboot(root: &Path, action: &str) -> Output {
+    let reboot = root.join("fake-reboot");
+    write_executable(
+        &reboot,
+        r#"#!/bin/sh
+printf '%s\n' "$*" >> "$RHYTHM_TEST_REBOOT_LOG"
+"#,
+    );
+    // Both filesystems appear mounted, and `mount` is a recording stand-in.
+    let bin = fake_bin_dir(root);
+    write_executable(
+        &bin.join("mount"),
+        r#"#!/bin/sh
+printf 'mount %s\n' "$*" >> "$RHYTHM_TEST_REBOOT_LOG"
+"#,
+    );
+    fs::write(
+        root.join("proc_mounts"),
+        format!(
+            "/dev/mmcblk0p1 {} vfat rw 0 0\n/dev/mmcblk0p4 {} ext4 rw 0 0\n",
+            root.join("boot").display(),
+            root.join("data").display()
+        ),
+    )
+    .unwrap();
+    bootstate_command(root, action, root.join("data"))
+        .env("PATH", path_with(&bin))
+        .env("RHYTHM_BOOTSTATE_REBOOT_BIN", reboot)
+        .env("RHYTHM_TEST_REBOOT_LOG", root.join("reboot.log"))
+        .output()
+        .unwrap()
+}
+
+fn fake_bin_dir(root: &Path) -> PathBuf {
+    let bin = root.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    bin
+}
+
+fn path_with(bin: &Path) -> String {
+    format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    )
+}
+
+fn bootstate_command(root: &Path, action: &str, data_dir: PathBuf) -> Command {
     let wifi_init = root.join("wifi-init");
     let network_ready_probe = root.join("network-ready-probe");
     let network_ready_file = root.join("network-ready");
@@ -146,7 +202,8 @@ fn run_bootstate_with_data_dir(root: &Path, action: &str, data_dir: PathBuf) -> 
         );
     }
 
-    Command::new("sh")
+    let mut command = Command::new("sh");
+    command
         .arg(bootstate_script())
         .arg(action)
         .env("RHYTHM_BOOT_MOUNT", root.join("boot"))
@@ -165,9 +222,9 @@ fn run_bootstate_with_data_dir(root: &Path, action: &str, data_dir: PathBuf) -> 
         .env("RHYTHM_TEST_NETWORK_READY_FILE", network_ready_file)
         .env("RHYTHM_CMDLINE_FILE", root.join("boot/cmdline.txt"))
         .env("RHYTHM_PROC_CMDLINE", root.join("proc_cmdline"))
-        .env("RHYTHM_BOOTSTATE_REBOOT_DRY_RUN", "1")
-        .output()
-        .unwrap()
+        // Never the host's mount table: the script remounts what it lists.
+        .env("RHYTHM_PROC_MOUNTS", root.join("proc_mounts"));
+    command
 }
 
 fn assert_success(output: Output) {
@@ -272,20 +329,252 @@ fn bluetooth_uart_migration_does_not_mask_a_failed_candidate_or_change_rollback_
             .contains("root=/dev/mmcblk0p2"));
     }
 
-    // If probation fails after the migration, the previous rootfs still uses
-    // the board's default PL011 route; the correction survives slot rollback.
+    // The migration belongs to its candidate: when that candidate fails
+    // probation, the previous image gets back the exact config.txt it was
+    // qualified with, and the next update attempt migrates again.
     let root = bluetooth_uart_boot_fixture("uart-rollback-after-migration", "pending");
     assert_success(run_bootstate(&root, "start"));
-    let migrated = fs::read_to_string(root.join("boot/config.txt")).unwrap();
+    assert_eq!(
+        fs::read_to_string(root.join("boot/rhythm-bluetooth-uart.pending")).unwrap(),
+        "b:0.4.2\n"
+    );
     assert_success(run_bootstate(&root, "start"));
+    let output = run_bootstate(&root, "start");
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .contains("restored the previous Bluetooth UART routing"));
+    assert_success(output);
+    assert_eq!(
+        fs::read_to_string(root.join("boot/config.txt")).unwrap(),
+        LEGACY_BLUETOOTH_CONFIG
+    );
+    assert!(!root.join("boot/rhythm-bluetooth-uart.pending").exists());
+    assert!(fs::read_to_string(root.join("boot/cmdline.txt"))
+        .unwrap()
+        .contains("root=/dev/mmcblk0p2"));
+    assert_eq!(
+        bootstate_value(&read_bootstate(&root), "RHYTHM_LAST_ROLLBACK_SLOT"),
+        Some("b")
+    );
+}
+
+#[test]
+fn bluetooth_uart_migration_is_permanent_once_its_candidate_is_proven() {
+    let root = bluetooth_uart_boot_fixture("uart-committed", "pending");
+    assert_success(run_bootstate(&root, "start"));
+    assert_success(run_bootstate(&root, "start"));
+    assert!(root.join("boot/rhythm-bluetooth-uart.pending").exists());
+    assert_success(run_bootstate(&root, "success"));
+    assert!(!root.join("boot/rhythm-bluetooth-uart.pending").exists());
+    let migrated = fs::read_to_string(root.join("boot/config.txt")).unwrap();
+
+    // A later candidate on the other slot fails: its rollback must not undo a
+    // migration that an earlier image already proved.
+    fs::write(
+        root.join("proc_cmdline"),
+        "console=tty1 root=/dev/mmcblk0p2 rootwait rw\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("boot/cmdline.txt"),
+        "console=tty1 root=/dev/mmcblk0p2 rootwait rw\n",
+    )
+    .unwrap();
+    write_bootstate(
+        &root,
+        "RHYTHM_ACTIVE_SLOT=b\nRHYTHM_LAST_GOOD_SLOT=b\nRHYTHM_PENDING_SLOT=a\nRHYTHM_PENDING_VERSION=0.4.3\nRHYTHM_ACTIVE_VERSION=0.4.2\nRHYTHM_BOOT_STATUS=booting\n",
+    );
+    // Even a stale record from the decided candidate is ignored.
+    fs::write(root.join("boot/rhythm-bluetooth-uart.pending"), "b:0.4.2\n").unwrap();
     assert_success(run_bootstate(&root, "start"));
     assert_eq!(
         fs::read_to_string(root.join("boot/config.txt")).unwrap(),
         migrated
     );
+    assert!(!root.join("boot/rhythm-bluetooth-uart.pending").exists());
     assert!(fs::read_to_string(root.join("boot/cmdline.txt"))
         .unwrap()
-        .contains("root=/dev/mmcblk0p2"));
+        .contains("root=/dev/mmcblk0p3"));
+}
+
+#[test]
+fn bluetooth_uart_migration_reboot_is_forced_once_and_survives_a_returning_reboot() {
+    let root = bluetooth_uart_boot_fixture("uart-real-reboot", "pending");
+    let output = run_bootstate_with_fake_reboot(&root, "start");
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert_success(output);
+    // Writable filesystems are frozen before the forced reboot and thawed
+    // again because this boot continues.
+    let boot = root.join("boot").display().to_string();
+    let data = root.join("data").display().to_string();
+    assert_eq!(
+        fs::read_to_string(root.join("reboot.log")).unwrap(),
+        format!(
+            "mount -o remount,ro {boot}\nmount -o remount,ro {data}\n-f\nmount -o remount,rw {boot}\nmount -o remount,rw {data}\n"
+        )
+    );
+    // The reboot request returned, so this boot carries on into probation.
+    assert!(stderr.contains("Bluetooth UART reboot returned"));
+    assert_eq!(
+        bootstate_value(&read_bootstate(&root), "RHYTHM_BOOT_STATUS"),
+        Some("booting")
+    );
+    assert!(!fs::read_to_string(root.join("boot/config.txt"))
+        .unwrap()
+        .contains("miniuart-bt"));
+}
+
+#[test]
+fn bluetooth_uart_migration_cannot_reboot_forever() {
+    let root = bluetooth_uart_boot_fixture("uart-reboot-limit", "idle");
+    write_bootstate(
+        &root,
+        "RHYTHM_ACTIVE_SLOT=b\nRHYTHM_LAST_GOOD_SLOT=b\nRHYTHM_BOOT_STATUS=idle\n",
+    );
+    // A boot partition that keeps presenting the directive (the rewrite is
+    // not persisting) gets two attempts, then the appliance stays up.
+    for expect_reboot in [true, true, false, false] {
+        fs::write(root.join("boot/config.txt"), LEGACY_BLUETOOTH_CONFIG).unwrap();
+        let output = run_bootstate(&root, "start");
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        assert_success(output);
+        assert_eq!(
+            stdout.contains("rebooting before OTA probation"),
+            expect_reboot
+        );
+        assert_eq!(stderr.contains("reboot limit reached"), !expect_reboot);
+    }
+    assert_eq!(
+        bootstate_value(&read_bootstate(&root), "RHYTHM_BOOT_STATUS"),
+        Some("idle")
+    );
+
+    // A boot that finds the directive gone re-arms the allowance.
+    assert_success(run_bootstate(&root, "start"));
+    assert!(!root
+        .join("data/ota/bluetooth-uart-migration-reboots")
+        .exists());
+}
+
+#[test]
+fn bluetooth_uart_rewrite_that_removes_nothing_never_reboots() {
+    let root = bluetooth_uart_boot_fixture("uart-noop-rewrite", "idle");
+    write_bootstate(
+        &root,
+        "RHYTHM_ACTIVE_SLOT=b\nRHYTHM_LAST_GOOD_SLOT=b\nRHYTHM_BOOT_STATUS=idle\n",
+    );
+    // Stand-in for a sed whose pattern dialect disagrees with grep's: the
+    // directive is detected but the rewrite leaves it in place.
+    let bin = fake_bin_dir(&root);
+    write_executable(
+        &bin.join("sed"),
+        r#"#!/bin/sh
+if [ "$1" = "-E" ]; then
+    exec cat "$3"
+fi
+for dir in /usr/bin /bin; do
+    [ -x "$dir/sed" ] && exec "$dir/sed" "$@"
+done
+exit 127
+"#,
+    );
+    for _ in 0..3 {
+        let output = bootstate_command(&root, "start", root.join("data"))
+            .env("PATH", path_with(&bin))
+            .env("RHYTHM_BOOTSTATE_REBOOT_DRY_RUN", "1")
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&output.stderr).contains("failed verification"));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("rebooting"));
+        assert_success(output);
+        assert_eq!(
+            fs::read_to_string(root.join("boot/config.txt")).unwrap(),
+            LEGACY_BLUETOOTH_CONFIG
+        );
+        assert!(!root.join("boot/config.txt.pre-bluetooth-uart").exists());
+        assert!(!root.join("boot/rhythm-bluetooth-uart.pending").exists());
+    }
+}
+
+#[test]
+fn bluetooth_uart_migration_rebuilds_a_config_lost_during_replacement() {
+    let root = bluetooth_uart_boot_fixture("uart-lost-config", "pending");
+    fs::rename(
+        root.join("boot/config.txt"),
+        root.join("boot/config.txt.pre-bluetooth-uart"),
+    )
+    .unwrap();
+    let output = run_bootstate(&root, "start");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("config.txt is missing"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("rebooting before OTA probation"));
+    assert_success(output);
+    assert_eq!(
+        fs::read_to_string(root.join("boot/config.txt")).unwrap(),
+        LEGACY_BLUETOOTH_CONFIG.replace("dtoverlay=miniuart-bt\n", "")
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("boot/config.txt.pre-bluetooth-uart")).unwrap(),
+        LEGACY_BLUETOOTH_CONFIG
+    );
+
+    // Without our backup there is nothing trustworthy to rebuild from.
+    let root = bluetooth_uart_boot_fixture("uart-lost-config-no-backup", "pending");
+    fs::remove_file(root.join("boot/config.txt")).unwrap();
+    assert_success(run_bootstate(&root, "start"));
+    assert!(!root.join("boot/config.txt").exists());
+}
+
+#[test]
+fn bluetooth_uart_repeat_migration_keeps_the_original_backup() {
+    let root = bluetooth_uart_boot_fixture("uart-repeat", "idle");
+    write_bootstate(
+        &root,
+        "RHYTHM_ACTIVE_SLOT=b\nRHYTHM_LAST_GOOD_SLOT=b\nRHYTHM_BOOT_STATUS=idle\n",
+    );
+    assert_success(run_bootstate(&root, "start"));
+    assert_success(run_bootstate(&root, "start"));
+
+    let edited = format!("{LEGACY_BLUETOOTH_CONFIG}gpu_mem=16\n");
+    for config in [edited.clone(), format!("{edited}hdmi_blanking=1\n")] {
+        fs::write(root.join("boot/config.txt"), &config).unwrap();
+        assert_success(run_bootstate(&root, "start"));
+        assert_eq!(
+            fs::read_to_string(root.join("boot/config.txt.pre-bluetooth-uart")).unwrap(),
+            config
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("boot/config.txt.pre-bluetooth-uart.orig")).unwrap(),
+            LEGACY_BLUETOOTH_CONFIG
+        );
+        assert_success(run_bootstate(&root, "start"));
+    }
+}
+
+#[test]
+fn bluetooth_uart_migration_handles_directive_only_and_unterminated_configs() {
+    for (name, config, migrated) in [
+        ("only", "dtoverlay=miniuart-bt\n", ""),
+        (
+            "unterminated",
+            "kernel=kernel.img\ndtoverlay=miniuart-bt",
+            "kernel=kernel.img\n",
+        ),
+        (
+            "repeated",
+            "[all]\ndtoverlay=miniuart-bt\r\ncore_freq=250\ndtoverlay=miniuart-bt\n",
+            "[all]\ncore_freq=250\n",
+        ),
+    ] {
+        let root = bluetooth_uart_boot_fixture(&format!("uart-shape-{name}"), "pending");
+        fs::write(root.join("boot/config.txt"), config).unwrap();
+        let output = run_bootstate(&root, "start");
+        assert!(String::from_utf8_lossy(&output.stdout).contains("rebooting before OTA probation"));
+        assert_success(output);
+        assert_eq!(
+            fs::read_to_string(root.join("boot/config.txt")).unwrap(),
+            migrated
+        );
+    }
 }
 
 #[test]

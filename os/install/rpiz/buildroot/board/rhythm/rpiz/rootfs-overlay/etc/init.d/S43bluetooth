@@ -12,6 +12,9 @@ BLUETOOTHD_INIT=/etc/init.d/S40bluetoothd
 BLUETOOTH_STATE_SOURCE=/data/bluetooth
 BLUETOOTH_STATE_TARGET=/var/lib/bluetooth
 BLUETOOTH_MIGRATION_MARKER=/data/.bluetooth-state-migrated
+DEV_DIR="${RHYTHM_DEV_DIR:-/dev}"
+SYSFS_TTY_DIR="${RHYTHM_SYSFS_TTY_DIR:-/sys/class/tty}"
+DT_BASE="${RHYTHM_DT_BASE:-/proc/device-tree}"
 
 resolve_log_dir() {
     if [ -n "${RHYTHM_LOG_DIR:-}" ]; then
@@ -86,20 +89,19 @@ attach_controller() {
         return 0
     fi
 
-    uart0="$(read_dt_value /proc/device-tree/aliases/uart0)"
-    serial1="$(read_dt_value /proc/device-tree/aliases/serial1)"
+    uart0="$(read_dt_value "$DT_BASE/aliases/uart0")"
+    serial1="$(read_dt_value "$DT_BASE/aliases/serial1")"
 
-    serial_dev=/dev/serial1
+    serial_dev="$DEV_DIR/serial1"
     if [ ! -c "$serial_dev" ]; then
-        serial_dev="$(bluetooth_uart_fallback "$uart0" "$serial1")"
-        if [ ! -c "$serial_dev" ]; then
+        if ! serial_dev="$(bluetooth_uart_device "$uart0" "$serial1")"; then
             log "no serial device found for Bluetooth UART attach"
             return 1
         fi
     fi
 
     if [ "$uart0" = "$serial1" ] && [ -n "$uart0" ]; then
-        uart0_pins="$(wc -c /proc/device-tree/soc/gpio@7e200000/uart0_pins/brcm,pins 2>/dev/null | cut -d ' ' -f1)"
+        uart0_pins="$(wc -c "$DT_BASE/soc/gpio@7e200000/uart0_pins/brcm,pins" 2>/dev/null | cut -d ' ' -f1)"
         if [ "$uart0_pins" = "16" ]; then
             speed=3000000
             flow=flow
@@ -121,14 +123,52 @@ attach_controller() {
     fi
 }
 
-bluetooth_uart_fallback() {
-    # Minimal /dev managers may omit serial1. Follow the board alias instead
-    # of assuming Bluetooth was moved to ttyS0 by miniuart-bt.
-    if [ -n "$1" ] && [ "$1" = "$2" ]; then
-        printf '/dev/ttyAMA0\n'
-    else
-        printf '/dev/ttyS0\n'
+# Name of the tty the kernel registered for a device-tree UART node. Port
+# numbering follows the serial aliases (the PL011 behind serial1 is ttyAMA1,
+# not ttyAMA0), so ask sysfs instead of assuming a name.
+resolve_uart_tty() {
+    local node="$1"
+    local tty parent
+
+    [ -n "$node" ] && [ -e "$DT_BASE$node" ] || return 1
+    for tty in "$SYSFS_TTY_DIR"/*; do
+        # Newer kernels insert serial-core port devices between the tty and
+        # the UART that carries the of_node link.
+        for parent in device device/.. device/../..; do
+            if [ "$tty/$parent/of_node" -ef "$DT_BASE$node" ]; then
+                printf '%s\n' "${tty##*/}"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
+bluetooth_uart_device() {
+    # Minimal /dev managers omit the serial1 symlink. Follow the board alias
+    # to the real tty; only when sysfs cannot answer fall back to the names
+    # that UART type can have, never to a port of the other type.
+    local uart0="$1"
+    local serial1="$2"
+    local tty candidate
+
+    if tty="$(resolve_uart_tty "$serial1")" && [ -c "$DEV_DIR/$tty" ]; then
+        printf '%s\n' "$DEV_DIR/$tty"
+        return 0
     fi
+
+    if [ -n "$uart0" ] && [ "$uart0" = "$serial1" ]; then
+        set -- ttyAMA1 ttyAMA0
+    else
+        set -- ttyS0
+    fi
+    for candidate in "$@"; do
+        if [ -c "$DEV_DIR/$candidate" ]; then
+            printf '%s\n' "$DEV_DIR/$candidate"
+            return 0
+        fi
+    done
+    return 1
 }
 
 wait_for_hci_ready() {
