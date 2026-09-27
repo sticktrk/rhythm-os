@@ -85,6 +85,17 @@ void main() {
     expect(transport.gatt.disconnects, 1);
   });
 
+  test('an already-added device that still advertises is not a candidate',
+      () async {
+    final transport = FakeTransport();
+    final service = AylaPhoneBleWifiService(transport: transport);
+    await expectLater(
+        service.discover(knownSerials: {candidate.dsn.toUpperCase()}),
+        throwsA(isA<PhoneBleWifiFailure>().having(
+            (e) => e.message, 'message', bleWifiAlreadyAddedMessage)));
+    expect(transport.gatt.disconnects, 1);
+  });
+
   test(
       'rechecks identity, writes exact Ayla services and confirms requested Wi-Fi',
       () async {
