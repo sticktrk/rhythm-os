@@ -16,6 +16,11 @@ class BleWifiDiscoveredCandidate {
       dsn.substring(dsn.length > 4 ? dsn.length - 4 : 0).toUpperCase();
 }
 
+/// Shown when every nearby advertiser is a device Rhythm already owns.
+const bleWifiAlreadyAddedMessage =
+    'Only devices already added to Rhythm were found. Put the new device in '
+    'setup mode and try again.';
+
 class PhoneBleWifiFailure implements Exception {
   const PhoneBleWifiFailure(this.message, {this.uncertain = false});
   final String message;
@@ -38,7 +43,10 @@ abstract interface class PhoneWifiTransport {
 }
 
 abstract interface class PhoneBleWifiService {
-  Future<List<BleWifiDiscoveredCandidate>> discover();
+  /// [knownSerials] are upper-cased serials Rhythm already owns. A device that
+  /// keeps advertising after setup is never offered as a new candidate.
+  Future<List<BleWifiDiscoveredCandidate>> discover(
+      {Set<String> knownSerials = const {}});
   Future<void> provision(BleWifiDiscoveredCandidate candidate,
       String setupToken, RhythmCommissioningWifi wifi);
   void validateWifi(RhythmCommissioningWifi wifi);
@@ -65,6 +73,8 @@ class AylaPhoneBleWifiService implements PhoneBleWifiService {
   }) : _transport = transport ?? FlutterPhoneWifiTransport();
 
   static const protocol = 'ayla_v1';
+  static const maxCandidates = 4;
+  static const maxProbes = 8;
   static const idService = '0000fe28-0000-1000-8000-00805f9b34fb';
   static const dsnCharacteristic = '00000001-fe28-435b-991a-f1b21bb9bcd0';
   static const tokenService = 'fce3ec41-59b6-4873-ae36-fab25bd59adc';
@@ -101,11 +111,15 @@ class AylaPhoneBleWifiService implements PhoneBleWifiService {
   }
 
   @override
-  Future<List<BleWifiDiscoveredCandidate>> discover() async {
+  Future<List<BleWifiDiscoveredCandidate>> discover(
+      {Set<String> knownSerials = const {}}) async {
     _checkActive();
     final addresses = await _transport.scan(idService);
     final candidates = <BleWifiDiscoveredCandidate>[];
-    for (final address in addresses.take(4)) {
+    var alreadyAdded = 0;
+    // Already-added advertisers must not use up the new-candidate limit.
+    for (final address in addresses.take(maxProbes)) {
+      if (candidates.length >= maxCandidates) break;
       _checkActive();
       PhoneWifiGatt? gatt;
       try {
@@ -113,7 +127,9 @@ class AylaPhoneBleWifiService implements PhoneBleWifiService {
         _checkActive();
         final dsn = await _identity(gatt);
         _checkActive();
-        if (!candidates.any((candidate) => candidate.dsn == dsn)) {
+        if (knownSerials.contains(dsn.toUpperCase())) {
+          alreadyAdded++;
+        } else if (!candidates.any((candidate) => candidate.dsn == dsn)) {
           candidates
               .add(BleWifiDiscoveredCandidate(dsn: dsn, address: address));
         }
@@ -126,8 +142,9 @@ class AylaPhoneBleWifiService implements PhoneBleWifiService {
     }
     _checkActive();
     if (candidates.isEmpty) {
-      throw const PhoneBleWifiFailure(
-          'Your phone could not read a device in setup mode. Keep it near the blinking device and try again.');
+      throw PhoneBleWifiFailure(alreadyAdded > 0
+          ? bleWifiAlreadyAddedMessage
+          : 'Your phone could not read a device in setup mode. Keep it near the blinking device and try again.');
     }
     return candidates;
   }

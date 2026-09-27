@@ -78,6 +78,7 @@ class BleWifiDeviceAddScreen extends StatefulWidget {
     @visibleForTesting this.phoneService,
     @visibleForTesting this.pairingResult,
     @visibleForTesting this.wifiCredentials,
+    @visibleForTesting this.canonicalDevices,
     @visibleForTesting this.cloudService,
     @visibleForTesting this.progressEvents,
     @visibleForTesting this.completeRetryDelay = const Duration(seconds: 5),
@@ -92,6 +93,7 @@ class BleWifiDeviceAddScreen extends StatefulWidget {
   final PhoneBleWifiService? phoneService;
   final Future<RhythmPairingResultStatus?> Function(String)? pairingResult;
   final Future<RhythmCommissioningWifi?> Function()? wifiCredentials;
+  final Future<List<Map<String, dynamic>>?> Function()? canonicalDevices;
   final DeviceCloudBrokerService? cloudService;
   final Stream<RhythmPairingProgress>? progressEvents;
   final Duration completeRetryDelay;
@@ -377,6 +379,28 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
     }
   }
 
+  /// Upper-cased serials of devices Rhythm already owns. Some devices keep
+  /// advertising their setup service after joining Wi-Fi. An unreadable device
+  /// list filters nothing, and adoption still verifies identity.
+  Future<Set<String>> _knownSerials() async {
+    try {
+      final loader = widget.canonicalDevices;
+      final devices = await (loader != null
+          ? loader()
+          : context.read<ServerSyncProvider?>()?.api.getCanonicalDevices());
+      return {
+        for (final device in devices ?? const <Map<String, dynamic>>[])
+          for (final id in device['hardware_ids'] as List? ?? const [])
+            if (id is Map && id['type'] == 'serial')
+              if (id['value']?.toString().trim().toUpperCase()
+                  case final String serial when serial.isNotEmpty)
+                serial,
+      };
+    } catch (_) {
+      return const {};
+    }
+  }
+
   Future<BleWifiDiscoveredCandidate?> _discover() async {
     setState(() {
       _stageIndex = 0;
@@ -384,11 +408,13 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
           ? 'Put the device in setup mode and keep it near your phone.'
           : 'Put the device in setup mode and keep it near your Rhythm Box.';
     });
+    final knownSerials = await _knownSerials();
+    if (!mounted) return null;
     List<BleWifiDiscoveredCandidate> candidates;
     final phone = _phone;
     if (phone != null) {
       try {
-        candidates = await phone.discover();
+        candidates = await phone.discover(knownSerials: knownSerials);
       } on PhoneBleWifiFailure catch (error) {
         if (mounted) _fail(error.message, failureStage: 'phone_discover');
         return null;
@@ -412,6 +438,15 @@ class _BleWifiDeviceAddScreenState extends State<BleWifiDeviceAddScreen> {
       candidates = _candidatesFromResponse(response!);
     }
     if (!mounted) return null;
+    final found = candidates.length;
+    candidates = [
+      for (final candidate in candidates)
+        if (!knownSerials.contains(candidate.dsn.toUpperCase())) candidate,
+    ];
+    if (candidates.isEmpty && found > 0) {
+      _fail(bleWifiAlreadyAddedMessage, failureStage: 'discover_already_added');
+      return null;
+    }
     if (candidates.isEmpty) {
       _fail(
         'No device in setup mode was found. Put it in setup mode and try '

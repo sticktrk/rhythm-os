@@ -43,13 +43,20 @@ class _Phone implements PhoneBleWifiService {
     }
   }
 
+  Set<String> knownSerials = const {};
+  List<BleWifiDiscoveredCandidate> found = const [
+    BleWifiDiscoveredCandidate(dsn: _dsn, address: 'phone-uuid')
+  ];
+
   @override
-  Future<List<BleWifiDiscoveredCandidate>> discover() async {
+  Future<List<BleWifiDiscoveredCandidate>> discover(
+      {Set<String> knownSerials = const {}}) async {
     discoveries++;
+    this.knownSerials = knownSerials;
     if (discoveryFailure) {
       throw const PhoneBleWifiFailure('Bluetooth unavailable');
     }
-    return const [BleWifiDiscoveredCandidate(dsn: _dsn, address: 'phone-uuid')];
+    return found;
   }
 
   @override
@@ -248,6 +255,7 @@ void main() {
     PhoneBleWifiService? phone,
     Future<RhythmCommissioningWifi?> Function()? wifiCredentials,
     Future<RhythmPairingResultStatus?> Function(String)? pairingResult,
+    Future<List<Map<String, dynamic>>?> Function()? canonicalDevices,
   }) async {
     // Tall enough that every action below the timeline is built.
     await tester.binding.setSurfaceSize(Size(
@@ -270,6 +278,7 @@ void main() {
                     phoneService: phone,
                     wifiCredentials: wifiCredentials,
                     pairingResult: pairingResult,
+                    canonicalDevices: canonicalDevices ?? () async => const [],
                     analyticsSource: 'test',
                     journeyId: 'ble-wifi-test',
                     pairingRequest: fixture.pair,
@@ -314,6 +323,64 @@ void main() {
   },
       variant:
           TargetPlatformVariant({TargetPlatform.iOS, TargetPlatform.android}));
+
+  Future<List<Map<String, dynamic>>?> ownedDevices(List<String> serials) async =>
+      [
+        for (final serial in serials)
+          {
+            'id': 'canonical-$serial',
+            'hardware_ids': [
+              {'type': 'mac', 'value': serial},
+              {'type': 'serial', 'value': serial},
+            ],
+          },
+      ];
+
+  testWidgets('phone discovery never offers a device Rhythm already owns',
+      (tester) async {
+    final fixture = _Fixture();
+    final phone = _Phone()
+      ..found = const [
+        BleWifiDiscoveredCandidate(dsn: 'ACOWNED0000001', address: 'owned'),
+        BleWifiDiscoveredCandidate(dsn: _dsn, address: 'phone-uuid'),
+      ];
+    final result = await pumpScreen(tester, fixture,
+        family: phoneFamily,
+        phone: phone,
+        canonicalDevices: () => ownedDevices(['acowned0000001']),
+        wifiCredentials: () async => const RhythmCommissioningWifi(
+            ssid: 'Saved network', password: 'saved-password'));
+    expect(phone.knownSerials, {'ACOWNED0000001'});
+    expect(find.text('Choose the device to add'), findsNothing);
+    expect(result, isNotNull);
+    expect(phone.provisions, 1);
+    expect(fixture.cloudCalls.first, 'vendor-device:begin');
+  },
+      variant:
+          TargetPlatformVariant({TargetPlatform.iOS, TargetPlatform.android}));
+
+  testWidgets('Box discovery of only owned devices stops before registration',
+      (tester) async {
+    final fixture = _Fixture();
+    await pumpScreen(tester, fixture,
+        canonicalDevices: () => ownedDevices([_dsn.toLowerCase()]));
+    expect(find.text(bleWifiAlreadyAddedMessage), findsWidgets);
+    expect(fixture.pairStages, ['discover']);
+    expect(fixture.cloudCalls, isEmpty);
+    final failed = analyticsBackend.events
+        .lastWhere((e) => e.name == 'ble_wifi_pairing_completed');
+    expect(failed.properties['failure_stage'], 'discover_already_added');
+    expect(failed.properties.toString(), isNot(contains(_dsn)));
+  });
+
+  testWidgets('an unreadable device list does not block setup',
+      (tester) async {
+    final fixture = _Fixture();
+    final result = await pumpScreen(tester, fixture,
+        canonicalDevices: () async => throw StateError('offline'));
+    expect(result, isNotNull);
+    expect(fixture.pairStages, ['discover', 'provision', 'adopt']);
+  });
 
   testWidgets('desktop keeps Box setup even with a phone-capable profile',
       (tester) async {
