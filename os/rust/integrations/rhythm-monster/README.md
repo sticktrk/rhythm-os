@@ -65,6 +65,12 @@ steps between them, so the appliance never holds a Supabase session:
 | `provision` | `dsn`, `address`, `setup_token` | `dsn`; a failure sets `uncertain: true` after the first GATT write |
 | `adopt` | `dsn`, `ip`, `local_key`, `local_key_id`, `name` | the paired light, only after a signed LAN power readback |
 
+Adoption waits up to 60 seconds for the first signed LAN power readback,
+retrying only temporary transport failures and timeouts every two seconds.
+This lets a newly registered strip finish becoming reachable without another
+Wi-Fi write or cloud registration. Authentication, identity and integrity
+failures still stop immediately; no light is persisted before verification.
+
 Wi-Fi credentials come from the appliance's stored commissioning credentials
 (the same source Matter BLE commissioning uses). Adopted lights persist in
 `<data_dir>/monster/devices.json` (0600 in a 0700 directory, corrupt files
