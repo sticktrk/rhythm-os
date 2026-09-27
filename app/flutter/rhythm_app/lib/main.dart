@@ -27,6 +27,7 @@ import 'services/recent_servers_service.dart';
 import 'services/settings_service.dart';
 import 'services/app_state_refresh.dart';
 import 'services/app_startup_performance.dart';
+import 'services/hue/hue_service_locator.dart';
 import 'services/virtual_experience_service.dart';
 import 'data/local_data_source.dart';
 import 'providers/hub_connection_provider.dart';
@@ -650,7 +651,29 @@ class _AuthGateState extends State<AuthGate> {
     });
   }
 
+  /// A demo session does not survive a restart: [HomeProvider] drops its
+  /// persisted Home on load, and the cached demo rooms go with it so the user
+  /// lands back on the hardware gate instead of a Home that never connects.
+  Future<void> _clearStaleDemoRooms() async {
+    final homeProvider = context.read<HomeProvider>();
+    final roomProvider = context.read<RoomProvider>();
+    try {
+      await homeProvider.ensureInitialized();
+    } catch (_) {
+      return;
+    }
+    if (!homeProvider.removedStaleDemoEnvironment ||
+        HueServiceLocator.isDemoMode) {
+      return;
+    }
+    debugPrint('AuthGate: Clearing rooms from a stale demo session');
+    await roomProvider.clearAllRooms();
+  }
+
   Future<void> _checkAuthState() async {
+    await _clearStaleDemoRooms();
+    if (!mounted) return;
+
     // Web platform: skip auth bootstrap and show the app shell.
     if (kIsWeb) {
       await SettingsService.instance.setOnboardingComplete(true);
