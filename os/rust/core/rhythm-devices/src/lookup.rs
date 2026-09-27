@@ -248,6 +248,7 @@ mod tests {
                 .map(|matter| matter.quirks.clone())
                 .unwrap_or_default(),
             vec![
+                crate::quirks::DeviceQuirk::NeedsExplicitOn,
                 crate::quirks::DeviceQuirk::NeedsHueSaturationNotCt,
                 crate::quirks::DeviceQuirk::CommandThrottleMs(250),
             ]

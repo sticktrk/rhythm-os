@@ -651,6 +651,7 @@
       "vendor_id": 4999,
       "product_id": 28758,
       "quirks": [
+        "needs_explicit_on",
         "needs_hue_saturation_not_ct",
         { "command_throttle_ms": 250 }
       ]
