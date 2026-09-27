@@ -7,14 +7,13 @@ use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use harness::{rooms_with_lights, TestHarness};
-use rhythm_core::spy_controller::SpyLightController;
+use rhythm_core::spy_controller::{SpyCall, SpyLightController};
 use rhythm_core::{Rgb, RoomModeState};
 use rhythm_os::commands::{self, NodeColorScope, NodeColorUpdate};
 use rhythm_os::topology::DevicePlacement;
 
-fn mood_assignment_fixture(
-    standalone: bool,
-) -> (TestHarness, Arc<SpyLightController>, String, String) {
+/// Source and target rooms, with the source room's light as the moved device.
+fn assignment_fixture() -> (TestHarness, Arc<SpyLightController>, String, String) {
     let (harness, spy) = TestHarness::with_spy_controller();
     let (rooms, devices) = rooms_with_lights(&[("source", "Source"), ("target", "Target")]);
     let harness = harness.with_discovery(rooms, devices);
@@ -29,6 +28,13 @@ fn mood_assignment_fixture(
         .unwrap()
         .id
         .clone();
+    (harness, spy, device_id, target)
+}
+
+fn mood_assignment_fixture(
+    standalone: bool,
+) -> (TestHarness, Arc<SpyLightController>, String, String) {
+    let (harness, spy, device_id, target) = assignment_fixture();
 
     if standalone {
         commands::do_canonical_assign_room(&harness.state, &device_id, None).unwrap();
@@ -269,6 +275,75 @@ fn a_second_move_cannot_be_overwritten_by_the_first_moves_delayed_scene() {
 }
 
 #[test]
+fn a_room_change_during_the_scene_wait_replaces_the_stale_scene() {
+    let (harness, spy, device_id, target) = mood_assignment_fixture(false);
+    let scene_lock = harness
+        .state
+        .lock()
+        .unwrap()
+        .scene_lifecycle_transaction_lock
+        .clone();
+    let scene_guard = scene_lock.lock().unwrap();
+    let (tx, rx) = mpsc::channel();
+    let state = harness.state.clone();
+    let moved_id = device_id.clone();
+    let target_id = target.clone();
+    let assignment = std::thread::spawn(move || {
+        let _ = tx.send(commands::do_canonical_assign_room(
+            &state,
+            &moved_id,
+            Some(&target_id),
+        ));
+    });
+    wait_for_committed_move(&harness, &device_id, &target);
+    // The refresh reads the room before it waits for the scene transaction.
+    // Give it time to take that snapshot, then turn the room off.
+    std::thread::sleep(Duration::from_millis(100));
+    commands::do_node_preferences_set(
+        &harness.state,
+        &target,
+        None,
+        None,
+        None,
+        Some(RoomModeState::HardOff),
+        None,
+        false,
+    )
+    .unwrap();
+    spy.reset();
+    drop(scene_guard);
+
+    rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+    assignment.join().unwrap();
+
+    assert!(harness.snapshot(&target).unwrap().hard_off);
+    let last_device_call = spy.calls().into_iter().rev().find(|call| match call {
+        SpyCall::TurnOn { room_id, .. } | SpyCall::TurnOff { room_id, .. } => room_id == &device_id,
+        SpyCall::AnyLightsOn { .. } => false,
+    });
+    assert!(
+        matches!(last_device_call, Some(SpyCall::TurnOff { .. })),
+        "the moved light must end in the room's current Off state, got {last_device_call:?}"
+    );
+}
+
+#[test]
+fn assigning_an_unknown_device_leaves_no_command_gate() {
+    let (harness, _spy, _device_id, target) = assignment_fixture();
+
+    let error = commands::do_canonical_assign_room(&harness.state, "missing-device", Some(&target))
+        .unwrap_err();
+
+    assert!(error.to_string().contains("Device not found"));
+    assert!(!harness
+        .state
+        .lock()
+        .unwrap()
+        .node_preference_write_locks
+        .contains_key("missing-device"));
+}
+
+#[test]
 fn room_assignment_preserves_active_off_standby_and_unbound_mood_output() {
     for mode in [
         RoomModeState::Active,
@@ -276,20 +351,7 @@ fn room_assignment_preserves_active_off_standby_and_unbound_mood_output() {
         RoomModeState::Standby,
         RoomModeState::Mood,
     ] {
-        let (harness, spy) = TestHarness::with_spy_controller();
-        let (rooms, devices) = rooms_with_lights(&[("source", "Source"), ("target", "Target")]);
-        let harness = harness.with_discovery(rooms, devices);
-        harness.sync();
-        let target = harness.resolve("target");
-        let device_id = harness
-            .state
-            .lock()
-            .unwrap()
-            .canonical_registry
-            .find_by_native_id(&harness.hub_key, "light-source")
-            .unwrap()
-            .id
-            .clone();
+        let (harness, spy, device_id, target) = assignment_fixture();
         commands::do_node_preferences_set(
             &harness.state,
             &target,

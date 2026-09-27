@@ -927,6 +927,14 @@ fn refresh_cached_motion_timeout_after_settings_change(
     true
 }
 
+/// The per-node gate shared by preference writes, user actions and room moves.
+fn node_command_gate(s: &mut AppState, node_id: &str) -> Arc<std::sync::Mutex<()>> {
+    s.node_preference_write_locks
+        .entry(node_id.to_string())
+        .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
+        .clone()
+}
+
 fn clear_removed_node_ephemeral_state(s: &mut AppState, node_id: &str) {
     s.room_observed_power.remove(node_id);
     s.light_usage.close_subject(node_id);
@@ -934,7 +942,16 @@ fn clear_removed_node_ephemeral_state(s: &mut AppState, node_id: &str) {
     s.room_mode_transitions.remove(node_id);
     s.room_schedule_evaluations.remove(node_id);
     s.pending_periodic_ticks.remove(node_id);
-    s.node_preference_write_locks.remove(node_id);
+    // A caller that already cloned this gate may still be waiting on or
+    // holding it. Retiring the entry then would hand the next caller a fresh
+    // gate and lose their ordering; the gate is cloned only under the state
+    // lock, so an unshared entry cannot gain a holder here.
+    if s.node_preference_write_locks
+        .get(node_id)
+        .is_some_and(|gate| Arc::strong_count(gate) == 1)
+    {
+        s.node_preference_write_locks.remove(node_id);
+    }
     s.pending_motion_clear.retain(|pending| pending != node_id);
     s.pending_motion_timeout_refresh
         .retain(|pending| pending != node_id);
@@ -7155,30 +7172,57 @@ fn apply_parent_room_output_to_light(
     else {
         return Ok(());
     };
-    let Some(room) = runtime.engine_effective_node_snapshot(room_id) else {
-        warn!(
-            target: "cmd",
-            "Skipping moved-light output refresh because destination room '{}' is not in the runtime",
-            room_id
-        );
-        return Ok(());
-    };
-
-    if room.hard_off {
-        runtime.lights_off_room(device_id, None)
-    } else if room.soft_off {
-        runtime.soft_off_tick_room(device_id)
-    } else if room.mood_active {
-        apply_mood_scene_or_tick(
-            state,
-            &runtime,
-            device_id,
-            room.profile_settings.mood_scene_id.as_deref(),
-            false,
+    let room_output = |room: &rhythm_core::NodeSnapshot| {
+        (
+            room.hard_off,
+            room.soft_off,
+            room.mood_active,
+            room.profile_settings.mood_scene_id.clone(),
         )
-    } else {
-        runtime.turn_on_room(device_id)
+    };
+    // A bound Mood scene waits for the scene lifecycle transaction, so the
+    // room can change mode or scene before the light is written. Repeat the
+    // refresh until the output applied is the one the room still has.
+    const MAX_REFRESH_ATTEMPTS: usize = 3;
+    for _ in 0..MAX_REFRESH_ATTEMPTS {
+        let Some(room) = runtime.engine_effective_node_snapshot(room_id) else {
+            warn!(
+                target: "cmd",
+                "Skipping moved-light output refresh because destination room '{}' is not in the runtime",
+                room_id
+            );
+            return Ok(());
+        };
+
+        if room.hard_off {
+            runtime.lights_off_room(device_id, None)?;
+        } else if room.soft_off {
+            runtime.soft_off_tick_room(device_id)?;
+        } else if room.mood_active {
+            apply_mood_scene_or_tick(
+                state,
+                &runtime,
+                device_id,
+                room.profile_settings.mood_scene_id.as_deref(),
+                false,
+            )?;
+        } else {
+            runtime.turn_on_room(device_id)?;
+        }
+
+        let unchanged = runtime
+            .engine_effective_node_snapshot(room_id)
+            .is_none_or(|current| room_output(&current) == room_output(&room));
+        if unchanged {
+            return Ok(());
+        }
     }
+    warn!(
+        target: "cmd",
+        "Destination room '{}' kept changing while refreshing moved light '{}'",
+        room_id, device_id
+    );
+    Ok(())
 }
 
 fn source_room_manager_for_export(state: &SharedState) -> rhythm_core::RoomManager {
@@ -13921,10 +13965,7 @@ pub fn do_node_action(
     // interleave with an action for the same node either.
     let node_action_lock = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.node_preference_write_locks
-            .entry(node_id.to_string())
-            .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
-            .clone()
+        node_command_gate(&mut s, node_id)
     };
     let _node_action_guard = node_action_lock
         .lock()
@@ -16906,10 +16947,7 @@ fn do_node_preferences_set_inner(
 ) -> Result<String> {
     let node_write_lock = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.node_preference_write_locks
-            .entry(node_id.to_string())
-            .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
-            .clone()
+        node_command_gate(&mut s, node_id)
     };
     let _node_write_guard = node_write_lock
         .lock()
@@ -18873,10 +18911,19 @@ fn do_canonical_assign_room_with_precondition_outcome(
     // refresh, without retaining the global topology transaction during I/O.
     let node_write_lock = {
         let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        s.node_preference_write_locks
-            .entry(device_id.to_string())
-            .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
-            .clone()
+        // Unknown ids must not leave a gate behind; only node removal retires one.
+        // A stale assistant snapshot still reports its precondition first.
+        if let Some(precondition) = precondition.as_ref() {
+            verify_topology_assignment_precondition(&s, device_id, precondition)?;
+        }
+        if !s
+            .canonical_registry
+            .get(device_id)
+            .is_some_and(|device| !device.is_removed())
+        {
+            return Err(anyhow::anyhow!("Device not found: {}", device_id));
+        }
+        node_command_gate(&mut s, device_id)
     };
     let _node_write_guard = node_write_lock
         .lock()
