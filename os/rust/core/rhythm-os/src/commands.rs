@@ -18869,12 +18869,24 @@ fn do_canonical_assign_room_with_precondition_outcome(
     room_id: Option<&str>,
     precondition: Option<TopologyAssignmentPrecondition>,
 ) -> Result<crate::api_types::DeviceRoomAssignmentResponse> {
+    // Keep moves and user commands for this device ordered through the output
+    // refresh, without retaining the global topology transaction during I/O.
+    let node_write_lock = {
+        let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        s.node_preference_write_locks
+            .entry(device_id.to_string())
+            .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
+            .clone()
+    };
+    let _node_write_guard = node_write_lock
+        .lock()
+        .map_err(|_| anyhow::anyhow!("node preference write lock"))?;
     let transaction_lock = state
         .lock()
         .map_err(|_| anyhow::anyhow!("lock"))?
         .external_topology_transaction_lock
         .clone();
-    let _transaction = transaction_lock
+    let transaction = transaction_lock
         .lock()
         .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
     let (assignments, source_room_id, prepare_hub_device_room_assignment_fn) = {
@@ -19194,6 +19206,11 @@ fn do_canonical_assign_room_with_precondition_outcome(
         clear_runtime_node_standalone_state(state, device_id)?;
         persist_rooms(state);
     }
+    // The durable move and runtime routing are now reconciled. Output refresh
+    // must run outside this transaction: bound Mood scenes acquire it during
+    // planning, and external controllers acquire it during dispatch. Holding
+    // it here would deadlock scene application and block unrelated hub control.
+    drop(transaction);
     if matches!(device_type, DeviceType::Light)
         && room_id.is_some()
         && source_room_id.as_deref() != room_id
@@ -39953,6 +39970,15 @@ mod tests {
         do_canonical_assign_room(&state, &device_id, Some(&room_one)).unwrap();
         runtime.clear_turn_on_calls();
         runtime.set_light_on(&device_id, false);
+        // Like the Hue controller, dispatch must be able to acquire the
+        // topology transaction after the move has committed.
+        runtime.require_scene_dispatch_transaction_lock(
+            state
+                .lock()
+                .unwrap()
+                .external_topology_transaction_lock
+                .clone(),
+        );
 
         do_canonical_assign_room(&state, &device_id, Some(&room_two)).unwrap();
 

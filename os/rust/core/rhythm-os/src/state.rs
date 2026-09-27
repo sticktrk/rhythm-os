@@ -572,7 +572,8 @@ pub struct AppState {
     /// Queued or running light-dispatch work count per topology node.
     pub pending_node_dispatches: HashMap<String, usize>,
     /// Per-node guards that make preference compare-and-set checks atomic with
-    /// the corresponding runtime mutation across queued and legacy callers.
+    /// the corresponding runtime mutation across queued and legacy callers,
+    /// and order room moves with user commands through their output refresh.
     pub node_preference_write_locks: HashMap<String, Arc<Mutex<()>>>,
     /// Asynchronous controller dispatches keyed by local dispatch token.
     pub pending_integration_dispatches: HashMap<u64, PendingIntegrationDispatch>,
