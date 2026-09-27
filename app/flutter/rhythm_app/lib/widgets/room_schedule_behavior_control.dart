@@ -72,7 +72,10 @@ void _applyBehaviorSelection(
     mode: mode,
     state: stateForRoomScheduleBehavior(selected),
   );
-  if (applyToLightsIfActive && sync.activeMode == mode) {
+  // A named schedule can hold this room in a different mode than the global
+  // one; unknown wall-clock modes keep the historical global comparison.
+  final currentMode = sync.scheduleModeForNode(roomId) ?? sync.activeMode;
+  if (applyToLightsIfActive && currentMode == mode) {
     _applyBehaviorToLightsNow(context, roomId: roomId, behavior: selected);
   }
   if (analyticsSource == 'room_schedule_tab') {
