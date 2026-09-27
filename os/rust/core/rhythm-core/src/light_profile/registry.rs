@@ -420,7 +420,13 @@ impl LightProfileRegistry {
     /// Rooms omitted from the mode config retain the historical Active
     /// default so older persisted configs keep their behavior.
     pub fn active_mode_room_default(&self, room_id: &str) -> RoomModeState {
-        self.mode_config_or_default(self.active_mode())
+        self.room_default_for_mode(room_id, self.active_mode())
+    }
+
+    /// Resolve a room default using its effective schedule mode.
+    /// Missing entries preserve the historical Active default.
+    pub fn room_default_for_mode(&self, room_id: &str, mode: RhythmMode) -> RoomModeState {
+        self.mode_config_or_default(mode)
             .room_defaults
             .into_iter()
             .find(|default| default.room_id == room_id)

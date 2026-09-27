@@ -4798,7 +4798,9 @@ class ServerSyncProvider extends ChangeNotifier {
     if (_resetNodeAction(modeDefault: modeDefault) == 'reset') {
       return RoomModeState.active;
     }
-    final mode = _activeMode ?? RhythmMode.day;
+    final mode = nodeById(nodeId)?.profileSettings?.lightScheduleMode ??
+        _activeMode ??
+        RhythmMode.day;
     return RoomModeState.fromString(roomDefaultStateForMode(nodeId, mode));
   }
 
