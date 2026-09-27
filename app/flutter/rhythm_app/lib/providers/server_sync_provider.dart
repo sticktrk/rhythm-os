@@ -385,7 +385,6 @@ class ServerSyncProvider extends ChangeNotifier {
   final Set<String> _motionActivationPending = {};
   final Set<String> _roomSchedulePending = {};
   final Map<String, int> _roomScheduleWriteGenerations = {};
-  final Set<String> _roomScheduleTestPending = {};
   final Set<String> _lightProfileOverridePending = {};
   static const Uuid _uuid = Uuid();
 
@@ -1636,9 +1635,6 @@ class ServerSyncProvider extends ChangeNotifier {
   bool roomSchedulePendingForRoom(String roomId) =>
       _roomSchedulePending.contains(roomId);
 
-  bool roomScheduleTestPendingForRoom(String roomId) =>
-      _roomScheduleTestPending.contains(roomId);
-
   Future<bool> setRoomSchedule(
     String roomId,
     RhythmRoomSchedule schedule, {
@@ -1707,34 +1703,6 @@ class ServerSyncProvider extends ChangeNotifier {
     }
     notifyListeners();
     return accepted;
-  }
-
-  Future<bool> testRoomSchedule(
-    String roomId,
-    RhythmMode mode, {
-    String? requestId,
-  }) async {
-    if (!roomScheduleSupportedForNode(roomId) ||
-        _roomScheduleTestPending.contains(roomId) ||
-        (!HueServiceLocator.isDemoMode && !_connection.connected)) {
-      return false;
-    }
-    _roomScheduleTestPending.add(roomId);
-    notifyListeners();
-    try {
-      return HueServiceLocator.isDemoMode ||
-          await api.roomScheduleTest(
-            roomId: roomId,
-            mode: mode,
-            requestId: requestId ?? 'room-schedule-test-${_uuid.v4()}',
-          );
-    } catch (error) {
-      debugPrint('ServerSync: room schedule test failed: $error');
-      return false;
-    } finally {
-      _roomScheduleTestPending.remove(roomId);
-      notifyListeners();
-    }
   }
 
   RhythmNodeProfileSettings _settingsWithSchedule(

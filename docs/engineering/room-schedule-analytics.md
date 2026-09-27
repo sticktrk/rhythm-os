@@ -21,6 +21,10 @@ Insight definition: `Room Schedule — opened to terminal outcome`.
 - Retry analysis: group by `journey_id` and inspect numeric `attempt_number`;
   attempts for one journey must share the same opaque ID.
 
+The room Lighting tab no longer offers a preset test, so current app builds
+stop emitting `room_schedule_test_completed`; the event and its server actions
+remain defined for older builds.
+
 Success is `outcome = succeeded`; failure is `outcome = failed`. Analytics is
 non-blocking and an unconfigured PostHog backend remains a no-op. This insight
 is forward-only; no historical events are synthesized.
