@@ -322,6 +322,7 @@ class HomeProvider extends ChangeNotifier {
 
   // Initialization tracking
   Completer<void>? _initCompleter;
+  bool _removedStaleDemoEnvironment = false;
 
   // Getters
   List<Home> get homes => _homes;
@@ -354,6 +355,9 @@ class HomeProvider extends ChangeNotifier {
   /// Whether there are any homes.
   bool get hasHomes => _homes.isNotEmpty;
 
+  /// Whether startup dropped a demo Home left behind by an earlier launch.
+  bool get removedStaleDemoEnvironment => _removedStaleDemoEnvironment;
+
   /// Get the current user ID from AuthService.
   String? get currentUserId => AuthService().currentUserId;
 
@@ -382,6 +386,13 @@ class HomeProvider extends ChangeNotifier {
       _repository = HomeRepository(
         localDataSource: _localDataSource,
       );
+
+      // Demo mode is session-only, but the Home it seeds is persisted. After
+      // a restart nothing simulates that Home's fake server, so drop it before
+      // it can be selected and connected to for real.
+      if (!HueServiceLocator.isDemoMode) {
+        _removedStaleDemoEnvironment = await _deleteDemoEnvironment();
+      }
 
       // Load initial data
       _loadHomes();
@@ -1209,6 +1220,14 @@ class HomeProvider extends ChangeNotifier {
   /// Remove demo-seeded data on sign-out so it doesn't leak into the next
   /// real session. Identifies demo data by the marker ownerId / hostname.
   Future<void> _clearDemoEnvironment() async {
+    await _deleteDemoEnvironment();
+    _loadHomes();
+    _loadCurrentHomeHubs();
+    notifyListeners();
+  }
+
+  /// Delete persisted demo homes and hubs. Returns whether any existed.
+  Future<bool> _deleteDemoEnvironment() async {
     final demoHubs = _repository
         .getAllHubs()
         .where((h) => h.endpoint.host == _demoServerHost)
@@ -1223,9 +1242,7 @@ class HomeProvider extends ChangeNotifier {
     for (final home in demoHomes) {
       await _repository.deleteHome(home.id);
     }
-    _loadHomes();
-    _loadCurrentHomeHubs();
-    notifyListeners();
+    return demoHubs.isNotEmpty || demoHomes.isNotEmpty;
   }
 
   // ============================================================
