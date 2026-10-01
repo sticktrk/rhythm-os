@@ -103,9 +103,13 @@ void main() {
                   opened = true;
                 }))));
     await tester.pumpAndSettle();
-    expect(
-        tester.getSize(find.byKey(const ValueKey('bulb-current-wifi'))).height,
-        lessThan(200));
+    final tile = find.byKey(const ValueKey('bulb-current-wifi'));
+    final tileHeight = tester.getSize(tile).height;
+    tester.view.physicalSize = const Size(320, 800);
+    await tester.pump();
+    expect(tester.getSize(tile).height, tileHeight);
+    tester.view.physicalSize = const Size(320, 640);
+    await tester.pump();
     final screenshotPath =
         Platform.environment['RHYTHM_MATTER_WIFI_NETWORK_SCREENSHOT'];
     if (screenshotPath != null && screenshotPath.isNotEmpty) {
