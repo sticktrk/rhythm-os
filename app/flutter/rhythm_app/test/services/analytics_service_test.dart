@@ -57,6 +57,25 @@ void main() {
     expect(backend.events, hasLength(2));
   });
 
+  test('Wi-Fi conflicts report a bounded reason without network data',
+      () async {
+    await analytics.logWifiAction(
+        networkChange: true,
+        journeyId: 'opaque-journey',
+        action: 'change',
+        outcome: 'failed',
+        reason: 'device_recovering');
+    expect(backend.events.single.properties['reason'], 'device_recovering');
+    await analytics.logWifiAction(
+        networkChange: true,
+        journeyId: 'opaque-journey',
+        action: 'change',
+        outcome: 'failed',
+        reason: 'private SSID or password');
+    expect(backend.events.last.properties.containsKey('reason'), isFalse);
+    expect(backend.events.toString(), isNot(contains('private SSID')));
+  });
+
   test('device network analytics contains outcomes only and is optional',
       () async {
     await analytics.logDeviceNetworkOpened();

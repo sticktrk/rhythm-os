@@ -10,6 +10,155 @@ use std::sync::{
     Arc, Mutex,
 };
 
+fn wait_for_completion(state: &SharedState, id: &str) -> Value {
+    for _ in 0..400 {
+        let response = wifi_change::handle_status(state, id);
+        assert_eq!(response.status, 200);
+        let receipt: Value = serde_json::from_str(&response.body).unwrap();
+        if receipt["status"] == "complete" {
+            return receipt;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("network change did not complete");
+}
+
+fn assert_next_change_admission(outcome: WifiChangeOutcome, should_admit: bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(FileStorage::new(dir.path().to_str().unwrap()).unwrap());
+    let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+    state.lock().unwrap().storage = Some(storage.clone());
+    let saved = wifi_profiles::handle_update(
+        &state,
+        &json!({"revision":0,"action":"save","ssid":"FixtureTarget","password":"fixture-secret","correlation_id":uuid::Uuid::new_v4().to_string()}),
+    );
+    assert_eq!(saved.status, 200);
+    let profile: Value = serde_json::from_str(&saved.body).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let count = calls.clone();
+    let (release, gate) = std::sync::mpsc::channel();
+    let gate = Mutex::new(gate);
+    let result = outcome.clone();
+    state.lock().unwrap().change_wifi_fn = Some(Arc::new(move |_, _, _, _| {
+        count.fetch_add(1, Ordering::SeqCst);
+        gate.lock().unwrap().recv().unwrap();
+        Ok(result.clone())
+    }));
+    let id = uuid::Uuid::new_v4().to_string();
+    let request =
+        json!({"operation_id":id,"device_id":"matter-100","profile_id":profile["default_id"]});
+    let next = json!({"operation_id":uuid::Uuid::new_v4().to_string(),"device_id":"matter-101","profile_id":profile["default_id"]});
+    assert_eq!(wifi_change::handle_start(&state, &request).status, 200);
+    // Even a read-only preflight must finish before another worker is admitted.
+    assert_eq!(wifi_change::handle_start(&state, &next).status, 409);
+    assert!(rhythm_os::pairing::clear_persisted_state_for_factory_reset(&state).is_err());
+    release.send(()).unwrap();
+    let receipt = wait_for_completion(&state, &id);
+    assert_eq!(receipt["outcome"], serde_json::to_value(&outcome).unwrap());
+    assert_eq!(
+        receipt["retry_after_ms"].as_u64().unwrap() == 0,
+        should_admit,
+        "unexpected recovery fence for {outcome:?}"
+    );
+    // Checking/replaying a completed receipt must not execute the move again.
+    assert_eq!(wifi_change::handle_start(&state, &request).status, 200);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    let mut same_device = next.clone();
+    same_device["device_id"] = json!("matter-100");
+    assert_eq!(
+        rhythm_os::wifi_profiles::handle_list(&state).body,
+        saved.body,
+        "a rejected move must preserve the saved network catalog"
+    );
+
+    // Durable receipts preserve the same admission decision after a restart.
+    let restarted: SharedState = Arc::new(Mutex::new(AppState::default()));
+    restarted.lock().unwrap().storage = Some(storage);
+    let next_calls = Arc::new(AtomicUsize::new(0));
+    let restored = wait_for_completion(&restarted, &id);
+    assert_eq!(restored["outcome"], receipt["outcome"]);
+    for current in [&state, &restarted] {
+        let count = next_calls.clone();
+        current.lock().unwrap().change_wifi_fn = Some(Arc::new(move |_, _, _, _| {
+            count.fetch_add(1, Ordering::SeqCst);
+            Ok(WifiChangeOutcome {
+                code: WifiChangeCode::Succeeded,
+                rollback_verified: false,
+            })
+        }));
+        for (mut candidate, admitted) in [(same_device.clone(), should_admit), (next.clone(), true)]
+        {
+            candidate["operation_id"] = json!(uuid::Uuid::new_v4().to_string());
+            assert_eq!(
+                wifi_change::handle_start(current, &candidate).status,
+                if admitted { 200 } else { 409 },
+                "unexpected admission after {outcome:?}"
+            );
+            if admitted {
+                let result =
+                    wait_for_completion(current, candidate["operation_id"].as_str().unwrap());
+                assert_eq!(result["outcome"]["code"], "succeeded");
+            }
+        }
+    }
+    assert_eq!(
+        next_calls.load(Ordering::SeqCst),
+        if should_admit { 4 } else { 2 }
+    );
+    assert_eq!(
+        rhythm_os::pairing::clear_persisted_state_for_factory_reset(&restarted).is_ok(),
+        should_admit
+    );
+}
+
+#[test]
+fn read_only_preflight_failures_do_not_block_subsequent_network_changes() {
+    for code in [WifiChangeCode::Offline, WifiChangeCode::Unsupported] {
+        assert_next_change_admission(
+            WifiChangeOutcome {
+                code,
+                rollback_verified: false,
+            },
+            true,
+        );
+    }
+}
+
+#[test]
+fn possible_device_changes_keep_the_fence_until_success_or_verified_rollback() {
+    for code in [
+        WifiChangeCode::NetworkSlots,
+        WifiChangeCode::CredentialsRejected,
+        WifiChangeCode::NetworkNotFound,
+        WifiChangeCode::Rejected,
+        WifiChangeCode::FailSafeBusy,
+        WifiChangeCode::VerificationFailed,
+        WifiChangeCode::RecoveryRequired,
+    ] {
+        assert_next_change_admission(
+            WifiChangeOutcome {
+                code: code.clone(),
+                rollback_verified: false,
+            },
+            false,
+        );
+        assert_next_change_admission(
+            WifiChangeOutcome {
+                code,
+                rollback_verified: true,
+            },
+            true,
+        );
+    }
+    assert_next_change_admission(
+        WifiChangeOutcome {
+            code: WifiChangeCode::Succeeded,
+            rollback_verified: false,
+        },
+        true,
+    );
+}
+
 #[test]
 fn uncertain_requests_never_replay_and_restart_retains_recovery_fence() {
     let dir = tempfile::tempdir().unwrap();
@@ -45,6 +194,13 @@ fn uncertain_requests_never_replay_and_restart_retains_recovery_fence() {
     let mut conflict = request.clone();
     conflict["device_id"] = json!("matter-101");
     assert_eq!(wifi_change::handle_start(&state, &conflict).status, 409);
+    conflict["operation_id"] = json!(uuid::Uuid::new_v4().to_string());
+    let active = wifi_change::handle_start(&state, &conflict);
+    assert_eq!(active.status, 409);
+    assert_eq!(
+        serde_json::from_str::<Value>(&active.body).unwrap()["reason"],
+        "change_in_progress"
+    );
     release.send(()).unwrap();
     let mut receipt = Value::Null;
     for _ in 0..200 {
@@ -95,4 +251,153 @@ fn uncertain_requests_never_replay_and_restart_retains_recovery_fence() {
     let mut retry = request.clone();
     retry["operation_id"] = json!(uuid::Uuid::new_v4().to_string());
     assert_eq!(wifi_change::handle_start(&state, &retry).status, 409);
+}
+
+fn completed_move(code: WifiChangeCode) -> (tempfile::TempDir, SharedState, Value, Value) {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(FileStorage::new(dir.path().to_str().unwrap()).unwrap());
+    let state: SharedState = Arc::new(Mutex::new(AppState::default()));
+    state.lock().unwrap().storage = Some(storage.clone());
+    let saved = wifi_profiles::handle_update(
+        &state,
+        &json!({
+            "revision": 0, "action": "save", "ssid": "FixtureTarget",
+            "password": "fixture-secret", "correlation_id": uuid::Uuid::new_v4().to_string()
+        }),
+    );
+    let profile: Value = serde_json::from_str(&saved.body).unwrap();
+    state.lock().unwrap().change_wifi_fn = Some(Arc::new(move |_, _, _, _| {
+        Ok(WifiChangeOutcome {
+            code: code.clone(),
+            rollback_verified: false,
+        })
+    }));
+    let request = json!({"operation_id": uuid::Uuid::new_v4().to_string(),
+        "device_id": "matter-100", "profile_id": profile["default_id"]});
+    assert_eq!(wifi_change::handle_start(&state, &request).status, 200);
+    let mut receipt = Value::Null;
+    for _ in 0..200 {
+        receipt = serde_json::from_str(
+            &wifi_change::handle_status(&state, request["operation_id"].as_str().unwrap()).body,
+        )
+        .unwrap();
+        if receipt["status"] == "complete" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(receipt["status"], "complete");
+    // Outcome persistence completes just after the terminal receipt write.
+    let history = (0..200)
+        .find_map(|_| {
+            let history = storage.load_pairing_history().unwrap().unwrap();
+            if history
+                .entries
+                .iter()
+                .any(|entry| entry.kind == "wifi_change")
+            {
+                Some(history)
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+                None
+            }
+        })
+        .expect("terminal lifecycle outcome was not recorded");
+    let event = history
+        .entries
+        .iter()
+        .find(|entry| entry.kind == "wifi_change")
+        .unwrap();
+    assert_eq!(
+        event.correlation_id.as_deref(),
+        request["operation_id"].as_str()
+    );
+    assert_eq!(event.status, receipt["outcome"]["code"].as_str().unwrap());
+    let evidence = serde_json::to_string(&event).unwrap();
+    for forbidden in ["FixtureTarget", "fixture-secret", "matter-100"] {
+        assert!(!evidence.contains(forbidden));
+    }
+    (dir, state, request, receipt)
+}
+
+#[test]
+fn read_only_preflight_failures_release_the_cooldown() {
+    for code in [WifiChangeCode::Offline, WifiChangeCode::Unsupported] {
+        let (_dir, state, mut request, receipt) = completed_move(code);
+        assert_eq!(receipt["retry_after_ms"], 0);
+        request["operation_id"] = json!(uuid::Uuid::new_v4().to_string());
+        assert_eq!(wifi_change::handle_start(&state, &request).status, 200);
+        wait_finished(&state, &request);
+    }
+}
+
+#[test]
+fn recovery_blocks_the_same_matter_node_but_not_another_bulb() {
+    let (_dir, state, request, receipt) = completed_move(WifiChangeCode::RecoveryRequired);
+    assert!(receipt["retry_after_ms"].as_u64().unwrap() > 0);
+    let mut next = request.clone();
+    next["operation_id"] = json!(uuid::Uuid::new_v4().to_string());
+    let conflict = wifi_change::handle_start(&state, &next);
+    assert_eq!(conflict.status, 409);
+    let conflict: Value = serde_json::from_str(&conflict.body).unwrap();
+    assert_eq!(conflict["reason"], "device_recovering");
+    assert!((1..=300_000).contains(&conflict["retry_after_ms"].as_u64().unwrap()));
+    next["device_id"] = json!("matter-100-2");
+    assert_eq!(wifi_change::handle_start(&state, &next).status, 409);
+    next["device_id"] = json!("matter-101");
+    assert_eq!(wifi_change::handle_start(&state, &next).status, 200);
+    wait_finished(&state, &next);
+}
+
+#[test]
+fn legacy_offline_receipt_is_repaired_after_restart_and_releases_reset_fence() {
+    let (_dir, state, request, _) = completed_move(WifiChangeCode::Offline);
+    let storage = state.lock().unwrap().storage.clone().unwrap();
+    let mut journal: Value = serde_json::from_str(
+        &storage
+            .load_integration_state_file("matter/wifi-changes.json")
+            .unwrap()
+            .unwrap(),
+    )
+    .unwrap();
+    journal["entries"][0]["receipt"]["retry_after_ms"] =
+        json!(chrono::Utc::now().timestamp_millis() as u64 + 300000);
+    journal["entries"][0]["boot"] = json!("previous-process");
+    storage
+        .save_integration_state_file("matter/wifi-changes.json", &journal.to_string())
+        .unwrap();
+    let receipt: Value = serde_json::from_str(
+        &wifi_change::handle_status(&state, request["operation_id"].as_str().unwrap()).body,
+    )
+    .unwrap();
+    assert_eq!(receipt["retry_after_ms"], 0);
+    let snapshot = wifi_change::diagnostic_snapshot(&state);
+    assert_eq!(
+        snapshot["entries"][0]["receipt"]["outcome"]["code"],
+        "offline"
+    );
+    for forbidden in [
+        "FixtureTarget",
+        "fixture-secret",
+        "profile_id",
+        "ssid",
+        "password",
+    ] {
+        assert!(!snapshot.to_string().contains(forbidden));
+    }
+    assert!(rhythm_os::pairing::clear_persisted_state_for_factory_reset(&state).is_ok());
+}
+
+fn wait_finished(state: &SharedState, request: &Value) {
+    for _ in 0..200 {
+        let receipt: Value = serde_json::from_str(
+            &wifi_change::handle_status(state, request["operation_id"].as_str().unwrap()).body,
+        )
+        .unwrap();
+        if receipt["status"] == "complete" {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("worker did not finish");
 }

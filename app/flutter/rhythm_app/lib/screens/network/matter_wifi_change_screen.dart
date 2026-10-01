@@ -7,6 +7,7 @@ import '../../services/cloud_backed_server_api.dart';
 import '../../widgets/solar_orbit.dart';
 import 'network_ui.dart';
 import 'saved_wifi_screen.dart';
+import '../../widgets/matter_wifi_network_tile.dart';
 
 class MatterWifiChangeScreen extends StatefulWidget {
   const MatterWifiChangeScreen(
@@ -25,6 +26,7 @@ class _MatterWifiChangeScreenState extends State<MatterWifiChangeScreen> {
   bool _loaded = false;
   Timer? _poll;
   String? _reported;
+  int _networkRefresh = 0;
   String? _entryJourney = const Uuid().v4();
   @override
   void initState() {
@@ -46,6 +48,14 @@ class _MatterWifiChangeScreenState extends State<MatterWifiChangeScreen> {
   void _accept(RhythmWifiChangeReceipt? receipt) {
     if (!mounted) return;
     setState(() {
+      // The initial network observation is already running. Loading an old
+      // terminal receipt must not replace it with a duplicate read.
+      if (_receipt != null &&
+          (_receipt?.operationId != receipt?.operationId ||
+              _receipt?.status != receipt?.status ||
+              _receipt?.code != receipt?.code)) {
+        _networkRefresh++;
+      }
       _receipt = receipt;
       _operation = receipt?.operationId ?? _operation;
       _error = null;
@@ -142,12 +152,24 @@ class _MatterWifiChangeScreenState extends State<MatterWifiChangeScreen> {
     } on RhythmWifiException catch (error) {
       final rejected = {'conflict', 'owner_required', 'not_found', 'rejected'}
           .contains(error.category);
+      if (rejected) {
+        AnalyticsService().logWifiAction(
+            networkChange: true,
+            journeyId: operation,
+            action: 'change',
+            outcome: 'failed',
+            reason: error.reason ?? 'request_rejected');
+      }
       if (mounted) {
         setState(() {
           if (rejected) _operation = null;
-          _error = rejected
-              ? 'The request was not accepted. Check owner access, the saved network and any active network change, then check status.'
-              : 'The request result is uncertain. Check status before taking another action.';
+          _error = error.reason == 'change_in_progress'
+              ? 'Another bulb’s network change is still running. Wait for it to finish, then check status.'
+              : error.reason == 'device_recovering'
+                  ? 'This bulb is recovering. Try again in about ${(error.retryAfterMs / 1000).ceil()} seconds. Keep both networks available.'
+                  : rejected
+                      ? 'The request was not accepted. Check owner access and the saved network, then check status.'
+                      : 'The request result is uncertain. Check status before taking another action.';
         });
       }
     } catch (_) {
@@ -191,6 +213,9 @@ class _MatterWifiChangeScreenState extends State<MatterWifiChangeScreen> {
       _ =>
         'The final network state could not be verified. Keep both networks available and check normal bulb controls.',
     };
+    if (receipt.code == 'offline' || receipt.code == 'unsupported') {
+      return reason;
+    }
     return '$reason ${receipt.rollbackVerified ? 'The original network connection was verified.' : 'If it stays offline, restore the old network or follow the manufacturer’s recovery instructions.'}';
   }
 
@@ -220,7 +245,8 @@ class _MatterWifiChangeScreenState extends State<MatterWifiChangeScreen> {
     return (
       icon: Icons.priority_high_rounded,
       color: CelestialColors.warning,
-      title: receipt.rollbackVerified
+      title: receipt.rollbackVerified ||
+              {'offline', 'unsupported'}.contains(receipt.code)
           ? 'Network not changed'
           : 'Network change not confirmed'
     );
@@ -246,11 +272,23 @@ class _MatterWifiChangeScreenState extends State<MatterWifiChangeScreen> {
               child: const Text('Choose network')),
           const SizedBox(height: 4),
           TextButton(
-              onPressed: _busy ? null : _refresh,
+              onPressed: _busy
+                  ? null
+                  : () {
+                      setState(() => _networkRefresh++);
+                      _refresh();
+                    },
               style: TextButton.styleFrom(foregroundColor: networkTeal),
               child: const Text('Check status')),
         ]),
         children: [
+          MatterWifiNetworkTile(
+              api: widget.api,
+              deviceId: widget.deviceId,
+              changing: _receipt?.isPending == true ||
+                  (_busy && _receipt == null && _operation != null),
+              refreshToken: _networkRefresh),
+          const SizedBox(height: 12),
           Container(
               padding: const EdgeInsets.all(20),
               decoration: BoxDecoration(
@@ -288,9 +326,9 @@ class _MatterWifiChangeScreenState extends State<MatterWifiChangeScreen> {
                   ])),
           if (_error != null) NetworkNotice(text: _error!),
           if ((_receipt?.retryAfterMs ?? 0) > 0)
-            const NetworkNotice(
+            NetworkNotice(
                 text:
-                    'Waiting for the bulb\u2019s recovery window to close before another attempt.'),
+                    'This bulb is recovering. Another attempt is available in about ${((_receipt?.retryAfterMs ?? 0) / 1000).ceil()} seconds. Keep both networks available.'),
           if (_receipt == null) ...[
             const NetworkSectionHeader('BEFORE YOU START'),
             for (final (icon, text) in const [

@@ -77,6 +77,8 @@ pub(crate) struct FakeMatterBulb {
     endpoint: u16,
     honours_execute_if_off: bool,
     state: Mutex<FakeBulbState>,
+    restore_previous_color: bool,
+    off_color: Mutex<Option<FakeBulbState>>,
     clock: Option<Arc<Mutex<Instant>>>,
     transitions: Mutex<HashMap<&'static str, FakeTransition>>,
     pub(crate) reads: Mutex<Vec<(Instant, FakeBulbState)>>,
@@ -91,12 +93,39 @@ impl FakeMatterBulb {
             endpoint,
             honours_execute_if_off,
             state: Mutex::new(FakeBulbState::default()),
+            restore_previous_color: false,
+            off_color: Mutex::new(None),
             clock: None,
             transitions: Mutex::new(HashMap::new()),
             reads: Mutex::new(Vec::new()),
             fail_reads: AtomicBool::new(false),
             read_hook: Mutex::new(None),
         }
+    }
+
+    /// Model firmware that accepts staged color while off but restores the last
+    /// visible color on the next off-to-on transition.
+    pub(crate) fn with_previous_color_restore(mut self) -> Self {
+        self.restore_previous_color = true;
+        self
+    }
+
+    fn update_power(&self, state: &mut FakeBulbState, on: bool) {
+        if self.restore_previous_color {
+            if state.on && !on {
+                *self.off_color.lock().unwrap() = Some(state.clone());
+            } else if !state.on && on {
+                if let Some(saved) = self.off_color.lock().unwrap().as_ref() {
+                    state.color_mode = saved.color_mode;
+                    state.hue = saved.hue;
+                    state.saturation = saved.saturation;
+                    state.x = saved.x;
+                    state.y = saved.y;
+                    state.mireds = saved.mireds;
+                }
+            }
+        }
+        state.on = on;
     }
 
     /// With a shared clock, attribute reports progress throughout each requested
@@ -213,7 +242,7 @@ impl MatterTransport for FakeMatterBulb {
     fn set_on_off(&self, node_id: u64, endpoint: u16, on: bool) -> Result<()> {
         self.check_target(node_id, endpoint)?;
         // Plain On/Off leaves CurrentLevel alone: On restores the prior level.
-        self.state.lock().unwrap().on = on;
+        self.update_power(&mut self.state.lock().unwrap(), on);
         Ok(())
     }
 
@@ -273,7 +302,7 @@ impl MatterTransport for FakeMatterBulb {
         };
         state.level = target;
         if with_on_off {
-            state.on = target > 0;
+            self.update_power(&mut state, target > 0);
         }
         self.transition(
             "level",

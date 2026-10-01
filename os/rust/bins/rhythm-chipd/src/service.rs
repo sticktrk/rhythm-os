@@ -67,6 +67,19 @@ pub struct ChipControllerService {
     /// Serializes commissioning/decommissioning/probing/group config —
     /// operations that touch shared fabric tables and the device store.
     lifecycle_lock: Mutex<()>,
+    wifi_network_reads: Mutex<HashSet<u64>>,
+}
+
+struct WifiNetworkReadGuard<'a> {
+    active: &'a Mutex<HashSet<u64>>,
+    node: u64,
+}
+impl Drop for WifiNetworkReadGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut active) = self.active.lock() {
+            active.remove(&self.node);
+        }
+    }
 }
 
 impl ChipControllerService {
@@ -88,6 +101,7 @@ impl ChipControllerService {
             device_store: Mutex::new(DeviceStore::default()),
             state: RwLock::new(None),
             lifecycle_lock: Mutex::new(()),
+            wifi_network_reads: Mutex::new(HashSet::new()),
         }
     }
 
@@ -131,6 +145,46 @@ impl ChipControllerService {
                 Ok(serde_json::to_value(ChipRpcCommissionLightResponse {
                     device,
                 })?)
+            }
+            ChipRpcRequest::ReadWifiNetwork { node_id, endpoint } => {
+                self.require_initialized()?;
+                // Do not queue optional reads behind lifecycle work.
+                let Ok(_lifecycle) = self.lifecycle_lock.try_lock() else {
+                    return Ok(serde_json::to_value(
+                        rhythm_os::wifi_network::WifiNetwork::unknown(
+                            rhythm_os::wifi_network::WifiNetworkStatus::Busy,
+                        ),
+                    )?);
+                };
+                drop(_lifecycle);
+                // Native callbacks can outlive the HTTP/RPC reader. Keep a
+                // bounded per-node admission guard until the backend finishes,
+                // without holding the global lifecycle lock over a slow bulb.
+                let _read = {
+                    let mut active = self.wifi_network_reads.lock().unwrap();
+                    if active.len() >= 4 || !active.insert(node_id) {
+                        return Ok(serde_json::to_value(
+                            rhythm_os::wifi_network::WifiNetwork::unknown(
+                                rhythm_os::wifi_network::WifiNetworkStatus::Busy,
+                            ),
+                        )?);
+                    }
+                    WifiNetworkReadGuard {
+                        active: &self.wifi_network_reads,
+                        node: node_id,
+                    }
+                };
+                if !self
+                    .device_store()
+                    .devices()
+                    .iter()
+                    .any(|d| d.node_id == node_id && d.light_endpoint == endpoint)
+                {
+                    anyhow::bail!("Unknown commissioned light");
+                }
+                Ok(serde_json::to_value(
+                    self.backend().read_wifi_network(node_id, endpoint)?,
+                )?)
             }
             ChipRpcRequest::ChangeWifi {
                 node_id,
@@ -834,6 +888,40 @@ mod tests {
     };
 
     use crate::backend::FakeChipBackend;
+
+    #[test]
+    fn wifi_network_reads_are_registered_bounded_and_do_not_hold_the_lifecycle_lane() {
+        let dir = unique_test_dir("wifi-network");
+        let service = ChipControllerService::new(Box::new(FakeChipBackend::default()));
+        service
+            .handle(ChipRpcRequest::InitController(init_request(&dir)))
+            .unwrap();
+        service
+            .handle(ChipRpcRequest::CommissionLight(commission_request(7)))
+            .unwrap();
+        let request = ChipRpcRequest::ReadWifiNetwork {
+            node_id: 7,
+            endpoint: 1,
+        };
+        {
+            let _lifecycle = service.lifecycle_lock.lock().unwrap();
+            assert_eq!(service.handle(request.clone()).unwrap()["status"], "busy");
+        }
+        service.wifi_network_reads.lock().unwrap().insert(7);
+        assert_eq!(service.handle(request.clone()).unwrap()["status"], "busy");
+        service.wifi_network_reads.lock().unwrap().clear();
+        assert_eq!(service.handle(request).unwrap()["status"], "unsupported");
+        assert!(service.wifi_network_reads.lock().unwrap().is_empty());
+        assert!(service.lifecycle_lock.try_lock().is_ok());
+        assert!(service
+            .handle(ChipRpcRequest::ReadWifiNetwork {
+                node_id: 8,
+                endpoint: 1
+            })
+            .is_err());
+        assert!(service.wifi_network_reads.lock().unwrap().is_empty());
+        fs::remove_dir_all(dir).unwrap();
+    }
 
     fn unique_test_dir(name: &str) -> PathBuf {
         let nanos = SystemTime::now()

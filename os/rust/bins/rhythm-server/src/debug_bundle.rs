@@ -837,6 +837,8 @@ pub fn build_debug_bundle_with_app_log(
         build_matter_controller_debug_json(&runtime, created_at, &mut diagnostics)
             .context("building Matter controller debug snapshot")?;
     let matter_runtime_json = build_matter_runtime_debug_json(state, created_at)?;
+    let wifi_changes_json =
+        serde_json::to_vec(&rhythm_os::wifi_change::diagnostic_snapshot(state))?;
     let hue_controller_json = build_hue_controller_debug_json(state, created_at, &mut diagnostics)
         .context("building Hue controller debug snapshot")?;
     #[cfg(target_os = "linux")]
@@ -933,6 +935,12 @@ pub fn build_debug_bundle_with_app_log(
         &mut generated_files,
         "matter_runtime.json",
         matter_runtime_json.as_bytes(),
+    )?;
+    append_generated_file(
+        &mut builder,
+        &mut generated_files,
+        "wifi_changes.json",
+        &wifi_changes_json,
     )?;
     append_generated_file(
         &mut builder,
@@ -4739,6 +4747,7 @@ mod tests {
         assert!(files.contains_key("log_summary.json"));
         assert!(files.contains_key("process_resources.json"));
         assert!(files.contains_key("matter_controller.json"));
+        assert!(files.contains_key("wifi_changes.json"));
         let matter_runtime: Value =
             serde_json::from_slice(files.get("matter_runtime.json").unwrap()).unwrap();
         assert_eq!(matter_runtime["schema_version"], 1);

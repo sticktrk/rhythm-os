@@ -877,6 +877,16 @@ pub trait ExternalLightHubIntegration: Send + Sync {
         ))
     }
 
+    fn read_wifi_network(
+        &self,
+        _state: &SharedState,
+        _device_id: &str,
+    ) -> Result<crate::wifi_network::WifiNetwork> {
+        Ok(crate::wifi_network::WifiNetwork::unknown(
+            crate::wifi_network::WifiNetworkStatus::Unsupported,
+        ))
+    }
+
     fn change_wifi(
         &self,
         _state: &SharedState,
@@ -1825,8 +1835,10 @@ pub struct IntegrationCallbacks {
             + Send
             + Sync,
     >,
-    /// Load secret pairing recovery material through the owning integration.
+    /// Observe the device's current network without exposing saved credentials.
+    pub read_wifi_network_fn: crate::wifi_network::ReadWifiNetworkFn,
     pub change_wifi_fn: crate::wifi_change::WifiChangeFn,
+    /// Load secret pairing recovery material through the owning integration.
     pub load_pairing_recovery_fn: Arc<
         dyn Fn(&SharedState, &str, &str) -> Result<Option<crate::pairing::PairingRecoverySecret>>
             + Send
@@ -2213,6 +2225,12 @@ pub fn integration_callbacks(
         },
     );
 
+    let read_wifi_network_fn: crate::wifi_network::ReadWifiNetworkFn =
+        Arc::new(move |state, device_id| {
+            find_integration(integrations, "matter")
+                .ok_or_else(|| anyhow::anyhow!("Matter unavailable"))?
+                .read_wifi_network(state, device_id)
+        });
     let change_wifi_fn: crate::wifi_change::WifiChangeFn =
         Arc::new(move |state, device_id, wifi, budget_ms| {
             find_integration(integrations, "matter")
@@ -2276,6 +2294,7 @@ pub fn integration_callbacks(
         start_pairing_fn,
         reconcile_pairing_results_fn,
         start_unpairing_fn,
+        read_wifi_network_fn,
         change_wifi_fn,
         load_pairing_recovery_fn,
         purge_pairing_recovery_fn,

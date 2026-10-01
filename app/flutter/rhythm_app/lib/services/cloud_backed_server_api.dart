@@ -542,6 +542,8 @@ class CloudBackedServerApi {
     return _delegate.getCanonicalDevice(id);
   }
 
+  Future<RhythmWifiNetwork> getMatterWifiNetwork(String deviceId) =>
+      _delegate.getMatterWifiNetwork(deviceId);
   Future<RhythmWifiProfiles> getWifiProfiles() => _delegate.getWifiProfiles();
   Future<RhythmWifiProfiles> updateWifiProfile(
           {required int revision,
