@@ -1,4 +1,5 @@
 #include "../wifi_change_transaction.h"
+#include "../wifi_network_observation.h"
 #include <algorithm>
 #include <cassert>
 #include <string>
@@ -21,6 +22,15 @@ struct Device {
     bool VerifyOriginal() { calls.push_back("original"); return original; }
 };
 int main() {
+    std::string ssid;
+    assert(rhythm::ConnectedWifiNetwork({{"Saved", false}, {"Current", true}}, ssid));
+    assert(ssid == "Current");
+    assert(!rhythm::ConnectedWifiNetwork({{"Saved", false}}, ssid));
+    assert(ssid.empty());
+    assert(!rhythm::ConnectedWifiNetwork({{"A", true}, {"B", true}}, ssid));
+    assert(!rhythm::ConnectedWifiNetwork({{std::string(33, 'x'), true}}, ssid));
+    assert(!rhythm::ConnectedWifiNetwork({{"", true}}, ssid));
+
     Device success;
     assert(rhythm::ChangeWifi(success).code == WifiChangeCode::Success);
     assert((success.calls == std::vector<std::string>{"preflight","arm","room","add","connect","target","complete","target"}));

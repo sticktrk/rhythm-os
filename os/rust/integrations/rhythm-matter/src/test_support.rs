@@ -16,6 +16,10 @@ use crate::transport::{
 /// A recorded typed controller operation for test assertions.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RecordedOperation {
+    ReadWifiNetwork {
+        node_id: u64,
+        endpoint: u16,
+    },
     ChangeWifi {
         node_id: u64,
         endpoint: u16,
@@ -454,6 +458,18 @@ impl Default for SpyTransport {
 }
 
 impl MatterTransport for SpyTransport {
+    fn read_wifi_network(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+    ) -> Result<rhythm_os::wifi_network::WifiNetwork> {
+        self.record(RecordedOperation::ReadWifiNetwork { node_id, endpoint });
+        Ok(rhythm_os::wifi_network::WifiNetwork {
+            status: rhythm_os::wifi_network::WifiNetworkStatus::Connected,
+            ssid: Some("Observed fixture network".into()),
+        })
+    }
+
     fn change_wifi(
         &self,
         node_id: u64,

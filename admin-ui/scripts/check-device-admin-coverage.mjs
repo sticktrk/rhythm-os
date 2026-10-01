@@ -21,6 +21,8 @@ const explicitExemptions = new Set([
   'GET api/matter/setup-code/{}',
   // Saved commissioning Wi-Fi credentials are likewise owner-only secrets.
   'GET api/pairing/wifi-credentials',
+  // Device SSIDs are uncached owner-only metadata, excluded from staff access.
+  'GET api/matter/wifi-network/{}',
   // Moving the Box with a stored owner secret is an owner-only saved-network
   // operation; staff keep the typed PUT api/wifi.
   'PUT api/wifi/profile/{}',

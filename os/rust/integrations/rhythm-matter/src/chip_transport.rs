@@ -1790,6 +1790,18 @@ impl MatterTransport for ChipTransport {
         Ok(response.commissioned_devices)
     }
 
+    fn read_wifi_network(
+        &self,
+        node_id: u64,
+        endpoint: u16,
+    ) -> Result<rhythm_os::wifi_network::WifiNetwork> {
+        // No transport recovery/replay or controller restart for an optional read.
+        self.ensure_sidecar()?;
+        self.decode_rpc_response(
+            self.send_rpc_envelope(ChipRpcRequest::ReadWifiNetwork { node_id, endpoint })?,
+        )
+    }
+
     fn change_wifi(
         &self,
         node_id: u64,
@@ -3899,6 +3911,38 @@ mod tests {
         );
 
         let _ = fs::remove_file(socket_path);
+    }
+
+    #[test]
+    fn wifi_network_read_forwards_identity_without_reinitialization_or_replay() {
+        let socket_path = temp_socket_path("wifi-network-read");
+        let server = spawn_fake_server_multi(socket_path.clone(), 1, |request| {
+            assert!(matches!(
+                request.request,
+                ChipRpcRequest::ReadWifiNetwork {
+                    node_id: 7,
+                    endpoint: 2
+                }
+            ));
+            ChipRpcResponseEnvelope::ok(
+                request.id,
+                serde_json::json!({"status": "connected", "ssid": "Observed fixture"}),
+            )
+        });
+        let transport = ChipTransport::for_test(socket_path);
+        assert_eq!(
+            transport.read_wifi_network(7, 2).unwrap().ssid.as_deref(),
+            Some("Observed fixture")
+        );
+        assert_eq!(server.join().unwrap().len(), 1);
+        let socket_path = temp_socket_path("wifi-network-old-sidecar");
+        let server = spawn_fake_server_multi(socket_path.clone(), 1, |request| {
+            ChipRpcResponseEnvelope::error(request.id, "CHIP controller backend not initialized")
+        });
+        assert!(ChipTransport::for_test(socket_path)
+            .read_wifi_network(7, 2)
+            .is_err());
+        assert_eq!(server.join().unwrap().len(), 1);
     }
 
     #[test]

@@ -936,6 +936,7 @@ pub struct AppState {
     >,
 
     /// Moves one paired accessory to a saved network through its integration.
+    pub read_wifi_network_fn: Option<crate::wifi_network::ReadWifiNetworkFn>,
     pub change_wifi_fn: Option<crate::wifi_change::WifiChangeFn>,
     /// Admission fence and restart identity for accessory network changes.
     pub wifi_change: Arc<crate::wifi_change::WifiChangeRuntime>,
@@ -1149,6 +1150,7 @@ impl Default for AppState {
             hub_credentials_interceptor: None,
             request_hub_bootstrap_fn: None,
             commissioning_wifi_credentials_provider: None,
+            read_wifi_network_fn: None,
             change_wifi_fn: None,
             wifi_change: Default::default(),
             before_factory_reset_fn: None,
