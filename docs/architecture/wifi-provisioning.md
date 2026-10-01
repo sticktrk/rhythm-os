@@ -95,7 +95,11 @@ The transaction arms a 180-second device fail-safe and stages everything under i
 No fabric, node, room, group, name or schedule writer participates.
 
 Failure attempts fail-safe rollback and reports separately whether the old network
-was verified. A lost completion response remains recovery-required. Transport
+was verified. Read-only preflight results `offline` and `unsupported` do not retain
+the recovery fence: no device fail-safe or network change was attempted, so a
+subsequent deliberate move of this or another bulb can proceed immediately.
+These codes are reserved for that preflight boundary. A lost completion response
+remains recovery-required. Transport
 failure never replays the RPC. Durable receipts contain no credentials, retain a
 five-minute recovery fence for the affected Matter node (including its other
 endpoints), and resolve an interrupted process to recovery-required

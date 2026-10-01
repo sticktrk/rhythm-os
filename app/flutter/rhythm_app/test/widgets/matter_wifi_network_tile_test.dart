@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -92,6 +93,8 @@ void main() {
           ssid: 'Thirty-two-byte-network-name-test');
     var opened = false;
     await tester.pumpWidget(MaterialApp(
+        debugShowCheckedModeBanner: false,
+        theme: ThemeData.dark(),
         home: Scaffold(
             body: MatterWifiNetworkTile(
                 api: api,
@@ -100,6 +103,15 @@ void main() {
                   opened = true;
                 }))));
     await tester.pumpAndSettle();
+    expect(
+        tester.getSize(find.byKey(const ValueKey('bulb-current-wifi'))).height,
+        lessThan(200));
+    final screenshotPath =
+        Platform.environment['RHYTHM_MATTER_WIFI_NETWORK_SCREENSHOT'];
+    if (screenshotPath != null && screenshotPath.isNotEmpty) {
+      await expectLater(
+          find.byType(MaterialApp), matchesGoldenFile(screenshotPath));
+    }
     await tester.tap(find.text('Change network'));
     await tester.pumpAndSettle();
     expect(opened, isTrue);

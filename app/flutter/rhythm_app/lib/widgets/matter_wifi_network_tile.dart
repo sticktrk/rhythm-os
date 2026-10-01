@@ -86,32 +86,34 @@ class _MatterWifiNetworkTileState extends State<MatterWifiNetworkTile> {
   }
 
   @override
-  Widget build(BuildContext context) => Container(
-      decoration: BoxDecoration(
-          color: CelestialColors.backgroundCard,
-          borderRadius: BorderRadius.circular(14)),
+  Widget build(BuildContext context) => Material(
+      color: CelestialColors.backgroundCard,
+      borderRadius: BorderRadius.circular(14),
+      clipBehavior: Clip.antiAlias,
       child: ListTile(
         key: const ValueKey('bulb-current-wifi'),
         contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         leading: const Icon(Icons.wifi_rounded, color: CelestialColors.sunWarm),
         title: const Text('Current Wi-Fi',
             style: TextStyle(color: CelestialColors.textPrimary)),
-        subtitle:
-            Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text(_description,
-              key: const ValueKey('bulb-current-wifi-value'),
-              style: const TextStyle(color: CelestialColors.textSecondary)),
-          if (_network?.status == 'connected')
-            Text(
-                _network?.observedAtMs == null
-                    ? 'Reported by bulb'
-                    : 'Reported by bulb at ${TimeOfDay.fromDateTime(DateTime.fromMillisecondsSinceEpoch(_network!.observedAtMs!)).format(context)}',
-                style: const TextStyle(
-                    color: CelestialColors.textSecondary, fontSize: 12)),
-          if (widget.onTap != null)
-            const Text('Change network',
-                style: TextStyle(color: CelestialColors.sunWarm)),
-        ]),
+        subtitle: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(_description,
+                  key: const ValueKey('bulb-current-wifi-value'),
+                  style: const TextStyle(color: CelestialColors.textSecondary)),
+              if (_network?.status == 'connected')
+                Text(
+                    _network?.observedAtMs == null
+                        ? 'Reported by bulb'
+                        : 'Reported by bulb at ${TimeOfDay.fromDateTime(DateTime.fromMillisecondsSinceEpoch(_network!.observedAtMs!)).format(context)}',
+                    style: const TextStyle(
+                        color: CelestialColors.textSecondary, fontSize: 12)),
+              if (widget.onTap != null)
+                const Text('Change network',
+                    style: TextStyle(color: CelestialColors.sunWarm)),
+            ]),
         onTap: widget.onTap == null
             ? null
             : () async {

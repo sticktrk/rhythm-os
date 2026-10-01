@@ -41,7 +41,9 @@ pub type WifiChangeFn = Arc<
 #[serde(rename_all = "snake_case")]
 pub enum WifiChangeCode {
     Succeeded,
+    /// Read-only preflight failed; no device fail-safe or change was attempted.
     Unsupported,
+    /// Read-only preflight failed; no device fail-safe or change was attempted.
     Offline,
     NetworkSlots,
     CredentialsRejected,
@@ -330,7 +332,11 @@ fn finish(state: &SharedState, operation_id: &str, outcome: WifiChangeOutcome) {
             .find(|e| e.receipt.operation_id == operation_id)
         {
             entry.receipt.status = "complete".into();
-            // A failed/uncertain transaction keeps the fail-safe grace fence.
+            // Offline/unsupported are returned only by read-only preflight,
+            // before arming the device fail-safe. There is nothing to recover
+            // from, so they must not block this or other bulbs for five minutes.
+            // Every possible device mutation still requires success or verified
+            // rollback to release the fail-safe grace fence early.
             if !outcome.needs_recovery() {
                 entry.receipt.retry_after_ms = 0;
             }
