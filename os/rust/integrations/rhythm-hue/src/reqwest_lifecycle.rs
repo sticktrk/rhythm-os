@@ -894,6 +894,30 @@ fn hue_release_context(state: &SharedState, key: &HubKey) -> Result<Option<HueAu
     }))
 }
 
+fn hue_authority_requires_handoff(state: &SharedState, key: &HubKey) -> Result<bool> {
+    let (storage, bridge_id) = {
+        let state = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+        if !state.external_controller_authority_is_ready(key) {
+            return Ok(true);
+        }
+        let Some(storage) = state.storage.clone() else {
+            return Ok(true);
+        };
+        let Some(bridge_id) = state
+            .hub_credentials
+            .get(key)
+            .and_then(|credentials| credentials.get_str("bridge_id"))
+            .filter(|id| !id.trim().is_empty())
+        else {
+            return Ok(true);
+        };
+        (storage, bridge_id.to_string())
+    };
+    let ownership = crate::ownership::load_controller_ownership(storage.as_ref(), &bridge_id)?;
+    let scope = hue_automation_suppression_scope(state, key)?;
+    Ok(!ownership.is_some_and(|ownership| ownership.has_active_suppression_scope(&scope)))
+}
+
 fn persist_connected_bridge_identity(
     state: &SharedState,
     key: &HubKey,
@@ -1520,6 +1544,18 @@ impl ExternalLightHubIntegration for HueIntegration {
         true
     }
 
+    fn topology_group_sync_allows_concurrent_dispatch(&self) -> bool {
+        true
+    }
+
+    fn external_controller_authority_requires_handoff(
+        &self,
+        state: &SharedState,
+        key: &HubKey,
+    ) -> Result<bool> {
+        hue_authority_requires_handoff(state, key)
+    }
+
     fn sync_topology_groups(&self, state: &SharedState, key: &HubKey) -> Result<()> {
         let enabled = state
             .lock()
@@ -1533,17 +1569,25 @@ impl ExternalLightHubIntegration for HueIntegration {
         // Publish the individual-device fallback before the first bridge
         // mutation. If Hue goes offline or readback is partial, this durable
         // fence survives restart and prevents a stale grouped target.
-        set_hue_topology_sync_state(state, key, true, false)?;
+        let dispatch_lock = state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .external_topology_transaction_lock
+            .dispatch_lock();
+        {
+            // Drain previously admitted grouped commands before publishing
+            // the durable individual-device route and changing membership.
+            let _dispatch = dispatch_lock
+                .lock()
+                .map_err(|_| anyhow::anyhow!("External controller dispatch lock poisoned"))?;
+            set_hue_topology_sync_state(state, key, true, false)?;
+        }
         let result = (|| {
             let context = hue_authority_context(state, key)?;
             let transport = ReqwestHueTransport::new(&context.bridge_ip)?;
             let bridge_id =
                 crate::ownership::connected_hue_bridge_id(&transport, &context.username)?;
             persist_connected_bridge_identity(state, key, &bridge_id)?;
-            let operation_lock = crate::ownership::controller_operation_lock(&bridge_id);
-            let _operation = operation_lock
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Failed to lock Hue controller operations"))?;
             let mut ownership =
                 active_ownership_for_topology_sync(context.storage.as_ref(), &bridge_id)?;
 
@@ -1617,6 +1661,7 @@ impl ExternalLightHubIntegration for HueIntegration {
         state: &SharedState,
         key: &HubKey,
     ) -> Result<()> {
+        let handoff = hue_authority_requires_handoff(state, key)?;
         let has_rhythm_room_consent = state
             .lock()
             .map_err(|_| anyhow::anyhow!("lock"))?
@@ -1680,9 +1725,15 @@ impl ExternalLightHubIntegration for HueIntegration {
             anyhow::bail!("Hue bridge release has started; takeover cannot be resumed");
         }
         let operation_lock = crate::ownership::controller_operation_lock(&bridge_id);
-        let _operation = operation_lock
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Failed to lock Hue controller operations"))?;
+        let _operation = if handoff {
+            Some(
+                operation_lock
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("Failed to lock Hue controller operations"))?,
+            )
+        } else {
+            None
+        };
         crate::ownership::acquire_authoritative_control_in_scope(
             context.storage.as_ref(),
             key,
@@ -3523,6 +3574,89 @@ mod tests {
                 .unwrap();
         }
         (state, key)
+    }
+
+    #[test]
+    fn only_ready_active_matching_hue_scope_can_reconcile_without_handoff() {
+        use serde_json::json;
+        let path = std::env::temp_dir().join(format!(
+            "rhythm-hue-maintenance-scope-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        let storage = Arc::new(FileStorage::new(path.to_str().unwrap()).unwrap());
+        let (state, key) = rhythm_owned_hue_room_state();
+        {
+            let mut app = state.lock().unwrap();
+            app.storage = Some(storage.clone());
+            let mut credentials = hue_credentials(&key.address, "user");
+            credentials.data["bridge_id"] = json!("bridge-maintenance");
+            app.hub_credentials.insert(key.clone(), credentials);
+            app.mark_external_controller_authority_ready(&key);
+        }
+        assert!(hue_authority_requires_handoff(&state, &key).unwrap());
+        let spy = SpyHueTransport::new();
+        for kind in [
+            "bridge",
+            "device",
+            "light",
+            "room",
+            "zone",
+            "scene",
+            "smart_scene",
+            "behavior_instance",
+        ] {
+            spy.set_resource_response(kind, json!({"data": if kind == "bridge" { json!([{"id": "bridge-maintenance"}]) } else { json!([]) }, "errors": []}));
+        }
+        spy.set_v1_response("rules", json!({}));
+        spy.set_v1_response("schedules", json!({}));
+        let scope = hue_automation_suppression_scope(&state, &key).unwrap();
+        let mut ownership = crate::ownership::acquire_authoritative_control_in_scope(
+            storage.as_ref(),
+            &key,
+            &spy,
+            "user",
+            &scope,
+        )
+        .unwrap();
+        assert!(!hue_authority_requires_handoff(&state, &key).unwrap());
+        // Loading the durable receipt again preserves the same decision.
+        assert!(!INTEGRATION
+            .external_controller_authority_requires_handoff(&state, &key)
+            .unwrap());
+        state
+            .lock()
+            .unwrap()
+            .mark_external_controller_authority_pending(&key);
+        assert!(hue_authority_requires_handoff(&state, &key).unwrap());
+        state
+            .lock()
+            .unwrap()
+            .mark_external_controller_authority_ready(&key);
+        for phase in [
+            crate::ownership::HueOwnershipPhase::ClearIncomplete,
+            crate::ownership::HueOwnershipPhase::Restoring,
+            crate::ownership::HueOwnershipPhase::ReleasePending,
+        ] {
+            ownership.phase = phase;
+            crate::ownership::persist_controller_ownership(storage.as_ref(), &ownership).unwrap();
+            assert!(hue_authority_requires_handoff(&state, &key).unwrap());
+        }
+        ownership.phase = crate::ownership::HueOwnershipPhase::Active;
+        crate::ownership::persist_controller_ownership(storage.as_ref(), &ownership).unwrap();
+        state
+            .lock()
+            .unwrap()
+            .topology
+            .get_mut("rhythm-office")
+            .unwrap()
+            .hub_room_bindings[0]
+            .light_device_ids
+            .push("new-bulb".to_string());
+        assert!(hue_authority_requires_handoff(&state, &key).unwrap());
+        drop(state);
+        drop(storage);
+        let _ = std::fs::remove_dir_all(path);
     }
 
     #[test]

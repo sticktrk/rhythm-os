@@ -41,6 +41,7 @@ pub mod state;
 pub mod state_selection;
 pub mod storage;
 pub mod topology;
+pub mod topology_transaction;
 
 pub mod axum_router;
 pub mod server_event;

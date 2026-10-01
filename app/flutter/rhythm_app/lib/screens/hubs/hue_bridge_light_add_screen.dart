@@ -76,7 +76,8 @@ class HueBridgeLightAddScreen extends StatefulWidget {
 class _HueBridgeLightAddScreenState extends State<HueBridgeLightAddScreen> {
   static const _hueGold = Color(0xFFFFB900);
   static const _danger = Color(0xFFEF5350);
-  static const _timeout = Duration(minutes: 2);
+  // Cover the bridge's five-minute serial search plus V2 discovery and sync.
+  static const _timeout = Duration(minutes: 7);
   static const _stages = [
     StageTimelineItem(
       label: 'Ask the Hue Bridge to search',
