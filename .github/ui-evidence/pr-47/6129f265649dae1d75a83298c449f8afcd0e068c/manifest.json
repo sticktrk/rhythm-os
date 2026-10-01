@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "repository": "sticktrk/rhythm-os",
+  "pull_request": 47,
+  "head": "6129f265649dae1d75a83298c449f8afcd0e068c",
+  "uses_mock_data": true,
+  "source_test": "test/screens/hue_bridge_light_add_screen_test.dart",
+  "screenshots": [
+    {
+      "file": "hue-search.png",
+      "caption": "Hue Bridge search in progress with deterministic test fixtures at phone size."
+    }
+  ]
+}
