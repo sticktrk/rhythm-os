@@ -374,6 +374,9 @@ pub fn controller_authority_diagnostics(
 }
 
 impl HueControllerOwnership {
+    pub fn has_active_suppression_scope(&self, scope: &HueAutomationSuppressionScope) -> bool {
+        self.phase == HueOwnershipPhase::Active && self.suppression_scope.as_ref() == Some(scope)
+    }
     fn captured(baseline: HueBridgeOwnershipBaseline) -> Self {
         Self {
             schema_version: HUE_CONTROLLER_OWNERSHIP_SCHEMA_VERSION,

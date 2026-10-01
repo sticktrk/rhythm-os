@@ -85,7 +85,7 @@ void main() {
       'serial': 'E277DA',
       'hub_address': '192.0.2.10',
     });
-    expect(capturedTimeout, const Duration(minutes: 2));
+    expect(capturedTimeout, const Duration(minutes: 7));
     expect(capturedSessionId, 'hue-bridge-test');
     expect(result?.addedCount, 1);
     expect(result?.devices.single.deviceId, 'hue-light-1');

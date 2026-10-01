@@ -533,8 +533,11 @@ pub struct AppState {
     /// to an external grouped-room controller. The ordinary AppState mutex is
     /// intentionally released during bridge I/O, so this lock prevents a
     /// failed operation from restoring a snapshot over another successful
-    /// room edit.
-    pub external_topology_transaction_lock: Arc<Mutex<()>>,
+    /// room edit. Mutating transactions also fence ordinary dispatch; routine
+    /// discovery and explicitly safe integration maintenance serialize
+    /// topology without retaining that dispatch barrier across bridge I/O.
+    pub external_topology_transaction_lock:
+        Arc<crate::topology_transaction::ExternalTopologyTransactionLock>,
     /// Serializes user-facing external-controller policy transitions while
     /// allowing the integration callback to acquire the topology transaction
     /// lock around bridge I/O. Keeping these locks distinct avoids a
@@ -1075,7 +1078,9 @@ impl Default for AppState {
             topology_group_sync_in_progress: false,
             topology_group_sync_pending: false,
             authority_state_recovery_required: false,
-            external_topology_transaction_lock: Arc::new(Mutex::new(())),
+            external_topology_transaction_lock: Arc::new(
+                crate::topology_transaction::ExternalTopologyTransactionLock::default(),
+            ),
             external_controller_policy_transaction_lock: Arc::new(Mutex::new(())),
             room_observed_power: HashMap::new(),
             observed_power_failure_refresh_queued: false,

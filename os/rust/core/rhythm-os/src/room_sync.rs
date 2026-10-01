@@ -240,7 +240,7 @@ fn sync_from_hub_for_key_locally(
         .external_topology_transaction_lock
         .clone();
     let _transaction = transaction_lock
-        .lock()
+        .lock_reconciliation()
         .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
     let Some(_guard) = try_acquire_hub_sync_guard(state, hub_key)? else {
         debug!(target: "room_sync", "Skipping sync for {}: already in progress", hub_key);
@@ -343,7 +343,7 @@ fn sync_from_hub_for_key_wait_with_policy(
         .clone();
     let report = {
         let _transaction = transaction_lock
-            .lock()
+            .lock_reconciliation()
             .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
         let _guard = acquire_hub_sync_guard_with_timeout(state, hub_key, timeout)?;
         sync_from_hub_for_key_acquired(

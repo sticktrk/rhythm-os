@@ -72,7 +72,7 @@ pub struct HueLightController<H: HueTransport> {
     capability_state: Option<SharedState>,
     capability_hub_key: Option<HubKey>,
     sse_liveness: Option<Arc<HueSseLiveness>>,
-    external_topology_transaction_lock: Option<Arc<Mutex<()>>>,
+    authority_dispatch_lock: Option<Arc<Mutex<()>>>,
     controller_operation_lock: Option<Arc<Mutex<()>>>,
     authority_lock_timeout: Duration,
 }
@@ -94,7 +94,7 @@ impl<H: HueTransport> HueLightController<H> {
             capability_state: None,
             capability_hub_key: None,
             sse_liveness: None,
-            external_topology_transaction_lock: None,
+            authority_dispatch_lock: None,
             controller_operation_lock: None,
             authority_lock_timeout: AUTHORITY_LOCK_TIMEOUT,
         }
@@ -103,10 +103,10 @@ impl<H: HueTransport> HueLightController<H> {
     /// Attach shared state so room capabilities can be derived from the
     /// canonical registry at command time.
     pub fn with_capability_source(mut self, state: SharedState, hub_key: HubKey) -> Self {
-        self.external_topology_transaction_lock = state
+        self.authority_dispatch_lock = state
             .lock()
             .ok()
-            .map(|state| state.external_topology_transaction_lock.clone());
+            .map(|state| state.external_topology_transaction_lock.dispatch_lock());
         self.capability_state = Some(state);
         self.capability_hub_key = Some(hub_key);
         self
@@ -148,11 +148,11 @@ impl<H: HueTransport> HueLightController<H> {
             .transpose()
     }
 
-    fn lock_topology_transaction(
+    fn lock_authority_dispatch(
         &self,
         deadline: Instant,
     ) -> LightControlResult<Option<std::sync::MutexGuard<'_, ()>>> {
-        self.external_topology_transaction_lock
+        self.authority_dispatch_lock
             .as_ref()
             .map(|lock| {
                 lock_before_deadline(
@@ -172,14 +172,17 @@ impl<H: HueTransport> HueLightController<H> {
         let Some(key) = self.capability_hub_key.as_ref() else {
             return Ok(());
         };
-        let ready = state
-            .lock()
-            .map_err(|_| {
-                LightControlError::CommandFailed(
-                    "Hue authority state is temporarily unavailable".to_string(),
-                )
-            })?
-            .external_controller_authority_is_ready(key);
+        let state = state.lock().map_err(|_| {
+            LightControlError::CommandFailed(
+                "Hue authority state is temporarily unavailable".to_string(),
+            )
+        })?;
+        if state.external_topology_transaction_lock.is_poisoned() {
+            return Err(LightControlError::CommandFailed(
+                "Hue topology is temporarily unavailable".to_string(),
+            ));
+        }
+        let ready = state.external_controller_authority_is_ready(key);
         if !ready {
             return Err(LightControlError::CommandFailed(
                 "Hue controller authority is not ready".to_string(),
@@ -194,16 +197,18 @@ impl<H: HueTransport> HueLightController<H> {
         Option<std::sync::MutexGuard<'_, ()>>,
         Option<std::sync::MutexGuard<'_, ()>>,
     )> {
-        // The topology transaction is the authority hand-off barrier. Recheck
-        // readiness only after crossing it so a command queued behind release
+        // The dispatch barrier fences ownership handoffs. Ordinary topology
+        // maintenance holds only topology serialization, allowing device
+        // control while native groups are suspended. Recheck readiness after
+        // both locks so a command queued behind release
         // cannot write to a bridge Rhythm has just restored to the user.
         // Keep one deadline across both locks. Timed-out callers must leave the
         // composite mailbox instead of lingering as uncancellable blocking
         // tasks and starving every later Hue command until process restart.
         let deadline = Instant::now() + self.authority_lock_timeout;
-        let topology = self.lock_topology_transaction(deadline)?;
-        self.ensure_authority_ready()?;
+        let topology = self.lock_authority_dispatch(deadline)?;
         let operation = self.lock_controller_operations(deadline)?;
+        self.ensure_authority_ready()?;
         Ok((topology, operation))
     }
 
@@ -277,6 +282,7 @@ impl<H: HueTransport> HueLightController<H> {
         grouped_light_id: &str,
         command: LightingCommand,
     ) -> LightControlResult<()> {
+        self.ensure_grouped_dispatch_ready()?;
         let (room_label, _caps, adapted) = self.room_context(room_id, &command);
         let dynamics = adapted.transition_ms.map(|ms| ms as u16);
         let started = Instant::now();
@@ -361,6 +367,7 @@ impl<H: HueTransport> HueLightController<H> {
         grouped_light_id: &str,
         transition_ms: Option<u32>,
     ) -> LightControlResult<()> {
+        self.ensure_grouped_dispatch_ready()?;
         let room_label = rhythm_os::controller_helpers::format_room_label(&self.registry, room_id);
         let fade_ms = transition_ms
             .map(|ms| u16::try_from(ms).unwrap_or(u16::MAX))
@@ -435,6 +442,7 @@ impl<H: HueTransport> HueLightController<H> {
         room_id: &str,
         grouped_light_id: &str,
     ) -> LightControlResult<bool> {
+        self.ensure_grouped_dispatch_ready()?;
         self.client
             .is_grouped_light_on(&self.username, grouped_light_id)
             .map_err(|e| {
@@ -446,6 +454,9 @@ impl<H: HueTransport> HueLightController<H> {
     }
 
     fn group_target_for_devices(&self, native_ids: &[String]) -> Option<(String, String)> {
+        if self.grouped_dispatch_is_suspended() {
+            return None;
+        }
         let registry = self.registry.lock().ok()?;
         let room_id = registry.find_room_for_exact_light_entities(native_ids)?;
         let grouped_light_id = registry.get_grouped_light_id(&room_id)?;
@@ -458,6 +469,26 @@ impl<H: HueTransport> HueLightController<H> {
             return None;
         }
         Some((room_id, grouped_light_id))
+    }
+
+    fn grouped_dispatch_is_suspended(&self) -> bool {
+        match (&self.capability_state, &self.capability_hub_key) {
+            (Some(state), Some(key)) => state
+                .lock()
+                .map(|state| state.topology.external_grouped_dispatch_is_suspended(key))
+                .unwrap_or(true),
+            _ => false,
+        }
+    }
+
+    fn ensure_grouped_dispatch_ready(&self) -> LightControlResult<()> {
+        if self.grouped_dispatch_is_suspended() {
+            return Err(LightControlError::CommandFailed(
+                "Hue grouped target is awaiting topology verification; retry through current device routing"
+                    .to_string(),
+            ));
+        }
+        Ok(())
     }
 
     /// Canonical Hue endpoints are device resource IDs because Hue rooms own
@@ -1001,6 +1032,66 @@ mod tests {
             }
             other => panic!("Expected SetGroupedLight, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn topology_reconciliation_keeps_device_commands_and_reads_available() {
+        let state = Arc::new(Mutex::new(AppState::default()));
+        let key = HubKey::new(HubType::new(HubType::HUE), "192.0.2.1");
+        let (controller, registry) = make_spy_controller();
+        registry
+            .lock()
+            .unwrap()
+            .upsert_room("room1", "Living", "gl1", &["bulb".to_string()]);
+        controller.client.set_resource_response("device", serde_json::json!({"data": [{"id": "bulb", "services": [{"rid": "light-bulb", "rtype": "light"}]}]}));
+        let controller = controller
+            .with_capability_source(state.clone(), key.clone())
+            .with_authority_lock_timeout(Duration::from_millis(25));
+        state
+            .lock()
+            .unwrap()
+            .topology
+            .set_external_grouped_dispatch_suspended(&key, true);
+        let transaction_lock = state
+            .lock()
+            .unwrap()
+            .external_topology_transaction_lock
+            .clone();
+        let _reconciliation = transaction_lock.lock_reconciliation().unwrap();
+        let target = HubDispatchTarget::Devices {
+            native_ids: vec!["bulb".to_string()],
+        };
+        block_on(controller.turn_on_target(&target, LightingCommand::new(80, 4000))).unwrap();
+        assert_eq!(controller.client.set_grouped_light_count(), 0);
+        assert_eq!(controller.client.set_light_calls().len(), 1);
+        block_on(controller.any_lights_on_target(&target)).unwrap();
+        block_on(controller.turn_off_target(&target, None)).unwrap();
+        assert_eq!(controller.client.set_light_calls().len(), 2);
+
+        let stale = HubDispatchTarget::Group {
+            room_id: "room1".to_string(),
+            control_id: "gl1".to_string(),
+        };
+        assert!(
+            block_on(controller.turn_on_target(&stale, LightingCommand::new(80, 4000))).is_err()
+        );
+        assert_eq!(controller.client.set_grouped_light_count(), 0);
+
+        state
+            .lock()
+            .unwrap()
+            .topology
+            .set_external_grouped_dispatch_suspended(&key, false);
+        block_on(controller.turn_on_target(&target, LightingCommand::new(80, 4000))).unwrap();
+        assert_eq!(controller.client.set_grouped_light_count(), 1);
+        state
+            .lock()
+            .unwrap()
+            .mark_external_controller_authority_pending(&key);
+        assert!(
+            block_on(controller.turn_on_target(&target, LightingCommand::new(80, 4000))).is_err()
+        );
+        assert_eq!(controller.client.set_grouped_light_count(), 1);
     }
 
     #[test]

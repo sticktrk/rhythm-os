@@ -706,6 +706,13 @@ pub trait ExternalLightHubIntegration: Send + Sync {
         Ok(())
     }
 
+    /// Opt in only when unverified native groups are fenced and individual
+    /// device control stays safe throughout projection. Other integrations
+    /// retain the serialized dispatch contract.
+    fn topology_group_sync_allows_concurrent_dispatch(&self) -> bool {
+        false
+    }
+
     /// Delete one source-owned native room after Rhythm has durably staged
     /// the corresponding local topology deletion.
     fn delete_source_room(
@@ -751,6 +758,18 @@ pub trait ExternalLightHubIntegration: Send + Sync {
     /// grouped rooms.
     fn requires_external_controller_authority(&self) -> bool {
         self.requires_grouped_room_control()
+    }
+
+    /// Whether reconciliation changes or recovers ownership. An integration
+    /// may return false only for an already-ready, durably verified authority
+    /// scope; maintenance then keeps topology serialization without stopping
+    /// ordinary commands. Errors still fence authority for recovery.
+    fn external_controller_authority_requires_handoff(
+        &self,
+        _state: &SharedState,
+        _key: &HubKey,
+    ) -> Result<bool> {
+        Ok(true)
     }
 
     /// Acquire or resume authoritative control after the integration's first
@@ -1963,7 +1982,7 @@ pub fn integration_callbacks(
             .external_topology_transaction_lock
             .clone();
         let _transaction = transaction_lock
-            .lock()
+            .lock_reconciliation()
             .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
         if state
             .lock()
@@ -1997,6 +2016,15 @@ pub fn integration_callbacks(
             if integration.requires_grouped_room_control() && !requires_grouped_room_control {
                 continue;
             }
+            let dispatch_lock = transaction_lock.dispatch_lock();
+            let _dispatch =
+                if integration.topology_group_sync_allows_concurrent_dispatch() {
+                    None
+                } else {
+                    Some(dispatch_lock.lock().map_err(|_| {
+                        anyhow::anyhow!("External controller dispatch lock poisoned")
+                    })?)
+                };
             if let Err(error) = integration.sync_topology_groups(state, &key) {
                 if requires_grouped_room_control {
                     fence_required_group_authority_uncertainty(state, &key);
@@ -2054,7 +2082,7 @@ pub fn integration_callbacks(
                 .external_topology_transaction_lock
                 .clone();
             let _transaction = transaction_lock
-                .lock()
+                .lock_reconciliation()
                 .map_err(|_| anyhow::anyhow!("External topology transaction lock poisoned"))?;
             if state
                 .lock()
@@ -2076,13 +2104,43 @@ pub fn integration_callbacks(
             {
                 return Ok(());
             }
-            if requires_controller_authority {
+            let handoff =
+                match integration.external_controller_authority_requires_handoff(state, key) {
+                    Ok(handoff) => handoff,
+                    Err(error) => {
+                        if requires_controller_authority {
+                            state
+                                .lock()
+                                .map_err(|_| anyhow::anyhow!("lock"))?
+                                .mark_external_controller_authority_pending(key);
+                        }
+                        return Err(error);
+                    }
+                };
+            let dispatch_lock = transaction_lock.dispatch_lock();
+            let _dispatch =
+                if handoff {
+                    Some(dispatch_lock.lock().map_err(|_| {
+                        anyhow::anyhow!("External controller dispatch lock poisoned")
+                    })?)
+                } else {
+                    None
+                };
+            if requires_controller_authority && handoff {
                 state
                     .lock()
                     .map_err(|_| anyhow::anyhow!("lock"))?
                     .mark_external_controller_authority_pending(key);
             }
-            integration.reconcile_external_controller_authority(state, key)?;
+            if let Err(error) = integration.reconcile_external_controller_authority(state, key) {
+                if requires_controller_authority {
+                    state
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("lock"))?
+                        .mark_external_controller_authority_pending(key);
+                }
+                return Err(error);
+            }
             if requires_controller_authority {
                 state
                     .lock()
@@ -2607,6 +2665,175 @@ mod tests {
         &[&MOCK_AUTHORITY_ONLY];
     static ROLLOUT_GATE_TEST_INTEGRATIONS: &[&dyn ExternalLightHubIntegration] =
         &[&MOCK_ROLLOUT_GATE];
+
+    struct BlockingReconciliationIntegration {
+        handoff: bool,
+        concurrent_projection: bool,
+        fails: bool,
+        entered: mpsc::Sender<()>,
+        resume: Mutex<mpsc::Receiver<()>>,
+    }
+
+    impl BlockingReconciliationIntegration {
+        fn bridge_io(&self) -> Result<()> {
+            self.entered.send(()).unwrap();
+            self.resume
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap();
+            if self.fails {
+                anyhow::bail!("injected reconciliation failure");
+            }
+            Ok(())
+        }
+    }
+
+    impl ExternalLightHubIntegration for BlockingReconciliationIntegration {
+        fn hub_type(&self) -> &'static str {
+            "maintenance"
+        }
+        fn provider(&self) -> &'static dyn HubProvider {
+            &MOCK_HUE_PROVIDER
+        }
+        fn connect_and_start(&self, _: SharedState, _: &HubKey) -> Result<Receiver<HubEvent>> {
+            Ok(mpsc::channel().1)
+        }
+        fn ensure_runtime(&self, _: &SharedState) -> Result<()> {
+            Ok(())
+        }
+        fn requires_external_controller_authority(&self) -> bool {
+            true
+        }
+        fn external_controller_authority_requires_handoff(
+            &self,
+            _: &SharedState,
+            _: &HubKey,
+        ) -> Result<bool> {
+            Ok(self.handoff)
+        }
+        fn topology_group_sync_allows_concurrent_dispatch(&self) -> bool {
+            self.concurrent_projection
+        }
+        fn reconcile_external_controller_authority(
+            &self,
+            _: &SharedState,
+            _: &HubKey,
+        ) -> Result<()> {
+            self.bridge_io()
+        }
+        fn sync_topology_groups(&self, _: &SharedState, _: &HubKey) -> Result<()> {
+            self.bridge_io()
+        }
+    }
+
+    fn exercise_blocking_reconciliation(
+        handoff: bool,
+        projection: bool,
+        concurrent_projection: bool,
+        fails: bool,
+    ) {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let integration: &'static dyn ExternalLightHubIntegration =
+            Box::leak(Box::new(BlockingReconciliationIntegration {
+                handoff,
+                concurrent_projection,
+                fails,
+                entered: entered_tx,
+                resume: Mutex::new(resume_rx),
+            }));
+        let integrations: &'static [&'static dyn ExternalLightHubIntegration] =
+            Box::leak(Box::new([integration]));
+        let callbacks = integration_callbacks(integrations);
+        let state: SharedState = Arc::new(Mutex::new(crate::state::AppState::default()));
+        let key = HubKey::new(HubType::new("maintenance"), "bridge");
+        {
+            let mut app = state.lock().unwrap();
+            app.set_external_controller_authority_enabled(key.hub_type.clone(), true);
+            app.mark_external_controller_authority_ready(&key);
+            app.hubs.insert(
+                key.clone(),
+                ActiveHub {
+                    hub_type: key.hub_type.clone(),
+                    hub_key: key.clone(),
+                    runtime: None,
+                    hub_data: Box::new(()),
+                    registry: None,
+                    discovery: None,
+                    shutdown: Arc::new(AtomicBool::new(false)),
+                },
+            );
+        }
+        let worker_state = state.clone();
+        let worker_key = key.clone();
+        let worker = std::thread::spawn(move || {
+            if projection {
+                (callbacks.sync_topology_groups_fn)(&worker_state)
+            } else {
+                (callbacks.reconcile_external_controller_authority_fn)(&worker_state, &worker_key)
+            }
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let transaction = state
+            .lock()
+            .unwrap()
+            .external_topology_transaction_lock
+            .clone();
+        assert!(
+            matches!(
+                transaction.try_lock(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ),
+            "topology commits must stay serialized during bridge I/O"
+        );
+        let dispatch_lock = transaction.dispatch_lock();
+        let dispatch_available = dispatch_lock.try_lock().is_ok();
+        let ready_during_io = state
+            .lock()
+            .unwrap()
+            .external_controller_authority_is_ready(&key);
+        // Release the fake I/O before asserting so regressions do not strand a worker.
+        resume_tx.send(()).unwrap();
+        let result = worker.join().unwrap();
+        assert_eq!(result.is_err(), fails);
+        assert_eq!(
+            dispatch_available,
+            if projection {
+                concurrent_projection
+            } else {
+                !handoff
+            }
+        );
+        assert_eq!(ready_during_io, projection || !handoff);
+        assert!(transaction.try_lock().is_ok());
+        if !projection {
+            assert_eq!(
+                state
+                    .lock()
+                    .unwrap()
+                    .external_controller_authority_is_ready(&key),
+                !fails
+            );
+        }
+    }
+
+    #[test]
+    fn routine_authority_maintenance_does_not_fence_dispatch() {
+        exercise_blocking_reconciliation(false, false, false, false);
+    }
+
+    #[test]
+    fn authority_handoff_and_failed_maintenance_remain_fenced() {
+        exercise_blocking_reconciliation(true, false, false, false);
+        exercise_blocking_reconciliation(false, false, false, true);
+    }
+
+    #[test]
+    fn concurrent_projection_is_explicit_and_keeps_topology_serialized() {
+        exercise_blocking_reconciliation(false, true, true, false);
+        exercise_blocking_reconciliation(false, true, false, false);
+    }
 
     fn string_error<T>(result: Result<T>) -> String {
         match result {

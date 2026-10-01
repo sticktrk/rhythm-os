@@ -22,7 +22,11 @@ const HUE_IDENTIFY_ACTION: &str = "identify";
 // narrower safe range before commands reach this transport.
 const HUE_VENDOR_MIN_MIRED: u32 = 50;
 const HUE_VENDOR_MAX_MIRED: u32 = 1000;
-const HUE_BRIDGE_SEARCH_TIMEOUT: Duration = Duration::from_secs(45);
+const HUE_BRIDGE_SENSOR_SEARCH_TIMEOUT: Duration = Duration::from_secs(45);
+// Serial searches can keep running on the bridge for several minutes. Ending
+// our pairing lifecycle early leaves the eventual bulb outside its assignment
+// flow. Sensors keep their existing, separate search budget.
+const HUE_BRIDGE_LIGHT_SEARCH_TIMEOUT: Duration = Duration::from_secs(300);
 const HUE_BRIDGE_SEARCH_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const HUE_BRIDGE_REMOVE_TIMEOUT: Duration = Duration::from_secs(15);
 const HUE_BRIDGE_REMOVE_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -365,7 +369,41 @@ fn completed_new_scan(
     current: &NewLightsSnapshot,
     saw_active: bool,
 ) -> bool {
-    !current.active && (saw_active || current.generation != before.generation)
+    !current.active
+        && (saw_active
+            || current.generation != before.generation
+            || current.lights.iter().any(|light| {
+                !before
+                    .lights
+                    .iter()
+                    .any(|old| old.legacy_id == light.legacy_id)
+            }))
+}
+
+fn poll_bridge_light_search(
+    before: &NewLightsSnapshot,
+    mut read_status: impl FnMut() -> Result<serde_json::Value>,
+    mut elapsed: impl FnMut() -> Duration,
+    mut wait: impl FnMut(Duration),
+) -> Result<Vec<HueBridgeSearchLight>> {
+    let mut saw_active = false;
+    loop {
+        let current = parse_new_lights(&read_status()?)?;
+        if current.active {
+            saw_active = true;
+        } else if completed_new_scan(before, &current, saw_active) {
+            log::info!(target: "hue_pairing", "Hue Bridge light search completed after {} seconds with {} results", elapsed().as_secs(), current.lights.len());
+            return Ok(current.lights);
+        }
+        let elapsed = elapsed();
+        if elapsed >= HUE_BRIDGE_LIGHT_SEARCH_TIMEOUT {
+            log::warn!(target: "hue_pairing", "Hue Bridge light search did not complete within {} seconds", HUE_BRIDGE_LIGHT_SEARCH_TIMEOUT.as_secs());
+            anyhow::bail!(
+                "Hue Bridge light search timed out before a new scan generation completed"
+            );
+        }
+        wait(HUE_BRIDGE_SEARCH_POLL_INTERVAL.min(HUE_BRIDGE_LIGHT_SEARCH_TIMEOUT - elapsed));
+    }
 }
 
 fn parse_new_sensors(value: &serde_json::Value) -> Result<NewSensorsSnapshot> {
@@ -1088,35 +1126,27 @@ impl HueTransport for ReqwestHueTransport {
         })?;
         validate_hue_v1_success("POST lights search", &value, "/lights")?;
 
-        let deadline = std::time::Instant::now() + HUE_BRIDGE_SEARCH_TIMEOUT;
-        let mut saw_active = false;
-        loop {
-            let response = self
-                .client
-                .get(&status_url)
-                .send()
-                .map_err(|_| anyhow::anyhow!("Hue light-search status request failed"))?;
-            let status = response.status();
-            let body = response.text().unwrap_or_default();
-            if !status.is_success() {
-                anyhow::bail!("GET lights/new failed with HTTP status {status}");
-            }
-            let value: serde_json::Value = serde_json::from_str(&body).map_err(|error| {
-                anyhow::anyhow!("GET lights/new returned invalid JSON: {error}")
-            })?;
-            let current = parse_new_lights(&value)?;
-            if current.active {
-                saw_active = true;
-            } else if completed_new_scan(&before, &current, saw_active) {
-                return Ok(current.lights);
-            }
-            if std::time::Instant::now() >= deadline {
-                anyhow::bail!(
-                    "Hue Bridge light search timed out before a new scan generation completed"
-                );
-            }
-            std::thread::sleep(HUE_BRIDGE_SEARCH_POLL_INTERVAL);
-        }
+        let started = std::time::Instant::now();
+        poll_bridge_light_search(
+            &before,
+            || {
+                let response = self
+                    .client
+                    .get(&status_url)
+                    .send()
+                    .map_err(|_| anyhow::anyhow!("Hue light-search status request failed"))?;
+                let status = response.status();
+                let body = response.text().unwrap_or_default();
+                if !status.is_success() {
+                    anyhow::bail!("GET lights/new failed with HTTP status {status}");
+                }
+                serde_json::from_str(&body).map_err(|error| {
+                    anyhow::anyhow!("GET lights/new returned invalid JSON: {error}")
+                })
+            },
+            || started.elapsed(),
+            std::thread::sleep,
+        )
     }
 
     fn search_new_sensors(&self, username: &str) -> Result<Vec<HueBridgeSearchSensor>> {
@@ -1158,7 +1188,7 @@ impl HueTransport for ReqwestHueTransport {
         })?;
         validate_hue_v1_success("POST sensors search", &value, "/sensors")?;
 
-        let deadline = std::time::Instant::now() + HUE_BRIDGE_SEARCH_TIMEOUT;
+        let deadline = std::time::Instant::now() + HUE_BRIDGE_SENSOR_SEARCH_TIMEOUT;
         let mut saw_active = false;
         loop {
             let response = self
@@ -1401,6 +1431,80 @@ impl HueTransport for ReqwestHueTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serial_search_waits_for_a_late_bridge_result() {
+        let before = parse_new_lights(&serde_json::json!({"lastscan": "old"})).unwrap();
+        let elapsed = std::cell::Cell::new(Duration::ZERO);
+        let lights = poll_bridge_light_search(
+            &before,
+            || {
+                Ok(if elapsed.get() < Duration::from_secs(277) {
+                    serde_json::json!({"lastscan": "active"})
+                } else {
+                    serde_json::json!({"lastscan": "new", "42": {"name": "New bulb"}})
+                })
+            },
+            || elapsed.get(),
+            |duration| elapsed.set(elapsed.get() + duration),
+        )
+        .unwrap();
+        assert_eq!(elapsed.get(), Duration::from_secs(277));
+        assert_eq!(lights.len(), 1);
+        assert_eq!(lights[0].legacy_id, "42");
+    }
+
+    #[test]
+    fn serial_search_does_not_return_previous_results_and_has_a_bounded_timeout() {
+        let stale = serde_json::json!({"lastscan": "old", "1": {"name": "Old bulb"}});
+        let before = parse_new_lights(&stale).unwrap();
+        let elapsed = std::cell::Cell::new(Duration::ZERO);
+        let error = poll_bridge_light_search(
+            &before,
+            || Ok(stale.clone()),
+            || elapsed.get(),
+            |duration| elapsed.set(elapsed.get() + duration),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("new scan generation"));
+        assert_eq!(elapsed.get(), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn serial_search_recognizes_new_ids_when_coarse_generation_did_not_change() {
+        let before =
+            parse_new_lights(&serde_json::json!({"lastscan": "same", "1": {"name": "Old"}}))
+                .unwrap();
+        let lights = poll_bridge_light_search(
+            &before,
+            || Ok(serde_json::json!({"lastscan": "same", "2": {"name": "New"}})),
+            || Duration::ZERO,
+            |_| panic!("fresh native identity proves completion"),
+        )
+        .unwrap();
+        assert_eq!(lights[0].legacy_id, "2");
+    }
+
+    #[test]
+    fn serial_search_preserves_empty_completion_and_transport_failure() {
+        let before = parse_new_lights(&serde_json::json!({"lastscan": "old"})).unwrap();
+        let lights = poll_bridge_light_search(
+            &before,
+            || Ok(serde_json::json!({"lastscan": "new"})),
+            || Duration::ZERO,
+            |_| panic!("completed scan must not wait"),
+        )
+        .unwrap();
+        assert!(lights.is_empty());
+        let error = poll_bridge_light_search(
+            &before,
+            || anyhow::bail!("bridge offline"),
+            || Duration::ZERO,
+            |_| panic!("failed request must not wait"),
+        )
+        .unwrap_err();
+        assert_eq!(error.to_string(), "bridge offline");
+    }
 
     #[test]
     fn identify_light_body_uses_hue_identify_action_enum() {

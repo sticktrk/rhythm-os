@@ -21536,7 +21536,8 @@ mod tests {
         fail_light_state_queries: AtomicBool,
         fail_periodic_light_state_queries: AtomicBool,
         fail_turn_on: AtomicBool,
-        scene_dispatch_transaction_lock: Mutex<Option<Arc<Mutex<()>>>>,
+        scene_dispatch_transaction_lock:
+            Mutex<Option<Arc<crate::topology_transaction::ExternalTopologyTransactionLock>>>,
         pause_after_scene_dispatch: AtomicBool,
         scene_dispatch_paused: AtomicBool,
         current_hour: f32,
@@ -21570,7 +21571,10 @@ mod tests {
             }
         }
 
-        fn require_scene_dispatch_transaction_lock(&self, lock: Arc<Mutex<()>>) {
+        fn require_scene_dispatch_transaction_lock(
+            &self,
+            lock: Arc<crate::topology_transaction::ExternalTopologyTransactionLock>,
+        ) {
             *self.scene_dispatch_transaction_lock.lock().unwrap() = Some(lock);
         }
 
@@ -22265,7 +22269,7 @@ mod tests {
         deletes: Arc<Mutex<Vec<String>>>,
         fail_apply: Arc<AtomicBool>,
         fail_delete: Arc<AtomicBool>,
-        transaction_lock: Arc<Mutex<()>>,
+        transaction_lock: Arc<crate::topology_transaction::ExternalTopologyTransactionLock>,
         projection_was_serialized: Arc<AtomicBool>,
         batch_events: Arc<Mutex<Vec<&'static str>>>,
     }
@@ -28643,7 +28647,8 @@ mod tests {
         restore_integration_files_calls: usize,
         deleted_integration_paths: Vec<String>,
         fail_factory_reset_clear: bool,
-        expected_restore_transaction_lock: Option<Arc<Mutex<()>>>,
+        expected_restore_transaction_lock:
+            Option<Arc<crate::topology_transaction::ExternalTopologyTransactionLock>>,
         restore_transaction_checks: usize,
     }
 
