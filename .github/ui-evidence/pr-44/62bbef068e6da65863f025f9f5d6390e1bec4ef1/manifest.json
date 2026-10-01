@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "repository": "sticktrk/rhythm-os",
+  "pull_request": 44,
+  "head": "62bbef068e6da65863f025f9f5d6390e1bec4ef1",
+  "uses_mock_data": true,
+  "source_test": "test/widgets/matter_wifi_network_tile_test.dart",
+  "screenshots": [
+    {
+      "file": "current-wifi.png",
+      "caption": "Current Wi-Fi with a 32-byte fixture SSID on a 320-pixel screen"
+    }
+  ]
+}
