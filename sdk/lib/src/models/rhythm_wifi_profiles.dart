@@ -71,8 +71,14 @@ class RhythmWifiChangeReceipt {
 
 /// Contains only a bounded category, never the server body, network or Dio error.
 class RhythmWifiException implements Exception {
-  const RhythmWifiException(this.category);
+  const RhythmWifiException(
+    this.category, {
+    this.reason,
+    this.retryAfterMs = 0,
+  });
   final String category;
+  final String? reason;
+  final int retryAfterMs;
   @override
   String toString() => 'Wi-Fi request: $category';
 }
@@ -99,4 +105,35 @@ class RhythmWifiCheck {
         ),
         _ => unavailable,
       };
+}
+
+/// A fresh authenticated device observation, never a saved-profile guess.
+class RhythmWifiNetwork {
+  const RhythmWifiNetwork(this.status, {this.ssid, this.observedAtMs});
+  final String status;
+  final String? ssid;
+  final int? observedAtMs;
+  factory RhythmWifiNetwork.fromJson(Map<String, dynamic> json) {
+    const states = {
+      'connected',
+      'offline',
+      'unsupported',
+      'unavailable',
+      'busy',
+    };
+    final status = states.contains(json['status'])
+        ? json['status'] as String
+        : 'unavailable';
+    final ssid = json['ssid'];
+    if (status == 'connected' && (ssid is! String || ssid.isEmpty)) {
+      return const RhythmWifiNetwork('unavailable');
+    }
+    return RhythmWifiNetwork(
+      status,
+      ssid: status == 'connected' ? ssid as String : null,
+      observedAtMs: (json['observed_at_ms'] as num?)?.toInt(),
+    );
+  }
+  @override
+  String toString() => 'RhythmWifiNetwork($status, <redacted>)';
 }

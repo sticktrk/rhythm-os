@@ -60,6 +60,16 @@ pub struct WifiChangeOutcome {
     pub rollback_verified: bool,
 }
 impl WifiChangeOutcome {
+    /// Offline and unsupported are returned only by read-only preflight,
+    /// before any fail-safe or network mutation. This also repairs old receipts.
+    fn needs_recovery(&self) -> bool {
+        !self.rollback_verified
+            && !matches!(
+                self.code,
+                WifiChangeCode::Succeeded | WifiChangeCode::Offline | WifiChangeCode::Unsupported
+            )
+    }
+
     pub fn recovery_required() -> Self {
         Self {
             code: WifiChangeCode::RecoveryRequired,
@@ -114,6 +124,15 @@ fn load(state: &SharedState, runtime: &WifiChangeRuntime) -> Result<Journal> {
         {
             entry.receipt.status = "complete".into();
             entry.receipt.outcome = Some(WifiChangeOutcome::recovery_required());
+        }
+        if entry.receipt.status == "complete"
+            && entry
+                .receipt
+                .outcome
+                .as_ref()
+                .is_some_and(|outcome| !outcome.needs_recovery())
+        {
+            entry.receipt.retry_after_ms = 0;
         }
     }
     Ok(journal)
@@ -219,13 +238,18 @@ pub fn handle_start(state: &SharedState, body: &Value) -> ApiResponse {
         return response(&entry.receipt);
     }
     let now = crate::state::current_epoch_ms();
-    if runtime.active.load(Ordering::SeqCst)
-        || journal
-            .entries
-            .iter()
-            .any(|e| e.receipt.status == "pending" || e.receipt.retry_after_ms > now)
+    if runtime.active.load(Ordering::SeqCst) {
+        return network_conflict("change_in_progress", 0);
+    }
+    if let Some(entry) = journal
+        .entries
+        .iter()
+        .find(|e| same_matter_node(&e.device_id, device_id) && e.receipt.retry_after_ms > now)
     {
-        return conflict("A network change is running or recovering; keep both networks available and check its status");
+        return network_conflict(
+            "device_recovering",
+            entry.receipt.retry_after_ms.saturating_sub(now),
+        );
     }
     // Receipt expiry is explicit: unknown status is never permission for the app
     // to repeat a POST. The UI creates a fresh UUID only for a deliberate attempt.
@@ -313,11 +337,7 @@ fn finish(state: &SharedState, operation_id: &str, outcome: WifiChangeOutcome) {
             // from, so they must not block this or other bulbs for five minutes.
             // Every possible device mutation still requires success or verified
             // rollback to release the fail-safe grace fence early.
-            if matches!(
-                outcome.code,
-                WifiChangeCode::Succeeded | WifiChangeCode::Unsupported | WifiChangeCode::Offline
-            ) || outcome.rollback_verified
-            {
+            if !outcome.needs_recovery() {
                 entry.receipt.retry_after_ms = 0;
             }
             entry.receipt.outcome = Some(outcome.clone());
@@ -332,6 +352,34 @@ fn finish(state: &SharedState, operation_id: &str, outcome: WifiChangeOutcome) {
             .and_then(|v| v.as_str().map(str::to_string))
             .unwrap_or_else(|| "recovery_required".into());
         crate::wifi_profiles::record_outcome(state, "wifi_change", operation_id, &code);
+    }
+}
+
+// Network Commissioning belongs to the root Matter node, not the light endpoint.
+fn same_matter_node(left: &str, right: &str) -> bool {
+    fn node(id: &str) -> Option<u64> {
+        let mut parts = id.strip_prefix("matter-")?.split('-');
+        let node = parts.next()?.parse::<u64>().ok()?;
+        if let Some(endpoint) = parts.next() {
+            endpoint.parse::<u16>().ok()?;
+        }
+        if parts.next().is_some() {
+            return None;
+        }
+        Some(node)
+    }
+    left == right || matches!((node(left), node(right)), (Some(a), Some(b)) if a == b)
+}
+
+fn network_conflict(reason: &str, retry_after_ms: u64) -> ApiResponse {
+    ApiResponse {
+        status: 409,
+        content_type: "application/json",
+        body: json!({
+            "error": "A network change is running or this bulb is recovering",
+            "reason": reason, "retry_after_ms": retry_after_ms
+        })
+        .to_string(),
     }
 }
 
@@ -354,4 +402,21 @@ pub fn ensure_idle_for_reset(state: &SharedState, runtime: &WifiChangeRuntime) -
         }
     }
     Ok(())
+}
+
+/// Bounded, credential-free evidence for support bundles. Never probes a device.
+pub fn diagnostic_snapshot(state: &SharedState) -> Value {
+    let Ok(runtime) = runtime(state) else {
+        return json!({"status": "unavailable"});
+    };
+    let Ok(_guard) = runtime.lock.try_lock() else {
+        return json!({"status": "busy"});
+    };
+    match load(state, &runtime) {
+        Ok(journal) => json!({"schema_version": 1, "status": "available", "entries":
+            journal.entries.iter().map(|entry| json!({
+                "device_id": entry.device_id, "receipt": entry.receipt,
+            })).collect::<Vec<_>>() }),
+        Err(_) => json!({"schema_version": 1, "status": "unavailable"}),
+    }
 }

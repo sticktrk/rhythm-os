@@ -1702,17 +1702,41 @@ class RhythmServerApi {
     return null;
   }
 
-  Future<Map<String, dynamic>> _wifiRequest(String path, String method,
-      [Map<String, dynamic>? data]) async {
+  Future<Map<String, dynamic>> _wifiRequest(
+    String path,
+    String method, [
+    Map<String, dynamic>? data,
+  ]) async {
     try {
-      final response = await _dio.request(path,
-          data: data,
-          options: Options(
-              method: method,
-              headers: {'Cache-Control': 'no-store'},
-              validateStatus: (_) => true));
+      final response = await _dio.request(
+        path,
+        data: data,
+        options: Options(
+          method: method,
+          receiveTimeout: path.startsWith('api/matter/wifi-network/')
+              ? const Duration(seconds: 30)
+              : null,
+          headers: {'Cache-Control': 'no-store'},
+          validateStatus: (_) => true,
+        ),
+      );
       if (response.statusCode == 409) {
-        throw const RhythmWifiException('conflict');
+        final body = response.data;
+        final reason = body is Map &&
+                {
+                  'change_in_progress',
+                  'device_recovering',
+                }.contains(body['reason'])
+            ? body['reason'] as String
+            : null;
+        final delay = body is Map && body['retry_after_ms'] is num
+            ? (body['retry_after_ms'] as num).toInt().clamp(0, 300000)
+            : 0;
+        throw RhythmWifiException(
+          'conflict',
+          reason: reason,
+          retryAfterMs: delay,
+        );
       }
       if (response.statusCode == 401 || response.statusCode == 403) {
         throw const RhythmWifiException('owner_required');
@@ -1732,6 +1756,22 @@ class RhythmServerApi {
       rethrow;
     } catch (_) {
       throw const RhythmWifiException('unavailable');
+    }
+  }
+
+  Future<RhythmWifiNetwork> getMatterWifiNetwork(String deviceId) async {
+    try {
+      return RhythmWifiNetwork.fromJson(
+        await _wifiRequest(
+          'api/matter/wifi-network/${Uri.encodeComponent(deviceId)}',
+          'GET',
+        ),
+      );
+    } on RhythmWifiException catch (error) {
+      if (error.category == 'not_found') {
+        return const RhythmWifiNetwork('unsupported_server');
+      }
+      rethrow;
     }
   }
 

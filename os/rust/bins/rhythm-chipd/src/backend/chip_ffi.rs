@@ -60,6 +60,24 @@ impl ChipFfiController {
         }
     }
 
+    pub fn read_wifi_network(
+        &self,
+        node: u64,
+        endpoint: u16,
+    ) -> Result<rhythm_os::wifi_network::WifiNetwork> {
+        #[cfg(rhythm_chipd_chip_ffi)]
+        {
+            ffi_probe::read_wifi_network(node, endpoint)
+        }
+        #[cfg(not(rhythm_chipd_chip_ffi))]
+        {
+            let _ = (node, endpoint);
+            Ok(rhythm_os::wifi_network::WifiNetwork::unknown(
+                rhythm_os::wifi_network::WifiNetworkStatus::Unsupported,
+            ))
+        }
+    }
+
     pub fn change_wifi(
         &self,
         node: u64,
@@ -1112,6 +1130,39 @@ mod ffi_probe {
         }
 
         Ok(trimmed.parse::<u16>()?)
+    }
+
+    pub fn read_wifi_network(
+        node: u64,
+        endpoint: u16,
+    ) -> Result<rhythm_os::wifi_network::WifiNetwork> {
+        use rhythm_os::wifi_network::{WifiNetwork, WifiNetworkStatus};
+        extern "C" {
+            fn rhythm_chip_bridge_read_wifi_network(
+                node: u64,
+                endpoint: u16,
+                ssid: *mut u8,
+                length: *mut usize,
+            ) -> u8;
+        }
+        let mut bytes = [0u8; 32];
+        let mut length = 0usize;
+        let code = unsafe {
+            rhythm_chip_bridge_read_wifi_network(node, endpoint, bytes.as_mut_ptr(), &mut length)
+        };
+        if code == 0 && (1..=32).contains(&length) {
+            if let Ok(ssid) = std::str::from_utf8(&bytes[..length]) {
+                return Ok(WifiNetwork {
+                    status: WifiNetworkStatus::Connected,
+                    ssid: Some(ssid.to_owned()),
+                });
+            }
+        }
+        Ok(WifiNetwork::unknown(match code {
+            1 => WifiNetworkStatus::Unsupported,
+            2 => WifiNetworkStatus::Offline,
+            _ => WifiNetworkStatus::Unavailable,
+        }))
     }
 
     pub fn change_wifi(

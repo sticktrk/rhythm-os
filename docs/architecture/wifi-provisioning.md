@@ -60,9 +60,16 @@ an owner token even on LAN, deny support tokens, and return `Cache-Control: no-s
 | POST `/api/wifi/verify` (appliance) | UUID operation ID, SSID and password. The Box scans, joins the network for up to 30 s, then always returns to its own. 200 with `state` `running` or `passed` (already the Box network); 409 when the Box has no Wi-Fi of its own or the radio is busy. Nothing is saved |
 | GET `/api/wifi/verify/:operation_id` (appliance) | `state` `running`/`passed`/`failed`, with `reason` `not_found` or `join_failed`. Held in memory only; 404 after a restart. Clients treat 404/409 as "cannot check" and still allow the save |
 | GET `/api/pairing/wifi-credentials` | Credentials of `default_id` for phone BLE provisioning |
+| GET `/api/matter/wifi-network/:id` | Owner-only, no-store authenticated read of the connected Network Commissioning entry. Returns `status` (`connected`, `offline`, `unsupported`, `unavailable`, `busy`), `ssid` only when connected, and `observed_at_ms`. No saved-profile inference or persistence |
 | POST `/api/matter/wifi-change` | UUID operation ID, saved profile ID, registered native Matter device ID; returns a receipt |
 | GET `/api/matter/wifi-change/:id` | Same receipt across retries and app reconnect |
 | GET `/api/matter/wifi-change?device_id=...` | Latest device receipt for reopening the screen after app restart |
+
+Current-network observation advertises `matter_wifi_network_v1`. Older appliances
+return 404 and the app explains that a Box update is needed. Device details and the
+move screen show the observed SSID and read time; failed refreshes clear prior
+observations. Reads are bounded per node in chipd and do not hold the lifecycle
+lock while waiting on a bulb. Network names never enter analytics or debug bundles.
 
 New clients require `saved_wifi_profiles_v1` and `matter_wifi_change_v1`. Existing
 pairing requests remain valid; an optional `wifi_profile_id` selects a profile.
@@ -94,8 +101,14 @@ subsequent deliberate move of this or another bulb can proceed immediately.
 These codes are reserved for that preflight boundary. A lost completion response
 remains recovery-required. Transport
 failure never replays the RPC. Durable receipts contain no credentials, retain a
-five-minute recovery fence, and resolve an interrupted process to recovery-required
-without replay. The remaining fence travels to the native command owner as a
+five-minute recovery fence for the affected Matter node (including its other
+endpoints), and resolve an interrupted process to recovery-required
+without replay. Offline/unsupported preflight outcomes make no writes and release
+the fence immediately, including when an older receipt is loaded. Active changes
+still serialize globally; terminal recovery does not block other bulbs. Conflict
+responses carry a bounded reason and remaining wait for the app.
+Credential-free `wifi_changes.json` in debug bundles records the outcomes and
+recovery deadlines without reading the bulbs. The remaining fence travels to the native command owner as a
 relative budget measured on monotonic clocks, including time queued behind another
 controller lifecycle operation, so neither delayed work nor a wall-clock step can
 arm a fail-safe that extends beyond the fence. The controller RPC waits for that

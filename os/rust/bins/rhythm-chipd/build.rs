@@ -13,6 +13,7 @@ const CHIP_FILE_ATTESTATION_TRUST_STORE_SOURCE: &str =
 
 fn main() {
     println!("cargo:rerun-if-changed=native/wifi_change_transaction.h");
+    println!("cargo:rerun-if-changed=native/wifi_network_observation.h");
     println!("cargo:rustc-check-cfg=cfg(rhythm_chipd_chip_ffi)");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={BRIDGE_HEADER}");

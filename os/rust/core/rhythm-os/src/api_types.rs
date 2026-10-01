@@ -297,6 +297,7 @@ pub const FEATURE_SCENE_MOTION_SUPPRESSION: &str = "scene_motion_suppression_v1"
 pub const FEATURE_BUTTON_MULTI_ROOM_CONTROLS: &str = "button_multi_room_controls_v1";
 pub const FEATURE_RESET_TO_MODE_DEFAULT: &str = "reset_to_mode_default_v1";
 pub const FEATURE_MATTER_UNREACHABLE_DEVICE_TRIAGE: &str = "matter_unreachable_device_triage_v1";
+pub const FEATURE_MATTER_WIFI_NETWORK: &str = "matter_wifi_network_v1";
 pub const FEATURE_MATTER_WIFI_CHANGE: &str = "matter_wifi_change_v1";
 pub const FEATURE_SAVED_WIFI_PROFILES: &str = "saved_wifi_profiles_v1";
 pub const FEATURE_HOME_SCENE_APPLY: &str = "home_scene_apply_v1";
@@ -338,6 +339,7 @@ impl Serialize for ApiCapabilitiesDto {
                 FEATURE_HOME_SCENE_APPLY,
                 FEATURE_SAVED_WIFI_PROFILES,
                 FEATURE_MATTER_WIFI_CHANGE,
+                FEATURE_MATTER_WIFI_NETWORK,
             ],
         )?;
         state.serialize_field("hubs", &self.hubs)?;

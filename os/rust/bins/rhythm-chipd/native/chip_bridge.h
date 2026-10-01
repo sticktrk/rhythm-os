@@ -40,6 +40,11 @@ struct rhythm_chip_bridge_commission_request
     uint32_t on_network_setup_pin_code;
 };
 
+// Read-only observation: 0 connected, 1 unsupported, 2 offline, 3 unavailable.
+// Caller supplies exactly 32 bytes. SSIDs are bytes, not NUL-terminated strings.
+uint8_t rhythm_chip_bridge_read_wifi_network(uint64_t node_id, uint16_t endpoint,
+    uint8_t * ssid, size_t * length);
+
 // Returns a bounded WifiChangeCode; never returns raw network/debug text.
 uint8_t rhythm_chip_bridge_change_wifi(uint64_t node_id, uint16_t endpoint,
     const char * ssid, const char * password, bool * rollback_verified, uint64_t budget_ms);
