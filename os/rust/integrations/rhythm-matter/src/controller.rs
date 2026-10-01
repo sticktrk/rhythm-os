@@ -2505,6 +2505,95 @@ mod tests {
     }
 
     #[test]
+    fn h7056_room_and_device_commands_replace_restored_color_after_power_on() {
+        use crate::fake_bulb::{FakeColorMode, FakeMatterBulb};
+
+        for room_target in [true, false] {
+            let bulb = Arc::new(FakeMatterBulb::new(42, 1, true).with_previous_color_restore());
+            let (controller, registry) = make_controller_with_transport(bulb.clone());
+            registry
+                .lock()
+                .unwrap()
+                .set_area_lights("kitchen", vec!["matter-42".into()]);
+            let mut device = profiled_color_bulb(42, "Shenzhen Qianyan Technology", "H7056");
+            device.vendor_id = 4999;
+            device.product_id = 28758;
+            device.color_modes = vec![
+                crate::transport::MatterColorMode::HueSaturation,
+                crate::transport::MatterColorMode::Xy,
+                crate::transport::MatterColorMode::ColorTemperature,
+            ];
+            device.min_kelvin = None;
+            device.max_kelvin = None;
+            let resolved = crate::commissioning::resolve_device_metadata(
+                &device,
+                "matter-42",
+                &Default::default(),
+                &Default::default(),
+            );
+            controller.cache_device_metadata(
+                "matter-42",
+                "matter-42",
+                &resolved.capabilities,
+                &resolved.quirks,
+                &resolved.control_profile,
+            );
+
+            // A previously visible scene is retained through Off. Staged HS
+            // writes change attributes, but firmware restores the old scene
+            // when a later level-with-on/off command activates the bulb.
+            bulb.set_on_off(42, 1, true).unwrap();
+            bulb.set_hue_saturation(42, 1, 170, 230, None).unwrap();
+            bulb.set_on_off(42, 1, false).unwrap();
+            for (index, command) in [
+                LightingCommand::new(45, 3400),
+                LightingCommand::new(70, 5000),
+                LightingCommand::from_color(
+                    55,
+                    rhythm_core::Rgb::new(50, 200, 100),
+                    rhythm_core::XyColor::new(0.3, 0.5),
+                    None,
+                ),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                if index == 2 {
+                    bulb.set_on_off(42, 1, false).unwrap();
+                }
+                let expected = rhythm_os::controller_helpers::adapt_lighting_command(
+                    &resolved.capabilities,
+                    &command,
+                    ColorPreference::PreferHueSaturation,
+                );
+                if room_target {
+                    block_on(controller.turn_on("kitchen", command.clone())).unwrap();
+                } else {
+                    block_on(controller.turn_on_target(
+                        &HubDispatchTarget::Devices {
+                            native_ids: vec!["matter-42".into()],
+                        },
+                        command.clone(),
+                    ))
+                    .unwrap();
+                }
+                let state = bulb.state();
+                assert!(state.on);
+                assert_eq!(
+                    state.level,
+                    clusters::brightness_to_level(command.brightness)
+                );
+                assert_eq!(state.color_mode, FakeColorMode::HueSaturation);
+                assert_eq!(
+                    (state.hue, state.saturation),
+                    expected.hue_saturation.unwrap(),
+                    "requested color must survive activation (room={room_target}, step={index})",
+                );
+            }
+        }
+    }
+
+    #[test]
     fn fake_bulb_default_plan_from_off_reaches_the_requested_color_and_level() {
         let (controller, bulb) = fake_bulb_controller(true);
         let plan = run_plans_on_fake_bulb(
@@ -3533,7 +3622,7 @@ mod tests {
         );
         let (expected_hue, expected_saturation) = expected_adaptive.hue_saturation.unwrap();
         assert_eq!(
-            operations[2],
+            operations[4],
             RecordedOperation::SetHueSaturation {
                 node_id: 42,
                 endpoint: 1,
