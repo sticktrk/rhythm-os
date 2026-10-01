@@ -53,8 +53,11 @@ Hue automation suppression, room-membership projection, and grouped-light dispat
 - topology projection is an additional capability-gated opt-in and defaults off;
 - Rhythm's canonical room assignment commits even when Hue is unavailable;
 - the desired projection is durable canonical state, so restart or reconnect can retry it;
-- Rhythm may change only Hue light membership and rooms carrying an explicit stable-bridge ownership receipt;
-- user-created Hue rooms, zones, scenes, automations, and accessory membership are preserved;
+- Rhythm projects Hue lights and canonically assigned inputs into rooms carrying an explicit stable-bridge ownership receipt; motion service IDs are resolved to physical device IDs before changing native room children;
+- user-created Hue room identities, zones, scenes, automations, and unassigned or externally controlled accessory membership are preserved;
+- rooms containing Hue inputs but no Hue lights are placement mirrors only: they never add a lighting route or a Hue automation-authority requirement to a mixed-integration room;
+- an input-only managed-room receipt keeps its existing string-shaped `grouped_light_id` empty; lighting discovery excludes it even if Hue exposes a grouped-light service, and exact input membership is still verified;
+- obsolete managed rooms containing devices outside the current controlled set retain those native memberships; Rhythm verifies controlled-device removal before retiring the room receipt and lighting route;
 - ambiguous native recovery is an attention state, never a name-based ownership guess;
 - grouped dispatch stays fenced until exact Hue membership and grouped-light identity are read back;
 - an offline, partial, or conflicting projection continues through individual-light dispatch and must not fence unrelated integrations.

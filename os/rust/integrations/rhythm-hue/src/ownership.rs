@@ -206,6 +206,7 @@ pub struct HueOwnershipReceipt {
 pub struct HueManagedRoom {
     pub rhythm_room_id: String,
     pub hue_room_id: String,
+    /// Empty for input-only placement mirrors, which are never lighting routes.
     pub grouped_light_id: String,
 }
 
@@ -397,6 +398,15 @@ impl HueControllerOwnership {
     pub fn managed_room_ids(&self) -> BTreeSet<String> {
         self.managed_rooms
             .values()
+            .map(|room| room.hue_room_id.clone())
+            .collect()
+    }
+
+    /// Rooms that may be advertised as controllable lighting groups.
+    pub fn managed_light_room_ids(&self) -> BTreeSet<String> {
+        self.managed_rooms
+            .values()
+            .filter(|room| !room.grouped_light_id.is_empty())
             .map(|room| room.hue_room_id.clone())
             .collect()
     }

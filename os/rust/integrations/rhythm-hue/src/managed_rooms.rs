@@ -52,8 +52,10 @@ pub struct DesiredHueRoom {
     pub rhythm_room_id: String,
     pub name: String,
     pub archetype: String,
-    /// Hue V2 device IDs for light devices assigned to this Rhythm room.
+    /// Hue V2 physical device IDs assigned to this Rhythm room.
     pub device_ids: Vec<String>,
+    /// Input-only rooms mirror placement without exposing a lighting route.
+    pub requires_grouped_light: bool,
 }
 
 impl DesiredHueRoom {
@@ -67,6 +69,7 @@ impl DesiredHueRoom {
             name: name.into(),
             archetype: DEFAULT_MANAGED_HUE_ROOM_ARCHETYPE.to_string(),
             device_ids,
+            requires_grouped_light: true,
         }
     }
 }
@@ -82,8 +85,8 @@ pub struct ObservedHueRoom {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum HueManagedRoomOperation {
-    /// Remove controlled bulbs from the wrong Hue room or add them to their
-    /// mapped target while retaining non-light child devices.
+    /// Move controlled devices to their mapped target while retaining every
+    /// child outside the authoritative controlled-device set.
     ReconcileMembership {
         hue_room_id: String,
         device_ids: Vec<String>,
@@ -112,6 +115,10 @@ pub enum HueManagedRoomOperation {
         hue_room_id: String,
     },
     ForgetMissing {
+        rhythm_room_id: String,
+    },
+    /// Retire ownership without deleting a room that retains native devices.
+    ForgetPreserved {
         rhythm_room_id: String,
     },
 }
@@ -228,7 +235,7 @@ fn validate_desired(
         let mut normalized = desired.clone();
         normalized.device_ids = sorted_unique(normalized.device_ids);
         if normalized.device_ids.is_empty() {
-            anyhow::bail!("A managed Hue room must contain at least one controlled Hue bulb");
+            anyhow::bail!("A managed Hue room must contain at least one controlled Hue device");
         }
         for device_id in &normalized.device_ids {
             if !controlled_device_ids.contains(device_id) {
@@ -267,21 +274,42 @@ pub fn next_managed_room_operation(
         .map(|room| (room.hue_room_id.as_str(), room))
         .collect::<BTreeMap<_, _>>();
 
-    // A mapping with no desired Rhythm room is the only kind of room this
-    // reconciler may delete. Unmapped Hue rooms are only stripped of controlled
-    // bulb membership; their identity is never guessed from a name.
+    // Retire obsolete mappings without deleting children outside Rhythm's
+    // current authority. Remove controlled members and verify that removal
+    // before relinquishing a room with native devices still in it.
     for (rhythm_room_id, managed) in state.managed_rooms() {
         if !desired.contains_key(rhythm_room_id) {
             return Ok(Some(
-                if observed_by_id.contains_key(managed.hue_room_id.as_str()) {
-                    HueManagedRoomOperation::Delete {
-                        rhythm_room_id: rhythm_room_id.clone(),
-                        hue_room_id: managed.hue_room_id.clone(),
+                match observed_by_id.get(managed.hue_room_id.as_str()) {
+                    Some(room) => {
+                        let preserved_device_ids = room
+                            .device_ids
+                            .iter()
+                            .filter(|id| !controlled_device_ids.contains(*id))
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        if !preserved_device_ids.is_empty() {
+                            if preserved_device_ids != room.device_ids {
+                                HueManagedRoomOperation::ReconcileMembership {
+                                    hue_room_id: managed.hue_room_id.clone(),
+                                    device_ids: preserved_device_ids,
+                                    removal_only: true,
+                                }
+                            } else {
+                                HueManagedRoomOperation::ForgetPreserved {
+                                    rhythm_room_id: rhythm_room_id.clone(),
+                                }
+                            }
+                        } else {
+                            HueManagedRoomOperation::Delete {
+                                rhythm_room_id: rhythm_room_id.clone(),
+                                hue_room_id: managed.hue_room_id.clone(),
+                            }
+                        }
                     }
-                } else {
-                    HueManagedRoomOperation::ForgetMissing {
+                    None => HueManagedRoomOperation::ForgetMissing {
                         rhythm_room_id: rhythm_room_id.clone(),
-                    }
+                    },
                 },
             ));
         } else if !observed_by_id.contains_key(managed.hue_room_id.as_str()) {
@@ -308,9 +336,13 @@ pub fn next_managed_room_operation(
                     && room.device_ids == desired.device_ids
             })
             .filter_map(|room| {
-                room.grouped_light_id
-                    .as_ref()
-                    .map(|grouped_light_id| (room.hue_room_id.clone(), grouped_light_id.clone()))
+                if desired.requires_grouped_light {
+                    room.grouped_light_id
+                        .as_ref()
+                        .map(|id| (room.hue_room_id.clone(), id.clone()))
+                } else {
+                    Some((room.hue_room_id.clone(), String::new()))
+                }
             })
             .collect::<Vec<_>>();
         equivalent.sort();
@@ -422,8 +454,22 @@ pub fn next_managed_room_operation(
                 name: desired.name.clone(),
             }));
         }
-        if current.grouped_light_id.as_deref() != Some(managed.grouped_light_id.as_str()) {
-            anyhow::bail!("A managed Hue room changed grouped-light identity");
+        let grouped_light_id = if desired.requires_grouped_light {
+            current.grouped_light_id.clone().ok_or_else(|| {
+                anyhow::anyhow!("A managed lighting room has no grouped_light service")
+            })?
+        } else {
+            String::new()
+        };
+        if grouped_light_id != managed.grouped_light_id {
+            if desired.requires_grouped_light && !managed.grouped_light_id.is_empty() {
+                anyhow::bail!("A managed Hue room changed grouped-light identity");
+            }
+            return Ok(Some(HueManagedRoomOperation::AdoptRecovered {
+                rhythm_room_id: rhythm_room_id.clone(),
+                hue_room_id: managed.hue_room_id.clone(),
+                grouped_light_id,
+            }));
         }
     }
 
@@ -477,7 +523,10 @@ fn execute_managed_room_operation<H: HueTransport + ?Sized>(
             .map(|room| room.rhythm_room_id.clone()),
         HueManagedRoomOperation::Update { rhythm_room_id, .. }
         | HueManagedRoomOperation::Delete { rhythm_room_id, .. }
-        | HueManagedRoomOperation::ForgetMissing { rhythm_room_id } => Some(rhythm_room_id.clone()),
+        | HueManagedRoomOperation::ForgetMissing { rhythm_room_id }
+        | HueManagedRoomOperation::ForgetPreserved { rhythm_room_id } => {
+            Some(rhythm_room_id.clone())
+        }
         HueManagedRoomOperation::Create { desired } => state
             .managed_rooms()
             .contains_key(&desired.rhythm_room_id)
@@ -516,9 +565,13 @@ fn execute_managed_room_operation<H: HueTransport + ?Sized>(
                 .ok_or_else(|| {
                     anyhow::anyhow!("Hue bridge did not expose the newly created room")
                 })?;
-            let grouped_light_id = created.grouped_light_id.clone().ok_or_else(|| {
-                anyhow::anyhow!("Newly created Hue room has no grouped_light service")
-            })?;
+            let grouped_light_id = if desired.requires_grouped_light {
+                created.grouped_light_id.clone().ok_or_else(|| {
+                    anyhow::anyhow!("Newly created Hue lighting room has no grouped_light service")
+                })?
+            } else {
+                String::new()
+            };
             state.record_managed_room(HueManagedRoom {
                 rhythm_room_id: desired.rhythm_room_id,
                 hue_room_id: created.hue_room_id.clone(),
@@ -554,7 +607,8 @@ fn execute_managed_room_operation<H: HueTransport + ?Sized>(
             state.remove_managed_room(&rhythm_room_id)?;
             persist_controller_ownership(storage, state)
         }
-        HueManagedRoomOperation::ForgetMissing { rhythm_room_id } => {
+        HueManagedRoomOperation::ForgetMissing { rhythm_room_id }
+        | HueManagedRoomOperation::ForgetPreserved { rhythm_room_id } => {
             state.remove_managed_room(&rhythm_room_id)?;
             persist_controller_ownership(storage, state)
         }
@@ -562,7 +616,7 @@ fn execute_managed_room_operation<H: HueTransport + ?Sized>(
     .context("Hue managed-room operation failed")
 }
 
-/// Reconcile all controlled Hue bulbs. A controlled bulb omitted from every
+/// Reconcile controlled Hue devices. A controlled device omitted from every
 /// desired room is explicitly standalone and is removed from all Hue rooms.
 pub fn reconcile_managed_rooms<H: HueTransport + ?Sized>(
     storage: &dyn Storage,
@@ -786,6 +840,85 @@ mod tests {
     }
 
     #[test]
+    fn input_only_room_recovers_without_group_and_can_gain_and_lose_lights() {
+        let temp = TempStorage::new("input-only-recovery");
+        let spy = SpyHueTransport::new();
+        let mut state = active_state(&spy, &temp.storage);
+        let controlled = BTreeSet::from(["sensor".to_string(), "bulb".to_string()]);
+        let mut desired =
+            DesiredHueRoom::new("rhythm-a", "Rhythm · Storage", vec!["sensor".to_string()]);
+        desired.requires_grouped_light = false;
+        spy.set_resource_response("room", json!({"data": [{
+            "id": "recovered", "metadata": {"name": desired.name, "archetype": desired.archetype},
+            "children": [{"rid": "sensor", "rtype": "device"}], "services": []
+        }]}));
+        reconcile_managed_rooms(
+            &temp.storage,
+            &key(),
+            &mut state,
+            &spy,
+            "user",
+            &[desired.clone()],
+            &controlled,
+        )
+        .unwrap();
+        assert_eq!(state.managed_rooms()["rhythm-a"].hue_room_id, "recovered");
+        assert!(state.managed_rooms()["rhythm-a"]
+            .grouped_light_id
+            .is_empty());
+        assert!(state.managed_light_room_ids().is_empty());
+
+        // Hue exposes a grouped_light when lighting is added to the room.
+        let mut rooms = spy.get_resources("user", "room").unwrap();
+        rooms["data"][0]["services"] = json!([{"rid": "lighting-group", "rtype": "grouped_light"}]);
+        spy.set_resource_response("room", rooms);
+        desired.device_ids.push("bulb".to_string());
+        desired.requires_grouped_light = true;
+        reconcile_managed_rooms(
+            &temp.storage,
+            &key(),
+            &mut state,
+            &spy,
+            "user",
+            &[desired.clone()],
+            &controlled,
+        )
+        .unwrap();
+        assert_eq!(
+            state.managed_rooms()["rhythm-a"].grouped_light_id,
+            "lighting-group"
+        );
+        assert_eq!(
+            state.managed_light_room_ids(),
+            BTreeSet::from(["recovered".to_string()])
+        );
+
+        desired.device_ids = vec!["sensor".to_string()];
+        desired.requires_grouped_light = false;
+        reconcile_managed_rooms(
+            &temp.storage,
+            &key(),
+            &mut state,
+            &spy,
+            "user",
+            &[desired],
+            &controlled,
+        )
+        .unwrap();
+        assert!(state.managed_light_room_ids().is_empty());
+        let durable = load_controller_ownership(&temp.storage, "bridge-rooms")
+            .unwrap()
+            .unwrap();
+        assert!(durable.managed_rooms()["rhythm-a"]
+            .grouped_light_id
+            .is_empty());
+        assert_eq!(
+            observe_hue_rooms(&spy, "user").unwrap()[0].device_ids,
+            vec!["sensor"]
+        );
+    }
+
+    #[test]
     fn creates_hidden_room_and_moves_bulb_by_removing_before_adding() {
         let temp = TempStorage::new("move");
         let spy = SpyHueTransport::new();
@@ -895,6 +1028,189 @@ mod tests {
             HueTransportCall::DeleteResource { resource_type, .. }
                 if resource_type == "scene"
         )));
+    }
+
+    #[test]
+    fn obsolete_managed_room_preserves_native_inputs_and_scenes_when_bulb_moves() {
+        let temp = TempStorage::new("preserve-native-input");
+        let spy = SpyHueTransport::new();
+        let mut state = active_state(&spy, &temp.storage);
+        let controlled = BTreeSet::from(["bulb".to_string()]);
+        reconcile_managed_rooms(
+            &temp.storage,
+            &key(),
+            &mut state,
+            &spy,
+            "user",
+            &[DesiredHueRoom::new(
+                "rhythm-a",
+                "Nook",
+                vec!["bulb".to_string()],
+            )],
+            &controlled,
+        )
+        .unwrap();
+        let source_id = state.managed_rooms()["rhythm-a"].hue_room_id.clone();
+        spy.update_room_children(
+            "user",
+            &source_id,
+            &["bulb".to_string(), "switch".to_string()],
+        )
+        .unwrap();
+        let native_scene = json!({
+            "id": "native-scene", "group": {"rtype": "room", "rid": source_id}
+        });
+        spy.set_resource_response(
+            "scene",
+            json!({"data": [native_scene.clone()], "errors": []}),
+        );
+        let desired = [DesiredHueRoom::new(
+            "rhythm-b",
+            "Office",
+            vec!["bulb".to_string()],
+        )];
+        spy.reset();
+        reconcile_managed_rooms(
+            &temp.storage,
+            &key(),
+            &mut state,
+            &spy,
+            "user",
+            &desired,
+            &controlled,
+        )
+        .unwrap();
+        let rooms = observe_hue_rooms(&spy, "user").unwrap();
+        assert_eq!(
+            rooms
+                .iter()
+                .find(|room| room.hue_room_id == source_id)
+                .unwrap()
+                .device_ids,
+            vec!["switch"]
+        );
+        assert_eq!(
+            rooms
+                .iter()
+                .find(|room| room.hue_room_id == state.managed_rooms()["rhythm-b"].hue_room_id)
+                .unwrap()
+                .device_ids,
+            vec!["bulb"]
+        );
+        assert!(!state.managed_rooms().contains_key("rhythm-a"));
+        assert_eq!(
+            spy.get_resources("user", "scene").unwrap()["data"],
+            json!([native_scene])
+        );
+        let calls = spy.calls();
+        let removal = calls
+            .iter()
+            .position(|call| {
+                matches!(call,
+                    HueTransportCall::UpdateRoomChildren { room_id, device_ids }
+                        if room_id == &source_id && device_ids == &vec!["switch".to_string()]
+                )
+            })
+            .unwrap();
+        let addition = calls
+            .iter()
+            .position(|call| matches!(call, HueTransportCall::CreateRoom { .. }))
+            .unwrap();
+        assert!(removal < addition);
+        assert!(!calls.iter().any(|call| matches!(
+            call,
+            HueTransportCall::DeleteRoom { .. } | HueTransportCall::DeleteResource { .. }
+        )));
+        let mut restored = load_controller_ownership(&temp.storage, "bridge-rooms")
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.managed_rooms(), state.managed_rooms());
+        spy.reset();
+        reconcile_managed_rooms(
+            &temp.storage,
+            &key(),
+            &mut restored,
+            &spy,
+            "user",
+            &desired,
+            &controlled,
+        )
+        .unwrap();
+        assert!(spy
+            .calls()
+            .iter()
+            .all(|call| matches!(call, HueTransportCall::GetResources { .. })));
+    }
+
+    #[test]
+    fn obsolete_room_keeps_receipt_until_controlled_membership_removal_is_verified() {
+        let temp = TempStorage::new("preserve-native-input-readback");
+        let spy = SpyHueTransport::new();
+        let mut state = active_state(&spy, &temp.storage);
+        let controlled = BTreeSet::from(["bulb".to_string()]);
+        reconcile_managed_rooms(
+            &temp.storage,
+            &key(),
+            &mut state,
+            &spy,
+            "user",
+            &[DesiredHueRoom::new(
+                "rhythm-a",
+                "Nook",
+                vec!["bulb".to_string()],
+            )],
+            &controlled,
+        )
+        .unwrap();
+        let source_id = state.managed_rooms()["rhythm-a"].hue_room_id.clone();
+        spy.update_room_children(
+            "user",
+            &source_id,
+            &["bulb".to_string(), "switch".to_string()],
+        )
+        .unwrap();
+        spy.set_ignore_resource_mutations(true);
+        spy.reset();
+        let error = reconcile_managed_rooms(
+            &temp.storage,
+            &key(),
+            &mut state,
+            &spy,
+            "user",
+            &[],
+            &controlled,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("read-back verification"));
+        let mut restored = load_controller_ownership(&temp.storage, "bridge-rooms")
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.managed_rooms()["rhythm-a"].hue_room_id, source_id);
+        assert!(!spy
+            .calls()
+            .iter()
+            .any(|call| matches!(call, HueTransportCall::DeleteRoom { .. })));
+        spy.set_ignore_resource_mutations(false);
+        spy.reset();
+        reconcile_managed_rooms(
+            &temp.storage,
+            &key(),
+            &mut restored,
+            &spy,
+            "user",
+            &[],
+            &controlled,
+        )
+        .unwrap();
+        assert!(restored.managed_rooms().is_empty());
+        let rooms = observe_hue_rooms(&spy, "user").unwrap();
+        assert_eq!(rooms.len(), 1);
+        assert_eq!(rooms[0].hue_room_id, source_id);
+        assert_eq!(rooms[0].device_ids, vec!["switch"]);
+        assert!(!spy
+            .calls()
+            .iter()
+            .any(|call| matches!(call, HueTransportCall::DeleteRoom { .. })));
     }
 
     #[test]

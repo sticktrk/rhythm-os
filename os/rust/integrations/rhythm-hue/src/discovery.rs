@@ -122,7 +122,7 @@ impl<H: HueTransport> HueDiscovery<H> {
                 &source.bridge_id,
             )?
             .filter(|state| state.phase.is_managed())
-            .map(|state| state.managed_room_ids()));
+            .map(|state| state.managed_light_room_ids()));
         }
         let mode = self
             .mode
