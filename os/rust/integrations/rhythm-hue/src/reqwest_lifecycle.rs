@@ -1322,6 +1322,23 @@ fn publish_managed_room_bindings(
         })
         .collect::<Vec<_>>();
     let mut stale_room_ids = BTreeSet::new();
+    // A room may have been relinquished to preserve native inputs. Its old
+    // lighting route must disappear even when it has no new desired binding.
+    for room in state_guard.topology.rooms() {
+        stale_room_ids.extend(
+            room.hub_room_bindings
+                .iter()
+                .filter(|binding| {
+                    binding.hub_key == *key
+                        && state_guard.topology.room_binding_is_managed(
+                            &room.id,
+                            key,
+                            &binding.hub_room_id,
+                        )
+                })
+                .map(|binding| binding.hub_room_id.clone()),
+        );
+    }
     for (rhythm_room_id, _, _) in bindings {
         if let Some(room) = state_guard.topology.get(rhythm_room_id) {
             stale_room_ids.extend(
@@ -1364,6 +1381,11 @@ fn publish_managed_room_bindings(
             anyhow::bail!("Failed to publish an exact managed Hue room binding");
         }
         stale_room_ids.remove(&binding.hub_room_id);
+    }
+    for room_id in &stale_room_ids {
+        state_guard
+            .topology
+            .remove_hub_room_binding_everywhere(key, room_id);
     }
     state_guard
         .topology
@@ -3684,6 +3706,134 @@ mod tests {
     }
 
     #[test]
+    fn topology_sync_preserves_native_room_after_last_input_is_unassigned() {
+        use crate::test_support::HueTransportCall;
+        use serde_json::json;
+
+        let path = std::env::temp_dir().join(format!(
+            "rhythm-hue-input-unassignment-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        let storage = Arc::new(FileStorage::new(path.to_str().unwrap()).unwrap());
+        let spy = SpyHueTransport::new();
+        for (kind, data) in [
+            ("bridge", json!([{"id": "bridge-unassignment"}])),
+            (
+                "device",
+                json!([{"id": "sensor", "services": [{"rid": "motion-service", "rtype": "motion"}]}]),
+            ),
+            ("light", json!([])),
+            ("room", json!([])),
+            ("behavior_instance", json!([])),
+            ("zone", json!([])),
+            ("scene", json!([])),
+            ("smart_scene", json!([])),
+        ] {
+            spy.set_resource_response(kind, json!({"data": data, "errors": []}));
+        }
+        spy.set_v1_response("rules", json!({}));
+        spy.set_v1_response("schedules", json!({}));
+        let key = hue_key("192.0.2.10");
+        let state = shared_state();
+        let sensor_id = add_hue_endpoint(
+            &state,
+            &key,
+            "motion-service",
+            rhythm_core::runtime::hub_registry::DeviceType::Motion,
+        );
+        let room_id = {
+            let mut app = state.lock().unwrap();
+            app.storage = Some(storage.clone());
+            let room_id = app.topology.create_room("Storage");
+            app.topology
+                .attach_device_user_override(&room_id, &sensor_id);
+            app.canonical_registry
+                .assign_room(&sensor_id, Some(&room_id));
+            room_id
+        };
+        let mut ownership =
+            crate::ownership::acquire_authoritative_control(storage.as_ref(), &key, &spy, "user")
+                .unwrap();
+        let bindings =
+            reconcile_hue_topology(&state, &key, storage.as_ref(), &spy, "user", &mut ownership)
+                .unwrap();
+        publish_managed_room_bindings(&state, &key, &bindings).unwrap();
+        let native_room_id = ownership.managed_rooms()[&room_id].hue_room_id.clone();
+
+        rhythm_os::commands::do_canonical_assign_room(&state, &sensor_id, None).unwrap();
+        spy.reset();
+        let bindings =
+            reconcile_hue_topology(&state, &key, storage.as_ref(), &spy, "user", &mut ownership)
+                .unwrap();
+        publish_managed_room_bindings(&state, &key, &bindings).unwrap();
+        let rooms = crate::managed_rooms::observe_hue_rooms(&spy, "user").unwrap();
+        assert!(
+            rooms.iter().any(|room| {
+                room.hue_room_id == native_room_id && room.device_ids == vec!["sensor"]
+            }),
+            "unassigned input lost its native room: {rooms:?}"
+        );
+        assert!(bindings.is_empty());
+        assert!(ownership.managed_rooms().is_empty());
+        assert!(spy
+            .calls()
+            .iter()
+            .all(|call| matches!(call, HueTransportCall::GetResources { .. })));
+        let app = state.lock().unwrap();
+        assert!(app
+            .canonical_registry
+            .get(&sensor_id)
+            .unwrap()
+            .room_id
+            .is_none());
+        assert!(app.topology.device_parent_room_id(&sensor_id).is_none());
+        assert!(app
+            .topology
+            .get(&room_id)
+            .unwrap()
+            .hub_room_bindings
+            .is_empty());
+        drop(app);
+
+        let mut restored =
+            crate::ownership::load_controller_ownership(storage.as_ref(), "bridge-unassignment")
+                .unwrap()
+                .unwrap();
+        assert!(restored.managed_rooms().is_empty());
+        let backup_files = storage.load_integration_backup_files(true).unwrap();
+        storage
+            .validate_integration_backup_files(&backup_files)
+            .unwrap();
+        spy.reset();
+        reconcile_hue_topology(&state, &key, storage.as_ref(), &spy, "user", &mut restored)
+            .unwrap();
+        assert!(spy
+            .calls()
+            .iter()
+            .all(|call| matches!(call, HueTransportCall::GetResources { .. })));
+
+        // Assigning it back adopts the preserved native room without duplication.
+        rhythm_os::commands::do_canonical_assign_room(&state, &sensor_id, Some(&room_id)).unwrap();
+        spy.reset();
+        let bindings =
+            reconcile_hue_topology(&state, &key, storage.as_ref(), &spy, "user", &mut restored)
+                .unwrap();
+        publish_managed_room_bindings(&state, &key, &bindings).unwrap();
+        assert_eq!(
+            restored.managed_rooms()[&room_id].hue_room_id,
+            native_room_id
+        );
+        assert!(spy
+            .calls()
+            .iter()
+            .all(|call| matches!(call, HueTransportCall::GetResources { .. })));
+        drop(state);
+        drop(storage);
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
     fn desired_topology_mirrors_inputs_in_rooms_without_hue_lights() {
         let state = shared_state();
         let key = hue_key("192.0.2.10");
@@ -4182,7 +4332,7 @@ mod tests {
         assert!(app
             .topology
             .room_binding_is_managed("rhythm-office", &key, "managed-office"));
-        let registry = app
+        let registry_guard = app
             .hubs
             .get(&key)
             .unwrap()
@@ -4191,6 +4341,52 @@ mod tests {
             .registry
             .lock()
             .unwrap();
+        assert_eq!(
+            registry_guard
+                .get_room_for_motion_sensor("hue-motion-1")
+                .as_deref(),
+            Some("rhythm-office")
+        );
+        assert_eq!(
+            registry_guard
+                .get_room_for_button("hue-button-1")
+                .as_deref(),
+            Some("rhythm-office")
+        );
+        drop(registry_guard);
+        drop(app);
+
+        // Retiring the last projection must remove its cached lighting route
+        // without clearing unrelated native rooms or canonical input routing.
+        {
+            let mut app = state.lock().unwrap();
+            let mut native = rhythm_os::topology::TopologyRoom::new("rhythm-native", "Native");
+            native.upsert_hub_room_binding(HubRoomBinding {
+                hub_key: key.clone(),
+                hub_room_id: "native-room".to_string(),
+                control_id: "native-group".to_string(),
+                light_device_ids: vec!["native-bulb".to_string()],
+            });
+            app.topology.insert_room(native);
+        }
+        publish_managed_room_bindings(&state, &key, &[]).unwrap();
+        let app = state.lock().unwrap();
+        assert!(app
+            .topology
+            .get("rhythm-office")
+            .unwrap()
+            .hub_room_bindings
+            .is_empty());
+        assert!(!app
+            .topology
+            .room_binding_is_managed("rhythm-office", &key, "managed-office"));
+        assert_eq!(
+            app.topology.get("rhythm-native").unwrap().hub_room_bindings[0].hub_room_id,
+            "native-room"
+        );
+        drop(app);
+        let registry = registry.lock().unwrap();
+        assert!(registry.get_grouped_light_id("managed-office").is_none());
         assert_eq!(
             registry
                 .get_room_for_motion_sensor("hue-motion-1")
@@ -4202,7 +4398,6 @@ mod tests {
             Some("rhythm-office")
         );
         drop(registry);
-        drop(app);
         drop(state);
         drop(storage);
         let _ = std::fs::remove_dir_all(path);
