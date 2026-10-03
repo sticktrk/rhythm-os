@@ -4598,7 +4598,16 @@ mod tests {
                 "test-boot-id",
                 12_000,
                 "summary",
-                &serde_json::json!({"watchdog":{"status":"ok","value":{"state":"active"}}}),
+                &serde_json::json!({
+                    "watchdog":{"status":"ok","value":{"state":"active"}},
+                    "cpu_ticks_per_second": 100,
+                    "target_processes": {"status": "ok", "value": [{
+                        "target": "bluetoothd", "pid": 42,
+                        "cpu_time": {"status": "ok", "value": {
+                            "user_ticks": 1234, "system_ticks": 567, "start_ticks": 10
+                        }}
+                    }]}
+                }),
                 true,
             )
             .unwrap();
@@ -4733,6 +4742,16 @@ mod tests {
         assert!(files.contains_key(
             "persisted/boot-diagnostics/host-flight-recorder/current/segment-000.ndjson"
         ));
+        let recorder_record: serde_json::Value = serde_json::from_slice(
+            &files["persisted/boot-diagnostics/host-flight-recorder/current/segment-000.ndjson"],
+        )
+        .unwrap();
+        assert_eq!(recorder_record["payload"]["cpu_ticks_per_second"], 100);
+        assert_eq!(
+            recorder_record["payload"]["target_processes"]["value"][0]["cpu_time"]["value"]
+                ["user_ticks"],
+            1234
+        );
         assert!(!files.contains_key("persisted/boot-diagnostics/host-flight-recorder/secret.env"));
         assert!(!files.contains_key("persisted/cloudflared/connector_token"));
         assert!(!files

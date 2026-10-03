@@ -130,6 +130,36 @@ host with `compute-image-hash.sh --chip-info` (set `RHYTHM_CHIP_SRC_DIR` if
 the checkout is not at `os/connectedhomeip`). Cite `chip_ref` in any PR that
 changes `os/rust/bins/rhythm-chipd/native/chip_bridge.cc`.
 
+## BlueZ commissioner guard
+
+The tracked `patches/chip-bluez-idle-guard.patch` targets the Linux
+`BluezEndpoint.cpp` API in CHIP `v1.5.1.0`. Apply it with
+`apply-chip-bluez-idle-guard.sh /path/to/connectedhomeip` before rebuilding the
+host/Linux archives. The script is idempotent and refuses incompatible source.
+It ignores advertisement-only property changes, admits new central connections
+only while the Rhythm bridge is commissioning, and preserves disconnect cleanup
+for existing connections. A weak policy hook preserves normal behavior for
+other applications using the same SDK archive.
+
+The Linux bridge probes a weak versioned symbol supplied by this patch. Older
+prebuilts remain compatible and emit one initialization warning; they do not
+have the callback guard until rebuilt. Before a Linux `chip-ffi` build, run
+`NM=/path/to/target-nm check-chip-bluez-idle-guard.sh /path/to/connectedhomeip /path/to/libCHIP.a`
+to verify the source and archive with a clear error. Builder packaging runs this
+preflight automatically, and the image fingerprint includes the patch and both
+helpers. Rebuild CHIP and refresh the builder image through the normal release
+workflow before releasing this change. The existing builder lock is unchanged
+until that build is validated. The release workflow selects that lock directly;
+a changed fingerprint does not publish or select a new image automatically.
+Ordinary Rust builds without `chip-ffi` are unaffected. The scope regression runs without CHIP:
+
+```bash
+c++ -std=c++17 -pthread os/rust/bins/rhythm-chipd/native/tests/bluez_commissioning_scope_test.cc -o /tmp/bluez-scope-test
+/tmp/bluez-scope-test
+# With the unpatched v1.5.1.0 source and host GLib installed:
+python3 os/rust/bins/rhythm-chipd/native/tests/bluez_idle_guard_test.py /path/to/BluezEndpoint.cpp
+```
+
 ## Bumping connectedhomeip
 
 Only bump for a reason: an SDK security fix, an mDNS / AddressResolve / CASE
@@ -147,7 +177,8 @@ On the release host:
 cd os/connectedhomeip
 git fetch --tags origin
 git checkout v1.5.1.0                             # release tag, not master
-# re-apply the local BLE patch if this host carries one (chip_diff != clean)
+# Apply the required shared-adapter guard before rebuilding libCHIP.
+../../tools/os/scripts/build/apply-chip-bluez-idle-guard.sh "$PWD"
 git submodule update --init --recursive
 # rebuild the prebuilts the bridge links against (host + rpiz musl)
 gn gen out/host && ninja -C out/host

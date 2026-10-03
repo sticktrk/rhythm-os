@@ -2,8 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
-import 'package:rhythm_sdk/rhythm_sdk.dart'
-    show RhythmDeviceType, RhythmDiagnosticsApi, RhythmHello;
+import 'package:rhythm_sdk/rhythm_sdk.dart' show RhythmDeviceType, RhythmHello;
 
 import 'models.dart';
 import 'device_json.dart';
@@ -447,15 +446,15 @@ class DeviceProbeService {
   ) async {
     final baseUrl = candidate.endpoint.baseUrl;
     final checkedAt = DateTime.now().toUtc();
-    final diagnostics = RhythmDiagnosticsApi.fromBaseUrl(
-      baseUrl: baseUrl,
-      authToken: hub.authToken,
-      connectTimeout: const Duration(seconds: 4),
-      receiveTimeout: const Duration(seconds: 4),
+    final health = await _fetchJsonFromEndpoint(
+      hub: hub,
+      candidate: candidate,
+      path: 'health',
+      authToken: null,
+      operation: 'health',
+      timeout: const Duration(seconds: 5),
     );
-    final healthy = await diagnostics
-        .healthCheck()
-        .timeout(const Duration(seconds: 5), onTimeout: () => false);
+    final healthy = health.success?.body['status'] == 'healthy';
     if (!healthy) {
       return DeviceProbeResultDto(
         hubId: hub.id,
@@ -500,7 +499,9 @@ class DeviceProbeService {
       checkedAt: checkedAt,
       tokenAvailable: stateAuthToken != null,
       hasEncryptedToken: hub.hasEncryptedToken,
-      inventory: hello == null ? null : _inventoryFromState(hello),
+      inventory: hello == null || !state.hasInventory
+          ? null
+          : _inventoryFromState(hello),
       serverVersion: hello?.version,
       serverInstanceId: hello?.serverInstanceId ?? hub.serverInstanceId,
       message: state.error,
@@ -792,7 +793,11 @@ class DeviceProbeService {
   Future<_StateFetchResult> _fetchState(String baseUrl, String? token) async {
     try {
       final response = await _http.get(
-        _uriWithAppendedPath(baseUrl, 'api/state'),
+        _uriWithAppendedPath(
+          baseUrl,
+          'api/state',
+          queryParameters: const {'include': 'base'},
+        ),
         headers: {
           'Accept': 'application/json',
           if (token != null) 'Authorization': 'Bearer $token',
@@ -816,6 +821,8 @@ class DeviceProbeService {
         RhythmHello.fromJson(
           decoded.map((key, value) => MapEntry(key.toString(), value)),
         ),
+        // Older appliances may ignore include and return their full snapshot.
+        hasInventory: decoded['nodes'] is List || decoded['rooms'] is List,
       );
     } catch (error) {
       return _StateFetchResult.error(
@@ -1216,15 +1223,18 @@ class _StateFetchResult {
     this.hello,
     this.error,
     this.authRequired = false,
+    this.hasInventory = false,
   });
 
-  const _StateFetchResult.hello(RhythmHello hello) : this._(hello: hello);
+  const _StateFetchResult.hello(RhythmHello hello, {required bool hasInventory})
+      : this._(hello: hello, hasInventory: hasInventory);
 
   const _StateFetchResult.error(String error) : this._(error: error);
 
   const _StateFetchResult.authRequired() : this._(authRequired: true);
 
   final RhythmHello? hello;
+  final bool hasInventory;
   final String? error;
   final bool authRequired;
 }

@@ -279,6 +279,11 @@ pub trait BleDeviceProfile: Sync {
     fn descriptor(&self) -> BleProfileDescriptor;
     fn projection(&self) -> BleProfileProjection;
     fn admission(&self) -> BleProfileAdmission;
+    /// Advertised services suitable for a BlueZ discovery filter. Empty means
+    /// broad discovery, preserving manufacturer-only profiles.
+    fn advertisement_services(&self) -> &'static [&'static str] {
+        &[]
+    }
     fn parse_pairing_setup(&self, value: &serde_json::Value) -> Result<ValidatedBleSetup>;
     fn stable_identity_from_advertisement(
         &self,
@@ -387,6 +392,15 @@ impl<'a> BleProfileRegistry<'a> {
                     "local Bluetooth profile {} has invalid onboarding methods",
                     descriptor.id
                 );
+            }
+
+            for service in profile.advertisement_services() {
+                Uuid::parse_str(service).with_context(|| {
+                    format!(
+                        "local Bluetooth profile {} has an invalid advertised service UUID",
+                        descriptor.id
+                    )
+                })?;
             }
 
             let projection = profile.projection();
@@ -537,6 +551,10 @@ impl BleDeviceProfile for OreinOc02001ButtonProfile {
         }
     }
 
+    // Identity and press frames are carried in service/manufacturer data.
+    // A service-data UUID does not prove a service-list AD field, which is
+    // the only field BlueZ uses for its discovery UUID filter. Keep the
+    // default broad request so manufacturer-only press packets survive.
     fn admission(&self) -> BleProfileAdmission {
         BleProfileAdmission::GattServiceProof {
             service_uuids: &[

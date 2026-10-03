@@ -49,6 +49,8 @@ pub struct SpyLightController {
     calls: Mutex<Vec<SpyCall>>,
     /// Configurable response for `any_lights_on`. Default: false.
     any_lights_on_response: Mutex<bool>,
+    any_lights_on_started: std::sync::atomic::AtomicUsize,
+    any_lights_on_gate: Mutex<Option<std::sync::Arc<std::sync::Barrier>>>,
     delays: Mutex<SpyControllerDelays>,
     fail_next_turn_off: Mutex<bool>,
     turn_on_room_delays: Mutex<HashMap<String, Duration>>,
@@ -66,6 +68,8 @@ impl SpyLightController {
         Self {
             calls: Mutex::new(Vec::new()),
             any_lights_on_response: Mutex::new(false),
+            any_lights_on_started: std::sync::atomic::AtomicUsize::new(0),
+            any_lights_on_gate: Mutex::new(None),
             delays: Mutex::new(SpyControllerDelays::default()),
             fail_next_turn_off: Mutex::new(false),
             turn_on_room_delays: Mutex::new(HashMap::new()),
@@ -103,6 +107,18 @@ impl SpyLightController {
     /// Add a blocking delay before `any_lights_on` returns.
     pub fn set_any_lights_on_delay(&self, delay: Duration) {
         self.delays.lock().unwrap().any_lights_on = delay;
+    }
+
+    /// Hold power I/O until the test releases the supplied two-party barrier.
+    pub fn hold_any_lights_on_until(&self, gate: std::sync::Arc<std::sync::Barrier>) {
+        *self.any_lights_on_gate.lock().unwrap() = Some(gate);
+    }
+
+    /// Number of power reads that entered I/O, including reads still blocked by
+    /// the configured delay. Useful for deterministic command/refresh races.
+    pub fn any_lights_on_started_count(&self) -> usize {
+        self.any_lights_on_started
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Get all recorded calls.
@@ -248,6 +264,12 @@ impl LightController for SpyLightController {
     }
 
     async fn any_lights_on(&self, room_id: &str) -> LightControlResult<bool> {
+        self.any_lights_on_started
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let gate = self.any_lights_on_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.wait();
+        }
         let delay = self.delays.lock().unwrap().any_lights_on;
         self.delay_for(delay);
         self.calls.lock().unwrap().push(SpyCall::AnyLightsOn {

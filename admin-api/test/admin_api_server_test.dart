@@ -14,6 +14,63 @@ import 'package:shelf/shelf.dart';
 import 'package:test/test.dart';
 
 void main() {
+  for (final legacyKey in <String?>[null, 'nodes', 'rooms']) {
+    test('dashboard probe requests base state (legacy=$legacyKey)', () async {
+      final deviceRequests = <http.BaseRequest>[];
+      final client = _HandlerClient((request) async {
+        if (request.url.host != 'device.test' &&
+            request.url.host != 'local.test') {
+          return _supabaseResponse(request);
+        }
+        deviceRequests.add(request);
+        if (request.url.path == '/health') {
+          return _jsonResponse({'status': 'healthy'});
+        }
+        expect(request.url.path, '/api/state');
+        expect(request.url.queryParameters, {'include': 'base'});
+        expect(request.headers['Authorization'], 'Bearer legacy-token');
+        return _jsonResponse({
+          'version': '0.6.600-beta',
+          'server_instance_id': 'srv-test',
+          'platform': 'appliance',
+          'context': 'rpiz',
+          if (legacyKey != null)
+            legacyKey: [
+              {
+                'id': 'light-1',
+                'name': 'Lamp',
+                'kind': 'light_device',
+                'devices': []
+              },
+            ],
+          if (legacyKey == null)
+            'state_scope': {
+              'schema_version': 1,
+              'included': ['base'],
+              'nodes': 'none'
+            },
+        });
+      });
+      final response = await _testServer(client: client).handler(Request(
+        'POST',
+        Uri.parse('http://admin.test/api/hubs/hub-1/probe'),
+        headers: {'authorization': 'Bearer staff-session'},
+      ));
+      expect(response.statusCode, 200);
+      final body = jsonDecode(await response.readAsString()) as Map;
+      expect(body['status'], 'online');
+      expect(body['serverInstanceId'], 'srv-test');
+      expect(body['serverVersion'], '0.6.600-beta');
+      if (legacyKey != null) {
+        expect(body['inventory']['lights'], 1);
+      } else {
+        expect(body['inventory'], isNull);
+      }
+      expect(deviceRequests.map((request) => request.url.path),
+          ['/health', '/api/state']);
+    });
+  }
+
   test('support snapshot associates customer emails with homes', () async {
     final client = _HandlerClient((request) async {
       if (request.url.host == 'supabase.test') {

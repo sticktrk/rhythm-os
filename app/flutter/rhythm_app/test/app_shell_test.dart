@@ -284,8 +284,11 @@ class _TestRhythmConnection extends RhythmConnection {
     String? webBaseUrl,
     String? authToken,
     bool authoritative = false,
+    bool refresh = false,
   }) async {
-    if (authoritative) await reconnect(authoritative: true);
+    if (authoritative || refresh) {
+      await reconnect(authoritative: authoritative);
+    }
   }
 
   @override
@@ -1163,7 +1166,7 @@ void main() {
     expect(find.text('Feature'), findsOneWidget);
   });
 
-  testWidgets('app resume shows cached rooms read-only until fresh hello',
+  testWidgets('app resume restores controls from an ordinary hello',
       (tester) async {
     final roomProvider = RoomProvider();
     await _seedRoom(roomProvider);
@@ -1218,7 +1221,7 @@ void main() {
 
     expect(serverSync.hasHomeEntryRefreshGate, isFalse);
     expect(connection.reconnectCallCount, 1);
-    expect(connection.lastReconnectAuthoritative, isTrue);
+    expect(connection.lastReconnectAuthoritative, isFalse);
     expect(find.text('Waiting to Retry...'), findsNothing);
     expect(find.byType(ServerDisconnectedScreen), findsNothing);
     expect(find.text('Setting up...'), findsNothing);

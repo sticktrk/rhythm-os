@@ -150,6 +150,7 @@ class RhythmConnection {
   Timer? _sseReconnectTimer;
   int _sseReconnectAttempts = 0;
   bool _sseConnecting = false;
+  bool _pollAfterSseConnect = false;
   bool _suppressNextSettingsChangedAfterMode = false;
   Timer? _settingsChangedSuppressTimer;
 
@@ -311,6 +312,8 @@ class RhythmConnection {
   /// Connect to a server device.
   ///
   /// [webBaseUrl] is required on web platforms (pass `Uri.base.toString()`).
+  /// [refresh] fetches an ordinary hello even on the same connected endpoint
+  /// and asks supporting servers to refresh observed power in the background.
   Future<void> connect(
     String host, {
     int port = 80,
@@ -318,13 +321,19 @@ class RhythmConnection {
     String? webBaseUrl,
     String? authToken,
     bool authoritative = false,
+    bool refresh = false,
   }) async {
     if (_connectionState == RhythmConnectionState.connected &&
         _host == host &&
         _port == port &&
         _useSsl == useSsl &&
         _authToken == authToken) {
-      if (authoritative) await reconnect(authoritative: true);
+      if (authoritative || refresh) {
+        await _reconnect(
+          authoritative: authoritative,
+          refreshObservedPower: refresh,
+        );
+      }
       return;
     }
 
@@ -372,14 +381,24 @@ class RhythmConnection {
         RhythmRuntimeApi(_dio!, onStatesReceived: _updateCacheFromStates);
 
     _log.config('Connecting to $host:$port');
-    await _connectInternal(supersede: true, authoritative: authoritative);
+    await _connectInternal(
+      supersede: true,
+      authoritative: authoritative,
+      refreshObservedPower: refresh,
+    );
   }
 
   /// Force a full reconnect.
   ///
   /// When [authoritative] is true, the initial hello fetch uses
   /// `GET /api/state?authoritative=true`.
-  Future<void> reconnect({bool authoritative = false}) async {
+  Future<void> reconnect({bool authoritative = false}) =>
+      _reconnect(authoritative: authoritative);
+
+  Future<void> _reconnect({
+    bool authoritative = false,
+    bool refreshObservedPower = false,
+  }) async {
     if (_host == null) return;
     _stopPolling();
     _disconnectSse();
@@ -394,7 +413,10 @@ class RhythmConnection {
     // stream's initial hub_status event from looking like a new change
     // (which would trigger another reconnect → infinite loop).
     _sseDirectAttempted = false;
-    await _connectInternal(authoritative: authoritative);
+    await _connectInternal(
+      authoritative: authoritative,
+      refreshObservedPower: refreshObservedPower,
+    );
   }
 
   /// Disconnect from the server.
@@ -507,6 +529,7 @@ class RhythmConnection {
   Future<void> _connectInternal({
     bool authoritative = false,
     bool supersede = false,
+    bool refreshObservedPower = false,
   }) {
     final activeConnect = _activeConnect;
     if (!supersede && activeConnect != null) {
@@ -523,7 +546,10 @@ class RhythmConnection {
       );
     }
 
-    final attempt = _runConnectInternal(authoritative: authoritative);
+    final attempt = _runConnectInternal(
+      authoritative: authoritative,
+      refreshObservedPower: refreshObservedPower,
+    );
     late final Future<void> trackedAttempt;
     trackedAttempt = attempt.whenComplete(() {
       if (identical(_activeConnect, trackedAttempt)) {
@@ -536,7 +562,10 @@ class RhythmConnection {
     return trackedAttempt;
   }
 
-  Future<void> _runConnectInternal({bool authoritative = false}) async {
+  Future<void> _runConnectInternal({
+    bool authoritative = false,
+    bool refreshObservedPower = false,
+  }) async {
     final dio = _dio;
     if (dio == null || _host == null) return;
     final transportGeneration = ++_transportGeneration;
@@ -550,7 +579,11 @@ class RhythmConnection {
         : RhythmConnectionState.connecting);
 
     try {
-      final payload = await _getHelloPayload(dio, authoritative: authoritative);
+      final payload = await _getHelloPayload(
+        dio,
+        authoritative: authoritative,
+        refreshObservedPower: refreshObservedPower,
+      );
       if (!_isCurrentTransport(transportGeneration, dio)) return;
       final modelTimer = Stopwatch()..start();
       final hello = RhythmHello.fromJson(payload.data);
@@ -625,6 +658,7 @@ class RhythmConnection {
       _reconnectAttempts = 0;
       _consecutivePollFailures = 0;
       _lastFreshStateAt = DateTime.now();
+      _pollAfterSseConnect = refreshObservedPower && !authoritative;
 
       _log.config('Connected, platform=${hello.platformType}, '
           '${hello.nodes.length} nodes');
@@ -650,7 +684,11 @@ class RhythmConnection {
         int requestMs,
         int decodeMs,
         int responseBytes,
-      })> _getHelloPayload(Dio dio, {bool authoritative = false}) async {
+      })> _getHelloPayload(
+    Dio dio, {
+    bool authoritative = false,
+    bool refreshObservedPower = false,
+  }) async {
     final timer = Stopwatch()..start();
     final response = await dio.get<List<int>>(
       'api/state',
@@ -658,6 +696,8 @@ class RhythmConnection {
       queryParameters: {
         'include': 'controls,configuration',
         if (authoritative) 'authoritative': 'true',
+        if (refreshObservedPower && !authoritative)
+          'refresh_observed_power': 'true',
       },
     );
     final requestMs = timer.elapsedMilliseconds;
@@ -968,7 +1008,12 @@ class RhythmConnection {
       // was silently lost — there is no Last-Event-ID resume, and the
       // periodic poller is now stopped. The freshness debounce keeps rapid
       // stream flaps from hammering the server with a poll per reconnect.
-      if (DateTime.now().difference(_lastFreshStateAt) >= _fastPollDebounce) {
+      // A resume's background power refresh can finish after the hello was
+      // snapshotted but before SSE subscribed. Read the cheap node cache once
+      // to recover that gap; later physical observations arrive on the stream.
+      if (_pollAfterSseConnect ||
+          DateTime.now().difference(_lastFreshStateAt) >= _fastPollDebounce) {
+        _pollAfterSseConnect = false;
         unawaited(_poll());
       }
 

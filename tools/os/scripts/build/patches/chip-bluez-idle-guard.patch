@@ -1,0 +1,50 @@
+--- a/src/platform/Linux/bluez/BluezEndpoint.cpp
++++ b/src/platform/Linux/bluez/BluezEndpoint.cpp
+@@ -79,6 +79,11 @@
+ #define g_memdup2(mem, size) g_memdup(mem, static_cast<unsigned int>(size))
+ #endif
+
++// Optional commissioner policy. Other CHIP applications retain the SDK default.
++extern "C" bool rhythm_chipd_ble_commissioning_active() __attribute__((weak));
++// Marker lets the bridge and builder diagnose an archive missing this guard.
++extern "C" void rhythm_chip_bluez_idle_guard_v1() {}
++
+ namespace chip {
+ namespace DeviceLayer {
+ namespace Internal {
+@@ -324,6 +329,10 @@
+
+ void BluezEndpoint::HandleNewDevice(BluezDevice1 & aDevice)
+ {
++    if (mIsCentral && rhythm_chipd_ble_commissioning_active != nullptr && !rhythm_chipd_ble_commissioning_active())
++    {
++        return;
++    }
+     VerifyOrReturn(bluez_device1_get_connected(&aDevice));
+     VerifyOrReturn(!mIsCentral || bluez_device1_get_services_resolved(&aDevice));
+     CHIP_ERROR err;
+@@ -358,7 +367,23 @@
+
+ void BluezEndpoint::OnDevicePropertyChanged(BluezDevice1 & device, GVariant * changedProps, const char * const * invalidatedProps)
+ {
+-    UpdateConnectionTable(device);
++    // Advertisements cannot change the connection table. Processing RSSI or
++    // manufacturer/service payloads here retries GATT enumeration for every
++    // packet from any connected non-Matter device on the shared adapter.
++    gboolean value;
++    bool connectionChanged = g_variant_lookup(changedProps, "Connected", "b", &value) ||
++        g_variant_lookup(changedProps, "ServicesResolved", "b", &value);
++    for (const char * const * property = invalidatedProps; property != nullptr && *property != nullptr; ++property)
++    {
++        connectionChanged = connectionChanged || strcmp(*property, "Connected") == 0 ||
++            strcmp(*property, "ServicesResolved") == 0;
++    }
++    if (connectionChanged)
++    {
++        // Existing connections must still receive disconnect cleanup after a
++        // commissioning scope has ended. HandleNewDevice gates only new ones.
++        UpdateConnectionTable(device);
++    }
+ }
+
+ void BluezEndpoint::OnDeviceRemoved(BluezDevice1 & device)

@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 
 import { probeHub } from '../../api';
+import { probeTargets, watchVisibleProbeSweep } from './probeSweep';
 import { errorMessage, shortId } from '../../lib/format';
 import {
   flattenHomes,
@@ -47,69 +48,51 @@ export default function DashboardPage() {
   const [probes, setProbes] = useState<Record<string, ProbeResult>>({});
   const [probing, setProbing] = useState(false);
   const sweepGeneration = useRef(0);
-  const automaticallyProbed = useRef<string | null>(null);
-  const homesKey = homes
-    .map((item) => `${item.home.id}:${item.hubs.map((hub) => hub.id).join(',')}`)
-    .join('|');
 
   const runProbeSweep = useCallback(() => {
     const targets = homes.flatMap((item) =>
       item.hubs.map((hub) => ({ hub }))
     );
-    if (targets.length === 0) return;
+    if (targets.length === 0 || document.visibilityState !== 'visible') return;
 
     const generation = ++sweepGeneration.current;
     setProbes({});
     setProbing(true);
 
     void (async () => {
-      let nextTargetIndex = 0;
-      const probeNextHub = async () => {
-        while (nextTargetIndex < targets.length) {
-          const target = targets[nextTargetIndex++];
-          let result: ProbeResult;
-          try {
-            result = await probeHub(accessToken, target.hub.id);
-          } catch (error) {
-            result = {
-              hubId: target.hub.id,
-              status: 'offline',
-              checkedAt: new Date().toISOString(),
-              tokenAvailable: false,
-              hasEncryptedToken: target.hub.hasEncryptedToken,
-              message: errorMessage(error)
-            };
-          }
-          if (sweepGeneration.current !== generation) return;
-          setProbes((current) => ({ ...current, [target.hub.id]: result }));
+      const isCurrent = () => sweepGeneration.current === generation
+        && document.visibilityState === 'visible';
+      await probeTargets(targets, async (target) => {
+        let result: ProbeResult;
+        try {
+          result = await probeHub(accessToken, target.hub.id);
+        } catch (error) {
+          result = {
+            hubId: target.hub.id,
+            status: 'offline',
+            checkedAt: new Date().toISOString(),
+            tokenAvailable: false,
+            hasEncryptedToken: target.hub.hasEncryptedToken,
+            message: errorMessage(error)
+          };
         }
-      };
-
-      await Promise.all(
-        Array.from(
-          { length: Math.min(homeDirectoryProbeConcurrency, targets.length) },
-          probeNextHub
-        )
-      );
+        if (!isCurrent()) return;
+        setProbes((current) => ({ ...current, [target.hub.id]: result }));
+      }, isCurrent, homeDirectoryProbeConcurrency);
       if (sweepGeneration.current === generation) setProbing(false);
     })();
   }, [accessToken, homes]);
 
-  useEffect(() => {
-    if (homes.length === 0 || automaticallyProbed.current === homesKey) return;
-    automaticallyProbed.current = homesKey;
-    runProbeSweep();
-  }, [homes.length, homesKey, runProbeSweep]);
-
-  useEffect(() => {
-    const interval = window.setInterval(runProbeSweep, 60_000);
-    return () => window.clearInterval(interval);
-  }, [runProbeSweep]);
+  useEffect(() => watchVisibleProbeSweep(document, runProbeSweep, () => {
+    // In-flight requests can finish, but no queued hub gets another request.
+    sweepGeneration.current += 1;
+    setProbing(false);
+  }), [runProbeSweep]);
 
   const refreshHomes = useCallback(() => {
+    // The refreshed directory starts one sweep through the visibility effect.
     void refresh();
-    runProbeSweep();
-  }, [refresh, runProbeSweep]);
+  }, [refresh]);
 
   return (
     <HomeDirectoryView

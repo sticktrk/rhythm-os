@@ -1084,6 +1084,7 @@ class _FakeRhythmConnection extends RhythmConnection {
     String? webBaseUrl,
     String? authToken,
     bool authoritative = false,
+    bool refresh = false,
   }) async {
     connectCalls.add((
       host: host,
@@ -1092,7 +1093,9 @@ class _FakeRhythmConnection extends RhythmConnection {
       authToken: authToken,
     ));
     await connectBlocker?.future;
-    if (authoritative) await reconnect(authoritative: true);
+    if (authoritative || refresh) {
+      await reconnect(authoritative: authoritative);
+    }
   }
 
   @override

@@ -41,7 +41,23 @@ server/watchdog heartbeat ages, and recorder health. When a process leader is
 in uninterruptible sleep, its bounded PID, name, and wait channel are retained
 in the same summary that observed it. The 5-minute detail adds
 bounded status and thread name/state/wchan for the server, CHIP daemon,
-watchdog, and recorder.
+watchdog, recorder, Bluetooth daemon, system D-Bus daemon, and tunnel process.
+
+Each target process summary includes user/system CPU ticks and its start tick
+from `/proc/<pid>/stat`; detail samples include the same counters for each
+thread from `/proc/<pid>/task/<tid>/stat`. `cpu_ticks_per_second` records USER_HZ
+from `sysconf(_SC_CLK_TCK)`. For two samples from the same boot and matching
+PID/TID **and start tick**, one-core CPU percent is
+`100 * delta(user_ticks + system_ticks) / ticks_per_second / elapsed_seconds`.
+Never subtract counters across a restart or identifier reuse. Missing counters
+are unavailable, not zero; older records omit these additive fields entirely.
+This works on BusyBox images without `top -H`, shell commands, or extra polling.
+
+At most eight target processes and 64 threads per process are retained. Thread
+collection stops starting new reads after one second. If details exceed the
+existing 16 KiB record cap, verbose status/I/O text is marked truncated first;
+then the largest thread lists are shortened and marked `threads_truncated`.
+Process counters remain in the record, and no ring/write budget increases.
 
 Escalation occurs for a recorder cadence slip over 2 seconds, a D-state count
 that persists for two samples, memory or I/O `full avg10 >= 1.0`, a
