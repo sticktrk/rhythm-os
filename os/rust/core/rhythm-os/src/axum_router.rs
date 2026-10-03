@@ -399,6 +399,9 @@ async fn get_state(
         .get("authoritative")
         .and_then(|value| value.parse::<bool>().ok())
         .unwrap_or(false);
+    let refresh_observed_power = params
+        .get("refresh_observed_power")
+        .is_some_and(|value| value == "true");
     let selection = match crate::state_selection::StateSelection::parse(
         params.get("include").map(String::as_str),
     ) {
@@ -406,7 +409,12 @@ async fn get_state(
         Err(error) => return ApiResponse::bad_request(error),
     };
     run_blocking(move || {
-        handlers::handle_get_state_with_selection(&state, authoritative, selection.as_ref())
+        let response =
+            handlers::handle_get_state_with_selection(&state, authoritative, selection.as_ref());
+        if response.status == 200 && refresh_observed_power && !authoritative {
+            crate::commands::request_observed_power_refresh_on_resume(&state);
+        }
+        response
     })
     .await
 }

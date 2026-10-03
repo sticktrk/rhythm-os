@@ -13,6 +13,7 @@ import '../services/app_startup_performance.dart';
 import 'dart:async';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:rhythm_core/rhythm_core.dart';
@@ -2731,6 +2732,7 @@ class ServerSyncProvider extends ChangeNotifier {
     bool assumeLanReachable = false,
     bool assumeSavedAuth = false,
     bool authoritative = false,
+    bool refresh = false,
   }) async {
     final endpointTimer = Stopwatch()..start();
     // Saved endpoints are the fastest usable candidates. Refreshing the same
@@ -2784,6 +2786,7 @@ class ServerSyncProvider extends ChangeNotifier {
       useSsl: endpoint.useSsl,
       authToken: auth.authToken,
       authoritative: authoritative,
+      refresh: refresh,
     );
     notifyListeners();
   }
@@ -2823,6 +2826,7 @@ class ServerSyncProvider extends ChangeNotifier {
     bool authoritative = false,
     bool assumeLanReachable = false,
     bool assumeSavedAuth = false,
+    bool refresh = false,
   }) async {
     final hub = _homeProvider.activeServerHub ?? _serverHub;
     if (hub == null) return;
@@ -2834,7 +2838,7 @@ class ServerSyncProvider extends ChangeNotifier {
       _resetConnectionMetadata();
       _roomProvider.clearTransientState();
     }
-    if (authoritative) {
+    if (authoritative || refresh) {
       _beginRoomReadinessRefresh();
     }
     await _connectToServerHub(
@@ -2843,7 +2847,45 @@ class ServerSyncProvider extends ChangeNotifier {
       assumeLanReachable: assumeLanReachable,
       assumeSavedAuth: assumeSavedAuth,
       authoritative: authoritative,
+      refresh: refresh,
     );
+  }
+
+  /// Resume from a live stream or an ordinary controls snapshot. Physical power
+  /// observations continue arriving through node-state events and fallback
+  /// polling; a foreground transition must not wait for per-room power reads.
+  Future<void> resumeActiveServerConnection({DateTime? suspendedAt}) async {
+    final hub = _homeProvider.activeServerHub ?? _serverHub;
+    if (hub == null) return;
+    final activeEndpoint = _activeConnectionEndpoint;
+    if (suspendedAt != null &&
+        _sameServerHubIdentity(_serverHub, hub) &&
+        _serverHub?.token == hub.token &&
+        (_sameEndpoint(activeEndpoint, hub.endpoint) ||
+            _sameEndpoint(activeEndpoint, hub.remoteEndpoint)) &&
+        _connection.connected &&
+        _connection.sseConnected &&
+        !_connection.lastSseActivity.isBefore(suspendedAt) &&
+        DateTime.now().difference(_connection.lastSseActivity) <
+            const Duration(seconds: 45)) {
+      // Activity received while suspended proves the selected transport is
+      // alive. Keep its stream and controls available without another probe.
+      AppStartupPerformance.instance.recordPhase(AppStartupPhase.endpoint, 0);
+      AppStartupPerformance.instance.recordServer(
+        nodes: _helloNodes.length,
+        devices: _helloNodes
+            .where((node) => node.kind == RhythmNodeKind.lightDevice)
+            .length,
+        version: _firmwareVersion,
+        stateScope: _selectiveState ? 'controls' : 'legacy',
+        transport: _sameEndpoint(activeEndpoint, hub.remoteEndpoint)
+            ? 'tunnel'
+            : 'lan',
+      );
+      notifyListeners();
+      return;
+    }
+    await retryActiveServerConnection(refresh: true);
   }
 
   Future<void> _syncLocalServerProcessForHub(Hub hub) async {
@@ -2959,11 +3001,10 @@ class ServerSyncProvider extends ChangeNotifier {
       return remote;
     }
 
-    if (await _canReachEndpoint(hub.endpoint, authToken)) {
-      return hub.endpoint;
-    }
-
     if (authToken?.trim().isEmpty != false) {
+      if (await _canReachEndpoint(hub.endpoint, authToken)) {
+        return hub.endpoint;
+      }
       debugPrint(
         'ServerSync: LAN endpoint ${hub.endpoint.host}:${hub.endpoint.port} '
         'unreachable and remote access has no saved owner token',
@@ -2971,11 +3012,51 @@ class ServerSyncProvider extends ChangeNotifier {
       return null;
     }
 
-    debugPrint(
-      'ServerSync: LAN endpoint ${hub.endpoint.host}:${hub.endpoint.port} '
-      'unreachable, falling back to ${remote.host}:${remote.port}',
-    );
-    return remote;
+    // Probe both paths together. A working tunnel waits only a short LAN
+    // preference window, never the unreachable LAN's full timeout. Late probe
+    // results cannot replace the endpoint selected for this connection.
+    final lanClient = _endpointProbeClient(hub.endpoint);
+    final remoteClient = _endpointProbeClient(remote);
+    final lanReachable =
+        _canReachEndpoint(hub.endpoint, authToken, client: lanClient);
+    final remoteReachable =
+        _canReachEndpoint(remote, authToken, client: remoteClient);
+    final selected = Completer<HubEndpoint>();
+    var finished = 0;
+    void finish(HubEndpoint? endpoint) {
+      finished++;
+      if (selected.isCompleted) return;
+      if (endpoint != null) {
+        selected.complete(endpoint);
+      } else if (finished == 2) {
+        // Let the SDK's authenticated hello/retry contract handle a transient
+        // auth-status failure when neither probe answered.
+        selected.complete(remote);
+      }
+    }
+
+    unawaited(lanReachable.then((reachable) {
+      finish(reachable ? hub.endpoint : null);
+    }));
+    unawaited(remoteReachable.then((reachable) async {
+      if (!reachable) {
+        finish(null);
+        return;
+      }
+      final preferLan = await lanReachable.timeout(
+        const Duration(milliseconds: 100),
+        onTimeout: () => false,
+      );
+      finish(preferLan ? hub.endpoint : remote);
+    }));
+    try {
+      return await selected.future;
+    } finally {
+      // Cancel the losing request too: Future.timeout alone leaves its socket
+      // active and repeated resumes can accumulate stalled probes.
+      lanClient.close(force: true);
+      remoteClient.close(force: true);
+    }
   }
 
   Future<bool> _isCellularOnly() async {
@@ -2996,23 +3077,34 @@ class ServerSyncProvider extends ChangeNotifier {
 
   Future<bool> _canReachEndpoint(
     HubEndpoint endpoint,
-    String? authToken,
-  ) async {
-    final reachability = _endpointReachability;
-    if (reachability != null) {
-      return reachability(endpoint, authToken);
-    }
-
+    String? authToken, {
+    Dio? client,
+  }) async {
+    final probeClient = client ?? _endpointProbeClient(endpoint);
     try {
+      final reachability = _endpointReachability;
+      if (reachability != null) {
+        return await reachability(endpoint, authToken)
+            .timeout(const Duration(seconds: 2));
+      }
       await RhythmAuthApi(
         baseUrl: endpoint.baseUrl,
         authToken: authToken,
+        dio: probeClient,
       ).getStatus().timeout(const Duration(seconds: 2));
       return true;
     } catch (_) {
       return false;
+    } finally {
+      probeClient.close(force: true);
     }
   }
+
+  Dio _endpointProbeClient(HubEndpoint endpoint) => Dio(BaseOptions(
+        baseUrl: '${endpoint.baseUrl}/',
+        connectTimeout: const Duration(seconds: 2),
+        receiveTimeout: const Duration(seconds: 2),
+      ));
 
   /// Start gating the Home tab while a user is entering/logging into a Home.
   ///

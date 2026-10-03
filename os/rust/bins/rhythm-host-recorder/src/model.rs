@@ -131,6 +131,15 @@ pub struct TaskCounts {
     pub truncated: bool,
 }
 
+/// Linux /proc stat counters, in USER_HZ ticks. Match start_ticks as well as
+/// pid/tid before taking deltas: identifiers can be reused within a boot.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct TaskCpuTime {
+    pub user_ticks: u64,
+    pub system_ticks: u64,
+    pub start_ticks: u64,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct TargetProcessSummary {
     pub target: String,
@@ -138,6 +147,8 @@ pub struct TargetProcessSummary {
     pub comm: String,
     pub state: String,
     pub thread_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_time: Option<Observation<TaskCpuTime>>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -179,6 +190,8 @@ pub struct HeartbeatSnapshot {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct SummarySample {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_ticks_per_second: Option<u64>,
     pub load: Observation<LoadSnapshot>,
     pub cpu: Observation<CpuSnapshot>,
     pub memory_kib: Observation<BTreeMap<String, u64>>,
@@ -204,6 +217,8 @@ pub struct SummarySample {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct ThreadDetail {
     pub tid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_time: Option<Observation<TaskCpuTime>>,
     pub name: Observation<String>,
     pub state: Observation<String>,
     pub wait_channel: Observation<String>,
@@ -217,6 +232,8 @@ pub struct ThreadDetail {
 pub struct ProcessDetail {
     pub target: String,
     pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_time: Option<Observation<TaskCpuTime>>,
     pub status: Observation<String>,
     pub io: Observation<String>,
     pub threads: Vec<ThreadDetail>,
@@ -225,6 +242,8 @@ pub struct ProcessDetail {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct DetailSample {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_ticks_per_second: Option<u64>,
     pub processes: Vec<ProcessDetail>,
 }
 
@@ -346,6 +365,34 @@ pub struct FlightRecorderSynthesis {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pre_cpu_records_still_deserialize_without_inventing_zero_counters() {
+        let process: TargetProcessSummary = serde_json::from_value(serde_json::json!({
+            "target": "rhythm-server", "pid": 42, "comm": "rhythm-server",
+            "state": "S", "thread_count": 1,
+        }))
+        .unwrap();
+        assert!(process.cpu_time.is_none());
+        let detail: DetailSample = serde_json::from_value(serde_json::json!({
+            "processes": [{
+                "target": "rhythm-server", "pid": 42,
+                "status": {"status": "ok", "value": ""},
+                "io": {"status": "ok", "value": ""},
+                "threads": [{
+                    "tid": 42,
+                    "name": {"status": "ok", "value": "rhythm-server"},
+                    "state": {"status": "ok", "value": "S"},
+                    "wait_channel": {"status": "ok", "value": "futex_wait"},
+                }],
+                "threads_truncated": false,
+            }],
+        }))
+        .unwrap();
+        assert!(detail.cpu_ticks_per_second.is_none());
+        assert!(detail.processes[0].cpu_time.is_none());
+        assert!(detail.processes[0].threads[0].cpu_time.is_none());
+    }
 
     #[test]
     fn observation_serialization_distinguishes_empty_zero_and_failures() {

@@ -13,7 +13,7 @@ use crate::model::{
     ArchiveResult, BlockedTaskSummary, CpuSnapshot, DetailSample, DiskSnapshot, EarlyBootSnapshot,
     EscalationSample, FilesystemSnapshot, HeartbeatSnapshot, LoadSnapshot, Observation,
     PowerSnapshot, ProcessDetail, PsiLine, PsiSnapshot, PstoreEntry, RecorderHealth, SourceStatus,
-    SummarySample, TargetProcessSummary, TaskCounts, ThermalSnapshot, ThreadDetail,
+    SummarySample, TargetProcessSummary, TaskCounts, TaskCpuTime, ThermalSnapshot, ThreadDetail,
     WatchdogSnapshot, SCHEMA_VERSION,
 };
 use crate::ring::{
@@ -33,6 +33,10 @@ const PSTORE_FILE_LIMIT: usize = 8;
 const PROCESS_SCAN_LIMIT: usize = 4096;
 const BLOCKED_TASK_LIMIT: usize = 8;
 const THREAD_SCAN_LIMIT: usize = 64;
+const TARGET_PROCESS_LIMIT: usize = 8;
+const DETAIL_COLLECTION_TIMEOUT: Duration = Duration::from_secs(1);
+// Leave space for the record envelope within the existing 16 KiB ring cap.
+const DETAIL_PAYLOAD_BYTES_LIMIT: usize = 15 * 1024;
 const ESCALATION_STACK_CAPTURE_LIMIT: usize = 4;
 const OPTIONAL_SOURCE_TIMEOUT: Duration = Duration::from_millis(100);
 const DETAIL_SOURCE_TIMEOUT: Duration = Duration::from_millis(150);
@@ -185,6 +189,7 @@ pub fn collect_summary(paths: &CollectorPaths, health: &RecorderHealth) -> (u64,
         .unwrap_or(0);
     let (tasks, targets, blocked_tasks) = collect_tasks_and_targets(paths);
     let mut sample = SummarySample {
+        cpu_ticks_per_second: cpu_ticks_per_second(),
         load: collect_load(paths),
         cpu: collect_cpu(paths),
         memory_kib: collect_key_values(
@@ -265,9 +270,36 @@ pub fn collect_boot_id(paths: &CollectorPaths) -> Observation<String> {
 }
 
 pub fn collect_detail(paths: &CollectorPaths, with_stacks: bool) -> DetailSample {
-    DetailSample {
+    let mut sample = DetailSample {
+        cpu_ticks_per_second: cpu_ticks_per_second(),
         processes: collect_process_details(paths, with_stacks),
+    };
+    // Never lose the entire CPU sample because raw status or many threads fill
+    // the ring record. Drop verbose text first, then mark partial thread lists.
+    if serde_json::to_vec(&sample).is_ok_and(|bytes| bytes.len() > DETAIL_PAYLOAD_BYTES_LIMIT) {
+        for process in &mut sample.processes {
+            process.status = Observation::truncated(String::new(), "detail byte budget");
+            process.io = Observation::truncated(String::new(), "detail byte budget");
+        }
+        let mut encoded_size = serde_json::to_vec(&sample).map_or(0, |bytes| bytes.len());
+        while encoded_size > DETAIL_PAYLOAD_BYTES_LIMIT {
+            let Some(process) = sample
+                .processes
+                .iter_mut()
+                .filter(|p| !p.threads.is_empty())
+                .max_by_key(|p| p.threads.len())
+            else {
+                break;
+            };
+            if let Some(thread) = process.threads.pop() {
+                // Ignoring removed separators keeps this estimate conservative.
+                encoded_size = encoded_size
+                    .saturating_sub(serde_json::to_vec(&thread).map_or(0, |bytes| bytes.len()));
+            }
+            process.threads_truncated = true;
+        }
     }
+    sample
 }
 
 pub fn collect_escalation(
@@ -553,21 +585,35 @@ fn collect_tasks_and_targets(
         };
         let (thread_count, threads_truncated) =
             bounded_entry_count(&entry.path().join("task"), 256);
+        if targets.len() >= TARGET_PROCESS_LIMIT {
+            counts.truncated = true;
+            continue;
+        }
         targets.push(TargetProcessSummary {
             target: target.to_string(),
             pid,
             comm,
             state: state.to_string(),
             thread_count: thread_count as u64,
+            cpu_time: Some(parse_observation(
+                Observation::ok(stat.clone()),
+                parse_task_cpu_time,
+            )),
         });
         counts.truncated |= threads_truncated;
     }
+    let targets_truncated = counts.truncated;
     let task_observation = if counts.truncated {
         Observation::truncated(counts, "process scan entry/time limit reached")
     } else {
         Observation::ok(counts)
     };
-    (task_observation, Observation::ok(targets), blocked_tasks)
+    let target_observation = if targets_truncated {
+        Observation::truncated(targets, "process scan entry/time limit reached")
+    } else {
+        Observation::ok(targets)
+    };
+    (task_observation, target_observation, blocked_tasks)
 }
 
 fn collect_thermal(paths: &CollectorPaths) -> Observation<Vec<ThermalSnapshot>> {
@@ -656,13 +702,16 @@ fn collect_process_details(paths: &CollectorPaths, with_stacks: bool) -> Vec<Pro
     let (_, targets, _) = collect_tasks_and_targets(paths);
     let mut details = Vec::new();
     let mut expensive_capture_budget = ESCALATION_STACK_CAPTURE_LIMIT;
+    let started = Instant::now();
     for target in targets.value.unwrap_or_default() {
         let process_dir = paths.proc_root.join(target.pid.to_string());
         let mut threads = Vec::new();
         let mut threads_truncated = false;
         if let Ok(entries) = fs::read_dir(process_dir.join("task")) {
             for entry in entries.flatten().take(THREAD_SCAN_LIMIT + 1) {
-                if threads.len() >= THREAD_SCAN_LIMIT {
+                if threads.len() >= THREAD_SCAN_LIMIT
+                    || started.elapsed() >= DETAIL_COLLECTION_TIMEOUT
+                {
                     threads_truncated = true;
                     break;
                 }
@@ -694,6 +743,15 @@ fn collect_process_details(paths: &CollectorPaths, with_stacks: bool) -> Vec<Pro
                     });
                 threads.push(ThreadDetail {
                     tid,
+                    cpu_time: Some(parse_observation(
+                        read_bounded_text(
+                            &task_dir.join("stat"),
+                            THREAD_TEXT_BYTES_LIMIT,
+                            DETAIL_SOURCE_TIMEOUT,
+                            false,
+                        ),
+                        parse_task_cpu_time,
+                    )),
                     name: read_bounded_text(
                         &task_dir.join("comm"),
                         128,
@@ -728,9 +786,11 @@ fn collect_process_details(paths: &CollectorPaths, with_stacks: bool) -> Vec<Pro
                 });
             }
         }
+        threads.sort_by_key(|thread| thread.tid);
         details.push(ProcessDetail {
             target: target.target,
             pid: target.pid,
+            cpu_time: target.cpu_time,
             status: read_bounded_text(
                 &process_dir.join("status"),
                 PROCESS_STATUS_BYTES_LIMIT,
@@ -1159,10 +1219,37 @@ fn parse_proc_stat_state(stat: &str) -> Option<&str> {
     stat.get(end + 1..)?.split_whitespace().next()
 }
 
+fn parse_task_cpu_time(stat: &str) -> Result<TaskCpuTime, &'static str> {
+    // comm is parenthesized and may itself contain spaces or parentheses.
+    let end = stat.rfind(')').ok_or("missing process comm")?;
+    let fields: Vec<_> = stat[end + 1..].split_whitespace().collect();
+    Ok(TaskCpuTime {
+        user_ticks: parse_field(&fields, 11)?,
+        system_ticks: parse_field(&fields, 12)?,
+        start_ticks: parse_field(&fields, 19)?,
+    })
+}
+
+fn cpu_ticks_per_second() -> Option<u64> {
+    #[cfg(unix)]
+    {
+        // SAFETY: sysconf has no pointer arguments or side effects.
+        let ticks = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        u64::try_from(ticks).ok().filter(|ticks| *ticks > 0)
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
 fn target_name(comm: &str) -> Option<&'static str> {
     match comm {
         "rhythm-server" | "rhythm-linux-appliance" => Some("rhythm-server"),
         "rhythm-chipd" => Some("rhythm-chipd"),
+        "bluetoothd" => Some("bluetoothd"),
+        "dbus-daemon" => Some("dbus-daemon"),
+        "cloudflared" => Some("cloudflared"),
         value if value.starts_with("rhythm-hardwar") => Some("rhythm-hardware-watchdog"),
         value if value.starts_with("rhythm-host-rec") => Some("rhythm-host-recorder"),
         _ => None,
@@ -1388,6 +1475,7 @@ mod tests {
             comm: "rhythm-server".to_string(),
             state: "S".to_string(),
             thread_count: 2,
+            cpu_time: None,
         }]);
         let mut state = TriggerState::default();
         assert!(state.evaluate(&sample, 0, 10_000).is_empty());
@@ -1423,6 +1511,7 @@ mod tests {
             comm: "rhythm-server".to_string(),
             state: "S".to_string(),
             thread_count: 1,
+            cpu_time: None,
         }]);
         sample.server_heartbeat = Observation::ok(HeartbeatSnapshot {
             kind: "server".to_string(),
@@ -1480,6 +1569,159 @@ mod tests {
             Some("io_schedule")
         );
         fs::remove_dir_all(paths.data_dir.parent().unwrap()).unwrap();
+    }
+
+    fn write_task_stat(path: &Path, pid: u32, name: &str, user: u64, system: u64, start: u64) {
+        let mut fields = vec!["0".to_string(); 50];
+        fields[0] = "S".to_string();
+        fields[11] = user.to_string();
+        fields[12] = system.to_string();
+        fields[19] = start.to_string();
+        fs::write(path, format!("{pid} ({name}) {}\n", fields.join(" "))).unwrap();
+    }
+
+    fn cpu_process(paths: &CollectorPaths, pid: u32, name: &str, threads: u32) {
+        let process = paths.proc_root.join(pid.to_string());
+        fs::create_dir_all(&process).unwrap();
+        fs::write(process.join("comm"), name).unwrap();
+        fs::write(process.join("status"), "State:\tS (sleeping)\n").unwrap();
+        fs::write(process.join("io"), "read_bytes: 0\n").unwrap();
+        write_task_stat(&process.join("stat"), pid, name, 500, 300, 10);
+        for tid in pid..pid + threads {
+            let task = process.join("task").join(tid.to_string());
+            fs::create_dir_all(&task).unwrap();
+            fs::write(task.join("comm"), "worker (io)").unwrap();
+            fs::write(task.join("status"), "State:\tS (sleeping)\n").unwrap();
+            fs::write(task.join("wchan"), "futex_wait").unwrap();
+            write_task_stat(&task.join("stat"), tid, "worker (io)", 120, 40, 20);
+        }
+    }
+
+    #[test]
+    fn cpu_samples_cover_bluetooth_processes_and_threads_without_external_commands() {
+        let paths = fixture("cpu");
+        for (pid, name) in [
+            (100, "rhythm-server"),
+            (200, "rhythm-chipd"),
+            (300, "bluetoothd"),
+            (400, "dbus-daemon"),
+        ] {
+            cpu_process(&paths, pid, name, 2);
+        }
+        let (_, summary) = collect_summary(&paths, &RecorderHealth::default());
+        let targets = summary.target_processes.value.unwrap();
+        assert_eq!(targets.len(), 4);
+        assert!(summary.cpu_ticks_per_second.is_some_and(|ticks| ticks > 0));
+        assert!(targets
+            .iter()
+            .all(|target| target.cpu_time.as_ref().unwrap().value
+                == Some(TaskCpuTime {
+                    user_ticks: 500,
+                    system_ticks: 300,
+                    start_ticks: 10,
+                })));
+        let detail = collect_detail(&paths, false);
+        assert_eq!(detail.processes.len(), 4);
+        assert!(detail
+            .processes
+            .iter()
+            .all(|process| process.threads.len() == 2));
+        assert!(detail
+            .processes
+            .iter()
+            .flat_map(|process| &process.threads)
+            .all(|thread| thread.cpu_time.as_ref().unwrap().value
+                == Some(TaskCpuTime {
+                    user_ticks: 120,
+                    system_ticks: 40,
+                    start_ticks: 20,
+                })));
+
+        // Same PID after restart must not be mistaken for a counter regression.
+        write_task_stat(
+            &paths.proc_root.join("100/stat"),
+            100,
+            "rhythm-server",
+            1,
+            2,
+            999,
+        );
+        // A racing thread exit is represented as unavailable, not zero CPU.
+        fs::remove_file(paths.proc_root.join("100/task/101/stat")).unwrap();
+        let detail = collect_detail(&paths, false);
+        let server = detail
+            .processes
+            .iter()
+            .find(|process| process.pid == 100)
+            .unwrap();
+        assert_eq!(
+            server
+                .cpu_time
+                .as_ref()
+                .unwrap()
+                .value
+                .as_ref()
+                .unwrap()
+                .start_ticks,
+            999
+        );
+        assert_eq!(
+            server
+                .threads
+                .iter()
+                .find(|thread| thread.tid == 101)
+                .unwrap()
+                .cpu_time
+                .as_ref()
+                .unwrap()
+                .status,
+            SourceStatus::Unavailable
+        );
+        fs::remove_dir_all(paths.data_dir.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn cpu_detail_remains_bundle_readable_when_thread_lists_exceed_record_budget() {
+        let paths = fixture("cpu-bounded");
+        for (pid, name) in [
+            (100, "rhythm-server"),
+            (200, "rhythm-chipd"),
+            (300, "bluetoothd"),
+            (400, "dbus-daemon"),
+        ] {
+            cpu_process(&paths, pid, name, THREAD_SCAN_LIMIT as u32 + 1);
+        }
+        let detail = collect_detail(&paths, false);
+        assert!(detail
+            .processes
+            .iter()
+            .any(|process| process.threads_truncated));
+        assert!(detail.processes.iter().all(|process| process
+            .cpu_time
+            .as_ref()
+            .unwrap()
+            .value
+            .is_some()));
+        assert!(serde_json::to_vec(&detail).unwrap().len() <= DETAIL_PAYLOAD_BYTES_LIMIT);
+        let mut ring =
+            RingWriter::open(&paths.data_dir, "cpu-boot", RingConfig::default()).unwrap();
+        assert!(ring
+            .append("cpu-boot", 1, "detail", &detail, false)
+            .unwrap()
+            .is_some());
+        let records =
+            crate::ring::read_ring(&recorder_root(&paths.data_dir).join(crate::ring::CURRENT_DIR))
+                .unwrap();
+        let recovered: DetailSample =
+            serde_json::from_value(records.records[0].payload.clone()).unwrap();
+        assert_eq!(recovered, detail);
+        fs::remove_dir_all(paths.data_dir.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn cpu_stat_rejects_incomplete_or_invalid_counters() {
+        assert!(parse_task_cpu_time("1 (worker) S 1 2").is_err());
+        assert!(parse_task_cpu_time("1 no-parentheses 0 0 0").is_err());
     }
 
     #[test]
@@ -1564,6 +1806,7 @@ mod tests {
 
     fn minimal_sample() -> SummarySample {
         SummarySample {
+            cpu_ticks_per_second: None,
             load: Observation::unsupported("test"),
             cpu: Observation::unsupported("test"),
             memory_kib: Observation::unsupported("test"),

@@ -209,3 +209,20 @@ async fn route_selection_empty_and_invalid_are_distinct_and_keep_authority() {
         }
     }
 }
+
+#[test]
+fn selected_configuration_keeps_every_legacy_field_and_empty_node_semantics() {
+    let h = TestHarness::new();
+    for listen_port in [None, Some(54448)] {
+        h.state.lock().unwrap().listen_port = listen_port;
+        let legacy: Value =
+            serde_json::from_str(&commands::build_state_snapshot(&h.state).unwrap()).unwrap();
+        let mut all = selected(&h, "nodes,configuration", false);
+        all.as_object_mut().unwrap().remove("state_scope");
+        assert_eq!(all, legacy, "selected serializer lost a legacy field");
+        let controls = selected(&h, "controls,configuration", false);
+        assert_eq!(controls["nodes"], serde_json::json!([]));
+        let configuration = selected(&h, "configuration", false);
+        assert!(configuration.get("nodes").is_none());
+    }
+}

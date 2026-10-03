@@ -554,6 +554,8 @@ pub struct AppState {
     /// already queued. Coalesces bursts of failure outcomes (room fan-out,
     /// multi-route commands) into one authoritative re-sample.
     pub observed_power_failure_refresh_queued: bool,
+    /// Coalesces nonblocking resume refreshes across all connected clients.
+    pub observed_power_resume_refresh_running: bool,
     /// Low-write authoritative observed-power duration ledger.
     pub light_usage: crate::light_usage::LightUsageLedger,
 
@@ -1084,6 +1086,7 @@ impl Default for AppState {
             external_controller_policy_transaction_lock: Arc::new(Mutex::new(())),
             room_observed_power: HashMap::new(),
             observed_power_failure_refresh_queued: false,
+            observed_power_resume_refresh_running: false,
             light_usage: crate::light_usage::LightUsageLedger::default(),
             motion_snapshots: HashMap::new(),
             motion_timer_restores: HashMap::new(),
