@@ -29,6 +29,21 @@ use crate::state::SharedState;
 // HubEvent — normalized events from any hub's event stream
 // ============================================================================
 
+/// Integration-authoritative light readback, independent of desired engine values.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LightObservation {
+    pub availability: String,
+    pub lights_on: Option<bool>,
+    pub brightness: Option<u8>,
+    pub kelvin: Option<u16>,
+    pub xy: Option<[f64; 2]>,
+    pub rgb: Option<[u8; 3]>,
+    pub context_id: Option<String>,
+    /// Source timestamp preserves ordering across the inventory/live boundary.
+    pub source_at_epoch_ms: Option<i64>,
+    pub received_at_epoch_ms: u64,
+}
+
 /// Normalized events from any hub's event stream.
 ///
 /// The main loop processes these generically via `RuntimeHandle`,
@@ -66,6 +81,17 @@ pub enum HubEvent {
         hub_key: Option<HubKey>,
         device_id: String,
         lights_on: bool,
+    },
+    /// Complete readback; external_user_change is true only with positive
+    /// upstream user attribution and no known in-flight/own command context.
+    LightObserved {
+        hub_key: Option<HubKey>,
+        device_id: String,
+        observation: LightObservation,
+        identity_proof: Option<serde_json::Value>,
+        /// Shared integration epoch rejects queued reports after invalidation.
+        observation_epoch: Option<(Arc<std::sync::atomic::AtomicU64>, u64)>,
+        external_user_change: bool,
     },
     /// The integration observed an upstream resource add/delete that requires
     /// fresh room/device discovery before live routing can remain authoritative.
@@ -176,6 +202,7 @@ impl HubEvent {
             HubEvent::Motion { hub_key, .. } => hub_key.as_ref(),
             HubEvent::Contact { hub_key, .. } => hub_key.as_ref(),
             HubEvent::LightPower { hub_key, .. } => hub_key.as_ref(),
+            HubEvent::LightObserved { hub_key, .. } => hub_key.as_ref(),
             HubEvent::TopologyChanged { hub_key, .. } => hub_key.as_ref(),
             HubEvent::DeviceReachability { hub_key, .. } => hub_key.as_ref(),
             HubEvent::CommandOutcome { hub_key, .. } => hub_key.as_ref(),
@@ -195,6 +222,7 @@ impl HubEvent {
             HubEvent::Motion { hub_key, .. } => *hub_key = Some(key),
             HubEvent::Contact { hub_key, .. } => *hub_key = Some(key),
             HubEvent::LightPower { hub_key, .. } => *hub_key = Some(key),
+            HubEvent::LightObserved { hub_key, .. } => *hub_key = Some(key),
             HubEvent::TopologyChanged { hub_key, .. } => *hub_key = Some(key),
             HubEvent::DeviceReachability { hub_key, .. } => *hub_key = Some(key),
             HubEvent::CommandOutcome { hub_key, .. } => *hub_key = Some(key),

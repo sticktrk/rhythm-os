@@ -41,6 +41,11 @@ pub struct ApiAuthRequestInfo {
     pub token_expires_at_epoch_ms: Option<u64>,
 }
 
+/// Credential proof retained by a live stream so revocation also closes
+/// already-established connections. Never serialize this value.
+#[derive(Clone)]
+pub struct ApiAuthStreamToken(pub String);
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredApiAuth {
     #[serde(default = "default_schema_version")]
@@ -162,6 +167,7 @@ pub fn install_ephemeral_owner_token(state: &SharedState, raw_token: &str) -> an
         "Local API credential must contain at least 32 alphanumeric characters"
     );
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    anyhow::ensure!(s.api_auth.tokens.iter().all(|token| token.id == "local-supervisor"), "Cannot replace durable credentials with an ephemeral owner; use listener-local authentication");
     s.api_auth = StoredApiAuth::default();
     s.api_auth.require_api_auth = Some(true);
     s.api_auth.tokens.push(StoredApiToken {
@@ -223,8 +229,9 @@ fn issue_local_token(
     let id = token_hash.chars().take(16).collect::<String>();
 
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    prune_expired_tokens(&mut s.api_auth.tokens, current_epoch_ms());
-    s.api_auth.tokens.push(StoredApiToken {
+    let mut auth = s.api_auth.clone();
+    prune_expired_tokens(&mut auth.tokens, current_epoch_ms());
+    auth.tokens.push(StoredApiToken {
         id: id.clone(),
         role,
         token_hash,
@@ -232,17 +239,12 @@ fn issue_local_token(
         label,
         expires_at_epoch_ms,
     });
-
-    // Save outside the lock — the write is fsync'd, and holding the global
-    // state lock through a slow SD-card flush stalls light control.
-    let persist = s
-        .storage
-        .as_ref()
-        .map(|st| (st.clone(), s.api_auth.clone()));
-    drop(s);
-    if let Some((storage, api_auth)) = persist {
-        storage.save_api_auth(&api_auth)?;
+    // Serialize credential mutation with revocation. Publishing a token before
+    // persistence, or writing stale snapshots after a revoke, can resurrect it.
+    if let Some(storage) = &s.storage {
+        storage.save_api_auth(&auth)?;
     }
+    s.api_auth = auth;
 
     Ok(IssuedToken { id, token })
 }
@@ -271,27 +273,41 @@ pub fn revoke_support_session_token(state: &SharedState, token_id: &str) -> anyh
     }
 
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    let before = s.api_auth.tokens.len();
-    s.api_auth.tokens.retain(|token| {
+    let mut auth = s.api_auth.clone();
+    let before = auth.tokens.len();
+    auth.tokens.retain(|token| {
         !(token.id == clean_id
             && token.role == ApiTokenRole::Support
             && token.expires_at_epoch_ms.is_some())
     });
-    let revoked = s.api_auth.tokens.len() != before;
-    prune_expired_tokens(&mut s.api_auth.tokens, current_epoch_ms());
-
+    let revoked = auth.tokens.len() != before;
+    prune_expired_tokens(&mut auth.tokens, current_epoch_ms());
     if revoked {
-        let persist = s
-            .storage
-            .as_ref()
-            .map(|st| (st.clone(), s.api_auth.clone()));
-        drop(s);
-        if let Some((storage, api_auth)) = persist {
-            storage.save_api_auth(&api_auth)?;
+        if let Some(storage) = &s.storage {
+            storage.save_api_auth(&auth)?;
         }
     }
+    s.api_auth = auth;
 
     Ok(revoked)
+}
+
+/// Revoke an installation credential from an owner-authorized channel.
+pub fn revoke_local_token(state: &SharedState, token_id: &str) -> anyhow::Result<bool> {
+    let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let mut auth = s.api_auth.clone();
+    let before = auth.tokens.len();
+    auth.tokens.retain(|token| token.id != token_id);
+    if before == auth.tokens.len() {
+        return Ok(false);
+    }
+    // Publish revocation only after it is durable. Credential mutations are
+    // infrequent and must not acknowledge a revocation that restart can undo.
+    if let Some(storage) = &s.storage {
+        storage.save_api_auth(&auth)?;
+    }
+    s.api_auth = auth;
+    Ok(true)
 }
 
 fn prune_expired_tokens(tokens: &mut Vec<StoredApiToken>, now_epoch_ms: u64) {
@@ -325,7 +341,8 @@ pub fn issue_owner_token(
         return Ok(IssueOwnerTokenResult::AlreadyConfigured);
     }
 
-    s.api_auth.tokens.push(StoredApiToken {
+    let mut auth = s.api_auth.clone();
+    auth.tokens.push(StoredApiToken {
         id: id.clone(),
         role: ApiTokenRole::Owner,
         token_hash,
@@ -334,14 +351,10 @@ pub fn issue_owner_token(
         expires_at_epoch_ms: None,
     });
 
-    let persist = s
-        .storage
-        .as_ref()
-        .map(|st| (st.clone(), s.api_auth.clone()));
-    drop(s);
-    if let Some((storage, api_auth)) = persist {
-        storage.save_api_auth(&api_auth)?;
+    if let Some(storage) = &s.storage {
+        storage.save_api_auth(&auth)?;
     }
+    s.api_auth = auth;
 
     Ok(IssueOwnerTokenResult::Issued(IssuedOwnerToken {
         id,
@@ -355,12 +368,13 @@ pub fn set_api_auth_required(
     label: Option<String>,
 ) -> anyhow::Result<ApiAuthSettingsUpdate> {
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    let issued_owner_token = if require_api_auth && !s.api_auth.has_owner() {
+    let mut auth = s.api_auth.clone();
+    let issued_owner_token = if require_api_auth && !auth.has_owner() {
         let token = generate_raw_token(TOKEN_PREFIX);
         let token_hash = hash_token(&token);
         let id = token_hash.chars().take(16).collect::<String>();
 
-        s.api_auth.tokens.push(StoredApiToken {
+        auth.tokens.push(StoredApiToken {
             id: id.clone(),
             role: ApiTokenRole::Owner,
             token_hash,
@@ -374,38 +388,31 @@ pub fn set_api_auth_required(
         None
     };
 
-    s.require_api_auth = require_api_auth;
-    s.api_auth.require_api_auth = Some(require_api_auth);
+    auth.require_api_auth = Some(require_api_auth);
 
     let update = ApiAuthSettingsUpdate {
-        require_api_auth: s.require_api_auth,
-        owner_configured: s.api_auth.has_owner(),
-        token_count: s.api_auth.tokens.len(),
+        require_api_auth,
+        owner_configured: auth.has_owner(),
+        token_count: auth.tokens.len(),
         issued_owner_token,
     };
-    let persist = s
-        .storage
-        .as_ref()
-        .map(|st| (st.clone(), s.api_auth.clone()));
-    drop(s);
-    if let Some((storage, api_auth)) = persist {
-        storage.save_api_auth(&api_auth)?;
+    if let Some(storage) = &s.storage {
+        storage.save_api_auth(&auth)?;
     }
+    s.api_auth = auth;
+    s.require_api_auth = require_api_auth;
 
     Ok(update)
 }
 
 pub fn clear_api_auth(state: &SharedState) -> anyhow::Result<()> {
     let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-    s.api_auth = StoredApiAuth::default();
-    let persist = s
-        .storage
-        .as_ref()
-        .map(|st| (st.clone(), s.api_auth.clone()));
-    drop(s);
-    if let Some((storage, api_auth)) = persist {
-        storage.save_api_auth(&api_auth)?;
+    let auth = StoredApiAuth::default();
+    if let Some(storage) = &s.storage {
+        storage.save_api_auth(&auth)?;
     }
+    s.api_auth = auth;
+
     Ok(())
 }
 
@@ -416,23 +423,26 @@ pub fn handle_get_auth_status(
     match state.lock() {
         Ok(s) => {
             let request_info = request_info.unwrap_or(ApiAuthRequestInfo {
-                requires_auth: s.require_api_auth,
-                claim_available: s.require_api_auth && !s.api_auth.has_owner(),
+                requires_auth: s.require_api_auth || s.platform_context == "ha_addon",
+                claim_available: s.platform_context != "ha_addon"
+                    && s.require_api_auth
+                    && !s.api_auth.has_owner(),
                 via_remote_access: false,
                 role: None,
                 token_expires_at_epoch_ms: None,
             });
-            ApiResponse::json_ok(
-                auth_status_payload(
-                    request_info.requires_auth,
-                    s.api_auth.has_owner(),
-                    s.api_auth.tokens.len(),
-                    request_info.claim_available,
-                    request_info.via_remote_access,
-                    request_info.role,
-                )
-                .to_string(),
-            )
+            let mut payload = auth_status_payload(
+                request_info.requires_auth,
+                s.api_auth.has_owner(),
+                s.api_auth.tokens.len(),
+                request_info.claim_available,
+                request_info.via_remote_access,
+                request_info.role,
+            );
+            if s.platform_context == "ha_addon" {
+                payload["mobile_enrollment_available"] = json!(true);
+            }
+            ApiResponse::json_ok(payload.to_string())
         }
         Err(_) => ApiResponse::server_error("lock"),
     }
@@ -611,6 +621,9 @@ pub async fn require_api_auth_middleware(
 
     let verified_bearer = verified_bearer_token(&state, &req);
     if let Some(verified_token) = verified_bearer.as_ref() {
+        if let Some(token) = bearer_token(req.headers().get(AUTHORIZATION)).map(str::to_owned) {
+            req.extensions_mut().insert(ApiAuthStreamToken(token));
+        }
         auth_info.role = Some(verified_token.role);
         auth_info.token_expires_at_epoch_ms = verified_token.expires_at_epoch_ms;
         req.extensions_mut().insert(auth_info);
@@ -700,18 +713,19 @@ fn auth_status_payload(
 }
 
 pub fn auth_request_info(state: &SharedState, req: &Request<Body>) -> ApiAuthRequestInfo {
-    let (stored_requires_auth, owner_configured, is_appliance) = state
+    let (stored_requires_auth, owner_configured, is_appliance, is_addon) = state
         .lock()
         .map(|s| {
             (
                 s.require_api_auth,
                 s.api_auth.has_owner(),
                 s.platform_type == "appliance",
+                s.platform_context == "ha_addon",
             )
         })
-        .unwrap_or((true, true, false));
+        .unwrap_or((true, true, false, false));
 
-    let via_remote_access = is_appliance
+    let via_remote_access = (is_appliance || is_addon)
         && req
             .extensions()
             .get::<ConnectInfo<SocketAddr>>()
@@ -719,7 +733,7 @@ pub fn auth_request_info(state: &SharedState, req: &Request<Body>) -> ApiAuthReq
             .unwrap_or(false)
         && has_remote_access_forwarding_headers(&req);
 
-    let requires_auth = if via_remote_access {
+    let requires_auth = if via_remote_access || is_addon {
         true
     } else if is_appliance {
         false
@@ -727,7 +741,7 @@ pub fn auth_request_info(state: &SharedState, req: &Request<Body>) -> ApiAuthReq
         stored_requires_auth
     };
 
-    let claim_available = !via_remote_access && (!requires_auth || !owner_configured);
+    let claim_available = !is_addon && !via_remote_access && (!requires_auth || !owner_configured);
 
     ApiAuthRequestInfo {
         requires_auth,
@@ -991,6 +1005,57 @@ mod tests {
             .contains(&second));
         drop(s);
         assert!(install_ephemeral_owner_token(&state, "short").is_err());
+        let phone = issue_local_owner_token(&state, None).unwrap();
+        assert!(install_ephemeral_owner_token(&state, &first).is_err());
+        assert!(state.lock().unwrap().api_auth.verify_token(&phone.token));
+    }
+
+    #[test]
+    fn credential_write_failure_does_not_publish_a_token_or_acknowledge_revocation() {
+        use crate::storage::FileStorage;
+        let root = unique_test_dir("failed-credential-write");
+        let state = test_state();
+        state.lock().unwrap().storage =
+            Some(Arc::new(FileStorage::new(root.to_str().unwrap()).unwrap()));
+        let owner = issue_local_owner_token(&state, None).unwrap();
+        fs::remove_file(root.join("auth.json")).unwrap();
+        fs::create_dir(root.join("auth.json")).unwrap();
+        assert!(revoke_local_token(&state, &owner.id).is_err());
+        assert!(issue_local_owner_token(&state, None).is_err());
+        assert!(state.lock().unwrap().api_auth.verify_token(&owner.token));
+        assert_eq!(state.lock().unwrap().api_auth.tokens.len(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_enrollment_and_support_revocation_preserve_the_same_durable_store() {
+        use crate::storage::{FileStorage, Storage};
+        let root = unique_test_dir("concurrent-credential-write");
+        let storage = Arc::new(FileStorage::new(root.to_str().unwrap()).unwrap());
+        let state = test_state();
+        state.lock().unwrap().storage = Some(storage.clone());
+        let (support, _) = issue_support_session_token(&state, None, Some(60)).unwrap();
+        let gate = Arc::new(std::sync::Barrier::new(9));
+        let tasks: Vec<_> = (0..8)
+            .map(|_| {
+                let state = state.clone();
+                let gate = gate.clone();
+                std::thread::spawn(move || {
+                    gate.wait();
+                    issue_local_owner_token(&state, None).unwrap()
+                })
+            })
+            .collect();
+        gate.wait();
+        assert!(revoke_support_session_token(&state, &support.id).unwrap());
+        let issued: Vec<_> = tasks.into_iter().map(|task| task.join().unwrap()).collect();
+        let persisted = storage.load_api_auth().unwrap().unwrap();
+        assert_eq!(persisted, state.lock().unwrap().api_auth);
+        assert!(!persisted.verify_token(&support.token));
+        assert!(issued
+            .iter()
+            .all(|token| persisted.verify_token(&token.token)));
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn auth_test_router(state: SharedState) -> axum::Router {

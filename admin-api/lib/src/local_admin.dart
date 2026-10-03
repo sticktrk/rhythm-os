@@ -64,7 +64,7 @@ class HomeAssistantUsers {
 class LocalDeviceProxy {
   LocalDeviceProxy({required this.token, http.Client? client, Uri? baseUri})
       : client = client ?? http.Client(),
-        baseUri = baseUri ?? Uri.parse('http://127.0.0.1:54448/');
+        baseUri = baseUri ?? Uri.parse('http://127.0.0.1:54449/');
 
   final String token;
   final http.Client client;

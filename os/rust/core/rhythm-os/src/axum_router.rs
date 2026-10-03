@@ -1588,29 +1588,51 @@ fn server_event_name(event: &ServerEvent) -> &'static str {
 
 async fn sse_events(
     State(state): State<SharedState>,
+    credential: Option<Extension<crate::auth::ApiAuthStreamToken>>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let rx = state
         .lock()
         .ok()
         .and_then(|s| s.event_tx.as_ref().map(|tx| tx.subscribe()));
 
-    let stream = futures::stream::unfold(rx, |rx_opt| async move {
-        let mut rx = rx_opt?;
-        match rx.recv().await {
-            Ok(event) => {
-                let event_type = server_event_name(&event);
-                let data = serde_json::to_string(&event).unwrap_or_default();
-                let sse_event = Event::default().event(event_type).data(data);
-                Some((Ok::<_, Infallible>(sse_event), Some(rx)))
+    let stream = futures::stream::unfold(
+        (rx, state, credential),
+        |(rx_opt, state, credential)| async move {
+            let mut rx = rx_opt?;
+            let received = loop {
+                if let Some(Extension(token)) = &credential {
+                    if !state
+                        .lock()
+                        .ok()
+                        .is_some_and(|s| s.api_auth.verify_token(&token.0))
+                    {
+                        return None;
+                    }
+                }
+                tokio::select! {
+                    event = rx.recv() => break event,
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)), if credential.is_some() => {}
+                }
+            };
+            match received {
+                Ok(event) => {
+                    let event_type = server_event_name(&event);
+                    let data = serde_json::to_string(&event).unwrap_or_default();
+                    let sse_event = Event::default().event(event_type).data(data);
+                    Some((
+                        Ok::<_, Infallible>(sse_event),
+                        (Some(rx), state, credential),
+                    ))
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    log::warn!(target: "sse", "SSE client lagged by {} events", n);
+                    let event = Event::default().event("lagged").data("{}");
+                    Some((Ok::<_, Infallible>(event), (Some(rx), state, credential)))
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
             }
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                log::warn!(target: "sse", "SSE client lagged by {} events", n);
-                let event = Event::default().event("lagged").data("{}");
-                Some((Ok::<_, Infallible>(event), Some(rx)))
-            }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => None,
-        }
-    });
+        },
+    );
 
     Sse::new(stream).keep_alive(KeepAlive::default())
 }

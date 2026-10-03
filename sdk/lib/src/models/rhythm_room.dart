@@ -802,6 +802,7 @@ class RhythmRoom {
   /// Node-local settings before parent inheritance is applied.
   final RhythmNodeProfileSettings? localProfileSettings;
   final RhythmObservedPower? observedPower;
+  final RhythmObservedLight? observedLight;
   final bool? lightsOn;
   final int? brightness;
   final int? kelvin;
@@ -840,6 +841,7 @@ class RhythmRoom {
     RhythmNodeProfileSettings? roomProfile,
     this.localProfileSettings,
     this.observedPower,
+    this.observedLight,
     this.lightsOn,
     this.brightness,
     this.kelvin,
@@ -992,6 +994,7 @@ class RhythmRoom {
       profileSettings: profileSettings,
       localProfileSettings: localProfileSettings,
       observedPower: observedPower,
+      observedLight: RhythmObservedLight.maybeFromJson(json['observed_light']),
       lightsOn: observedPower?.lightsOn ?? json['lights_on'] as bool?,
       brightness: jsonInt(
         json['brightness'],
@@ -1107,6 +1110,107 @@ class RhythmRoomColor {
       );
 }
 
+/// Physical light readback, separate from Rhythm's desired output. Only an
+/// available observation describes current power/color; unknown and transport
+/// loss must never be interpreted as an off command.
+enum RhythmLightAvailability {
+  available,
+  unavailable,
+  unknown,
+  disconnected;
+
+  static RhythmLightAvailability fromWire(Object? value) => switch (value) {
+        'available' => available,
+        'unavailable' => unavailable,
+        'disconnected' => disconnected,
+        _ => unknown,
+      };
+}
+
+class RhythmObservedLight {
+  const RhythmObservedLight({
+    required this.availability,
+    this.lightsOn,
+    this.brightness,
+    this.kelvin,
+    this.xy,
+    this.rgb,
+    this.contextId,
+    this.sourceAtEpochMs,
+    required this.receivedAtEpochMs,
+  });
+
+  final RhythmLightAvailability availability;
+  final bool? lightsOn;
+  final int? brightness;
+  final int? kelvin;
+  final (double, double)? xy;
+  final (int, int, int)? rgb;
+  final String? contextId;
+  final int? sourceAtEpochMs;
+  final int receivedAtEpochMs;
+
+  bool get isAvailable => availability == RhythmLightAvailability.available;
+  bool? get currentLightsOn => isAvailable ? lightsOn : null;
+
+  /// Late HTTP acknowledgements may contain an older snapshot than SSE.
+  static RhythmObservedLight? newest(
+    RhythmObservedLight? current,
+    RhythmObservedLight? incoming,
+  ) {
+    if (incoming == null) return current;
+    if (current != null &&
+        incoming.receivedAtEpochMs < current.receivedAtEpochMs) {
+      return current;
+    }
+    return incoming;
+  }
+
+  static RhythmObservedLight? maybeFromJson(Object? value) {
+    final json = jsonMap(value);
+    if (json == null) return null;
+    final rgb = json['rgb'];
+    final xy = json['xy'];
+    return RhythmObservedLight(
+      availability: RhythmLightAvailability.fromWire(json['availability']),
+      lightsOn: json['lights_on'] is bool ? json['lights_on'] as bool : null,
+      brightness: jsonInt(json['brightness']),
+      kelvin: jsonInt(json['kelvin']),
+      rgb: rgb is List && rgb.length == 3 && rgb.every((v) => v is num)
+          ? (
+              (rgb[0] as num).toInt(),
+              (rgb[1] as num).toInt(),
+              (rgb[2] as num).toInt()
+            )
+          : null,
+      xy: xy is List && xy.length == 2 && xy.every((v) => v is num)
+          ? ((xy[0] as num).toDouble(), (xy[1] as num).toDouble())
+          : null,
+      contextId:
+          json['context_id'] is String ? json['context_id'] as String : null,
+      sourceAtEpochMs: jsonInt(json['source_at_epoch_ms']),
+      receivedAtEpochMs: jsonInt(json['received_at_epoch_ms']) ?? 0,
+    );
+  }
+
+  @override
+  bool operator ==(Object other) =>
+      other is RhythmObservedLight &&
+      other.availability == availability &&
+      other.lightsOn == lightsOn &&
+      other.brightness == brightness &&
+      other.kelvin == kelvin &&
+      other.xy == xy &&
+      other.rgb == rgb &&
+      other.contextId == contextId &&
+      other.sourceAtEpochMs == sourceAtEpochMs &&
+      other.receivedAtEpochMs == receivedAtEpochMs;
+
+  @override
+  int get hashCode => Object.hash(availability, lightsOn, brightness, kelvin,
+      xy, rgb, contextId, sourceAtEpochMs, receivedAtEpochMs);
+}
+
 /// Node state from Rhythm server poll diffs and SSE events.
 class RhythmRoomState {
   final String nodeId;
@@ -1126,6 +1230,7 @@ class RhythmRoomState {
   final String? model;
   final RhythmLightCapabilities? lightCapabilities;
   final RhythmObservedPower? observedPower;
+  final RhythmObservedLight? observedLight;
   final bool? lightsOn;
   final int? brightness;
   final int? kelvin;
@@ -1163,6 +1268,7 @@ class RhythmRoomState {
     this.model,
     this.lightCapabilities,
     this.observedPower,
+    this.observedLight,
     this.lightsOn,
     this.brightness,
     this.kelvin,
@@ -1252,6 +1358,7 @@ class RhythmRoomState {
         json['light_capabilities'],
       ),
       observedPower: observedPower,
+      observedLight: RhythmObservedLight.maybeFromJson(json['observed_light']),
       lightsOn: observedPower?.lightsOn ?? json['lights_on'] as bool?,
       brightness: jsonInt(
         json['brightness'],

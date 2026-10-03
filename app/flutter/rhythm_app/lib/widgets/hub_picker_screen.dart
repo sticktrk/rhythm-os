@@ -8,6 +8,7 @@ import '../screens/hubs/ha_configurator_screen.dart';
 import '../screens/hubs/hue_configurator_screen.dart';
 import '../screens/hubs/matter_pairing_flow.dart';
 import 'beta_badge.dart';
+import 'home_assistant_device_setup.dart';
 import 'solar_orbit.dart';
 
 /// Shown when the server is connected but has no hub paired (hub.type == "none").
@@ -109,6 +110,18 @@ class _HubPickerScreenState extends State<HubPickerScreen>
   @override
   Widget build(BuildContext context) {
     final serverSync = context.watch<ServerSyncProvider>();
+    if (serverSync.deviceManagementOwnedByHomeAssistant) {
+      return Scaffold(
+        backgroundColor: CelestialColors.backgroundDark,
+        appBar: AppBar(title: const Text('Home Assistant devices')),
+        body: const SafeArea(
+          child: SingleChildScrollView(
+            padding: EdgeInsets.all(24),
+            child: HomeAssistantDeviceSetup(),
+          ),
+        ),
+      );
+    }
     final isAddon = serverSync.serverPlatformContext == 'ha_addon';
     final homeAssistantConnected = _isHubConnected(serverSync, 'homeassistant');
     final hueConnected = _isHubConnected(serverSync, 'hue');

@@ -995,6 +995,25 @@ impl CanonicalRegistry {
         Some((canonical_id, remove_whole_device))
     }
 
+    /// Retire a reused routing address without deleting the original identity
+    /// or its configuration. Discovery must create/resolve the replacement from
+    /// independent proof; rollback material remains attached to the old device.
+    pub fn retire_endpoint_identity(
+        &mut self,
+        hub_key: &HubKey,
+        native_id: &str,
+    ) -> Option<String> {
+        let canonical_id = self
+            .native_index
+            .remove(&(hub_key.to_string(), native_id.to_string()))?;
+        if let Some(device) = self.devices.get_mut(&canonical_id) {
+            device
+                .endpoints
+                .retain(|ep| &ep.hub_key != hub_key || ep.native_id != native_id);
+        }
+        Some(canonical_id)
+    }
+
     /// Normalize UnassignedDevice triage for existing devices with no room.
     ///
     /// Called on startup after loading the registry. Retired identities may

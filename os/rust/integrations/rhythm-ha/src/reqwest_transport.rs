@@ -52,6 +52,16 @@ impl ReqwestHaTransport {
 
 impl HaTransport for ReqwestHaTransport {
     fn call_service(&self, domain: &str, service: &str, data: &serde_json::Value) -> Result<()> {
+        self.call_service_contexts(domain, service, data)
+            .map(|_| ())
+    }
+
+    fn call_service_contexts(
+        &self,
+        domain: &str,
+        service: &str,
+        data: &serde_json::Value,
+    ) -> Result<Vec<String>> {
         let url = self
             .config
             .rest_url(&format!("/api/services/{}/{}", domain, service));
@@ -76,7 +86,13 @@ impl HaTransport for ReqwestHaTransport {
             ));
         }
 
-        Ok(())
+        let values: serde_json::Value = resp.json()?;
+        Ok(values
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|value| value["context"]["id"].as_str().map(str::to_owned))
+            .collect())
     }
 
     fn get_states(&self) -> Result<Vec<EntityState>> {

@@ -540,6 +540,24 @@ void main() {
       expect(hub.address, '192.168.1.20:443');
     });
 
+    test('retains physical readback separately from desired SSE output', () async {
+      sseEventChunks = [
+        'event: node_state\n'
+            'data: {"nodes":[{"id":"room-1","state":"active","rhythm_enabled":false,"time_offset":0.0,"brightness_offset":0.0,"brightness":80,"kelvin":4000,"observed_light":{"availability":"available","lights_on":true,"brightness":23,"kelvin":2700,"received_at_epoch_ms":100}}]}\n\n',
+      ];
+      sseCloseDelay = const Duration(milliseconds: 100);
+      final connection = RhythmConnection();
+      addTearDown(connection.dispose);
+      final stateFuture = connection.rhythmStateEvents.first.timeout(const Duration(seconds: 2));
+      await connection.connect('127.0.0.1', port: server.port);
+      final state = await stateFuture;
+      expect(state.brightness, 80);
+      expect(state.kelvin, 4000);
+      expect(state.observedLight?.brightness, 23);
+      expect(state.observedLight?.kelvin, 2700);
+      expect(state.observedLight?.currentLightsOn, isTrue);
+    });
+
     test('retains nested light capabilities on node-state SSE events',
         () async {
       sseEventChunks = [

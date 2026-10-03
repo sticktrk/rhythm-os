@@ -15,6 +15,32 @@ export type DeviceAdminOperation = {
 
 export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
   {
+    id: 'addon-status', category: 'Home Assistant', label: 'Read add-on status',
+    description: 'Read deployment capabilities and HA readiness.',
+    method: 'GET', path: 'api/addon/status'
+  },
+  {
+    id: 'addon-enrollment', category: 'Home Assistant', label: 'Connect mobile app',
+    description: 'Issue a short-lived mobile enrollment code through the internal HA administrator listener.',
+    method: 'POST', path: 'api/addon/enrollment', body: {}, danger: true
+  },
+  {
+    id: 'addon-enrollment-exchange', category: 'Home Assistant', label: 'Exchange mobile code',
+    description: 'Exchange a single-use HA administrator-issued code on the mobile listener.',
+    method: 'POST', path: 'api/addon/enrollment/exchange',
+    body: {code: '{enrollment_code}', server_instance_id: '{server_instance_id}'}, danger: true
+  },
+  {
+    id: 'addon-mobile-tokens', category: 'Home Assistant', label: 'Read mobile credentials',
+    description: 'List credential metadata without bearer secrets.',
+    method: 'GET', path: 'api/addon/mobile-tokens'
+  },
+  {
+    id: 'addon-mobile-token-revoke', category: 'Home Assistant', label: 'Revoke mobile credential',
+    description: 'Revoke one credential for both LAN and tunnel access.',
+    method: 'DELETE', path: 'api/addon/mobile-tokens/{token_id}', danger: true
+  },
+  {
     id: 'custom-json',
     category: 'Custom',
     label: 'Custom JSON request',

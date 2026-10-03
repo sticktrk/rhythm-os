@@ -50,6 +50,11 @@ class CloudBackupSnapshot {
   final DateTime? capturedAt;
   final DateTime? updatedAt;
 
+  /// Portable snapshots never contain HA device/fabric state or credentials.
+  bool get hasApplianceBackup =>
+      backupBundle.isNotEmpty &&
+      backupBundle['kind'] != 'rhythm_portable_snapshot';
+
   factory CloudBackupSnapshot.fromRow(Map<String, dynamic> row) {
     return CloudBackupSnapshot(
       userId: row['user_id'] as String? ?? '',
@@ -390,8 +395,8 @@ class CloudBackupService {
         .eq('user_id', expectedUserId)
         .maybeSingle();
     if (row == null) {
-      // A snapshot row has required appliance-backup metadata. Let the normal
-      // capture path create it rather than fabricating an empty backup record.
+      // The capture path records either an appliance backup or a distinctly
+      // marked portable snapshot, along with the account layout.
       await captureNow(
         serverHub: serverHub,
         home: home,
@@ -531,6 +536,56 @@ class CloudBackupService {
     }
   }
 
+  /// Query the actual endpoint before requesting any secret-bearing backup.
+  /// Add-ons synchronize portable Rhythm profiles and phone preferences only;
+  /// Home Assistant owns full-installation backup and recovery.
+  @visibleForTesting
+  static Future<
+          ({Map<String, dynamic> backup, Map<String, dynamic> configuration})>
+      captureSupportedBundles(RhythmBundleApi api) async {
+    final deployment = await api.getDeploymentCapabilities();
+    if (!deployment.fullBackupExport && !deployment.portableProfiles) {
+      throw const CloudBackupCaptureException(
+        'This server does not support cloud configuration snapshots.',
+      );
+    }
+    final backup = deployment.fullBackupExport
+        ? await api.getBackupBundle(includeSecrets: true)
+        : <String, dynamic>{
+            'kind': 'rhythm_portable_snapshot',
+            'schema_version': 1,
+          };
+    Map<String, dynamic> configuration = const {};
+    if (deployment.portableProfiles) {
+      try {
+        configuration = await api.getConfigurationBundle();
+      } catch (_) {
+        // A portable snapshot with no profile data would falsely report success.
+        if (!deployment.fullBackupExport) rethrow;
+      }
+    }
+    return (backup: backup, configuration: configuration);
+  }
+
+  /// Add-on capture must not replace the account's appliance rollback material
+  /// or relabel its source identity. Until portable profiles have dedicated
+  /// storage, an existing row receives phone preferences only.
+  @visibleForTesting
+  static Map<String, dynamic> portableSnapshotSettingsUpdate({
+    required CloudBackupSnapshot existing,
+    required CloudBackupSnapshot portable,
+  }) {
+    if (portable.hasApplianceBackup) {
+      throw ArgumentError('Expected a portable configuration snapshot.');
+    }
+    return {
+      'app_settings_bundle': mergeAppSettingsBundles(
+        existing.appSettingsBundle,
+        portable.appSettingsBundle,
+      ),
+    };
+  }
+
   Future<CloudBackupSnapshot> _captureNowInternal({
     required Hub serverHub,
     required String userId,
@@ -541,20 +596,9 @@ class CloudBackupService {
     final resolved = await ServerEndpointResolver.resolve(serverHub);
     final api = resolved.bundleApi();
 
-    // Persist the secret-bearing GET /api/backup payload. The PUT response is
-    // intentionally redacted and must not replace the stored backup.
-    final backupBundle = await _runCaptureStep(
-      serverHub: serverHub,
-      reason: reason,
-      context: 'Failed to fetch backup from the server.',
-      action: () => api.getBackupBundle(includeSecrets: true),
-    );
-
-    final configurationBundle = await _getConfigurationBundleBestEffort(
-      api: api,
-      serverHub: serverHub,
-      reason: reason,
-    );
+    final bundles = await captureSupportedBundles(api);
+    final backupBundle = bundles.backup;
+    final configurationBundle = bundles.configuration;
     final roomLayoutScopeKey = RoomPageProvider.layoutScopeFor(
       home: home,
       hubs: <Hub>[serverHub],
@@ -577,21 +621,45 @@ class CloudBackupService {
       appSettingsBundle: appSettingsBundle,
     );
 
+    var persistedSnapshot = snapshot;
     await _runCaptureStep(
       serverHub: serverHub,
       reason: reason,
-      context: 'Failed to save the backup to cloud storage.',
-      action: () => client.from(tableName).upsert(
-            snapshot.toUpsertJson(),
-            onConflict: 'user_id',
-          ),
+      context: 'Failed to save the configuration to cloud storage.',
+      action: () async {
+        if (snapshot.hasApplianceBackup) {
+          await client.from(tableName).upsert(
+                snapshot.toUpsertJson(),
+                onConflict: 'user_id',
+              );
+          return;
+        }
+        final row = await client
+            .from(tableName)
+            .select()
+            .eq('user_id', userId)
+            .maybeSingle();
+        if (row == null) {
+          // Insert rather than upsert: a concurrent appliance backup must win
+          // without being overwritten between the read and this write.
+          await client.from(tableName).insert(snapshot.toUpsertJson());
+          return;
+        }
+        final existing = CloudBackupSnapshot.fromRow(row);
+        final update = portableSnapshotSettingsUpdate(
+          existing: existing,
+          portable: snapshot,
+        );
+        await client.from(tableName).update(update).eq('user_id', userId);
+        persistedSnapshot = CloudBackupSnapshot.fromRow({...row, ...update});
+      },
     );
 
     debugPrint(
       'CloudBackupService: captured snapshot for user=$userId '
       'hub=${serverHub.id} reason=$reason',
     );
-    return snapshot;
+    return persistedSnapshot;
   }
 
   Future<Map<String, dynamic>> _buildAppSettingsBundleForCapture({
@@ -669,33 +737,11 @@ class CloudBackupService {
       return mergeAppSettingsBundles(existing, local);
     }
     final localKeys = localLayouts.expand(_layoutIdentityKeys).toSet();
-    final accountHasLayoutForHub = _layoutMaps(existing['all_rooms_layouts'])
-        .any(
-      (layout) => _layoutIdentityKeys(layout).any(localKeys.contains),
-    );
+    final accountHasLayoutForHub = _layoutMaps(
+      existing['all_rooms_layouts'],
+    ).any((layout) => _layoutIdentityKeys(layout).any(localKeys.contains));
     if (accountHasLayoutForHub) return existing;
     return mergeAppSettingsBundles(existing, local);
-  }
-
-  Future<Map<String, dynamic>> _getConfigurationBundleBestEffort({
-    required RhythmBundleApi api,
-    required Hub serverHub,
-    required String reason,
-  }) async {
-    try {
-      return await api.getConfigurationBundle();
-    } catch (error, stackTrace) {
-      final message = _buildCaptureErrorMessage(
-        'Configuration metadata was unavailable; continuing with backup only.',
-        error,
-      );
-      debugPrint(
-        'CloudBackupService: optional configuration fetch failed '
-        'for hub=${serverHub.id} reason=$reason error=$message',
-      );
-      debugPrint('$stackTrace');
-      return const <String, dynamic>{};
-    }
   }
 
   Future<T> _runCaptureStep<T>({

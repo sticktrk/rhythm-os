@@ -24,3 +24,17 @@ reqwest = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = { workspace = true }
+chrono = { workspace = true }
+sha2 = "0.10"
+
+[[test]]
+name = "integration_flow"
+required-features = ["test-support"]
+
+[[test]]
+name = "event_ordering"
+required-features = ["test-support"]
+
+[[test]]
+name = "scenario_ha_owned_lights"
+required-features = ["test-support"]

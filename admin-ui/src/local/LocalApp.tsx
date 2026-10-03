@@ -19,6 +19,8 @@ import ModesPage from '../pages/hub/ModesPage';
 import InputsPage from '../pages/hub/InputsPage';
 import HistoryPage from '../pages/hub/HistoryPage';
 import { createLocalDeviceClient, ingressBasePath, localFetch } from './transport';
+import MobileAccess from './MobileAccess';
+import { canSaveLightSelection, canToggleManagedLight } from './managedLights';
 
 type LocalSession = {
   deployment: 'home_assistant_addon';
@@ -29,7 +31,7 @@ type LocalSession = {
 const pages = [
   ['overview', 'Overview'], ['managed-lights', 'Managed lights'], ['nodes', 'Rooms & lights'], ['profiles', 'Profiles'],
   ['scenes', 'Scenes'], ['modes', 'Modes'], ['inputs', 'Inputs'],
-  ['environment', 'Home Assistant'], ['history', 'Activity'], ['system', 'System']
+  ['environment', 'Home Assistant'], ['mobile', 'Connect mobile app'], ['history', 'Activity'], ['system', 'System']
 ];
 
 export default function LocalApp() {
@@ -65,6 +67,7 @@ export default function LocalApp() {
           <Route path="/modes" element={<ModesPage />} />
           <Route path="/inputs" element={<InputsPage />} />
           <Route path="/environment" element={<Connection status={session.data.status} />} />
+          <Route path="/mobile" element={<MobileAccess />} />
           <Route path="/history" element={<HistoryPage />} />
           <Route path="/system" element={<System status={session.data.status} />} />
           <Route path="*" element={<Navigate to="/overview" replace />} />
@@ -109,41 +112,52 @@ function Overview({status, refresh}: {status: Record<string, unknown> | null; re
   </div>;
 }
 
-type LightSelection = { entities: string[]; available: {entity_id: string; name: string}[] };
+type LightSelection = {
+  entities: string[];
+  snapshot_ready: boolean;
+  snapshot_revision: string | null;
+  unresolved: string[];
+  available: {entity_id: string; name: string; reviewable: boolean}[];
+};
 function ManagedLights() {
   const client = useDeviceClient();
   const confirm = useConfirm();
   const selection = usePolling(useCallback(() => client.get<LightSelection>('api/addon/lights'), [client]), {intervalMs: 30_000});
   const [draft, setDraft] = useState<string[] | null>(null);
   const [expected, setExpected] = useState<string[] | null>(null);
+  const [expectedRevision, setExpectedRevision] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const selected = draft ?? selection.data?.entities ?? [];
+  const snapshotReady = selection.data?.snapshot_ready === true;
+  const canSave = canSaveLightSelection(draft, expected, expectedRevision, snapshotReady);
   async function save() {
-    if (!draft || !expected || !(await confirm({title: 'Save managed lights', message: 'Rhythm will pause and save this selection. Review your profiles and enable Rhythm from Overview when ready.', confirmLabel: 'Pause and save'}))) return;
+    if (!canSave || !draft || !expected || !expectedRevision || !(await confirm({title: 'Save managed lights', message: 'Rhythm will pause and save this selection. Review your profiles and enable Rhythm from Overview when ready.', confirmLabel: 'Pause and save'}))) return;
     setBusy(true); setError(null); setNotice(null);
     try {
       await setLightBreaker(client, false);
-      await client.put('api/addon/lights', {body: {entities: draft, expected_entities: expected}});
-      setDraft(null); setExpected(null); await selection.refresh(); setNotice('Selection saved. Rhythm is paused.');
+      await client.put('api/addon/lights', {body: {entities: draft, expected_entities: expected, expected_snapshot_revision: expectedRevision}});
+      setDraft(null); setExpected(null); setExpectedRevision(null); await selection.refresh(); setNotice('Selection saved. Rhythm is paused.');
     } catch (e) { setError(errorMessage(e)); } finally { setBusy(false); }
   }
   return <div className="consolePage"><header className="pageHeader"><h1>Managed lights</h1></header>
     <SectionCard title="Choose the lights Rhythm may control" error={error ?? selection.error}>
-      <p>Only selected entities receive light commands. New entities stay excluded, even when added to an existing room. If you rename an entity in Home Assistant, review this selection again.</p>
+      <p>Only reviewed identities receive light commands. New or replaced entities stay excluded, even when added to an existing room. Home Assistant owns areas and device setup.</p>
+      {selection.data && !snapshotReady && <p role="status">Waiting for a complete Home Assistant catalog before adding lights. Existing selections can still be removed.</p>}
+      {selection.data?.unresolved?.length ? <p role="status">Some previous selections need identity review. Select their verified replacements below.</p> : null}
       {selection.data?.available.map(light => <label className="managedLight" key={light.entity_id}>
-        <input type="checkbox" disabled={busy} checked={selected.includes(light.entity_id)} onChange={event => {
-          if (!draft) setExpected(selection.data!.entities);
+        <input type="checkbox" disabled={busy || !canToggleManagedLight(selected.includes(light.entity_id), snapshotReady, light.reviewable)} checked={selected.includes(light.entity_id)} onChange={event => {
+          if (!draft) { setExpected(selection.data!.entities); setExpectedRevision(selection.data!.snapshot_revision); }
           setDraft(event.target.checked ? [...selected, light.entity_id] : selected.filter(id => id !== light.entity_id));
-        }} /><span>{light.name}<small>{light.entity_id}</small></span>
+        }} /><span>{light.name}<small>{light.entity_id}{!light.reviewable ? ' — identity unavailable; review in Home Assistant' : ''}</small></span>
       </label>)}
       {!selection.data?.available.length && <p>Waiting for lights from Home Assistant. Add your light integrations and synchronize from the Home Assistant page.</p>}
       {selected.filter(id => !selection.data?.available.some(light => light.entity_id === id)).map(id => <label className="managedLight" key={id}>
-        <input type="checkbox" disabled={busy} checked onChange={() => {if (!draft) setExpected(selection.data!.entities); setDraft(selected.filter(item => item !== id));}} />
+        <input type="checkbox" disabled={busy} checked onChange={() => {if (!draft) {setExpected(selection.data!.entities); setExpectedRevision(selection.data!.snapshot_revision);} setDraft(selected.filter(item => item !== id));}} />
         <span>{id}<small>Unavailable — remove if no longer needed</small></span></label>)}
-      <div className="actionRow"><button className="consoleButton" disabled={busy || !draft} onClick={() => void save()}>{busy ? 'Saving…' : 'Save selection'}</button>
-        <button className="consoleButton" disabled={busy || !draft} onClick={() => {setDraft(null); setExpected(null);}}>Discard changes</button></div>
+      <div className="actionRow"><button className="consoleButton" disabled={busy || !canSave} onClick={() => void save()}>{busy ? 'Saving…' : 'Save selection'}</button>
+        <button className="consoleButton" disabled={busy || !draft} onClick={() => {setDraft(null); setExpected(null); setExpectedRevision(null);}}>Discard changes</button></div>
       {notice && <p role="status">{notice}</p>}
     </SectionCard>
   </div>;

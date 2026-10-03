@@ -72,6 +72,30 @@ void main() {
     expect(body, isNot(contains(runtimeToken)));
     expect(body, isNot(contains('group_ids')));
     expect(response.headers['cache-control'], 'no-store');
+    expect(requests.single.url.port, 54449);
+  });
+
+  test('mobile enrollment uses the guarded admin listener and fresh HA role',
+      () async {
+    Map<String, dynamic> enrollment() => {
+      'method': 'POST',
+      'path': 'api/addon/enrollment',
+      'body': <String, dynamic>{},
+      'requestId': 'mobile-test:1234',
+      'expectedServerInstanceId': 'instance-1'
+    };
+    final response = await server.handler(browserRequest(
+        path: 'api/local/device-admin/proxy', operation: enrollment()));
+    expect(response.statusCode, 200);
+    expect(requests.last.url.port, 54449);
+    expect(requests.last.url.path, '/api/addon/enrollment');
+    expect(response.headers['cache-control'], 'no-store');
+    requests.clear();
+    user = {...admin, 'is_active': false};
+    final denied = await server.handler(browserRequest(
+        path: 'api/local/device-admin/proxy', operation: enrollment()));
+    expect(denied.statusCode, 403);
+    expect(requests, isEmpty);
   });
 
   test('a forged role cannot authorize an ordinary HA user', () async {

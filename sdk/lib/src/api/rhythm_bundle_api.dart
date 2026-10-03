@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 import 'package:logging/logging.dart';
 
 import '../api_auth.dart';
+import '../models/rhythm_capabilities.dart';
 import '../errors/rhythm_exception.dart';
 import '../rhythm_log_interceptor.dart';
 
@@ -40,6 +41,25 @@ class RhythmBundleApi {
       _dio.options.headers.addAll(headers);
     }
     _dio.interceptors.add(RhythmLogInterceptor(_log));
+  }
+
+  /// Recheck the connected deployment before a whole-installation operation.
+  /// A successful legacy state payload without capabilities keeps old behavior;
+  /// network, authentication, or malformed-state failures never imply support.
+  Future<RhythmDeploymentCapabilities> getDeploymentCapabilities() async {
+    final response = await _dio.get<Map<String, dynamic>>('api/state');
+    final data = response.data;
+    if (data == null) throw StateError('Server returned no deployment state.');
+    final capabilities = data['capabilities'];
+    if (capabilities == null) {
+      return const RhythmDeploymentCapabilities.legacy();
+    }
+    if (capabilities is! Map) {
+      throw StateError('Server returned invalid deployment capabilities.');
+    }
+    return RhythmCapabilities.fromJson(
+      Map<String, dynamic>.from(capabilities),
+    ).deployment;
   }
 
   Future<Map<String, dynamic>> getConfigurationBundle() async {

@@ -142,9 +142,9 @@ class HaInfoScreen extends StatelessWidget {
                           ),
                           SizedBox(height: 10),
                           Text(
-                            'Home Assistant manages your lights and rooms through '
-                            'the Rhythm Lighting add-on. Rooms and devices are '
-                            'automatically imported from your Home Assistant areas.',
+                            'Home Assistant manages devices and areas. Open Rhythm '
+                            'in Home Assistant to review the lights it may control. '
+                            'Approved lights and their areas then appear in this app.',
                             style: TextStyle(
                               color: CelestialColors.textSecondary,
                               fontSize: 14,

@@ -796,6 +796,117 @@ fn is_button_event_device_class(device_class: Option<&str>) -> bool {
     device_class.is_none_or(|class| class == "button")
 }
 
+fn translate_catalog_event(
+    event_type: &str,
+    data: &Value,
+    cache: &Arc<Mutex<HaEventRoutingCache>>,
+) -> Option<Vec<HubEvent>> {
+    if matches!(
+        event_type,
+        "entity_registry_updated"
+            | "device_registry_updated"
+            | "area_registry_updated"
+            | "core_config_updated"
+    ) {
+        if let Ok(mut cache) = cache.lock() {
+            cache.invalidate();
+        }
+        return Some(vec![HubEvent::TopologyChanged {
+            hub_key: None,
+            resource_id: data["entity_id"]
+                .as_str()
+                .or(data["device_id"].as_str())
+                .or(data["area_id"].as_str())
+                .unwrap_or("ha-config")
+                .to_owned(),
+            resource_type: event_type.to_owned(),
+        }]);
+    }
+    if matches!(event_type, "hue_event" | "zha_event")
+        && data["device_id"].as_str().is_some_and(|device_id| {
+            cache
+                .lock()
+                .is_ok_and(|cache| cache.button_event_device_ids.contains(device_id))
+        })
+    {
+        return Some(Vec::new());
+    }
+    let entity_id = data["entity_id"].as_str()?;
+    if event_type != "state_changed" || !entity_id.starts_with("light.") {
+        return None;
+    }
+    let mut cache = cache.lock().ok()?;
+    let epoch = cache.generation;
+    let validity = cache.observation_epoch.clone();
+    let snapshot_ready = cache.lights_ready;
+    let context = data["new_state"]["context"]["id"].as_str();
+    let in_flight = cache.writes_in_flight.get(entity_id).copied().unwrap_or(0) > 0;
+    let external_candidate = cache.lights_ready
+        && data["new_state"]["context"]["user_id"].is_string()
+        && data["new_state"]["context"]["parent_id"].is_null()
+        && context.is_some_and(|context| !cache.own_contexts.iter().any(|own| own == context));
+    let Some(entry) = cache.lights.get_mut(entity_id) else {
+        return Some(Vec::new());
+    };
+    let Some(identity_proof) = entry
+        .identity
+        .as_ref()
+        .and_then(|proof| serde_json::to_value(proof).ok())
+    else {
+        return Some(Vec::new());
+    };
+    let observation = crate::light::HaLightObservation::parse(&data["new_state"]);
+    // HA emits UTC RFC3339 timestamps. Only compare when both carry a timestamp;
+    // duplicates and delayed reports cannot overwrite newer integration evidence.
+    if !data["new_state"].is_null() && !observation.newer_than(&entry.observation) {
+        return Some(Vec::new());
+    }
+    let external_candidate = external_candidate
+        && entry.observation.available()
+        && (observation.lights_on != entry.observation.lights_on
+            || observation.brightness != entry.observation.brightness
+            || observation.kelvin != entry.observation.kelvin
+            || observation.xy != entry.observation.xy
+            || observation.rgb != entry.observation.rgb);
+    if data["new_state"]["attributes"]
+        .get("supported_color_modes")
+        .is_some()
+    {
+        entry.capabilities = crate::light::capabilities(&data["new_state"]["attributes"]);
+    }
+    entry.observation = observation.clone();
+    if in_flight && external_candidate {
+        cache.pending_manual.insert(
+            entity_id.to_owned(),
+            (observation.normalized(), identity_proof.clone(), epoch),
+        );
+    }
+    let external_user_change = external_candidate && !in_flight;
+    // Unknown/unavailable/deleted must never become an observed "off".
+    // Reports update observation authority only; unidentified contexts never
+    // manufacture a physical button action or a manual-override command.
+    let mut events = vec![HubEvent::LightObserved {
+        hub_key: None,
+        device_id: entity_id.to_owned(),
+        external_user_change,
+        observation: observation.normalized(),
+        identity_proof: Some(identity_proof),
+        observation_epoch: Some((validity, epoch)),
+    }];
+    if data["new_state"].is_null() {
+        cache.invalidate();
+        events.push(HubEvent::TopologyChanged {
+            hub_key: None,
+            resource_id: entity_id.to_owned(),
+            resource_type: "entity_removed".into(),
+        });
+    }
+    if !snapshot_ready && !data["new_state"].is_null() {
+        events.clear();
+    }
+    Some(events)
+}
+
 /// Translate a raw HA WebSocket event into hub-agnostic events.
 ///
 /// Dispatches based on event type:
@@ -809,6 +920,9 @@ pub fn translate_ws_event(
     registry: &Arc<Mutex<HaDeviceRegistry>>,
     event_routing_cache: &Arc<Mutex<HaEventRoutingCache>>,
 ) -> Vec<HubEvent> {
+    if let Some(events) = translate_catalog_event(event_type, event_data, event_routing_cache) {
+        return events;
+    }
     match event_type {
         "hue_event" => translate_hue_event(event_data, registry, event_routing_cache),
         "zha_event" => translate_zha_event(event_data, registry, event_routing_cache),
@@ -836,6 +950,9 @@ pub(crate) fn translate_ws_event_with_hooks(
     on_unknown_motion: Option<&dyn Fn(&str)>,
     on_unknown_contact: Option<&dyn Fn(&str)>,
 ) -> Vec<HubEvent> {
+    if let Some(events) = translate_catalog_event(event_type, event_data, event_routing_cache) {
+        return events;
+    }
     match event_type {
         "hue_event" => {
             translate_hue_event_with_hooks(event_data, registry, on_activity, on_unknown_button)

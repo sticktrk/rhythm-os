@@ -81,11 +81,13 @@ class RhythmCapabilities {
   final int? apiSchemaVersion;
   final List<String> features;
   final List<RhythmHubCapabilities> hubs;
+  final RhythmDeploymentCapabilities deployment;
 
   const RhythmCapabilities({
     this.apiSchemaVersion,
     this.features = const [],
     this.hubs = const [],
+    this.deployment = const RhythmDeploymentCapabilities.legacy(),
   });
 
   factory RhythmCapabilities.fromJson(Map<String, dynamic> json) {
@@ -95,6 +97,11 @@ class RhythmCapabilities {
         preferredKeys: const ['api_schema_version'],
       ),
       features: _parseStringList(json['features']),
+      deployment: json.containsKey('deployment')
+          ? RhythmDeploymentCapabilities.fromJson(
+              jsonMap(json['deployment']) ?? const {},
+            )
+          : const RhythmDeploymentCapabilities.legacy(),
       hubs: ((json['hubs'] as List<dynamic>?) ?? const <dynamic>[])
           .map(jsonMap)
           .nonNulls
@@ -112,6 +119,61 @@ class RhythmCapabilities {
   }
 
   bool supportsFeature(String feature) => features.contains(feature);
+}
+
+/// Deployment operations are independent of the phone's platform and hub type.
+/// Missing metadata keeps previous appliance behavior. An explicit block fails
+/// closed for omitted operations, including future deployment kinds.
+class RhythmDeploymentCapabilities {
+  final String kind;
+  final bool directMobileControl;
+  final bool eventStreaming;
+  final bool remoteAccess;
+  final bool haDeviceManagement;
+  final bool managedLightSelection;
+  final bool portableProfiles;
+  final bool fullBackupExport;
+  final bool fullBackupImport;
+  final bool mobileEnrollment;
+
+  const RhythmDeploymentCapabilities({
+    required this.kind,
+    this.directMobileControl = false,
+    this.eventStreaming = false,
+    this.remoteAccess = false,
+    this.haDeviceManagement = false,
+    this.managedLightSelection = false,
+    this.portableProfiles = false,
+    this.fullBackupExport = false,
+    this.fullBackupImport = false,
+    this.mobileEnrollment = false,
+  });
+
+  const RhythmDeploymentCapabilities.legacy()
+      : kind = 'legacy',
+        directMobileControl = true,
+        eventStreaming = true,
+        remoteAccess = true,
+        haDeviceManagement = false,
+        managedLightSelection = false,
+        portableProfiles = true,
+        fullBackupExport = true,
+        fullBackupImport = true,
+        mobileEnrollment = false;
+
+  factory RhythmDeploymentCapabilities.fromJson(Map<String, dynamic> json) =>
+      RhythmDeploymentCapabilities(
+        kind: json['kind'] is String ? json['kind'] as String : 'unknown',
+        directMobileControl: json['direct_mobile_control'] == true,
+        eventStreaming: json['event_streaming'] == true,
+        remoteAccess: json['remote_access'] == true,
+        haDeviceManagement: json['ha_device_management'] == true,
+        managedLightSelection: json['managed_light_selection'] == true,
+        portableProfiles: json['portable_profiles'] == true,
+        fullBackupExport: json['full_backup_export'] == true,
+        fullBackupImport: json['full_backup_import'] == true,
+        mobileEnrollment: json['mobile_enrollment'] == true,
+      );
 }
 
 /// Per-hub capability metadata from `/api/state.capabilities.hubs`.

@@ -1072,6 +1072,7 @@ pub struct ChildProcessRemoteAccessController {
 }
 
 struct ChildProcessInner {
+    shutting_down: std::sync::atomic::AtomicBool,
     cloudflared_bin: PathBuf,
     protocol: String,
     edge_ip_version: String,
@@ -1129,6 +1130,7 @@ impl ChildProcessRemoteAccessController {
     pub fn new(cloudflared_bin: impl Into<PathBuf>) -> Self {
         Self {
             inner: Arc::new(ChildProcessInner {
+                shutting_down: std::sync::atomic::AtomicBool::new(false),
                 cloudflared_bin: cloudflared_bin.into(),
                 protocol: DEFAULT_CLOUDFLARED_PROTOCOL.to_string(),
                 edge_ip_version: DEFAULT_CLOUDFLARED_EDGE_IP_VERSION.to_string(),
@@ -1149,6 +1151,40 @@ impl ChildProcessRemoteAccessController {
             .expect("controller not shared yet")
             .metrics_addr = metrics_addr.into();
         self
+    }
+
+    /// Final process shutdown/reset barrier. Unlike the delayed API stop, this
+    /// waits for the child supervisor to quiesce and refuses future starts.
+    pub fn shutdown(&self) -> anyhow::Result<()> {
+        use std::sync::atomic::Ordering;
+        self.inner.shutting_down.store(true, Ordering::SeqCst);
+        {
+            let mut shared = self
+                .inner
+                .shared
+                .lock()
+                .map_err(|_| anyhow::anyhow!("controller lock"))?;
+            shared.generation = shared.generation.saturating_add(1);
+            shared.desired = None;
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            kill_child(&self.inner);
+            if !self
+                .inner
+                .shared
+                .lock()
+                .map_err(|_| anyhow::anyhow!("controller lock"))?
+                .supervisor_running
+            {
+                return Ok(());
+            }
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "cloudflared did not stop before reset"
+            );
+            thread::sleep(Duration::from_millis(25));
+        }
     }
 
     pub fn with_protocol(mut self, protocol: impl Into<String>) -> Self {
@@ -1188,6 +1224,13 @@ impl ChildProcessRemoteAccessController {
             .shared
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self
+            .inner
+            .shutting_down
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return;
+        }
         if shared.supervisor_running {
             return;
         }
@@ -1301,6 +1344,13 @@ impl RemoteAccessController for ChildProcessRemoteAccessController {
                 .shared
                 .lock()
                 .map_err(|_| anyhow::anyhow!("remote access lock"))?;
+            anyhow::ensure!(
+                !self
+                    .inner
+                    .shutting_down
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                "remote access controller is shutting down"
+            );
             shared.generation = shared.generation.saturating_add(1);
             shared.desired = Some(ChildDesired {
                 runtime_dir: runtime_dir.to_path_buf(),
@@ -1340,10 +1390,14 @@ impl RemoteAccessController for ChildProcessRemoteAccessController {
                 let Ok(mut shared) = inner.shared.lock() else {
                     return;
                 };
+                if shared.generation != target_generation {
+                    return;
+                }
                 shared.status.state = "stopped".to_string();
                 shared.status.child_pid = None;
-                shared.status.supervisor_pid = None;
-                shared.supervisor_running = false;
+                // Only the supervisor may declare itself quiescent. Clearing
+                // this here allows a rapid start to spawn a second supervisor
+                // while the existing one is still observing its new generation.
                 let _ = write_child_status_env(&runtime_dir, &inner, &shared.status);
             }
         });
@@ -2585,6 +2639,76 @@ cloudflared_tunnel_server_locations{edge_location=\"iad\"} 1\n";
         let status = controller.status(&root);
         assert_eq!(status.supervisor_state.as_deref(), Some("stopped"));
         assert!(!status.service_running);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_shutdown_reaps_connector_and_prevents_restart() {
+        let root = temp_root("child-shutdown");
+        std::fs::create_dir_all(&root).unwrap();
+        let binary = root.join("cloudflared");
+        write_executable(&binary, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'cloudflared fixture'; exit 0; fi\nexec sleep 60\n");
+        std::fs::write(root.join(CONNECTOR_TOKEN_FILE), "fixture-secret").unwrap();
+        let controller = ChildProcessRemoteAccessController::new(&binary);
+        let config = StoredRemoteAccessConfig {
+            schema_version: 1,
+            enabled: true,
+            hostname: "fixture.devices.rhythm.lighting".into(),
+            connector_token: "fixture-secret".into(),
+            tunnel_id: None,
+            tunnel_name: None,
+            updated_at_epoch_ms: 1,
+        };
+        controller.start(&root, &config).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while controller.inner.child.lock().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "connector did not start");
+            thread::sleep(Duration::from_millis(10));
+        }
+        controller.shutdown().unwrap();
+        assert!(controller.inner.child.lock().unwrap().is_none());
+        assert!(!controller.inner.shared.lock().unwrap().supervisor_running);
+        assert!(controller.start(&root, &config).is_err());
+        controller.shutdown().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn child_stop_does_not_claim_a_live_supervisor_has_exited() {
+        let root = temp_root("child-stop-barrier");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut controller = ChildProcessRemoteAccessController::new("/missing");
+        Arc::get_mut(&mut controller.inner).unwrap().stop_delay = Duration::ZERO;
+        {
+            let mut shared = controller.inner.shared.lock().unwrap();
+            shared.generation = 1;
+            shared.supervisor_running = true;
+            shared.desired = Some(ChildDesired {
+                runtime_dir: root.clone(),
+            });
+            shared.status.state = "running".into();
+        }
+        // Keep child shutdown in flight while the stop request invalidates the
+        // old generation. The separate supervisor still owns its exit signal.
+        let child = controller.inner.child.lock().unwrap();
+        controller.stop(&root).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while controller.inner.shared.lock().unwrap().generation != 2 {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+        drop(child);
+        loop {
+            let shared = controller.inner.shared.lock().unwrap();
+            if shared.status.state == "stopped" {
+                assert!(shared.supervisor_running);
+                break;
+            }
+            drop(shared);
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -7,6 +7,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../providers/server_sync_provider.dart';
+import '../../widgets/observed_light_status.dart';
 import '../../services/analytics_service.dart';
 import '../../utils/app_color_temperature.dart';
 import '../../widgets/header_close_button.dart';
@@ -214,11 +215,15 @@ class _LightScreenState extends State<LightScreen> {
                                 ?.profileSettings
                                 ?.profileOverrides ??
                             const <String, RhythmLightProfileNodeOverride>{};
+                    final observation = widget.roomId == null ? null :
+                        sync.nodeById(widget.roomId!)?.observedLight;
                     final hasRoomOverrides = roomOverrides.values
                         .any((profileOverride) => !profileOverride.isEmpty);
                     return Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
+                        if (observation != null)
+                          ObservedLightStatus(observation: observation),
                         if (widget.isRoomScoped) ...[
                           _buildRoomScopeBanner(
                             sync,

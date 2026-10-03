@@ -1,5 +1,7 @@
 import '../screens/network/matter_wifi_change_screen.dart';
 import 'matter_wifi_network_tile.dart';
+import 'observed_light_status.dart';
+import 'home_assistant_device_setup.dart';
 import 'device_details_loader.dart';
 import 'device_network_diagnostics.dart';
 import 'dart:async';
@@ -11,6 +13,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
     show
         RhythmDevice,
         RhythmDeviceType,
+        RhythmObservedLight,
         RhythmPairingRecoverySecret,
         RhythmRoomProjectionStatus;
 import 'package:uuid/uuid.dart';
@@ -96,6 +99,10 @@ Future<bool> assignCanonicalDeviceToRoom(
   }
 
   final syncProvider = context.read<ServerSyncProvider>();
+  if (syncProvider.deviceManagementOwnedByHomeAssistant) {
+    await HomeAssistantDeviceSetup.show(context);
+    return false;
+  }
   final journeyId = 'device-room-move-${_deviceRoomMoveUuid.v4()}';
   final assignment = await syncProvider.api.assignDeviceParentResult(
     device.id,
@@ -178,6 +185,10 @@ Future<bool> showDeviceNodeAssignmentFlow(
   String analyticsSource = 'device_detail',
 }) async {
   final syncProvider = context.read<ServerSyncProvider>();
+  if (syncProvider.deviceManagementOwnedByHomeAssistant) {
+    await HomeAssistantDeviceSetup.show(context);
+    return false;
+  }
   final normalizedCurrentParentNodeId =
       currentParentNodeId.isEmpty ? null : currentParentNodeId;
   final roomSummariesById = {
@@ -1053,8 +1064,12 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
     };
 
     final rhythmId = _canonicalData?['id'] as String?;
+    final observation = context.select<ServerSyncProvider, RhythmObservedLight?>(
+      (sync) => sync.nodeById(device.id)?.observedLight,
+    );
 
     return _buildGroup('Device Info', [
+      if (observation != null) ObservedLightStatus(observation: observation),
       // The canonical rename endpoint owns names for every device type.
       _buildNameEditRow(context),
       _InfoRow(label: 'Type', value: typeLabel),
@@ -1311,6 +1326,10 @@ class _DeviceDetailSheetState extends State<DeviceDetailSheet> {
       );
 
   Future<void> _showRenameDialog(BuildContext context) async {
+    if (context.read<ServerSyncProvider>().deviceManagementOwnedByHomeAssistant) {
+      await HomeAssistantDeviceSetup.show(context);
+      return;
+    }
     final deviceLabel = switch (widget.device.type) {
       RhythmDeviceType.light => 'Bulb',
       RhythmDeviceType.button => 'Button',

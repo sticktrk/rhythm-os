@@ -22,6 +22,18 @@ pub trait HaTransport: Send + Sync {
     /// * `data` - Service data as JSON (includes target, fields)
     fn call_service(&self, domain: &str, service: &str, data: &Value) -> Result<()>;
 
+    /// Contexts returned by HA prove an echo of this accepted service call.
+    /// Acceptance does not imply physical convergence.
+    fn call_service_contexts(
+        &self,
+        domain: &str,
+        service: &str,
+        data: &Value,
+    ) -> Result<Vec<String>> {
+        self.call_service(domain, service, data)?;
+        Ok(Vec::new())
+    }
+
     /// Get states of all entities.
     fn get_states(&self) -> Result<Vec<EntityState>>;
 

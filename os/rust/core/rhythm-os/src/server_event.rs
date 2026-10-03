@@ -284,6 +284,8 @@ pub struct NodeStateEvent {
     /// Whether lights are currently on in this room.
     pub lights_on: bool,
     pub observed_power: ObservedPowerDto,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_light: Option<crate::hub::LightObservation>,
     /// Whether a global mode transition fade is currently in progress.
     pub transitioning: bool,
     /// Whether light-dispatch work for this node is queued or running.
@@ -317,6 +319,7 @@ pub(crate) struct NodeStateEventParams {
     pub state: RoomModeState,
     pub lights_on: bool,
     pub observed_power: ObservedPowerDto,
+    pub observed_light: Option<crate::hub::LightObservation>,
     pub transitioning: bool,
     pub pending_dispatch: bool,
     pub brightness: u8,
@@ -339,6 +342,7 @@ impl NodeStateEvent {
             state,
             lights_on,
             observed_power,
+            observed_light,
             transitioning,
             pending_dispatch,
             brightness,
@@ -361,6 +365,7 @@ impl NodeStateEvent {
             brightness_offset: snap.brightness_offset,
             lights_on,
             observed_power,
+            observed_light,
             transitioning,
             pending_dispatch,
             brightness,

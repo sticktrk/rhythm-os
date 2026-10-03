@@ -25,6 +25,28 @@ void main() {
     BackendProvider.resetForTesting();
   });
 
+  test('mobile enrollment analytics excludes approval, identity, and raw failures', () async {
+    await analytics.logMobileEnrollmentCompleted(
+      journeyId: 'opaque-enrollment', outcome: 'failed', failureStage: 'exchange',
+    );
+    await analytics.logMobileEnrollmentCompleted(
+      journeyId: 'opaque-enrollment', outcome: 'succeeded', failureStage: 'secret-approval',
+    );
+    await analytics.logMobileEnrollmentCompleted(
+      journeyId: 'opaque-enrollment', outcome: 'raw-private-error',
+    );
+    expect(backend.events, hasLength(2));
+    expect(backend.events.first.name, 'mobile_enrollment_completed');
+    expect(backend.events.first.properties.keys.toSet(), {
+      'journey_id', 'deployment', 'transport', 'outcome', 'failure_stage',
+    });
+    expect(backend.events.last.properties.containsKey('failure_stage'), isFalse);
+    expect(backend.events.last.properties.toString(), isNot(contains('secret')));
+    analytics.resetForTesting();
+    await analytics.logMobileEnrollmentCompleted(journeyId: 'opaque-enrollment', outcome: 'failed');
+    expect(backend.events, hasLength(2));
+  });
+
   test('Wi-Fi analytics is bounded, private, and optional', () async {
     await analytics.logWifiAction(
         networkChange: false,

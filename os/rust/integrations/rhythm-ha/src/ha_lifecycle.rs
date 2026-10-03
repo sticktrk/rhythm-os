@@ -59,7 +59,16 @@ where
     info!(target: "sys", "Connecting to HA at {}:{}...", config.host, config.port);
 
     let config_clone = config.clone();
-    let event_routing_cache = Arc::new(Mutex::new(HaEventRoutingCache::default()));
+    let (deferred_tx, deferred_rx) = std::sync::mpsc::sync_channel(64);
+    state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("State lock"))?
+        .pending_hub_event_rxs
+        .push(deferred_rx);
+    let event_routing_cache = Arc::new(Mutex::new(HaEventRoutingCache {
+        deferred_tx: Some(deferred_tx),
+        ..Default::default()
+    }));
     let cache_for_hub = event_routing_cache.clone();
 
     rhythm_os::lifecycle::connect_hub(
@@ -147,6 +156,12 @@ pub fn start_event_translator(
                 .as_ref()
                 .map(|f| f.as_ref() as &dyn Fn(&str));
 
+            if matches!(event, HaWsEvent::Connected | HaWsEvent::Disconnected(_)) {
+                if let Ok(mut cache) = event_routing_cache.lock() {
+                    cache.invalidate();
+                    cache.stream_ready = matches!(event, HaWsEvent::Connected);
+                }
+            }
             match event {
                 HaWsEvent::Connected => vec![HubEvent::Connected { hub_key: None }],
                 HaWsEvent::ServiceEvent { event_type, data } => {

@@ -2159,6 +2159,98 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             );
         }
 
+        HubEvent::LightObserved {
+            ref hub_key,
+            ref device_id,
+            ref observation,
+            ref identity_proof,
+            ref observation_epoch,
+            external_user_change,
+        } => {
+            if observation_epoch
+                .as_ref()
+                .is_some_and(|(current, expected)| {
+                    current.load(std::sync::atomic::Ordering::Acquire) != *expected
+                })
+            {
+                return;
+            }
+            let Some(hub_key) = hub_key.as_ref() else {
+                return;
+            };
+            let (node_id, runtime) = {
+                let Ok(mut s) = state.lock() else {
+                    return;
+                };
+                let Some(device) = s.canonical_registry.find_by_native_id(hub_key, device_id)
+                else {
+                    return;
+                };
+                if identity_proof.as_ref().is_some_and(|proof| {
+                    device
+                        .endpoints
+                        .iter()
+                        .find(|ep| &ep.hub_key == hub_key && &ep.native_id == device_id)
+                        .and_then(|ep| ep.capabilities.as_ref())
+                        .and_then(|caps| caps.get("ha_identity"))
+                        != Some(proof)
+                }) {
+                    return;
+                }
+                let node_id = device.id.clone();
+                if s.light_observations
+                    .get(&node_id)
+                    .and_then(|previous| previous.source_at_epoch_ms)
+                    .zip(observation.source_at_epoch_ms)
+                    .is_some_and(|(previous, next)| {
+                        next < previous || (next == previous && !external_user_change)
+                    })
+                {
+                    return;
+                }
+                s.light_observations
+                    .insert(node_id.clone(), observation.clone());
+                // Unknown and unavailable invalidate power evidence rather than
+                // manufacture an off observation.
+                if observation.lights_on.is_none() {
+                    s.room_observed_power.remove(&node_id);
+                    if let Some(parent) = s
+                        .topology
+                        .device_parent_room_id(&node_id)
+                        .map(str::to_owned)
+                    {
+                        s.room_observed_power.remove(&parent);
+                    }
+                }
+                (node_id, s.hub_runtime())
+            };
+            let Some(runtime) = runtime else {
+                return;
+            };
+            if let Some(lights_on) = observation.lights_on {
+                commands::update_lights_on_cache_for_canonical_light_report(
+                    state,
+                    &runtime,
+                    &node_id,
+                    lights_on,
+                    crate::state::ObservedPowerSource::LiveSubscription,
+                );
+            }
+            // Explicit HA user control pauses adaptation for this light until
+            // a Rhythm action re-enables it. Unclassified/automation/own echoes
+            // update readback without masquerading as physical button input.
+            if external_user_change && observation.lights_on.is_some() {
+                if let Some(snapshot) = runtime.engine_node_snapshot(&node_id) {
+                    let mut restored =
+                        rhythm_core::runtime::handle::RestoredNodeState::from(&snapshot);
+                    restored.rhythm_enabled = false;
+                    runtime.restore_node_state(&node_id, restored);
+                    commands::persist_rooms(state);
+                }
+            }
+            commands::emit_node_state_event_after_apply(state, &runtime, &node_id);
+        }
+
         HubEvent::LightPower {
             ref hub_key,
             ref device_id,
@@ -2365,6 +2457,23 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
                     // an older connection observation, even when that worker
                     // has already fenced the API-visible connection false.
                     s.note_hub_disconnected_event(key);
+                    let light_ids: Vec<_> = s
+                        .canonical_registry
+                        .devices()
+                        .filter(|device| device.endpoints.iter().any(|ep| &ep.hub_key == key))
+                        .map(|device| device.id.clone())
+                        .collect();
+                    for id in light_ids {
+                        if let Some(observation) = s.light_observations.get_mut(&id) {
+                            observation.availability = "disconnected".to_owned();
+                        }
+                        s.room_observed_power.remove(&id);
+                        if let Some(parent) =
+                            s.topology.device_parent_room_id(&id).map(str::to_owned)
+                        {
+                            s.room_observed_power.remove(&parent);
+                        }
+                    }
                     if s.hub_is_connected(key) && s.hub_seen_connected_once(key) {
                         Some(s.note_hub_pending_disconnect(key, HUB_DISCONNECT_GRACE))
                     } else if s.hub_is_connected(key) {

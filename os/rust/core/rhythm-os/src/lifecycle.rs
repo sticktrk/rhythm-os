@@ -661,7 +661,13 @@ fn forward_translated_hub_event(
     match hub_tx.try_send(hub_event) {
         Ok(()) => true,
         Err(std::sync::mpsc::TrySendError::Full(hub_event)) => {
-            if matches!(&hub_event, HubEvent::TopologyChanged { .. }) {
+            if matches!(
+                &hub_event,
+                HubEvent::TopologyChanged { .. }
+                    | HubEvent::LightObserved { .. }
+                    | HubEvent::Connected { .. }
+                    | HubEvent::Disconnected { .. }
+            ) {
                 hub_tx.send(hub_event).is_ok()
             } else {
                 warn!(

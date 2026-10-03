@@ -400,6 +400,11 @@ fn sync_from_hub_for_key_acquired(
     }
     .ok_or_else(|| anyhow::anyhow!("No hub discovery for {}", hub_key))?;
 
+    let failure_policy = if discovery.requires_complete_snapshot() {
+        SyncFailurePolicy::FailClosedBeforeAuthority
+    } else {
+        failure_policy
+    };
     let report = sync_with_discovery(
         state,
         hub_key,
@@ -409,6 +414,7 @@ fn sync_from_hub_for_key_acquired(
     )?;
     commands::reconcile_room_binding_triage_best_effort(state);
     commands::reconcile_runtime_from_state_with_group_sync(state, group_sync)?;
+    discovery.complete_sync()?;
     Ok(report)
 }
 
@@ -691,6 +697,14 @@ fn sync_with_discovery(
                     .map(|capabilities| (identity.native_id.clone(), capabilities))
             })
             .collect();
+        let discovered_observations: HashMap<_, _> = identities
+            .iter()
+            .filter_map(|identity| {
+                discovery
+                    .endpoint_observation(&identity.native_id)
+                    .map(|observation| (identity.native_id.clone(), observation))
+            })
+            .collect();
         let has_typed_light_identities = identities
             .iter()
             .any(|identity| identity.device_type == DeviceType::Light);
@@ -760,6 +774,43 @@ fn sync_with_discovery(
                         }
                     }
 
+                    if let Some(incoming_proof) = discovered_endpoint_capabilities
+                        .get(&identity.native_id)
+                        .and_then(|caps| caps.get("ha_identity"))
+                        .filter(|proof| !proof.is_null())
+                    {
+                        let reused_route = s
+                            .canonical_registry
+                            .find_by_native_id(&canonical_hub_key, &identity.native_id)
+                            .is_some_and(|device| {
+                                device
+                                    .endpoints
+                                    .iter()
+                                    .find(|ep| {
+                                        ep.hub_key == canonical_hub_key
+                                            && ep.native_id == identity.native_id
+                                    })
+                                    .and_then(|ep| ep.capabilities.as_ref())
+                                    .and_then(|caps| caps.get("ha_identity"))
+                                    != Some(incoming_proof)
+                            });
+                        if reused_route {
+                            if let Some(retired) = s
+                                .canonical_registry
+                                .retire_endpoint_identity(&canonical_hub_key, &identity.native_id)
+                            {
+                                s.light_observations.remove(&retired);
+                                s.room_observed_power.remove(&retired);
+                                if let Some(parent) = s
+                                    .topology
+                                    .device_parent_room_id(&retired)
+                                    .map(str::to_owned)
+                                {
+                                    s.room_observed_power.remove(&parent);
+                                }
+                            }
+                        }
+                    }
                     let result = s
                         .canonical_registry
                         .resolve(identity, &canonical_hub_key, now);
@@ -783,6 +834,36 @@ fn sync_with_discovery(
                             })
                         {
                             endpoint.capabilities = Some(capabilities.clone());
+                        }
+                    }
+                    if let Some(observation) = discovered_observations.get(&identity.native_id) {
+                        let stale = s
+                            .light_observations
+                            .get(&canonical_id)
+                            .and_then(|old| old.source_at_epoch_ms)
+                            .zip(observation.source_at_epoch_ms)
+                            .is_some_and(|(old, next)| next < old);
+                        if !stale {
+                            s.light_observations
+                                .insert(canonical_id.clone(), observation.clone());
+                            if let Some(on) = observation.lights_on {
+                                s.room_observed_power.insert(
+                                    canonical_id.clone(),
+                                    crate::state::ObservedPowerState::new(
+                                        on,
+                                        crate::state::ObservedPowerSource::SyncPoll,
+                                    ),
+                                );
+                            } else {
+                                s.room_observed_power.remove(&canonical_id);
+                                if let Some(parent) = s
+                                    .topology
+                                    .device_parent_room_id(&canonical_id)
+                                    .map(str::to_owned)
+                                {
+                                    s.room_observed_power.remove(&parent);
+                                }
+                            }
                         }
                     }
                     if created_canonical_device && identity.device_type == DeviceType::Light {

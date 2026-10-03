@@ -758,6 +758,23 @@ class AnalyticsService {
     await logEvent('bridge_provisioning_completed');
   }
 
+  /// Approval/token contents and installation addresses never enter analytics.
+  Future<void> logMobileEnrollmentCompleted({
+    required String journeyId,
+    required String outcome,
+    String? failureStage,
+  }) async {
+    if (!const {'succeeded', 'failed', 'cancelled'}.contains(outcome)) return;
+    await logEvent('mobile_enrollment_completed', {
+      'journey_id': journeyId,
+      'deployment': 'home_assistant_addon',
+      'transport': 'lan',
+      'outcome': outcome,
+      if (const {'validation', 'exchange'}.contains(failureStage))
+        'failure_stage': failureStage!,
+    });
+  }
+
   /// Track Rhythm bridge provisioning failed.
   Future<void> logBridgeProvisioningFailed(String error) async {
     await logEvent('bridge_provisioning_failed', {
