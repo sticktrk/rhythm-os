@@ -734,6 +734,51 @@ fn sync_with_discovery(
             {
                 let mut s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
 
+                // Preserve proven identity lineage for the entire transaction.
+                // Resolving a replacement first can retire a renamed device's
+                // only endpoint; a later hardware lookup then loses its same-
+                // hub relationship. Snapshot proof, rather than iteration order,
+                // carries that relationship through route reuse and swaps.
+                let mut incoming_ha_proof_counts = HashMap::<String, usize>::new();
+                for capabilities in discovered_endpoint_capabilities.values() {
+                    if let Some(proof) = capabilities
+                        .get("ha_identity")
+                        .filter(|proof| !proof.is_null())
+                    {
+                        *incoming_ha_proof_counts
+                            .entry(proof.to_string())
+                            .or_default() += 1;
+                    }
+                }
+                let mut proven_ha_endpoints = HashMap::new();
+                for device in s
+                    .canonical_registry
+                    .devices()
+                    .filter(|device| device.device_type == DeviceType::Light)
+                {
+                    for endpoint in device
+                        .endpoints
+                        .iter()
+                        .filter(|endpoint| endpoint.hub_key == canonical_hub_key)
+                    {
+                        let Some(proof) = endpoint
+                            .capabilities
+                            .as_ref()
+                            .and_then(|caps| caps.get("ha_identity"))
+                            .filter(|proof| !proof.is_null())
+                        else {
+                            continue;
+                        };
+                        let key = proof.to_string();
+                        if incoming_ha_proof_counts.get(&key) == Some(&1) {
+                            proven_ha_endpoints
+                                .entry(key)
+                                .and_modify(|value| *value = None)
+                                .or_insert_with(|| Some((device.id.clone(), endpoint.clone())));
+                        }
+                    }
+                }
+
                 // Prune triage entries resolved more than 7 days ago
                 let seven_days = 7 * 24 * 60 * 60;
                 if now > seven_days {
@@ -807,6 +852,19 @@ fn sync_with_discovery(
                                     .map(str::to_owned)
                                 {
                                     s.room_observed_power.remove(&parent);
+                                }
+                            }
+                        }
+                        if identity.device_type == DeviceType::Light {
+                            if let Some(Some((canonical_id, previous))) =
+                                proven_ha_endpoints.get(&incoming_proof.to_string())
+                            {
+                                if previous.native_id != identity.native_id {
+                                    s.canonical_registry.restore_proven_endpoint(
+                                        canonical_id,
+                                        previous,
+                                        &identity.native_id,
+                                    );
                                 }
                             }
                         }

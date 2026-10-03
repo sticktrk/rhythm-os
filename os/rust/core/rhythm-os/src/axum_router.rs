@@ -1599,21 +1599,28 @@ async fn sse_events(
         (rx, state, credential),
         |(rx_opt, state, credential)| async move {
             let mut rx = rx_opt?;
-            let received = loop {
-                if let Some(Extension(token)) = &credential {
-                    if !state
+            let authorized = || {
+                credential.as_ref().map_or(true, |Extension(token)| {
+                    state
                         .lock()
                         .ok()
                         .is_some_and(|s| s.api_auth.verify_token(&token.0))
-                    {
-                        return None;
-                    }
+                })
+            };
+            let received = loop {
+                if !authorized() {
+                    return None;
                 }
                 tokio::select! {
                     event = rx.recv() => break event,
                     _ = tokio::time::sleep(std::time::Duration::from_secs(1)), if credential.is_some() => {}
                 }
             };
+            // A credential may expire or be revoked while recv() is pending.
+            // Recheck before publishing the event that woke the stream.
+            if !authorized() {
+                return None;
+            }
             match received {
                 Ok(event) => {
                     let event_type = server_event_name(&event);

@@ -51,7 +51,7 @@ class RhythmBundleApi {
     final data = response.data;
     if (data == null) throw StateError('Server returned no deployment state.');
     final capabilities = data['capabilities'];
-    if (capabilities == null) {
+    if (!data.containsKey('capabilities')) {
       return const RhythmDeploymentCapabilities.legacy();
     }
     if (capabilities is! Map) {

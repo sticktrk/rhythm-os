@@ -569,7 +569,8 @@ class CloudBackupService {
 
   /// Add-on capture must not replace the account's appliance rollback material
   /// or relabel its source identity. Until portable profiles have dedicated
-  /// storage, an existing row receives phone preferences only.
+  /// storage, an existing appliance row receives phone preferences only.
+  /// A portable row can refresh its profiles and capture metadata.
   @visibleForTesting
   static Map<String, dynamic> portableSnapshotSettingsUpdate({
     required CloudBackupSnapshot existing,
@@ -579,11 +580,81 @@ class CloudBackupService {
       throw ArgumentError('Expected a portable configuration snapshot.');
     }
     return {
+      if (existing.backupBundle['kind'] == 'rhythm_portable_snapshot')
+        ...portable.toUpsertJson(),
       'app_settings_bundle': mergeAppSettingsBundles(
         existing.appSettingsBundle,
         portable.appSettingsBundle,
       ),
     };
+  }
+
+  @visibleForTesting
+  static Future<CloudBackupSnapshot> persistPortableSnapshot({
+    required SupabaseClient client,
+    required CloudBackupSnapshot portable,
+  }) async {
+    if (portable.hasApplianceBackup) {
+      throw ArgumentError('Expected a portable configuration snapshot.');
+    }
+    Future<Map<String, dynamic>?> read() => client
+        .from(tableName)
+        .select()
+        .eq('user_id', portable.userId)
+        .maybeSingle();
+
+    var row = await read();
+    if (row == null) {
+      try {
+        // Insert rather than upsert: a concurrent appliance backup must win.
+        await client.from(tableName).insert(portable.toUpsertJson());
+        return portable;
+      } on PostgrestException catch (error) {
+        if (error.code != '23505') rethrow;
+        row = await read();
+      }
+    }
+    if (row == null) {
+      throw StateError('The cloud snapshot changed during capture. Retry.');
+    }
+
+    var existing = CloudBackupSnapshot.fromRow(row);
+    if (existing.backupBundle['kind'] == 'rhythm_portable_snapshot') {
+      final updated = await client
+          .from(tableName)
+          .update(portableSnapshotSettingsUpdate(
+            existing: existing,
+            portable: portable,
+          ))
+          .eq('user_id', portable.userId)
+          // The read alone cannot authorize replacing a row: an appliance
+          // backup may have arrived since then. Check its kind atomically.
+          .eq('backup_bundle->>kind', 'rhythm_portable_snapshot')
+          .select();
+      if (updated.isNotEmpty) {
+        return CloudBackupSnapshot.fromRow(updated.single);
+      }
+      row = await read();
+      if (row == null) {
+        throw StateError('The cloud snapshot changed during capture. Retry.');
+      }
+      existing = CloudBackupSnapshot.fromRow(row);
+    }
+
+    // Preserve any appliance rollback material even if it arrived during the
+    // conditional portable update. Return the actual saved source metadata.
+    final saved = await client
+        .from(tableName)
+        .update({
+          'app_settings_bundle': mergeAppSettingsBundles(
+            existing.appSettingsBundle,
+            portable.appSettingsBundle,
+          ),
+        })
+        .eq('user_id', portable.userId)
+        .select()
+        .single();
+    return CloudBackupSnapshot.fromRow(saved);
   }
 
   Future<CloudBackupSnapshot> _captureNowInternal({
@@ -634,24 +705,10 @@ class CloudBackupService {
               );
           return;
         }
-        final row = await client
-            .from(tableName)
-            .select()
-            .eq('user_id', userId)
-            .maybeSingle();
-        if (row == null) {
-          // Insert rather than upsert: a concurrent appliance backup must win
-          // without being overwritten between the read and this write.
-          await client.from(tableName).insert(snapshot.toUpsertJson());
-          return;
-        }
-        final existing = CloudBackupSnapshot.fromRow(row);
-        final update = portableSnapshotSettingsUpdate(
-          existing: existing,
+        persistedSnapshot = await persistPortableSnapshot(
+          client: client,
           portable: snapshot,
         );
-        await client.from(tableName).update(update).eq('user_id', userId);
-        persistedSnapshot = CloudBackupSnapshot.fromRow({...row, ...update});
       },
     );
 

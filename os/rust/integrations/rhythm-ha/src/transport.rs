@@ -80,18 +80,15 @@ impl HaConnectionConfig {
     /// Build WebSocket URL.
     ///
     /// When connecting through the HA Supervisor proxy (host == "supervisor"),
-    /// the path must be `/core/api/websocket`.
+    /// the path is `/core/websocket`, distinct from the REST `/core/api` proxy.
     pub fn ws_url(&self) -> String {
         let scheme = if self.use_ssl { "wss" } else { "ws" };
-        let prefix = if self.host == "supervisor" {
-            "/core"
+        let path = if self.host == "supervisor" {
+            "/core/websocket"
         } else {
-            ""
+            "/api/websocket"
         };
-        format!(
-            "{}://{}:{}{}/api/websocket",
-            scheme, self.host, self.port, prefix
-        )
+        format!("{}://{}:{}{}", scheme, self.host, self.port, path)
     }
 
     /// Build REST API URL for a given path.
@@ -225,10 +222,7 @@ mod tests {
             token: "token".to_string(),
             use_ssl: true,
         };
-        assert_eq!(
-            supervisor.ws_url(),
-            "wss://supervisor:80/core/api/websocket"
-        );
+        assert_eq!(supervisor.ws_url(), "wss://supervisor:80/core/websocket");
         assert_eq!(
             supervisor.rest_url("/api/config"),
             "https://supervisor:80/core/api/config"

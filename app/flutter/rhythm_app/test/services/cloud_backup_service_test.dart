@@ -151,6 +151,38 @@ void main() {
   });
 
   group('CloudBackupService.buildSnapshot', () {
+    test('repeated portable capture refreshes profiles and source metadata',
+        () {
+      CloudBackupSnapshot portable(String profile, DateTime capturedAt) =>
+          CloudBackupService.buildSnapshot(
+            userId: 'user',
+            serverHub: Hub.server(
+              id: 'addon',
+              homeId: 'home',
+              name: 'Add-on',
+              host: 'ha-host',
+            ),
+            backupBundle: {
+              'kind': 'rhythm_portable_snapshot',
+              'schema_version': 1
+            },
+            configurationBundle: {'kind': 'profile_bundle', 'profile': profile},
+            appSettingsBundle: const {},
+            capturedAt: capturedAt,
+          );
+      final old = portable('old', DateTime.utc(2026, 1, 1));
+      final current = portable('current', DateTime.utc(2026, 1, 2));
+      final update = CloudBackupService.portableSnapshotSettingsUpdate(
+        existing: old,
+        portable: current,
+      );
+      final stored =
+          CloudBackupSnapshot.fromRow({...old.toUpsertJson(), ...update});
+      expect(stored.configurationBundle, current.configurationBundle);
+      expect(stored.capturedAt, current.capturedAt);
+      expect(stored.hasApplianceBackup, isFalse);
+    });
+
     test('stamps source hub metadata on the single-user snapshot', () {
       final snapshot = CloudBackupService.buildSnapshot(
         userId: 'user-123',

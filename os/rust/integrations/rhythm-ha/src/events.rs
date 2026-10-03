@@ -841,20 +841,18 @@ fn translate_catalog_event(
     let snapshot_ready = cache.lights_ready;
     let context = data["new_state"]["context"]["id"].as_str();
     let in_flight = cache.writes_in_flight.get(entity_id).copied().unwrap_or(0) > 0;
-    let external_candidate = cache.lights_ready
+    let external_candidate = cache.stream_ready
+        && (cache.lights_ready || cache.snapshot_generation == Some(epoch))
         && data["new_state"]["context"]["user_id"].is_string()
         && data["new_state"]["context"]["parent_id"].is_null()
         && context.is_some_and(|context| !cache.own_contexts.iter().any(|own| own == context));
     let Some(entry) = cache.lights.get_mut(entity_id) else {
         return Some(Vec::new());
     };
-    let Some(identity_proof) = entry
-        .identity
-        .as_ref()
-        .and_then(|proof| serde_json::to_value(proof).ok())
-    else {
+    let Some(identity) = entry.identity.clone() else {
         return Some(Vec::new());
     };
+    let identity_proof = serde_json::to_value(&identity).expect("HA identity serializes");
     let observation = crate::light::HaLightObservation::parse(&data["new_state"]);
     // HA emits UTC RFC3339 timestamps. Only compare when both carry a timestamp;
     // duplicates and delayed reports cannot overwrite newer integration evidence.
@@ -882,6 +880,13 @@ fn translate_catalog_event(
         );
     }
     let external_user_change = external_candidate && !in_flight;
+    if external_user_change && !snapshot_ready {
+        // Core is still reconciling this proven catalog. Preserve the user's
+        // override until commit rather than silently resuming adaptation.
+        cache
+            .snapshot_user_changes
+            .insert(entity_id.to_owned(), identity);
+    }
     // Unknown/unavailable/deleted must never become an observed "off".
     // Reports update observation authority only; unidentified contexts never
     // manufacture a physical button action or a manual-override command.

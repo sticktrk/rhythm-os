@@ -86,7 +86,6 @@ impl rhythm_ha::transport::HaTransport for ContextTransport {
         Ok(true)
     }
 }
-use rhythm_ha::transport::HaTransport;
 struct Fixture {
     state: SharedState,
     cache: Arc<Mutex<HaEventRoutingCache>>,
@@ -500,4 +499,50 @@ fn queued_observation_is_invalidated_before_reconciliation_even_when_route_still
         .unwrap()
         .light_observations
         .contains_key(&f.node));
+}
+
+#[test]
+fn in_flight_user_context_resolving_during_snapshot_is_retained_until_commit() {
+    for (context, expect_pause) in [("rhythm-request", false), ("other-ha-user", true)] {
+        let f = Fixture::new();
+        let cache = f.cache.clone();
+        let registry = f.registry.clone();
+        *f.hook.lock().unwrap() = Some(Box::new(move || {
+            {
+                let mut cache = cache.lock().unwrap();
+                cache.lights_ready = false;
+                cache.snapshot_generation = Some(cache.generation);
+            }
+            let data = json!({"entity_id":"light.reviewed","new_state":{"state":"on","attributes":{"brightness":50},"context":{"id":context,"user_id":"ha-user","parent_id":null},"last_updated":"2026-10-03T12:00:01+00:00"}});
+            assert!(translate_ws_event("state_changed", &data, &registry, &cache).is_empty());
+        }));
+        f.runtime
+            .handle_event(&InputEvent::new("room", ButtonAction::Reset))
+            .unwrap();
+        let mut cache = f.cache.lock().unwrap();
+        assert_eq!(
+            cache.snapshot_user_changes.get("light.reviewed") == Some(&proof("entry-1")),
+            expect_pause
+        );
+        assert!(cache.pending_manual.is_empty());
+        cache.invalidate();
+        assert!(
+            cache.snapshot_user_changes.is_empty(),
+            "invalidation revokes pending override proof"
+        );
+    }
+}
+
+#[test]
+fn invalidated_catalog_cannot_attribute_user_changes_until_fresh_inventory() {
+    let f = Fixture::new();
+    f.cache.lock().unwrap().invalidate();
+    f.observe("on", 50, "unproven-route-user", 1);
+    assert!(f.cache.lock().unwrap().snapshot_user_changes.is_empty());
+    assert!(
+        f.runtime
+            .engine_node_snapshot(&f.node)
+            .unwrap()
+            .rhythm_enabled
+    );
 }

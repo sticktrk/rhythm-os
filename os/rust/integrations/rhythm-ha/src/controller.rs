@@ -181,7 +181,7 @@ impl<H: HaTransport> HaLightController<H> {
                                     && observation.context_id.as_ref().is_some_and(|context| {
                                         !cache.own_contexts.contains(context)
                                     });
-                            if external && cache.lights_ready {
+                            if external && epoch == cache.generation && cache.lights_ready {
                                 if let Some(tx) = &cache.deferred_tx {
                                     if tx
                                         .try_send(rhythm_os::hub::HubEvent::LightObserved {
@@ -198,6 +198,22 @@ impl<H: HaTransport> HaLightController<H> {
                                         .is_err()
                                     {
                                         cache.invalidate();
+                                    }
+                                }
+                            } else if external && cache.snapshot_generation == Some(epoch) {
+                                if let Ok(proof) = serde_json::from_value::<
+                                    crate::light::HaLightIdentity,
+                                >(identity_proof)
+                                {
+                                    if cache
+                                        .lights
+                                        .get(entity)
+                                        .and_then(|entry| entry.identity.as_ref())
+                                        == Some(&proof)
+                                    {
+                                        cache
+                                            .snapshot_user_changes
+                                            .insert(entity.to_owned(), proof);
                                     }
                                 }
                             }

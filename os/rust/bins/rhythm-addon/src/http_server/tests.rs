@@ -342,6 +342,60 @@ async fn revocation_is_durable_and_closes_an_existing_sse_stream() {
 }
 
 #[tokio::test]
+async fn revocation_drops_events_that_wake_an_already_waiting_stream() {
+    use std::future::{poll_fn, Future};
+    use std::task::Poll;
+
+    let f = Fixture::new();
+    let phone = f.enroll().await;
+    let response = f
+        .mobile()
+        .oneshot(request(
+            Method::GET,
+            "/api/events",
+            phone["token"].as_str(),
+            json!({}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let tx = f.state.lock().unwrap().event_tx.clone().unwrap();
+    let event = |address: &str| rhythm_os::server_event::ServerEvent::HubStatus {
+        hub_type: Some("homeassistant".into()),
+        address: Some(address.into()),
+        connected: true,
+    };
+    tx.send(event("before-revocation")).unwrap();
+    let body = to_bytes(response.into_body(), 4096);
+    tokio::pin!(body);
+    // Read the valid event and leave the stream suspended in recv(), after its
+    // credential check. No timing or task-scheduling race is needed.
+    poll_fn(|cx| {
+        assert!(body.as_mut().poll(cx).is_pending());
+        Poll::Ready(())
+    })
+    .await;
+    let path = format!(
+        "/api/addon/mobile-tokens/{}",
+        phone["token_id"].as_str().unwrap()
+    );
+    assert_eq!(
+        json_request(f.admin(), Method::DELETE, &path, Some(ADMIN), json!({}))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    tx.send(event("after-revocation")).unwrap();
+    let bytes = tokio::time::timeout(std::time::Duration::from_secs(2), body)
+        .await
+        .unwrap()
+        .unwrap();
+    let received = std::str::from_utf8(&bytes).unwrap();
+    assert!(received.contains("before-revocation"));
+    assert!(!received.contains("after-revocation"), "{received}");
+}
+
+#[tokio::test]
 async fn support_scope_and_unavailable_appliance_operations_remain_closed() {
     let f = Fixture::new();
     let support = auth::issue_local_support_token(&f.state, Some("fixture".into())).unwrap();

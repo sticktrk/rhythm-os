@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use rhythm_core::runtime::hub_registry::DeviceType;
 
-use super::identity::{CanonicalDevice, DiscoveredIdentity, HardwareId, HubKey};
+use super::identity::{CanonicalDevice, DiscoveredIdentity, HardwareId, HubKey, IntegrationEndpoint};
 use super::triage::{
     CandidateMatch, MatchReason, TriageDiscoveredDevice, TriageEntry, TriageKind, TriageQueue,
     TriageStatus,
@@ -1012,6 +1012,51 @@ impl CanonicalRegistry {
                 .retain(|ep| &ep.hub_key != hub_key || ep.native_id != native_id);
         }
         Some(canonical_id)
+    }
+
+    /// Restore a route from an exact identity proof captured before discovery
+    /// retires reused addresses. The caller must prove a unique same-hub match;
+    /// hardware resemblance or a matching mutable native ID is insufficient.
+    pub(crate) fn restore_proven_endpoint(
+        &mut self,
+        canonical_id: &str,
+        previous: &IntegrationEndpoint,
+        native_id: &str,
+    ) {
+        let new_key = (previous.hub_key.to_string(), native_id.to_owned());
+        if self
+            .native_index
+            .get(&new_key)
+            .is_some_and(|id| id != canonical_id)
+        {
+            return;
+        }
+        let Some(device) = self
+            .devices
+            .get_mut(canonical_id)
+            .filter(|device| !device.is_removed())
+        else {
+            return;
+        };
+        let mut restored = previous.clone();
+        restored.native_id = native_id.to_owned();
+        if let Some(endpoint) = device.endpoints.iter_mut().find(|endpoint| {
+            endpoint.hub_key == previous.hub_key && endpoint.native_id == previous.native_id
+        }) {
+            *endpoint = restored;
+        } else {
+            device.endpoints.push(restored);
+        }
+        let old_key = (previous.hub_key.to_string(), previous.native_id.clone());
+        // An earlier identity in this snapshot may already own the old route.
+        if self
+            .native_index
+            .get(&old_key)
+            .is_some_and(|id| id == canonical_id)
+        {
+            self.native_index.remove(&old_key);
+        }
+        self.native_index.insert(new_key, canonical_id.to_owned());
     }
 
     /// Normalize UnassignedDevice triage for existing devices with no room.

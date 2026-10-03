@@ -903,7 +903,11 @@ impl HaDiscovery {
                         }
                     }
                 }
+                live.snapshot_user_changes.retain(|id, proof| {
+                    lights.get(id).and_then(|entry| entry.identity.as_ref()) == Some(proof)
+                });
                 live.lights = lights;
+                live.snapshot_generation = Some(live.generation);
                 live.reviewed = selection.lights;
                 live.lights_ready = false;
                 live.snapshot_revision = rhythm_os::canonical::identity::generate_uuid_public();
@@ -935,7 +939,8 @@ impl rhythm_os::discovery::HubDiscovery for HaDiscovery {
         if let Some((weak, live)) = &self.live {
             // Config is HA-owned too; refresh timezone/location after live
             // core_config_updated reconciliation, preserving prior on failure.
-            if let Some(state) = weak.upgrade() {
+            let state = weak.upgrade();
+            if let Some(state) = &state {
                 if let Ok(transport) =
                     crate::reqwest_transport::ReqwestHaTransport::new(self.config.clone())
                 {
@@ -946,12 +951,55 @@ impl rhythm_os::discovery::HubDiscovery for HaDiscovery {
                 .cached_generation
                 .lock()
                 .map_err(|_| anyhow::anyhow!("HA snapshot lock"))?;
+            // Match dispatch's state -> cache lock order. Queue the final
+            // observation snapshot before allowing live event delivery again.
+            let mut state = state
+                .as_ref()
+                .map(|state| state.lock())
+                .transpose()
+                .map_err(|_| anyhow::anyhow!("State lock"))?;
+            let hub_key = state.as_ref().and_then(|state| {
+                state.hubs.iter().find_map(|(key, hub)| {
+                    hub.data::<crate::hub_state::HaHubData>()
+                        .filter(|data| std::sync::Arc::ptr_eq(&data.event_routing_cache, live))
+                        .map(|_| key.clone())
+                })
+            });
             let mut live = live.lock().map_err(|_| anyhow::anyhow!("HA cache lock"))?;
-            live.lights_ready = live.stream_ready && Some(live.generation) == generation;
             anyhow::ensure!(
-                live.lights_ready,
+                live.stream_ready && Some(live.generation) == generation,
                 "HA snapshot invalidated before runtime commit"
             );
+            if let (Some(state), Some(hub_key)) = (state.as_mut(), hub_key) {
+                if !live.lights.is_empty() {
+                    // The catalog bounds the queue size. A one-shot receiver
+                    // avoids overflowing the small command-attribution queue
+                    // on installations with more than 64 lights; the event loop
+                    // removes it after draining. Source timestamps and epochs
+                    // still reject an overtaken or invalidated snapshot.
+                    let (tx, rx) = std::sync::mpsc::sync_channel(live.lights.len());
+                    for (device_id, entry) in &live.lights {
+                        let Some(identity) = &entry.identity else {
+                            continue;
+                        };
+                        tx.send(rhythm_os::hub::HubEvent::LightObserved {
+                            hub_key: Some(hub_key.clone()),
+                            device_id: device_id.clone(),
+                            observation: entry.observation.normalized(),
+                            identity_proof: Some(serde_json::to_value(identity)?),
+                            observation_epoch: Some((
+                                live.observation_epoch.clone(),
+                                live.generation,
+                            )),
+                            external_user_change: live.snapshot_user_changes.get(device_id)
+                                == Some(identity),
+                        })?;
+                    }
+                    state.pending_hub_event_rxs.push(rx);
+                }
+            }
+            live.snapshot_user_changes.clear();
+            live.lights_ready = true;
         }
         Ok(())
     }

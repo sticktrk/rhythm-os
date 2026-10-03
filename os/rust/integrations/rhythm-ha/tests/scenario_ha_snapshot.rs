@@ -20,6 +20,7 @@ enum Reply {
     Partial,
     Rejected,
     Invalidated,
+    Light,
 }
 fn fake_ha(
     replies: Vec<Reply>,
@@ -40,7 +41,14 @@ fn fake_ha(
             if matches!(reply,Reply::Invalidated) { cache.lock().unwrap().generation+=1; }
             for request in requests {
                 if matches!(reply,Reply::Partial) && request["type"]=="get_states" { break; }
-                ws.send(Message::Text(json!({"id":request["id"],"type":"result","success":!matches!(reply,Reply::Rejected),"result":[]}).to_string())).await.unwrap();
+                let result = if matches!(reply, Reply::Light) {
+                    match request["type"].as_str().unwrap() {
+                        "config/entity_registry/list" => json!([{"id":"fixture-entry","unique_id":"fixture-unique","platform":"test","entity_id":"light.fixture"}]),
+                        "get_states" => json!([{"entity_id":"light.fixture","state":"off","last_updated":"2026-10-03T12:00:00+00:00"}]),
+                        _ => json!([]),
+                    }
+                } else { json!([]) };
+                ws.send(Message::Text(json!({"id":request["id"],"type":"result","success":!matches!(reply,Reply::Rejected),"result":result}).to_string())).await.unwrap();
                 if matches!(reply,Reply::Rejected) { break; }
             }
             let _=ws.close(None).await;
@@ -128,4 +136,158 @@ fn generation_change_retries_same_connection_lifecycle_and_commit_rechecks_gener
     server.join().unwrap();
     assert!(discovery.complete_sync().is_err());
     assert!(!cache.lock().unwrap().lights_ready);
+}
+
+#[test]
+fn live_change_after_inventory_sampling_reaches_core_at_snapshot_commit() {
+    assert_snapshot_handoff(None, false);
+}
+
+#[test]
+fn explicit_user_change_during_snapshot_pauses_only_that_light_after_commit() {
+    assert_snapshot_handoff(Some("external-user"), true);
+    assert_snapshot_handoff(Some("own-call"), false);
+}
+
+fn assert_snapshot_handoff(context: Option<&str>, should_pause: bool) {
+    use rhythm_core::{
+        runtime::{
+            handle::RuntimeHandle, orchestrator::RhythmRuntime, registry::SimpleDeviceRegistry,
+            scheduler::NoOpScheduler, time::MockTimeProvider, RuntimeConfig,
+        },
+        ButtonAction, InputEvent, LightNodeKind, NoOpController,
+    };
+    use rhythm_ha::{ha_lifecycle::connect_ha, hub_state::HaHubData};
+    use rhythm_os::{
+        canonical::identity::HubKey,
+        event_loop::{handle_hub_event, MotionTimerState},
+        hub::HubType,
+    };
+    let (cache, state) = cache_and_state();
+    let (config, server) = fake_ha(vec![Reply::Light], cache.clone());
+    let key = HubKey::new(HubType::new("homeassistant"), "fixture-ha");
+    let (mut hub, _) = connect_ha(&state, key.clone(), config.clone(), None, |_, _, _, _| {
+        std::sync::mpsc::channel().1
+    })
+    .unwrap();
+    let registry = hub.data::<HaHubData>().unwrap().registry.clone();
+    hub.hub_data
+        .downcast_mut::<HaHubData>()
+        .unwrap()
+        .event_routing_cache = cache.clone();
+    state.lock().unwrap().hubs.insert(key.clone(), hub);
+    let discovery = HaDiscovery::new(config).with_live_state(&state, cache.clone());
+    discovery.discover_rooms().unwrap();
+    let identity = discovery.discover_identities().unwrap().remove(0);
+    let initial = discovery.endpoint_observation(&identity.native_id).unwrap();
+    let capabilities = discovery
+        .endpoint_capabilities(&identity.native_id)
+        .unwrap();
+    let node_id = {
+        let mut state = state.lock().unwrap();
+        state.canonical_registry.resolve(&identity, &key, 1);
+        let node_id = state
+            .canonical_registry
+            .find_by_native_id(&key, &identity.native_id)
+            .unwrap()
+            .id
+            .clone();
+        state
+            .canonical_registry
+            .get_mut(&node_id)
+            .unwrap()
+            .endpoints[0]
+            .capabilities = Some(capabilities);
+        state.light_observations.insert(node_id.clone(), initial);
+        node_id
+    };
+    let runtime: Arc<dyn RuntimeHandle> = Arc::new(RhythmRuntime::new(
+        Arc::new(NoOpController::new()),
+        MockTimeProvider::new(14.0, 172, 2026),
+        NoOpScheduler::new(),
+        SimpleDeviceRegistry::new(),
+        RuntimeConfig::default(),
+    ));
+    runtime.add_room("fixture-room", "Fixture room");
+    runtime
+        .handle_event(&InputEvent::new("fixture-room", ButtonAction::RhythmOn))
+        .unwrap();
+    runtime.add_node(
+        &node_id,
+        "Fixture",
+        LightNodeKind::LightDevice,
+        Some("fixture-room".into()),
+    );
+    state.lock().unwrap().hubs.get_mut(&key).unwrap().runtime = Some(runtime.clone());
+    cache
+        .lock()
+        .unwrap()
+        .own_contexts
+        .push_back("own-call".into());
+    let update = json!({"entity_id":"light.fixture","new_state":{"state":"on","attributes":{"brightness":204},"last_updated":"2026-10-03T12:00:01+00:00","context":{"id":context,"user_id":"user","parent_id":null}}});
+    assert!(
+        rhythm_ha::events::translate_ws_event("state_changed", &update, &registry, &cache)
+            .is_empty()
+    );
+    assert_eq!(
+        state.lock().unwrap().light_observations[&node_id].lights_on,
+        Some(false)
+    );
+    server.join().unwrap();
+    discovery.complete_sync().unwrap();
+    let pending: Vec<_> = state
+        .lock()
+        .unwrap()
+        .pending_hub_event_rxs
+        .iter()
+        .flat_map(|rx| rx.try_iter())
+        .collect();
+    assert_eq!(
+        pending.len(),
+        1,
+        "commit must deliver the latest snapshot through the event pipeline"
+    );
+    handle_hub_event(&state, pending[0].clone(), &mut MotionTimerState::default());
+    let observed = state.lock().unwrap().light_observations[&node_id].clone();
+    assert_eq!(observed.lights_on, Some(true));
+    assert_eq!(observed.brightness, Some(80));
+    assert_eq!(
+        !runtime
+            .engine_node_snapshot(&node_id)
+            .unwrap()
+            .rhythm_enabled,
+        should_pause
+    );
+    assert!(
+        runtime
+            .engine_node_snapshot("fixture-room")
+            .unwrap()
+            .rhythm_enabled
+    );
+
+    // A live event can overtake queued snapshot delivery without being reverted.
+    let newer = json!({"entity_id":"light.fixture","new_state":{"state":"off","last_updated":"2026-10-03T12:00:02+00:00"}});
+    for event in rhythm_ha::events::translate_ws_event("state_changed", &newer, &registry, &cache) {
+        handle_hub_event(
+            &state,
+            event.with_hub_key(key.clone()),
+            &mut MotionTimerState::default(),
+        );
+    }
+    handle_hub_event(&state, pending[0].clone(), &mut MotionTimerState::default());
+    assert_eq!(
+        state.lock().unwrap().light_observations[&node_id].lights_on,
+        Some(false)
+    );
+    state.lock().unwrap().light_observations.remove(&node_id);
+    cache.lock().unwrap().invalidate();
+    handle_hub_event(&state, pending[0].clone(), &mut MotionTimerState::default());
+    assert!(
+        !state
+            .lock()
+            .unwrap()
+            .light_observations
+            .contains_key(&node_id),
+        "a later invalidation revokes queued snapshot observations"
+    );
 }

@@ -23,6 +23,10 @@ pub struct HaEventRoutingCache {
     pub generation: u64,
     pub observation_epoch: Arc<std::sync::atomic::AtomicU64>,
     pub snapshot_revision: String,
+    /// Identity proof remains usable while this generation is being applied
+    /// to core, even though writes/live delivery are not ready yet.
+    pub snapshot_generation: Option<u64>,
+    pub snapshot_user_changes: HashMap<String, crate::light::HaLightIdentity>,
     pub ownership_revision: u64,
     pub own_contexts: std::collections::VecDeque<String>,
     pub writes_in_flight: HashMap<String, usize>,
@@ -42,6 +46,8 @@ impl HaEventRoutingCache {
         self.observation_epoch
             .store(self.generation, std::sync::atomic::Ordering::Release);
         self.pending_manual.clear();
+        self.snapshot_generation = None;
+        self.snapshot_user_changes.clear();
     }
 }
 
