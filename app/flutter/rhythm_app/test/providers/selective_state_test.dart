@@ -16,6 +16,17 @@ import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
 class _Store implements LocalDataSource {
+  final values = <String, dynamic>{};
+  @override
+  Iterable<String> getSettingsKeysWithPrefix(String prefix) =>
+      values.keys.where((key) => key.startsWith(prefix));
+  @override
+  dynamic getSettingsValue(String key) => values[key];
+  @override
+  Future<void> saveSettingsValue(String key, dynamic value) async {
+    values[key] = value;
+  }
+
   AppSettings current = AppSettings.defaults();
   @override
   bool get isInitialized => true;
@@ -30,6 +41,7 @@ class _Store implements LocalDataSource {
 
   @override
   Future<void> clearSettings() async {
+    values.clear();
     current = AppSettings.defaults();
   }
 

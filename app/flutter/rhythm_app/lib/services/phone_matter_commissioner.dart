@@ -1,5 +1,9 @@
+import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
+import 'package:rhythm_core/rhythm_core.dart' show DirectHubAccess;
+
+enum PhoneMatterBackend { rhythm, haAddon }
 
 /// Stable failure returned by the platform Matter commissioning boundary.
 class PhoneMatterCommissioningException implements Exception {
@@ -15,8 +19,8 @@ class PhoneMatterCommissioningException implements Exception {
   String toString() => message;
 }
 
-/// Uses the phone for Matter BLE/network setup, then waits for the appliance
-/// to complete commissioning on Rhythm's durable fabric.
+/// Uses the phone for BLE/network setup, then hands commissioning to the
+/// selected Rhythm appliance or Home Assistant addon.
 class PhoneMatterCommissioner {
   const PhoneMatterCommissioner({
     MethodChannel channel = const MethodChannel(
@@ -41,16 +45,45 @@ class PhoneMatterCommissioner {
     required String originalSetupPayload,
     required String sessionId,
     String? authToken,
+    PhoneMatterBackend backend = PhoneMatterBackend.rhythm,
+    HaMatterCodeSource codeSource = HaMatterCodeSource.originalLabel,
+    bool Function()? isCurrentTarget,
   }) async {
+    final lease = DirectHubAccess.capture();
+    bool current() =>
+        (backend == PhoneMatterBackend.haAddon
+            ? lease.isSameSelection
+            : lease.isCurrent) &&
+        (isCurrentTarget?.call() ?? true);
+    if (!current()) throw StateError('Matter commissioning target changed');
+    var cancelled = false;
+    void onTargetChanged() {
+      if (!current()) {
+        cancelled = true;
+        unawaited(cancel(sessionId));
+      }
+    }
+
+    DirectHubAccess.changes.addListener(onTargetChanged);
     try {
       final result =
           await _channel.invokeMapMethod<String, Object?>('commission', {
         'base_url': baseUrl,
         'setup_payload': originalSetupPayload,
         'session_id': sessionId,
+        if (backend == PhoneMatterBackend.haAddon) ...{
+          'backend': 'ha_addon',
+          'code_source': codeSource.wire,
+        },
         if (authToken?.trim().isNotEmpty == true)
           'auth_token': authToken!.trim(),
       });
+      if (cancelled || !current()) {
+        throw const PhoneMatterCommissioningException(
+            stage: 'cancelled',
+            message:
+                'The selected home changed. Check the previous pairing result before trying again.');
+      }
       if (result == null) {
         throw const PhoneMatterCommissioningException(
           stage: 'invalid_response',
@@ -71,6 +104,18 @@ class PhoneMatterCommissioner {
         stage: 'native_unavailable',
         message: 'Phone Matter commissioning is unavailable on this device.',
       );
+    } finally {
+      DirectHubAccess.changes.removeListener(onTargetChanged);
+    }
+  }
+
+  Future<void> cancel(String sessionId) async {
+    try {
+      await _channel.invokeMethod<void>('cancel', {'session_id': sessionId});
+    } on PlatformException {
+      // Older hosts may not support cancellation; the durable receipt remains.
+    } on MissingPluginException {
+      // No native operation exists on this platform.
     }
   }
 

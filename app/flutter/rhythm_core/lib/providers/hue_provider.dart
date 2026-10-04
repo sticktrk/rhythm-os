@@ -11,6 +11,7 @@ import 'package:http/io_client.dart';
 import 'package:multicast_dns/multicast_dns.dart';
 
 import 'light_provider.dart';
+import 'direct_hub_access.dart';
 
 /// Philips Hue light provider.
 ///
@@ -30,7 +31,7 @@ class HueProvider implements LightProvider {
   String get name => 'Philips Hue (${config.bridgeIp})';
 
   HueProvider(this.config, {http.Client? client})
-      : _client = client ?? _createSecureClient();
+      : _client = DirectHubHttpClient(client ?? _createSecureClient());
 
   /// Create an HTTP client that accepts self-signed certificates.
   /// Hue bridges use self-signed certs for HTTPS.
@@ -84,10 +85,7 @@ class HueProvider implements LightProvider {
   @override
   Future<void> turnOff(String lightId) async {
     final uri = Uri.parse('${config.baseUrl}/lights/$lightId/state');
-    final response = await _client.put(
-      uri,
-      body: jsonEncode({'on': false}),
-    );
+    final response = await _client.put(uri, body: jsonEncode({'on': false}));
 
     if (response.statusCode != 200) {
       throw LightProviderException(
@@ -121,7 +119,8 @@ class HueProvider implements LightProvider {
 
       // Check capabilities
       final type = lightData['type'] as String? ?? '';
-      final capabilities = lightData['capabilities'] as Map<String, dynamic>? ?? {};
+      final capabilities =
+          lightData['capabilities'] as Map<String, dynamic>? ?? {};
       final control = capabilities['control'] as Map<String, dynamic>? ?? {};
 
       // Extended color lights support xy, color temp lights support ct
@@ -192,12 +191,13 @@ class HueProvider implements LightProvider {
     required String bridgeIp,
     required String username,
   }) async {
+    if (!DirectHubAccess.allowed) return false;
     print('[HueTest] Testing connection to $bridgeIp');
 
     // Create an HTTP client that accepts self-signed certificates
     final httpClient = HttpClient()
       ..badCertificateCallback = (cert, host, port) => true;
-    final client = IOClient(httpClient);
+    final client = DirectHubHttpClient(IOClient(httpClient));
 
     try {
       final uri = Uri.parse('https://$bridgeIp/api/$username/config');
@@ -212,7 +212,9 @@ class HueProvider implements LightProvider {
           final data = jsonDecode(response.body);
           // Check for a known field in the config response
           if (data is Map && data.containsKey('name')) {
-            print('[HueTest] Connection successful, bridge name: ${data['name']}');
+            print(
+              '[HueTest] Connection successful, bridge name: ${data['name']}',
+            );
             return true;
           }
         } catch (e) {
@@ -250,10 +252,12 @@ class HueProvider implements LightProvider {
   Future<List<({String id, String name})>> getRooms() async {
     final rooms = await _getRooms();
     return rooms.entries
-        .map((e) => (
-              id: e.key,
-              name: (e.value as Map<String, dynamic>)['name'] as String
-            ))
+        .map(
+          (e) => (
+            id: e.key,
+            name: (e.value as Map<String, dynamic>)['name'] as String,
+          ),
+        )
         .toList();
   }
 
@@ -286,10 +290,7 @@ class HueProvider implements LightProvider {
     // Calculate y
     double y;
     if (k >= 4000) {
-      y = 3.0817580 * x * x * x -
-          5.8733867 * x * x +
-          3.7514764 * x -
-          0.3700098;
+      y = 3.0817580 * x * x * x - 5.8733867 * x * x + 3.7514764 * x - 0.3700098;
     } else if (k >= 2222) {
       y = -0.9549476 * x * x * x +
           2.0266423 * x * x -
@@ -312,18 +313,25 @@ class HueProvider implements LightProvider {
   static Future<List<String>> discoverBridges({
     Duration timeout = const Duration(seconds: 5),
   }) async {
+    if (!DirectHubAccess.allowed) return const [];
+    final lease = DirectHubAccess.capture();
     final bridges = <String>[];
-
+    final client = MDnsClient();
+    final stopWatching = lease.cancelOnChange(client.stop);
     try {
-      final client = MDnsClient();
       await client.start();
+      lease.check();
 
-      await for (final ptr in client.lookup<PtrResourceRecord>(
-        ResourceRecordQuery.serverPointer('_hue._tcp.local'),
-      ).timeout(timeout, onTimeout: (sink) => sink.close())) {
+      await for (final ptr in client
+          .lookup<PtrResourceRecord>(
+            ResourceRecordQuery.serverPointer('_hue._tcp.local'),
+          )
+          .timeout(timeout, onTimeout: (sink) => sink.close())) {
+        lease.check();
         await for (final srv in client.lookup<SrvResourceRecord>(
           ResourceRecordQuery.service(ptr.domainName),
         )) {
+          lease.check();
           await for (final ip in client.lookup<IPAddressResourceRecord>(
             ResourceRecordQuery.addressIPv4(srv.target),
           )) {
@@ -334,15 +342,27 @@ class HueProvider implements LightProvider {
 
       client.stop();
     } catch (e) {
-      // mDNS discovery failed, try alternative method
+      // mDNS discovery failed, try alternative method only in this scope.
+    } finally {
+      client.stop();
+      stopWatching();
     }
+    if (!lease.isCurrent) return const [];
 
     // Also try the Philips discovery endpoint as fallback
     if (bridges.isEmpty) {
       try {
-        final response = await http.get(
-          Uri.parse('https://discovery.meethue.com'),
-        );
+        final fallbackClient = DirectHubHttpClient(http.Client());
+        final http.Response response;
+        try {
+          lease.check();
+          response = await fallbackClient.get(
+            Uri.parse('https://discovery.meethue.com'),
+          );
+        } finally {
+          fallbackClient.close();
+        }
+        lease.check();
         if (response.statusCode == 200) {
           final List<dynamic> discovered = jsonDecode(response.body);
           for (final bridge in discovered) {
@@ -370,13 +390,14 @@ class HueProvider implements LightProvider {
     String appName = 'rhythm_lighting',
     String deviceName = 'mobile_app',
   }) async {
+    if (!DirectHubAccess.allowed) return null;
     print('[HuePair] Attempting to pair with bridge at $bridgeIp');
 
     // Create an HTTP client that accepts self-signed certificates
     // (Hue bridges use self-signed certs for HTTPS)
     final httpClient = HttpClient()
       ..badCertificateCallback = (cert, host, port) => true;
-    final client = IOClient(httpClient);
+    final client = DirectHubHttpClient(IOClient(httpClient));
 
     try {
       // Modern Hue bridges require HTTPS
@@ -413,7 +434,9 @@ class HueProvider implements LightProvider {
       // Check for error (link button not pressed)
       if (first.containsKey('error')) {
         final error = first['error'];
-        print('[HuePair] Error response: type=${error['type']}, description=${error['description']}');
+        print(
+          '[HuePair] Error response: type=${error['type']}, description=${error['description']}',
+        );
         return null;
       }
 

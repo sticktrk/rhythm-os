@@ -40,6 +40,13 @@ class Echo(BaseHTTPRequestHandler):
         self.send_header('Content-Type', 'application/json')
         self.end_headers()
         self.wfile.write(body)
+    def do_GET(self):
+        assert self.path == '/api/addon/matter/pairing/ha-attempt'
+        assert self.headers['Authorization'] == 'Bearer owner-token'
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.end_headers()
+        self.wfile.write(b'{"session_id":"ha-attempt","status":"completed"}')
     def log_message(self, *_): pass
 server = HTTPServer(('127.0.0.1', 0), Echo)
 Path(sys.argv[1]).write_text(str(server.server_port))

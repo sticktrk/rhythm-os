@@ -912,7 +912,11 @@ fn validate_terminal_session_input(session: &PairingSession, hub_type: &str) -> 
     }
     match session.status {
         PairingStatus::Complete => {
-            if session.device.is_none() && session.devices.is_empty() {
+            // HA Core acknowledges commissioning without returning a device
+            // identity. Its adapter requires a separate explicit registry
+            // confirmation; never manufacture a device from an inventory diff.
+            if session.device.is_none() && session.devices.is_empty() && hub_type != "homeassistant"
+            {
                 anyhow::bail!("successful durable pairing result has no device");
             }
             if session.error.is_some() {
@@ -1759,6 +1763,22 @@ pub fn record_pairing_history(state: &crate::state::SharedState, mut entry: Pair
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn ha_success_acknowledgement_does_not_invent_a_device_identity() {
+        let mut result = super::PairingSession {
+            hub_type: "homeassistant".into(),
+            status: super::PairingStatus::Complete,
+            device: None,
+            devices: vec![],
+            error: None,
+            failure_stage: None,
+            warnings: vec![],
+            details: None,
+        };
+        assert!(super::sanitized_terminal_session_for_delivery(&result, "homeassistant").is_ok());
+        result.hub_type = "matter".into();
+        assert!(super::sanitized_terminal_session_for_delivery(&result, "matter").is_err());
+    }
     use super::*;
     use crate::state::{AppState, SharedState};
     use std::sync::{Arc, Mutex};

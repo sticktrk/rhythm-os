@@ -651,6 +651,7 @@ async fn capabilities_advertise_mobile_and_ha_without_full_backup_or_native_setu
     .await;
     assert_eq!(state["capabilities"]["deployment"], addon["capabilities"]);
     assert_eq!(addon["capabilities"]["direct_mobile_control"], true);
+    assert_eq!(addon["capabilities"]["ha_matter_management"], true);
     assert_eq!(addon["capabilities"]["portable_settings"], true);
     assert_eq!(addon["capabilities"]["full_backup_export"], false);
     assert_eq!(addon["capabilities"]["full_backup_import"], false);
@@ -659,6 +660,234 @@ async fn capabilities_advertise_mobile_and_ha_without_full_backup_or_native_setu
         .unwrap()
         .iter()
         .any(|f| f.as_str().unwrap().contains("matter")));
+}
+
+#[tokio::test]
+async fn ha_matter_owner_boundary_includes_reads_and_secret_routes() {
+    let f = Fixture::new();
+    let support = auth::issue_local_support_token(&f.state, Some("fixture".into())).unwrap();
+    let phone = f.enroll().await;
+    for (method, path) in [
+        (Method::GET, "/api/addon/matter"),
+        (Method::GET, "/api/addon/matter/pairing/safe-session"),
+        (Method::POST, "/api/addon/matter/pair"),
+        (
+            Method::GET,
+            "/api/addon/matter/setup-code/device?identity=proof",
+        ),
+        (Method::PUT, "/api/addon/matter/setup-code/device"),
+        (Method::POST, "/api/addon/matter/pairing/session/device"),
+        (Method::POST, "/api/addon/matter/share/device"),
+        (Method::DELETE, "/api/addon/matter/devices/device"),
+    ] {
+        for (token, expected) in [
+            (None, StatusCode::UNAUTHORIZED),
+            (Some(support.token.as_str()), StatusCode::FORBIDDEN),
+        ] {
+            let response = f
+                .mobile()
+                .oneshot(request(method.clone(), path, token, json!({})))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "{method} {path}");
+            assert_eq!(response.headers()["cache-control"], "no-store");
+        }
+    }
+    let (status,_) = json_request(f.mobile(),Method::POST,"/api/addon/matter/pair",phone["token"].as_str(),json!({
+        "session_id":"valid","setup_code":"invalid","code_source":"original_label","rendezvous":"on_network"
+    })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn ha_matter_missing_receipt_fences_late_pair_and_confirmed_original_survives_restart_reset()
+{
+    let f = Fixture::new();
+    let phone = f.enroll().await;
+    let token = phone["token"].as_str();
+    let (status, receipt) = json_request(
+        f.mobile(),
+        Method::GET,
+        "/api/addon/matter/pairing/late-session",
+        token,
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(receipt["status"], "failed");
+    let request = json!({"session_id":"late-session","setup_code":"12345678901","code_source":"original_label","rendezvous":"on_network"});
+    assert_eq!(
+        json_request(
+            f.mobile(),
+            Method::POST,
+            "/api/addon/matter/pair",
+            token,
+            request.clone()
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    let scope = f.state.lock().unwrap().server_instance_id.clone();
+    let fingerprint = rhythm_os::pairing::pairing_request_fingerprint_for_state(
+        &f.state,
+        "homeassistant",
+        &request,
+    )
+    .unwrap();
+    rhythm_ha::matter_store::remember_success(
+        f.root.to_str().unwrap(),
+        &scope,
+        "confirmed-session",
+        &fingerprint,
+        Some("12345678901"),
+    )
+    .unwrap();
+    let restarted =
+        create_mobile_router(load(&f.root), Arc::new(MobileAccess::new(ADMIN).unwrap()));
+    let (status, receipt) = json_request(
+        restarted,
+        Method::GET,
+        "/api/addon/matter/pairing/confirmed-session",
+        token,
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(receipt["status"], "completed");
+    assert_eq!(receipt["needs_device_confirmation"], true);
+    assert!(receipt["device"].is_null());
+    assert!(!receipt.to_string().contains("12345678901"));
+    let history = std::fs::read_to_string(f.root.join("pairing_history.json")).unwrap();
+    assert!(!history.contains("12345678901"));
+    let storage = FileStorage::new(f.root.to_str().unwrap()).unwrap();
+    assert!(storage
+        .load_integration_backup_files(false)
+        .unwrap()
+        .is_empty());
+    let full = storage.load_integration_backup_files(true).unwrap();
+    assert!(full
+        .iter()
+        .any(|file| file.path == "matter/ha-setup-payloads.json"));
+    storage.clear_factory_reset_state().unwrap();
+    assert!(!f.root.join("matter/ha-setup-payloads.json").exists());
+    // Full secret storage round-trips for HA cold backups. Portable exports
+    // above exclude it, and the add-on denies appliance restore endpoints.
+    storage.restore_integration_backup_files(&full).unwrap();
+    assert_eq!(
+        rhythm_ha::matter_store::confirmed(f.root.to_str().unwrap(), &scope, "confirmed-session")
+            .unwrap()
+            .unwrap()
+            .original
+            .as_deref(),
+        Some("12345678901")
+    );
+    assert!(storage
+        .load_integration_backup_files(true)
+        .unwrap()
+        .iter()
+        .any(|file| file.path == "matter/ha-setup-payloads.json"));
+    storage.clear_factory_reset_state().unwrap();
+}
+
+#[tokio::test]
+async fn ha_pairing_completion_is_durable_correlated_and_cannot_resurrect_after_reset() {
+    let f = Fixture::new();
+    let request: crate::matter::PairRequest=serde_json::from_value(json!({"session_id":"ha-success","setup_code":"12345678901","code_source":"original_label","rendezvous":"on_network"})).unwrap();
+    let fingerprint = rhythm_os::pairing::pairing_request_fingerprint_for_state(
+        &f.state,
+        "homeassistant",
+        &serde_json::to_value(&request).unwrap(),
+    )
+    .unwrap();
+    let lease = rhythm_os::pairing::begin_pairing_result(
+        &f.state,
+        "ha-success",
+        "homeassistant",
+        &fingerprint,
+    )
+    .unwrap();
+    crate::matter::finish_pairing(&f.state, &f.access, &request, &fingerprint, Ok(())).await;
+    drop(lease);
+    let history = FileStorage::new(f.root.to_str().unwrap())
+        .unwrap()
+        .load_pairing_history()
+        .unwrap()
+        .unwrap();
+    assert!(history
+        .entries
+        .iter()
+        .any(|e| e.correlation_id.as_deref() == Some("ha-success")
+            && e.hub_type == "homeassistant"
+            && e.status == "complete"));
+    let stored = std::fs::read_to_string(f.root.join("pairing_history.json")).unwrap();
+    assert!(!stored.contains("12345678901"));
+    f.access.invalidate_enrollment();
+    FileStorage::new(f.root.to_str().unwrap())
+        .unwrap()
+        .clear_factory_reset_state()
+        .unwrap();
+    crate::matter::finish_pairing(&f.state, &f.access, &request, &fingerprint, Ok(())).await;
+    assert!(!f.root.join("matter/ha-setup-payloads.json").exists());
+    assert!(!f.root.join("pairing_history.json").exists());
+}
+
+#[tokio::test]
+async fn ha_unknown_outcome_requires_terminal_receipt_before_explicit_close() {
+    let f = Fixture::new();
+    let phone = f.enroll().await;
+    let request: crate::matter::PairRequest = serde_json::from_value(json!({"session_id":"ha-uncertain","setup_code":"12345678901","code_source":"original_label","rendezvous":"on_network"})).unwrap();
+    let fingerprint = rhythm_os::pairing::pairing_request_fingerprint_for_state(
+        &f.state,
+        "homeassistant",
+        &serde_json::to_value(&request).unwrap(),
+    )
+    .unwrap();
+    let lease = rhythm_os::pairing::begin_pairing_result(
+        &f.state,
+        "ha-uncertain",
+        "homeassistant",
+        &fingerprint,
+    )
+    .unwrap();
+    let (_, pending) = json_request(
+        f.mobile(),
+        Method::GET,
+        "/api/addon/matter/pairing/ha-uncertain",
+        phone["token"].as_str(),
+        json!({}),
+    )
+    .await;
+    assert_eq!(pending["status"], "pending");
+    assert_eq!(pending["can_close_attempt"], false);
+    crate::matter::finish_pairing(
+        &f.state,
+        &f.access,
+        &request,
+        &fingerprint,
+        Err(anyhow::anyhow!("upstream secret=MT:PRIVATE")),
+    )
+    .await;
+    drop(lease);
+    let (_, unknown) = json_request(
+        f.mobile(),
+        Method::GET,
+        "/api/addon/matter/pairing/ha-uncertain",
+        phone["token"].as_str(),
+        json!({}),
+    )
+    .await;
+    assert_eq!(unknown["status"], "unknown");
+    assert_eq!(unknown["can_close_attempt"], true);
+    assert!(!unknown.to_string().contains("PRIVATE"));
+    assert_eq!(unknown["needs_device_confirmation"], false);
+    assert_eq!(unknown["original_code_saved"], false);
+    let scope = f.state.lock().unwrap().server_instance_id.clone();
+    assert!(
+        rhythm_ha::matter_store::confirmed(f.root.to_str().unwrap(), &scope, "ha-uncertain")
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]

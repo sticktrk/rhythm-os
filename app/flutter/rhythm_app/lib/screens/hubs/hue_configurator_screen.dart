@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 import '../../widgets/solar_orbit.dart';
+import '../../widgets/home_assistant_device_setup.dart';
 import '../../widgets/hub_status_indicator.dart';
 import '../../widgets/success_modal.dart';
 import '../../services/hue/hue_service_locator.dart';
@@ -86,12 +87,22 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
   Timer? _countdownTimer;
   Timer? _pairingPollTimer;
 
+  final DirectHubAccessLease _access = DirectHubAccess.capture();
+
+  void _onDeviceAccessChanged() {
+    if (_access.isCurrent || !mounted) return;
+    _countdownTimer?.cancel();
+    _pairingPollTimer?.cancel();
+    setState(() {});
+  }
+
   late AnimationController _glowController;
   late Animation<double> _glowAnimation;
 
   @override
   void initState() {
     super.initState();
+    DirectHubAccess.changes.addListener(_onDeviceAccessChanged);
     AnalyticsService().logScreenView('hue_configurator');
     _loadSavedConfig();
 
@@ -107,6 +118,7 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
 
   @override
   void dispose() {
+    DirectHubAccess.changes.removeListener(_onDeviceAccessChanged);
     _countdownTimer?.cancel();
     _pairingPollTimer?.cancel();
     _glowController.dispose();
@@ -118,7 +130,9 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
     final hueHub = homeProvider.getFirstHubOfType(HubType.hue);
 
     if (hueHub != null && hueHub.hasCredentials) {
-      if (!mounted) return;
+      if (!mounted || (!_access.isCurrent && !HueServiceLocator.isDemoMode)) {
+        return;
+      }
       setState(() {
         _connectedBridgeIp = hueHub.endpoint.host;
         _status = HueLinkingStatus.connected;
@@ -129,7 +143,10 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
   // ─── Discovery & Pairing Logic ───────────────────────────
 
   Future<void> _startDiscovery() async {
-    if (!mounted) return;
+    if (!_access.isCurrent && !HueServiceLocator.isDemoMode) return;
+    if (!mounted || (!_access.isCurrent && !HueServiceLocator.isDemoMode)) {
+      return;
+    }
     setState(() {
       _status = HueLinkingStatus.discovering;
       _errorMessage = null;
@@ -141,7 +158,9 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
         timeout: const Duration(seconds: 8),
       );
 
-      if (!mounted) return;
+      if (!mounted || (!_access.isCurrent && !HueServiceLocator.isDemoMode)) {
+        return;
+      }
 
       if (bridges.isEmpty) {
         setState(() {
@@ -162,7 +181,9 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
         });
       }
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || (!_access.isCurrent && !HueServiceLocator.isDemoMode)) {
+        return;
+      }
       setState(() {
         _status = HueLinkingStatus.error;
         _errorMessage = 'Discovery failed: ${e.toString()}';
@@ -172,6 +193,7 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
   }
 
   void _startPairing() {
+    if (!_access.isCurrent && !HueServiceLocator.isDemoMode) return;
     if (_selectedBridgeIp == null) return;
 
     if (!HueServiceLocator.isDemoMode &&
@@ -213,9 +235,13 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
 
     _pairingPollTimer =
         Timer.periodic(const Duration(seconds: 2), (timer) async {
+      if (!_access.isCurrent) {
+        timer.cancel();
+        return;
+      }
       final username =
           await HueServiceLocator.instance.pair(_selectedBridgeIp!);
-      if (username != null) {
+      if (username != null && mounted && _access.isCurrent) {
         timer.cancel();
         _countdownTimer?.cancel();
         await _onPairingSuccess(username);
@@ -231,7 +257,10 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
   }
 
   Future<void> _onPairingSuccess(String username) async {
-    if (!mounted) return;
+    if (!_access.isCurrent && !HueServiceLocator.isDemoMode) return;
+    if (!mounted || (!_access.isCurrent && !HueServiceLocator.isDemoMode)) {
+      return;
+    }
     setState(() {
       _status = HueLinkingStatus.linking;
     });
@@ -240,7 +269,9 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
     final syncProvider = context.read<ServerSyncProvider>();
 
     if (homeProvider.currentHome == null) {
-      if (!mounted) return;
+      if (!mounted || (!_access.isCurrent && !HueServiceLocator.isDemoMode)) {
+        return;
+      }
       setState(() {
         _status = HueLinkingStatus.error;
         _errorMessage = 'No home configured. Please complete setup first.';
@@ -275,7 +306,9 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
     }
 
     if (savedHub == null) {
-      if (!mounted) return;
+      if (!mounted || (!_access.isCurrent && !HueServiceLocator.isDemoMode)) {
+        return;
+      }
       setState(() {
         _status = HueLinkingStatus.error;
         _errorMessage =
@@ -284,6 +317,9 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
       return;
     }
 
+    if (!mounted || (!_access.isCurrent && !HueServiceLocator.isDemoMode)) {
+      return;
+    }
     HapticFeedback.heavyImpact();
 
     AnalyticsService().logHubConnected('hue');
@@ -294,7 +330,9 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
     final hubConnected =
         await syncProvider.pushHubCredentials(RoomSourceDto.hue);
 
-    if (!mounted) return;
+    if (!mounted || (!_access.isCurrent && !HueServiceLocator.isDemoMode)) {
+      return;
+    }
     if (!hubConnected) {
       setState(() {
         _status = HueLinkingStatus.error;
@@ -311,7 +349,12 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
 
     if (_isFirstTimePairing && mounted) {
       final authority = await syncProvider.fetchHueAuthority();
-      if (!mounted) return;
+      if (!mounted || (!_access.isCurrent && !HueServiceLocator.isDemoMode)) {
+        return;
+      }
+      if (!mounted || (!_access.isCurrent && !HueServiceLocator.isDemoMode)) {
+        return;
+      }
       final matchingBridges = authority?.bridges
               .where(
                 (candidate) =>
@@ -357,6 +400,7 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
   }
 
   Future<void> _disconnect() async {
+    if (!_access.isCurrent) return;
     final syncProvider = context.read<ServerSyncProvider>();
     final hubConnectionProvider = context.read<HubConnectionProvider>();
     final roomProvider = context.read<RoomProvider>();
@@ -396,19 +440,33 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
       AnalyticsService().logHubDisconnected('hue');
       AnalyticsService().setHubType(null);
 
-      if (!mounted) return;
+      if (!mounted || (!_access.isCurrent && !HueServiceLocator.isDemoMode)) {
+        return;
+      }
       // Tell the server to drop hub + rooms first (before local cleanup
       // triggers source-changed events that would re-push credentials).
       await syncProvider.disconnectHub();
+      if (!mounted || (!_access.isCurrent && !HueServiceLocator.isDemoMode)) {
+        return;
+      }
       hubConnectionProvider.disconnect();
       await roomProvider.clearRoomsBySource(RoomSourceDto.hue);
+      if (!mounted || (!_access.isCurrent && !HueServiceLocator.isDemoMode)) {
+        return;
+      }
 
       final hueHub = homeProvider.getFirstHubOfType(HubType.hue);
       if (hueHub != null) {
         await homeProvider.deleteHub(hueHub.id);
+        if (!mounted || (!_access.isCurrent && !HueServiceLocator.isDemoMode)) {
+          return;
+        }
       }
 
       await HueSseStorage.clearAll();
+      if (!mounted || (!_access.isCurrent && !HueServiceLocator.isDemoMode)) {
+        return;
+      }
 
       setState(() {
         _connectedBridgeIp = null;
@@ -421,6 +479,21 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
 
   @override
   Widget build(BuildContext context) {
+    final haOwned = context
+        .watch<ServerSyncProvider>()
+        .deviceManagementOwnedByHomeAssistant;
+    if (!_access.isCurrent && !HueServiceLocator.isDemoMode) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Device setup')),
+        body: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: haOwned
+              ? const HomeAssistantDeviceSetup()
+              : const Text(
+                  'The connection changed. Close this screen and reopen device setup.'),
+        ),
+      );
+    }
     return Scaffold(
       backgroundColor: CelestialColors.backgroundDark,
       body: SafeArea(
@@ -1010,6 +1083,7 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
   }
 
   Future<void> _reconnect() async {
+    if (!_access.isCurrent) return;
     if (_isReconnecting) return;
     final syncProvider = context.read<ServerSyncProvider>();
     if (!syncProvider.hueRoomAuthorityConsentSupported) {
@@ -1023,8 +1097,14 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
     }
     setState(() => _isReconnecting = true);
     final connected = await syncProvider.pushHubCredentials(RoomSourceDto.hue);
+    if (!mounted || (!_access.isCurrent && !HueServiceLocator.isDemoMode)) {
+      return;
+    }
     if (connected && mounted) {
       final authority = await syncProvider.fetchHueAuthority();
+      if (!mounted || (!_access.isCurrent && !HueServiceLocator.isDemoMode)) {
+        return;
+      }
       final bridgeAddress = _connectedBridgeIp;
       final matchingBridges = authority?.bridges
               .where(

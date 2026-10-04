@@ -121,6 +121,35 @@ class AnalyticsService {
     }
   }
 
+  /// Controlled labels and an opaque attempt ID; no device/setup material.
+  Future<void> logHaMatterAction(
+      {required String action,
+      required String outcome,
+      String? sessionId}) async {
+    if (!{
+          'pair',
+          'check',
+          'confirm_device',
+          'save_code',
+          'read_code',
+          'share',
+          'remove'
+        }.contains(action) ||
+        !{'attempt', 'completed', 'failed', 'pending', 'unknown'}
+            .contains(outcome)) {
+      return;
+    }
+    final validSession = sessionId != null &&
+        RegExp(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$')
+            .hasMatch(sessionId);
+    await logEvent('ha_matter_action', {
+      'deployment': 'home_assistant_addon',
+      'action': action,
+      'outcome': outcome,
+      if (validSession) 'journey_id': sessionId,
+    });
+  }
+
   /// Record bounded provisioning outcomes without network or credential data.
   Future<void> logWifiAction(
       {required bool networkChange,
@@ -670,7 +699,8 @@ class AnalyticsService {
     int? skippedNodes,
     String? failureStage,
   }) async {
-    if (!const {'started', 'succeeded', 'failed', 'cancelled'}.contains(outcome)) {
+    if (!const {'started', 'succeeded', 'failed', 'cancelled'}
+        .contains(outcome)) {
       return;
     }
     await logEvent('backup_restore_$outcome', {

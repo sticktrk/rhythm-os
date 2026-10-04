@@ -4,6 +4,7 @@
 /// associated rooms, enabling automatic room mapping for SSE events.
 library;
 
+import '../providers/direct_hub_access.dart';
 import 'dart:convert';
 import 'dart:io';
 
@@ -86,10 +87,7 @@ class HueRoom {
   /// Human-readable name.
   final String name;
 
-  const HueRoom({
-    required this.id,
-    required this.name,
-  });
+  const HueRoom({required this.id, required this.name});
 
   @override
   String toString() => 'HueRoom($name)';
@@ -125,6 +123,7 @@ class HueRoom {
 /// final roomId = registry.getRoomForDevice('device-uuid');
 /// ```
 class HueDeviceRegistry {
+  final DirectHubAccessLease _access = DirectHubAccess.capture();
   final String bridgeIp;
   final String applicationKey;
   final bool acceptSelfSignedCerts;
@@ -229,7 +228,11 @@ class HueDeviceRegistry {
   /// This queries the V2 API to find all button devices and rooms,
   /// building the mapping infrastructure.
   Future<void> discover() async {
+    _access.check();
     final client = HttpClient();
+    final stopWatching = _access.cancelOnChange(
+      () => client.close(force: true),
+    );
     if (acceptSelfSignedCerts) {
       client.badCertificateCallback = (cert, host, port) => true;
     }
@@ -309,7 +312,8 @@ class HueDeviceRegistry {
 
           if (rtype == 'button') {
             buttonIds.add(rid);
-          } else if (rtype == 'device_power' || rtype == 'zigbee_connectivity') {
+          } else if (rtype == 'device_power' ||
+              rtype == 'zigbee_connectivity') {
             // These don't help us find the room
           }
         }
@@ -347,6 +351,7 @@ class HueDeviceRegistry {
         );
       }
     } finally {
+      stopWatching();
       client.close();
     }
   }
@@ -356,7 +361,11 @@ class HueDeviceRegistry {
   /// A device with a behavior_instance is configured in the Hue app and
   /// Rhythm should not process its button events.
   Future<void> fetchBehaviorInstances() async {
+    _access.check();
     final client = HttpClient();
+    final stopWatching = _access.cancelOnChange(
+      () => client.close(force: true),
+    );
     if (acceptSelfSignedCerts) {
       client.badCertificateCallback = (cert, host, port) => true;
     }
@@ -365,7 +374,9 @@ class HueDeviceRegistry {
       final behaviorData = await _fetchResource(client, 'behavior_instance');
 
       // Clear and rebuild the tracker
-      _behaviorTracker = rust_hue.behaviorTrackerClear(tracker: _behaviorTracker);
+      _behaviorTracker = rust_hue.behaviorTrackerClear(
+        tracker: _behaviorTracker,
+      );
 
       for (final behavior in behaviorData) {
         final behaviorId = behavior['id'] as String?;
@@ -382,6 +393,7 @@ class HueDeviceRegistry {
         }
       }
     } finally {
+      stopWatching();
       client.close();
     }
   }
@@ -393,7 +405,10 @@ class HueDeviceRegistry {
   ///
   /// [eventType] is "add", "update", or "delete".
   /// [data] is the behavior_instance resource data.
-  void handleBehaviorInstanceEvent(String eventType, Map<String, dynamic> data) {
+  void handleBehaviorInstanceEvent(
+    String eventType,
+    Map<String, dynamic> data,
+  ) {
     final behaviorId = data['id'] as String?;
     if (behaviorId == null) return;
 
@@ -450,14 +465,15 @@ class HueDeviceRegistry {
     HttpClient client,
     String resourceType,
   ) async {
-    final uri = Uri.parse(
-      'https://$bridgeIp/clip/v2/resource/$resourceType',
-    );
+    final uri = Uri.parse('https://$bridgeIp/clip/v2/resource/$resourceType');
 
+    _access.check();
     final request = await client.getUrl(uri);
+    _access.check();
     request.headers.set('hue-application-key', applicationKey);
 
     final response = await request.close();
+    _access.check();
 
     if (response.statusCode != 200) {
       throw HttpException(
@@ -482,26 +498,27 @@ class HueDeviceRegistry {
     return {
       'roomMappings': _roomMappings,
       'devices': _devices.values
-          .map((d) => <String, dynamic>{
-                'id': d.id,
-                'name': d.name,
-                'productName': d.productName,
-                'buttonServiceIds': d.buttonServiceIds,
-                'roomId': d.roomId,
-              })
+          .map(
+            (d) => <String, dynamic>{
+              'id': d.id,
+              'name': d.name,
+              'productName': d.productName,
+              'buttonServiceIds': d.buttonServiceIds,
+              'roomId': d.roomId,
+            },
+          )
           .toList(),
       'rooms': _rooms.values
-          .map((r) => <String, dynamic>{
-                'id': r.id,
-                'name': r.name,
-              })
+          .map((r) => <String, dynamic>{'id': r.id, 'name': r.name})
           .toList(),
       'motionSensors': _motionSensors.values
-          .map((m) => <String, dynamic>{
-                'id': m.id,
-                'ownerDeviceId': m.ownerDeviceId,
-                'roomId': m.roomId,
-              })
+          .map(
+            (m) => <String, dynamic>{
+              'id': m.id,
+              'ownerDeviceId': m.ownerDeviceId,
+              'roomId': m.roomId,
+            },
+          )
           .toList(),
       'behaviorTracker': behaviorTrackerJson,
     };
@@ -535,9 +552,8 @@ class HueDeviceRegistry {
           id: id,
           name: name,
           productName: d['productName'] as String?,
-          buttonServiceIds: (d['buttonServiceIds'] as List<dynamic>?)
-                  ?.cast<String>() ??
-              [],
+          buttonServiceIds:
+              (d['buttonServiceIds'] as List<dynamic>?)?.cast<String>() ?? [],
           roomId: d['roomId'] as String?,
         );
       }
@@ -586,7 +602,8 @@ class HueDeviceRegistry {
       }
     } else {
       // Handle legacy format: migrate from old behaviorToDevice/configuredDeviceIds
-      final behaviorToDevice = json['behaviorToDevice'] as Map<String, dynamic>?;
+      final behaviorToDevice =
+          json['behaviorToDevice'] as Map<String, dynamic>?;
       if (behaviorToDevice != null) {
         _behaviorTracker = rust_hue.createBehaviorTracker();
         behaviorToDevice.forEach((behaviorId, deviceId) {

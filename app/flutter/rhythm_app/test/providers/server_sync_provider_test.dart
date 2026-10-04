@@ -131,7 +131,8 @@ class _FakeRhythmServerApi extends RhythmServerApi {
     required String nodeId,
     required String action,
   }) async =>
-      nodeActionCheckedResult ?? await super.nodeActionChecked(
+      nodeActionCheckedResult ??
+      await super.nodeActionChecked(
         nodeId: nodeId,
         action: action,
       );
@@ -146,6 +147,18 @@ class _FakeRhythmServerApi extends RhythmServerApi {
       profileModeSetCalls = [];
   int hubCredentialsCalls = 0;
   int hubRetryCalls = 0;
+  int hubDisconnectCalls = 0;
+  @override
+  Future<void> hubDisconnect() async {
+    hubDisconnectCalls++;
+  }
+
+  @override
+  Future<void> hubDisconnectOne(
+      {required String hubType, required String address}) async {
+    hubDisconnectCalls++;
+  }
+
   bool hubCredentialsResult = true;
   String? lastHubType;
   String? lastAddress;
@@ -3961,7 +3974,9 @@ void main() {
       connection.dispose();
     });
 
-    test('HA observations update readback without replacing desired light output', () async {
+    test(
+        'HA observations update readback without replacing desired light output',
+        () async {
       final provider = ServerSyncProvider(
         connection: connection,
         roomProvider: roomProvider,
@@ -3969,39 +3984,56 @@ void main() {
       );
       addTearDown(provider.dispose);
       connection.emitHello(RhythmHello.fromJson({
-        'nodes': [{
-          'id': 'light-1', 'name': 'Light', 'kind': 'light_device',
-          'state': 'active', 'rhythm_enabled': true,
-          'brightness': 80, 'kelvin': 4000,
-          'observed_light': {
-            'availability': 'available', 'lights_on': true,
-            'brightness': 23, 'kelvin': 2700, 'received_at_epoch_ms': 100,
-          },
-        }],
+        'nodes': [
+          {
+            'id': 'light-1',
+            'name': 'Light',
+            'kind': 'light_device',
+            'state': 'active',
+            'rhythm_enabled': true,
+            'brightness': 80,
+            'kelvin': 4000,
+            'observed_light': {
+              'availability': 'available',
+              'lights_on': true,
+              'brightness': 23,
+              'kelvin': 2700,
+              'received_at_epoch_ms': 100,
+            },
+          }
+        ],
       }));
       await Future<void>.delayed(Duration.zero);
       expect(provider.nodeById('light-1')?.observedLight?.brightness, 23);
       var notifications = 0;
       provider.addListener(() => notifications++);
       connection.emitRhythmState(RhythmRoomState.fromJson({
-        'id': 'light-1', 'state': 'active', 'rhythm_enabled': true,
-        'brightness': 80, 'kelvin': 4000,
+        'id': 'light-1',
+        'state': 'active',
+        'rhythm_enabled': true,
+        'brightness': 80,
+        'kelvin': 4000,
         'observed_light': {
-          'availability': 'unavailable', 'lights_on': null,
+          'availability': 'unavailable',
+          'lights_on': null,
           'received_at_epoch_ms': 200,
         },
       }));
       await Future<void>.delayed(Duration.zero);
       final light = provider.nodeById('light-1')!;
-      expect(light.observedLight?.availability, RhythmLightAvailability.unavailable);
+      expect(light.observedLight?.availability,
+          RhythmLightAvailability.unavailable);
       expect(light.observedLight?.currentLightsOn, isNull);
       expect(light.brightness, 80);
       expect(light.kelvin, 4000);
       expect(notifications, greaterThan(0));
       connection.emitRhythmState(RhythmRoomState.fromJson({
-        'id': 'light-1', 'state': 'active', 'rhythm_enabled': true,
+        'id': 'light-1',
+        'state': 'active',
+        'rhythm_enabled': true,
         'observed_light': {
-          'availability': 'available', 'lights_on': false,
+          'availability': 'available',
+          'lights_on': false,
           'received_at_epoch_ms': 150,
         },
       }));
@@ -4010,11 +4042,20 @@ void main() {
           RhythmLightAvailability.unavailable);
     });
 
-    test('HA ownership overrides legacy physical setup and backup capabilities', () async {
+    test('HA ownership overrides legacy physical setup and backup capabilities',
+        () async {
       final provider = ServerSyncProvider(
         connection: connection,
         roomProvider: roomProvider,
-        homeProvider: _TestHomeProvider(const []),
+        homeProvider: _TestHomeProvider([
+          Hub.create(
+              id: 'saved-ha',
+              homeId: 'home',
+              type: HubType.homeAssistant,
+              name: 'Saved HA',
+              endpoint: const HubEndpoint(host: 'fixture.invalid', port: 8123),
+              token: 'saved-token'),
+        ]),
         activityCloudCanProvision: () => true,
       );
       addTearDown(provider.dispose);
@@ -4022,19 +4063,25 @@ void main() {
         'rooms': const <Map<String, dynamic>>[],
         'location': const <String, dynamic>{},
         'capabilities': {
-          'features': [RhythmFeature.savedWifiProfiles, RhythmFeature.matterSetupCodeRecovery, RhythmFeature.removedDeviceArchive],
+          'features': [
+            RhythmFeature.savedWifiProfiles,
+            RhythmFeature.matterSetupCodeRecovery,
+            RhythmFeature.removedDeviceArchive
+          ],
           'deployment': {
             'kind': 'home_assistant_addon',
             'ha_device_management': true,
             'portable_profiles': true,
           },
           // Even an inconsistent older hub descriptor cannot re-enable setup.
-          'hubs': [{
-            'type': 'matter',
-            'configurable': true,
-            'supports_unpairing': true,
-            'device_onboarding_methods': ['matter_on_network_setup_code'],
-          }],
+          'hubs': [
+            {
+              'type': 'matter',
+              'configurable': true,
+              'supports_unpairing': true,
+              'device_onboarding_methods': ['matter_on_network_setup_code'],
+            }
+          ],
         },
       }));
       await Future<void>.delayed(Duration.zero);
@@ -4049,6 +4096,20 @@ void main() {
       expect(provider.supportsSavedWifiProfiles, isFalse);
       expect(provider.canRecoverMatterSetupCode, isFalse);
       expect(provider.removedDeviceArchiveSupported, isFalse);
+      expect(await provider.pushHubCredentials(RoomSourceDto.homeAssistant),
+          isFalse);
+      expect(await provider.configureAddonHaHub(), isFalse);
+      expect(await provider.retryHub('hue', 'fixture.invalid'), isFalse);
+      expect(
+          await provider.retryHubs([
+            {'type': 'hue', 'address': 'fixture.invalid'}
+          ]),
+          0);
+      await provider.disconnectHub();
+      await provider.disconnectOneHub('homeassistant', 'fixture.invalid');
+      expect(api.hubCredentialsCalls, 0);
+      expect(api.hubRetryCalls, 0);
+      expect(api.hubDisconnectCalls, 0);
     });
 
     test('uses device_onboarding_methods from the hello capabilities payload',
@@ -5070,8 +5131,7 @@ void main() {
       connection.dispose();
     });
 
-    test('reset acknowledges the server-resolved wall-clock default',
-        () async {
+    test('reset acknowledges the server-resolved wall-clock default', () async {
       final provider = ServerSyncProvider(
         connection: connection,
         roomProvider: roomProvider,

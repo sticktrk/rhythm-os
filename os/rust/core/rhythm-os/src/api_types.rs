@@ -316,6 +316,8 @@ pub struct DeploymentCapabilitiesDto {
     pub event_streaming: bool,
     pub remote_access: bool,
     pub ha_device_management: bool,
+    /// HA-owned Matter management; never authorizes direct protocol drivers.
+    pub ha_matter_management: bool,
     pub managed_light_selection: bool,
     pub portable_profiles: bool,
     pub portable_settings: bool,
@@ -332,6 +334,7 @@ impl DeploymentCapabilitiesDto {
             event_streaming: true,
             remote_access: true,
             ha_device_management: true,
+            ha_matter_management: true,
             managed_light_selection: true,
             portable_profiles: true,
             portable_settings: true,
