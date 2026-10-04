@@ -563,6 +563,13 @@ impl TopologyRoom {
         hub_key: &HubKey,
         assigned_native_ids: &HashSet<String>,
     ) -> Option<HubDispatchTarget> {
+        // HA areas are discovery/placement metadata, not an atomic light
+        // controller. A user can pause any member independently through HA.
+        // Keep periodic settings and child actions on that member's node;
+        // otherwise the enabled parent can overwrite a paused child's state.
+        if hub_key.hub_type.as_str() == crate::hub::HubType::HA {
+            return None;
+        }
         if assigned_native_ids.is_empty() {
             return None;
         }
