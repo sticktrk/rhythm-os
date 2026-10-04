@@ -72,6 +72,18 @@ pub struct DiscoveredMotionState {
 /// `room_sync::sync_from_hub()` to keep the server's state in sync
 /// with the hub without requiring app-side pushes.
 pub trait HubDiscovery: Send + Sync {
+    /// Snapshot-based integrations require every discovery/application phase
+    /// to succeed before acquiring device authority.
+    fn requires_complete_snapshot(&self) -> bool {
+        false
+    }
+
+    /// Commit observation/ownership readiness only after topology and runtime
+    /// reconciliation have both succeeded. Failure leaves output fenced.
+    fn complete_sync(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Whether a later source-room rename should replace an established
     /// canonical Rhythm room name. Integrations that expose generated or
     /// controller-facing names can opt out while still using those names to
@@ -115,6 +127,11 @@ pub trait HubDiscovery: Send + Sync {
     /// integration to publish capabilities gathered while producing the
     /// identity snapshot at the same time the canonical endpoint is created.
     fn endpoint_capabilities(&self, _native_id: &str) -> Option<serde_json::Value> {
+        None
+    }
+
+    /// Initial authoritative light readback from the same complete discovery snapshot.
+    fn endpoint_observation(&self, _native_id: &str) -> Option<crate::hub::LightObservation> {
         None
     }
 

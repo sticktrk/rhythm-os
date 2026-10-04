@@ -22,6 +22,7 @@ pub mod discovery;
 pub mod event_loop;
 pub mod factory_default_config;
 pub mod handlers;
+pub mod ha_migration;
 pub mod hub;
 pub mod hue_buttons;
 pub mod lifecycle;

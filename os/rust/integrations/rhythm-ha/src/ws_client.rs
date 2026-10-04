@@ -24,6 +24,10 @@ pub(crate) const SUBSCRIBED_EVENT_TYPES: &[&str] = &[
     "zha_event",
     "hue_event",
     "state_changed",
+    "entity_registry_updated",
+    "device_registry_updated",
+    "area_registry_updated",
+    "core_config_updated",
 ];
 
 /// Bound on the TCP + TLS + WebSocket upgrade handshake. Without this a
@@ -241,6 +245,7 @@ async fn run_ws_loop(
         let mut authenticated = false;
         let mut subscribed = false;
         let mut auth_rejected = false;
+        let mut pending_subscriptions = std::collections::BTreeSet::new();
         // Liveness: any inbound frame proves the connection is alive. After
         // WS_IDLE_PING_INTERVAL of silence we send an HA `ping`; if nothing at
         // all arrives within WS_PONG_TIMEOUT after that, the TCP connection is
@@ -265,7 +270,7 @@ async fn run_ws_loop(
                     if shutdown.load(Ordering::Relaxed) {
                         return;
                     }
-                    if awaiting_pong || !authenticated {
+                    if awaiting_pong || !authenticated || !pending_subscriptions.is_empty() {
                         warn!(
                             target: "ws",
                             "WS connection unresponsive (no traffic in {:?}), reconnecting",
@@ -325,7 +330,6 @@ async fn run_ws_loop(
                 WsMessageAction::AuthOk => {
                     info!(target: "ws", "HA WebSocket authenticated");
                     authenticated = true;
-                    let _ = tx.try_send(HaWsEvent::Connected);
 
                     for event_type in SUBSCRIBED_EVENT_TYPES {
                         let sub_msg = serde_json::json!({
@@ -333,6 +337,7 @@ async fn run_ws_loop(
                             "type": "subscribe_events",
                             "event_type": event_type,
                         });
+                        pending_subscriptions.insert(msg_id);
                         msg_id += 1;
                         if let Err(e) = write.send(Message::Text(sub_msg.to_string())).await {
                             warn!(target: "ws", "Failed to subscribe to {} events: {}", event_type, e);
@@ -361,14 +366,38 @@ async fn run_ws_loop(
                     break;
                 }
                 WsMessageAction::Event { event_type, data } => {
-                    let _ = tx.try_send(HaWsEvent::ServiceEvent { event_type, data });
+                    if tx
+                        .try_send(HaWsEvent::ServiceEvent { event_type, data })
+                        .is_err()
+                    {
+                        // A missing topology or observation event invalidates the
+                        // snapshot. Reconnect rather than silently losing authority.
+                        if tx
+                            .send(HaWsEvent::Disconnected(
+                                "HA event queue overflow; resnapshot required".into(),
+                            ))
+                            .is_err()
+                        {
+                            return;
+                        }
+                        break;
+                    }
                 }
                 WsMessageAction::Pong => {
                     let _ = tx.try_send(HaWsEvent::Heartbeat);
                 }
-                WsMessageAction::ResultSuccess => {}
+                WsMessageAction::ResultSuccess => {
+                    if let Some(id) = json.get("id").and_then(Value::as_u64) {
+                        if pending_subscriptions.remove(&id) && pending_subscriptions.is_empty() {
+                            if tx.send(HaWsEvent::Connected).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
                 WsMessageAction::ResultFailure(error) => {
                     warn!(target: "ws", "WS command failed: {}", error);
+                    break; // A rejected subscription cannot remain a ready live stream.
                 }
                 WsMessageAction::Ignore => {}
             }

@@ -88,6 +88,7 @@ pub struct AreaDiscoveryResult {
     /// source on the same HA parent device. These events refresh that one
     /// motion source rather than becoming independent buttons or sensors.
     pub event_motion_sensors: HashMap<String, String>,
+    pub button_event_device_ids: HashSet<String>,
 }
 
 /// Discover areas that contain light entities via HA WebSocket.
@@ -117,7 +118,14 @@ fn discover_full(config: &HaConnectionConfig) -> Result<FullRegistryData> {
         .enable_all()
         .build()
         .context("Failed to build tokio runtime for area discovery")?;
-    rt.block_on(discover_full_async(config))
+    rt.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            discover_full_async(config),
+        )
+        .await
+        .context("HA inventory deadline exceeded")?
+    })
 }
 
 /// Enriched device info from HA device registry (private).
@@ -146,16 +154,13 @@ struct FullRegistryData {
     device_info: HashMap<String, DeviceInfo>,
     /// entity_id → device_id.
     entity_device_map: HashMap<String, String>,
-    /// Light entity_id → area_id.
-    light_entity_areas: HashMap<String, String>,
-    /// Entity IDs created by virtual platforms (group, homeassistant) — not physical devices.
-    virtual_entity_ids: std::collections::HashSet<String>,
     /// Motion sensors with current state from `get_states`: (entity_id, area_id, is_active).
     prefetched_motion: Vec<(String, String, bool)>,
     /// Contact sensors classified from `get_states`: (entity_id, area_id, is_open).
     prefetched_contact: Vec<(String, String, bool)>,
     /// Button/control devices that can emit HA events.
     button_devices: Vec<HaButtonDevice>,
+    lights: std::collections::BTreeMap<String, crate::light::HaLightCatalogEntry>,
 }
 
 async fn discover_full_async(config: &HaConnectionConfig) -> Result<FullRegistryData> {
@@ -274,6 +279,9 @@ async fn discover_full_async(config: &HaConnectionConfig) -> Result<FullRegistry
         };
 
         let json: Value = serde_json::from_str(&text)?;
+        if json.get("success").and_then(Value::as_bool) == Some(false) {
+            anyhow::bail!("HA inventory command rejected");
+        }
         let resp_id = json.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
 
         if resp_id == area_msg_id {
@@ -306,9 +314,47 @@ async fn discover_full_async(config: &HaConnectionConfig) -> Result<FullRegistry
     // Close WS
     let _ = write.send(Message::Close(None)).await;
 
-    let areas = areas_json.unwrap_or_default();
-    let entities = entities_json.unwrap_or_default();
-    let devices = devices_json.unwrap_or_default();
+    let areas = areas_json.context("Incomplete HA area registry")?;
+    let entities = entities_json.context("Incomplete HA entity registry")?;
+    let devices = devices_json.context("Incomplete HA device registry")?;
+    anyhow::ensure!(states_json.is_some(), "Incomplete HA states snapshot");
+    anyhow::ensure!(
+        entities
+            .iter()
+            .map(|entry| &entry.entity_id)
+            .collect::<HashSet<_>>()
+            .len()
+            == entities.len(),
+        "Duplicate HA entity routes in snapshot"
+    );
+    let registry_ids: Vec<_> = entities
+        .iter()
+        .filter_map(|entry| entry.id.as_ref())
+        .collect();
+    anyhow::ensure!(
+        registry_ids.iter().copied().collect::<HashSet<_>>().len() == registry_ids.len(),
+        "Duplicate HA registry identities in snapshot"
+    );
+    anyhow::ensure!(
+        entities.len() <= 16384 && devices.len() <= 16384,
+        "HA registry exceeds bounded catalog size"
+    );
+    let disabled_devices: HashSet<_> = devices
+        .iter()
+        .filter(|device| device.disabled_by.is_some())
+        .map(|device| device.id.clone())
+        .collect();
+    let entities: Vec<_> = entities
+        .into_iter()
+        .filter(|entity| {
+            entity.disabled_by.is_none()
+                && entity
+                    .device_id
+                    .as_ref()
+                    .is_none_or(|device| !disabled_devices.contains(device))
+                && entity.platform.as_deref() != Some("rhythm")
+        })
+        .collect();
 
     // Build area map: area_id -> name
     let area_map: std::collections::HashMap<String, String> =
@@ -354,12 +400,15 @@ async fn discover_full_async(config: &HaConnectionConfig) -> Result<FullRegistry
         // not physical devices. Common platforms: "group" (legacy groups),
         // "homeassistant" (area groups created by the light integration).
         if let Some(platform) = entity.platform.as_deref() {
-            if matches!(platform, "group" | "homeassistant") {
+            if matches!(platform, "group" | "homeassistant" | "rhythm") {
                 virtual_entity_ids.insert(entity.entity_id.clone());
             }
         }
 
-        if !entity.entity_id.starts_with("light.") {
+        if !entity.entity_id.starts_with("light.")
+            || entity.disabled_by.is_some()
+            || virtual_entity_ids.contains(&entity.entity_id)
+        {
             continue;
         }
         // Resolve area: direct assignment takes priority, then device inheritance
@@ -531,7 +580,51 @@ async fn discover_full_async(config: &HaConnectionConfig) -> Result<FullRegistry
     // Prefetch motion sensor states from get_states response.
     // Filters states_json for binary_sensors that are in binary_sensor_areas
     // and whose runtime attributes.device_class is "motion" or "occupancy".
-    let states = states_json.unwrap_or_default();
+    let states = states_json.context("Incomplete HA states snapshot")?;
+    let lights = entities
+        .iter()
+        .filter(|entity| {
+            entity.entity_id.starts_with("light.")
+                && entity.disabled_by.is_none()
+                && !virtual_entity_ids.contains(&entity.entity_id)
+        })
+        .map(|entity| {
+            let state = states
+                .iter()
+                .find(|state| state["entity_id"].as_str() == Some(entity.entity_id.as_str()))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let identity = entity
+                .id
+                .as_ref()
+                .filter(|id| !id.is_empty())
+                .zip(entity.unique_id.as_ref().filter(|id| !id.is_empty()))
+                .zip(entity.platform.as_ref().filter(|id| !id.is_empty()))
+                .map(
+                    |((id, unique_id), platform)| crate::light::HaLightIdentity {
+                        scope: config.ws_url(),
+                        registry_id: id.clone(),
+                        unique_id: unique_id.clone(),
+                        platform: platform.clone(),
+                        device_id: entity.device_id.clone(),
+                        config_entry_id: entity.config_entry_id.clone(),
+                    },
+                );
+            (
+                entity.entity_id.clone(),
+                crate::light::HaLightCatalogEntry {
+                    identity,
+                    name: state["attributes"]["friendly_name"]
+                        .as_str()
+                        .unwrap_or(&entity.entity_id)
+                        .to_owned(),
+                    area_id: light_entity_areas.get(&entity.entity_id).cloned(),
+                    capabilities: crate::light::capabilities(&state["attributes"]),
+                    observation: crate::light::HaLightObservation::parse(&state),
+                },
+            )
+        })
+        .collect();
 
     let prefetched_motion: Vec<(String, String, bool)> = states
         .iter()
@@ -641,17 +734,20 @@ async fn discover_full_async(config: &HaConnectionConfig) -> Result<FullRegistry
             motion_sensors,
             contact_sensors,
             binary_sensor_areas,
+            button_event_device_ids: event_entity_areas
+                .keys()
+                .filter_map(|id| entity_device_map.get(id).cloned())
+                .collect(),
             event_entity_areas,
             event_motion_sensors,
         },
         area_names: area_map,
         device_info: device_info_map,
         entity_device_map,
-        light_entity_areas,
-        virtual_entity_ids,
         prefetched_motion,
         prefetched_contact,
         button_devices,
+        lights,
     })
 }
 
@@ -705,6 +801,11 @@ pub fn sync_areas_to_registry(areas: &[HaArea], registry: &mut HaDeviceRegistry)
 pub struct HaDiscovery {
     config: HaConnectionConfig,
     cache: Mutex<Option<FullRegistryData>>,
+    cached_generation: Mutex<Option<u64>>,
+    live: Option<(
+        std::sync::Weak<Mutex<rhythm_os::state::AppState>>,
+        std::sync::Arc<Mutex<crate::hub_state::HaEventRoutingCache>>,
+    )>,
 }
 
 impl HaDiscovery {
@@ -712,29 +813,209 @@ impl HaDiscovery {
         Self {
             config,
             cache: Mutex::new(None),
+            cached_generation: Mutex::new(None),
+            live: None,
         }
+    }
+
+    pub fn with_live_state(
+        mut self,
+        state: &rhythm_os::state::SharedState,
+        cache: std::sync::Arc<Mutex<crate::hub_state::HaEventRoutingCache>>,
+    ) -> Self {
+        self.live = Some((std::sync::Arc::downgrade(state), cache));
+        self
     }
 
     /// Return cached data or fetch once via WS.
     fn get_or_fetch(&self) -> Result<FullRegistryData> {
+        self.get_or_fetch_attempt(0)
+    }
+
+    fn get_or_fetch_attempt(&self, attempt: usize) -> Result<FullRegistryData> {
         let cached = self
             .cache
             .lock()
             .map_err(|_| anyhow::anyhow!("Failed to lock HaDiscovery cache"))?
             .clone();
         if let Some(data) = cached {
+            if let Some((_, live)) = &self.live {
+                let generation = *self
+                    .cached_generation
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("HA snapshot lock"))?;
+                let live = live.lock().map_err(|_| anyhow::anyhow!("HA cache lock"))?;
+                anyhow::ensure!(
+                    live.stream_ready && Some(live.generation) == generation,
+                    "HA snapshot invalidated while applying inventory"
+                );
+            }
             return Ok(data);
         }
+        if let Some((_, cache)) = &self.live {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+            loop {
+                if cache
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("HA cache lock"))?
+                    .stream_ready
+                {
+                    break;
+                }
+                anyhow::ensure!(
+                    std::time::Instant::now() < deadline,
+                    "HA subscriptions not ready for inventory"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+        let generation = self
+            .live
+            .as_ref()
+            .and_then(|(_, cache)| cache.lock().ok().map(|cache| cache.generation));
         let data = discover_full(&self.config)?;
+        if let Some((weak, cache)) = &self.live {
+            if let Some(state) = weak.upgrade() {
+                let mut state = state.lock().map_err(|_| anyhow::anyhow!("State lock"))?;
+                let mut live = cache.lock().map_err(|_| anyhow::anyhow!("HA cache lock"))?;
+                if Some(live.generation) != generation || !live.stream_ready {
+                    drop(live);
+                    drop(state);
+                    anyhow::ensure!(
+                        attempt < 2,
+                        "HA inventory changed during bounded reconciliation attempts"
+                    );
+                    return self.get_or_fetch_attempt(attempt + 1);
+                }
+                let selection = crate::light::HaLightSelection::load(&state.data_dir)?;
+                if state.platform_context == "ha_addon" {
+                    state.managed_ha_lights = Some(selection.resolve(&data.lights));
+                }
+                let mut lights = data.lights.clone();
+                for (id, entry) in &mut lights {
+                    if let Some(previous) = live
+                        .lights
+                        .get(id)
+                        .filter(|previous| previous.identity == entry.identity)
+                    {
+                        if previous.observation.newer_than(&entry.observation) {
+                            entry.observation = previous.observation.clone();
+                        }
+                    }
+                }
+                live.snapshot_user_changes.retain(|id, proof| {
+                    lights.get(id).and_then(|entry| entry.identity.as_ref()) == Some(proof)
+                });
+                live.lights = lights;
+                live.snapshot_generation = Some(live.generation);
+                live.reviewed = selection.lights;
+                live.lights_ready = false;
+                live.snapshot_revision = rhythm_os::canonical::identity::generate_uuid_public();
+                live.device_areas = data.result.device_area_map.clone();
+                live.device_areas
+                    .extend(data.result.binary_sensor_areas.clone());
+                live.device_areas
+                    .extend(data.result.event_entity_areas.clone());
+                live.motion_subevents = data.result.event_motion_sensors.clone();
+                live.button_event_device_ids = data.result.button_event_device_ids.clone();
+            }
+        }
         if let Ok(mut guard) = self.cache.lock() {
             *guard = Some(data.clone());
+        }
+        if let Ok(mut guard) = self.cached_generation.lock() {
+            *guard = generation;
         }
         Ok(data)
     }
 }
 
 impl rhythm_os::discovery::HubDiscovery for HaDiscovery {
+    fn requires_complete_snapshot(&self) -> bool {
+        true
+    }
+
+    fn complete_sync(&self) -> Result<()> {
+        if let Some((weak, live)) = &self.live {
+            // Config is HA-owned too; refresh timezone/location after live
+            // core_config_updated reconciliation, preserving prior on failure.
+            let state = weak.upgrade();
+            if let Some(state) = &state {
+                if let Ok(transport) =
+                    crate::reqwest_transport::ReqwestHaTransport::new(self.config.clone())
+                {
+                    crate::post_connect::fetch_ha_config(&state, &transport);
+                }
+            }
+            let generation = *self
+                .cached_generation
+                .lock()
+                .map_err(|_| anyhow::anyhow!("HA snapshot lock"))?;
+            // Match dispatch's state -> cache lock order. Queue the final
+            // observation snapshot before allowing live event delivery again.
+            let mut state = state
+                .as_ref()
+                .map(|state| state.lock())
+                .transpose()
+                .map_err(|_| anyhow::anyhow!("State lock"))?;
+            let hub_key = state.as_ref().and_then(|state| {
+                state.hubs.iter().find_map(|(key, hub)| {
+                    hub.data::<crate::hub_state::HaHubData>()
+                        .filter(|data| std::sync::Arc::ptr_eq(&data.event_routing_cache, live))
+                        .map(|_| key.clone())
+                })
+            });
+            let mut live = live.lock().map_err(|_| anyhow::anyhow!("HA cache lock"))?;
+            anyhow::ensure!(
+                live.stream_ready && Some(live.generation) == generation,
+                "HA snapshot invalidated before runtime commit"
+            );
+            if let (Some(state), Some(hub_key)) = (state.as_mut(), hub_key) {
+                if !live.lights.is_empty() {
+                    // The catalog bounds the queue size. A one-shot receiver
+                    // avoids overflowing the small command-attribution queue
+                    // on installations with more than 64 lights; the event loop
+                    // removes it after draining. Source timestamps and epochs
+                    // still reject an overtaken or invalidated snapshot.
+                    let (tx, rx) = std::sync::mpsc::sync_channel(live.lights.len());
+                    for (device_id, entry) in &live.lights {
+                        let Some(identity) = &entry.identity else {
+                            continue;
+                        };
+                        tx.send(rhythm_os::hub::HubEvent::LightObserved {
+                            hub_key: Some(hub_key.clone()),
+                            device_id: device_id.clone(),
+                            observation: entry.observation.normalized(),
+                            identity_proof: Some(serde_json::to_value(identity)?),
+                            observation_epoch: Some((
+                                live.observation_epoch.clone(),
+                                live.generation,
+                            )),
+                            external_user_change: live.snapshot_user_changes.get(device_id)
+                                == Some(identity),
+                        })?;
+                    }
+                    state.pending_hub_event_rxs.push(rx);
+                }
+            }
+            live.snapshot_user_changes.clear();
+            live.lights_ready = true;
+        }
+        Ok(())
+    }
+
     fn discover_rooms(&self) -> Result<Vec<rhythm_os::discovery::DiscoveredRoom>> {
+        // A sync always begins a new snapshot. An aborted earlier application
+        // must never promote its cached inventory on the next attempt.
+        *self
+            .cache
+            .lock()
+            .map_err(|_| anyhow::anyhow!("HA discovery lock"))? = None;
+        if let Some((_, live)) = &self.live {
+            live.lock()
+                .map_err(|_| anyhow::anyhow!("HA cache lock"))?
+                .lights_ready = false;
+        }
         let data = self.get_or_fetch()?;
         Ok(data
             .result
@@ -816,29 +1097,28 @@ impl rhythm_os::discovery::HubDiscovery for HaDiscovery {
 
         let mut identities = Vec::new();
 
-        // Light entities → DiscoveredIdentity with DeviceType::Light
-        // Skip:
-        // 1. Virtual entities (HA "group"/"homeassistant" platform — area groups)
-        // 2. Entities whose backing device has no hardware IDs (e.g. Hue "Room"
-        //    group devices that HA imports with manufacturer but no MAC/serial)
-        for (entity_id, area_id) in &data.light_entity_areas {
-            if data.virtual_entity_ids.contains(entity_id) {
-                continue;
-            }
-            let room_name = data.area_names.get(area_id).cloned();
-            let (name, hw_ids, manufacturer, model) = enrich_from_device(&data, entity_id);
-
-            // Physical lights always have hardware IDs (MAC, ZHA IEEE, serial).
-            // Entities with no HW IDs are virtual groups (Hue "Room", etc.).
-            if hw_ids.is_empty() {
-                continue;
-            }
-
+        // Every eligible endpoint is reviewable, including lights with no area or hardware MAC.
+        // Registry identity is endpoint-scoped so two channels on one device never merge.
+        for (entity_id, entry) in &data.lights {
+            let (name, legacy_hw, manufacturer, model) = enrich_from_device(&data, entity_id);
+            let hw_ids = entry
+                .identity
+                .as_ref()
+                .map(|id| vec![HardwareId::serial(&id.fingerprint())])
+                .unwrap_or(legacy_hw);
             identities.push(DiscoveredIdentity {
                 native_id: entity_id.clone(),
-                room_id: Some(area_id.clone()),
-                room_name,
-                name,
+                room_id: entry.area_id.clone(),
+                room_name: entry
+                    .area_id
+                    .as_ref()
+                    .and_then(|id| data.area_names.get(id))
+                    .cloned(),
+                name: if entry.name == *entity_id {
+                    name
+                } else {
+                    entry.name.clone()
+                },
                 device_type: DeviceType::Light,
                 hardware_ids: hw_ids,
                 manufacturer,
@@ -917,6 +1197,32 @@ impl rhythm_os::discovery::HubDiscovery for HaDiscovery {
         );
 
         Ok(identities)
+    }
+
+    fn endpoint_capabilities(&self, native_id: &str) -> Option<Value> {
+        let data = self.get_or_fetch().ok()?;
+        let entry = data.lights.get(native_id)?;
+        Some(
+            serde_json::json!({ "light": entry.capabilities, "ha_identity": entry.identity,
+                "light_capabilities": { "color_temperature": entry.capabilities.min_kelvin.zip(entry.capabilities.max_kelvin).map(|(min, max)| serde_json::json!({"min_kelvin":min,"max_kelvin":max})) }
+            }),
+        )
+    }
+
+    fn endpoint_observation(&self, native_id: &str) -> Option<rhythm_os::hub::LightObservation> {
+        if let Some((_, cache)) = &self.live {
+            return cache
+                .lock()
+                .ok()?
+                .lights
+                .get(native_id)
+                .map(|entry| entry.observation.normalized());
+        }
+        self.get_or_fetch()
+            .ok()?
+            .lights
+            .get(native_id)
+            .map(|entry| entry.observation.normalized())
     }
 
     fn discover_motion_state(&self) -> Result<Vec<rhythm_os::discovery::DiscoveredMotionState>> {
@@ -1245,8 +1551,16 @@ struct AreaEntry {
     name: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 struct EntityEntry {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    unique_id: Option<String>,
+    #[serde(default)]
+    config_entry_id: Option<String>,
+    #[serde(default)]
+    disabled_by: Option<String>,
     entity_id: String,
     area_id: Option<String>,
     device_id: Option<String>,
@@ -1261,6 +1575,8 @@ struct EntityEntry {
 #[derive(Deserialize)]
 struct DeviceEntry {
     id: String,
+    #[serde(default)]
+    disabled_by: Option<String>,
     area_id: Option<String>,
     #[serde(default)]
     name: Option<String>,
@@ -1359,6 +1675,9 @@ mod tests {
                 "config/entity_registry/list",
                 serde_json::json!([
                     {"entity_id": "light.kitchen_ceiling", "device_id": "dev-light"},
+                    {"id":"unassigned-entry","unique_id":"endpoint-2","platform":"test","entity_id":"light.unassigned"},
+                    {"id":"exported-entry","unique_id":"exported","platform":"rhythm","entity_id":"light.rhythm_export","area_id":"kitchen"},
+                    {"id":"disabled-entry","unique_id":"disabled","platform":"test","entity_id":"light.disabled","area_id":"kitchen","disabled_by":"user"},
                     {"entity_id": "light.kitchen_group", "area_id": "kitchen", "device_id": "dev-virtual", "platform": "group"},
                     {"entity_id": "light.office_virtual", "area_id": "office", "device_id": "dev-nohw"},
                     {"entity_id": "binary_sensor.kitchen_motion", "device_id": "dev-motion", "original_device_class": "motion"},
@@ -1577,10 +1896,7 @@ mod tests {
         assert_eq!(rooms[0].grouped_light_id, "kitchen");
         assert_eq!(
             rooms[0].device_ids,
-            vec![
-                "light.kitchen_ceiling".to_string(),
-                "light.kitchen_group".to_string()
-            ]
+            vec!["light.kitchen_ceiling".to_string()]
         );
         assert_eq!(rooms[1].id, "office");
 
@@ -1653,6 +1969,21 @@ mod tests {
             .any(|device| device.device_id == "dev-camera"));
 
         let identities = discovery.discover_identities().unwrap();
+        assert!(
+            identities
+                .iter()
+                .any(|identity| identity.native_id == "light.unassigned"
+                    && identity.room_id.is_none())
+        );
+        assert!(!identities.iter().any(|identity| matches!(
+            identity.native_id.as_str(),
+            "light.rhythm_export" | "light.disabled"
+        )));
+        assert!(
+            discovery.endpoint_capabilities("light.unassigned").unwrap()["ha_identity"]
+                ["registry_id"]
+                == "unassigned-entry"
+        );
         assert!(identities.iter().any(|identity| {
             identity.device_type == DeviceType::Light
                 && identity.native_id == "light.kitchen_ceiling"
@@ -1662,9 +1993,12 @@ mod tests {
         assert!(!identities
             .iter()
             .any(|identity| identity.native_id == "light.kitchen_group"));
-        assert!(!identities
-            .iter()
-            .any(|identity| identity.native_id == "light.office_virtual"));
+        assert!(
+            identities
+                .iter()
+                .any(|identity| identity.native_id == "light.office_virtual"),
+            "Missing hardware identifiers do not prove a light is virtual"
+        );
         assert!(identities.iter().any(|identity| {
             identity.device_type == DeviceType::Motion
                 && identity.native_id == "binary_sensor.kitchen_motion"
@@ -1831,6 +2165,7 @@ mod tests {
             device_id: Some("device-1".to_string()),
             original_device_class: None,
             platform: Some("zha".to_string()),
+            ..Default::default()
         }];
         let device_area_map = HashMap::from([("device-1".to_string(), "kitchen".to_string())]);
         let device_info = HashMap::from([(
@@ -1868,6 +2203,7 @@ mod tests {
             device_id: Some("camera-1".to_string()),
             original_device_class: None,
             platform: Some("unifiprotect".to_string()),
+            ..Default::default()
         }];
         let device_area_map = HashMap::from([("camera-1".to_string(), "entrance".to_string())]);
         let device_info = HashMap::from([(

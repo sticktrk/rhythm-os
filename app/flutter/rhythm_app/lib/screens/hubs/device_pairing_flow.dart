@@ -5,6 +5,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
 import 'package:uuid/uuid.dart';
 
 import '../../providers/server_sync_provider.dart';
+import '../../widgets/home_assistant_device_setup.dart';
 import '../../services/nearby_ble_discovery_service.dart';
 import '../../widgets/device_detail_sheet.dart';
 import '../../widgets/nearby_device_sheet.dart';
@@ -98,6 +99,10 @@ Future<void> startDevicePairingFlow(
   String? hueBleJourneyId,
 }) async {
   final syncProvider = context.read<ServerSyncProvider>();
+  if (syncProvider.deviceManagementOwnedByHomeAssistant) {
+    await HomeAssistantDeviceSetup.show(context);
+    return;
+  }
   final allowsLightPairing = roomAssignment == null ||
       roomAssignment.expectedDeviceType == RhythmDeviceType.light;
 

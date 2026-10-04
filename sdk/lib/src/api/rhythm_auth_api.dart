@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
 import 'package:logging/logging.dart';
 
@@ -13,6 +15,7 @@ class RhythmAuthStatus {
     required this.claimAvailable,
     this.authenticatedRole,
     this.reportsAuthenticatedRole = false,
+    this.mobileEnrollmentAvailable = false,
   });
 
   factory RhythmAuthStatus.fromJson(Map<String, dynamic> json) {
@@ -23,6 +26,7 @@ class RhythmAuthStatus {
       claimAvailable: json['claim_available'] == true,
       authenticatedRole: json['authenticated_role']?.toString(),
       reportsAuthenticatedRole: json.containsKey('authenticated_role'),
+      mobileEnrollmentAvailable: json['mobile_enrollment_available'] == true,
     );
   }
 
@@ -32,6 +36,7 @@ class RhythmAuthStatus {
   final bool claimAvailable;
   final String? authenticatedRole;
   final bool reportsAuthenticatedRole;
+  final bool mobileEnrollmentAvailable;
 
   bool get hasAuthenticatedOwner => authenticatedRole == 'owner';
 }
@@ -53,6 +58,49 @@ class RhythmOwnerClaim {
 
   final String tokenId;
   final String token;
+}
+
+/// One-use approval copied from Connect mobile app in the HA admin interface.
+/// No API endpoint is inferred from this payload: enrollment uses the LAN
+/// endpoint the user selected, and the server must prove the same instance ID.
+class RhythmMobileEnrollment {
+  const RhythmMobileEnrollment({
+    required this.code,
+    required this.serverInstanceId,
+    required this.expiresAtEpochMs,
+  });
+
+  final String code;
+  final String serverInstanceId;
+  final int expiresAtEpochMs;
+
+  factory RhythmMobileEnrollment.parse(String value) {
+    Object? decoded;
+    try {
+      decoded = jsonDecode(value);
+    } catch (_) {
+      throw const FormatException('Paste the complete mobile connection code.');
+    }
+    if (decoded is! Map ||
+        decoded['format'] != 'rhythm-mobile-enrollment' ||
+        decoded['version'] != 1 ||
+        decoded['code'] is! String ||
+        (decoded['code'] as String).trim().isEmpty ||
+        decoded['server_instance_id'] is! String ||
+        (decoded['server_instance_id'] as String).trim().isEmpty ||
+        decoded['expires_at_epoch_ms'] is! int ||
+        (decoded['expires_at_epoch_ms'] as int) <= 0) {
+      throw const FormatException('Paste the complete mobile connection code.');
+    }
+    return RhythmMobileEnrollment(
+      code: (decoded['code'] as String).trim(),
+      serverInstanceId: (decoded['server_instance_id'] as String).trim(),
+      expiresAtEpochMs: decoded['expires_at_epoch_ms'] as int,
+    );
+  }
+
+  bool isExpired({DateTime? now}) =>
+      (now ?? DateTime.now()).millisecondsSinceEpoch >= expiresAtEpochMs;
 }
 
 class RhythmCloudJoinProof {
@@ -223,6 +271,41 @@ class RhythmAuthApi {
         'Failed to fetch auth status',
         statusCode: error.response?.statusCode,
         cause: error,
+      );
+    }
+  }
+
+  Future<RhythmOwnerClaim> exchangeMobileEnrollment(
+    RhythmMobileEnrollment enrollment, {
+    String label = 'Rhythm app',
+  }) async {
+    if (enrollment.isExpired()) {
+      throw const FormatException(
+        'This connection code expired. Create a new code in Home Assistant.',
+      );
+    }
+    try {
+      final response = await _dio.post<Map<String, dynamic>>(
+        'api/addon/enrollment/exchange',
+        data: {
+          'code': enrollment.code,
+          'server_instance_id': enrollment.serverInstanceId,
+          'label': label.trim(),
+        },
+      );
+      final data = response.data;
+      if (data == null ||
+          data['server_instance_id'] != enrollment.serverInstanceId) {
+        throw StateError(
+          'The connection code belongs to another installation.',
+        );
+      }
+      return RhythmOwnerClaim.fromJson(data);
+    } on DioException catch (error) {
+      // Never surface an echoed response, request body, code, or credential.
+      throw RhythmApiException(
+        'Connection code was rejected. Create a new code in Home Assistant.',
+        statusCode: error.response?.statusCode,
       );
     }
   }

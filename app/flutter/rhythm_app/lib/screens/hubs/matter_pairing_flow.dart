@@ -5,6 +5,7 @@ import 'package:uuid/uuid.dart';
 
 import '../../providers/home_provider.dart';
 import '../../providers/server_sync_provider.dart';
+import '../../widgets/home_assistant_device_setup.dart';
 import '../../services/hue/hue_service_locator.dart';
 import '../../services/phone_matter_commissioner.dart';
 import '../../services/server_endpoint_resolver.dart';
@@ -27,6 +28,10 @@ Future<void> startMatterPairingFlow(
 }) async {
   final homeProvider = context.read<HomeProvider>();
   final syncProvider = context.read<ServerSyncProvider>();
+  if (syncProvider.deviceManagementOwnedByHomeAssistant) {
+    await HomeAssistantDeviceSetup.show(context);
+    return;
+  }
   final serverHub = homeProvider.activeServerHub;
   if (serverHub == null) return;
   final activeJourneyId = journeyId ?? 'matter-pair-${const Uuid().v4()}';

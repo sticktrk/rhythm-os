@@ -1886,29 +1886,40 @@ pub(crate) fn update_lights_on_cache_for_native_light_report(
     lights_on: bool,
     source: ObservedPowerSource,
 ) -> Option<String> {
-    let (node_id, parent_id) = {
-        let s = state.lock().ok()?;
-        let canonical_id = s
-            .canonical_registry
-            .find_by_native_id(hub_key, native_id)
-            .map(|device| device.id.clone())?;
-        let parent_id = s
-            .topology
-            .get_device_node(&canonical_id)
-            .and_then(|node| node.parent_id.clone());
-        (canonical_id, parent_id)
-    };
+    let node_id = state
+        .lock()
+        .ok()?
+        .canonical_registry
+        .find_by_native_id(hub_key, native_id)
+        .map(|device| device.id.clone())?;
+    update_lights_on_cache_for_canonical_light_report(state, runtime, &node_id, lights_on, source);
+    Some(node_id)
+}
 
+/// Apply an accepted observation to its proven canonical identity. Never resolve
+/// its mutable native route again after the caller has checked identity.
+pub(crate) fn update_lights_on_cache_for_canonical_light_report(
+    state: &SharedState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    node_id: &str,
+    lights_on: bool,
+    source: ObservedPowerSource,
+) {
+    let parent_id = state.lock().ok().and_then(|s| {
+        s.topology
+            .get_device_node(node_id)
+            .and_then(|node| node.parent_id.clone())
+    });
     update_lights_on_cache_for_node_with_source(
         state,
-        &node_id,
+        node_id,
         LightNodeKind::LightDevice,
         None,
         lights_on,
         source,
     );
 
-    if let Some(parent_id) = parent_id.filter(|parent_id| parent_id != &node_id) {
+    if let Some(parent_id) = parent_id.filter(|parent_id| parent_id != node_id) {
         if lights_on {
             update_lights_on_cache_for_node_with_source(
                 state,
@@ -1938,8 +1949,6 @@ pub(crate) fn update_lights_on_cache_for_native_light_report(
             }
         }
     }
-
-    Some(node_id)
 }
 
 pub(crate) fn refresh_lights_on_cache_for_runtime_snapshot_with_source(
@@ -2538,6 +2547,7 @@ fn build_node_state_dto_from_snapshot_parts(
             kelvin,
         },
         lights_on: observed_power.lights_on,
+        observed_light: ctx.state.light_observations.get(&snap.id).cloned(),
         observed_power,
         transitioning: ctx.transitioning_nodes.contains(&snap.id),
         pending_dispatch: ctx.pending_dispatch_nodes.contains(&snap.id),
@@ -2682,6 +2692,10 @@ pub fn build_node_state_event(
             mode,
             state: room_state,
             lights_on: observed_power.lights_on,
+            observed_light: state
+                .lock()
+                .ok()
+                .and_then(|s| s.light_observations.get(&snap.id).cloned()),
             observed_power,
             transitioning,
             pending_dispatch,
@@ -3471,6 +3485,9 @@ pub fn build_selected_state_snapshot(
                 })
                 .collect();
             let capabilities = ApiCapabilitiesDto {
+                deployment: crate::api_types::DeploymentCapabilitiesDto::for_context(
+                    s.platform_context,
+                ),
                 hubs: s
                     .hub_capabilities
                     .iter()
@@ -3732,6 +3749,9 @@ fn build_state_snapshot_for_nodes(
             })
             .collect();
         let capabilities_dto = ApiCapabilitiesDto {
+            deployment: crate::api_types::DeploymentCapabilitiesDto::for_context(
+                s.platform_context,
+            ),
             hubs: s
                 .hub_capabilities
                 .iter()
@@ -7888,6 +7908,7 @@ fn clear_factory_reset_ephemeral_state(state: &SharedState) -> Result<()> {
     s.hub_reconnect_sync_at.clear();
     s.hub_pending_disconnect_at.clear();
     s.room_observed_power.clear();
+    s.light_observations.clear();
     s.light_usage.disable_shutdown_flush();
     s.light_usage = crate::light_usage::LightUsageLedger::default();
     // The on-disk ledger is removed with the data directory; the in-memory
@@ -7900,6 +7921,11 @@ fn clear_factory_reset_ephemeral_state(state: &SharedState) -> Result<()> {
     s.last_check_instant = None;
     s.last_check_utc_offset_hours = None;
     s.api_auth = crate::auth::StoredApiAuth::default();
+    if s.platform_context == "ha_addon" {
+        s.managed_ha_lights = Some(std::collections::BTreeSet::new());
+        s.require_api_auth = true;
+        s.light_breaker_enabled = false;
+    }
     s.invalidate_queued_light_dispatches();
     s.pending_hub_event_rxs.clear();
     s.pending_motion_clear.clear();
@@ -7987,12 +8013,14 @@ pub fn do_factory_reset(state: &SharedState) -> Result<String> {
         crate::hub::ExternalControllerReleaseReason::FactoryReset,
     )?;
 
-    if let Some(callback) = state
-        .lock()
-        .map_err(|_| anyhow::anyhow!("lock"))?
-        .before_factory_reset_fn
-        .clone()
-    {
+    let before_factory_reset = {
+        state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .before_factory_reset_fn
+            .clone()
+    };
+    if let Some(callback) = before_factory_reset {
         callback(state).context("preparing platform for factory reset")?;
     }
     // The platform safety barrier runs before credentials or hub state are
@@ -13543,6 +13571,14 @@ pub fn do_profile_bundle_import(
         ));
     }
 
+    if state
+        .lock()
+        .map_err(|_| anyhow::anyhow!("lock"))?
+        .platform_context
+        == "ha_addon"
+    {
+        do_light_breaker_set(state, false)?;
+    }
     let profile = bundle.profile;
 
     if let Some(schedules) = profile.light_schedules.as_ref() {
@@ -13627,7 +13663,12 @@ fn apply_backup_configuration(
 
     let imported_profiles = configuration.profiles;
     let imported_power_save = configuration.power_save;
-    let imported_light_breaker_enabled = configuration.light_breaker_enabled;
+    let imported_light_breaker_enabled = configuration.light_breaker_enabled
+        && state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("lock"))?
+            .platform_context
+            != "ha_addon";
     let imported_active_mode = configuration.active_mode;
     let imported_mode_configs = configuration.mode_configs;
     let imported_mode_transitions = configuration.mode_transitions;
@@ -14274,7 +14315,16 @@ pub fn do_node_action(
     sync_active_mode_from_runtime(state, &runtime);
     clear_room_mode_transition(state, node_id);
 
-    update_lights_on_cache_for_runtime_node(state, &runtime, node_id, turned_on);
+    // `turned_on` is false for actions that send no light command as well as
+    // actual off commands. Preserve physical readback for mode-only actions.
+    // Legacy RuntimeHandle implementations may execute I/O while returning an
+    // empty plan, so plan emptiness cannot identify these no-output actions.
+    if !matches!(
+        action,
+        ButtonAction::RhythmOn | ButtonAction::RhythmOff
+    ) {
+        update_lights_on_cache_for_runtime_node(state, &runtime, node_id, turned_on);
+    }
 
     {
         emit_node_state_event_after_apply(state, &runtime, node_id);
@@ -16987,6 +17037,7 @@ fn disconnect_hubs_after_external_controller_release(state: &SharedState) -> Res
         s.hub_credentials.clear();
 
         s.room_observed_power.clear();
+        s.light_observations.clear();
         s.motion_snapshots.clear();
 
         if let Some(ref storage) = s.storage {
@@ -27721,7 +27772,7 @@ mod tests {
 
     #[test]
     fn applying_native_scene_recalls_hue_room_and_colors_device_dispatch_companions() {
-        let (state, runtime, matter_id, _ha_id, hue_one_id, hue_two_id) =
+        let (state, runtime, matter_id, ha_id, hue_one_id, hue_two_id) =
             setup_mixed_room_with_hub_groups();
         let scene_id = crate::scenes::native_scene_id("hue", "native-palette");
         let mut native = imported_hue_scene(&scene_id, "native-palette");
@@ -27779,16 +27830,31 @@ mod tests {
             &[("native-palette".to_string(), Some(800))]
         );
         let calls = runtime.applied_commands();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, matter_id);
-        assert_eq!(calls[0].1.brightness, 66);
+        // The Hue group recalls its native scene once. Both Matter and HA
+        // companions support individual dispatch, so each receives a palette
+        // color; HA's area metadata must not suppress its explicit room action.
+        assert_eq!(calls.len(), 2);
+        let targets: HashSet<_> = calls.iter().map(|(id, _)| id.clone()).collect();
+        assert_eq!(targets, HashSet::from([matter_id.clone(), ha_id.clone()]));
+        let outputs: HashSet<_> = calls
+            .iter()
+            .map(|(_, command)| {
+                (
+                    command.brightness,
+                    command.rgb.r,
+                    command.rgb.g,
+                    command.rgb.b,
+                )
+            })
+            .collect();
         assert_eq!(
-            (calls[0].1.rgb.r, calls[0].1.rgb.g, calls[0].1.rgb.b),
-            (255, 48, 112)
+            outputs,
+            HashSet::from([(66, 255, 48, 112), (52, 40, 188, 255)])
         );
         assert!(response.affected_node_ids.contains(&hue_one_id));
         assert!(response.affected_node_ids.contains(&hue_two_id));
         assert!(response.affected_node_ids.contains(&matter_id));
+        assert!(response.affected_node_ids.contains(&ha_id));
     }
 
     #[test]

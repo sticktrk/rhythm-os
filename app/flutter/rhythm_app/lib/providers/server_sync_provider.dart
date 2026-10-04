@@ -1204,22 +1204,34 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Host capabilities from the last server hello, if the server advertises them.
   RhythmCapabilities? get serverCapabilities => _capabilities;
+  RhythmDeploymentCapabilities get deploymentCapabilities =>
+      _capabilities?.deployment ?? const RhythmDeploymentCapabilities.legacy();
+  bool get deviceManagementOwnedByHomeAssistant =>
+      deploymentCapabilities.haDeviceManagement;
+  bool get supportsFullBackupExport => deploymentCapabilities.fullBackupExport;
+  bool get supportsFullBackupImport => deploymentCapabilities.fullBackupImport;
   bool get supportsSavedWifiProfiles =>
-      _capabilities?.supportsFeature(RhythmFeature.savedWifiProfiles) == true;
+      !deviceManagementOwnedByHomeAssistant &&
+      (_capabilities?.supportsFeature(RhythmFeature.savedWifiProfiles) == true);
   bool get supportsMatterWifiChange =>
-      _capabilities?.supportsFeature(RhythmFeature.matterWifiChange) == true;
+      !deviceManagementOwnedByHomeAssistant &&
+      (_capabilities?.supportsFeature(RhythmFeature.matterWifiChange) == true);
 
   /// Hue configuration is destructive on legacy servers because they can
   /// seize bridge automation authority without a room review. New app builds
   /// therefore fail closed unless the server advertises the consent contract.
   bool get hueRoomAuthorityConsentSupported =>
-      HueServiceLocator.isDemoMode ||
-      _capabilities?.supportsFeature(RhythmFeature.hueRoomAuthorityConsent) ==
-          true;
+      !deviceManagementOwnedByHomeAssistant &&
+      (HueServiceLocator.isDemoMode ||
+          _capabilities
+                  ?.supportsFeature(RhythmFeature.hueRoomAuthorityConsent) ==
+              true);
 
   bool get hueRoomTopologySyncSupported =>
-      HueServiceLocator.isDemoMode ||
-      _capabilities?.supportsFeature(RhythmFeature.hueRoomTopologySync) == true;
+      !deviceManagementOwnedByHomeAssistant &&
+      (HueServiceLocator.isDemoMode ||
+          _capabilities?.supportsFeature(RhythmFeature.hueRoomTopologySync) ==
+              true);
 
   /// Button fan-out must fail closed because older appliances persist the
   /// additive target list but execute only its first entry.
@@ -1239,16 +1251,19 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Device-health review is additive and must fail closed for older
   /// appliances so the app never probes routes they do not own.
   bool get matterUnreachableDeviceTriageSupported =>
-      _capabilities?.supportsFeature(
-        RhythmFeature.matterUnreachableDeviceTriage,
-      ) ==
-      true;
+      !deviceManagementOwnedByHomeAssistant &&
+      (_capabilities?.supportsFeature(
+            RhythmFeature.matterUnreachableDeviceTriage,
+          ) ==
+          true);
 
   /// Whether the host explicitly advertised supported hub types.
-  bool get hasExplicitHubCapabilities => _capabilities != null;
+  bool get hasExplicitHubCapabilities =>
+      deviceManagementOwnedByHomeAssistant || _capabilities != null;
 
   /// Explicit per-hub capabilities, keyed by hub type.
   RhythmHubCapabilities? hubCapabilities(String hubType) {
+    if (deviceManagementOwnedByHomeAssistant) return null;
     final normalized = switch (hubType) {
       'home_assistant' => 'homeassistant',
       _ => hubType,
@@ -1261,6 +1276,7 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Legacy servers omit hub capability metadata entirely, so we default to
   /// the historical UI behavior when that block is absent.
   bool canConfigureHub(String hubType) {
+    if (deviceManagementOwnedByHomeAssistant) return false;
     if (!hasExplicitHubCapabilities) return true;
     return hubCapabilities(hubType)?.configurable ?? false;
   }
@@ -1307,14 +1323,16 @@ class ServerSyncProvider extends ChangeNotifier {
 
   /// Whether the appliance can return an owner-saved Matter setup payload.
   bool get canRecoverMatterSetupCode =>
-      _capabilities?.supportsFeature(RhythmFeature.matterSetupCodeRecovery) ??
-      false;
+      !deviceManagementOwnedByHomeAssistant &&
+      (_capabilities?.supportsFeature(RhythmFeature.matterSetupCodeRecovery) ??
+          false);
 
   /// Whether whole-light removal can retain a recoverable tombstone.
   bool get removedDeviceArchiveSupported =>
-      HueServiceLocator.isDemoMode ||
-      (_capabilities?.supportsFeature(RhythmFeature.removedDeviceArchive) ??
-          false);
+      !deviceManagementOwnedByHomeAssistant &&
+      (HueServiceLocator.isDemoMode ||
+          (_capabilities?.supportsFeature(RhythmFeature.removedDeviceArchive) ??
+              false));
 
   /// Whether a Matter device may exist before room assignment.
   bool get supportsMatterRoomlessDevices =>
@@ -1335,20 +1353,25 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Hue's built-in nearby scan plus every advertised light profile that
   /// names the vendor-neutral Bluetooth-to-Wi-Fi method, the service UUIDs
   /// to scan for, and a cloud broker. The app never hardcodes a vendor.
-  Set<NearbyBleFamily> get nearbyBleFamilies => {
-        if (canAddHueBleDevice) NearbyBleFamily.hueBle,
-        for (final hub
-            in _capabilities?.hubs ?? const <RhythmHubCapabilities>[])
-          if (hub.supportsDeviceOnboardingMethod(
-            RhythmDeviceOnboardingMethod.bleWifiNearbyScan,
-          ))
-            for (final profile in hub.deviceProfiles)
-              if (profile.supportsNearbyScan &&
-                  profile.cloudBroker != null &&
-                  profile.deviceType == 'light')
-                NearbyBleFamily.fromProfile(
-                    hubType: hub.type, profile: profile),
-      };
+  Set<NearbyBleFamily> get nearbyBleFamilies =>
+      deviceManagementOwnedByHomeAssistant
+          ? const {}
+          : {
+              if (canAddHueBleDevice) NearbyBleFamily.hueBle,
+              for (final hub
+                  in _capabilities?.hubs ?? const <RhythmHubCapabilities>[])
+                if (hub.supportsDeviceOnboardingMethod(
+                  RhythmDeviceOnboardingMethod.bleWifiNearbyScan,
+                ))
+                  for (final profile in hub.deviceProfiles)
+                    if (profile.supportsNearbyScan &&
+                        profile.cloudBroker != null &&
+                        profile.deviceType == 'light')
+                      NearbyBleFamily.fromProfile(
+                        hubType: hub.type,
+                        profile: profile,
+                      ),
+            };
 
   /// Whether at least one advertised profile can be added through the staged
   /// Bluetooth-to-Wi-Fi flow.
@@ -1919,6 +1942,7 @@ class ServerSyncProvider extends ChangeNotifier {
       manufacturer: previous.manufacturer,
       model: previous.model,
       lightCapabilities: previous.lightCapabilities,
+      observedLight: previous.observedLight,
       deviceIds: previous.deviceIds,
       devices: previous.devices,
       deviceCounts: previous.deviceCounts,
@@ -1989,6 +2013,7 @@ class ServerSyncProvider extends ChangeNotifier {
       manufacturer: previous.manufacturer,
       model: previous.model,
       lightCapabilities: previous.lightCapabilities,
+      observedLight: previous.observedLight,
       deviceIds: previous.deviceIds,
       devices: previous.devices,
       deviceCounts: previous.deviceCounts,
@@ -2153,6 +2178,7 @@ class ServerSyncProvider extends ChangeNotifier {
       manufacturer: previous.manufacturer,
       model: previous.model,
       lightCapabilities: previous.lightCapabilities,
+      observedLight: previous.observedLight,
       deviceIds: previous.deviceIds,
       devices: previous.devices,
       deviceCounts: previous.deviceCounts,
@@ -3600,6 +3626,10 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   void _startActivityCloudProvisioningTimer() {
+    if (deviceManagementOwnedByHomeAssistant) {
+      _stopActivityCloudProvisioningTimer();
+      return;
+    }
     if (!_connection.connected ||
         HueServiceLocator.isDemoMode ||
         !_activityCloudCanProvision()) {
@@ -3623,7 +3653,9 @@ class ServerSyncProvider extends ChangeNotifier {
       _activityCloudProvisioningTimer != null;
 
   void _ensureServerActivityCloudConfigured({String? serverInstanceId}) {
-    if (!_connection.connected) return;
+    // A phone connection or tunnel enrollment does not opt an HA installation
+    // into optional activity uploads. That needs separate explicit consent.
+    if (!_connection.connected || deviceManagementOwnedByHomeAssistant) return;
     final serverHub = _serverHub ?? _homeProvider.activeServerHub;
     if (serverHub == null ||
         HueServiceLocator.isDemoMode ||
@@ -6021,6 +6053,8 @@ class ServerSyncProvider extends ChangeNotifier {
       manufacturer: state.manufacturer ?? previous.manufacturer,
       model: state.model ?? previous.model,
       lightCapabilities: state.lightCapabilities ?? previous.lightCapabilities,
+      observedLight: RhythmObservedLight.newest(
+          previous.observedLight, state.observedLight),
       deviceIds: previous.deviceIds,
       devices: previous.devices,
       deviceCounts: previous.deviceCounts,
@@ -6073,6 +6107,7 @@ class ServerSyncProvider extends ChangeNotifier {
       manufacturer: previous.manufacturer,
       model: previous.model,
       lightCapabilities: previous.lightCapabilities,
+      observedLight: previous.observedLight,
       deviceIds: previous.deviceIds,
       devices: previous.devices,
       deviceCounts: previous.deviceCounts,
@@ -6135,6 +6170,7 @@ class ServerSyncProvider extends ChangeNotifier {
         left.moodActive != right.moodActive ||
         left.standbyEnabled != right.standbyEnabled ||
         left.standbyActive != right.standbyActive ||
+        left.observedLight != right.observedLight ||
         left.lightsOn != right.lightsOn ||
         left.brightness != right.brightness ||
         left.kelvin != right.kelvin ||
@@ -6211,6 +6247,7 @@ class ServerSyncProvider extends ChangeNotifier {
           manufacturer: state?.manufacturer,
           model: state?.model,
           lightCapabilities: state?.lightCapabilities,
+          observedLight: state?.observedLight,
           deviceIds: devices
               .where((device) => device.type == RhythmDeviceType.light)
               .map((device) => device.id)

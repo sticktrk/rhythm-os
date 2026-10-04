@@ -64,7 +64,7 @@ class HomeAssistantUsers {
 class LocalDeviceProxy {
   LocalDeviceProxy({required this.token, http.Client? client, Uri? baseUri})
       : client = client ?? http.Client(),
-        baseUri = baseUri ?? Uri.parse('http://127.0.0.1:54448/');
+        baseUri = baseUri ?? Uri.parse('http://127.0.0.1:54449/');
 
   final String token;
   final http.Client client;
@@ -208,9 +208,12 @@ class LocalAdminServer {
             403, 'Use Home Assistant to open Rhythm.');
       }
       if (request.url.path == 'health' && request.method == 'GET') {
-        await proxy.status();
-        return _json(
-            200, {'status': 'ok', 'deployment': 'home_assistant_addon'});
+        final status = await proxy.status();
+        return _json(200, {
+          'status': 'ok',
+          'deployment': 'home_assistant_addon',
+          if (status['build'] is Map<String, dynamic>) 'build': status['build'],
+        });
       }
       if (request.method != 'GET' && request.method != 'POST') {
         throw const AdminApiException(405, 'Method not allowed.');

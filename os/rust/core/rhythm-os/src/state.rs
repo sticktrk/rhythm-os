@@ -550,6 +550,8 @@ pub struct AppState {
     /// Keyed by the effective light-state cache key (topology room IDs for
     /// normal room dispatch, parent room IDs for composite/group dispatch).
     pub room_observed_power: HashMap<String, ObservedPowerState>,
+    /// Latest physical observations keyed by canonical light node. Never persisted as intent.
+    pub light_observations: HashMap<String, crate::hub::LightObservation>,
     /// Whether a `RefreshObservedPowerAfterDispatchFailure` work item is
     /// already queued. Coalesces bursts of failure outcomes (room fan-out,
     /// multi-route commands) into one authoritative re-sample.
@@ -1085,6 +1087,7 @@ impl Default for AppState {
             ),
             external_controller_policy_transaction_lock: Arc::new(Mutex::new(())),
             room_observed_power: HashMap::new(),
+            light_observations: HashMap::new(),
             observed_power_failure_refresh_queued: false,
             observed_power_resume_refresh_running: false,
             light_usage: crate::light_usage::LightUsageLedger::default(),

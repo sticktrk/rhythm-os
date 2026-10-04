@@ -46,6 +46,7 @@ class _CachedNodeState {
   final int? brightness;
   final int? kelvin;
   final RhythmLightCapabilities? lightCapabilities;
+  final RhythmObservedLight? observedLight;
   final bool? motionActive;
   final bool? motionOwned;
   final int? motionRemaining;
@@ -67,6 +68,7 @@ class _CachedNodeState {
     this.brightness,
     this.kelvin,
     this.lightCapabilities,
+    this.observedLight,
     this.motionActive,
     this.motionOwned,
     this.motionRemaining,
@@ -635,6 +637,7 @@ class RhythmConnection {
           brightness: node.brightness,
           kelvin: node.kelvin,
           lightCapabilities: node.lightCapabilities,
+          observedLight: node.observedLight,
           motionActive: node.motionActive,
           motionOwned: node.motionOwned,
           motionRemaining: node.remainingSecs,
@@ -827,6 +830,7 @@ class RhythmConnection {
             cached.lightsOn != nodeState.lightsOn ||
             cached.powerFresh != nextPowerFresh ||
             cached.powerSource != nextPowerSource ||
+            cached.observedLight != nodeState.observedLight ||
             cached.brightness != nodeState.brightness ||
             cached.kelvin != nodeState.kelvin ||
             cached.lightCapabilities != nodeState.lightCapabilities;
@@ -853,6 +857,7 @@ class RhythmConnection {
             brightness: nodeState.brightness,
             kelvin: nodeState.kelvin,
             lightCapabilities: nodeState.lightCapabilities,
+            observedLight: nodeState.observedLight,
             motionActive: motionActive,
             motionOwned: motionOwned,
             motionRemaining: motionRemaining,
@@ -910,6 +915,7 @@ class RhythmConnection {
             brightness: entry.value.brightness,
             kelvin: entry.value.kelvin,
             lightCapabilities: entry.value.lightCapabilities,
+            observedLight: entry.value.observedLight,
             warningActive: false,
             hasMotionSensor: entry.value.hasMotionSensor,
           );
@@ -1136,6 +1142,8 @@ class RhythmConnection {
               brightness: nodeState.brightness ?? existing?.brightness,
               kelvin: nodeState.kelvin ?? existing?.kelvin,
               lightCapabilities: nodeState.lightCapabilities,
+              observedLight: RhythmObservedLight.newest(
+                  existing?.observedLight, nodeState.observedLight),
               motionActive: nodeState.motionActive ?? existing?.motionActive,
               motionOwned: nodeState.motionOwned ?? existing?.motionOwned,
               motionRemaining:
@@ -1190,6 +1198,7 @@ class RhythmConnection {
                 brightness: cached.brightness,
                 kelvin: cached.kelvin,
                 lightCapabilities: cached.lightCapabilities,
+                observedLight: cached.observedLight,
                 motionActive: motionActive,
                 motionOwned: motionOwned,
                 motionRemaining: remainingSecs,
@@ -1225,6 +1234,7 @@ class RhythmConnection {
                 brightness: entry.value.brightness,
                 kelvin: entry.value.kelvin,
                 lightCapabilities: entry.value.lightCapabilities,
+                observedLight: entry.value.observedLight,
                 warningActive: false,
                 hasMotionSensor: entry.value.hasMotionSensor,
               );
@@ -1500,6 +1510,8 @@ class RhythmConnection {
         brightness: state.brightness ?? existing?.brightness,
         kelvin: state.kelvin ?? existing?.kelvin,
         lightCapabilities: state.lightCapabilities,
+        observedLight: RhythmObservedLight.newest(
+            existing?.observedLight, state.observedLight),
         motionActive: state.motionActive ?? existing?.motionActive,
         motionOwned: state.motionOwned ?? existing?.motionOwned,
         motionRemaining: state.remainingSecs ?? existing?.motionRemaining,

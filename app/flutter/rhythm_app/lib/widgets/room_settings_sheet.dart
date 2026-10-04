@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import '../providers/room_provider.dart';
 import '../providers/server_sync_provider.dart';
+import 'home_assistant_device_setup.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart'
     show
         RhythmCurveConfig,
@@ -719,6 +720,10 @@ class _RoomSettingsSheetState extends State<RoomSettingsSheet> {
   }
 
   Future<void> _showRenameDialog(BuildContext context) async {
+    if (context.read<ServerSyncProvider>().deviceManagementOwnedByHomeAssistant) {
+      await HomeAssistantDeviceSetup.show(context);
+      return;
+    }
     final controller = TextEditingController(text: _roomName);
     final isRoom = room.kind.isRoom;
     final title = isRoom ? 'Rename Room' : 'Rename Bulb';

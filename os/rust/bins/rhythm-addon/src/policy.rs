@@ -15,6 +15,10 @@ use serde_json::json;
 const READ_PATHS: &[&str] = &[
     "/health",
     "/api/state",
+    "/api/events",
+    "/api/auth/status",
+    "/api/remote-access/status",
+    "/api/addon/mobile-tokens",
     "/api/nodes/state",
     "/api/settings",
     "/api/light-breaker",
@@ -30,6 +34,11 @@ const READ_PATHS: &[&str] = &[
     "/api/curve/solar",
     "/api/topology/nodes",
     "/api/devices/canonical",
+    "/api/devices/canonical/:id",
+    "/api/device-attention",
+    "/api/topology/rooms",
+    "/api/share-bundle",
+    "/api/share-bundle/factory-default",
     "/api/triage",
     "/api/triage/count",
     "/api/history",
@@ -43,7 +52,23 @@ const READ_PATHS: &[&str] = &[
 ];
 
 const WRITE_PATHS: &[(&str, &str)] = &[
+    ("POST", "/api/addon/enrollment"),
+    ("POST", "/api/addon/enrollment/exchange"),
+    ("DELETE", "/api/addon/mobile-tokens/:id"),
+    ("POST", "/api/auth/support-token"),
+    ("POST", "/api/auth/support-session-token"),
+    ("POST", "/api/auth/support-session-token/revoke"),
+    ("PUT", "/api/remote-access/config"),
+    ("DELETE", "/api/remote-access/config"),
+    ("POST", "/api/cloud/join-proof"),
     ("PUT", "/api/addon/lights"),
+    ("PUT", "/api/share-bundle"),
+    ("POST", "/api/share-bundle/reset"),
+    ("PUT", "/api/topology/nodes/:id/controls/:kind"),
+    ("PUT", "/api/triage/:id/bind"),
+    ("PUT", "/api/triage/:id/dismiss"),
+    ("PUT", "/api/device-attention/:id/snooze"),
+    ("PUT", "/api/device-attention/:id/still-installed"),
     ("PUT", "/api/light-runtime"),
     ("POST", "/api/sync"),
     ("POST", "/api/hub/retry"),
@@ -93,7 +118,16 @@ fn matches_path(pattern: &str, path: &str) -> bool {
     pattern.len() == path.len()
         && pattern.iter().zip(path).all(|(part, actual)| {
             if part.starts_with(':') {
-                !actual.is_empty() && actual != "." && actual != ".." && !actual.contains('%')
+                percent_encoding::percent_decode_str(actual)
+                    .decode_utf8()
+                    .is_ok_and(|actual| {
+                        !actual.is_empty()
+                            && actual != "."
+                            && actual != ".."
+                            && !actual
+                                .chars()
+                                .any(|c| c == '/' || c == '\\' || c == '%' || c.is_control())
+                    })
             } else {
                 *part == actual
             }
@@ -101,7 +135,7 @@ fn matches_path(pattern: &str, path: &str) -> bool {
 }
 
 pub fn allows(method: &Method, path: &str) -> bool {
-    if path.contains('%') || path.contains('\\') {
+    if path.contains('\\') {
         return false;
     }
     if method == Method::GET {
@@ -113,7 +147,7 @@ pub fn allows(method: &Method, path: &str) -> bool {
 }
 
 pub async fn enforce(
-    State(state): State<SharedState>,
+    State(_state): State<SharedState>,
     request: Request<Body>,
     next: Next,
 ) -> Response {
@@ -124,25 +158,6 @@ pub async fn enforce(
                 "error": "This operation is unavailable in the Home Assistant add-on",
                 "code": "addon_operation_unavailable"
             })),
-        )
-            .into_response();
-    }
-    // Positive proof is required even during the interval after factory reset,
-    // when the shared state has returned to its ordinary permissive defaults.
-    let token = request
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "));
-    if !token.is_some_and(|token| {
-        state
-            .lock()
-            .ok()
-            .is_some_and(|s| s.api_auth.verify_token(token))
-    }) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "Local admin authentication required"})),
         )
             .into_response();
     }
@@ -160,8 +175,9 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
         "location_source": "home_assistant",
         "light_breaker_enabled": s.light_breaker_enabled,
         "version": s.firmware_version,
-        "capabilities": {"direct_hubs": false, "pairing": false, "cloud": false,
-            "appliance_ota": false, "profile_export": true, "full_backup_import": false},
+        "build": crate::build_info::current(),
+        "server_instance_id": s.server_instance_id,
+        "capabilities": rhythm_os::api_types::DeploymentCapabilitiesDto::for_context("ha_addon"),
     }))
 }
 
@@ -176,7 +192,6 @@ mod tests {
             (Method::POST, "/api/devices/pair"),
             (Method::PUT, "/api/backup"),
             (Method::GET, "/api/backup"),
-            (Method::PUT, "/api/remote-access/config"),
             (Method::PUT, "/api/settings"),
             (Method::POST, "/api/auth/claim"),
             (Method::GET, "/api/matter/setup-code/1"),
@@ -191,5 +206,11 @@ mod tests {
         assert!(allows(&Method::POST, "/api/scenes/evening/apply"));
         assert!(allows(&Method::PUT, "/api/config"));
         assert!(!allows(&Method::DELETE, "/api/config"));
+        assert!(allows(
+            &Method::GET,
+            "/api/devices/canonical/homeassistant%3Asupervisor%3Alight"
+        ));
+        assert!(!allows(&Method::GET, "/api/devices/canonical/a%2fb"));
+        assert!(!allows(&Method::GET, "/api/devices/canonical/%252e%252e"));
     }
 }

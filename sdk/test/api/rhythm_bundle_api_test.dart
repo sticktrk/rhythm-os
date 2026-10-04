@@ -47,6 +47,53 @@ void main() {
     });
   });
 
+  group('getDeploymentCapabilities', () {
+    void state(Map<String, dynamic> data) {
+      when(() => dio.get<Map<String, dynamic>>('api/state')).thenAnswer(
+        (_) async => Response(
+          requestOptions: RequestOptions(path: 'api/state'),
+          statusCode: 200,
+          data: data,
+        ),
+      );
+    }
+
+    test('absent capabilities preserve legacy appliance operations', () async {
+      state({'version': '0.6.632', 'nodes': []});
+      final deployment = await api.getDeploymentCapabilities();
+      expect(deployment.fullBackupExport, isTrue);
+      expect(deployment.fullBackupImport, isTrue);
+    });
+
+    test('explicit null capabilities cannot permit full appliance backup',
+        () async {
+      state({'version': '0.6.632', 'nodes': [], 'capabilities': null});
+      await expectLater(api.getDeploymentCapabilities(), throwsStateError);
+    });
+
+    test('valid older capabilities preserve the appliance contract', () async {
+      state({
+        'capabilities': {
+          'features': ['future-feature'],
+          'hubs': []
+        }
+      });
+      final deployment = await api.getDeploymentCapabilities();
+      expect(deployment.fullBackupExport, isTrue);
+    });
+
+    test('explicit deployment keeps whole backup disabled', () async {
+      state({
+        'capabilities': {
+          'deployment': {'kind': 'home_assistant_addon'}
+        }
+      });
+      final deployment = await api.getDeploymentCapabilities();
+      expect(deployment.fullBackupExport, isFalse);
+      expect(deployment.fullBackupImport, isFalse);
+    });
+  });
+
   group('putConfigurationBundle', () {
     test('sends profile bundles to the server profile-bundle route', () async {
       when(

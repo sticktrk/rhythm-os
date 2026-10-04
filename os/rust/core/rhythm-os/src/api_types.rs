@@ -304,7 +304,40 @@ pub const FEATURE_HOME_SCENE_APPLY: &str = "home_scene_apply_v1";
 
 #[derive(Clone, Debug)]
 pub struct ApiCapabilitiesDto {
+    pub deployment: Option<DeploymentCapabilitiesDto>,
     pub hubs: Vec<HubCapabilityDto>,
+}
+
+/// Explicit deployment permissions; absent on older/legacy server deployments.
+#[derive(Clone, Debug, Serialize)]
+pub struct DeploymentCapabilitiesDto {
+    pub kind: &'static str,
+    pub direct_mobile_control: bool,
+    pub event_streaming: bool,
+    pub remote_access: bool,
+    pub ha_device_management: bool,
+    pub managed_light_selection: bool,
+    pub portable_profiles: bool,
+    pub full_backup_export: bool,
+    pub full_backup_import: bool,
+    pub mobile_enrollment: bool,
+}
+
+impl DeploymentCapabilitiesDto {
+    pub fn for_context(context: &str) -> Option<Self> {
+        (context == "ha_addon").then_some(Self {
+            kind: "home_assistant_addon",
+            direct_mobile_control: true,
+            event_streaming: true,
+            remote_access: true,
+            ha_device_management: true,
+            managed_light_selection: true,
+            portable_profiles: true,
+            full_backup_export: false,
+            full_backup_import: false,
+            mobile_enrollment: true,
+        })
+    }
 }
 
 impl Serialize for ApiCapabilitiesDto {
@@ -312,37 +345,59 @@ impl Serialize for ApiCapabilitiesDto {
     where
         S: serde::Serializer,
     {
-        let mut state = serializer.serialize_struct("ApiCapabilitiesDto", 3)?;
-        state.serialize_field("api_schema_version", &API_SCHEMA_VERSION)?;
-        state.serialize_field(
-            "features",
-            &[
-                FEATURE_STATE_INCLUDES_V1,
-                FEATURE_ASYNC_DEBUG_BUNDLE_UPLOAD,
-                FEATURE_MOTION_ACTIVATION_TOGGLE,
-                FEATURE_ROOM_SCHEDULE_V1,
-                FEATURE_LIGHT_SCHEDULES_V1,
-                FEATURE_LIGHT_SCHEDULE_OVERRIDES_V1,
-                FEATURE_LIGHT_SCHEDULE_SOLAR_OFFSETS_V1,
-                FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES,
-                FEATURE_ROOM_DAY_IDLE_PROFILE_OVERRIDES,
-                FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
-                FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
-                FEATURE_HUE_ROOM_AUTHORITY_CONSENT,
-                FEATURE_MATTER_SETUP_CODE_RECOVERY,
-                FEATURE_REMOVED_DEVICE_ARCHIVE,
-                FEATURE_HUE_ROOM_TOPOLOGY_SYNC,
-                FEATURE_SCENE_MOTION_SUPPRESSION,
-                FEATURE_BUTTON_MULTI_ROOM_CONTROLS,
-                FEATURE_RESET_TO_MODE_DEFAULT,
-                FEATURE_MATTER_UNREACHABLE_DEVICE_TRIAGE,
-                FEATURE_HOME_SCENE_APPLY,
-                FEATURE_SAVED_WIFI_PROFILES,
-                FEATURE_MATTER_WIFI_CHANGE,
-                FEATURE_MATTER_WIFI_NETWORK,
-            ],
+        let mut state = serializer.serialize_struct(
+            "ApiCapabilitiesDto",
+            if self.deployment.is_some() { 4 } else { 3 },
         )?;
+        state.serialize_field("api_schema_version", &API_SCHEMA_VERSION)?;
+        let features = [
+            FEATURE_STATE_INCLUDES_V1,
+            FEATURE_ASYNC_DEBUG_BUNDLE_UPLOAD,
+            FEATURE_MOTION_ACTIVATION_TOGGLE,
+            FEATURE_ROOM_SCHEDULE_V1,
+            FEATURE_LIGHT_SCHEDULES_V1,
+            FEATURE_LIGHT_SCHEDULE_OVERRIDES_V1,
+            FEATURE_LIGHT_SCHEDULE_SOLAR_OFFSETS_V1,
+            FEATURE_ROOM_LIGHT_PROFILE_OVERRIDES,
+            FEATURE_ROOM_DAY_IDLE_PROFILE_OVERRIDES,
+            FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
+            FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
+            FEATURE_HUE_ROOM_AUTHORITY_CONSENT,
+            FEATURE_MATTER_SETUP_CODE_RECOVERY,
+            FEATURE_REMOVED_DEVICE_ARCHIVE,
+            FEATURE_HUE_ROOM_TOPOLOGY_SYNC,
+            FEATURE_SCENE_MOTION_SUPPRESSION,
+            FEATURE_BUTTON_MULTI_ROOM_CONTROLS,
+            FEATURE_RESET_TO_MODE_DEFAULT,
+            FEATURE_MATTER_UNREACHABLE_DEVICE_TRIAGE,
+            FEATURE_HOME_SCENE_APPLY,
+            FEATURE_SAVED_WIFI_PROFILES,
+            FEATURE_MATTER_WIFI_CHANGE,
+            FEATURE_MATTER_WIFI_NETWORK,
+        ];
+        let features: Vec<_> = features
+            .into_iter()
+            .filter(|feature| {
+                self.deployment.is_none()
+                    || !matches!(
+                        *feature,
+                        FEATURE_ASYNC_DEBUG_BUNDLE_UPLOAD
+                            | FEATURE_HUE_ROOM_AUTHORITY_CONSENT
+                            | FEATURE_HUE_ROOM_TOPOLOGY_SYNC
+                            | FEATURE_MATTER_SETUP_CODE_RECOVERY
+                            | FEATURE_REMOVED_DEVICE_ARCHIVE
+                            | FEATURE_MATTER_UNREACHABLE_DEVICE_TRIAGE
+                            | FEATURE_SAVED_WIFI_PROFILES
+                            | FEATURE_MATTER_WIFI_CHANGE
+                            | FEATURE_MATTER_WIFI_NETWORK
+                    )
+            })
+            .collect();
+        state.serialize_field("features", &features)?;
         state.serialize_field("hubs", &self.hubs)?;
+        if let Some(deployment) = &self.deployment {
+            state.serialize_field("deployment", deployment)?;
+        }
         state.end()
     }
 }
@@ -595,6 +650,8 @@ pub struct NodeStateDto {
     pub curve_modifier: CurveModifierDto,
     pub lights_on: bool,
     pub observed_power: ObservedPowerDto,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_light: Option<crate::hub::LightObservation>,
     pub transitioning: bool,
     pub pending_dispatch: bool,
     pub brightness: u8,
@@ -943,6 +1000,7 @@ mod tests {
                 kelvin: 4000,
             },
             lights_on: true,
+            observed_light: None,
             observed_power: ObservedPowerDto {
                 lights_on: true,
                 fresh: true,
@@ -1474,7 +1532,10 @@ mod tests {
             context: "server".into(),
             listen_port: None,
             hubs: vec![],
-            capabilities: ApiCapabilitiesDto { hubs: vec![] },
+            capabilities: ApiCapabilitiesDto {
+                deployment: None,
+                hubs: vec![],
+            },
             active_profile: ActiveProfileDto {
                 config: rhythm_core::default_rhythm_profile(),
                 effective: ActiveProfileEffectiveDto {
@@ -1561,19 +1622,20 @@ mod tests {
             context: "ha_addon".into(),
             listen_port: Some(8099),
             hubs: vec![HubDto {
-                hub_type: "hue".into(),
-                address: Some("192.168.1.2".into()),
+                hub_type: "homeassistant".into(),
+                address: Some("supervisor:80".into()),
                 connected: true,
                 startup_retry: None,
             }],
             capabilities: ApiCapabilitiesDto {
+                deployment: DeploymentCapabilitiesDto::for_context("ha_addon"),
                 hubs: vec![HubCapabilityDto {
-                    hub_type: "matter".into(),
-                    configurable: true,
-                    device_onboarding_methods: vec!["matter_on_network_setup_code".into()],
+                    hub_type: "homeassistant".into(),
+                    configurable: false,
+                    device_onboarding_methods: vec![],
                     device_profiles: Vec::new(),
-                    supports_unpairing: true,
-                    unpairable_device_types: vec!["light".into()],
+                    supports_unpairing: false,
+                    unpairable_device_types: vec![],
                     supports_roomless_devices: true,
                     blocks_room_readiness: true,
                 }],
@@ -1651,15 +1713,14 @@ mod tests {
         assert_eq!(json["listen_port"], 8099);
         assert_eq!(json["nodes"].as_array().unwrap().len(), 1);
         assert_eq!(json["nodes"][0]["name"], "Office");
-        assert_eq!(json["hubs"][0]["type"], "hue");
-        assert_eq!(json["capabilities"]["hubs"][0]["type"], "matter");
+        assert_eq!(json["hubs"][0]["type"], "homeassistant");
+        assert_eq!(json["capabilities"]["hubs"][0]["type"], "homeassistant");
         assert_eq!(
             json["capabilities"]["api_schema_version"],
             API_SCHEMA_VERSION
         );
         let features = json["capabilities"]["features"].as_array().unwrap();
         for feature in [
-            FEATURE_ASYNC_DEBUG_BUNDLE_UPLOAD,
             FEATURE_MOTION_ACTIVATION_TOGGLE,
             FEATURE_ROOM_SCHEDULE_V1,
             FEATURE_LIGHT_SCHEDULES_V1,
@@ -1667,11 +1728,6 @@ mod tests {
             FEATURE_ROOM_DAY_IDLE_PROFILE_OVERRIDES,
             FEATURE_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
             FEATURE_TARGET_GUARDED_ROOM_LIGHT_PROFILE_OVERRIDES,
-            FEATURE_HUE_ROOM_AUTHORITY_CONSENT,
-            FEATURE_MATTER_SETUP_CODE_RECOVERY,
-            FEATURE_MATTER_UNREACHABLE_DEVICE_TRIAGE,
-            FEATURE_REMOVED_DEVICE_ARCHIVE,
-            FEATURE_HUE_ROOM_TOPOLOGY_SYNC,
             FEATURE_SCENE_MOTION_SUPPRESSION,
             FEATURE_BUTTON_MULTI_ROOM_CONTROLS,
             FEATURE_RESET_TO_MODE_DEFAULT,
@@ -1679,10 +1735,42 @@ mod tests {
         ] {
             assert!(features.contains(&serde_json::json!(feature)));
         }
-        assert_eq!(
-            json["capabilities"]["hubs"][0]["device_onboarding_methods"][0],
-            "matter_on_network_setup_code"
-        );
+        for feature in [
+            FEATURE_ASYNC_DEBUG_BUNDLE_UPLOAD,
+            FEATURE_HUE_ROOM_AUTHORITY_CONSENT,
+            FEATURE_MATTER_SETUP_CODE_RECOVERY,
+            FEATURE_MATTER_UNREACHABLE_DEVICE_TRIAGE,
+            FEATURE_REMOVED_DEVICE_ARCHIVE,
+            FEATURE_HUE_ROOM_TOPOLOGY_SYNC,
+            FEATURE_SAVED_WIFI_PROFILES,
+            FEATURE_MATTER_WIFI_CHANGE,
+            FEATURE_MATTER_WIFI_NETWORK,
+        ] {
+            assert!(
+                !features.contains(&serde_json::json!(feature)),
+                "add-on cannot advertise {feature}"
+            );
+        }
+        let deployment = &json["capabilities"]["deployment"];
+        assert_eq!(deployment["kind"], "home_assistant_addon");
+        for feature in [
+            "direct_mobile_control",
+            "event_streaming",
+            "remote_access",
+            "ha_device_management",
+            "managed_light_selection",
+            "portable_profiles",
+            "mobile_enrollment",
+        ] {
+            assert_eq!(deployment[feature], true, "{feature}");
+        }
+        assert_eq!(deployment["full_backup_export"], false);
+        assert_eq!(deployment["full_backup_import"], false);
+        assert_eq!(json["capabilities"]["hubs"][0]["type"], "homeassistant");
+        assert_eq!(json["capabilities"]["hubs"][0]["configurable"], false);
+        assert!(json["capabilities"]["hubs"][0]
+            .get("device_onboarding_methods")
+            .is_none());
         assert_eq!(json["last_tick_epoch_ms"], 1700000000000u64);
         assert_eq!(json["location"]["solar_noon"], 12.4_f32 as f64);
         assert_eq!(json["location"]["solar_noon_local_time"], "12:24:00");

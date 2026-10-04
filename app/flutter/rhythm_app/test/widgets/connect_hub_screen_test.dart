@@ -10,6 +10,36 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
     show RhythmAuthStatus, RhythmCloudJoinProof;
 
 void main() {
+  test('HA enrollment does not fall back to LAN claim or device Bluetooth', () async {
+    var enrollments = 0;
+    final token = await rhythmResolveDiscoveredAuthTokenForTesting(
+      status: const RhythmAuthStatus(
+        requiresAuth: true, ownerConfigured: false, tokenCount: 0,
+        claimAvailable: false, mobileEnrollmentAvailable: true,
+      ),
+      claimLanToken: () async => throw StateError('LAN claim must not run'),
+      loadStoredToken: () async => null,
+      requestBleToken: () async => throw StateError('BLE must not run'),
+      requestEnrollmentToken: () async { enrollments++; return 'phone-token'; },
+    );
+    expect(token, 'phone-token');
+    expect(enrollments, 1);
+  });
+
+  test('HA reconnect uses durable phone token without another enrollment', () async {
+    final token = await rhythmResolveDiscoveredAuthTokenForTesting(
+      status: const RhythmAuthStatus(
+        requiresAuth: true, ownerConfigured: true, tokenCount: 1,
+        claimAvailable: false, mobileEnrollmentAvailable: true,
+      ),
+      claimLanToken: () async => throw StateError('LAN claim must not run'),
+      loadStoredToken: () async => 'existing-phone-token',
+      requestBleToken: () async => throw StateError('BLE must not run'),
+      requestEnrollmentToken: () async => throw StateError('Enrollment must not run'),
+    );
+    expect(token, 'existing-phone-token');
+  });
+
   group('Rhythm mDNS discovery helpers', () {
     test('uses Android TXT ip attribute before the resolved host', () {
       const service = BonsoirService.ignoreNorms(

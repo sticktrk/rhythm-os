@@ -23,6 +23,13 @@ use crate::transport::HaTransport;
 const DISPATCH_INFO_MS: u128 = 250;
 const DISPATCH_WARN_MS: u128 = 1000;
 
+#[derive(Clone)]
+struct HaDispatchAdmission {
+    generation: u64,
+    snapshot_revision: String,
+    ownership_revision: u64,
+}
+
 /// Light controller implementation using Home Assistant service calls.
 ///
 /// Generic over `H: HaTransport` so different platforms can provide their
@@ -60,13 +67,174 @@ impl<H: HaTransport> HaLightController<H> {
         self
     }
 
+    fn call_light_service(
+        &self,
+        service: &str,
+        data: &serde_json::Value,
+        admission: Option<&HaDispatchAdmission>,
+    ) -> anyhow::Result<()> {
+        let cache = if let Some(shared) = self.capability_state.as_ref() {
+            let state = shared.lock().map_err(|_| anyhow::anyhow!("State lock"))?;
+            let cache = self
+                .capability_hub_key
+                .as_ref()
+                .and_then(|key| state.hubs.get(key))
+                .and_then(|hub| hub.data::<crate::hub_state::HaHubData>())
+                .map(|ha| ha.event_routing_cache.clone());
+            if self.managed_addon {
+                anyhow::ensure!(cache.is_some(), "HA ownership snapshot unavailable");
+            }
+            if let Some(cache) = &cache {
+                let mut cache = cache
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("HA context lock"))?;
+                if self.managed_addon {
+                    let admission = admission
+                        .ok_or_else(|| anyhow::anyhow!("HA dispatch admission missing"))?;
+                    anyhow::ensure!(
+                        admission.generation == cache.generation
+                            && admission.snapshot_revision == cache.snapshot_revision
+                            && admission.ownership_revision == cache.ownership_revision,
+                        "HA authority changed since command planning"
+                    );
+                    anyhow::ensure!(
+                        data["entity_id"]
+                            .as_array()
+                            .is_some_and(|ids| !ids.is_empty()),
+                        "Managed HA dispatch requires reviewed entity targets"
+                    );
+                }
+                // Command admission is linearized with ownership edits and
+                // topology invalidation under the same state/cache locks.
+                // Network I/O runs after admission and never retains those locks.
+                for entity in data["entity_id"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                {
+                    if self.managed_addon {
+                        anyhow::ensure!(
+                            !self
+                                .capability_hub_key
+                                .as_ref()
+                                .is_some_and(|key| state.hub_sync_in_progress.contains(key)),
+                            "HA topology reconciliation in progress"
+                        );
+                        anyhow::ensure!(
+                            cache.lights_ready
+                                && state
+                                    .managed_ha_lights
+                                    .as_ref()
+                                    .is_some_and(|selected| selected.contains(entity))
+                                && cache.lights.get(entity).is_some_and(|entry| entry
+                                    .observation
+                                    .available()
+                                    && entry.identity.as_ref().is_some_and(|identity| cache
+                                        .reviewed
+                                        .values()
+                                        .any(|proof| proof == identity))),
+                            "HA ownership changed before dispatch admission"
+                        );
+                    }
+                }
+                for entity in data["entity_id"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                {
+                    *cache.writes_in_flight.entry(entity.to_owned()).or_default() += 1;
+                }
+            }
+            cache
+        } else {
+            None
+        };
+        let result = self.client.call_service_contexts("light", service, data);
+        if let Some(cache) = cache {
+            if let Ok(mut cache) = cache.lock() {
+                if let Ok(contexts) = &result {
+                    for context in contexts {
+                        cache.own_contexts.push_back(context.clone());
+                        while cache.own_contexts.len() > 128 {
+                            cache.own_contexts.pop_front();
+                        }
+                    }
+                }
+                for entity in data["entity_id"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                {
+                    if let Some(count) = cache.writes_in_flight.get_mut(entity) {
+                        *count = count.saturating_sub(1);
+                    }
+                    if cache.writes_in_flight.get(entity) == Some(&0) {
+                        cache.writes_in_flight.remove(entity);
+                        if let Some((observation, identity_proof, epoch)) =
+                            cache.pending_manual.remove(entity)
+                        {
+                            let external =
+                                result.as_ref().is_ok_and(|contexts| !contexts.is_empty())
+                                    && observation.context_id.as_ref().is_some_and(|context| {
+                                        !cache.own_contexts.contains(context)
+                                    });
+                            if external && epoch == cache.generation && cache.lights_ready {
+                                if let Some(tx) = &cache.deferred_tx {
+                                    if tx
+                                        .try_send(rhythm_os::hub::HubEvent::LightObserved {
+                                            hub_key: self.capability_hub_key.clone(),
+                                            device_id: entity.to_owned(),
+                                            observation,
+                                            identity_proof: Some(identity_proof),
+                                            observation_epoch: Some((
+                                                cache.observation_epoch.clone(),
+                                                epoch,
+                                            )),
+                                            external_user_change: true,
+                                        })
+                                        .is_err()
+                                    {
+                                        cache.invalidate();
+                                    }
+                                }
+                            } else if external && cache.snapshot_generation == Some(epoch) {
+                                if let Ok(proof) = serde_json::from_value::<
+                                    crate::light::HaLightIdentity,
+                                >(identity_proof)
+                                {
+                                    if cache
+                                        .lights
+                                        .get(entity)
+                                        .and_then(|entry| entry.identity.as_ref())
+                                        == Some(&proof)
+                                    {
+                                        cache
+                                            .snapshot_user_changes
+                                            .insert(entity.to_owned(), proof);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        result.map(|_| ())
+    }
+
     fn is_managed_addon(&self) -> LightControlResult<bool> {
         Ok(self.managed_addon)
     }
 
-    fn selected_devices(&self, ids: &[String]) -> LightControlResult<Vec<String>> {
+    fn selected_devices(
+        &self,
+        ids: &[String],
+    ) -> LightControlResult<(Vec<String>, Option<HaDispatchAdmission>)> {
         if !self.managed_addon {
-            return Ok(ids.to_vec());
+            return Ok((ids.to_vec(), None));
         }
         let state = self
             .capability_state
@@ -75,16 +243,46 @@ impl<H: HaTransport> HaLightController<H> {
         let s = state
             .lock()
             .map_err(|_| LightControlError::Internal("policy lock".into()))?;
-        Ok(ids
-            .iter()
-            .filter(|id| {
-                id.starts_with("light.")
-                    && s.managed_ha_lights
-                        .as_ref()
-                        .is_some_and(|allowed| allowed.contains(*id))
-            })
-            .cloned()
-            .collect())
+        let cache = self
+            .capability_hub_key
+            .as_ref()
+            .and_then(|key| s.hubs.get(key))
+            .and_then(|hub| hub.data::<crate::hub_state::HaHubData>())
+            .map(|ha| ha.event_routing_cache.clone())
+            .ok_or_else(|| {
+                LightControlError::CommandFailed("HA ownership snapshot unavailable".into())
+            })?;
+        let cache = cache
+            .lock()
+            .map_err(|_| LightControlError::Internal("HA ownership lock".into()))?;
+        if !cache.lights_ready {
+            return Err(LightControlError::CommandFailed(
+                "HA inventory requires reconciliation".into(),
+            ));
+        }
+        let admission = HaDispatchAdmission {
+            generation: cache.generation,
+            snapshot_revision: cache.snapshot_revision.clone(),
+            ownership_revision: cache.ownership_revision,
+        };
+        Ok((
+            ids.iter()
+                .filter(|id| {
+                    id.starts_with("light.")
+                        && cache.lights.get(*id).is_some_and(|entry| {
+                            entry.observation.available()
+                                && entry.identity.as_ref().is_some_and(|identity| {
+                                    cache.reviewed.values().any(|proof| proof == identity)
+                                })
+                        })
+                        && s.managed_ha_lights
+                            .as_ref()
+                            .is_some_and(|allowed| allowed.contains(*id))
+                })
+                .cloned()
+                .collect(),
+            Some(admission),
+        ))
     }
 
     fn adapt_group_command(
@@ -107,18 +305,45 @@ impl<H: HaTransport> HaLightController<H> {
         (room_label, adapted)
     }
 
+    fn device_capabilities(&self, native_ids: &[String]) -> rhythm_devices::LightCapabilities {
+        let cache = self
+            .capability_state
+            .as_ref()
+            .and_then(|state| state.lock().ok())
+            .and_then(|state| {
+                self.capability_hub_key
+                    .as_ref()
+                    .and_then(|key| state.hubs.get(key))
+                    .and_then(|hub| hub.data::<crate::hub_state::HaHubData>())
+                    .map(|ha| ha.event_routing_cache.clone())
+            });
+        if let Some(cache) = cache {
+            if let Ok(cache) = cache.lock() {
+                let caps: Vec<_> = native_ids
+                    .iter()
+                    .filter_map(|id| cache.lights.get(id).map(|entry| &entry.capabilities))
+                    .collect();
+                if caps.len() == native_ids.len() {
+                    if let Some(caps) = rhythm_devices::LightCapabilities::common_for(caps) {
+                        return caps;
+                    }
+                }
+            }
+        }
+        rhythm_os::controller_helpers::resolve_device_capabilities(
+            self.capability_state.as_ref(),
+            self.capability_hub_key.as_ref(),
+            native_ids,
+        )
+    }
+
     fn adapt_device_command(
         &self,
         native_ids: &[String],
         command: &LightingCommand,
     ) -> rhythm_devices::AdaptedCommand {
-        let caps = rhythm_os::controller_helpers::resolve_device_capabilities(
-            self.capability_state.as_ref(),
-            self.capability_hub_key.as_ref(),
-            native_ids,
-        );
         rhythm_os::controller_helpers::adapt_lighting_command(
-            &caps,
+            &self.device_capabilities(native_ids),
             command,
             ColorPreference::PreferColorTemperature,
         )
@@ -158,7 +383,7 @@ impl<H: HaTransport> HaLightController<H> {
         }
 
         let started = Instant::now();
-        if let Err(e) = self.client.call_service("light", "turn_on", &data) {
+        if let Err(e) = self.call_light_service("turn_on", &data, None) {
             tracing::warn!(
                 target: "cmd",
                 event = "ha_turn_on_failed",
@@ -226,18 +451,36 @@ impl<H: HaTransport> HaLightController<H> {
         native_ids: &[String],
         command: LightingCommand,
     ) -> LightControlResult<()> {
-        let selected = self.selected_devices(native_ids)?;
-        let native_ids = selected.as_slice();
+        let (selected, admission) = self.selected_devices(native_ids)?;
+        if self.managed_addon {
+            for id in &selected {
+                self.send_turn_on_devices(
+                    std::slice::from_ref(id),
+                    command.clone(),
+                    admission.as_ref(),
+                )?;
+            }
+            return Ok(());
+        }
+        self.send_turn_on_devices(&selected, command, admission.as_ref())
+    }
+
+    fn send_turn_on_devices(
+        &self,
+        native_ids: &[String],
+        command: LightingCommand,
+        admission: Option<&HaDispatchAdmission>,
+    ) -> LightControlResult<()> {
         if native_ids.is_empty() {
             return Ok(());
         }
         let adapted = self.adapt_device_command(native_ids, &command);
-        let fade_ms = adapted.transition_ms.unwrap_or(0) as u16;
+        let fade_ms = adapted.transition_ms.unwrap_or(0);
 
-        let mut data = serde_json::json!({
-            "entity_id": native_ids,
-            "brightness_pct": adapted.brightness.unwrap_or(0),
-        });
+        let mut data = serde_json::json!({ "entity_id": native_ids });
+        if let Some(brightness) = adapted.brightness {
+            data["brightness_pct"] = serde_json::json!(brightness);
+        }
 
         if let Some((x, y)) = adapted.xy {
             data["xy_color"] = serde_json::json!([x, y]);
@@ -250,8 +493,7 @@ impl<H: HaTransport> HaLightController<H> {
             data["transition"] = serde_json::json!(transition_secs);
         }
 
-        self.client
-            .call_service("light", "turn_on", &data)
+        self.call_light_service("turn_on", &data, admission)
             .map_err(|e| {
                 LightControlError::CommandFailed(format!(
                     "Failed to turn on devices [{}]: {}",
@@ -294,7 +536,7 @@ impl<H: HaTransport> HaLightController<H> {
         }
 
         let started = Instant::now();
-        if let Err(e) = self.client.call_service("light", "turn_off", &data) {
+        if let Err(e) = self.call_light_service("turn_off", &data, None) {
             tracing::warn!(
                 target: "cmd",
                 event = "ha_turn_off_failed",
@@ -352,7 +594,7 @@ impl<H: HaTransport> HaLightController<H> {
         native_ids: &[String],
         transition_ms: Option<u32>,
     ) -> LightControlResult<()> {
-        let selected = self.selected_devices(native_ids)?;
+        let (selected, admission) = self.selected_devices(native_ids)?;
         let native_ids = selected.as_slice();
         if native_ids.is_empty() {
             return Ok(());
@@ -361,13 +603,14 @@ impl<H: HaTransport> HaLightController<H> {
             "entity_id": native_ids,
         });
 
-        if let Some(transition_ms) = transition_ms.filter(|ms| *ms > 0) {
+        if let Some(transition_ms) = transition_ms
+            .filter(|ms| *ms > 0 && self.device_capabilities(native_ids).supports_transition)
+        {
             let transition_secs = (transition_ms as f32 / 1000.0).max(0.1);
             data["transition"] = serde_json::json!(transition_secs);
         }
 
-        self.client
-            .call_service("light", "turn_off", &data)
+        self.call_light_service("turn_off", &data, admission.as_ref())
             .map_err(|e| {
                 LightControlError::CommandFailed(format!(
                     "Failed to turn off devices [{}]: {}",
@@ -386,16 +629,66 @@ impl<H: HaTransport> HaLightController<H> {
     }
 
     fn any_devices_on(&self, native_ids: &[String]) -> LightControlResult<bool> {
+        if self.managed_addon {
+            let state = self
+                .capability_state
+                .as_ref()
+                .ok_or_else(|| LightControlError::Internal("HA state missing".into()))?
+                .lock()
+                .map_err(|_| LightControlError::Internal("HA state lock".into()))?;
+            let cache = self
+                .capability_hub_key
+                .as_ref()
+                .and_then(|key| state.hubs.get(key))
+                .and_then(|hub| hub.data::<crate::hub_state::HaHubData>())
+                .ok_or_else(|| {
+                    LightControlError::CommandFailed("HA observations unavailable".into())
+                })?
+                .event_routing_cache
+                .lock()
+                .map_err(|_| LightControlError::Internal("HA cache lock".into()))?;
+            if !cache.stream_ready || !cache.lights_ready {
+                return Err(LightControlError::CommandFailed(
+                    "HA observations disconnected or reconciling".into(),
+                ));
+            }
+            let mut unknown = false;
+            // Ownership limits writes, not physical readback. An unselected
+            // light or a temporarily empty selection must never imply off.
+            for id in native_ids {
+                match cache
+                    .lights
+                    .get(id)
+                    .and_then(|entry| entry.observation.lights_on)
+                {
+                    Some(true) => return Ok(true),
+                    Some(false) => {}
+                    None => unknown = true,
+                }
+            }
+            return if unknown {
+                Err(LightControlError::CommandFailed(
+                    "HA power observation unknown".into(),
+                ))
+            } else {
+                Ok(false)
+            };
+        }
+        let mut unknown = false;
         for entity_id in native_ids {
             match self.client.get_state(entity_id) {
                 Ok(state) if state.state == "on" => return Ok(true),
-                Ok(_) => {}
-                Err(e) => {
-                    log::warn!(target: "cmd", "Failed to get state for {}: {}", entity_id, e);
-                }
+                Ok(state) if state.state == "off" => {}
+                _ => unknown = true,
             }
         }
-        Ok(false)
+        if unknown {
+            Err(LightControlError::CommandFailed(
+                "HA power observation unknown".into(),
+            ))
+        } else {
+            Ok(false)
+        }
     }
 }
 
@@ -465,24 +758,44 @@ impl<H: HaTransport + 'static> HubLightController for HaLightController<H> {
         // identification effect across light platforms — unlike the default
         // on/off cycling, it does not perturb persisted on/brightness state
         // and works for any HA-managed light backend.
-        let mut data = match target {
-            HubDispatchTarget::Devices { native_ids } => {
-                if native_ids.is_empty() {
-                    return Err(LightControlError::CommandFailed(
-                        "HA flash: no entity_ids supplied".to_string(),
-                    ));
-                }
-                serde_json::json!({ "entity_id": native_ids })
+        let (mut data, admission) = if self.managed_addon {
+            let ids = match target {
+                HubDispatchTarget::Devices { native_ids } => native_ids.clone(),
+                HubDispatchTarget::Group { room_id, .. } => self
+                    .registry
+                    .lock()
+                    .map_err(|_| LightControlError::Internal("HA registry lock".into()))?
+                    .get_light_entities(room_id),
+            };
+            let (selected, admission) = self.selected_devices(&ids)?;
+            if selected.is_empty() {
+                return Err(LightControlError::CommandFailed(
+                    "No reviewed HA light selected for identification".into(),
+                ));
             }
-            HubDispatchTarget::Group {
-                room_id: _,
-                control_id,
-            } => serde_json::json!({ "area_id": control_id }),
+            (serde_json::json!({"entity_id":selected}), admission)
+        } else {
+            (
+                match target {
+                    HubDispatchTarget::Devices { native_ids } => {
+                        if native_ids.is_empty() {
+                            return Err(LightControlError::CommandFailed(
+                                "HA flash: no entity_ids supplied".to_string(),
+                            ));
+                        }
+                        serde_json::json!({ "entity_id": native_ids })
+                    }
+                    HubDispatchTarget::Group {
+                        room_id: _,
+                        control_id,
+                    } => serde_json::json!({ "area_id": control_id }),
+                },
+                None,
+            )
         };
         data["flash"] = serde_json::json!("short");
 
-        self.client
-            .call_service("light", "turn_on", &data)
+        self.call_light_service("turn_on", &data, admission.as_ref())
             .map_err(|e| {
                 LightControlError::CommandFailed(format!(
                     "HA flash for target {} failed: {}",
@@ -596,13 +909,59 @@ mod tests {
             s.platform_context = "ha_addon";
             s.managed_ha_lights = Some(["light.selected".into()].into());
         }
-        let controller = controller.with_capability_source(
-            state.clone(),
-            HubKey::new(
-                rhythm_os::hub::HubType::new("homeassistant"),
-                "supervisor:80",
-            ),
+        let key = HubKey::new(
+            rhythm_os::hub::HubType::new("homeassistant"),
+            "supervisor:80",
         );
+        let (hub, _rx) = crate::ha_lifecycle::connect_ha(
+            &state,
+            key.clone(),
+            crate::transport::HaConnectionConfig {
+                host: "supervisor".into(),
+                port: 80,
+                token: "test".into(),
+                use_ssl: false,
+            },
+            None,
+            |_, _, _, _| std::sync::mpsc::channel().1,
+        )
+        .unwrap();
+        let cache = hub
+            .data::<crate::hub_state::HaHubData>()
+            .unwrap()
+            .event_routing_cache
+            .clone();
+        let identity = crate::light::HaLightIdentity {
+            scope: "test".into(),
+            registry_id: "entry1".into(),
+            unique_id: "unique1".into(),
+            platform: "test".into(),
+            device_id: None,
+            config_entry_id: None,
+        };
+        {
+            let mut cache = cache.lock().unwrap();
+            cache.lights_ready = true;
+            cache
+                .reviewed
+                .insert("light.selected".into(), identity.clone());
+            cache.lights.insert(
+                "light.selected".into(),
+                crate::light::HaLightCatalogEntry {
+                    identity: Some(identity),
+                    name: "selected".into(),
+                    area_id: Some("living_room".into()),
+                    capabilities: crate::light::capabilities(
+                        &serde_json::json!({"supported_color_modes":["color_temp"]}),
+                    ),
+                    observation: crate::light::HaLightObservation::parse(
+                        &serde_json::json!({"state":"on"}),
+                    ),
+                },
+            );
+        }
+        state.lock().unwrap().hubs.insert(key.clone(), hub);
+        let controller = controller.with_capability_source(state.clone(), key);
         block_on(controller.turn_on("living_room", LightingCommand::new(80, 4000))).unwrap();
         block_on(controller.turn_off("living_room", None)).unwrap();
         let calls = controller.client.calls();
@@ -623,6 +982,40 @@ mod tests {
             .turn_off_devices(&["light.new".into()], None)
             .unwrap();
         assert_eq!(controller.client.calls().len(), 2);
+        // A command planned before a completed reconciliation cannot be admitted
+        // merely because the new inventory has become ready again.
+        let (planned, admission) = controller
+            .selected_devices(&["light.selected".into()])
+            .unwrap();
+        {
+            let mut cache = cache.lock().unwrap();
+            cache.invalidate();
+            cache.lights_ready = true;
+        }
+        assert!(controller
+            .send_turn_on_devices(&planned, LightingCommand::new(80, 4000), admission.as_ref())
+            .is_err());
+        assert_eq!(controller.client.calls().len(), 2);
+        // Removing and re-adding ownership also revokes previously planned work.
+        let (planned, admission) = controller
+            .selected_devices(&["light.selected".into()])
+            .unwrap();
+        cache.lock().unwrap().ownership_revision += 1;
+        assert!(controller
+            .send_turn_on_devices(&planned, LightingCommand::new(80, 4000), admission.as_ref())
+            .is_err());
+        assert_eq!(controller.client.calls().len(), 2);
+        cache.lock().unwrap().stream_ready = true;
+        state.lock().unwrap().managed_ha_lights = Some(Default::default());
+        assert!(controller
+            .any_devices_on(&["light.selected".into()])
+            .unwrap());
+        assert!(controller.any_devices_on(&["light.absent".into()]).is_err());
+        cache.lock().unwrap().lights_ready = false;
+        assert!(controller
+            .any_devices_on(&["light.selected".into()])
+            .is_err());
+        cache.lock().unwrap().lights_ready = true;
         state.lock().unwrap().managed_ha_lights = None; // Reset must fail closed.
         controller
             .turn_on_devices(&["light.selected".into()], LightingCommand::new(80, 4000))

@@ -25,6 +25,7 @@ import 'package:uuid/uuid.dart';
 import '../../widgets/solar_orbit.dart';
 import '../../widgets/device_details_loader.dart';
 import '../../providers/server_sync_provider.dart';
+import '../../widgets/home_assistant_device_setup.dart';
 import '../../providers/home_provider.dart';
 import '../../providers/room_provider.dart';
 import '../../services/analytics_service.dart';
@@ -3039,6 +3040,20 @@ class _RhythmServerHubManagementSectionState
     ServerSyncProvider syncProvider,
     List<Map<String, dynamic>> configuredHubs,
   ) {
+    if (syncProvider.deviceManagementOwnedByHomeAssistant) {
+      return _buildSection(
+        title: 'DEVICE SETUP',
+        children: [
+          _buildHubOptionRow(
+            icon: Icons.home_outlined,
+            label: 'Set up devices in Home Assistant',
+            color: const Color(0xFF42A5F5),
+            onTap: () => HomeAssistantDeviceSetup.show(context),
+          ),
+          _buildResyncRow(),
+        ],
+      );
+    }
     final directPairingOptions = <Widget>[
       if (widget.showHueBleAddOption)
         ..._buildHueBleAddOptionRows(syncProvider),

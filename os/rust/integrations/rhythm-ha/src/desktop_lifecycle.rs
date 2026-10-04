@@ -204,6 +204,15 @@ impl ExternalLightHubIntegration for HaIntegration {
             return Ok(HubDeviceRoomAssignmentOutcome::Unchanged);
         }
 
+        // HA owns areas in the managed deployment. A Rhythm profile/node
+        // assignment is a local behavior override, never a hidden HA mutation.
+        if state
+            .lock()
+            .map(|s| s.platform_context == "ha_addon")
+            .unwrap_or(true)
+        {
+            return Ok(HubDeviceRoomAssignmentOutcome::Unchanged);
+        }
         let target_area_id = target_area_id_for_assignment(assignment)?;
 
         let config = {
@@ -420,7 +429,13 @@ fn connect_ha_ws(
     )?;
 
     // Attach HA discovery to the hub
-    let discovery = crate::area_sync::HaDiscovery::new(discovery_config);
+    let discovery = crate::area_sync::HaDiscovery::new(discovery_config).with_live_state(
+        state,
+        hub.data::<crate::hub_state::HaHubData>()
+            .expect("HA data")
+            .event_routing_cache
+            .clone(),
+    );
     hub.discovery = Some(Arc::new(discovery));
 
     Ok((hub, event_rx))

@@ -178,11 +178,23 @@ pub fn resolve_device_capabilities(
                 .canonical_registry
                 .find_by_native_id(hub_key, native_id)
                 .and_then(|device| {
+                    if let Some(capabilities) = device
+                        .endpoints
+                        .iter()
+                        .find(|ep| &ep.hub_key == hub_key && &ep.native_id == native_id)
+                        .and_then(|ep| ep.capabilities.as_ref())
+                        .and_then(|value| value.get("light"))
+                        .and_then(|value| {
+                            serde_json::from_value::<LightCapabilities>(value.clone()).ok()
+                        })
+                    {
+                        return Some(capabilities);
+                    }
                     let manufacturer = device.manufacturer.as_deref()?;
                     let model = device.model.as_deref()?;
                     db.lookup(manufacturer, model)
+                        .map(|entry| entry.capabilities())
                 })
-                .map(|entry| entry.capabilities())
                 .unwrap_or_else(|| default_caps.clone())
         })
         .collect();

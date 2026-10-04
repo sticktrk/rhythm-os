@@ -158,6 +158,7 @@ pub fn populate_device_area_cache(state: &SharedState) {
 
     let motion_subevent_count = result.event_motion_sensors.len();
     cache.motion_subevents = result.event_motion_sensors;
+    cache.button_event_device_ids = result.button_event_device_ids;
 
     info!(target: "sys",
         "Populated event cache with {} device + {} binary_sensor + {} button event + {} motion sub-event entries",

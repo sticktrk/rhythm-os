@@ -2257,6 +2257,9 @@ impl Storage for FileStorage {
             "rooms.json",
             "managed-ha-lights.json",
             "managed-ha-lights.json.tmp",
+            "managed-ha-lights-v2.json",
+            "managed-ha-lights-v2.json.tmp",
+            "managed-ha-lights-v1.rollback.json",
             "light_profiles.json",
             "location.json",
             "settings.json",
@@ -6534,9 +6537,17 @@ mod tests {
             std::fs::write(path.join("local_ble").join("devices.json"), "{}").unwrap();
             std::fs::write(path.join("aidot_ble").join("devices.json"), "{}").unwrap();
 
+            for name in ["managed-ha-lights.json", "managed-ha-lights.json.tmp", "managed-ha-lights-v2.json", "managed-ha-lights-v2.json.tmp", "managed-ha-lights-v1.rollback.json"] {
+                std::fs::write(path.join(name), "{}").unwrap();
+            }
             storage.clear_factory_reset_state().unwrap();
 
             for name in [
+                "managed-ha-lights.json",
+                "managed-ha-lights.json.tmp",
+                "managed-ha-lights-v2.json",
+                "managed-ha-lights-v2.json.tmp",
+                "managed-ha-lights-v1.rollback.json",
                 "rooms.json",
                 "light_profiles.json",
                 "location.json",

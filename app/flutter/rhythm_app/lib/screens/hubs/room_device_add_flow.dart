@@ -6,6 +6,7 @@ import 'package:rhythm_sdk/rhythm_sdk.dart'
     show RhythmDevice, RhythmDeviceType, RhythmTopologyNode;
 
 import '../../providers/server_sync_provider.dart';
+import '../../widgets/home_assistant_device_setup.dart';
 import '../../services/analytics_service.dart';
 import '../../widgets/device_detail_sheet.dart';
 import '../../widgets/solar_orbit.dart';
@@ -157,6 +158,10 @@ Future<void> startRoomDeviceAddFlow(
   required RhythmDeviceType deviceType,
   required String analyticsSource,
 }) async {
+  if (context.read<ServerSyncProvider>().deviceManagementOwnedByHomeAssistant) {
+    await HomeAssistantDeviceSetup.show(context);
+    return;
+  }
   final selection = await showRoomDeviceAddSheet(
     context,
     roomId: roomId,

@@ -37,6 +37,7 @@ import '../screens/hubs/rhythmserver_settings_screen.dart';
 import '../services/account_cloud_sync_service.dart';
 import '../services/analytics_service.dart';
 import '../services/auth_service.dart';
+import 'mobile_enrollment_dialog.dart';
 import '../services/ble_provisioning_service.dart';
 import '../services/cloud_home_join_service.dart';
 import '../services/local_rhythm_server_service.dart';
@@ -206,7 +207,18 @@ Future<String?> rhythmResolveDiscoveredAuthTokenForTesting({
   required Future<String?> Function() claimLanToken,
   required Future<String?> Function() loadStoredToken,
   required Future<String> Function() requestBleToken,
+  Future<String> Function()? requestEnrollmentToken,
 }) async {
+  if (status?.mobileEnrollmentAvailable == true) {
+    final storedToken = await loadStoredToken();
+    if (storedToken != null && storedToken.trim().isNotEmpty) {
+      return storedToken;
+    }
+    if (requestEnrollmentToken == null) {
+      throw StateError('This installation requires a mobile connection code.');
+    }
+    return requestEnrollmentToken();
+  }
   final shouldClaimToken = status?.claimAvailable == true;
   if (status?.requiresAuth != true && !shouldClaimToken) return null;
 
@@ -1740,7 +1752,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
         _isConnecting = false;
         _connectingEndpoint = null;
         _connectError = endpointKey;
-        _connectErrorMessage = 'Could not authorize this Box';
+        _connectErrorMessage = 'Could not authorize this Rhythm Server';
       });
       return;
     }
@@ -1892,7 +1904,7 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
         _isConnecting = false;
         _connectingEndpoint = null;
         _connectError = endpointKey;
-        _connectErrorMessage = 'Could not authorize this Box';
+        _connectErrorMessage = 'Could not authorize this Rhythm Server';
       });
       return;
     }
@@ -2277,6 +2289,24 @@ class _ConnectHubScreenState extends State<ConnectHubScreen>
       claimLanToken: () => _claimOwnerTokenViaLan(baseUrl),
       loadStoredToken: () => _storedServerTokenFor(hub, baseUrl: baseUrl),
       requestBleToken: () => _requestOwnerTokenViaBle(hub),
+      requestEnrollmentToken: () async {
+        final api = RhythmAuthApi(baseUrl: '$baseUrl/');
+        if (!mounted) {
+          throw const _AuthTokenRequiredException('Connection cancelled');
+        }
+        final token = await showDialog<String>(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) =>
+              MobileEnrollmentDialog(exchange: api.exchangeMobileEnrollment),
+        );
+        if (token == null) {
+          throw const _AuthTokenRequiredException(
+            'Mobile connection cancelled',
+          );
+        }
+        return token;
+      },
     );
   }
 

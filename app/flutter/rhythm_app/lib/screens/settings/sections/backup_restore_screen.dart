@@ -74,19 +74,31 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen> {
     final serverConnected =
         serverSync.connectionState == RhythmConnectionState.connected;
     final canUseCloudBackups = CloudBackupService.instance.canUseCloudBackups;
-    final backupAvailabilityLabel = !serverConnected
-        ? 'Server not connected'
-        : (canUseCloudBackups ? null : 'Sign in required');
-    final restoreAvailabilityLabel = !serverConnected
-        ? 'Server not connected'
-        : !canUseCloudBackups
-            ? 'Sign in required'
-            : _isLoadingSnapshot
-                ? 'Checking cloud backup...'
-                : (_latestSnapshot == null ? 'No cloud backup' : null);
-    final backupEnabled = serverConnected && canUseCloudBackups;
-    final restoreEnabled =
-        backupEnabled && !_isLoadingSnapshot && _latestSnapshot != null;
+    final supportsExport = serverSync.supportsFullBackupExport;
+    final supportsImport = serverSync.supportsFullBackupImport;
+    final backupAvailabilityLabel = !supportsExport
+        ? 'Use Home Assistant backups'
+        : !serverConnected
+            ? 'Server not connected'
+            : (canUseCloudBackups ? null : 'Sign in required');
+    final restoreAvailabilityLabel = !supportsImport
+        ? 'Use Home Assistant backups'
+        : !serverConnected
+            ? 'Server not connected'
+            : !canUseCloudBackups
+                ? 'Sign in required'
+                : _isLoadingSnapshot
+                    ? 'Checking cloud backup...'
+                    : (_latestSnapshot?.hasApplianceBackup != true
+                        ? 'No appliance backup'
+                        : null);
+    final backupEnabled =
+        supportsExport && serverConnected && canUseCloudBackups;
+    final restoreEnabled = supportsImport &&
+        serverConnected &&
+        canUseCloudBackups &&
+        !_isLoadingSnapshot &&
+        _latestSnapshot?.hasApplianceBackup == true;
 
     return Scaffold(
       backgroundColor: CelestialColors.backgroundDark,
@@ -107,9 +119,11 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen> {
                         color: CelestialColors.backgroundCard,
                         borderRadius: BorderRadius.circular(14),
                       ),
-                      child: const Text(
-                        'Save the current Rhythm Server state and All Rooms layout to your cloud backup, or restore the latest cloud backup back onto the connected server.',
-                        style: TextStyle(
+                      child: Text(
+                        serverSync.deviceManagementOwnedByHomeAssistant
+                            ? 'Home Assistant backups protect this installation, including devices and integrations. Your All Rooms layout syncs with your account. Export Rhythm lighting profiles separately.'
+                            : 'Save the current Rhythm Server state and All Rooms layout to your cloud backup, or restore the latest cloud backup back onto the connected server.',
+                        style: const TextStyle(
                           color: CelestialColors.textSecondary,
                           fontSize: 14,
                           height: 1.4,
@@ -312,6 +326,7 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen> {
 
   Future<void> _backupNow(BuildContext context) async {
     final serverSync = context.read<ServerSyncProvider>();
+    if (!serverSync.supportsFullBackupExport) return;
     final homeProvider = context.read<HomeProvider>();
     final serverHub = _resolveConnectedServer(
       serverSync: serverSync,
@@ -428,6 +443,7 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen> {
 
   Future<void> _restoreFromBackup(BuildContext context) async {
     final serverSync = context.read<ServerSyncProvider>();
+    if (!serverSync.supportsFullBackupImport) return;
     final homeProvider = context.read<HomeProvider>();
     final serverHub = _resolveConnectedServer(
       serverSync: serverSync,
@@ -460,7 +476,7 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen> {
 
     final snapshot =
         _latestSnapshot ?? await cloudBackups.getSnapshotForCurrentUser();
-    if (snapshot == null) {
+    if (snapshot == null || !snapshot.hasApplianceBackup) {
       if (context.mounted) {
         setState(() {
           _latestSnapshot = null;
@@ -531,6 +547,12 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen> {
         'BackupRestoreScreen: manual restore using ${resolved.baseUrl}',
       );
       final api = resolved.bundleApi();
+      final deployment = await api.getDeploymentCapabilities();
+      if (!deployment.fullBackupImport) {
+        throw StateError(
+          'Use Home Assistant backups to restore this installation.',
+        );
+      }
       await api.putBackupBundle(snapshot.backupBundle);
       final scopeKey = RoomPageProvider.layoutScopeFor(
         home: homeProvider.currentHome,

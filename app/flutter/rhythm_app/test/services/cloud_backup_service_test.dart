@@ -54,8 +54,135 @@ class _FakeRhythmServerApi extends RhythmServerApi {
   }
 }
 
+class _DeploymentBundleApi extends RhythmBundleApi {
+  _DeploymentBundleApi(this.deployment) : super(baseUrl: 'http://test/');
+  final RhythmDeploymentCapabilities deployment;
+  int fullBackupCalls = 0;
+  int profileCalls = 0;
+  bool failCapabilities = false;
+  bool failProfiles = false;
+
+  @override
+  Future<RhythmDeploymentCapabilities> getDeploymentCapabilities() async {
+    if (failCapabilities) throw StateError('offline');
+    return deployment;
+  }
+
+  @override
+  Future<Map<String, dynamic>> getBackupBundle({bool includeSecrets = false}) async {
+    fullBackupCalls++;
+    return {'kind': 'backup_bundle', 'includes_secrets': includeSecrets};
+  }
+
+  @override
+  Future<Map<String, dynamic>> getConfigurationBundle() async {
+    profileCalls++;
+    if (failProfiles) throw StateError('profile unavailable');
+    return {'kind': 'configuration_bundle'};
+  }
+}
+
 void main() {
+  group('deployment-aware cloud snapshots', () {
+    test('HA captures portable profiles without ever requesting full backup', () async {
+      final api = _DeploymentBundleApi(const RhythmDeploymentCapabilities(
+        kind: 'home_assistant_addon', haDeviceManagement: true, portableProfiles: true,
+      ));
+      final bundles = await CloudBackupService.captureSupportedBundles(api);
+      expect(api.fullBackupCalls, 0);
+      expect(api.profileCalls, 1);
+      expect(bundles.backup['kind'], 'rhythm_portable_snapshot');
+      final snapshot = CloudBackupService.buildSnapshot(
+        userId: 'user', serverHub: Hub.server(id: 'hub', homeId: 'home', name: 'Rhythm', host: 'host'),
+        backupBundle: bundles.backup, configurationBundle: bundles.configuration,
+      );
+      expect(snapshot.hasApplianceBackup, isFalse);
+      expect(CloudBackupSnapshot.fromRow(snapshot.toUpsertJson()).hasApplianceBackup, isFalse);
+    });
+
+    test('addon automatic capture preserves the appliance rollback snapshot and identity', () {
+      final appliance = CloudBackupService.buildSnapshot(
+        userId: 'user', serverHub: Hub.server(id: 'old', homeId: 'home', name: 'Old Box', host: 'old-host'),
+        backupBundle: {'kind': 'backup_bundle', 'secret': 'rollback-token'},
+        configurationBundle: {'kind': 'configuration_bundle', 'old': true},
+        appSettingsBundle: {'all_rooms_layouts': [{'hub_key': 'old', 'pages': [['old-room']]}]},
+      );
+      final portable = CloudBackupService.buildSnapshot(
+        userId: 'user', serverHub: Hub.server(id: 'addon', homeId: 'home', name: 'New Add-on', host: 'new-host'),
+        backupBundle: {'kind': 'rhythm_portable_snapshot', 'schema_version': 1},
+        configurationBundle: {'kind': 'configuration_bundle', 'new': true},
+        appSettingsBundle: {'all_rooms_layouts': [{'hub_key': 'addon', 'pages': [['new-room']]}]},
+      );
+      final update = CloudBackupService.portableSnapshotSettingsUpdate(
+        existing: appliance, portable: portable,
+      );
+      expect(update.keys, ['app_settings_bundle']);
+      final stored = CloudBackupSnapshot.fromRow({...appliance.toUpsertJson(), ...update});
+      expect(stored.sourceHubId, 'old');
+      expect(stored.sourceHubHost, 'old-host');
+      expect(stored.backupBundle, appliance.backupBundle);
+      expect(stored.configurationBundle, appliance.configurationBundle);
+      expect(stored.hasApplianceBackup, isTrue);
+      expect(stored.appSettingsBundle['all_rooms_layouts'], hasLength(2));
+    });
+
+    test('legacy server keeps full secret-bearing appliance backup', () async {
+      final api = _DeploymentBundleApi(const RhythmDeploymentCapabilities.legacy());
+      final bundles = await CloudBackupService.captureSupportedBundles(api);
+      expect(api.fullBackupCalls, 1);
+      expect(bundles.backup['includes_secrets'], isTrue);
+    });
+
+    test('failed capability read cannot downgrade to legacy backup', () async {
+      final api = _DeploymentBundleApi(const RhythmDeploymentCapabilities.legacy())
+        ..failCapabilities = true;
+      await expectLater(CloudBackupService.captureSupportedBundles(api), throwsStateError);
+      expect(api.fullBackupCalls, 0);
+      expect(api.profileCalls, 0);
+    });
+
+    test('portable profile failures never produce a successful empty snapshot', () async {
+      final api = _DeploymentBundleApi(const RhythmDeploymentCapabilities(
+        kind: 'home_assistant_addon', portableProfiles: true,
+      ))..failProfiles = true;
+      await expectLater(CloudBackupService.captureSupportedBundles(api), throwsStateError);
+      expect(api.fullBackupCalls, 0);
+    });
+  });
+
   group('CloudBackupService.buildSnapshot', () {
+    test('repeated portable capture refreshes profiles and source metadata',
+        () {
+      CloudBackupSnapshot portable(String profile, DateTime capturedAt) =>
+          CloudBackupService.buildSnapshot(
+            userId: 'user',
+            serverHub: Hub.server(
+              id: 'addon',
+              homeId: 'home',
+              name: 'Add-on',
+              host: 'ha-host',
+            ),
+            backupBundle: {
+              'kind': 'rhythm_portable_snapshot',
+              'schema_version': 1
+            },
+            configurationBundle: {'kind': 'profile_bundle', 'profile': profile},
+            appSettingsBundle: const {},
+            capturedAt: capturedAt,
+          );
+      final old = portable('old', DateTime.utc(2026, 1, 1));
+      final current = portable('current', DateTime.utc(2026, 1, 2));
+      final update = CloudBackupService.portableSnapshotSettingsUpdate(
+        existing: old,
+        portable: current,
+      );
+      final stored =
+          CloudBackupSnapshot.fromRow({...old.toUpsertJson(), ...update});
+      expect(stored.configurationBundle, current.configurationBundle);
+      expect(stored.capturedAt, current.capturedAt);
+      expect(stored.hasApplianceBackup, isFalse);
+    });
+
     test('stamps source hub metadata on the single-user snapshot', () {
       final snapshot = CloudBackupService.buildSnapshot(
         userId: 'user-123',

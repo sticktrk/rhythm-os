@@ -94,6 +94,13 @@ export type NodeSummary = {
   disabled?: boolean;
   brightness?: number;
   kelvin?: number;
+  observedLight?: {
+    availability: string;
+    powerOn?: boolean;
+    brightness?: number;
+    kelvin?: number;
+    receivedAt?: number;
+  };
   profileOverrides: JsonRecord;
   raw: Record<string, unknown>;
 };
@@ -108,6 +115,10 @@ export function parseNodes(payload: unknown): NodeSummary[] {
       const state = asRecord(raw.state);
       const id = asString(raw.node_id) ?? asString(raw.id);
       if (!id) return null;
+      const observed = asRecord(raw.observed_light ?? state.observed_light);
+      const observedBrightness = asNumber(observed.brightness);
+      const observedKelvin = asNumber(observed.kelvin);
+      const receivedAt = asNumber(observed.received_at_epoch_ms);
       return {
         id,
         name: asString(raw.name) ?? asString(raw.label) ?? id,
@@ -125,11 +136,60 @@ export function parseNodes(payload: unknown): NodeSummary[] {
           asNumber(raw.kelvin) ??
           asNumber(state.kelvin) ??
           asNumber(raw.color_temperature),
+        observedLight: Object.keys(observed).length > 0 ? {
+          availability: asString(observed.availability) ?? 'unknown',
+          powerOn: asBoolean(observed.lights_on),
+          brightness: observedBrightness !== undefined && observedBrightness >= 0 && observedBrightness <= 100
+            ? observedBrightness : undefined,
+          kelvin: observedKelvin !== undefined && observedKelvin > 0 ? observedKelvin : undefined,
+          receivedAt: receivedAt !== undefined && receivedAt > 0 && receivedAt <= 8.64e15
+            ? receivedAt : undefined
+        } : undefined,
         profileOverrides: profileOverridesFromNode(raw),
         raw
       };
     })
     .filter((node): node is NodeSummary => node !== null);
+}
+
+function readbackStatus(node: NodeSummary, stale: boolean) {
+  if (stale) return 'Stale';
+  const observed = node.observedLight;
+  if (!observed) return 'Not reported';
+  if (observed.availability === 'unavailable') return 'Unavailable';
+  if (observed.availability === 'disconnected') return 'Disconnected';
+  if (observed.availability !== 'available' || observed.powerOn === undefined) return 'Unknown';
+  return observed.powerOn ? 'On' : 'Off';
+}
+
+export function NodeReadout({ node, stale = false, compact = false }: {
+  node: NodeSummary; stale?: boolean; compact?: boolean;
+}) {
+  const observed = node.observedLight;
+  const current = !stale && observed?.availability === 'available';
+  const status = readbackStatus(node, stale);
+  if (compact) {
+    const values = observed
+      ? [observed.brightness !== undefined ? `${Math.round(observed.brightness)}%` : null,
+          observed.kelvin !== undefined ? `${Math.round(observed.kelvin)}K` : null].filter(Boolean).join(' ')
+      : [node.brightness !== undefined ? `${Math.round(node.brightness)}%` : null,
+          node.kelvin !== undefined ? `${Math.round(node.kelvin)}K` : null].filter(Boolean).join(' ');
+    return <span className="nodeItemMeta readout">
+      {observed ? `${current ? 'Observed' : 'Last reported'}: ${status}${values ? ` · ${values}` : ''}`
+        : `${stale ? 'Last requested' : 'Requested'}: ${values || 'unknown'}`}
+    </span>;
+  }
+  if (!observed) return <p className="cardNote">Current light state is not reported by this device.</p>;
+  const values = [observed.powerOn === undefined ? 'Power unknown' : observed.powerOn ? 'On' : 'Off',
+    observed.brightness === undefined ? 'Brightness unknown' : `${Math.round(observed.brightness)}%`,
+    observed.kelvin === undefined ? 'Color temp unknown' : `${Math.round(observed.kelvin)}K`].join(' · ');
+  const reportedAt = observed.receivedAt === undefined ? null : new Date(observed.receivedAt);
+  return <div className="nodeObservedState" aria-label="Observed light state">
+    <strong>{current ? 'Observed' : `Last reported · ${status}`}</strong>
+    <span className="readout">{values}</span>
+    {reportedAt ? <span className="cardNote">Reported <time dateTime={reportedAt.toISOString()}>{reportedAt.toLocaleString()}</time></span> : null}
+    {!current ? <span className="cardNote">Current light state is unknown.</span> : null}
+  </div>;
 }
 
 export default function NodesPage() {
@@ -183,8 +243,8 @@ export default function NodesPage() {
         </div>
       </header>
 
-      {nodesQuery.error && !nodesQuery.data ? (
-        <ErrorNotice message={nodesQuery.error} />
+      {nodesQuery.error ? (
+        <ErrorNotice message={nodesQuery.data ? `Refresh failed. Showing last reported values. ${nodesQuery.error}` : nodesQuery.error} />
       ) : null}
 
       <div className="nodesLayout">
@@ -206,13 +266,10 @@ export default function NodesPage() {
                     onClick={() => setSelectedId(node.id)}
                   >
                     <span
-                      className={`nodeDot${node.powerOn ? ' on' : ''}${node.disabled ? ' disabled' : ''}`}
+                      className={`nodeDot${!nodesQuery.error && (node.observedLight ? readbackStatus(node, false) === 'On' : node.powerOn) ? ' on' : ''}${node.disabled ? ' disabled' : ''}`}
                     />
                     <span className="nodeItemName">{node.name}</span>
-                    <span className="nodeItemMeta readout">
-                      {node.brightness !== undefined ? `${Math.round(node.brightness)}%` : ''}
-                      {node.kelvin !== undefined ? ` ${Math.round(node.kelvin)}K` : ''}
-                    </span>
+                    <NodeReadout node={node} stale={Boolean(nodesQuery.error)} compact />
                   </button>
                 ))}
               </div>
@@ -230,6 +287,7 @@ export default function NodesPage() {
                   ?.profileOverrides ?? {}
               }
               onWrite={nodesQuery.refresh}
+              snapshotStale={Boolean(nodesQuery.error)}
               lightSettingsProfiles={lightSettingsProfiles}
               lightSettingsSupport={lightSettingsSupport}
               lightSettingsLoading={stateQuery.loading}
@@ -251,7 +309,8 @@ export function NodeDetail({
   lightSettingsProfiles,
   lightSettingsSupport,
   lightSettingsLoading,
-  lightSettingsError
+  lightSettingsError,
+  snapshotStale = false
 }: {
   node: NodeSummary;
   parentProfileOverrides: JsonRecord;
@@ -260,10 +319,14 @@ export function NodeDetail({
   lightSettingsSupport: LightProfileOverrideSupport;
   lightSettingsLoading: boolean;
   lightSettingsError: string | null;
+  snapshotStale?: boolean;
 }) {
   const client = useDeviceClient();
   const localDevice = useLocalDevice();
   const lightAddressable = isLightAddressableKind(node.kind);
+  const observedStatus = readbackStatus(node, snapshotStale);
+  const powerLabel = node.observedLight || snapshotStale ? observedStatus
+    : node.powerOn === undefined ? 'Unknown' : `Requested ${node.powerOn ? 'on' : 'off'}`;
 
   const [colorScope, setColorScope] = useState<'preview' | 'mood' | 'auto'>('auto');
   const [wheelRgb, setWheelRgb] = useState<RgbColor>({ r: 255, g: 180, b: 120 });
@@ -288,13 +351,14 @@ export function NodeDetail({
         error={write.error}
         rawPayload={node.raw}
         actions={
-          <span className={`consoleStatus${node.powerOn ? ' online' : ' idle'}`}>
-            {node.powerOn ? 'On' : 'Off'}
+          <span className={`consoleStatus${observedStatus === 'On' ? ' online' : ' idle'}`}>
+            {powerLabel}
           </span>
         }
       >
         {lightAddressable ? (
           <>
+            <NodeReadout node={node} stale={snapshotStale} />
             <div className="actionRow">
               {NODE_ACTIONS.map((action) => (
                 <button
@@ -311,8 +375,9 @@ export function NodeDetail({
               ))}
             </div>
 
+            <p className="cardNote">Controls set Rhythm’s requested values. Device reports may differ.</p>
             <Slider
-              label="Brightness"
+              label="Requested brightness"
               value={node.brightness ?? 50}
               min={1}
               max={100}
@@ -323,7 +388,7 @@ export function NodeDetail({
               }
             />
             <KelvinSlider
-              label="Color temp"
+              label="Requested color temp"
               value={node.kelvin ?? 3000}
               min={500}
               max={6500}

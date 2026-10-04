@@ -3961,6 +3961,96 @@ void main() {
       connection.dispose();
     });
 
+    test('HA observations update readback without replacing desired light output', () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+      );
+      addTearDown(provider.dispose);
+      connection.emitHello(RhythmHello.fromJson({
+        'nodes': [{
+          'id': 'light-1', 'name': 'Light', 'kind': 'light_device',
+          'state': 'active', 'rhythm_enabled': true,
+          'brightness': 80, 'kelvin': 4000,
+          'observed_light': {
+            'availability': 'available', 'lights_on': true,
+            'brightness': 23, 'kelvin': 2700, 'received_at_epoch_ms': 100,
+          },
+        }],
+      }));
+      await Future<void>.delayed(Duration.zero);
+      expect(provider.nodeById('light-1')?.observedLight?.brightness, 23);
+      var notifications = 0;
+      provider.addListener(() => notifications++);
+      connection.emitRhythmState(RhythmRoomState.fromJson({
+        'id': 'light-1', 'state': 'active', 'rhythm_enabled': true,
+        'brightness': 80, 'kelvin': 4000,
+        'observed_light': {
+          'availability': 'unavailable', 'lights_on': null,
+          'received_at_epoch_ms': 200,
+        },
+      }));
+      await Future<void>.delayed(Duration.zero);
+      final light = provider.nodeById('light-1')!;
+      expect(light.observedLight?.availability, RhythmLightAvailability.unavailable);
+      expect(light.observedLight?.currentLightsOn, isNull);
+      expect(light.brightness, 80);
+      expect(light.kelvin, 4000);
+      expect(notifications, greaterThan(0));
+      connection.emitRhythmState(RhythmRoomState.fromJson({
+        'id': 'light-1', 'state': 'active', 'rhythm_enabled': true,
+        'observed_light': {
+          'availability': 'available', 'lights_on': false,
+          'received_at_epoch_ms': 150,
+        },
+      }));
+      await Future<void>.delayed(Duration.zero);
+      expect(provider.nodeById('light-1')?.observedLight?.availability,
+          RhythmLightAvailability.unavailable);
+    });
+
+    test('HA ownership overrides legacy physical setup and backup capabilities', () async {
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: _TestHomeProvider(const []),
+        activityCloudCanProvision: () => true,
+      );
+      addTearDown(provider.dispose);
+      connection.emitHello(RhythmHello.fromJson({
+        'rooms': const <Map<String, dynamic>>[],
+        'location': const <String, dynamic>{},
+        'capabilities': {
+          'features': [RhythmFeature.savedWifiProfiles, RhythmFeature.matterSetupCodeRecovery, RhythmFeature.removedDeviceArchive],
+          'deployment': {
+            'kind': 'home_assistant_addon',
+            'ha_device_management': true,
+            'portable_profiles': true,
+          },
+          // Even an inconsistent older hub descriptor cannot re-enable setup.
+          'hubs': [{
+            'type': 'matter',
+            'configurable': true,
+            'supports_unpairing': true,
+            'device_onboarding_methods': ['matter_on_network_setup_code'],
+          }],
+        },
+      }));
+      await Future<void>.delayed(Duration.zero);
+      expect(provider.deviceManagementOwnedByHomeAssistant, isTrue);
+      expect(provider.canConfigureHub('matter'), isFalse);
+      expect(provider.canAddMatterDevice, isFalse);
+      expect(provider.canUnpairMatterDevices, isFalse);
+      expect(provider.canScanToAddDevice, isFalse);
+      expect(provider.supportsFullBackupExport, isFalse);
+      expect(provider.supportsFullBackupImport, isFalse);
+      expect(provider.activityCloudProvisioningTimerActive, isFalse);
+      expect(provider.supportsSavedWifiProfiles, isFalse);
+      expect(provider.canRecoverMatterSetupCode, isFalse);
+      expect(provider.removedDeviceArchiveSupported, isFalse);
+    });
+
     test('uses device_onboarding_methods from the hello capabilities payload',
         () async {
       final homeProvider = _TestHomeProvider(const []);
