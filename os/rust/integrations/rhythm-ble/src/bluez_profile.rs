@@ -13,7 +13,7 @@ use rhythm_os::hub::HubEvent;
 use rhythm_os::pairing::PairingFailureStage;
 use rhythm_os::registry::HubDeviceRegistry;
 
-use crate::bluez::{BluezClient, BluezDriverId, ScanObservation, ScannerHealth};
+use crate::bluez::{BluezClient, BluezDriverId, ScanDemand, ScanObservation, ScannerHealth};
 use crate::profile::{
     decode_profile_events, profile_by_id, profiles, BleAdvertisement, BleDeviceProfile,
     BleProfileAdmission, ValidatedBleSetup,
@@ -60,7 +60,7 @@ impl BluezLocalBleTransport {
         on_ready: &mut dyn FnMut(),
     ) -> Result<BluezAssociationOutcome> {
         let mut observations = install_association_listener(
-            || client.subscribe_services(profile_services(profile)),
+            || client.subscribe_demand(profile_demand(profile)),
             on_ready,
         )?;
         let proof_deadline = tokio::time::Instant::from_std(deadline.proof_end());
@@ -281,19 +281,25 @@ impl BluezLocalBleTransport {
         let mut connected = false;
         // Configuring the hub alone is not scan demand. Advertisement-only
         // buttons/sensors need a live stream only after an active association.
-        let services = loop {
+        let mut idle_health = IdleHealthCadence::default();
+        let demand = loop {
             if shutdown.load(Ordering::Acquire) {
                 return Ok(());
             }
-            if let Some(services) = monitor_services(&store) {
-                break services;
+            // The store is in memory, so a new association is noticed within
+            // a second. The adapter health read is a D-Bus round trip and
+            // runs far less often on an otherwise silent adapter.
+            if let Some(demand) = monitor_demand(&store) {
+                break demand;
             }
-            if let Some(health) = client.idle_broker_health().await? {
-                publish_scanner_health(health, &mut connected, &event_tx);
+            if idle_health.due(tokio::time::Instant::now()) {
+                if let Some(health) = client.idle_broker_health().await? {
+                    publish_scanner_health(health, &mut connected, &event_tx);
+                }
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
         };
-        let (mut observations, mut scanner_health) = client.subscribe_broker(services.clone())?;
+        let (mut observations, mut scanner_health) = client.subscribe_broker(demand.clone())?;
         let mut configuration_tick = tokio::time::interval(Duration::from_millis(500));
         configuration_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let initial_health = *scanner_health.borrow();
@@ -309,7 +315,7 @@ impl BluezLocalBleTransport {
                 }
                 observation = observations.recv() => observation?,
                 _ = configuration_tick.tick() => {
-                    if monitor_services(&store).as_ref() != Some(&services) { return Ok(()); }
+                    if monitor_demand(&store).as_ref() != Some(&demand) { return Ok(()); }
                     continue;
                 },
             };
@@ -359,29 +365,62 @@ impl BluezLocalBleTransport {
     }
 }
 
-fn profile_services(profile: &dyn BleDeviceProfile) -> HashSet<uuid::Uuid> {
-    profile
-        .advertisement_services()
-        .iter()
-        .filter_map(|service| uuid::Uuid::parse_str(service).ok())
-        .collect()
+/// How often an idle monitor confirms the adapter is still powered.
+const IDLE_HEALTH_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Spaces adapter health reads while no device needs discovery. The first
+/// check is immediate so hub health is published on entry.
+#[derive(Default)]
+struct IdleHealthCadence {
+    next: Option<tokio::time::Instant>,
 }
 
-fn monitor_services(store: &LocalBleDeviceStore) -> Option<HashSet<uuid::Uuid>> {
-    let requests = store
+impl IdleHealthCadence {
+    fn due(&mut self, now: tokio::time::Instant) -> bool {
+        if self.next.is_some_and(|next| now < next) {
+            return false;
+        }
+        self.next = Some(now + IDLE_HEALTH_INTERVAL);
+        true
+    }
+}
+
+fn profile_demand(profile: &dyn BleDeviceProfile) -> ScanDemand {
+    ScanDemand {
+        services: profile
+            .advertisement_services()
+            .iter()
+            .filter_map(|service| uuid::Uuid::parse_str(service).ok())
+            .collect(),
+        duplicate_data: profile.requires_duplicate_advertisements(),
+    }
+}
+
+fn monitor_demand(store: &LocalBleDeviceStore) -> Option<ScanDemand> {
+    let demands = store
         .all()
         .into_iter()
         .filter(|device| !device.blocked)
         .filter_map(|device| profile_by_id(&device.profile_id))
-        .map(profile_services)
+        .map(profile_demand)
         .collect::<Vec<_>>();
-    if requests.is_empty() {
+    if demands.is_empty() {
         return None;
     }
-    if requests.iter().any(HashSet::is_empty) {
-        return Some(HashSet::new());
-    }
-    Some(requests.into_iter().flatten().collect())
+    let duplicate_data = demands.iter().any(|demand| demand.duplicate_data);
+    // One profile without an advertised service makes the union broad.
+    let services = if demands.iter().any(|demand| demand.services.is_empty()) {
+        HashSet::new()
+    } else {
+        demands
+            .into_iter()
+            .flat_map(|demand| demand.services)
+            .collect()
+    };
+    Some(ScanDemand {
+        services,
+        duplicate_data,
+    })
 }
 
 fn transport_hint_matches(stored_hint: &str, observed_address: bluer::Address) -> bool {
@@ -587,7 +626,7 @@ mod tests {
             rand::random::<u64>()
         ));
         let store = LocalBleDeviceStore::load(&root).unwrap();
-        assert!(monitor_services(&store).is_none());
+        assert!(monitor_demand(&store).is_none());
         let profile = profile_by_id(crate::profile::OREIN_OC02001_PROFILE_ID).unwrap();
         let setup = profile.parse_pairing_setup(&serde_json::json!({
             "ble_identity": "0A0B0C0D0E0F", "serial_metadata": "SYNTHETIC000001", "model_metadata": "TESTMODEL001"
@@ -601,15 +640,31 @@ mod tests {
             1,
         );
         store.upsert(device.clone()).unwrap();
-        assert!(monitor_services(&store).is_none());
+        assert!(monitor_demand(&store).is_none());
         device.blocked = false;
         store.upsert(device.clone()).unwrap();
-        assert_eq!(monitor_services(&store), Some(profile_services(profile)));
-        assert!(monitor_services(&store).unwrap().is_empty());
+        assert_eq!(monitor_demand(&store), Some(profile_demand(profile)));
+        // Orein is broad but carries a rolling counter: no duplicate reports.
+        assert!(monitor_demand(&store).unwrap().services.is_empty());
+        assert!(!monitor_demand(&store).unwrap().duplicate_data);
         device.blocked = true;
         store.upsert(device).unwrap();
-        assert!(monitor_services(&store).is_none());
+        assert!(monitor_demand(&store).is_none());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn idle_monitor_spaces_adapter_health_reads() {
+        let mut cadence = IdleHealthCadence::default();
+        let start = tokio::time::Instant::now();
+        let mut probes = 0;
+        for second in 0..60 {
+            if cadence.due(start + Duration::from_secs(second)) {
+                probes += 1;
+            }
+        }
+        // Immediately on entry, then every 15 s: 0, 15, 30 and 45 s.
+        assert_eq!(probes, 4);
     }
 
     #[test]

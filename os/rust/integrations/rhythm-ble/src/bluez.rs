@@ -141,12 +141,33 @@ pub struct ScanObservation {
     pub observed_at: Instant,
 }
 
+/// What one consumer needs from the shared discovery session.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScanDemand {
+    /// Advertised services for the BlueZ filter. Empty means broad discovery,
+    /// for profiles that are identified by manufacturer or service data only.
+    pub services: HashSet<Uuid>,
+    /// Report every advertisement even when its payload repeats. BlueZ
+    /// otherwise signals manufacturer/service data only when it changes, which
+    /// loses repeated events from a protocol whose frames carry no counter.
+    pub duplicate_data: bool,
+}
+
+impl ScanDemand {
+    pub fn services(services: impl IntoIterator<Item = Uuid>) -> Self {
+        Self {
+            services: services.into_iter().collect(),
+            duplicate_data: false,
+        }
+    }
+}
+
 /// A discovery request lives exactly as long as its observation subscription.
 /// Empty UUID sets deliberately mean broad discovery for profiles without an
 /// advertised service; the union must never narrow another consumer's request.
 struct ScanRequests {
     next_id: AtomicU64,
-    requests: Mutex<HashMap<u64, (HashSet<Uuid>, bool)>>,
+    requests: Mutex<HashMap<u64, (ScanDemand, bool)>>,
     filter_tx: watch::Sender<Option<DiscoveryFilter>>,
 }
 
@@ -161,13 +182,13 @@ impl Default for ScanRequests {
 }
 
 impl ScanRequests {
-    fn acquire(self: &Arc<Self>, services: HashSet<Uuid>, fresh_rssi: bool) -> Result<ScanRequest> {
+    fn acquire(self: &Arc<Self>, demand: ScanDemand, fresh_rssi: bool) -> Result<ScanRequest> {
         let mut requests = self
             .requests
             .lock()
             .map_err(|_| anyhow::anyhow!("Bluetooth scan demand lock poisoned"))?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        requests.insert(id, (services, fresh_rssi));
+        requests.insert(id, (demand, fresh_rssi));
         self.publish(&requests);
         Ok(ScanRequest {
             owner: self.clone(),
@@ -175,16 +196,23 @@ impl ScanRequests {
         })
     }
 
-    fn publish(&self, requests: &HashMap<u64, (HashSet<Uuid>, bool)>) {
+    fn publish(&self, requests: &HashMap<u64, (ScanDemand, bool)>) {
         let filter = (!requests.is_empty()).then(|| {
             let mut filter = broad_discovery_filter();
-            if requests.values().all(|(services, _)| !services.is_empty()) {
+            if requests
+                .values()
+                .all(|(demand, _)| !demand.services.is_empty())
+            {
                 filter.uuids = requests
                     .values()
-                    .flat_map(|(services, _)| services)
+                    .flat_map(|(demand, _)| &demand.services)
                     .copied()
                     .collect();
             }
+            // Duplicate reporting is the costly mode: every packet from every
+            // matching device becomes a signal. Only a consumer that cannot
+            // work from changed payloads may turn it on.
+            filter.duplicate_data = requests.values().any(|(demand, _)| demand.duplicate_data);
             // During bounded pairing, RSSI supplies fresh presence even when
             // BlueZ already knows the device and its payload is unchanged.
             // Background button monitoring only needs changed payloads.
@@ -819,28 +847,20 @@ impl RuntimeCore {
                 backoff = SCAN_RESTART_MIN_BACKOFF;
                 continue;
             }
-            if result.is_err() {
-                // Any scan-stage error may represent adapter or D-Bus loss.
-                // Never retry indefinitely through a cached dead proxy.
-                self.invalidate_current_context().await;
-            }
+            // Only a failed scan reaches this point. Any scan-stage error may
+            // represent adapter or D-Bus loss: never retry indefinitely
+            // through a cached dead proxy.
+            self.invalidate_current_context().await;
             self.scanner_health_tx
                 .send_replace(ScannerHealth::Recovering);
             self.supervisor_restarts.fetch_add(1, Ordering::Relaxed);
             if let Ok(mut stage) = self.last_failure_stage.lock() {
-                *stage = Some(if result.is_err() {
-                    "scan"
-                } else {
-                    "stream_ended"
-                });
+                *stage = Some("scan");
             }
-            if let Err(error) = result {
-                tracing::warn!(
-                    target: "ble",
-                    "Shared Bluetooth scanner restarting after bounded scan failure at scan stage"
-                );
-                let _ = error;
-            }
+            tracing::warn!(
+                target: "ble",
+                "Shared Bluetooth scanner restarting after bounded scan failure at scan stage"
+            );
             tokio::select! {
                 _ = tokio::time::sleep(backoff) => {}
                 changed = reservation_rx.changed() => {
@@ -1139,7 +1159,7 @@ impl RuntimeCore {
 
     fn subscribe(
         self: &Arc<Self>,
-        services: HashSet<Uuid>,
+        demand: ScanDemand,
         fresh_rssi: bool,
     ) -> Result<ScanSubscription> {
         // Subscriptions are deliberately fresh-only. Cached observations are
@@ -1151,7 +1171,7 @@ impl RuntimeCore {
             .map_err(|_| anyhow::anyhow!("shared Bluetooth observation cache poisoned"))?;
         prune_observations(&mut observations, Instant::now());
         drop(observations);
-        let request = self.scan_requests.acquire(services, fresh_rssi)?;
+        let request = self.scan_requests.acquire(demand, fresh_rssi)?;
         self.ensure_scanner_started()?;
         Ok(ScanSubscription {
             _request: Some(request),
@@ -1667,7 +1687,7 @@ impl BluezClient {
 
     pub fn subscribe(&self) -> Result<ScanSubscription> {
         self.ensure_active()?;
-        self.core.subscribe(HashSet::new(), true)
+        self.core.subscribe(ScanDemand::default(), true)
     }
 
     /// Request discovery for the advertised services needed by this consumer.
@@ -1676,8 +1696,13 @@ impl BluezClient {
         &self,
         services: impl IntoIterator<Item = Uuid>,
     ) -> Result<ScanSubscription> {
+        self.subscribe_demand(ScanDemand::services(services))
+    }
+
+    /// Request bounded, presence-fresh discovery for one consumer's demand.
+    pub(crate) fn subscribe_demand(&self, demand: ScanDemand) -> Result<ScanSubscription> {
         self.ensure_active()?;
-        self.core.subscribe(services.into_iter().collect(), true)
+        self.core.subscribe(demand, true)
     }
 
     pub(crate) async fn idle_broker_health(&self) -> Result<Option<ScannerHealth>> {
@@ -1712,11 +1737,11 @@ impl BluezClient {
 
     pub(crate) fn subscribe_broker(
         &self,
-        services: HashSet<Uuid>,
+        demand: ScanDemand,
     ) -> Result<(ScanSubscription, watch::Receiver<ScannerHealth>)> {
         self.ensure_not_quiescing()?;
         Ok((
-            self.core.subscribe(services, false)?,
+            self.core.subscribe(demand, false)?,
             self.core.scanner_health(),
         ))
     }
@@ -2104,13 +2129,15 @@ mod tests {
         let requests = Arc::new(ScanRequests::default());
         let hue = Uuid::from_u128(1);
         let button = Uuid::from_u128(2);
-        let monitor = requests.acquire(HashSet::from([button]), false).unwrap();
+        let monitor = requests
+            .acquire(ScanDemand::services([button]), false)
+            .unwrap();
         let filter = requests.filter_tx.borrow().clone().unwrap();
         assert_eq!(filter.uuids, HashSet::from([button]));
         assert!(!filter.duplicate_data);
         assert_eq!(filter.rssi, None);
 
-        let pairing = requests.acquire(HashSet::from([hue]), true).unwrap();
+        let pairing = requests.acquire(ScanDemand::services([hue]), true).unwrap();
         let filter = requests.filter_tx.borrow().clone().unwrap();
         assert_eq!(filter.uuids, HashSet::from([button, hue]));
         assert_eq!(filter.rssi, Some(-127));
@@ -2124,7 +2151,7 @@ mod tests {
         drop(monitor);
         assert!(requests.filter_tx.borrow().is_none());
         // A later consumer wakes the same supervisor after an idle period.
-        let _reconnect = requests.acquire(HashSet::from([hue]), true).unwrap();
+        let _reconnect = requests.acquire(ScanDemand::services([hue]), true).unwrap();
         assert_eq!(
             requests.filter_tx.borrow().as_ref().unwrap().uuids,
             HashSet::from([hue])
@@ -2135,9 +2162,9 @@ mod tests {
     fn broad_profile_request_is_not_narrowed_by_another_consumer() {
         let requests = Arc::new(ScanRequests::default());
         let _filtered = requests
-            .acquire(HashSet::from([Uuid::from_u128(1)]), true)
+            .acquire(ScanDemand::services([Uuid::from_u128(1)]), true)
             .unwrap();
-        let broad = requests.acquire(HashSet::new(), false).unwrap();
+        let broad = requests.acquire(ScanDemand::default(), false).unwrap();
         assert!(requests
             .filter_tx
             .borrow()
@@ -2147,6 +2174,28 @@ mod tests {
             .is_empty());
         drop(broad);
         assert_eq!(requests.filter_tx.borrow().as_ref().unwrap().uuids.len(), 1);
+    }
+
+    #[test]
+    fn duplicate_reporting_lasts_only_while_a_consumer_requires_it() {
+        let requests = Arc::new(ScanRequests::default());
+        let service = Uuid::from_u128(1);
+        let _changed_only = requests
+            .acquire(ScanDemand::services([service]), false)
+            .unwrap();
+        assert!(!requests.filter_tx.borrow().as_ref().unwrap().duplicate_data);
+        let counterless = requests
+            .acquire(
+                ScanDemand {
+                    services: HashSet::from([service]),
+                    duplicate_data: true,
+                },
+                false,
+            )
+            .unwrap();
+        assert!(requests.filter_tx.borrow().as_ref().unwrap().duplicate_data);
+        drop(counterless);
+        assert!(!requests.filter_tx.borrow().as_ref().unwrap().duplicate_data);
     }
 
     #[test]

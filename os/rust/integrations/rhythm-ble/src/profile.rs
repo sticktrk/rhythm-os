@@ -284,6 +284,15 @@ pub trait BleDeviceProfile: Sync {
     fn advertisement_services(&self) -> &'static [&'static str] {
         &[]
     }
+    /// Whether every advertisement must be reported even when its payload
+    /// repeats. Shared discovery normally reports manufacturer/service data
+    /// only when it changes, which is enough for a frame with a rolling
+    /// counter. A counterless protocol whose repeated event is byte-identical
+    /// must return `true` or it loses every repeat; that keeps per-packet
+    /// reporting on for as long as such a device is monitored.
+    fn requires_duplicate_advertisements(&self) -> bool {
+        false
+    }
     fn parse_pairing_setup(&self, value: &serde_json::Value) -> Result<ValidatedBleSetup>;
     fn stable_identity_from_advertisement(
         &self,
