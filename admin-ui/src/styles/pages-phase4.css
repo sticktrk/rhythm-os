@@ -91,7 +91,21 @@
 .nodeItemMeta {
   color: var(--dim);
   font-size: 11.5px;
-  white-space: nowrap;
+  max-width: 58%;
+  white-space: normal;
+  text-align: right;
+}
+
+.nodeObservedState {
+  display: grid;
+  gap: 4px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.nodeObservedState .cardNote {
+  margin: 0;
 }
 
 .nodeDetailStack {
