@@ -528,6 +528,7 @@ fn collect_tasks_and_targets(
     let started = Instant::now();
     let mut counts = TaskCounts::default();
     let mut targets = Vec::new();
+    let mut targets_capped = false;
     let mut blocked_tasks = Vec::new();
     for entry in entries.flatten().take(PROCESS_SCAN_LIMIT) {
         if started.elapsed() >= DETAIL_SOURCE_TIMEOUT {
@@ -586,7 +587,8 @@ fn collect_tasks_and_targets(
         let (thread_count, threads_truncated) =
             bounded_entry_count(&entry.path().join("task"), 256);
         if targets.len() >= TARGET_PROCESS_LIMIT {
-            counts.truncated = true;
+            // Task counts stay complete; only the target list was capped.
+            targets_capped = true;
             continue;
         }
         targets.push(TargetProcessSummary {
@@ -602,13 +604,15 @@ fn collect_tasks_and_targets(
         });
         counts.truncated |= threads_truncated;
     }
-    let targets_truncated = counts.truncated;
-    let task_observation = if counts.truncated {
+    let scan_truncated = counts.truncated;
+    let task_observation = if scan_truncated {
         Observation::truncated(counts, "process scan entry/time limit reached")
     } else {
         Observation::ok(counts)
     };
-    let target_observation = if targets_truncated {
+    let target_observation = if targets_capped {
+        Observation::truncated(targets, "target process limit reached")
+    } else if scan_truncated {
         Observation::truncated(targets, "process scan entry/time limit reached")
     } else {
         Observation::ok(targets)
@@ -1715,6 +1719,27 @@ mod tests {
         let recovered: DetailSample =
             serde_json::from_value(records.records[0].payload.clone()).unwrap();
         assert_eq!(recovered, detail);
+        fs::remove_dir_all(paths.data_dir.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn target_process_cap_does_not_mark_task_counts_incomplete() {
+        let paths = fixture("target-cap");
+        for index in 0..=TARGET_PROCESS_LIMIT as u32 {
+            cpu_process(&paths, 100 + index * 10, "cloudflared", 1);
+        }
+        let (_, summary) = collect_summary(&paths, &RecorderHealth::default());
+        assert_eq!(summary.tasks.status, SourceStatus::Ok);
+        assert_eq!(
+            summary.tasks.value.as_ref().unwrap().scanned,
+            TARGET_PROCESS_LIMIT as u64 + 1
+        );
+        assert!(!summary.tasks.value.unwrap().truncated);
+        assert_eq!(summary.target_processes.status, SourceStatus::Truncated);
+        assert_eq!(
+            summary.target_processes.value.unwrap().len(),
+            TARGET_PROCESS_LIMIT
+        );
         fs::remove_dir_all(paths.data_dir.parent().unwrap()).unwrap();
     }
 
