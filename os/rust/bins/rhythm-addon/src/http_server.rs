@@ -3,9 +3,9 @@
 use std::sync::Arc;
 
 use axum::{
-    body::Body,
-    extract::{Extension, State},
-    http::{Request, StatusCode},
+    body::{Body, Bytes},
+    extract::{Extension, FromRequest, State},
+    http::{Request, StatusCode, Version},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post},
@@ -51,6 +51,7 @@ pub fn create_mobile_router(state: SharedState, access: Arc<MobileAccess>) -> Ro
             crate::policy::enforce,
         ))
         .layer(Extension(access))
+        .layer(middleware::from_fn(buffer_request_body))
         .layer(middleware::from_fn(no_store));
     logging::with_http_observability(api)
 }
@@ -69,6 +70,7 @@ pub fn create_admin_router(state: SharedState, access: Arc<MobileAccess>) -> Rou
             crate::policy::enforce,
         ))
         .layer(Extension(access))
+        .layer(middleware::from_fn(buffer_request_body))
         .layer(middleware::from_fn(no_store));
     logging::with_http_observability(api)
 }
@@ -89,6 +91,41 @@ async fn no_store(request: Request<Body>, next: Next) -> Response {
         "no-store".parse().expect("constant header"),
     );
     response
+}
+
+async fn buffer_request_body(request: Request<Body>, next: Next) -> Response {
+    // Policy/auth failures and handlers such as enrollment do not extract a
+    // body. Dropping an unread HTTP/1 body can make Hyper close the connection
+    // while Dart is still writing it, losing even a successful mutation's
+    // response. Consume it before admission, then replay it to JSON extractors.
+    // Bytes uses Axum's normal 2 MiB bound; include ignored and chunked bodies.
+    let (parts, body) = request.into_parts();
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        Bytes::from_request(Request::new(body), &()),
+    )
+    .await;
+    let mut rejection = match result {
+        Ok(Ok(bytes)) => {
+            return next
+                .run(Request::from_parts(parts, Body::from(bytes)))
+                .await;
+        }
+        Ok(Err(error)) => error.into_response(),
+        Err(_) => (
+            StatusCode::REQUEST_TIMEOUT,
+            Json(json!({"error": "Request body timed out"})),
+        )
+            .into_response(),
+    };
+    // Failed reads may leave bytes unread. Explicitly retire HTTP/1 sockets so
+    // clients do not reuse them after an oversized, malformed or stalled body.
+    if matches!(parts.version, Version::HTTP_10 | Version::HTTP_11) {
+        rejection
+            .headers_mut()
+            .insert("connection", "close".parse().expect("constant header"));
+    }
+    rejection
 }
 
 async fn serialize_mutations(

@@ -475,6 +475,160 @@ async fn actual_tcp_listener_classifies_tunnel_and_still_requires_bearer_on_loop
     server.abort();
 }
 
+// In-process router calls always present an already-buffered Body. Exercise
+// headers arriving before the body, as Dart's real HTTP client sends them.
+#[tokio::test]
+async fn early_responses_consume_split_request_bodies_and_keep_connections_usable() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn response(stream: &mut tokio::net::TcpStream) -> (u16, Value) {
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            headers.push(stream.read_u8().await.unwrap());
+            assert!(headers.len() < 8192);
+        }
+        let headers = String::from_utf8(headers).unwrap();
+        let status = headers.split_whitespace().nth(1).unwrap().parse().unwrap();
+        let length: usize = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse().unwrap())
+            })
+            .unwrap();
+        let mut body = vec![0; length];
+        stream.read_exact(&mut body).await.unwrap();
+        (status, serde_json::from_slice(&body).unwrap())
+    }
+
+    let f = Fixture::new();
+    for (router, method, path, token, expected) in [
+        (f.admin(), "POST", "/api/addon/enrollment", Some(ADMIN), 200),
+        (f.admin(), "PUT", "/api/hub/credentials", Some(ADMIN), 403),
+        (f.admin(), "POST", "/api/addon/enrollment", None, 401),
+        (f.mobile(), "PUT", "/api/hub/credentials", None, 403),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        for chunked in [false, true] {
+            let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+            let framing = if chunked {
+                "Transfer-Encoding: chunked"
+            } else {
+                "Content-Length: 2"
+            };
+            let authorization = token.map_or(String::new(), |token| {
+                format!("Authorization: Bearer {token}\r\n")
+            });
+            stream.write_all(format!(
+                "{method} {path} HTTP/1.1\r\nHost: localhost\r\n{authorization}Content-Type: application/json\r\n{framing}\r\n\r\n"
+            ).as_bytes()).await.unwrap();
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(30), stream.read_u8())
+                    .await
+                    .is_err(),
+                "{method} {path} responded before consuming the body (chunked={chunked})"
+            );
+            stream
+                .write_all(if chunked {
+                    b"2\r\n{}\r\n0\r\n\r\n"
+                } else {
+                    b"{}"
+                })
+                .await
+                .unwrap();
+            let (status, body) =
+                tokio::time::timeout(std::time::Duration::from_secs(2), response(&mut stream))
+                    .await
+                    .unwrap();
+            assert_eq!(status, expected);
+            if expected == 200 {
+                assert!(body["code"].is_string());
+            }
+            stream.write_all(format!(
+                "GET /api/addon/status HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {ADMIN}\r\n\r\n"
+            ).as_bytes()).await.unwrap();
+            let (status, _) =
+                tokio::time::timeout(std::time::Duration::from_secs(2), response(&mut stream))
+                    .await
+                    .unwrap();
+            assert_eq!(status, 200, "the next request must reuse the connection");
+        }
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn rejected_request_bodies_cannot_rotate_enrollment() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let f = Fixture::new();
+    let (status, code) = json_request(
+        f.admin(),
+        Method::POST,
+        "/api/addon/enrollment",
+        Some(ADMIN),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let oversized = Request::builder()
+        .method(Method::POST)
+        .uri("/api/addon/enrollment")
+        .header("authorization", format!("Bearer {ADMIN}"))
+        .body(Body::from(vec![b' '; 2 * 1024 * 1024 + 1]))
+        .unwrap();
+    let response = f.admin().oneshot(oversized).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(response.headers()["cache-control"], "no-store");
+    assert_eq!(response.headers()["connection"], "close");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let router = f.admin();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+    for (body, expected) in [("invalid-chunk\r\n", 400), ("", 408)] {
+        let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
+        stream.write_all(format!(
+            "POST /api/addon/enrollment HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {ADMIN}\r\nTransfer-Encoding: chunked\r\n\r\n{body}"
+        ).as_bytes()).await.unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(17),
+            stream.read_to_end(&mut response),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let response = String::from_utf8(response).unwrap();
+        assert!(
+            response.starts_with(&format!("HTTP/1.1 {expected}")),
+            "{response}"
+        );
+        assert!(response.to_ascii_lowercase().contains("connection: close"));
+        assert!(response
+            .to_ascii_lowercase()
+            .contains("cache-control: no-store"));
+    }
+    server.abort();
+    // All three rejected requests must leave the previously issued code intact.
+    let (status, _) = json_request(
+        f.mobile(),
+        Method::POST,
+        "/api/addon/enrollment/exchange",
+        None,
+        code,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
 #[tokio::test]
 async fn capabilities_advertise_mobile_and_ha_without_full_backup_or_native_setup() {
     let f = Fixture::new();
