@@ -5,6 +5,7 @@
 
 mod http_server;
 mod hub;
+mod listeners;
 mod mobile_access;
 mod policy;
 mod selection;
@@ -325,8 +326,7 @@ async fn run_server(
     controller: Arc<ChildProcessRemoteAccessController>,
 ) -> Result<()> {
     rhythm_os::state::capture_tokio_runtime_handle(&state);
-    let mobile =
-        tokio::net::TcpListener::bind((std::net::Ipv4Addr::UNSPECIFIED, MOBILE_PORT)).await?;
+    let mobile = listeners::bind_mobile(MOBILE_PORT).await?;
     let admin = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, ADMIN_PORT)).await?;
     info!(target: "sys", "Mobile API listening on port {}; internal admin on loopback port {}", MOBILE_PORT, ADMIN_PORT);
     rhythm_os::hub::spawn_stored_hub_bootstrap(state.clone(), hub::INTEGRATIONS);
@@ -340,7 +340,7 @@ async fn run_server(
     let mobile_server = http_server::create_mobile_router(state.clone(), access.clone());
     let admin_server = http_server::create_admin_router(state, access);
     let result = tokio::select! {
-        result = axum::serve(mobile, mobile_server.into_make_service_with_connect_info::<std::net::SocketAddr>()) => result,
+        result = mobile.serve(mobile_server) => result,
         result = axum::serve(admin, admin_server.into_make_service_with_connect_info::<std::net::SocketAddr>()) => result,
         _ = shutdown_signal() => Ok(()),
     };
