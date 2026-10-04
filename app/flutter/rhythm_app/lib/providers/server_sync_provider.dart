@@ -2870,6 +2870,7 @@ class ServerSyncProvider extends ChangeNotifier {
             const Duration(seconds: 45)) {
       // Activity received while suspended proves the selected transport is
       // alive. Keep its stream and controls available without another probe.
+      AppStartupPerformance.instance.recordResumePath('live_stream');
       AppStartupPerformance.instance.recordPhase(AppStartupPhase.endpoint, 0);
       AppStartupPerformance.instance.recordServer(
         nodes: _helloNodes.length,
@@ -2885,6 +2886,7 @@ class ServerSyncProvider extends ChangeNotifier {
       notifyListeners();
       return;
     }
+    AppStartupPerformance.instance.recordResumePath('snapshot');
     await retryActiveServerConnection(refresh: true);
   }
 

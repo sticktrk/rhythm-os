@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:rhythm_app/providers/home_provider.dart';
 import 'package:rhythm_app/providers/room_provider.dart';
 import 'package:rhythm_app/providers/server_sync_provider.dart';
+import 'package:rhythm_app/services/app_startup_performance.dart';
 import 'package:rhythm_core/rhythm_core.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
 
@@ -169,9 +170,17 @@ void main() {
             description: 'initial hello and SSE');
         expect(rooms.getNode('room-0')!.lightsOn, isTrue);
 
+        // The initial connection is not a resume and carries no resume path.
+        final performance = AppStartupPerformance.instance;
+        performance.start();
+        performance.recordResumePath('snapshot');
+        expect(performance.resumePathForTesting, isNull);
+
+        performance.start(resumed: true);
         await sync.resumeActiveServerConnection().timeout(
               const Duration(seconds: 1),
             );
+        expect(performance.resumePathForTesting, 'snapshot');
         await _until(() => sync.roomsReadyForDisplay && streams.length == 2,
             description: 'resume hello and SSE');
         expect(sync.canDispatchActions, isTrue);
@@ -214,10 +223,12 @@ void main() {
 
         // A stream that delivered traffic after suspension proves the selected
         // endpoint is still alive. Resume keeps it and skips hello/probing.
+        performance.start(resumed: true);
         await sync.resumeActiveServerConnection(
           suspendedAt: connection.lastSseActivity
               .subtract(const Duration(milliseconds: 1)),
         );
+        expect(performance.resumePathForTesting, 'live_stream');
         expect(stateRequests, hasLength(2));
         expect(streams, hasLength(2));
         expect(sync.roomsReadyForDisplay, isTrue);
