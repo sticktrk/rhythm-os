@@ -83,6 +83,14 @@ pub const SHARED_API_ROUTES: &[SharedRoute] = &[
         methods: &["GET", "PUT"],
     },
     SharedRoute {
+        path: "/api/lighting-settings",
+        methods: &["GET", "PUT"],
+    },
+    SharedRoute {
+        path: "/api/lighting-settings/preview",
+        methods: &["POST"],
+    },
+    SharedRoute {
         path: "/api/profile-bundle/factory-default",
         methods: &["GET"],
     },

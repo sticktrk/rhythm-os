@@ -25,6 +25,34 @@ void main() {
     BackendProvider.resetForTesting();
   });
 
+  test('lighting settings analytics bounds counts and excludes private failures', () async {
+    await analytics.logLightingSettingsRestore(
+      outcome: 'started', fromAppliance: true,
+    );
+    await analytics.logLightingSettingsRestore(
+      outcome: 'succeeded', fromAppliance: true,
+      appliedNodes: 5, skippedNodes: 2,
+    );
+    await analytics.logLightingSettingsRestore(
+      outcome: 'failed', fromAppliance: false,
+      appliedNodes: -1, skippedNodes: 99999, failureStage: 'private-error-token',
+    );
+    await analytics.logLightingSettingsRestore(
+      outcome: 'private-error-token', fromAppliance: false,
+    );
+    expect(backend.events.map((event) => event.name), [
+      'backup_restore_started', 'backup_restore_succeeded', 'backup_restore_failed',
+    ]);
+    expect(backend.events[1].properties, {
+      'restore_kind': 'lighting_settings', 'deployment': 'home_assistant_addon',
+      'source_kind': 'appliance_backup', 'applied_nodes': 5, 'skipped_nodes': 2,
+    });
+    expect(backend.events.last.properties['applied_nodes'], 0);
+    expect(backend.events.last.properties['skipped_nodes'], 4096);
+    expect(backend.events.last.properties.containsKey('failure_stage'), isFalse);
+    expect(backend.events.toString(), isNot(contains('private-error-token')));
+  });
+
   test('mobile enrollment analytics excludes approval, identity, and raw failures', () async {
     await analytics.logMobileEnrollmentCompleted(
       journeyId: 'opaque-enrollment', outcome: 'failed', failureStage: 'exchange',

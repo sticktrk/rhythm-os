@@ -68,7 +68,23 @@ identity review for the new versioned selection. Restore the matching old image
 and data snapshot together; old writers must not write new live stores. Profile
 import pauses adaptation and carries no device ownership or integration secrets.
 Mobile cloud snapshots use supported portable data for this deployment instead
-of requesting a secret-bearing appliance backup.
+of requesting a secret-bearing appliance backup. In **Settings → Rhythm App →
+Backup & Restore**, the app can restore portable lighting settings from an old
+Rhythm Box account backup or a saved add-on settings snapshot. The user explicitly
+matches old rooms and lights to destination nodes; unmatched devices are skipped.
+Profiles, schedules, portable scenes, mode configuration and mapped room/light
+preferences transfer while adaptation stays paused. Credentials, device
+ownership, Matter fabrics and active output state do not transfer. See the
+[step-by-step migration flow](home-assistant-migration.md#transfer-lighting-settings-with-the-app).
+
+The destination advertises `portable_settings` before the app offers this
+transfer. Older add-ons prompt for an update and still support profile-only
+exports. Subsequent add-on account captures save a portable settings snapshot
+alongside the original appliance rollback backup, preserving its configuration
+and source metadata. The System page also accepts standard `profile_bundle`
+files, including offline migration `profiles.json`, and existing
+`rhythm-ha-profiles` exports. Profile-file restore validates the schema, pauses
+adaptation, and imports only the portable profile bundle.
 
 HA cold backups include persistent Rhythm and tunnel secrets. Restoring to
 replacement hardware requires explicit connector/account ownership handover;

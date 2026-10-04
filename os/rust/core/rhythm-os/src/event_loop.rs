@@ -2240,12 +2240,13 @@ pub fn handle_hub_event(state: &SharedState, event: HubEvent, motion: &mut Motio
             // a Rhythm action re-enables it. Unclassified/automation/own echoes
             // update readback without masquerading as physical button input.
             if external_user_change && observation.lights_on.is_some() {
-                if let Some(snapshot) = runtime.engine_node_snapshot(&node_id) {
-                    let mut restored =
-                        rhythm_core::runtime::handle::RestoredNodeState::from(&snapshot);
-                    restored.rhythm_enabled = false;
-                    runtime.restore_node_state(&node_id, restored);
-                    commands::persist_rooms(state);
+                // Change only enablement under the engine lock. Replaying a
+                // node snapshot here could erase settings imported between
+                // reading that snapshot and observing the manual HA change.
+                match runtime.pause_light_node(&node_id) {
+                    Ok(true) => commands::persist_rooms(state),
+                    Ok(false) => {}
+                    Err(error) => warn!(target: "evt", "Failed to pause HA light '{}': {}", node_id, error),
                 }
             }
             commands::emit_node_state_event_after_apply(state, &runtime, &node_id);

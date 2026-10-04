@@ -46,6 +46,7 @@ const READ_PATHS: &[&str] = &[
     "/api/light-runtimes",
     "/api/light-runtimes/:id/manifest",
     "/api/profile-bundle",
+    "/api/lighting-settings",
     "/api/profile-bundle/factory-default",
     "/api/addon/status",
     "/api/addon/lights",
@@ -108,6 +109,8 @@ const WRITE_PATHS: &[(&str, &str)] = &[
     ("POST", "/api/scene-previews/:id/commit"),
     ("POST", "/api/scene-previews/:id/cancel"),
     ("PUT", "/api/profile-bundle"),
+    ("PUT", "/api/lighting-settings"),
+    ("POST", "/api/lighting-settings/preview"),
     ("POST", "/api/profile-bundle/reset"),
     ("POST", "/api/factory-reset"),
 ];

@@ -661,6 +661,29 @@ class AnalyticsService {
     return '5_plus';
   }
 
+  /// Record the settings transfer outcome without source names, node IDs,
+  /// network addresses, backup contents or free-form failure messages.
+  Future<void> logLightingSettingsRestore({
+    required String outcome,
+    required bool fromAppliance,
+    int? appliedNodes,
+    int? skippedNodes,
+    String? failureStage,
+  }) async {
+    if (!const {'started', 'succeeded', 'failed', 'cancelled'}.contains(outcome)) {
+      return;
+    }
+    await logEvent('backup_restore_$outcome', {
+      'restore_kind': 'lighting_settings',
+      'deployment': 'home_assistant_addon',
+      'source_kind': fromAppliance ? 'appliance_backup' : 'portable_settings',
+      if (appliedNodes != null) 'applied_nodes': appliedNodes.clamp(0, 4096),
+      if (skippedNodes != null) 'skipped_nodes': skippedNodes.clamp(0, 4096),
+      if (const {'preparation', 'import', 'app_refresh'}.contains(failureStage))
+        'failure_stage': failureStage!,
+    });
+  }
+
   // ===========================================================================
   // Curve Editing Events (Lower Priority)
   // ===========================================================================

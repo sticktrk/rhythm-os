@@ -15,6 +15,21 @@ export type DeviceAdminOperation = {
 
 export const DEVICE_ADMIN_OPERATIONS: DeviceAdminOperation[] = [
   {
+    id: 'lighting-settings-get', category: 'Backup', label: 'Read portable lighting settings',
+    description: 'Export profiles, schedules and room/light preferences without installation credentials.',
+    method: 'GET', path: 'api/lighting-settings'
+  },
+  {
+    id: 'lighting-settings-preview', category: 'Backup', label: 'Preview lighting settings transfer',
+    description: 'Convert a supported backup to portable settings for review without applying it.',
+    method: 'POST', path: 'api/lighting-settings/preview', body: {}
+  },
+  {
+    id: 'lighting-settings-put', category: 'Backup', label: 'Restore reviewed lighting settings',
+    description: 'Restore portable settings using explicit source-to-destination room/light mappings; add-on control stays paused.',
+    method: 'PUT', path: 'api/lighting-settings', body: {settings: {}, node_mappings: {}}, danger: true
+  },
+  {
     id: 'addon-status', category: 'Home Assistant', label: 'Read add-on status',
     description: 'Read deployment capabilities and HA readiness.',
     method: 'GET', path: 'api/addon/status'

@@ -55,6 +55,28 @@ class CloudBackupSnapshot {
       backupBundle.isNotEmpty &&
       backupBundle['kind'] != 'rhythm_portable_snapshot';
 
+  /// Keep both migration sources available when an add-on starts synchronizing
+  /// before the owner has transferred the old appliance's settings.
+  List<CloudBackupSnapshot> get lightingRestoreSources {
+    final portable = appSettingsBundle['portable_lighting_snapshot'];
+    return [
+      this,
+      if (hasApplianceBackup && portable is Map)
+        CloudBackupSnapshot.fromRow({
+          ...Map<String, dynamic>.from(portable),
+          'user_id': userId,
+          'backup_bundle': {
+            'kind': 'rhythm_portable_snapshot',
+            'schema_version': 1,
+          },
+          'app_settings_bundle': appSettingsBundle,
+        }),
+    ];
+  }
+
+  Map<String, dynamic> get lightingRestorePayload =>
+      hasApplianceBackup ? backupBundle : configurationBundle;
+
   factory CloudBackupSnapshot.fromRow(Map<String, dynamic> row) {
     return CloudBackupSnapshot(
       userId: row['user_id'] as String? ?? '',
@@ -414,14 +436,11 @@ class CloudBackupService {
       if (row == null) return false;
     }
 
-    final existingRaw = row['app_settings_bundle'];
-    final existing = existingRaw is Map
-        ? Map<String, dynamic>.from(existingRaw)
-        : const <String, dynamic>{};
-    final merged = mergeAppSettingsBundles(existing, localBundle);
-    await client
-        .from(tableName)
-        .update({'app_settings_bundle': merged}).eq('user_id', expectedUserId);
+    await persistAppSettings(
+      client: client,
+      userId: expectedUserId,
+      replacement: localBundle,
+    );
     debugPrint(
       'CloudBackupService: synced account All Rooms layout reason=$reason',
     );
@@ -436,6 +455,18 @@ class CloudBackupService {
     final merged = Map<String, dynamic>.from(existing);
     merged['schema_version'] =
         replacement['schema_version'] ?? existing['schema_version'] ?? 1;
+    if (replacement['portable_lighting_snapshot'] is Map) {
+      merged['portable_lighting_snapshot'] =
+          replacement['portable_lighting_snapshot'];
+    }
+    final existingSourceKeys = existing['lighting_source_hub_keys'];
+    final replacementSourceKeys = replacement['lighting_source_hub_keys'];
+    if (replacementSourceKeys is Map) {
+      merged['lighting_source_hub_keys'] = {
+        if (existingSourceKeys is Map) ...existingSourceKeys,
+        ...replacementSourceKeys,
+      };
+    }
 
     final replacementLayouts = _layoutMaps(replacement['all_rooms_layouts']);
     if (replacementLayouts.isEmpty) return merged;
@@ -470,6 +501,59 @@ class CloudBackupService {
     if (aliases is List) yield* aliases.whereType<String>();
   }
 
+  /// A migration is an explicit transfer between installations. Only reviewed
+  /// room IDs enter the destination layout; source aliases never follow them.
+  static Map<String, dynamic> remapLightingLayout({
+    required CloudBackupSnapshot source,
+    required Hub targetHub,
+    required Map<String, String> roomMappings,
+  }) {
+    final sourceHub = Hub.server(
+      id: source.sourceHubId,
+      homeId: source.homeId ?? '',
+      name: source.sourceHubName,
+      host: source.sourceHubHost,
+      port: source.sourceHubPort,
+    );
+    final sourceKeys = {
+      RoomPageProvider.hubLayoutKey(sourceHub),
+      ...RoomPageProvider.hubLayoutKeyAliases(sourceHub),
+    };
+    final recordedKeys = source.appSettingsBundle['lighting_source_hub_keys'];
+    if (recordedKeys is Map && recordedKeys[source.sourceHubId] is String) {
+      sourceKeys.add(recordedKeys[source.sourceHubId] as String);
+    }
+    final layout = _layoutMaps(source.appSettingsBundle['all_rooms_layouts'])
+        .where((entry) => _layoutIdentityKeys(entry).any(sourceKeys.contains))
+        .firstOrNull;
+    final rawPages = (layout ??
+        (source.appSettingsBundle['all_rooms_layout'] is Map
+            ? source.appSettingsBundle['all_rooms_layout'] as Map
+            : const {}))['pages'];
+    if (rawPages is! List) return const {};
+    final assigned = <String>{};
+    final pages = <List<String>>[
+      for (final page in rawPages)
+        if (page is List)
+          [
+            for (final id in page.whereType<String>())
+              if (roomMappings[id] != null && assigned.add(roomMappings[id]!))
+                roomMappings[id]!,
+          ],
+    ];
+    if (assigned.isEmpty) return const {};
+    return {
+      'schema_version': 1,
+      'all_rooms_layouts': [
+        {
+          'hub_key': RoomPageProvider.hubLayoutKey(targetHub),
+          'hub_key_aliases': RoomPageProvider.hubLayoutKeyAliases(targetHub),
+          'pages': pages,
+        },
+      ],
+    };
+  }
+
   @visibleForTesting
   static CloudBackupSnapshot buildSnapshot({
     required String userId,
@@ -491,7 +575,14 @@ class CloudBackupService {
       homeName: home?.name,
       configurationBundle: configurationBundle,
       backupBundle: backupBundle,
-      appSettingsBundle: appSettingsBundle,
+      appSettingsBundle: {
+        ...appSettingsBundle,
+        'lighting_source_hub_keys': {
+          if (appSettingsBundle['lighting_source_hub_keys'] is Map)
+            ...(appSettingsBundle['lighting_source_hub_keys'] as Map),
+          serverHub.id: RoomPageProvider.hubLayoutKey(serverHub),
+        },
+      },
       capturedAt: capturedAt ?? DateTime.now(),
     );
   }
@@ -544,7 +635,9 @@ class CloudBackupService {
           ({Map<String, dynamic> backup, Map<String, dynamic> configuration})>
       captureSupportedBundles(RhythmBundleApi api) async {
     final deployment = await api.getDeploymentCapabilities();
-    if (!deployment.fullBackupExport && !deployment.portableProfiles) {
+    if (!deployment.fullBackupExport &&
+        !deployment.portableProfiles &&
+        !deployment.portableSettings) {
       throw const CloudBackupCaptureException(
         'This server does not support cloud configuration snapshots.',
       );
@@ -556,7 +649,9 @@ class CloudBackupService {
             'schema_version': 1,
           };
     Map<String, dynamic> configuration = const {};
-    if (deployment.portableProfiles) {
+    if (deployment.portableSettings) {
+      configuration = await api.getLightingSettings();
+    } else if (deployment.portableProfiles) {
       try {
         configuration = await api.getConfigurationBundle();
       } catch (_) {
@@ -569,92 +664,168 @@ class CloudBackupService {
 
   /// Add-on capture must not replace the account's appliance rollback material
   /// or relabel its source identity. Until portable profiles have dedicated
-  /// storage, an existing appliance row receives phone preferences only.
-  /// A portable row can refresh its profiles and capture metadata.
+  /// storage, the latest add-on settings live alongside phone preferences. The
+  /// original appliance row remains an independently selectable restore source.
   @visibleForTesting
   static Map<String, dynamic> portableSnapshotSettingsUpdate({
     required CloudBackupSnapshot existing,
     required CloudBackupSnapshot portable,
+    bool overwriteSourceLayout = false,
   }) {
     if (portable.hasApplianceBackup) {
       throw ArgumentError('Expected a portable configuration snapshot.');
     }
+    final appSettings = _captureAppSettingsForWrite(
+      existing: existing.appSettingsBundle, snapshot: portable,
+      overwriteSourceLayout: overwriteSourceLayout,
+    );
+    appSettings['portable_lighting_snapshot'] =
+        _portableAppSettings(portable)['portable_lighting_snapshot'];
     return {
       if (existing.backupBundle['kind'] == 'rhythm_portable_snapshot')
         ...portable.toUpsertJson(),
-      'app_settings_bundle': mergeAppSettingsBundles(
-        existing.appSettingsBundle,
-        portable.appSettingsBundle,
-      ),
+      'app_settings_bundle': appSettings,
     };
   }
+
+  /// Captures carry an account-wide view for recovery, but only this source's
+  /// layout is their input. Reapply the dirty/layout decision against the latest
+  /// row so an old capture cannot roll back another phone or hub's edits.
+  static Map<String, dynamic> _captureAppSettingsForWrite({
+    required Map<String, dynamic> existing,
+    required CloudBackupSnapshot snapshot,
+    required bool overwriteSourceLayout,
+  }) {
+    final sourceHub = Hub.server(
+      id: snapshot.sourceHubId, homeId: snapshot.homeId ?? '',
+      name: snapshot.sourceHubName, host: snapshot.sourceHubHost,
+      port: snapshot.sourceHubPort,
+    );
+    final recorded = snapshot.appSettingsBundle['lighting_source_hub_keys'];
+    final sourceKey = recorded is Map && recorded[snapshot.sourceHubId] is String
+        ? recorded[snapshot.sourceHubId] as String
+        : RoomPageProvider.hubLayoutKey(sourceHub);
+    final keys = {sourceKey, RoomPageProvider.hubLayoutKey(sourceHub), snapshot.sourceHubId};
+    final local = <String, dynamic>{
+      'schema_version': snapshot.appSettingsBundle['schema_version'] ?? 1,
+      'all_rooms_layouts': _layoutMaps(snapshot.appSettingsBundle['all_rooms_layouts'])
+          .where((layout) => _layoutIdentityKeys(layout).any(keys.contains)).toList(),
+    };
+    final chosen = appSettingsBundleForCapture(
+      existing: existing, local: local,
+      hasUnsyncedLayoutEdit: overwriteSourceLayout,
+    );
+    return mergeAppSettingsBundles(chosen, {
+      'lighting_source_hub_keys': {snapshot.sourceHubId: sourceKey},
+    });
+  }
+
+  static Map<String, dynamic> _portableAppSettings(
+    CloudBackupSnapshot snapshot,
+  ) =>
+      {
+        ...snapshot.appSettingsBundle,
+        'portable_lighting_snapshot': {
+          'source_hub_id': snapshot.sourceHubId,
+          'source_hub_type': snapshot.sourceHubType,
+          'source_hub_name': snapshot.sourceHubName,
+          'source_hub_host': snapshot.sourceHubHost,
+          'source_hub_port': snapshot.sourceHubPort,
+          'home_id': snapshot.homeId,
+          'home_name': snapshot.homeName,
+          'captured_at': snapshot.capturedAt?.toUtc().toIso8601String(),
+          'configuration_bundle': snapshot.configurationBundle,
+        },
+      };
+
+  /// Every writer compares the row version it merged. A concurrent capture or
+  /// layout sync causes a reread, never an unconditional replacement of JSON.
+  static Future<CloudBackupSnapshot> _persistCloudMutation({
+    required SupabaseClient client,
+    required String userId,
+    CloudBackupSnapshot? initial,
+    required Map<String, dynamic> Function(CloudBackupSnapshot) update,
+  }) async {
+    for (var attempt = 0; attempt < 5; attempt++) {
+      final row = await client.from(tableName).select()
+          .eq('user_id', userId).maybeSingle();
+      if (row == null) {
+        if (initial == null) throw StateError('Cloud backup no longer exists.');
+        try {
+          await client.from(tableName).insert(initial.toUpsertJson());
+          return initial;
+        } on PostgrestException catch (error) {
+          if (error.code != '23505') rethrow;
+          continue;
+        }
+      }
+      final updatedAt = row['updated_at'];
+      if (updatedAt is! String || updatedAt.isEmpty) {
+        throw StateError('Cloud backup has no revision. Retry after refreshing.');
+      }
+      final saved = await client.from(tableName)
+          .update(update(CloudBackupSnapshot.fromRow(row)))
+          .eq('user_id', userId).eq('updated_at', updatedAt).select();
+      if (saved.isNotEmpty) return CloudBackupSnapshot.fromRow(saved.single);
+    }
+    throw StateError('The cloud backup changed during saving. Please retry.');
+  }
+
+  @visibleForTesting
+  static Future<CloudBackupSnapshot> persistAppSettings({
+    required SupabaseClient client,
+    required String userId,
+    required Map<String, dynamic> replacement,
+  }) => _persistCloudMutation(
+    client: client, userId: userId,
+    update: (existing) => {
+      'app_settings_bundle': mergeAppSettingsBundles(existing.appSettingsBundle, replacement),
+    },
+  );
 
   @visibleForTesting
   static Future<CloudBackupSnapshot> persistPortableSnapshot({
     required SupabaseClient client,
     required CloudBackupSnapshot portable,
-  }) async {
+    bool overwriteSourceLayout = false,
+  }) {
     if (portable.hasApplianceBackup) {
       throw ArgumentError('Expected a portable configuration snapshot.');
     }
-    Future<Map<String, dynamic>?> read() => client
-        .from(tableName)
-        .select()
-        .eq('user_id', portable.userId)
-        .maybeSingle();
+    return _persistCloudMutation(
+      client: client, userId: portable.userId, initial: portable,
+      update: (existing) => portableSnapshotSettingsUpdate(
+        existing: existing, portable: portable,
+        overwriteSourceLayout: overwriteSourceLayout,
+      ),
+    );
+  }
 
-    var row = await read();
-    if (row == null) {
-      try {
-        // Insert rather than upsert: a concurrent appliance backup must win.
-        await client.from(tableName).insert(portable.toUpsertJson());
-        return portable;
-      } on PostgrestException catch (error) {
-        if (error.code != '23505') rethrow;
-        row = await read();
-      }
+  @visibleForTesting
+  static Future<CloudBackupSnapshot> persistApplianceSnapshot({
+    required SupabaseClient client,
+    required CloudBackupSnapshot appliance,
+    bool overwriteSourceLayout = false,
+  }) {
+    if (!appliance.hasApplianceBackup) {
+      throw ArgumentError('Expected an appliance backup.');
     }
-    if (row == null) {
-      throw StateError('The cloud snapshot changed during capture. Retry.');
-    }
-
-    var existing = CloudBackupSnapshot.fromRow(row);
-    if (existing.backupBundle['kind'] == 'rhythm_portable_snapshot') {
-      final updated = await client
-          .from(tableName)
-          .update(portableSnapshotSettingsUpdate(
-            existing: existing,
-            portable: portable,
-          ))
-          .eq('user_id', portable.userId)
-          // The read alone cannot authorize replacing a row: an appliance
-          // backup may have arrived since then. Check its kind atomically.
-          .eq('backup_bundle->>kind', 'rhythm_portable_snapshot')
-          .select();
-      if (updated.isNotEmpty) {
-        return CloudBackupSnapshot.fromRow(updated.single);
-      }
-      row = await read();
-      if (row == null) {
-        throw StateError('The cloud snapshot changed during capture. Retry.');
-      }
-      existing = CloudBackupSnapshot.fromRow(row);
-    }
-
-    // Preserve any appliance rollback material even if it arrived during the
-    // conditional portable update. Return the actual saved source metadata.
-    final saved = await client
-        .from(tableName)
-        .update({
-          'app_settings_bundle': mergeAppSettingsBundles(
-            existing.appSettingsBundle,
-            portable.appSettingsBundle,
-          ),
-        })
-        .eq('user_id', portable.userId)
-        .select()
-        .single();
-    return CloudBackupSnapshot.fromRow(saved);
+    return _persistCloudMutation(
+      client: client, userId: appliance.userId, initial: appliance,
+      update: (existing) {
+        final appSettings = _captureAppSettingsForWrite(
+          existing: existing.appSettingsBundle, snapshot: appliance,
+          overwriteSourceLayout: overwriteSourceLayout,
+        );
+        final latestPortable = existing.hasApplianceBackup
+            ? existing.appSettingsBundle['portable_lighting_snapshot']
+            : _portableAppSettings(existing)['portable_lighting_snapshot'];
+        if (latestPortable is Map) {
+          appSettings['portable_lighting_snapshot'] = latestPortable;
+        }
+        return {...appliance.toUpsertJson(), 'app_settings_bundle': appSettings};
+      },
+    );
   }
 
   Future<CloudBackupSnapshot> _captureNowInternal({
@@ -674,7 +845,7 @@ class CloudBackupService {
       home: home,
       hubs: <Hub>[serverHub],
     );
-    final appSettingsBundle = await _buildAppSettingsBundleForCapture(
+    final appSettings = await _buildAppSettingsBundleForCapture(
       client: client,
       userId: userId,
       serverHub: serverHub,
@@ -689,7 +860,7 @@ class CloudBackupService {
       home: home,
       configurationBundle: configurationBundle,
       backupBundle: backupBundle,
-      appSettingsBundle: appSettingsBundle,
+      appSettingsBundle: appSettings.bundle,
     );
 
     var persistedSnapshot = snapshot;
@@ -699,15 +870,16 @@ class CloudBackupService {
       context: 'Failed to save the configuration to cloud storage.',
       action: () async {
         if (snapshot.hasApplianceBackup) {
-          await client.from(tableName).upsert(
-                snapshot.toUpsertJson(),
-                onConflict: 'user_id',
-              );
+          persistedSnapshot = await persistApplianceSnapshot(
+            client: client, appliance: snapshot,
+            overwriteSourceLayout: appSettings.overwriteSourceLayout,
+          );
           return;
         }
         persistedSnapshot = await persistPortableSnapshot(
           client: client,
           portable: snapshot,
+          overwriteSourceLayout: appSettings.overwriteSourceLayout,
         );
       },
     );
@@ -719,7 +891,8 @@ class CloudBackupService {
     return persistedSnapshot;
   }
 
-  Future<Map<String, dynamic>> _buildAppSettingsBundleForCapture({
+  Future<({Map<String, dynamic> bundle, bool overwriteSourceLayout})>
+      _buildAppSettingsBundleForCapture({
     required SupabaseClient client,
     required String userId,
     required Hub serverHub,
@@ -765,10 +938,13 @@ class CloudBackupService {
       ),
     );
 
-    return appSettingsBundleForCapture(
-      existing: existing,
-      local: localBundle,
-      hasUnsyncedLayoutEdit: hasUnsyncedLayoutEdit,
+    return (
+      bundle: appSettingsBundleForCapture(
+        existing: existing,
+        local: localBundle,
+        hasUnsyncedLayoutEdit: hasUnsyncedLayoutEdit,
+      ),
+      overwriteSourceLayout: hasUnsyncedLayoutEdit,
     );
   }
 

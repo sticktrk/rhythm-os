@@ -1,5 +1,6 @@
 //! HA manual control must survive later adaptive ticks through composite routing.
 
+use std::collections::BTreeMap;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
@@ -24,6 +25,7 @@ use rhythm_ha::{
     transport::HaConnectionConfig,
 };
 use rhythm_os::{
+    bundle::{LightingSettingsBundle, LightingSettingsImportPayload},
     canonical::identity::{DiscoveredIdentity, HardwareId, HubKey},
     discovery::{DiscoveredDevice, DiscoveredRoom, HubDiscovery},
     event_loop::{handle_hub_event, process_work_item, MotionTimerState},
@@ -451,6 +453,65 @@ fn manual_override_survives_later_periodic_tick_while_sibling_adapts() {
     let mut expected = LIGHTS.map(str::to_owned).to_vec();
     expected.sort();
     assert_eq!(targets, expected);
+}
+
+#[test]
+fn manual_observation_after_settings_transfer_preserves_preferences_and_live_state() {
+    let f = Fixture::new();
+    let node_id = &f.nodes[0];
+    let mut live = rhythm_core::runtime::handle::RestoredNodeState::from(
+        &f.runtime.engine_node_snapshot(node_id).unwrap(),
+    );
+    live.time_offset_minutes = 37.0;
+    live.brightness_offset = 12.0;
+    live.hard_off = true;
+    f.runtime.restore_node_state(node_id, live);
+
+    let mut settings: LightingSettingsBundle = serde_json::from_str(
+        &rhythm_os::commands::build_lighting_settings_bundle(&f.state).unwrap(),
+    )
+    .unwrap();
+    let source = settings.nodes.iter_mut().find(|node| &node.id == node_id).unwrap();
+    source.rhythm_enabled = true;
+    source.room_profile.motion_activation_enabled = Some(false);
+    source.room_profile.profile_overrides.insert(
+        "rhythm".into(),
+        rhythm_core::LightProfileNodeOverride {
+            min_brightness: Some(31),
+            max_color_temp: Some(3900),
+            ..Default::default()
+        },
+    );
+    rhythm_os::commands::do_lighting_settings_import(
+        &f.state,
+        LightingSettingsImportPayload {
+            settings,
+            node_mappings: BTreeMap::from([(node_id.clone(), node_id.clone())]),
+        },
+    )
+    .unwrap();
+    let imported = f.runtime.engine_node_snapshot(node_id).unwrap();
+    assert!(imported.rhythm_enabled);
+    assert_eq!(imported.profile_settings.profile_overrides["rhythm"].min_brightness, Some(31));
+    assert_eq!(imported.time_offset_minutes, 37.0);
+    assert_eq!(imported.brightness_offset, 12.0);
+    assert!(imported.hard_off);
+
+    for second in [1, 2] {
+        f.observe(LIGHTS[0], "manual-after-transfer", 194, second);
+        let paused = f.runtime.engine_node_snapshot(node_id).unwrap();
+        assert!(!paused.rhythm_enabled);
+        assert_eq!(paused.profile_settings, imported.profile_settings);
+        assert_eq!(paused.time_offset_minutes, imported.time_offset_minutes);
+        assert_eq!(paused.brightness_offset, imported.brightness_offset);
+        assert_eq!(
+            (paused.soft_off, paused.mood_active, paused.hard_off, paused.standby_enabled),
+            (imported.soft_off, imported.mood_active, imported.hard_off, imported.standby_enabled)
+        );
+        assert!(f.runtime.engine_node_snapshot(&f.nodes[1]).unwrap().rhythm_enabled);
+    }
+    assert_eq!(f.spy.call_count(), 0, "transfer and manual observations emit no light commands");
+    assert!(!f.state.lock().unwrap().light_breaker_enabled);
 }
 
 #[test]

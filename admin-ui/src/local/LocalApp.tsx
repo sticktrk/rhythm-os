@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from 'react';
 import { BrowserRouter, Link, NavLink, Navigate, Route, Routes } from 'react-router-dom';
 import { Lightbulb, RefreshCw } from 'lucide-react';
-import { ConfirmProvider, useConfirm } from '../components/ui/ConfirmDialog';
+import { ConfirmProvider, useConfirm, type ConfirmOptions } from '../components/ui/ConfirmDialog';
 import { SectionCard } from '../components/ui/SectionCard';
 import { ErrorNotice, KeyValueGrid } from '../components/ui/bits';
 import { usePolling } from '../hooks/usePolling';
@@ -10,6 +10,7 @@ import { LocalDeviceContext } from '../state/LocalDeviceContext';
 import { getState } from '../device/state';
 import { getLightBreaker, setLightBreaker } from '../device/settings';
 import { getProfileBundle, putProfileBundle } from '../device/backup';
+import type { DeviceClient } from '../device/client';
 import { asRecord, asString } from '../device/values';
 import { errorMessage } from '../lib/format';
 import NodesPage from '../pages/hub/NodesPage';
@@ -191,6 +192,29 @@ function saveJson(name: string, value: unknown) {
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+export async function restoreProfileExport(
+  file: Pick<File, 'size' | 'text'>,
+  client: DeviceClient,
+  confirm: (options: ConfirmOptions) => Promise<boolean>,
+): Promise<boolean> {
+  if (file.size > 1024 * 1024) throw new Error('Choose a profile export smaller than 1 MB.');
+  const value = asRecord(JSON.parse(await file.text()));
+  const wrapped = value.format !== undefined;
+  const bundle = wrapped ? asRecord(value.profiles) : value;
+  if ((wrapped && (value.format !== 'rhythm-ha-profiles' || value.version !== 1)) ||
+      bundle.schema_version !== 1 ||
+      !['profile_bundle', 'share_bundle', 'configuration_bundle'].includes(String(bundle.kind)) ||
+      ![bundle.profile, bundle.share, bundle.configuration].some(payload =>
+        payload !== null && typeof payload === 'object' && !Array.isArray(payload))) {
+    throw new Error('Choose a Rhythm profile export, including profiles.json from the migration preview. Restore full installation backups through Home Assistant or transfer lighting settings in the Rhythm app.');
+  }
+  if (!(await confirm({title: 'Restore lighting profiles', message: 'This replaces your lighting profile bundle and pauses adaptation for review. Home Assistant devices and areas are unchanged.',
+    confirmLabel: 'Restore profiles', requireTypedText: 'RESTORE'}))) return false;
+  await setLightBreaker(client, false);
+  await putProfileBundle(client, bundle);
+  return true;
+}
+
 function System({status}: {status: Record<string, unknown> | null}) {
   const client = useDeviceClient();
   const confirm = useConfirm();
@@ -202,17 +226,9 @@ function System({status}: {status: Record<string, unknown> | null}) {
     try { await action(); } catch (e) { setError(errorMessage(e)); } finally { setBusy(false); }
   }
   async function importProfiles(file: File) {
-    if (file.size > 1024 * 1024) throw new Error('Choose a profile export smaller than 1 MB.');
-    const value = JSON.parse(await file.text());
-    if (value.format !== 'rhythm-ha-profiles' || value.version !== 1 ||
-        !value.profiles || typeof value.profiles !== 'object' || Array.isArray(value.profiles)) {
-      throw new Error('Choose a Rhythm Home Assistant profile export. Full device backups are restored through Home Assistant.');
+    if (await restoreProfileExport(file, client, confirm)) {
+      setNotice('Profiles restored. Review your rooms and enable Rhythm when ready.');
     }
-    if (!(await confirm({title: 'Restore lighting profiles', message: 'This replaces your lighting profile bundle and pauses adaptation for review. Home Assistant devices and areas are unchanged.',
-      confirmLabel: 'Restore profiles', requireTypedText: 'RESTORE'}))) return;
-    await setLightBreaker(client, false);
-    await putProfileBundle(client, value.profiles);
-    setNotice('Profiles restored. Review your rooms and enable Rhythm when ready.');
   }
   return <div className="consolePage"><header className="pageHeader"><h1>System</h1></header>
     {error && <ErrorNotice message={error} />}{notice && <p role="status">{notice}</p>}
@@ -220,7 +236,7 @@ function System({status}: {status: Record<string, unknown> | null}) {
       <p>Start, stop, update and back up this add-on in Home Assistant. A Home Assistant backup includes all Rhythm configuration.</p>
       <button className="consoleButton" onClick={() => saveJson('rhythm-status.json', status)}>Download connection diagnostics</button>
     </SectionCard>
-    <SectionCard title="Lighting profile export" subtitle="Transfer profile settings. Full configuration and device selections use Home Assistant backups.">
+    <SectionCard title="Lighting profile export" subtitle="Import a Rhythm profile export or migration profiles.json. To transfer room and light settings, use Backup & Restore in the Rhythm app.">
       <div className="actionRow"><button className="consoleButton" disabled={busy} onClick={() => void run(async () => {
         saveJson('rhythm-profiles.json', {format: 'rhythm-ha-profiles', version: 1, profiles: await getProfileBundle(client)});
       })}>Export profiles</button>

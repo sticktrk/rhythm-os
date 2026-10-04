@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::{
     body::{Body, Bytes},
-    extract::{Extension, FromRequest, State},
+    extract::{DefaultBodyLimit, Extension, FromRequest, State},
     http::{Request, StatusCode, Version},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -17,6 +17,7 @@ use rhythm_os::{
     state::SharedState,
 };
 use serde_json::json;
+use tower::ServiceExt;
 
 use crate::mobile_access::MobileAccess;
 
@@ -109,13 +110,27 @@ async fn buffer_request_body(request: Request<Body>, next: Next) -> Response {
     // body. Dropping an unread HTTP/1 body can make Hyper close the connection
     // while Dart is still writing it, losing even a successful mutation's
     // response. Consume it before admission, then replay it to JSON extractors.
-    // Bytes uses Axum's normal 2 MiB bound; include ignored and chunked bodies.
+    // Whole backup conversion can include large integration files that will be
+    // discarded by the typed preview. Keep ordinary requests at 2 MiB and
+    // settings transfer at the converter's explicit 32 MiB bound.
+    let limit = match (request.method().as_str(), request.uri().path()) {
+        ("POST", "/api/lighting-settings/preview") | ("PUT", "/api/lighting-settings") => {
+            32 * 1024 * 1024
+        }
+        _ => 2 * 1024 * 1024,
+    };
     let (parts, body) = request.into_parts();
+    let reader = tower::ServiceBuilder::new()
+        .layer(DefaultBodyLimit::max(limit))
+        .service_fn(|request| async move {
+            Ok::<_, std::convert::Infallible>(Bytes::from_request(request, &()).await)
+        });
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(15),
-        Bytes::from_request(Request::new(body), &()),
+        reader.oneshot(Request::new(body)),
     )
-    .await;
+    .await
+    .map(|result| result.expect("infallible body reader"));
     let mut rejection = match result {
         Ok(Ok(bytes)) => {
             return next

@@ -132,6 +132,7 @@ class RhythmDeploymentCapabilities {
   final bool haDeviceManagement;
   final bool managedLightSelection;
   final bool portableProfiles;
+  final bool portableSettings;
   final bool fullBackupExport;
   final bool fullBackupImport;
   final bool mobileEnrollment;
@@ -144,6 +145,7 @@ class RhythmDeploymentCapabilities {
     this.haDeviceManagement = false,
     this.managedLightSelection = false,
     this.portableProfiles = false,
+    this.portableSettings = false,
     this.fullBackupExport = false,
     this.fullBackupImport = false,
     this.mobileEnrollment = false,
@@ -157,6 +159,7 @@ class RhythmDeploymentCapabilities {
         haDeviceManagement = false,
         managedLightSelection = false,
         portableProfiles = true,
+        portableSettings = false,
         fullBackupExport = true,
         fullBackupImport = true,
         mobileEnrollment = false;
@@ -170,6 +173,7 @@ class RhythmDeploymentCapabilities {
         haDeviceManagement: json['ha_device_management'] == true,
         managedLightSelection: json['managed_light_selection'] == true,
         portableProfiles: json['portable_profiles'] == true,
+        portableSettings: json['portable_settings'] == true,
         fullBackupExport: json['full_backup_export'] == true,
         fullBackupImport: json['full_backup_import'] == true,
         mobileEnrollment: json['mobile_enrollment'] == true,

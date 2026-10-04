@@ -47,6 +47,111 @@ void main() {
     });
   });
 
+  group('portable lighting settings', () {
+    test(
+      'preview delegates conversion without writing the installation',
+      () async {
+        when(
+          () => dio.post(
+            any(),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          ),
+        ).thenAnswer(
+          (_) async => Response(
+            requestOptions: RequestOptions(
+              path: 'api/lighting-settings/preview',
+            ),
+            statusCode: 200,
+            data: {'kind': 'lighting_settings', 'nodes': []},
+          ),
+        );
+        final result = await api.previewLightingSettings({
+          'kind': 'backup_bundle',
+        });
+        expect(result['kind'], 'lighting_settings');
+        verify(
+          () => dio.post(
+            'api/lighting-settings/preview',
+            data: {'kind': 'backup_bundle'},
+            options: any(named: 'options'),
+          ),
+        ).called(1);
+        verifyNever(
+          () => dio.put(
+            any(),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          ),
+        );
+      },
+    );
+
+    test(
+      'restore sends reviewed mapping and keeps skipped nodes unmapped',
+      () async {
+        when(
+          () => dio.put(
+            any(),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          ),
+        ).thenAnswer(
+          (_) async => Response(
+            requestOptions: RequestOptions(path: 'api/lighting-settings'),
+            statusCode: 200,
+            data: {'applied_nodes': 1, 'skipped_nodes': 1},
+          ),
+        );
+        final result = await api.putLightingSettings(
+          {'kind': 'lighting_settings'},
+          nodeMappings: {'old-room': 'ha-room'},
+        );
+        expect(result['skipped_nodes'], 1);
+        verify(
+          () => dio.put(
+            'api/lighting-settings',
+            data: {
+              'settings': {'kind': 'lighting_settings'},
+              'node_mappings': {'old-room': 'ha-room'},
+            },
+            options: any(named: 'options'),
+          ),
+        ).called(1);
+      },
+    );
+
+    test('rejected restore is surfaced without retry', () async {
+      when(
+        () => dio.put(
+          any(),
+          data: any(named: 'data'),
+          options: any(named: 'options'),
+        ),
+      ).thenAnswer(
+        (_) async => Response(
+          requestOptions: RequestOptions(path: 'api/lighting-settings'),
+          statusCode: 400,
+          data: {'error': 'Destination no longer exists'},
+        ),
+      );
+      await expectLater(
+        api.putLightingSettings(
+          {'kind': 'lighting_settings'},
+          nodeMappings: {'old': 'missing'},
+        ),
+        throwsA(isA<RhythmException>()),
+      );
+      verify(
+        () => dio.put(
+          any(),
+          data: any(named: 'data'),
+          options: any(named: 'options'),
+        ),
+      ).called(1);
+    });
+  });
+
   group('getDeploymentCapabilities', () {
     void state(Map<String, dynamic> data) {
       when(() => dio.get<Map<String, dynamic>>('api/state')).thenAnswer(
