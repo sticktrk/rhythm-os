@@ -148,6 +148,79 @@ async fn resume_snapshot_does_not_wait_for_room_io_and_emits_coalesced_correctio
         8,
         "concurrent resumes should share one reconciliation"
     );
+
+    // A later resume re-reads every room but the fresh values are unchanged,
+    // so clients receive no further node events.
+    wait_for_resume_refresh(&harness).await;
+    while events.try_recv().is_ok() {}
+    spy.set_any_lights_on_delay(Duration::ZERO);
+    commands::request_observed_power_refresh_on_resume(&harness.state);
+    wait_for_resume_refresh(&harness).await;
+    assert_eq!(
+        spy.calls()
+            .iter()
+            .filter(|call| matches!(call, SpyCall::AnyLightsOn { .. }))
+            .count(),
+        16
+    );
+    while let Ok(event) = events.try_recv() {
+        assert!(
+            !matches!(event, ServerEvent::NodeState { .. }),
+            "unchanged rooms must not be re-sent"
+        );
+    }
+}
+
+async fn wait_for_resume_refresh(harness: &TestHarness) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while harness
+            .state
+            .lock()
+            .unwrap()
+            .observed_power_resume_refresh_running
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("resume power reconciliation must finish");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resume_refresh_stops_starting_room_queries_at_its_budget() {
+    use rhythm_core::spy_controller::SpyCall;
+    use std::time::Duration;
+
+    let (harness, spy) = TestHarness::with_spy_controller();
+    let harness = harness.with_discovery(
+        (0..8).map(|i| room(&format!("room-{i}"), "Room")).collect(),
+        vec![],
+    );
+    harness.sync();
+    spy.reset();
+    spy.set_any_lights_on_delay(Duration::from_millis(200));
+    let queries = || {
+        spy.calls()
+            .iter()
+            .filter(|call| matches!(call, SpyCall::AnyLightsOn { .. }))
+            .count()
+    };
+    // Queries start at 0 ms and 200 ms; the third would start at 400 ms.
+    commands::request_observed_power_refresh_on_resume_within(
+        &harness.state,
+        Duration::from_millis(300),
+    );
+    wait_for_resume_refresh(&harness).await;
+    let first_walk = queries();
+    assert!(
+        (1..8).contains(&first_walk),
+        "budget must end the walk early, ran {first_walk} of 8"
+    );
+    // The coalescing flag is released, so a later client starts a new walk.
+    spy.set_any_lights_on_delay(Duration::ZERO);
+    commands::request_observed_power_refresh_on_resume(&harness.state);
+    wait_for_resume_refresh(&harness).await;
+    assert_eq!(queries(), first_walk + 8);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

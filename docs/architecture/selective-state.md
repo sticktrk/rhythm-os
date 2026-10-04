@@ -49,9 +49,11 @@ every node's effective settings. Unrequested nodes skip per-node DTO and
 lighting-display construction; base-only reads also skip configuration work.
 
 For a nonblocking resume, `refresh_observed_power=true` returns the ordinary
-snapshot and starts one coalesced background power reconciliation. Each completed
-observation is emitted as a node-state event; failed queries leave the cache
-unchanged. The job runs separately from HTTP and the command worker, and a newer
+snapshot and starts one coalesced background power reconciliation. An observation
+that changes a room's value, or makes a stale one fresh, is emitted as a
+node-state event as soon as that room answers; unchanged rooms send nothing and
+failed queries leave the cache unchanged. No room query starts after 15 seconds,
+so one unreachable integration cannot hold the coalescing slot for a whole walk. The job runs separately from HTTP and the command worker, and a newer
 command or live observation supersedes an in-flight sample. `authoritative=true`
 retains its blocking semantics and takes precedence if both flags are present.
 Previous appliances ignore the additive refresh query; normal SSE and periodic

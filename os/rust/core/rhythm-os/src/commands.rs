@@ -1652,6 +1652,17 @@ fn update_lights_on_cache_for_node_with_source(
     );
 }
 
+/// What a guarded observed-power write did to the cache.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ObservedPowerWrite {
+    /// A newer observation, a replaced runtime or a removed node won.
+    Skipped,
+    /// Recorded, but clients already show this fresh value.
+    Unchanged,
+    /// Recorded a different, first or newly fresh value.
+    Changed,
+}
+
 fn update_lights_on_cache_if_not_superseded(
     state: &SharedState,
     node_id: &str,
@@ -1661,7 +1672,7 @@ fn update_lights_on_cache_if_not_superseded(
     source: ObservedPowerSource,
     query_started_ms: Option<u64>,
     lifecycle: Option<(&Arc<dyn RuntimeHandle>, u64)>,
-) -> bool {
+) -> ObservedPowerWrite {
     let observed_at_instant = Instant::now();
     let observed_at_epoch_ms = current_epoch_ms();
     if let Ok(mut s) = state.lock() {
@@ -1673,7 +1684,7 @@ fn update_lights_on_cache_if_not_superseded(
                 || (s.topology.get(node_id).is_none()
                     && s.topology.get_device_node(node_id).is_none())
             {
-                return false;
+                return ObservedPowerWrite::Skipped;
             }
         }
         let cache_key = effective_lights_on_cache_key(&s, node_id, kind, parent_id).to_string();
@@ -1682,8 +1693,14 @@ fn update_lights_on_cache_if_not_superseded(
                 .get(&cache_key)
                 .is_some_and(|observed| observed.observed_at_epoch_ms >= started)
         }) {
-            return false;
+            return ObservedPowerWrite::Skipped;
         }
+        let changed = s
+            .room_observed_power
+            .get(&cache_key)
+            .is_none_or(|existing| {
+                existing.lights_on != lights_on || !observed_power_is_fresh(&s, existing)
+            });
         let usage_source = light_usage_source(source);
         if usage_source.is_none() {
             s.light_usage.record_excluded_source(observed_at_instant);
@@ -1694,7 +1711,7 @@ fn update_lights_on_cache_if_not_superseded(
                     && existing.lights_on == lights_on
                     && observed_power_is_fresh(&s, existing)
                 {
-                    return false;
+                    return ObservedPowerWrite::Skipped;
                 }
             }
         }
@@ -1724,9 +1741,13 @@ fn update_lights_on_cache_if_not_superseded(
                 source,
             },
         );
-        return true;
+        return if changed {
+            ObservedPowerWrite::Changed
+        } else {
+            ObservedPowerWrite::Unchanged
+        };
     }
-    false
+    ObservedPowerWrite::Skipped
 }
 
 pub(crate) fn light_state_query_id<'a>(
@@ -3207,9 +3228,22 @@ pub fn refresh_observed_power_authoritatively(
     Ok(snapshots)
 }
 
+/// Longest a resume reconciliation keeps starting room queries. One slow or
+/// unreachable integration must not hold the coalescing flag, and with it
+/// every later client's refresh, for a whole sequential walk.
+const RESUME_POWER_REFRESH_BUDGET: Duration = Duration::from_secs(15);
+
 /// Reconcile resumed clients without putting integration I/O on HTTP or the
 /// command worker. A single in-flight job bounds fan-out across clients.
 pub fn request_observed_power_refresh_on_resume(state: &SharedState) {
+    request_observed_power_refresh_on_resume_within(state, RESUME_POWER_REFRESH_BUDGET);
+}
+
+/// [`request_observed_power_refresh_on_resume`] with an explicit budget. No
+/// room query starts after `budget`; one already in flight still ends within
+/// its hub's own query timeout.
+#[doc(hidden)]
+pub fn request_observed_power_refresh_on_resume_within(state: &SharedState, budget: Duration) {
     let (runtime, generation) = {
         let Ok(mut s) = state.lock() else { return };
         if s.observed_power_resume_refresh_running {
@@ -3234,6 +3268,7 @@ pub fn request_observed_power_refresh_on_resume(state: &SharedState) {
                 }
             }
             let _guard = RefreshGuard(Arc::clone(&task_state));
+            let deadline = Instant::now() + budget;
             let snapshots = addressable_root_snapshots(&runtime);
             let mut results = HashMap::new();
             for snap in snapshots
@@ -3252,6 +3287,14 @@ pub fn request_observed_power_refresh_on_resume(state: &SharedState) {
                     light_state_query_id(&s, &snap.id, snap.kind, snap.parent_id.as_deref())
                         .to_string()
                 };
+                if !results.contains_key(&query_id) && Instant::now() >= deadline {
+                    warn!(
+                        target: "cmd",
+                        "Resume power reconciliation stopped at its {}s budget; remaining rooms keep their last observation",
+                        budget.as_secs()
+                    );
+                    break;
+                }
                 let (started, lights_on) = *results.entry(query_id.clone()).or_insert_with(|| {
                     let started = current_epoch_ms();
                     let observed = observed_lights_on_for_source(
@@ -3263,7 +3306,7 @@ pub fn request_observed_power_refresh_on_resume(state: &SharedState) {
                     (started, observed)
                 });
                 if let Some(lights_on) = lights_on {
-                    let applied = update_lights_on_cache_if_not_superseded(
+                    let write = update_lights_on_cache_if_not_superseded(
                         &task_state,
                         &snap.id,
                         snap.kind,
@@ -3273,7 +3316,10 @@ pub fn request_observed_power_refresh_on_resume(state: &SharedState) {
                         Some(started),
                         Some((&runtime, generation)),
                     );
-                    if !applied {
+                    // Each correction is sent as soon as its room answers, so
+                    // an early room is not held behind a slow later one.
+                    // Rooms that already show this fresh value send nothing.
+                    if write != ObservedPowerWrite::Changed {
                         continue;
                     }
                     let Some(snapshot) = runtime.engine_effective_node_snapshot(&snap.id) else {
