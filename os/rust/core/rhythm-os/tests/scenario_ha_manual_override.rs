@@ -50,7 +50,9 @@ fn proof(id: &str) -> HaLightIdentity {
     }
 }
 
-struct Discovery;
+struct Discovery {
+    cache: Arc<Mutex<HaEventRoutingCache>>,
+}
 impl HubDiscovery for Discovery {
     fn discover_rooms(&self) -> Result<Vec<DiscoveredRoom>> {
         // Real HA discovery retains the area ID as its control ID, even though
@@ -82,6 +84,14 @@ impl HubDiscovery for Discovery {
     }
     fn endpoint_capabilities(&self, id: &str) -> Option<serde_json::Value> {
         Some(json!({"ha_identity":proof(id)}))
+    }
+    fn endpoint_observation(&self, id: &str) -> Option<rhythm_os::hub::LightObservation> {
+        self.cache
+            .lock()
+            .unwrap()
+            .lights
+            .get(id)
+            .map(|entry| entry.observation.normalized())
     }
 }
 
@@ -188,7 +198,9 @@ impl Fixture {
             RuntimeConfig::default(),
         ));
         hub.runtime = Some(runtime.clone());
-        hub.discovery = Some(Arc::new(Discovery));
+        hub.discovery = Some(Arc::new(Discovery {
+            cache: cache.clone(),
+        }));
         {
             let mut app = state.lock().unwrap();
             app.composite_controller = Some(composite);
@@ -236,7 +248,11 @@ impl Fixture {
     }
 
     fn observe(&self, id: &str, context: &str, brightness: u8, second: u8) {
-        let data = json!({"entity_id": id, "new_state": {"state":"on", "attributes":{"brightness":brightness},
+        self.observe_power(id, context, "on", brightness, second);
+    }
+
+    fn observe_power(&self, id: &str, context: &str, power: &str, brightness: u8, second: u8) {
+        let data = json!({"entity_id": id, "new_state": {"state":power, "attributes":{"brightness":brightness},
             "last_updated":format!("2026-01-01T12:00:{second:02}Z"),
             "context":{"id":context,"user_id":"synthetic-user","parent_id":null}}});
         for event in translate_ws_event("state_changed", &data, &self.registry, &self.cache) {
@@ -298,6 +314,85 @@ impl Fixture {
                     .collect::<Vec<_>>()
             })
             .collect()
+    }
+}
+
+#[test]
+fn no_output_actions_preserve_observed_power_and_send_no_device_command() {
+    for power in ["snapshot", "on", "off"] {
+        for target_room in [false, true] {
+            let f = Fixture::new();
+            if power != "snapshot" {
+                f.observe_power(LIGHTS[0], "physical-readback", power, 230, 1);
+            }
+            let target = if target_room { &f.room } else { &f.nodes[0] };
+            let before = f.state.lock().unwrap().room_observed_power.clone();
+            for action in ["rhythm_on", "rhythm_off"] {
+                let response: serde_json::Value = serde_json::from_str(
+                    &rhythm_os::commands::do_node_action(&f.state, target, action, false).unwrap(),
+                )
+                .unwrap();
+                f.settle();
+                assert_eq!(f.spy.call_count(), 0, "{action} must not write to HA");
+                if let Some(prior) = before.get(target) {
+                    assert_eq!(response["lights_on"], prior.lights_on);
+                    assert_eq!(response["observed_power"]["source"], prior.source.as_str());
+                    assert_eq!(
+                        response["observed_power"]["observed_at_epoch_ms"],
+                        prior.observed_at_epoch_ms
+                    );
+                }
+                assert_eq!(
+                    f.runtime.engine_node_snapshot(target).unwrap().rhythm_enabled,
+                    action == "rhythm_on"
+                );
+                let state = f.state.lock().unwrap();
+                assert_eq!(state.room_observed_power.len(), before.len());
+                for (id, prior) in &before {
+                    let after = &state.room_observed_power[id];
+                    assert_eq!(
+                        (after.lights_on, after.source, after.observed_at_epoch_ms),
+                        (prior.lights_on, prior.source, prior.observed_at_epoch_ms),
+                        "{action} must preserve the physical {power} observation for {id}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn no_output_actions_do_not_invent_an_unknown_power_observation() {
+    let f = Fixture::new();
+    f.state.lock().unwrap().room_observed_power.clear();
+    for action in ["rhythm_on", "rhythm_off"] {
+        rhythm_os::commands::do_node_action(&f.state, &f.nodes[0], action, false).unwrap();
+        f.settle();
+        assert_eq!(f.spy.call_count(), 0);
+        assert!(
+            f.state.lock().unwrap().room_observed_power.is_empty(),
+            "{action} cannot manufacture a power observation without a light command"
+        );
+    }
+}
+
+#[test]
+fn power_actions_still_record_the_accepted_on_and_off_command() {
+    let f = Fixture::new();
+    for (action, service, lights_on) in [("off", "turn_off", false), ("on", "turn_on", true)] {
+        f.spy.reset();
+        rhythm_os::commands::do_node_action(&f.state, &f.nodes[0], action, false).unwrap();
+        f.settle();
+        let calls = f.spy.calls_for_service(service);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].data["entity_id"], json!([LIGHTS[0]]));
+        let state = f.state.lock().unwrap();
+        let observed = &state.room_observed_power[&f.nodes[0]];
+        assert_eq!(observed.lights_on, lights_on);
+        assert_eq!(
+            observed.source,
+            rhythm_os::state::ObservedPowerSource::Command
+        );
     }
 }
 

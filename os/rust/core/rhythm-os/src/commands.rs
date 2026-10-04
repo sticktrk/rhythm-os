@@ -14315,7 +14315,16 @@ pub fn do_node_action(
     sync_active_mode_from_runtime(state, &runtime);
     clear_room_mode_transition(state, node_id);
 
-    update_lights_on_cache_for_runtime_node(state, &runtime, node_id, turned_on);
+    // `turned_on` is false for actions that send no light command as well as
+    // actual off commands. Preserve physical readback for mode-only actions.
+    // Legacy RuntimeHandle implementations may execute I/O while returning an
+    // empty plan, so plan emptiness cannot identify these no-output actions.
+    if !matches!(
+        action,
+        ButtonAction::RhythmOn | ButtonAction::RhythmOff
+    ) {
+        update_lights_on_cache_for_runtime_node(state, &runtime, node_id, turned_on);
+    }
 
     {
         emit_node_state_event_after_apply(state, &runtime, node_id);
