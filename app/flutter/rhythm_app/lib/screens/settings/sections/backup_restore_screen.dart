@@ -724,6 +724,10 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen> {
           .where((node) => node['kind'] == 'room')
           .map((node) => node['id'])
           .toSet();
+      final scopeKey = RoomPageProvider.layoutScopeFor(
+        home: homeProvider.currentHome,
+        hubs: homeProvider.currentHomeHubs,
+      );
       final appSettings = CloudBackupService.remapLightingLayout(
         source: snapshot,
         targetHub: serverHub,
@@ -731,10 +735,9 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen> {
           for (final entry in mappings.entries)
             if (roomIds.contains(entry.key)) entry.key: entry.value,
         },
-      );
-      final scopeKey = RoomPageProvider.layoutScopeFor(
-        home: homeProvider.currentHome,
-        hubs: homeProvider.currentHomeHubs,
+        targetPages:
+            SettingsService.instance.getRoomPageLayout(scopeKey: scopeKey) ??
+                const [],
       );
       final restoredLayout =
           await SettingsService.instance.applyCloudSettingsBundle(

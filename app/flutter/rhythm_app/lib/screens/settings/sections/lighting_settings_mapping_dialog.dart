@@ -89,38 +89,45 @@ class _LightingSettingsMappingDialogState
               ],
               for (final source in sources) ...[
                 const SizedBox(height: 16),
-                DropdownButtonFormField<String>(
-                  key: ValueKey('mapping-${source['id']}'),
-                  initialValue: _mappings[source['id']] ?? '',
-                  isExpanded: true,
-                  decoration: InputDecoration(
-                    labelText:
-                        '${_nodeLabel(source, sources)} (${source['kind'] == 'room' ? 'room' : 'light'})',
-                  ),
-                  items: [
-                    const DropdownMenuItem(
-                      value: '',
-                      child: Text('Skip for now'),
-                    ),
-                    for (final target in targets)
-                      if (target['kind'] == source['kind'] &&
-                          (!_mappings.containsValue(target['id']) ||
-                              _mappings[source['id']] == target['id']))
-                        DropdownMenuItem(
-                          value: target['id'] as String,
-                          child: Text(
-                            _nodeLabel(target, targets),
-                            overflow: TextOverflow.ellipsis,
+                Text(
+                  '${_nodeLabel(source, sources)} (${source['kind'] == 'room' ? 'room' : 'light'})',
+                  key: ValueKey('mapping-source-${source['id']}'),
+                  style: Theme.of(context).textTheme.labelLarge,
+                ),
+                Semantics(
+                  label:
+                      '${_nodeLabel(source, sources)} (${source['kind'] == 'room' ? 'room' : 'light'})',
+                  child: DropdownButtonFormField<String>(
+                    key: ValueKey('mapping-${source['id']}'),
+                    initialValue: _mappings[source['id']] ?? '',
+                    isExpanded: true,
+                    isDense: false,
+                    itemHeight: null,
+                    items: [
+                      const DropdownMenuItem(
+                        value: '',
+                        child: Text('Skip for now'),
+                      ),
+                      for (final target in targets)
+                        if (target['kind'] == source['kind'] &&
+                            (!_mappings.containsValue(target['id']) ||
+                                _mappings[source['id']] == target['id']))
+                          DropdownMenuItem(
+                            value: target['id'] as String,
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(vertical: 8),
+                              child: Text(_nodeLabel(target, targets)),
+                            ),
                           ),
-                        ),
-                  ],
-                  onChanged: (value) => setState(() {
-                    if (value == null || value.isEmpty) {
-                      _mappings.remove(source['id']);
-                    } else {
-                      _mappings[source['id'] as String] = value;
-                    }
-                  }),
+                    ],
+                    onChanged: (value) => setState(() {
+                      if (value == null || value.isEmpty) {
+                        _mappings.remove(source['id']);
+                      } else {
+                        _mappings[source['id'] as String] = value;
+                      }
+                    }),
+                  ),
                 ),
               ],
             ],

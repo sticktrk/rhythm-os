@@ -503,10 +503,12 @@ class CloudBackupService {
 
   /// A migration is an explicit transfer between installations. Only reviewed
   /// room IDs enter the destination layout; source aliases never follow them.
+  /// Destination rooms outside this transfer retain their existing pages.
   static Map<String, dynamic> remapLightingLayout({
     required CloudBackupSnapshot source,
     required Hub targetHub,
     required Map<String, String> roomMappings,
+    List<List<String>> targetPages = const [],
   }) {
     final sourceHub = Hub.server(
       id: source.sourceHubId,
@@ -520,19 +522,37 @@ class CloudBackupService {
       ...RoomPageProvider.hubLayoutKeyAliases(sourceHub),
     };
     final recordedKeys = source.appSettingsBundle['lighting_source_hub_keys'];
-    if (recordedKeys is Map && recordedKeys[source.sourceHubId] is String) {
+    final hasRecordedKey =
+        recordedKeys is Map && recordedKeys[source.sourceHubId] is String;
+    if (hasRecordedKey) {
       sourceKeys.add(recordedKeys[source.sourceHubId] as String);
     }
-    final layout = _layoutMaps(source.appSettingsBundle['all_rooms_layouts'])
+    final accountLayouts =
+        _layoutMaps(source.appSettingsBundle['all_rooms_layouts']);
+    var matches = accountLayouts
         .where((entry) => _layoutIdentityKeys(entry).any(sourceKeys.contains))
-        .firstOrNull;
+        .toList();
+    if (matches.isEmpty && !hasRecordedKey) {
+      // Older snapshots did not record the durable hub key. A later capture
+      // could update its endpoint while retaining the original layout alias.
+      // Reviewed source rooms can identify that layout only when unambiguous.
+      matches = accountLayouts.where((entry) {
+        final pages = entry['pages'];
+        return pages is List &&
+            pages.whereType<List>().any(
+                  (page) => page.whereType<String>().any(roomMappings.containsKey),
+                );
+      }).toList();
+    }
+    if (matches.length > 1) return const {};
+    final layout = matches.singleOrNull;
     final rawPages = (layout ??
         (source.appSettingsBundle['all_rooms_layout'] is Map
             ? source.appSettingsBundle['all_rooms_layout'] as Map
             : const {}))['pages'];
     if (rawPages is! List) return const {};
     final assigned = <String>{};
-    final pages = <List<String>>[
+    final mappedPages = <List<String>>[
       for (final page in rawPages)
         if (page is List)
           [
@@ -542,6 +562,18 @@ class CloudBackupService {
           ],
     ];
     if (assigned.isEmpty) return const {};
+    // A later transfer may review only newly available rooms. Keep every
+    // other destination room on its existing page instead of replacing it.
+    final retained = <String>{};
+    final pageCount = targetPages.length > mappedPages.length
+        ? targetPages.length
+        : mappedPages.length;
+    final pages = List.generate(pageCount, (index) => <String>[
+          if (index < targetPages.length)
+            for (final id in targetPages[index])
+              if (!assigned.contains(id) && retained.add(id)) id,
+          if (index < mappedPages.length) ...mappedPages[index],
+        ]);
     return {
       'schema_version': 1,
       'all_rooms_layouts': [

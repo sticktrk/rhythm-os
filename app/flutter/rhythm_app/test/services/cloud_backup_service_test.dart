@@ -298,6 +298,110 @@ void main() {
     expect((result['all_rooms_layouts'] as List).single['pages'], [['ha-room']]);
   });
 
+  test('legacy snapshot resolves a unique layout after its endpoint changes', () {
+    final originalLayout = {
+      'hub_key': 'server_instance:box-instance',
+      'hub_key_aliases': ['server:old-address.local:54448:plain'],
+      'pages': [
+        ['old-1', 'unreviewed'],
+        ['old-2'],
+      ],
+    };
+    final retained = CloudBackupService.appSettingsBundleForCapture(
+      existing: {
+        'all_rooms_layouts': [
+          {
+            'hub_key': 'server_instance:other',
+            'pages': [['unrelated-room']],
+          },
+          originalLayout,
+        ],
+      },
+      local: {
+        'all_rooms_layouts': [
+          {
+            ...originalLayout,
+            'hub_key_aliases': ['server:new-address.local:54448:plain'],
+          },
+        ],
+      },
+      hasUnsyncedLayoutEdit: false,
+    );
+    // A pre-upgrade capture stored the new endpoint but retained the old
+    // layout, without the lighting_source_hub_keys added by newer clients.
+    final source = CloudBackupSnapshot.fromRow({
+      'source_hub_id': 'source',
+      'source_hub_host': 'new-address.local',
+      'source_hub_port': 54448,
+      'app_settings_bundle': retained,
+    });
+    final target = Hub.server(
+      id: 'ha', homeId: 'home', name: 'HA', host: 'ha.local',
+      serverInstanceId: 'ha-instance',
+    );
+    final result = CloudBackupService.remapLightingLayout(
+      source: source, targetHub: target,
+      roomMappings: {'old-1': 'ha-1', 'old-2': 'ha-2'},
+    );
+    final layout = (result['all_rooms_layouts'] as List).single as Map;
+    expect(layout['pages'], [['ha-1'], ['ha-2']]);
+    expect(layout['hub_key'], RoomPageProvider.hubLayoutKey(target));
+    expect(layout['hub_key_aliases'], RoomPageProvider.hubLayoutKeyAliases(target));
+    expect((retained['all_rooms_layouts'] as List).last, originalLayout);
+    expect(retained.containsKey('lighting_source_hub_keys'), isFalse);
+  });
+
+  test('legacy layout recovery rejects ambiguous reviewed room matches', () {
+    final source = CloudBackupSnapshot.fromRow({
+      'source_hub_id': 'source',
+      'source_hub_host': 'new-address.local',
+      'source_hub_port': 54448,
+      'app_settings_bundle': {
+        'all_rooms_layouts': [
+          for (final hub in ['first', 'second'])
+            {
+              'hub_key': 'server_instance:$hub',
+              'pages': [['old-room']],
+            },
+        ],
+        'all_rooms_layout': {'pages': [['old-room']]},
+      },
+    });
+    expect(
+      CloudBackupService.remapLightingLayout(
+        source: source,
+        targetHub: Hub.server(id: 'ha', homeId: 'home', name: 'HA', host: 'ha.local'),
+        roomMappings: {'old-room': 'ha-room'},
+      ),
+      isEmpty,
+    );
+  });
+
+  test('recorded source identity does not fall back to another hub layout', () {
+    final source = CloudBackupSnapshot.fromRow({
+      'source_hub_id': 'source',
+      'source_hub_host': 'box.local',
+      'source_hub_port': 54448,
+      'app_settings_bundle': {
+        'lighting_source_hub_keys': {'source': 'server_instance:box'},
+        'all_rooms_layouts': [
+          {
+            'hub_key': 'server_instance:other',
+            'pages': [['old-room']],
+          },
+        ],
+      },
+    });
+    expect(
+      CloudBackupService.remapLightingLayout(
+        source: source,
+        targetHub: Hub.server(id: 'ha', homeId: 'home', name: 'HA', host: 'ha.local'),
+        roomMappings: {'old-room': 'ha-room'},
+      ),
+      isEmpty,
+    );
+  });
+
   group('CloudBackupService.buildSnapshot', () {
     test('repeated portable capture refreshes profiles and source metadata',
         () {

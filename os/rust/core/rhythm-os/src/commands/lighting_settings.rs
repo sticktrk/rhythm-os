@@ -346,16 +346,9 @@ pub fn do_lighting_settings_import(
             "Cannot map different node kinds for '{}'",
             source
         );
-        let mut profile = imported.room_profile.clone();
-        clear_schedule_mode(
-            &mut profile,
-            snapshot
-                .profile_settings
-                .light_schedule
-                .as_ref()
-                .and_then(rhythm_core::LightScheduleAssignment::active_mode)
-                .unwrap_or(active_mode),
-        );
+        // Portable assignments contain a placeholder mode. The runtime resolves
+        // the live destination mode atomically when applying all mapped nodes.
+        let profile = imported.room_profile.clone();
         validate_room_profile_settings(target, &profile, &profile_ids, Some(&scene_ids))?;
         for id in profile.profile_overrides.keys() {
             anyhow::ensure!(
@@ -471,20 +464,26 @@ pub fn do_lighting_settings_import(
                 "Failed to activate imported mode profile"
             );
             runtime.set_power_save(incoming.profile.power_save);
-            for snapshot in snapshots.iter().filter(|node| targets.contains(&node.id)) {
-                let applied = runtime.apply_light_node_preferences(
-                    &snapshot.id,
-                    rhythm_core::runtime::handle::LightNodePreferences {
-                        rhythm_enabled: snapshot.rhythm_enabled,
-                        disabled: snapshot.disabled,
-                        standby_enabled: snapshot.standby_enabled,
-                        profile_settings: snapshot.profile_settings.clone(),
+            let updates = snapshots
+                .iter()
+                .filter(|node| targets.contains(&node.id))
+                .map(
+                    |snapshot| rhythm_core::runtime::handle::LightNodePreferencesUpdate {
+                        node_id: snapshot.id.clone(),
+                        preferences: rhythm_core::runtime::handle::LightNodePreferences {
+                            rhythm_enabled: snapshot.rhythm_enabled,
+                            disabled: snapshot.disabled,
+                            standby_enabled: snapshot.standby_enabled,
+                            profile_settings: snapshot.profile_settings.clone(),
+                        },
+                        expected_rhythm_enabled: expected_enablement[&snapshot.id],
                     },
-                    expected_enablement[&snapshot.id],
-                )?;
-                if !applied {
-                    warnings.insert("newer_target_enablement_preserved".into());
-                }
+                )
+                .collect::<Vec<_>>();
+            if !updates.is_empty()
+                && !runtime.apply_light_node_preferences(updates, app.active_mode)?
+            {
+                warnings.insert("newer_target_enablement_preserved".into());
             }
         }
         app.replace_light_profile_configs(profiles.into_values());

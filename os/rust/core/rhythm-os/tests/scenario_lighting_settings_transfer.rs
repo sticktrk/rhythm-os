@@ -5,7 +5,10 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use harness::{light, rooms_with_lights, TestHarness};
-use rhythm_core::{LightNodeKind, LightProfileNodeOverride, RoomProfileSettings};
+use rhythm_core::{
+    LightNodeKind, LightProfileNodeOverride, LightScheduleAssignment, RhythmMode,
+    RoomProfileSettings,
+};
 use rhythm_os::bundle::{LightingSettingsBundle, LightingSettingsImportPayload};
 use rhythm_os::commands;
 use rhythm_os::storage::{FileStorage, Storage};
@@ -313,6 +316,159 @@ fn standalone_light_preferences_and_named_schedule_survive_reviewed_transfer() {
         state.light_schedules["weekday"].active_mode,
         state.active_mode
     );
+}
+
+#[test]
+fn transfer_preserves_destination_sleep_when_imported_mode_uses_a_custom_profile() {
+    let target = room_harness("ha-area");
+    let target_id = target.resolve("ha-area");
+    commands::do_set_active_mode(&target.state, RhythmMode::Sleep).unwrap();
+    let mut incoming = export(&target);
+    let mut profile = rhythm_core::default_sleep_profile();
+    profile.id = "custom-sleep".into();
+    incoming.profile.profiles.push(profile);
+    incoming
+        .mode_configs
+        .as_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|mode| mode.mode == RhythmMode::Sleep)
+        .unwrap()
+        .active_profile_id = Some("custom-sleep".into());
+    incoming
+        .nodes
+        .iter_mut()
+        .find(|node| node.id == target_id)
+        .unwrap()
+        .room_profile
+        .light_schedule = Some(LightScheduleAssignment::Unscheduled {
+        active_mode: RhythmMode::Day,
+    });
+
+    commands::do_lighting_settings_import(
+        &target.state,
+        LightingSettingsImportPayload {
+            settings: incoming,
+            node_mappings: BTreeMap::from([(target_id.clone(), target_id)]),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(target.state.lock().unwrap().active_mode, RhythmMode::Sleep);
+    assert_eq!(
+        target
+            .snapshot("ha-area")
+            .unwrap()
+            .profile_settings
+            .light_schedule
+            .unwrap()
+            .active_mode(),
+        Some(RhythmMode::Sleep)
+    );
+}
+
+#[test]
+fn transfer_preserves_inherited_and_materialized_destination_modes() {
+    for materialized in [false, true] {
+        let target = room_harness("parent");
+        let parent_id = target.resolve("parent");
+        let runtime = target.state.lock().unwrap().hub_runtime().unwrap();
+        runtime.add_node(
+            "child-room",
+            "Child room",
+            LightNodeKind::Room,
+            Some(parent_id.clone()),
+        );
+        commands::do_light_schedules_set(
+            &target.state,
+            vec![serde_json::from_value(json!({
+                "id":"weekday", "name":"Weekday", "active_mode":"day",
+                "transitions":[rhythm_core::ModeTransitionConfig::new(
+                    RhythmMode::Sleep, RhythmMode::Day, 0
+                ).with_id("wake")]
+            }))
+            .unwrap()],
+        )
+        .unwrap();
+        let patch = commands::RoomProfileSettingsPatch {
+            light_schedule: Some(Some(LightScheduleAssignment::Named {
+                schedule_id: "weekday".into(),
+                active_mode: if materialized {
+                    RhythmMode::Day
+                } else {
+                    RhythmMode::Sleep
+                },
+            })),
+            ..Default::default()
+        };
+        commands::do_node_preferences_set(
+            &target.state,
+            &parent_id,
+            None,
+            None,
+            None,
+            None,
+            Some(&patch),
+            false,
+        )
+        .unwrap();
+        if materialized {
+            let patch = commands::RoomProfileSettingsPatch {
+                light_schedule_modes: Some(BTreeMap::from([(
+                    "weekday".into(),
+                    Some(RhythmMode::Sleep),
+                )])),
+                ..Default::default()
+            };
+            commands::do_node_preferences_set(
+                &target.state,
+                "child-room",
+                None,
+                None,
+                None,
+                None,
+                Some(&patch),
+                false,
+            )
+            .unwrap();
+        }
+        let before = runtime
+            .engine_effective_node_snapshot("child-room")
+            .unwrap();
+        assert_eq!(
+            before
+                .profile_settings
+                .light_schedule
+                .unwrap()
+                .active_mode(),
+            Some(RhythmMode::Sleep)
+        );
+        let mut incoming = export(&target);
+        incoming
+            .nodes
+            .iter_mut()
+            .find(|node| node.id == "child-room")
+            .unwrap()
+            .room_profile
+            .light_schedule = Some(LightScheduleAssignment::Unscheduled {
+            active_mode: RhythmMode::Day,
+        });
+        commands::do_lighting_settings_import(
+            &target.state,
+            LightingSettingsImportPayload {
+                settings: incoming,
+                node_mappings: BTreeMap::from([("child-room".into(), "child-room".into())]),
+            },
+        )
+        .unwrap();
+        let after = runtime
+            .engine_effective_node_snapshot("child-room")
+            .unwrap();
+        assert_eq!(
+            after.profile_settings.light_schedule.unwrap().active_mode(),
+            Some(RhythmMode::Sleep)
+        );
+    }
 }
 
 #[test]
