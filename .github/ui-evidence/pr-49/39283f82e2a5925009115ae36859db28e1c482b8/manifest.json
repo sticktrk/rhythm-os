@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "repository": "sticktrk/rhythm-os",
+  "pull_request": 49,
+  "head": "39283f82e2a5925009115ae36859db28e1c482b8",
+  "uses_mock_data": true,
+  "source_test": "test/review_mobile_ui_evidence_test.dart",
+  "screenshots": [
+    {
+      "file": "enrollment-phone.png",
+      "caption": "Mobile enrollment on a 390 by 844 phone using synthetic data."
+    }
+  ]
+}
