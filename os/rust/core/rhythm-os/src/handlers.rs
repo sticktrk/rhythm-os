@@ -6004,6 +6004,10 @@ mod tests {
 
     #[test]
     fn simultaneous_duplicate_pairing_post_observes_the_same_pending_operation() {
+        // File-backed pairing shares a document lock with other parallel tests.
+        // These waits bound a stalled fixture, not pairing latency: scheduling
+        // and fsync contention must not fail the duplicate-request assertion.
+        const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
         let (state, path) = pairing_test_state("concurrent-duplicate");
         let calls = Arc::new(AtomicUsize::new(0));
         let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
@@ -6018,7 +6022,7 @@ mod tests {
                 release_rx
                     .lock()
                     .unwrap()
-                    .recv_timeout(Duration::from_secs(2))
+                    .recv_timeout(HANDSHAKE_TIMEOUT)
                     .unwrap();
                 Ok(PairingSession {
                     hub_type: "local_ble".to_string(),
@@ -6041,7 +6045,7 @@ mod tests {
         let first_request = request.clone();
         let first = std::thread::spawn(move || handle_pair_device(&first_state, &first_request));
         started_rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(HANDSHAKE_TIMEOUT)
             .expect("first pairing entered integration");
 
         let duplicate = handle_pair_device(&state, &request);
