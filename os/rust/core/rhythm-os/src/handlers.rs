@@ -634,6 +634,35 @@ pub fn handle_get_profile_bundle(state: &SharedState) -> ApiResponse {
     }
 }
 
+pub fn handle_get_lighting_settings(state: &SharedState) -> ApiResponse {
+    match commands::build_lighting_settings_bundle(state) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::server_error(e),
+    }
+}
+
+pub fn handle_preview_lighting_settings(body: &Value) -> ApiResponse {
+    match commands::normalize_lighting_settings_payload(body)
+        .and_then(|settings| Ok(serde_json::to_string(&settings)?))
+    {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::bad_request(&e.to_string()),
+    }
+}
+
+pub fn handle_put_lighting_settings(state: &SharedState, body: &Value) -> ApiResponse {
+    let payload = match serde_json::from_value::<crate::bundle::LightingSettingsImportPayload>(
+        body.clone(),
+    ) {
+        Ok(payload) => payload,
+        Err(_) => return ApiResponse::bad_request("Invalid lighting settings import"),
+    };
+    match commands::do_lighting_settings_import(state, payload) {
+        Ok(json) => ApiResponse::json_ok(json),
+        Err(e) => ApiResponse::bad_request(&e.to_string()),
+    }
+}
+
 pub fn handle_put_profile_bundle(state: &SharedState, body: &Value) -> ApiResponse {
     let payload: crate::bundle::ProfileBundleImportPayload =
         match serde_json::from_value(body.clone()) {

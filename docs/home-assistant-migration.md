@@ -19,7 +19,7 @@ HA deployment does not support whole-appliance backup or restore.
 | LAN and remote access | Direct API and existing Rhythm tunnel | Credential revocation | Rhythm account/home and tunnel contracts |
 | Managed lights | Deployment capability | Reviewed selection while paused | HA registry identity plus explicit Rhythm opt-in |
 | Physical device setup | Hand off to HA | Manage in HA | HA integration |
-| Portable behavior | Profile bundle | Profile import/export | Rhythm; import pauses control |
+| Portable behavior | Account lighting-settings backup and reviewed restore | Profile import/export | Rhythm; import pauses control |
 | Whole installation recovery | Unavailable through appliance backup APIs | HA cold backup | HA Supervisor |
 | Appliance OTA, network provisioning, direct protocol pairing | Unavailable on add-on | Unavailable | HA host/app lifecycle |
 
@@ -27,6 +27,54 @@ The internal admin credential and Supervisor token are never phone credentials.
 Ingress identity headers have no authority on the mobile listener. The mobile
 listener requires positive bearer authorization even when the phone is on LAN.
 Unknown operations remain denied. Old appliances retain their current routes.
+
+## Transfer lighting settings with the app
+
+Use **Settings → Rhythm App → Backup & Restore** in the Rhythm app to move
+lighting behavior from a Rhythm Box to the add-on. The app and destination must
+support portable lighting settings. An older add-on shows **Update add-on to
+transfer settings**; older appliance account backups remain usable as the source.
+
+1. Connect the app to the old Rhythm Box, sign in, and choose **Back Up Now**.
+   Keep the old installation and its recovery backup until the move is verified.
+2. Add the physical lights to Home Assistant using their supported integrations.
+   In the add-on, use **Connect mobile app** to enroll the phone, then connect the
+   app to the add-on.
+3. Open **Backup & Restore → Restore From Backup**. If the account also has
+   saved add-on settings, **Choose a settings backup** lets you choose between
+   those settings and the old Light Box backup.
+4. In **Match your rooms and lights**, select the destination for each old room
+   or light you want to transfer. Every mapping starts at **Skip for now**; verify
+   each match explicitly. Leave devices not yet in Home Assistant unmapped.
+5. Choose **Restore settings**. Rhythm imports portable profiles, schedules,
+   user scenes, mode configuration and mapped room/light preferences. The review
+   reports skipped nodes and exclusions. It pauses adaptation for review and
+   does not grant permission to control any light.
+6. Review the resulting settings, select verified identities under **Managed
+   lights**, and stop the old controller before enabling Rhythm for those lights.
+   Lights added to HA later can receive their old settings through another
+   reviewed transfer.
+
+The transfer excludes appliance credentials, Matter fabrics, hub connections,
+tunnel identity, active output state and managed-light ownership. Home Assistant
+remains responsible for devices, areas and inputs. Integration-native scenes and
+opaque scene extensions are excluded; recreate their equivalents and input
+bindings in the destination as needed. Re-pairing or adding a Matter device to
+another controller remains a separate device setup step.
+
+The account retains portable lighting settings separately from its appliance
+rollback bundle. Subsequent add-on backups can update lighting settings without
+replacing that old full backup or its source metadata. Sign-in alone does not
+migrate settings. App layout remains account data; source room IDs and
+input/device references do not establish destination identity. A lighting
+settings backup is not a full Home Assistant installation backup.
+
+The API advertises `capabilities.deployment.portable_settings`. Supporting clients
+export `GET /api/lighting-settings`, convert a source bundle with
+`POST /api/lighting-settings/preview`, and apply settings with explicit reviewed
+target node mappings through `PUT /api/lighting-settings`. Missing capability support does
+not authorize falling back to full appliance restore on the add-on. The existing
+profile-only bundle API and offline converter remain available.
 
 ## Offline migration preview
 
@@ -43,8 +91,10 @@ cargo run -p rhythm-os --example ha-migration-preview -- \
 The converter accepts backup schemas 1–3, bounds input size, and exclusively
 creates a private output directory. `review.json` records a deterministic input
 digest, every old device, exact hardware candidates, migration methods and pending
-reviews. `profiles.json` can be imported through the add-on's System page. It
-contains typed portable profiles, schedules and user scenes; integration-native
+reviews. `profiles.json` can be imported through **System → Restore profiles**.
+The System page accepts both this standard `profile_bundle` file and its own
+`rhythm-ha-profiles` export wrapper. It contains typed portable profiles,
+schedules and user scenes; integration-native
 scenes and opaque scene extensions are excluded and listed for review. It never
 copies credentials, fabrics, connectors, ownership selection or live mode state.
 Identical inputs produce identical review content; an existing output directory is
@@ -54,9 +104,10 @@ A hardware match remains a candidate. Names and room names are never identity
 proof. Matter node IDs are fabric-scoped and cannot match across controllers.
 Serial matches additionally require manufacturer and model. Multiple HA endpoints,
 unavailable counterparts and device-specific behavior require explicit review.
-Room preferences, layout aliases, input bindings, schedule references and native
-scene equivalents need a reviewed mapping before enabling control; the preview
-does not claim to apply these installation-specific mappings.
+This offline profile-only preview does not apply room/light preferences, layout
+aliases or input bindings. Use the app's reviewed lighting-settings transfer for
+room/light preferences; review schedule references and native scene equivalents
+before enabling control.
 
 ## Device handover
 
@@ -66,8 +117,9 @@ does not claim to apply these installation-specific mappings.
    connectivity separately; adding a fabric does not migrate a Thread network.
 3. Verify fresh HA observations and control of each candidate, including inputs,
    colors, transitions and scenes. Unsupported models stay on the old installation.
-4. Import portable behavior while paused, review HA identities, assign rooms and
-   inputs, and approve the managed-light selection. Re-enroll phones and perform an
+4. Transfer portable behavior with reviewed room/light mappings while paused,
+   review HA identities and inputs, and approve the managed-light selection.
+   Re-enroll phones and perform an
    explicit account/tunnel handover; copying an appliance data directory is unsafe.
 5. Stop the old lighting writer before enabling the add-on for those same lights.
 6. Keep old recovery material through the agreed transition window. Before rollback,
@@ -86,6 +138,11 @@ Deterministic unit and fake-I/O scenarios are necessary, but do not establish re
 HAOS behavior or device support. Record exact HA Core, OS, Supervisor, Matter-app,
 mobile and product versions for the release candidate. Broad historical version
 series are insufficient compatibility evidence.
+
+The app transfer and profile-file compatibility changes require real RPiZ-to-HA
+verification on the released app and add-on builds. Automated tests do not prove
+that a particular physical device can be transferred or that its HA integration
+supports the same lighting behavior.
 
 The release evidence must cover native amd64 and aarch64 images, HAOS Ingress and
 custom host-port mapping, real phones on Wi-Fi and cellular, tunnel disable/recovery,

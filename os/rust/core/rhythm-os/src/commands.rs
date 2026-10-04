@@ -69,6 +69,12 @@ use crate::topology::{
     AutomationAction, InputBinding, InputBindingPreset, ModeTransitionSelection, NodeControlKind,
 };
 
+mod lighting_settings;
+pub use lighting_settings::{
+    build_lighting_settings_bundle, do_lighting_settings_import,
+    normalize_lighting_settings_payload,
+};
+
 pub const DEFAULT_HTTP_BATCH_DISPATCH_SPACING_MS: u64 = 500;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

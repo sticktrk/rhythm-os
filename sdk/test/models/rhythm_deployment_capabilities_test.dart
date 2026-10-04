@@ -7,6 +7,7 @@ void main() {
     expect(deployment.fullBackupExport, isTrue);
     expect(deployment.fullBackupImport, isTrue);
     expect(deployment.haDeviceManagement, isFalse);
+    expect(deployment.portableSettings, isFalse);
   });
 
   test('explicit deployments fail closed for absent backup operations', () {
@@ -22,6 +23,7 @@ void main() {
     expect(deployment.haDeviceManagement, isTrue);
     expect(deployment.directMobileControl, isTrue);
     expect(deployment.portableProfiles, isTrue);
+    expect(deployment.portableSettings, isFalse);
     expect(deployment.fullBackupExport, isFalse);
     expect(deployment.fullBackupImport, isFalse);
   });
@@ -31,12 +33,27 @@ void main() {
       null,
       'invalid',
       {},
-      {'kind': 'future'}
+      {'kind': 'future'},
     ]) {
-      final deployment =
-          RhythmCapabilities.fromJson({'deployment': value}).deployment;
+      final deployment = RhythmCapabilities.fromJson({
+        'deployment': value,
+      }).deployment;
       expect(deployment.fullBackupExport, isFalse);
       expect(deployment.fullBackupImport, isFalse);
     }
   });
+
+  test(
+    'portable settings needs explicit support and does not enable full restore',
+    () {
+      final deployment = RhythmCapabilities.fromJson({
+        'deployment': {
+          'kind': 'home_assistant_addon',
+          'portable_settings': true,
+        },
+      }).deployment;
+      expect(deployment.portableSettings, isTrue);
+      expect(deployment.fullBackupImport, isFalse);
+    },
+  );
 }

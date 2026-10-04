@@ -177,6 +177,25 @@ pub trait RuntimeHandle: Send + Sync {
         self.restore_room_state(node_id, RestoredRoomState::from(&state));
     }
 
+    /// Apply portable preferences atomically without replaying a snapshot's live
+    /// mode, manual offsets, or motion state. Resolve every destination's mode
+    /// before changing its ancestors, using the caller's authoritative global
+    /// mode. Returns false if any newer Rhythm pause/resume superseded the
+    /// reviewed snapshot's enablement.
+    fn apply_light_node_preferences(
+        &self,
+        _updates: Vec<LightNodePreferencesUpdate>,
+        _global_mode: crate::RhythmMode,
+    ) -> Result<bool> {
+        anyhow::bail!("Runtime does not support portable lighting preferences")
+    }
+
+    /// Pause adaptation after an external observation without restoring an old
+    /// snapshot of preferences or other live state. Returns whether it changed.
+    fn pause_light_node(&self, _node_id: &str) -> Result<bool> {
+        anyhow::bail!("Runtime does not support atomic node pause")
+    }
+
     /// Add a room to the engine's room manager.
     fn add_room(&self, room_id: &str, room_name: &str);
 
@@ -351,6 +370,23 @@ impl NodeSnapshot {
             profile_settings: snapshot.profile_settings,
         }
     }
+}
+
+/// Portable lighting preferences, excluding runtime state and physical identity.
+#[derive(Debug, Clone)]
+pub struct LightNodePreferences {
+    pub rhythm_enabled: bool,
+    pub disabled: bool,
+    pub standby_enabled: bool,
+    pub profile_settings: RoomProfileSettings,
+}
+
+/// A reviewed portable preference update for one existing destination node.
+#[derive(Debug, Clone)]
+pub struct LightNodePreferencesUpdate {
+    pub node_id: String,
+    pub preferences: LightNodePreferences,
+    pub expected_rhythm_enabled: bool,
 }
 
 /// Persisted node state restored into the runtime.
@@ -873,6 +909,75 @@ where
 
     fn restore_node_state(&self, node_id: &str, state: RestoredNodeState) {
         self.restore_room_state(node_id, RestoredRoomState::from(&state));
+    }
+
+    fn apply_light_node_preferences(
+        &self,
+        updates: Vec<LightNodePreferencesUpdate>,
+        global_mode: crate::RhythmMode,
+    ) -> Result<bool> {
+        let current_hour = self.current_hour();
+        let mut engine = self
+            .engine()
+            .write()
+            .map_err(|_| anyhow::anyhow!("engine lock"))?;
+        let current_modes = updates
+            .iter()
+            .map(|update| {
+                let effective = engine
+                    .rooms()
+                    .effective_state(&update.node_id)
+                    .ok_or_else(|| anyhow::anyhow!("Node '{}' not found", update.node_id))?;
+                let local_hour =
+                    (current_hour + effective.time_offset_minutes / 60.0).rem_euclid(24.0);
+                Ok(effective
+                    .profile_settings
+                    .schedule_mode(global_mode, local_hour))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let mut all_enablement_unchanged = true;
+        for (update, current_mode) in updates.into_iter().zip(current_modes) {
+            let node = engine
+                .rooms_mut()
+                .get_mut(&update.node_id)
+                .expect("destination was validated under the same engine lock");
+            if node.rhythm_enabled == update.expected_rhythm_enabled {
+                node.rhythm_enabled = update.preferences.rhythm_enabled;
+            } else {
+                all_enablement_unchanged = false;
+            }
+            node.disabled = update.preferences.disabled;
+            node.standby_enabled = update.preferences.standby_enabled;
+            let mut profile_settings = update.preferences.profile_settings;
+            if let Some(assignment) = &mut profile_settings.light_schedule {
+                match assignment {
+                    crate::LightScheduleAssignment::Named { active_mode, .. }
+                    | crate::LightScheduleAssignment::Unscheduled { active_mode } => {
+                        *active_mode = current_mode
+                    }
+                }
+            }
+            profile_settings.light_schedule_modes =
+                node.profile_settings.light_schedule_modes.clone();
+            node.profile_settings = profile_settings;
+            engine.invalidate_periodic_cache_for_room(&update.node_id);
+        }
+        Ok(all_enablement_unchanged)
+    }
+
+    fn pause_light_node(&self, node_id: &str) -> Result<bool> {
+        let mut engine = self
+            .engine()
+            .write()
+            .map_err(|_| anyhow::anyhow!("engine lock"))?;
+        let node = engine
+            .rooms_mut()
+            .get_mut(node_id)
+            .ok_or_else(|| anyhow::anyhow!("Node '{}' not found", node_id))?;
+        let changed = node.rhythm_enabled;
+        node.rhythm_enabled = false;
+        engine.invalidate_periodic_cache_for_room(node_id);
+        Ok(changed)
     }
 
     fn add_room(&self, room_id: &str, room_name: &str) {
@@ -1517,6 +1622,156 @@ mod tests {
         assert!((snap.brightness_offset - 5.0).abs() < f32::EPSILON);
         assert!(snap.soft_off);
         assert!(!snap.hard_off);
+    }
+
+    #[test]
+    fn portable_preferences_preserve_newer_pause_live_state_and_unmapped_nodes() {
+        let rt = test_runtime();
+        let handle = as_handle(&rt);
+        handle.add_room("mapped", "Mapped");
+        handle.add_room("unmapped", "Unmapped");
+        let reviewed = handle.engine_node_snapshot("mapped").unwrap();
+        // HA observations/manual actions arrive after migration preflight.
+        for id in ["mapped", "unmapped"] {
+            let mut current = RestoredNodeState::from(&handle.engine_node_snapshot(id).unwrap());
+            current.rhythm_enabled = !reviewed.rhythm_enabled;
+            current.hard_off = true;
+            current.brightness_offset = 13.0;
+            current.profile_settings.light_schedule =
+                Some(crate::LightScheduleAssignment::Unscheduled {
+                    active_mode: crate::RhythmMode::Sleep,
+                });
+            current
+                .profile_settings
+                .light_schedule_modes
+                .insert("weekday".into(), crate::RhythmMode::Sleep);
+            handle.restore_node_state(id, current);
+        }
+        let unmapped = handle.engine_node_snapshot("unmapped").unwrap();
+        let applied = handle
+            .apply_light_node_preferences(
+                vec![LightNodePreferencesUpdate {
+                    node_id: "mapped".into(),
+                    preferences: LightNodePreferences {
+                        rhythm_enabled: reviewed.rhythm_enabled,
+                        disabled: false,
+                        standby_enabled: true,
+                        profile_settings: RoomProfileSettings {
+                            motion_activation_enabled: Some(false),
+                            light_schedule: Some(crate::LightScheduleAssignment::Named {
+                                schedule_id: "weekday".into(),
+                                active_mode: crate::RhythmMode::Day,
+                            }),
+                            ..Default::default()
+                        },
+                    },
+                    expected_rhythm_enabled: reviewed.rhythm_enabled,
+                }],
+                crate::RhythmMode::Day,
+            )
+            .unwrap();
+        assert!(
+            !applied,
+            "newer observed enablement wins over migration snapshot"
+        );
+        let mapped = handle.engine_node_snapshot("mapped").unwrap();
+        assert_eq!(mapped.rhythm_enabled, !reviewed.rhythm_enabled);
+        assert!(mapped.hard_off);
+        assert_eq!(mapped.brightness_offset, 13.0);
+        assert!(mapped.standby_enabled);
+        assert_eq!(
+            mapped
+                .profile_settings
+                .light_schedule
+                .as_ref()
+                .unwrap()
+                .active_mode(),
+            Some(crate::RhythmMode::Sleep)
+        );
+        assert_eq!(
+            mapped.profile_settings.light_schedule_modes["weekday"],
+            crate::RhythmMode::Sleep
+        );
+        assert_eq!(
+            mapped.profile_settings.motion_activation_enabled,
+            Some(false)
+        );
+        let after = handle.engine_node_snapshot("unmapped").unwrap();
+        assert_eq!(
+            (
+                after.rhythm_enabled,
+                after.hard_off,
+                after.brightness_offset,
+                after.profile_settings
+            ),
+            (
+                unmapped.rhythm_enabled,
+                unmapped.hard_off,
+                unmapped.brightness_offset,
+                unmapped.profile_settings
+            )
+        );
+    }
+
+    #[test]
+    fn portable_preferences_resolve_live_child_mode_before_replacing_parent_settings() {
+        let rt = test_runtime();
+        let handle = as_handle(&rt);
+        handle.add_room("parent", "Parent");
+        handle.add_node("child", "Child", LightNodeKind::Room, Some("parent".into()));
+        let parent = handle.engine_node_snapshot("parent").unwrap();
+        let child = handle.engine_node_snapshot("child").unwrap();
+        // A destination mode change after review must win, even when that
+        // parent's assignment is removed by the same reviewed transfer.
+        let mut live_parent = RestoredNodeState::from(&parent);
+        live_parent.profile_settings.light_schedule =
+            Some(crate::LightScheduleAssignment::Unscheduled {
+                active_mode: crate::RhythmMode::Sleep,
+            });
+        handle.restore_node_state("parent", live_parent);
+        let update = |snapshot: &NodeSnapshot, profile_settings| LightNodePreferencesUpdate {
+            node_id: snapshot.id.clone(),
+            preferences: LightNodePreferences {
+                rhythm_enabled: snapshot.rhythm_enabled,
+                disabled: snapshot.disabled,
+                standby_enabled: snapshot.standby_enabled,
+                profile_settings,
+            },
+            expected_rhythm_enabled: snapshot.rhythm_enabled,
+        };
+        handle
+            .apply_light_node_preferences(
+                vec![
+                    update(&parent, RoomProfileSettings::default()),
+                    update(
+                        &child,
+                        RoomProfileSettings {
+                            light_schedule: Some(crate::LightScheduleAssignment::Unscheduled {
+                                active_mode: crate::RhythmMode::Day,
+                            }),
+                            ..Default::default()
+                        },
+                    ),
+                ],
+                crate::RhythmMode::Day,
+            )
+            .unwrap();
+        assert!(handle
+            .engine_node_snapshot("parent")
+            .unwrap()
+            .profile_settings
+            .light_schedule
+            .is_none());
+        assert_eq!(
+            handle
+                .engine_effective_node_snapshot("child")
+                .unwrap()
+                .profile_settings
+                .light_schedule
+                .unwrap()
+                .active_mode(),
+            Some(crate::RhythmMode::Sleep)
+        );
     }
 
     fn spy_runtime() -> (SharedSpyTestRuntime, Arc<SpyLightController>) {

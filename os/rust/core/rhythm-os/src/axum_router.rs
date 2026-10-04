@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 
 use axum::body::Bytes;
-use axum::extract::{Extension, Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Extension, Path, Query, State};
 use axum::http::header::CACHE_CONTROL;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -106,6 +106,16 @@ fn shared_routes() -> Router<SharedState> {
             post(crate::activity_cloud::post_join_proof),
         )
         .route("/api/state", get(get_state))
+        .route(
+            "/api/lighting-settings",
+            get(get_lighting_settings)
+                .put(put_lighting_settings)
+                .layer(DefaultBodyLimit::max(32 * 1024 * 1024)),
+        )
+        .route(
+            "/api/lighting-settings/preview",
+            post(preview_lighting_settings).layer(DefaultBodyLimit::max(32 * 1024 * 1024)),
+        )
         .route(
             "/api/profile-bundle",
             get(get_profile_bundle).put(put_profile_bundle),
@@ -421,6 +431,21 @@ async fn get_state(
 
 async fn get_profile_bundle(State(state): State<SharedState>) -> ApiResponse {
     handlers::handle_get_profile_bundle(&state)
+}
+
+async fn get_lighting_settings(State(state): State<SharedState>) -> ApiResponse {
+    handlers::handle_get_lighting_settings(&state)
+}
+
+async fn preview_lighting_settings(Json(body): Json<Value>) -> ApiResponse {
+    run_blocking(move || handlers::handle_preview_lighting_settings(&body)).await
+}
+
+async fn put_lighting_settings(
+    State(state): State<SharedState>,
+    Json(body): Json<Value>,
+) -> ApiResponse {
+    run_blocking(move || handlers::handle_put_lighting_settings(&state, &body)).await
 }
 
 async fn put_profile_bundle(

@@ -70,6 +70,37 @@ class RhythmBundleApi {
     );
   }
 
+  /// Portable behavior and source nodes, without installation credentials.
+  /// Call only when the deployment advertises `portable_settings`.
+  Future<Map<String, dynamic>> getLightingSettings() => _getBundleJson(
+        'api/lighting-settings',
+        message: 'Failed to fetch lighting settings',
+        errorMessage: 'Server returned invalid lighting settings.',
+      );
+
+  /// Convert a supported appliance backup or portable snapshot for review.
+  /// The server owns schema compatibility and removes installation-only data.
+  Future<Map<String, dynamic>> previewLightingSettings(
+    Map<String, dynamic> source,
+  ) =>
+      _postBundleJson(
+        'api/lighting-settings/preview',
+        data: source,
+        message: 'Failed to prepare lighting settings',
+        errorMessage: 'Server returned invalid lighting settings.',
+      );
+
+  Future<Map<String, dynamic>> putLightingSettings(
+    Map<String, dynamic> settings, {
+    required Map<String, String> nodeMappings,
+  }) =>
+      _putBundleJson(
+        'api/lighting-settings',
+        {'settings': settings, 'node_mappings': nodeMappings},
+        message: 'Failed to restore lighting settings',
+        errorMessage: 'Server returned an invalid settings restore response.',
+      );
+
   Future<Map<String, dynamic>> putConfigurationBundle(
     Map<String, dynamic> bundle,
   ) async {
@@ -241,12 +272,14 @@ class RhythmBundleApi {
 
   Future<Map<String, dynamic>> _postBundleJson(
     String path, {
+    Map<String, dynamic>? data,
     required String message,
     required String errorMessage,
   }) async {
     try {
       final response = await _dio.post(
         path,
+        data: data,
         options: Options(validateStatus: (_) => true),
       );
       _throwForUnexpectedStatus(response, message: message);

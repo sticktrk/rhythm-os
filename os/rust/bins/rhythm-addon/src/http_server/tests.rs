@@ -651,6 +651,7 @@ async fn capabilities_advertise_mobile_and_ha_without_full_backup_or_native_setu
     .await;
     assert_eq!(state["capabilities"]["deployment"], addon["capabilities"]);
     assert_eq!(addon["capabilities"]["direct_mobile_control"], true);
+    assert_eq!(addon["capabilities"]["portable_settings"], true);
     assert_eq!(addon["capabilities"]["full_backup_export"], false);
     assert_eq!(addon["capabilities"]["full_backup_import"], false);
     assert!(!state["capabilities"]["features"]
@@ -675,6 +676,98 @@ async fn profile_import_and_reset_pause_addon_control() {
     assert_eq!(status, StatusCode::OK);
     assert!(!f.state.lock().unwrap().light_breaker_enabled);
     assert!(!load(&f.root).lock().unwrap().light_breaker_enabled);
+}
+
+#[tokio::test]
+async fn lighting_settings_require_auth_and_restore_without_cloning_installation() {
+    let f = Fixture::new();
+    let phone = f.enroll().await;
+    for (method, path) in [
+        (Method::GET, "/api/lighting-settings"),
+        (Method::POST, "/api/lighting-settings/preview"),
+        (Method::PUT, "/api/lighting-settings"),
+    ] {
+        let (status, _) = json_request(f.mobile(), method, path, None, json!({})).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    let (status, mut source) = json_request(
+        f.mobile(),
+        Method::GET,
+        "/api/lighting-settings",
+        phone["token"].as_str(),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(source["kind"], "lighting_settings");
+    assert!(source.get("installation").is_none());
+    source["profile"]["power_save"] = json!(true);
+    f.state.lock().unwrap().light_breaker_enabled = true;
+    let identity = f.state.lock().unwrap().server_instance_id.clone();
+    let (status, preview) = json_request(
+        f.mobile(),
+        Method::POST,
+        "/api/lighting-settings/preview",
+        phone["token"].as_str(),
+        source,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        f.state.lock().unwrap().light_breaker_enabled,
+        "preview must not pause control"
+    );
+    let (status, result) = json_request(
+        f.mobile(),
+        Method::PUT,
+        "/api/lighting-settings",
+        phone["token"].as_str(),
+        json!({"settings": preview, "node_mappings": {}}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{result}");
+    assert_eq!(result["applied_nodes"], 0);
+    let state = f.state.lock().unwrap();
+    assert!(state.power_save);
+    assert!(!state.light_breaker_enabled);
+    assert_eq!(state.server_instance_id, identity);
+    assert!(state
+        .api_auth
+        .verify_token(phone["token"].as_str().unwrap()));
+    drop(state);
+    let restarted = load(&f.root);
+    let state = restarted.lock().unwrap();
+    assert!(state.power_save);
+    assert!(!state.light_breaker_enabled);
+    assert_eq!(state.server_instance_id, identity);
+}
+
+#[tokio::test]
+async fn lighting_preview_accepts_large_backups_but_does_not_export_integration_data() {
+    let f = Fixture::new();
+    let phone = f.enroll().await;
+    let mut backup: Value = serde_json::to_value(
+        rhythm_os::commands::build_backup_bundle_dto(&f.state, false).unwrap(),
+    )
+    .unwrap();
+    backup["installation"]["integration_files"] = json!([{
+        "path": "matter/ignored.json",
+        "content": "private-fixture".repeat(170_000),
+        "secret": true,
+    }]);
+    assert!(backup.to_string().len() > 2 * 1024 * 1024);
+    let (status, settings) = json_request(
+        f.mobile(),
+        Method::POST,
+        "/api/lighting-settings/preview",
+        phone["token"].as_str(),
+        backup,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{settings}");
+    assert_eq!(settings["kind"], "lighting_settings");
+    assert!(!settings.to_string().contains("private-fixture"));
+    assert!(settings.get("installation").is_none());
 }
 
 #[tokio::test]

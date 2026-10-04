@@ -13,6 +13,7 @@ import '../../../services/settings_service.dart';
 import '../../triage_screen.dart';
 import '../../../widgets/settings_row.dart';
 import '../../../widgets/solar_orbit.dart';
+import 'lighting_settings_mapping_dialog.dart';
 
 class BackupRestoreScreen extends StatefulWidget {
   const BackupRestoreScreen({super.key});
@@ -74,23 +75,31 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen> {
     final serverConnected =
         serverSync.connectionState == RhythmConnectionState.connected;
     final canUseCloudBackups = CloudBackupService.instance.canUseCloudBackups;
-    final supportsExport = serverSync.supportsFullBackupExport;
-    final supportsImport = serverSync.supportsFullBackupImport;
+    final deployment = serverSync.deploymentCapabilities;
+    final supportsExport = deployment.fullBackupExport ||
+        deployment.portableSettings ||
+        deployment.portableProfiles;
+    final supportsImport =
+        deployment.fullBackupImport || deployment.portableSettings;
+    final portableRestore =
+        !deployment.fullBackupImport && deployment.portableSettings;
     final backupAvailabilityLabel = !supportsExport
-        ? 'Use Home Assistant backups'
+        ? 'Configuration backup unavailable'
         : !serverConnected
             ? 'Server not connected'
             : (canUseCloudBackups ? null : 'Sign in required');
     final restoreAvailabilityLabel = !supportsImport
-        ? 'Use Home Assistant backups'
+        ? 'Update add-on to transfer settings'
         : !serverConnected
             ? 'Server not connected'
             : !canUseCloudBackups
                 ? 'Sign in required'
                 : _isLoadingSnapshot
                     ? 'Checking cloud backup...'
-                    : (_latestSnapshot?.hasApplianceBackup != true
-                        ? 'No appliance backup'
+                    : (_latestSnapshot == null ||
+                            (!portableRestore &&
+                                !_latestSnapshot!.hasApplianceBackup)
+                        ? 'No backup available'
                         : null);
     final backupEnabled =
         supportsExport && serverConnected && canUseCloudBackups;
@@ -98,7 +107,8 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen> {
         serverConnected &&
         canUseCloudBackups &&
         !_isLoadingSnapshot &&
-        _latestSnapshot?.hasApplianceBackup == true;
+        _latestSnapshot != null &&
+        (portableRestore || _latestSnapshot!.hasApplianceBackup);
 
     return Scaffold(
       backgroundColor: CelestialColors.backgroundDark,
@@ -121,7 +131,7 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen> {
                       ),
                       child: Text(
                         serverSync.deviceManagementOwnedByHomeAssistant
-                            ? 'Home Assistant backups protect this installation, including devices and integrations. Your All Rooms layout syncs with your account. Export Rhythm lighting profiles separately.'
+                            ? 'Save your Rhythm lighting settings to your account or transfer them from a Light Box backup. Match rooms and lights to keep their preferences and All Rooms layout. Devices and integrations are set up in Home Assistant; use Home Assistant backups for the whole installation.'
                             : 'Save the current Rhythm Server state and All Rooms layout to your cloud backup, or restore the latest cloud backup back onto the connected server.',
                         style: const TextStyle(
                           color: CelestialColors.textSecondary,
@@ -326,7 +336,12 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen> {
 
   Future<void> _backupNow(BuildContext context) async {
     final serverSync = context.read<ServerSyncProvider>();
-    if (!serverSync.supportsFullBackupExport) return;
+    final deployment = serverSync.deploymentCapabilities;
+    if (!deployment.fullBackupExport &&
+        !deployment.portableSettings &&
+        !deployment.portableProfiles) {
+      return;
+    }
     final homeProvider = context.read<HomeProvider>();
     final serverHub = _resolveConnectedServer(
       serverSync: serverSync,
@@ -365,9 +380,11 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen> {
           'Back Up Now',
           style: TextStyle(color: CelestialColors.textPrimary),
         ),
-        content: const Text(
-          'This will capture the current settings from the connected Rhythm Server and save them as your latest cloud backup.',
-          style: TextStyle(color: CelestialColors.textSecondary),
+        content: Text(
+          deployment.fullBackupExport
+              ? 'This will capture the current settings from the connected Rhythm Server and save them as your latest cloud backup.'
+              : 'Save the connected add-on’s lighting settings to your account. Your previous Light Box backup stays available for transfer or recovery.',
+          style: const TextStyle(color: CelestialColors.textSecondary),
         ),
         actions: [
           TextButton(
@@ -443,7 +460,10 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen> {
 
   Future<void> _restoreFromBackup(BuildContext context) async {
     final serverSync = context.read<ServerSyncProvider>();
-    if (!serverSync.supportsFullBackupImport) return;
+    if (!serverSync.supportsFullBackupImport &&
+        !serverSync.deploymentCapabilities.portableSettings) {
+      return;
+    }
     final homeProvider = context.read<HomeProvider>();
     final serverHub = _resolveConnectedServer(
       serverSync: serverSync,
@@ -476,7 +496,9 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen> {
 
     final snapshot =
         _latestSnapshot ?? await cloudBackups.getSnapshotForCurrentUser();
-    if (snapshot == null || !snapshot.hasApplianceBackup) {
+    if (snapshot == null ||
+        (!serverSync.deploymentCapabilities.portableSettings &&
+            !snapshot.hasApplianceBackup)) {
       if (context.mounted) {
         setState(() {
           _latestSnapshot = null;
@@ -490,6 +512,11 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen> {
       return;
     }
     if (!context.mounted) return;
+
+    if (!serverSync.supportsFullBackupImport) {
+      await _restoreLightingSettings(context, snapshot, serverHub);
+      return;
+    }
 
     final sourceLabel = snapshot.sourceHubName.isNotEmpty
         ? snapshot.sourceHubName
@@ -613,10 +640,177 @@ class _BackupRestoreScreenState extends State<BackupRestoreScreen> {
     }
   }
 
-  void _showProgressDialog(
-    BuildContext context, {
-    required String message,
-  }) {
+  Future<void> _restoreLightingSettings(
+    BuildContext context,
+    CloudBackupSnapshot accountSnapshot,
+    Hub serverHub,
+  ) async {
+    final sources = accountSnapshot.lightingRestoreSources;
+    final snapshot = sources.length == 1
+        ? sources.single
+        : await showDialog<CloudBackupSnapshot>(
+            context: context,
+            builder: (dialogContext) => SimpleDialog(
+              title: const Text('Choose a settings backup'),
+              children: [
+                for (final source in sources)
+                  SimpleDialogOption(
+                    onPressed: () => Navigator.of(dialogContext).pop(source),
+                    child: ListTile(
+                      title: Text(source.sourceHubName),
+                      subtitle: Text(
+                        '${source.hasApplianceBackup ? 'Light Box backup' : 'Add-on settings'} · '
+                        '${_formatBackupTimestamp(source.capturedAt ?? source.updatedAt) ?? 'Saved backup'}',
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          );
+    if (snapshot == null || !context.mounted) return;
+    final serverSync = context.read<ServerSyncProvider>();
+    final homeProvider = context.read<HomeProvider>();
+    var progressVisible = true;
+    var settingsSaved = false;
+    var failureStage = 'preparation';
+    int? appliedNodes;
+    int? skippedNodes;
+    AnalyticsService().logLightingSettingsRestore(
+      outcome: 'started', fromAppliance: snapshot.hasApplianceBackup,
+    );
+    _showProgressDialog(context, message: 'Preparing lighting settings...');
+    try {
+      final resolved = await ServerEndpointResolver.resolve(
+        serverHub,
+        syncProvider: serverSync,
+      );
+      final api = resolved.bundleApi();
+      final deployment = await api.getDeploymentCapabilities();
+      if (!deployment.portableSettings) {
+        throw StateError('Update the add-on to transfer lighting settings.');
+      }
+      final settings = await api.previewLightingSettings(
+        snapshot.lightingRestorePayload,
+      );
+      final target = await api.getLightingSettings();
+      if (!context.mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
+      progressVisible = false;
+      final mappings = await showDialog<Map<String, String>>(
+        context: context,
+        builder: (_) =>
+            LightingSettingsMappingDialog(source: settings, target: target),
+      );
+      if (mappings == null || !context.mounted) {
+        AnalyticsService().logLightingSettingsRestore(
+          outcome: 'cancelled', fromAppliance: snapshot.hasApplianceBackup,
+        );
+        return;
+      }
+      _showProgressDialog(context, message: 'Restoring lighting settings...');
+      progressVisible = true;
+      failureStage = 'import';
+      final result = await api.putLightingSettings(
+        settings,
+        nodeMappings: mappings,
+      );
+      settingsSaved = true;
+      appliedNodes = (result['applied_nodes'] as num?)?.toInt();
+      skippedNodes = (result['skipped_nodes'] as num?)?.toInt();
+      failureStage = 'app_refresh';
+      final sourceNodes =
+          (settings['nodes'] as List? ?? const []).whereType<Map>();
+      final roomIds = sourceNodes
+          .where((node) => node['kind'] == 'room')
+          .map((node) => node['id'])
+          .toSet();
+      final scopeKey = RoomPageProvider.layoutScopeFor(
+        home: homeProvider.currentHome,
+        hubs: homeProvider.currentHomeHubs,
+      );
+      final appSettings = CloudBackupService.remapLightingLayout(
+        source: snapshot,
+        targetHub: serverHub,
+        roomMappings: {
+          for (final entry in mappings.entries)
+            if (roomIds.contains(entry.key)) entry.key: entry.value,
+        },
+        targetPages:
+            SettingsService.instance.getRoomPageLayout(scopeKey: scopeKey) ??
+                const [],
+      );
+      final restoredLayout =
+          await SettingsService.instance.applyCloudSettingsBundle(
+        appSettings,
+        roomLayoutScopeKey: scopeKey,
+        roomLayoutHubKey: RoomPageProvider.hubLayoutKey(serverHub),
+        roomLayoutHubKeyAliases: RoomPageProvider.hubLayoutKeyAliases(
+          serverHub,
+        ),
+      );
+      if (restoredLayout && context.mounted) {
+        context.read<RoomPageProvider>().reloadLayout();
+        CloudBackupService.instance.scheduleAppSettingsSync(
+          serverHub: serverHub,
+          home: homeProvider.currentHome,
+          roomLayoutScopeKey: scopeKey,
+          reason: 'lighting_settings_restore',
+        );
+      }
+      await serverSync.fullRefresh();
+      AnalyticsService().logLightingSettingsRestore(
+        outcome: 'succeeded', fromAppliance: snapshot.hasApplianceBackup,
+        appliedNodes: appliedNodes, skippedNodes: skippedNodes,
+      );
+      if (!context.mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
+      progressVisible = false;
+      final warnings = lightingSettingsWarnings(result['warnings']);
+      await showDialog<void>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Lighting settings restored'),
+          content: SingleChildScrollView(
+            child: Text(
+              [
+                'Profiles, schedules and portable settings are saved. Rhythm is paused. Review your rooms, finish device setup in Home Assistant and stop the old Light Box before enabling Rhythm.',
+                if (appliedNodes != null)
+                  '$appliedNodes room and light preference matches applied.',
+                if (skippedNodes != null && skippedNodes > 0)
+                  '$skippedNodes rooms and lights were skipped. Their settings stay in the original backup and can be transferred after setup.',
+                ...warnings,
+              ].join('\n\n'),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('Done'),
+            ),
+          ],
+        ),
+      );
+    } catch (error) {
+      AnalyticsService().logLightingSettingsRestore(
+        outcome: settingsSaved ? 'succeeded' : 'failed',
+        fromAppliance: snapshot.hasApplianceBackup,
+        appliedNodes: appliedNodes, skippedNodes: skippedNodes,
+        failureStage: failureStage,
+      );
+      if (!context.mounted) return;
+      if (progressVisible) Navigator.of(context, rootNavigator: true).pop();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(settingsSaved
+              ? 'Lighting settings were saved, but refreshing the app failed: $error'
+              : 'Lighting settings restore failed: $error'),
+          backgroundColor: Colors.red.shade800,
+        ),
+      );
+    }
+  }
+
+  void _showProgressDialog(BuildContext context, {required String message}) {
     showDialog<void>(
       context: context,
       barrierDismissible: false,

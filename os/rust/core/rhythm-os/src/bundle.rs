@@ -10,6 +10,7 @@ use rhythm_core::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 use crate::canonical::identity::HubKey;
 use crate::canonical::registry::CanonicalRegistry;
@@ -112,6 +113,61 @@ impl ProfileBundleImportPayload {
             },
         }
     }
+}
+
+/// Portable lighting preferences. Source IDs and parent IDs are review labels,
+/// never permission to create, move, select, or control a target device.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LightingSettingsNode {
+    pub id: String,
+    pub name: String,
+    pub kind: rhythm_core::LightNodeKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    pub rhythm_enabled: bool,
+    pub disabled: bool,
+    #[serde(default)]
+    pub standby_enabled: bool,
+    #[serde(default)]
+    pub room_profile: RoomProfileSettings,
+}
+
+impl From<&Room> for LightingSettingsNode {
+    fn from(room: &Room) -> Self {
+        Self {
+            id: room.id.clone(),
+            name: room.name.clone(),
+            kind: room.kind,
+            parent_id: room.parent_id.clone(),
+            rhythm_enabled: room.rhythm_enabled,
+            disabled: room.disabled,
+            standby_enabled: room.standby_enabled,
+            room_profile: room.profile_settings.clone(),
+        }
+    }
+}
+
+/// Cross-installation settings, deliberately separate from appliance recovery.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LightingSettingsBundle {
+    pub schema_version: u32,
+    pub kind: String,
+    pub profile: ProfileBundleData,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode_configs: Option<Vec<ModeConfig>>,
+    #[serde(default)]
+    pub nodes: Vec<LightingSettingsNode>,
+    /// Stable codes describing material omitted from the portable view.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct LightingSettingsImportPayload {
+    pub settings: LightingSettingsBundle,
+    /// Every mapping must be explicitly reviewed, even on the same installation.
+    #[serde(default)]
+    pub node_mappings: BTreeMap<String, String>,
 }
 
 /// Portable per-room preferences included in backup configuration.
