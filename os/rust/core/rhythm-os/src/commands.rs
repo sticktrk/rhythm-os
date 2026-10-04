@@ -27763,7 +27763,7 @@ mod tests {
 
     #[test]
     fn applying_native_scene_recalls_hue_room_and_colors_device_dispatch_companions() {
-        let (state, runtime, matter_id, _ha_id, hue_one_id, hue_two_id) =
+        let (state, runtime, matter_id, ha_id, hue_one_id, hue_two_id) =
             setup_mixed_room_with_hub_groups();
         let scene_id = crate::scenes::native_scene_id("hue", "native-palette");
         let mut native = imported_hue_scene(&scene_id, "native-palette");
@@ -27821,16 +27821,31 @@ mod tests {
             &[("native-palette".to_string(), Some(800))]
         );
         let calls = runtime.applied_commands();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0, matter_id);
-        assert_eq!(calls[0].1.brightness, 66);
+        // The Hue group recalls its native scene once. Both Matter and HA
+        // companions support individual dispatch, so each receives a palette
+        // color; HA's area metadata must not suppress its explicit room action.
+        assert_eq!(calls.len(), 2);
+        let targets: HashSet<_> = calls.iter().map(|(id, _)| id.clone()).collect();
+        assert_eq!(targets, HashSet::from([matter_id.clone(), ha_id.clone()]));
+        let outputs: HashSet<_> = calls
+            .iter()
+            .map(|(_, command)| {
+                (
+                    command.brightness,
+                    command.rgb.r,
+                    command.rgb.g,
+                    command.rgb.b,
+                )
+            })
+            .collect();
         assert_eq!(
-            (calls[0].1.rgb.r, calls[0].1.rgb.g, calls[0].1.rgb.b),
-            (255, 48, 112)
+            outputs,
+            HashSet::from([(66, 255, 48, 112), (52, 40, 188, 255)])
         );
         assert!(response.affected_node_ids.contains(&hue_one_id));
         assert!(response.affected_node_ids.contains(&hue_two_id));
         assert!(response.affected_node_ids.contains(&matter_id));
+        assert!(response.affected_node_ids.contains(&ha_id));
     }
 
     #[test]

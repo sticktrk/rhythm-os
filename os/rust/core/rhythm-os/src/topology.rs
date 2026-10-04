@@ -567,7 +567,12 @@ impl TopologyRoom {
         // controller. A user can pause any member independently through HA.
         // Keep periodic settings and child actions on that member's node;
         // otherwise the enabled parent can overwrite a paused child's state.
-        if hub_key.hub_type.as_str() == crate::hub::HubType::HA {
+        // The integration registers "homeassistant"; older persisted hubs use
+        // "ha". Accept both without rewriting their durable endpoint keys.
+        if matches!(
+            hub_key.hub_type.as_str(),
+            crate::hub::HubType::HA | "homeassistant"
+        ) {
             return None;
         }
         if assigned_native_ids.is_empty() {

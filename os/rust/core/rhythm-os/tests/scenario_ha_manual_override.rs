@@ -17,7 +17,7 @@ use rhythm_core::{
 use rhythm_ha::{
     controller::HaLightController,
     events::translate_ws_event,
-    ha_lifecycle::connect_ha,
+    ha_lifecycle::{connect_ha, HA_HUB_TYPE},
     hub_state::{HaEventRoutingCache, HaHubData},
     light::{HaLightCatalogEntry, HaLightIdentity, HaLightObservation},
     test_support::SpyHaTransport,
@@ -100,11 +100,15 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with_selection(&LIGHTS, HA_HUB_TYPE)
+    }
+
+    fn with_selection(selected: &[&str], hub_type: &str) -> Self {
         let data = tempfile::tempdir().unwrap();
         let mut app = AppState {
             platform_context: "ha_addon",
             light_breaker_enabled: true,
-            managed_ha_lights: Some(LIGHTS.map(str::to_owned).into()),
+            managed_ha_lights: Some(selected.iter().map(|id| (*id).to_owned()).collect()),
             data_dir: data.path().to_str().unwrap().into(),
             ..AppState::default()
         };
@@ -119,7 +123,7 @@ impl Fixture {
         )
         .unwrap();
         let state = Arc::new(Mutex::new(app));
-        let key = HubKey::new(HubType::new(HubType::HA), "test-installation");
+        let key = HubKey::new(HubType::new(hub_type), "test-installation");
         let (mut hub, _) = connect_ha(
             &state,
             key.clone(),
@@ -141,11 +145,13 @@ impl Fixture {
             cache.lights_ready = true;
             cache.stream_ready = true;
             for id in LIGHTS {
-                cache.reviewed.insert(id.into(), proof(id));
+                if selected.contains(&id) {
+                    cache.reviewed.insert(id.into(), proof(id));
+                }
                 cache.lights.insert(id.into(), HaLightCatalogEntry {
                     identity: Some(proof(id)), name: id.into(), area_id: Some("area".into()),
                     capabilities: rhythm_ha::light::capabilities(&json!({"supported_color_modes":["color_temp"]})),
-                    observation: HaLightObservation::parse(&json!({"state":"on", "attributes":{"brightness":196}, "last_updated":"2026-01-01T12:00:00Z"})),
+                    observation: HaLightObservation::parse(&json!({"state":if selected.contains(&id) {"on"} else {"unavailable"}, "attributes":{"brightness":196}, "last_updated":"2026-01-01T12:00:00Z"})),
                 });
             }
         }
@@ -377,4 +383,65 @@ fn correlated_echo_keeps_both_lights_adapting_and_child_on_is_scoped() {
         vec![LIGHTS[0]],
         "explicit child action must not target its whole HA area"
     );
+}
+
+#[test]
+fn one_reviewed_light_stays_manual_across_two_changed_periodic_cycles() {
+    // Production discovery uses "homeassistant"; retain compatibility with old
+    // "ha" keys without renaming persisted endpoints. The unavailable sibling
+    // remains in the discovered area but has never been selected for control.
+    for hub_type in [HA_HUB_TYPE, HubType::HA] {
+        let control = Fixture::with_selection(&LIGHTS[..1], hub_type);
+        let hours = [18.0, 18.05, 18.10];
+        for hour in hours {
+            control.tick(hour);
+        }
+        let calls = control.spy.calls_for_service("turn_on");
+        assert_eq!(control.targets(), vec![LIGHTS[0]; 3]);
+        let kelvins: Vec<_> = calls
+            .iter()
+            .map(|call| call.data["color_temp_kelvin"].as_u64().unwrap())
+            .collect();
+        assert!(kelvins.windows(2).all(|pair| pair[0].abs_diff(pair[1]) >= 2),
+            "the control cycles must change color enough to exercise dispatch, not dedup: {kelvins:?}");
+
+        let manual = Fixture::with_selection(&LIGHTS[..1], hub_type);
+        manual.tick(hours[0]);
+        assert_eq!(manual.targets(), vec![LIGHTS[0]]);
+        manual.observe(LIGHTS[0], "manual-after-first-cycle", 227, 1);
+        assert!(
+            !manual
+                .runtime
+                .engine_node_snapshot(&manual.nodes[0])
+                .unwrap()
+                .rhythm_enabled
+        );
+        assert!(
+            manual
+                .runtime
+                .engine_node_snapshot(&manual.room)
+                .unwrap()
+                .rhythm_enabled
+        );
+        manual.spy.reset();
+        for hour in &hours[1..] {
+            manual.tick(*hour);
+            assert!(manual.spy.calls().is_empty(),
+                "paused selected light must receive no area or entity command on either later cycle ({hub_type}, {hour})");
+            assert_eq!(
+                manual.state.lock().unwrap().light_observations[&manual.nodes[0]].brightness,
+                Some(89)
+            );
+        }
+        manual
+            .runtime
+            .handle_event(&InputEvent::new(&manual.nodes[0], ButtonAction::RhythmOn))
+            .unwrap();
+        manual.tick(18.15);
+        assert_eq!(
+            manual.targets(),
+            vec![LIGHTS[0]],
+            "explicit resume restores only the reviewed light"
+        );
+    }
 }
