@@ -212,17 +212,51 @@ async fn route_selection_empty_and_invalid_are_distinct_and_keep_authority() {
 
 #[test]
 fn selected_configuration_keeps_every_legacy_field_and_empty_node_semantics() {
-    let h = TestHarness::new();
+    // A room and a roomless light exercise the flattened node serializer.
+    let h = TestHarness::new().with_discovery(
+        vec![room("kitchen", "Kitchen")],
+        vec![light("standalone", "")],
+    );
+    h.sync();
+    let triage = h.triage_pending_ids().into_iter().next().unwrap();
+    h.triage_new(&triage).unwrap();
     for listen_port in [None, Some(54448)] {
         h.state.lock().unwrap().listen_port = listen_port;
-        let legacy: Value =
-            serde_json::from_str(&commands::build_state_snapshot(&h.state).unwrap()).unwrap();
-        let mut all = selected(&h, "nodes,configuration", false);
+        // Snapshots embed second-resolution clock values. Compare only when
+        // two bracketing legacy snapshots are identical, which proves the
+        // clock did not tick while the selected response was built.
+        let (legacy, mut all) = (0..20)
+            .find_map(|_| {
+                let before: Value =
+                    serde_json::from_str(&commands::build_state_snapshot(&h.state).unwrap())
+                        .unwrap();
+                let all = selected(&h, "nodes,configuration", false);
+                let after: Value =
+                    serde_json::from_str(&commands::build_state_snapshot(&h.state).unwrap())
+                        .unwrap();
+                (before == after).then_some((before, all))
+            })
+            .expect("no snapshot window without a clock tick");
+        assert!(legacy["nodes"].as_array().unwrap().len() >= 2);
         all.as_object_mut().unwrap().remove("state_scope");
         assert_eq!(all, legacy, "selected serializer lost a legacy field");
         let controls = selected(&h, "controls,configuration", false);
-        assert_eq!(controls["nodes"], serde_json::json!([]));
+        let control_nodes = controls["nodes"].as_array().unwrap();
+        assert!(control_nodes
+            .iter()
+            .any(|node| node["kind"] == "room" && node["device_counts"].is_object()));
+        assert!(control_nodes
+            .iter()
+            .all(|node| node["kind"] == "room" || node.get("device_counts").is_none()));
         let configuration = selected(&h, "configuration", false);
         assert!(configuration.get("nodes").is_none());
     }
+}
+
+#[test]
+fn selected_configuration_keeps_empty_node_semantics_without_nodes() {
+    let h = TestHarness::new();
+    let controls = selected(&h, "controls,configuration", false);
+    assert_eq!(controls["nodes"], serde_json::json!([]));
+    assert!(selected(&h, "configuration", false).get("nodes").is_none());
 }
