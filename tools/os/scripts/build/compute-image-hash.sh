@@ -88,6 +88,9 @@ git_describe() {
 hashed_inputs() {
     echo "dockerfile $(sha_file "$SCRIPT_DIR/Dockerfile.rpiz-builder")"
     echo "packager   $(sha_file "$SCRIPT_DIR/build-rpiz-builder-image.sh")"
+    echo "bluez-guard $(sha_file "$SCRIPT_DIR/patches/chip-bluez-idle-guard.patch")"
+    echo "bluez-apply $(sha_file "$SCRIPT_DIR/apply-chip-bluez-idle-guard.sh")"
+    echo "bluez-check $(sha_file "$SCRIPT_DIR/check-chip-bluez-idle-guard.sh")"
     echo "br-external $(sha_dir_tree "$PROJECT_ROOT/install/rpiz/buildroot")"
     echo "buildroot  $(git_rev "$BUILDROOT_SRC")"
     echo "chip-rev   $(git_rev "$CHIP_SRC")"

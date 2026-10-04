@@ -299,7 +299,7 @@ impl BluezHueBleTransport {
         request: &HueBlePairingRequest,
     ) -> Result<Vec<PairCandidate>> {
         let hue_service = uuid(protocol::HUE_DISCOVERY_SERVICE_UUID);
-        let mut observations = client.subscribe()?;
+        let mut observations = client.subscribe_services([hue_service])?;
 
         let overall_deadline =
             tokio::time::Instant::now() + Duration::from_secs(request.scan_timeout_secs);

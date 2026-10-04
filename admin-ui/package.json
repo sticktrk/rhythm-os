@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "npm run check:device-admin-coverage && npm run check:profile-curve-data && npm run check:node-light-settings && npm run test:node-actions && npm run test:room-rename && npm run test:topology-membership && npm run test:room-assignment && npm run test:room-board-layout && npm run test:hub-management && npm run test:scene-palette && tsc --noEmit && vite build",
+    "build": "npm run check:device-admin-coverage && npm run check:profile-curve-data && npm run check:node-light-settings && npm run test:node-actions && npm run test:room-rename && npm run test:topology-membership && npm run test:room-assignment && npm run test:room-board-layout && npm run test:hub-management && npm run test:scene-palette && npm run test:probe-sweep && tsc --noEmit && vite build",
     "check:device-admin-coverage": "node scripts/check-device-admin-coverage.mjs",
     "check:profile-curve-data": "node scripts/check-profile-curve-data.mjs",
     "check:node-light-settings": "node scripts/check-node-light-settings.mjs",
@@ -18,7 +18,8 @@
     "test:hub-management": "node --experimental-strip-types --test test/hubManagement.test.ts",
     "preview": "vite preview --host 127.0.0.1",
     "test:scene-palette": "node --experimental-strip-types --test test/scenePalette.test.ts",
-    "build:homeassistant": "tsc --noEmit && vite build --mode homeassistant"
+    "build:homeassistant": "tsc --noEmit && vite build --mode homeassistant",
+    "test:probe-sweep": "node --experimental-strip-types --test test/probeSweep.test.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.108.2",

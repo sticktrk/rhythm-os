@@ -65,12 +65,17 @@ void main() {
     pending.complete();
     await stale;
     perf.recordPhase(AppStartupPhase.request, 30);
+    perf.recordResumePath('unlisted');
+    expect(perf.resumePathForTesting, isNull);
+    perf.recordResumePath('snapshot');
     perf.markAllRoomsInteractive(roomCount: 11);
     await Future<void>.delayed(Duration.zero);
     final journeys =
         backend.events.where((e) => e.name == 'app_control_readiness').toList();
     expect(journeys, hasLength(2));
     expect(journeys.last.properties, containsPair('journey_kind', 'resume'));
+    expect(journeys.last.properties, containsPair('resume_path', 'snapshot'));
+    expect(cold.properties.containsKey('resume_path'), isFalse);
     expect(journeys.last.properties['journey_id'],
         isNot(cold.properties['journey_id']));
     expect(journeys.last.properties.containsKey('auth_ms'), isFalse);

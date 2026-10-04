@@ -141,12 +141,150 @@ pub struct ScanObservation {
     pub observed_at: Instant,
 }
 
+/// What one consumer needs from the shared discovery session.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScanDemand {
+    /// Advertised services for the BlueZ filter. Empty means broad discovery,
+    /// for profiles that are identified by manufacturer or service data only.
+    pub services: HashSet<Uuid>,
+    /// Report every advertisement even when its payload repeats. BlueZ
+    /// otherwise signals manufacturer/service data only when it changes, which
+    /// loses repeated events from a protocol whose frames carry no counter.
+    pub duplicate_data: bool,
+}
+
+impl ScanDemand {
+    pub fn services(services: impl IntoIterator<Item = Uuid>) -> Self {
+        Self {
+            services: services.into_iter().collect(),
+            duplicate_data: false,
+        }
+    }
+}
+
+/// A discovery request lives exactly as long as its observation subscription.
+/// Empty UUID sets deliberately mean broad discovery for profiles without an
+/// advertised service; the union must never narrow another consumer's request.
+struct ScanRequests {
+    next_id: AtomicU64,
+    requests: Mutex<HashMap<u64, (ScanDemand, bool)>>,
+    filter_tx: watch::Sender<Option<DiscoveryFilter>>,
+}
+
+impl Default for ScanRequests {
+    fn default() -> Self {
+        Self {
+            next_id: AtomicU64::new(0),
+            requests: Mutex::new(HashMap::new()),
+            filter_tx: watch::channel(None).0,
+        }
+    }
+}
+
+impl ScanRequests {
+    fn acquire(self: &Arc<Self>, demand: ScanDemand, fresh_rssi: bool) -> Result<ScanRequest> {
+        let mut requests = self
+            .requests
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Bluetooth scan demand lock poisoned"))?;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        requests.insert(id, (demand, fresh_rssi));
+        self.publish(&requests);
+        Ok(ScanRequest {
+            owner: self.clone(),
+            id,
+        })
+    }
+
+    fn publish(&self, requests: &HashMap<u64, (ScanDemand, bool)>) {
+        let filter = (!requests.is_empty()).then(|| {
+            let mut filter = broad_discovery_filter();
+            if requests
+                .values()
+                .all(|(demand, _)| !demand.services.is_empty())
+            {
+                filter.uuids = requests
+                    .values()
+                    .flat_map(|(demand, _)| &demand.services)
+                    .copied()
+                    .collect();
+            }
+            // Duplicate reporting is the costly mode: every packet from every
+            // matching device becomes a signal. Only a consumer that cannot
+            // work from changed payloads may turn it on.
+            filter.duplicate_data = requests.values().any(|(demand, _)| demand.duplicate_data);
+            // During bounded pairing, RSSI supplies fresh presence even when
+            // BlueZ already knows the device and its payload is unchanged.
+            // Background button monitoring only needs changed payloads.
+            if requests.values().any(|(_, fresh_rssi)| *fresh_rssi) {
+                filter.rssi = Some(-127);
+            }
+            filter
+        });
+        self.filter_tx.send_if_modified(|current| {
+            if *current == filter {
+                return false;
+            }
+            *current = filter;
+            true
+        });
+    }
+}
+
+struct ScanRequest {
+    owner: Arc<ScanRequests>,
+    id: u64,
+}
+
+impl Drop for ScanRequest {
+    fn drop(&mut self) {
+        if let Ok(mut requests) = self.owner.requests.lock() {
+            requests.remove(&self.id);
+            self.owner.publish(&requests);
+        }
+    }
+}
+
+/// Merge the values already present in a BlueZ signal. GATT/connection state
+/// and UUID changes alone do not establish fresh radio evidence.
+fn apply_advertisement_property(
+    observation: &mut ScanObservation,
+    property: DeviceProperty,
+) -> bool {
+    let fresh = is_fresh_advertisement_property(&property);
+    match property {
+        DeviceProperty::Rssi(value) => observation.rssi = Some(value),
+        DeviceProperty::Uuids(value) => observation.service_uuids = value,
+        DeviceProperty::ServiceData(value) => observation.service_data = value,
+        DeviceProperty::ManufacturerData(value) => observation.manufacturer_data = value,
+        _ => {}
+    }
+    fresh
+}
+
+// A full live-subscription pool must not hide newly advertising pairing
+// candidates until the next rotation. Read their initial properties once.
+async fn initial_observation<F, Fut>(
+    cached: Option<&ScanObservation>,
+    snapshot: F,
+) -> Option<ScanObservation>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Option<ScanObservation>>,
+{
+    match cached {
+        Some(cached) => Some(cached.clone()),
+        None => snapshot().await,
+    }
+}
+
 /// Lossless state for consumers that need to distinguish a running broker
 /// from a subscription that is merely waiting for adapter recovery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ScannerHealth {
     Starting,
     Active,
+    Idle,
     PausedForExternalOwner,
     Recovering,
     Stopped,
@@ -157,6 +295,7 @@ impl ScannerHealth {
         match self {
             Self::Starting => "starting",
             Self::Active => "active",
+            Self::Idle => "idle",
             Self::PausedForExternalOwner => "paused_for_external_owner",
             Self::Recovering => "recovering",
             Self::Stopped => "stopped",
@@ -335,6 +474,7 @@ type DeviceChangeStream = Pin<Box<dyn Stream<Item = DeviceSubscriptionChange> + 
 struct DeviceSubscriptions {
     generations: DeviceSubscriptionGenerations,
     streams: StreamMap<Address, DeviceChangeStream>,
+    advertisements: HashMap<Address, ScanObservation>,
 }
 
 impl DeviceSubscriptions {
@@ -342,6 +482,7 @@ impl DeviceSubscriptions {
         Self {
             generations: DeviceSubscriptionGenerations::new(limit),
             streams: StreamMap::with_capacity(limit),
+            advertisements: HashMap::with_capacity(limit),
         }
     }
 
@@ -397,17 +538,20 @@ impl DeviceSubscriptions {
         // queued value from it remains authorized after this point.
         self.generations.remove(address);
         self.streams.remove(&address);
+        self.advertisements.remove(&address);
     }
 
     fn close_if_current(&mut self, address: Address, generation: &DeviceSubscriptionGeneration) {
         if self.generations.remove_if_current(address, generation) {
             self.streams.remove(&address);
+            self.advertisements.remove(&address);
         }
     }
 
     fn invalidate_all(&mut self) {
         self.generations.invalidate_all();
         self.streams.clear();
+        self.advertisements.clear();
     }
 }
 
@@ -459,6 +603,7 @@ struct RuntimeCore {
     observations: RwLock<HashMap<Address, ScanObservation>>,
     observation_tx: broadcast::Sender<ScanObservation>,
     scan_started: AtomicBool,
+    scan_requests: Arc<ScanRequests>,
     scan_handle: Mutex<Option<JoinHandle<()>>>,
     scan_shutdown_tx: watch::Sender<bool>,
     scanner_health_tx: watch::Sender<ScannerHealth>,
@@ -500,6 +645,7 @@ impl RuntimeCore {
             observations: RwLock::new(HashMap::new()),
             observation_tx,
             scan_started: AtomicBool::new(false),
+            scan_requests: Arc::new(ScanRequests::default()),
             scan_handle: Mutex::new(None),
             scan_shutdown_tx,
             scanner_health_tx,
@@ -626,6 +772,8 @@ impl RuntimeCore {
             ScannerHealth::Stopped
         } else if self.external_adapter_reserved.load(Ordering::Acquire) {
             ScannerHealth::PausedForExternalOwner
+        } else if self.scan_requests.filter_tx.borrow().is_none() {
+            ScannerHealth::Idle
         } else {
             ScannerHealth::Recovering
         };
@@ -659,14 +807,23 @@ impl RuntimeCore {
         let mut backoff = SCAN_RESTART_MIN_BACKOFF;
         let mut reservation_rx = self.reservation_tx.subscribe();
         let mut shutdown_rx = self.scan_shutdown_tx.subscribe();
+        let mut filter_rx = self.scan_requests.filter_tx.subscribe();
         let mut subscription_rotation = DeviceSubscriptionRotation::default();
         'supervisor: while !self.quiescing.load(Ordering::Acquire) {
-            while self.external_adapter_reserved.load(Ordering::Acquire)
+            while (self.external_adapter_reserved.load(Ordering::Acquire)
+                || filter_rx.borrow().is_none())
                 && !self.quiescing.load(Ordering::Acquire)
             {
-                self.scanner_health_tx
-                    .send_replace(ScannerHealth::PausedForExternalOwner);
+                let health = if self.external_adapter_reserved.load(Ordering::Acquire) {
+                    ScannerHealth::PausedForExternalOwner
+                } else {
+                    ScannerHealth::Idle
+                };
+                self.scanner_health_tx.send_replace(health);
                 tokio::select! {
+                    changed = filter_rx.changed() => {
+                        if changed.is_err() { break 'supervisor; }
+                    }
                     changed = reservation_rx.changed() => {
                         if changed.is_err() { break 'supervisor; }
                     }
@@ -679,38 +836,31 @@ impl RuntimeCore {
                 .scan_once(
                     &mut reservation_rx,
                     &mut shutdown_rx,
+                    &mut filter_rx,
                     &mut subscription_rotation,
                 )
                 .await;
             if self.quiescing.load(Ordering::Acquire) {
                 break;
             }
-            if self.external_adapter_reserved.load(Ordering::Acquire) {
+            if result.is_ok() || self.external_adapter_reserved.load(Ordering::Acquire) {
                 backoff = SCAN_RESTART_MIN_BACKOFF;
                 continue;
             }
-            if result.is_err() {
-                // Any scan-stage error may represent adapter or D-Bus loss.
-                // Never retry indefinitely through a cached dead proxy.
-                self.invalidate_current_context().await;
-            }
+            // Only a failed scan reaches this point. Any scan-stage error may
+            // represent adapter or D-Bus loss: never retry indefinitely
+            // through a cached dead proxy.
+            self.invalidate_current_context().await;
             self.scanner_health_tx
                 .send_replace(ScannerHealth::Recovering);
             self.supervisor_restarts.fetch_add(1, Ordering::Relaxed);
             if let Ok(mut stage) = self.last_failure_stage.lock() {
-                *stage = Some(if result.is_err() {
-                    "scan"
-                } else {
-                    "stream_ended"
-                });
+                *stage = Some("scan");
             }
-            if let Err(error) = result {
-                tracing::warn!(
-                    target: "ble",
-                    "Shared Bluetooth scanner restarting after bounded scan failure at scan stage"
-                );
-                let _ = error;
-            }
+            tracing::warn!(
+                target: "ble",
+                "Shared Bluetooth scanner restarting after bounded scan failure at scan stage"
+            );
             tokio::select! {
                 _ = tokio::time::sleep(backoff) => {}
                 changed = reservation_rx.changed() => {
@@ -729,8 +879,12 @@ impl RuntimeCore {
         &self,
         reservation_rx: &mut watch::Receiver<bool>,
         shutdown_rx: &mut watch::Receiver<bool>,
+        filter_rx: &mut watch::Receiver<Option<DiscoveryFilter>>,
         subscription_rotation: &mut DeviceSubscriptionRotation,
     ) -> Result<()> {
+        let Some(filter) = filter_rx.borrow_and_update().clone() else {
+            return Ok(());
+        };
         if !self.begin_scan()? {
             return Ok(());
         }
@@ -746,9 +900,9 @@ impl RuntimeCore {
             return Ok(());
         }
         if let Err(error) = adapter
-            .set_discovery_filter(broad_discovery_filter())
+            .set_discovery_filter(filter)
             .await
-            .context("setting shared broad LE discovery filter")
+            .context("setting shared requested LE discovery filter")
         {
             self.finish_scan(true);
             return Err(error);
@@ -800,6 +954,10 @@ impl RuntimeCore {
                 tokio::pin!(events);
                 'scan: loop {
                     tokio::select! {
+                        changed = filter_rx.changed() => {
+                            let _ = changed;
+                            break Ok(());
+                        }
                         changed = shutdown_rx.changed() => {
                             if changed.is_err() || *shutdown_rx.borrow() {
                                 break Ok(());
@@ -819,14 +977,20 @@ impl RuntimeCore {
                                             Ok(DeviceSubscriptionOutcome::AtCapacity) => {
                                                 subscription_rotation_needed = true;
                                             }
-                                            Ok(DeviceSubscriptionOutcome::AlreadySubscribed | DeviceSubscriptionOutcome::Subscribed) => {}
+                                            Ok(DeviceSubscriptionOutcome::Subscribed | DeviceSubscriptionOutcome::AlreadySubscribed) => {}
                                             Err(error) => break Err(error),
                                         }
                                     }
                                     if !is_fresh {
                                         continue;
                                     }
-                                    if let Some(observation) = self.snapshot(&adapter, address).await {
+                                    if let Some(observation) = initial_observation(
+                                        subscriptions.advertisements.get(&address),
+                                        || self.snapshot(&adapter, address),
+                                    ).await {
+                                        if subscriptions.generations.current.contains_key(&address) {
+                                            subscriptions.advertisements.insert(address, observation.clone());
+                                        }
                                         self.cache_observation(observation.clone());
                                         let _ = self.observation_tx.send(observation);
                                     }
@@ -857,12 +1021,22 @@ impl RuntimeCore {
                                 continue;
                             }
                             let DeviceEvent::PropertyChanged(property) = event;
-                            if !is_fresh_advertisement_property(&property) {
-                                continue;
+                            // Known BlueZ objects are seeded only when they first
+                            // advertise. Do not perform four reads for every old
+                            // cached address before new pairing candidates run.
+                            if !subscriptions.advertisements.contains_key(&address)
+                                && is_fresh_advertisement_property(&property) {
+                                if let Some(observation) = self.snapshot(&adapter, address).await {
+                                    subscriptions.advertisements.insert(address, observation);
+                                }
                             }
-                            if let Some(observation) = self.snapshot(&adapter, address).await {
-                                self.cache_observation(observation.clone());
-                                let _ = self.observation_tx.send(observation);
+                            if let Some(observation) = subscriptions.advertisements.get_mut(&address) {
+                                if apply_advertisement_property(observation, property) {
+                                    observation.sequence = self.next_sequence.fetch_add(1, Ordering::Relaxed);
+                                    observation.observed_at = Instant::now();
+                                    self.cache_observation(observation.clone());
+                                    let _ = self.observation_tx.send(observation.clone());
+                                }
                             }
                         }
                         _ = rotation_interval.tick(), if subscription_rotation_needed => {
@@ -881,7 +1055,7 @@ impl RuntimeCore {
                             subscriptions.invalidate_all();
                             for address in window.addresses {
                                 match subscriptions.subscribe(&adapter, address).await {
-                                    Ok(DeviceSubscriptionOutcome::AlreadySubscribed | DeviceSubscriptionOutcome::Subscribed) => {}
+                                    Ok(DeviceSubscriptionOutcome::Subscribed | DeviceSubscriptionOutcome::AlreadySubscribed) => {}
                                     Ok(DeviceSubscriptionOutcome::AtCapacity) => {
                                         break 'scan Err(anyhow::anyhow!(
                                             "bounded Bluetooth subscription window exceeded its limit"
@@ -933,6 +1107,7 @@ impl RuntimeCore {
     fn scan_interrupted(&self) -> bool {
         self.quiescing.load(Ordering::Acquire)
             || self.external_adapter_reserved.load(Ordering::Acquire)
+            || self.scan_requests.filter_tx.borrow().is_none()
     }
 
     fn cache_observation(&self, observation: ScanObservation) {
@@ -982,7 +1157,11 @@ impl RuntimeCore {
         })
     }
 
-    fn subscribe(self: &Arc<Self>) -> Result<ScanSubscription> {
+    fn subscribe(
+        self: &Arc<Self>,
+        demand: ScanDemand,
+        fresh_rssi: bool,
+    ) -> Result<ScanSubscription> {
         // Subscriptions are deliberately fresh-only. Cached observations are
         // diagnostics, not proof that a pairing candidate is still nearby.
         let receiver = self.observation_tx.subscribe();
@@ -992,8 +1171,10 @@ impl RuntimeCore {
             .map_err(|_| anyhow::anyhow!("shared Bluetooth observation cache poisoned"))?;
         prune_observations(&mut observations, Instant::now());
         drop(observations);
+        let request = self.scan_requests.acquire(demand, fresh_rssi)?;
         self.ensure_scanner_started()?;
         Ok(ScanSubscription {
+            _request: Some(request),
             receiver,
             lagged_observations: self.subscriber_lagged_observations.clone(),
         })
@@ -1160,7 +1341,7 @@ where
 fn broad_discovery_filter() -> DiscoveryFilter {
     DiscoveryFilter {
         transport: DiscoveryTransport::Le,
-        duplicate_data: true,
+        duplicate_data: false,
         ..Default::default()
     }
 }
@@ -1506,14 +1687,63 @@ impl BluezClient {
 
     pub fn subscribe(&self) -> Result<ScanSubscription> {
         self.ensure_active()?;
-        self.core.subscribe()
+        self.core.subscribe(ScanDemand::default(), true)
+    }
+
+    /// Request discovery for the advertised services needed by this consumer.
+    /// Dropping the subscription releases its discovery request.
+    pub fn subscribe_services(
+        &self,
+        services: impl IntoIterator<Item = Uuid>,
+    ) -> Result<ScanSubscription> {
+        self.subscribe_demand(ScanDemand::services(services))
+    }
+
+    /// Request bounded, presence-fresh discovery for one consumer's demand.
+    pub(crate) fn subscribe_demand(&self, demand: ScanDemand) -> Result<ScanSubscription> {
+        self.ensure_active()?;
+        self.core.subscribe(demand, true)
+    }
+
+    pub(crate) async fn idle_broker_health(&self) -> Result<Option<ScannerHealth>> {
+        self.ensure_not_quiescing()?;
+        if self.core.external_adapter_reserved.load(Ordering::Acquire) {
+            return Ok(Some(ScannerHealth::PausedForExternalOwner));
+        }
+        let Ok(_barrier) = self.core.operation_barrier.try_read() else {
+            return Ok(None);
+        };
+        let Some(_scope) = self.operations.try_admit_global()? else {
+            return Ok(None);
+        };
+        let Ok(_permit) = self.core.adapter_operation.try_acquire() else {
+            return Ok(None);
+        };
+        self.ensure_not_quiescing()?;
+        if self.core.external_adapter_reserved.load(Ordering::Acquire) {
+            return Ok(Some(ScannerHealth::PausedForExternalOwner));
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let (_, adapter) = self.core.session_adapter().await?;
+            anyhow::ensure!(
+                adapter.is_powered().await?,
+                "Bluetooth adapter is not powered"
+            );
+            Ok(Some(ScannerHealth::Idle))
+        })
+        .await
+        .context("Bluetooth idle health probe timed out")?
     }
 
     pub(crate) fn subscribe_broker(
         &self,
+        demand: ScanDemand,
     ) -> Result<(ScanSubscription, watch::Receiver<ScannerHealth>)> {
         self.ensure_not_quiescing()?;
-        Ok((self.core.subscribe()?, self.core.scanner_health()))
+        Ok((
+            self.core.subscribe(demand, false)?,
+            self.core.scanner_health(),
+        ))
     }
 
     /// Permanently stop this driver's new work and wait for its synchronous
@@ -1550,6 +1780,7 @@ impl BluezClient {
 }
 
 pub struct ScanSubscription {
+    _request: Option<ScanRequest>,
     receiver: broadcast::Receiver<ScanObservation>,
     lagged_observations: Arc<AtomicU64>,
 }
@@ -1636,6 +1867,7 @@ mod tests {
 
     fn subscription(sender: &broadcast::Sender<ScanObservation>) -> ScanSubscription {
         ScanSubscription {
+            _request: None,
             receiver: sender.subscribe(),
             lagged_observations: Arc::new(AtomicU64::new(0)),
         }
@@ -1716,6 +1948,7 @@ mod tests {
         let (sender, _) = broadcast::channel(2);
         let lagged = Arc::new(AtomicU64::new(0));
         let mut subscription = ScanSubscription {
+            _request: None,
             receiver: sender.subscribe(),
             lagged_observations: lagged.clone(),
         };
@@ -1862,6 +2095,142 @@ mod tests {
                 vec![1],
             )]))
         ));
+    }
+
+    #[tokio::test]
+    async fn new_pairing_candidate_is_observed_when_subscription_pool_is_full() {
+        let mut subscriptions = DeviceSubscriptions::new(1);
+        let existing: Address = "02:00:00:00:00:01".parse().unwrap();
+        assert!(matches!(
+            subscriptions.generations.begin(existing),
+            DeviceSubscriptionAdmission::Started(_)
+        ));
+        let mut candidate = observation(2, Uuid::from_u128(1), None);
+        candidate.address = "02:00:00:00:00:02".parse().unwrap();
+        assert!(matches!(
+            subscriptions.generations.begin(candidate.address),
+            DeviceSubscriptionAdmission::AtCapacity
+        ));
+        let seen = initial_observation(
+            subscriptions.advertisements.get(&candidate.address),
+            || async { Some(candidate.clone()) },
+        )
+        .await;
+        assert_eq!(seen, Some(candidate.clone()));
+        let seeded = initial_observation(Some(&candidate), || async {
+            panic!("must not re-read a seeded advertisement")
+        })
+        .await;
+        assert_eq!(seeded, Some(candidate));
+    }
+
+    #[test]
+    fn scan_demand_unions_services_and_stops_after_last_consumer() {
+        let requests = Arc::new(ScanRequests::default());
+        let hue = Uuid::from_u128(1);
+        let button = Uuid::from_u128(2);
+        let monitor = requests
+            .acquire(ScanDemand::services([button]), false)
+            .unwrap();
+        let filter = requests.filter_tx.borrow().clone().unwrap();
+        assert_eq!(filter.uuids, HashSet::from([button]));
+        assert!(!filter.duplicate_data);
+        assert_eq!(filter.rssi, None);
+
+        let pairing = requests.acquire(ScanDemand::services([hue]), true).unwrap();
+        let filter = requests.filter_tx.borrow().clone().unwrap();
+        assert_eq!(filter.uuids, HashSet::from([button, hue]));
+        assert_eq!(filter.rssi, Some(-127));
+        assert!(!filter.duplicate_data);
+        drop(pairing);
+        assert_eq!(
+            requests.filter_tx.borrow().as_ref().unwrap().uuids,
+            HashSet::from([button])
+        );
+        assert_eq!(requests.filter_tx.borrow().as_ref().unwrap().rssi, None);
+        drop(monitor);
+        assert!(requests.filter_tx.borrow().is_none());
+        // A later consumer wakes the same supervisor after an idle period.
+        let _reconnect = requests.acquire(ScanDemand::services([hue]), true).unwrap();
+        assert_eq!(
+            requests.filter_tx.borrow().as_ref().unwrap().uuids,
+            HashSet::from([hue])
+        );
+    }
+
+    #[test]
+    fn broad_profile_request_is_not_narrowed_by_another_consumer() {
+        let requests = Arc::new(ScanRequests::default());
+        let _filtered = requests
+            .acquire(ScanDemand::services([Uuid::from_u128(1)]), true)
+            .unwrap();
+        let broad = requests.acquire(ScanDemand::default(), false).unwrap();
+        assert!(requests
+            .filter_tx
+            .borrow()
+            .as_ref()
+            .unwrap()
+            .uuids
+            .is_empty());
+        drop(broad);
+        assert_eq!(requests.filter_tx.borrow().as_ref().unwrap().uuids.len(), 1);
+    }
+
+    #[test]
+    fn duplicate_reporting_lasts_only_while_a_consumer_requires_it() {
+        let requests = Arc::new(ScanRequests::default());
+        let service = Uuid::from_u128(1);
+        let _changed_only = requests
+            .acquire(ScanDemand::services([service]), false)
+            .unwrap();
+        assert!(!requests.filter_tx.borrow().as_ref().unwrap().duplicate_data);
+        let counterless = requests
+            .acquire(
+                ScanDemand {
+                    services: HashSet::from([service]),
+                    duplicate_data: true,
+                },
+                false,
+            )
+            .unwrap();
+        assert!(requests.filter_tx.borrow().as_ref().unwrap().duplicate_data);
+        drop(counterless);
+        assert!(!requests.filter_tx.borrow().as_ref().unwrap().duplicate_data);
+    }
+
+    #[test]
+    fn signal_payloads_keep_identity_and_deliver_changed_button_data_without_resnapshot() {
+        let service = Uuid::from_u128(1);
+        let mut cached = observation(1, service, Some(0x1511));
+        cached.service_data.insert(service, vec![0x10, 0x20]);
+        let original_time = cached.observed_at;
+        assert!(!apply_advertisement_property(
+            &mut cached,
+            DeviceProperty::Connected(true)
+        ));
+        assert_eq!(cached.observed_at, original_time);
+        assert!(apply_advertisement_property(
+            &mut cached,
+            DeviceProperty::Rssi(-50)
+        ));
+        assert_eq!(cached.rssi, Some(-50));
+        for counter in [1, 2, 3] {
+            assert!(apply_advertisement_property(
+                &mut cached,
+                DeviceProperty::ManufacturerData(HashMap::from([(0x1511, vec![counter])]))
+            ));
+            assert_eq!(cached.manufacturer_data[&0x1511], vec![counter]);
+            assert_eq!(cached.service_data[&service], vec![0x10, 0x20]);
+            assert!(cached.service_uuids.contains(&service));
+        }
+        // Empty property values replace stale data, not merge it forever.
+        apply_advertisement_property(&mut cached, DeviceProperty::ServiceData(HashMap::new()));
+        assert!(cached.service_data.is_empty());
+        assert!(!apply_advertisement_property(
+            &mut cached,
+            DeviceProperty::Uuids(HashSet::new())
+        ));
+        assert!(cached.service_uuids.is_empty());
     }
 
     #[test]
@@ -2012,6 +2381,7 @@ mod tests {
     fn scanner_health_diagnostics_are_stable_and_sanitized() {
         assert_eq!(ScannerHealth::Starting.as_str(), "starting");
         assert_eq!(ScannerHealth::Active.as_str(), "active");
+        assert_eq!(ScannerHealth::Idle.as_str(), "idle");
         assert_eq!(
             ScannerHealth::PausedForExternalOwner.as_str(),
             "paused_for_external_owner"

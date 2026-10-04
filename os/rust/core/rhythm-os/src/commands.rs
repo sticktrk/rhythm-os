@@ -1647,10 +1647,60 @@ fn update_lights_on_cache_for_node_with_source(
     lights_on: bool,
     source: ObservedPowerSource,
 ) {
+    update_lights_on_cache_if_not_superseded(
+        state, node_id, kind, parent_id, lights_on, source, None, None,
+    );
+}
+
+/// What a guarded observed-power write did to the cache.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ObservedPowerWrite {
+    /// A newer observation, a replaced runtime or a removed node won.
+    Skipped,
+    /// Recorded, but clients already show this fresh value.
+    Unchanged,
+    /// Recorded a different, first or newly fresh value.
+    Changed,
+}
+
+fn update_lights_on_cache_if_not_superseded(
+    state: &SharedState,
+    node_id: &str,
+    kind: LightNodeKind,
+    parent_id: Option<&str>,
+    lights_on: bool,
+    source: ObservedPowerSource,
+    query_started_ms: Option<u64>,
+    lifecycle: Option<(&Arc<dyn RuntimeHandle>, u64)>,
+) -> ObservedPowerWrite {
     let observed_at_instant = Instant::now();
     let observed_at_epoch_ms = current_epoch_ms();
     if let Ok(mut s) = state.lock() {
+        if let Some((runtime, generation)) = lifecycle {
+            if s.light_dispatch_generation != generation
+                || !s
+                    .hub_runtime()
+                    .is_some_and(|active| Arc::ptr_eq(&active, runtime))
+                || (s.topology.get(node_id).is_none()
+                    && s.topology.get_device_node(node_id).is_none())
+            {
+                return ObservedPowerWrite::Skipped;
+            }
+        }
         let cache_key = effective_lights_on_cache_key(&s, node_id, kind, parent_id).to_string();
+        if query_started_ms.is_some_and(|started| {
+            s.room_observed_power
+                .get(&cache_key)
+                .is_some_and(|observed| observed.observed_at_epoch_ms >= started)
+        }) {
+            return ObservedPowerWrite::Skipped;
+        }
+        let changed = s
+            .room_observed_power
+            .get(&cache_key)
+            .is_none_or(|existing| {
+                existing.lights_on != lights_on || !observed_power_is_fresh(&s, existing)
+            });
         let usage_source = light_usage_source(source);
         if usage_source.is_none() {
             s.light_usage.record_excluded_source(observed_at_instant);
@@ -1661,7 +1711,7 @@ fn update_lights_on_cache_for_node_with_source(
                     && existing.lights_on == lights_on
                     && observed_power_is_fresh(&s, existing)
                 {
-                    return;
+                    return ObservedPowerWrite::Skipped;
                 }
             }
         }
@@ -1691,7 +1741,13 @@ fn update_lights_on_cache_for_node_with_source(
                 source,
             },
         );
+        return if changed {
+            ObservedPowerWrite::Changed
+        } else {
+            ObservedPowerWrite::Unchanged
+        };
     }
+    ObservedPowerWrite::Skipped
 }
 
 pub(crate) fn light_state_query_id<'a>(
@@ -3172,6 +3228,119 @@ pub fn refresh_observed_power_authoritatively(
     Ok(snapshots)
 }
 
+/// Longest a resume reconciliation keeps starting room queries. One slow or
+/// unreachable integration must not hold the coalescing flag, and with it
+/// every later client's refresh, for a whole sequential walk.
+const RESUME_POWER_REFRESH_BUDGET: Duration = Duration::from_secs(15);
+
+/// Reconcile resumed clients without putting integration I/O on HTTP or the
+/// command worker. A single in-flight job bounds fan-out across clients.
+pub fn request_observed_power_refresh_on_resume(state: &SharedState) {
+    request_observed_power_refresh_on_resume_within(state, RESUME_POWER_REFRESH_BUDGET);
+}
+
+/// [`request_observed_power_refresh_on_resume`] with an explicit budget. No
+/// room query starts after `budget`; one already in flight still ends within
+/// its hub's own query timeout.
+#[doc(hidden)]
+pub fn request_observed_power_refresh_on_resume_within(state: &SharedState, budget: Duration) {
+    let (runtime, generation) = {
+        let Ok(mut s) = state.lock() else { return };
+        if s.observed_power_resume_refresh_running {
+            return;
+        }
+        let Some(runtime) = s.hub_runtime() else {
+            return;
+        };
+        s.observed_power_resume_refresh_running = true;
+        (runtime, s.light_dispatch_generation)
+    };
+    let task_state = Arc::clone(state);
+    let result = std::thread::Builder::new()
+        .name("resume-power".into())
+        .spawn(move || {
+            struct RefreshGuard(SharedState);
+            impl Drop for RefreshGuard {
+                fn drop(&mut self) {
+                    if let Ok(mut s) = self.0.lock() {
+                        s.observed_power_resume_refresh_running = false;
+                    }
+                }
+            }
+            let _guard = RefreshGuard(Arc::clone(&task_state));
+            let deadline = Instant::now() + budget;
+            let snapshots = addressable_root_snapshots(&runtime);
+            let mut results = HashMap::new();
+            for snap in snapshots
+                .iter()
+                .filter(|snap| snap.kind.is_light_addressable())
+            {
+                let query_id = {
+                    let Ok(s) = task_state.lock() else { continue };
+                    if s.light_dispatch_generation != generation
+                        || !s
+                            .hub_runtime()
+                            .is_some_and(|active| Arc::ptr_eq(&active, &runtime))
+                    {
+                        break;
+                    }
+                    light_state_query_id(&s, &snap.id, snap.kind, snap.parent_id.as_deref())
+                        .to_string()
+                };
+                if !results.contains_key(&query_id) && Instant::now() >= deadline {
+                    warn!(
+                        target: "cmd",
+                        "Resume power reconciliation stopped at its {}s budget; remaining rooms keep their last observation",
+                        budget.as_secs()
+                    );
+                    break;
+                }
+                let (started, lights_on) = *results.entry(query_id.clone()).or_insert_with(|| {
+                    let started = current_epoch_ms();
+                    let observed = observed_lights_on_for_source(
+                        &runtime,
+                        &query_id,
+                        ObservedPowerSource::AuthoritativeRefresh,
+                    )
+                    .ok();
+                    (started, observed)
+                });
+                if let Some(lights_on) = lights_on {
+                    let write = update_lights_on_cache_if_not_superseded(
+                        &task_state,
+                        &snap.id,
+                        snap.kind,
+                        snap.parent_id.as_deref(),
+                        lights_on,
+                        ObservedPowerSource::AuthoritativeRefresh,
+                        Some(started),
+                        Some((&runtime, generation)),
+                    );
+                    // Each correction is sent as soon as its room answers, so
+                    // an early room is not held behind a slow later one.
+                    // Rooms that already show this fresh value send nothing.
+                    if write != ObservedPowerWrite::Changed {
+                        continue;
+                    }
+                    let Some(snapshot) = runtime.engine_effective_node_snapshot(&snap.id) else {
+                        continue;
+                    };
+                    let event = build_node_state_event(&task_state, &snapshot);
+                    crate::state::emit_server_event(
+                        &task_state,
+                        crate::server_event::ServerEvent::NodeState { nodes: vec![event] },
+                    );
+                }
+            }
+        });
+    if let Err(error) = result {
+        if let Ok(mut s) = state.lock() {
+            s.observed_power_resume_refresh_running = false;
+        }
+        warn!(target: "cmd", "Could not start resume power reconciliation: {error}");
+    }
+}
+
 /// Queue one authoritative observed-power refresh after a physical dispatch
 /// failure on a user-initiated command.
 ///
@@ -3259,7 +3428,8 @@ pub fn refresh_observed_power_authoritatively_and_emit(state: &SharedState) -> R
 /// Two-phase lock: collects metadata from state (brief lock), then queries
 /// engine snapshots (engine read lock) to prevent cascading lock contention.
 pub fn build_state_snapshot(state: &SharedState) -> Result<String> {
-    build_state_snapshot_for_nodes(state, crate::state_selection::StateNodes::All)
+    let snapshot = build_state_snapshot_for_nodes(state, crate::state_selection::StateNodes::All)?;
+    Ok(serde_json::to_string(&snapshot)?)
 }
 
 /// Skip unrequested DTOs and lighting-display work; retain global configuration calculations.
@@ -3268,9 +3438,22 @@ pub fn build_selected_state_snapshot(
     selection: &crate::state_selection::StateSelection,
 ) -> Result<String> {
     let started = Instant::now();
-    let mut value: serde_json::Value = if selection.configuration() {
-        serde_json::from_str(&build_state_snapshot_for_nodes(state, selection.nodes)?)?
+    let counts = if selection.nodes == crate::state_selection::StateNodes::Controls {
+        control_device_counts(state)?
     } else {
+        HashMap::new()
+    };
+    if selection.configuration() {
+        let snapshot = build_state_snapshot_for_nodes(state, selection.nodes)?;
+        let json = serde_json::to_string(&SelectedStateSnapshot {
+            snapshot: &snapshot,
+            selection,
+            counts: &counts,
+        })?;
+        info!(target: "startup", "selected_state nodes_scope={:?} duration_us={} response_bytes={}", selection.nodes, started.elapsed().as_micros(), json.len());
+        return Ok(json);
+    }
+    let mut value: serde_json::Value = {
         let mut base = {
             let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
             let hubs: Vec<_> = s
@@ -3323,31 +3506,6 @@ pub fn build_selected_state_snapshot(
         value.as_object_mut().unwrap().remove("nodes");
     }
     if selection.nodes == crate::state_selection::StateNodes::Controls {
-        // Counts keep the room overview useful without materializing child DTOs.
-        let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
-        let mut counts: HashMap<String, BTreeMap<&str, usize>> = HashMap::new();
-        for node in s.topology.device_nodes() {
-            let Some(parent) = node.parent_id.as_ref() else {
-                continue;
-            };
-            let Some(device) = s.canonical_registry.get(&node.canonical_device_id) else {
-                continue;
-            };
-            if device.is_removed() {
-                continue;
-            }
-            let kind = match device.device_type {
-                DeviceType::Light => "light",
-                DeviceType::Button => "button",
-                DeviceType::Motion => "motion",
-                DeviceType::Contact => "contact",
-            };
-            *counts
-                .entry(parent.clone())
-                .or_default()
-                .entry(kind)
-                .or_default() += 1;
-        }
         if let Some(nodes) = value["nodes"].as_array_mut() {
             for node in nodes {
                 if node["kind"] == "room" {
@@ -3365,6 +3523,97 @@ pub fn build_selected_state_snapshot(
     let json = serde_json::to_string(&value)?;
     info!(target: "startup", "selected_state nodes_scope={:?} duration_us={} response_bytes={}", selection.nodes, started.elapsed().as_micros(), json.len());
     Ok(json)
+}
+
+type ControlDeviceCounts = HashMap<String, BTreeMap<&'static str, usize>>;
+
+fn control_device_counts(state: &SharedState) -> Result<ControlDeviceCounts> {
+    let s = state.lock().map_err(|_| anyhow::anyhow!("lock"))?;
+    let mut counts: ControlDeviceCounts = HashMap::new();
+    for node in s.topology.device_nodes() {
+        let Some(parent) = node.parent_id.as_ref() else {
+            continue;
+        };
+        let Some(device) = s.canonical_registry.get(&node.canonical_device_id) else {
+            continue;
+        };
+        if device.is_removed() {
+            continue;
+        }
+        let kind = match device.device_type {
+            DeviceType::Light => "light",
+            DeviceType::Button => "button",
+            DeviceType::Motion => "motion",
+            DeviceType::Contact => "contact",
+        };
+        *counts
+            .entry(parent.clone())
+            .or_default()
+            .entry(kind)
+            .or_default() += 1;
+    }
+    Ok(counts)
+}
+
+/// A borrowed wire view avoids building, parsing and encoding the entire response twice.
+/// Keep the legacy snapshot DTO unchanged for backup and previous clients.
+struct SelectedStateSnapshot<'a> {
+    snapshot: &'a StateSnapshot,
+    selection: &'a crate::state_selection::StateSelection,
+    counts: &'a ControlDeviceCounts,
+}
+
+#[derive(serde::Serialize)]
+struct SelectedStateNode<'a> {
+    #[serde(flatten)]
+    node: &'a NodeStateDto,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device_counts: Option<&'a BTreeMap<&'static str, usize>>,
+}
+
+impl serde::Serialize for SelectedStateSnapshot<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use crate::state_selection::StateNodes;
+        use serde::ser::SerializeMap;
+        let snapshot = self.snapshot;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("last_tick_epoch_ms", &snapshot.last_tick_epoch_ms)?;
+        map.serialize_entry("version", &snapshot.version)?;
+        map.serialize_entry("server_instance_id", &snapshot.server_instance_id)?;
+        map.serialize_entry("platform", &snapshot.platform)?;
+        map.serialize_entry("context", &snapshot.context)?;
+        map.serialize_entry("hubs", &snapshot.hubs)?;
+        map.serialize_entry("capabilities", &snapshot.capabilities)?;
+        map.serialize_entry("active_profile", &snapshot.active_profile)?;
+        map.serialize_entry("location", &snapshot.location)?;
+        map.serialize_entry("settings", &snapshot.settings)?;
+        map.serialize_entry("light_breaker", &snapshot.light_breaker)?;
+        map.serialize_entry("mode", &snapshot.mode)?;
+        map.serialize_entry("transitions", &snapshot.transitions)?;
+        map.serialize_entry("scenes", &snapshot.scenes)?;
+        map.serialize_entry("input_bindings", &snapshot.input_bindings)?;
+        map.serialize_entry("profiles", &snapshot.profiles)?;
+        map.serialize_entry("review", &snapshot.review)?;
+        if let Some(port) = snapshot.listen_port {
+            map.serialize_entry("listen_port", &port)?;
+        }
+        if self.selection.nodes != StateNodes::None {
+            let empty = BTreeMap::new();
+            let nodes: Vec<_> = snapshot
+                .nodes
+                .iter()
+                .map(|node| SelectedStateNode {
+                    node,
+                    device_counts: (self.selection.nodes == StateNodes::Controls
+                        && node.kind.is_room())
+                    .then(|| self.counts.get(&node.id).unwrap_or(&empty)),
+                })
+                .collect();
+            map.serialize_entry("nodes", &nodes)?;
+        }
+        map.serialize_entry("state_scope", self.selection)?;
+        map.end()
+    }
 }
 
 fn retain_state_nodes(
@@ -3419,7 +3668,7 @@ fn state_node_snapshots(
 fn build_state_snapshot_for_nodes(
     state: &SharedState,
     scope: crate::state_selection::StateNodes,
-) -> Result<String> {
+) -> Result<StateSnapshot> {
     let started = Instant::now();
     let mut lock_wait = Duration::ZERO;
     let mut lock_hold = Duration::ZERO;
@@ -3730,10 +3979,9 @@ fn build_state_snapshot_for_nodes(
         review: review_dto,
         nodes,
     };
-    let json = serde_json::to_string(&snapshot).map_err(|e| anyhow::anyhow!("serialize: {}", e))?;
-    info!(target: "startup", "state_snapshot duration_us={} lock_wait_us={} lock_hold_us={} nodes={} response_bytes={}",
-        started.elapsed().as_micros(), lock_wait.as_micros(), lock_hold.as_micros(), snapshot.nodes.len(), json.len());
-    Ok(json)
+    info!(target: "startup", "state_snapshot duration_us={} lock_wait_us={} lock_hold_us={} nodes={}",
+        started.elapsed().as_micros(), lock_wait.as_micros(), lock_hold.as_micros(), snapshot.nodes.len());
+    Ok(snapshot)
 }
 
 fn build_review_summary_dto(s: &AppState) -> ReviewSummaryDto {
@@ -41902,5 +42150,48 @@ mod tests {
             "new".to_string(),
             41
         )));
+    }
+
+    #[test]
+    fn background_power_sample_cannot_replace_a_newer_command_or_live_observation() {
+        for source in [
+            ObservedPowerSource::Command,
+            ObservedPowerSource::LiveSubscription,
+        ] {
+            let mut app = AppState::default();
+            app.room_observed_power.insert(
+                "room".into(),
+                ObservedPowerState {
+                    lights_on: true,
+                    observed_at_epoch_ms: 20,
+                    source,
+                },
+            );
+            let state = Arc::new(std::sync::Mutex::new(app));
+            update_lights_on_cache_if_not_superseded(
+                &state,
+                "room",
+                LightNodeKind::Room,
+                None,
+                false,
+                ObservedPowerSource::AuthoritativeRefresh,
+                Some(10),
+                None,
+            );
+            let current = state.lock().unwrap().room_observed_power["room"].clone();
+            assert!(current.lights_on);
+            assert_eq!(current.source, source);
+            update_lights_on_cache_if_not_superseded(
+                &state,
+                "room",
+                LightNodeKind::Room,
+                None,
+                false,
+                ObservedPowerSource::AuthoritativeRefresh,
+                Some(21),
+                None,
+            );
+            assert!(!state.lock().unwrap().room_observed_power["room"].lights_on);
+        }
     }
 }

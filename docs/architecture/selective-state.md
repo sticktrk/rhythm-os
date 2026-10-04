@@ -48,11 +48,25 @@ configuration is requested, the global rhythm interval still accounts for
 every node's effective settings. Unrequested nodes skip per-node DTO and
 lighting-display construction; base-only reads also skip configuration work.
 
+For a nonblocking resume, `refresh_observed_power=true` returns the ordinary
+snapshot and starts one coalesced background power reconciliation. An observation
+that changes a room's value, or makes a stale one fresh, is emitted as a
+node-state event as soon as that room answers; unchanged rooms send nothing and
+failed queries leave the cache unchanged. No room query starts after 15 seconds,
+so one unreachable integration cannot hold the coalescing slot for a whole walk. The job runs separately from HTTP and the command worker, and a newer
+command or live observation supersedes an in-flight sample. `authoritative=true`
+retains its blocking semantics and takes precedence if both flags are present.
+Previous appliances ignore the additive refresh query; normal SSE and periodic
+observations remain their correction path. After subscribing to SSE, a resume
+performs one cached node-state poll to recover observations emitted between the
+hello snapshot and stream subscription.
+
 The SDK requests controls and configuration together during connect/resume.
 The server advertises `state_includes_v1`; a selected hello must carry both
 that capability and the requested scope. Older servers ignore the query and
 return a full snapshot, which the SDK continues to accept. Older apps and
-admin/debug/backup consumers retain unqualified full reads. The app and
+debug/backup consumers retain unqualified full reads. Admin status probes request
+base only and still tolerate legacy full snapshots. The app and
 appliance may roll back independently; no persistent schema changes.
 
 On capable servers, periodic node polling uses `scope=controls`. Omitted scope

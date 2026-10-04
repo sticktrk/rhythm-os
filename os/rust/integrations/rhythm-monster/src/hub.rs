@@ -306,8 +306,8 @@ fn discover(
         "Looking for a nearby Monster strip in setup mode",
     );
     let client = BluezClient::new(BluezDriverId::Monster)?;
-    let mut observations = client.subscribe()?;
     let service = Uuid::parse_str(ble::ID_SERVICE).context("Ayla service UUID")?;
+    let mut observations = client.subscribe_services([service])?;
     let scan = Duration::from_secs(scan_secs);
     let addresses = client
         .run_adapter_operation_for(

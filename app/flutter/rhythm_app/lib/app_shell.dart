@@ -100,6 +100,7 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   /// to answer the first hello).
   static const _serverConnectGrace = Duration(seconds: 5);
   Timer? _serverConnectGraceTimer;
+  DateTime? _serverSuspendedAt;
 
   List<MainNavTab> get _activeTabs => _rhythmAdaptiveTabs;
 
@@ -147,6 +148,13 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _refreshActiveHomeOnResume();
+      _serverSuspendedAt = null;
+    } else if (state == AppLifecycleState.paused) {
+      // Traffic received during the inactive transition must not certify a
+      // transport after the app has actually entered the background.
+      _serverSuspendedAt = DateTime.now();
+    } else {
+      _serverSuspendedAt ??= DateTime.now();
     }
   }
 
@@ -164,8 +172,8 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
       AppStartupPerformance.instance.start(resumed: true);
       unawaited(
         serverSync
-            .retryActiveServerConnection(
-          authoritative: true,
+            .resumeActiveServerConnection(
+          suspendedAt: _serverSuspendedAt,
         )
             .catchError((Object error, StackTrace stackTrace) {
           debugPrint('AppShell: Resume server refresh failed: $error');

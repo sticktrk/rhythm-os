@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart';
+
 import 'analytics_service.dart';
 
 /// Process-local timing for the startup journey to All Rooms.
@@ -90,6 +92,19 @@ class AppStartupPerformance {
                   : '256k_plus';
     }
   }
+
+  /// Which transport a resume used to restore controls: `live_stream` keeps
+  /// the open event stream, `snapshot` selects an endpoint and fetches a hello.
+  /// Kept as a separate dimension so near-instant kept-stream resumes cannot
+  /// hide a slow reconnect in aggregate timings.
+  void recordResumePath(String path) {
+    if (_interactiveRecorded || _details['journey_kind'] != 'resume') return;
+    if (path != 'live_stream' && path != 'snapshot') return;
+    _details['resume_path'] = path;
+  }
+
+  @visibleForTesting
+  String? get resumePathForTesting => _details['resume_path'] as String?;
 
   static String countBucket(int count) => count == 0
       ? '0'

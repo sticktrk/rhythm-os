@@ -130,6 +130,9 @@ if [ ! -d "$CHIP_SRC/out/rpiz-arm-musl" ]; then
     exit 1
 fi
 
+NM="$TOOLCHAIN_SRC/bin/arm-unknown-linux-musleabihf-nm" \
+    "$SCRIPT_DIR/check-chip-bluez-idle-guard.sh" "$CHIP_SRC" "$CHIP_SRC/out/rpiz-arm-musl/lib/libCHIP.a"
+
 if [ ! -d "$RPIZ_OUT_SRC/host" ]; then
     echo "Error: $RPIZ_OUT_SRC/host is missing. Finish a local ./tools/os/scripts/build-rpiz-image.sh run first." >&2
     exit 1

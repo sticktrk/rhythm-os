@@ -1,4 +1,5 @@
 #include "chip_bridge.h"
+#include "bluez_commissioning_scope.h"
 #include "blocking_pairing_delegate.h"
 #include "wifi_change_transaction.h"
 #include "wifi_network_observation.h"
@@ -63,6 +64,14 @@ using chip::Controller::DeviceControllerFactory;
 using chip::Controller::ExampleOperationalCredentialsIssuer;
 using chip::Controller::FactoryInitParams;
 using chip::Controller::SetupParams;
+
+#if CHIP_DEVICE_LAYER_TARGET_LINUX && CHIP_DEVICE_CONFIG_ENABLE_CHIPOBLE
+extern "C" void rhythm_chip_bluez_idle_guard_v1() __attribute__((weak));
+extern "C" bool rhythm_chipd_ble_commissioning_active()
+{
+    return rhythm::matter::BluezCommissioningScope::IsActive();
+}
+#endif
 
 namespace {
 
@@ -1161,6 +1170,7 @@ public:
             commissioningParams.SetWiFiCredentials(WiFiCredentials(ssidSpan, passwordSpan));
         }
 
+        rhythm::matter::BluezCommissioningScope bleCommissioning;
         CHIP_ERROR err = CHIP_NO_ERROR;
         mPairingDelegate.Begin(request.node_id);
 
@@ -2351,6 +2361,13 @@ private:
         // so the BTP endpoint is never established after a successful GATT
         // connect. Fall back to adapter 0 (hci0) when the caller did not
         // select a specific controller.
+        // Keep older builder images usable while making their missing SDK
+        // guard visible once at initialization. New image packaging verifies
+        // the patch and rebuilt archive before publishing.
+        if (rhythm_chip_bluez_idle_guard_v1 == nullptr)
+        {
+            ChipLogError(DeviceLayer, "CHIP SDK lacks the BlueZ idle guard; rebuild the SDK to suppress unrelated device updates");
+        }
         const uint16_t adapterId = hasBleController ? bleController : 0;
         ReturnErrorOnFailure(
             chip::DeviceLayer::Internal::BLEMgrImpl().ConfigureBle(adapterId, /* BLE central */ true));
