@@ -62,6 +62,49 @@ void main() {
         proxy: proxy, lookupUser: (_) async => user, trustedPeer: (_) => true);
   });
 
+  test('health returns runtime build identity without installation credentials',
+      () async {
+    const build = {
+      'schema_version': 1,
+      'product_version': '1.2.3',
+      'image_version': '0.3.0-dev.1',
+      'product_revision': '1111111111111111111111111111111111111111',
+      'packaging_revision': '2222222222222222222222222222222222222222',
+      'build_inputs_sha256':
+          '3333333333333333333333333333333333333333333333333333333333333333',
+    };
+    proxy = LocalDeviceProxy(
+        token: runtimeToken,
+        client: MockClient((request) async {
+          expect(request.url.path, '/api/addon/status');
+          return http.Response(
+              jsonEncode({
+                'build': build,
+                'server_instance_id': 'private-installation',
+                'token': runtimeToken,
+              }),
+              200);
+        }));
+    server = LocalAdminServer(
+        proxy: proxy, lookupUser: (_) async => null, trustedPeer: (_) => true);
+    final response = await server.handler(browserRequest(path: 'health'));
+    expect(response.statusCode, 200);
+    expect(jsonDecode(await response.readAsString()), {
+      'status': 'ok',
+      'deployment': 'home_assistant_addon',
+      'build': build,
+    });
+  });
+
+  test('health tolerates a previous runtime without image metadata', () async {
+    final response = await server.handler(browserRequest(path: 'health'));
+    expect(response.statusCode, 200);
+    expect(jsonDecode(await response.readAsString()), {
+      'status': 'ok',
+      'deployment': 'home_assistant_addon',
+    });
+  });
+
   test('session uses HA identity without a cloud session or exposed token',
       () async {
     final response = await server.handler(browserRequest());
@@ -78,12 +121,12 @@ void main() {
   test('mobile enrollment uses the guarded admin listener and fresh HA role',
       () async {
     Map<String, dynamic> enrollment() => {
-      'method': 'POST',
-      'path': 'api/addon/enrollment',
-      'body': <String, dynamic>{},
-      'requestId': 'mobile-test:1234',
-      'expectedServerInstanceId': 'instance-1'
-    };
+          'method': 'POST',
+          'path': 'api/addon/enrollment',
+          'body': <String, dynamic>{},
+          'requestId': 'mobile-test:1234',
+          'expectedServerInstanceId': 'instance-1'
+        };
     final response = await server.handler(browserRequest(
         path: 'api/local/device-admin/proxy', operation: enrollment()));
     expect(response.statusCode, 200);

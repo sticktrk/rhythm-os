@@ -812,3 +812,47 @@ async fn canceled_http_request_keeps_the_write_barrier_until_its_handler_finishe
     let _quiesced = access.mutation_gate.lock().await;
     assert_eq!(completed.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn health_and_admin_status_expose_the_same_build_identity_without_secrets() {
+    let f = Fixture::new();
+    let (status, health) = json_request(f.mobile(), Method::GET, "/health", None, json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(health["status"], "healthy");
+    assert_eq!(
+        health["build"]["product_version"],
+        env!("CARGO_PKG_VERSION")
+    );
+    for (field, value) in [
+        ("image_version", option_env!("RHYTHM_IMAGE_VERSION")),
+        ("product_revision", option_env!("RHYTHM_PRODUCT_REVISION")),
+        (
+            "packaging_revision",
+            option_env!("RHYTHM_PACKAGING_REVISION"),
+        ),
+        (
+            "build_inputs_sha256",
+            option_env!("RHYTHM_BUILD_INPUTS_SHA256"),
+        ),
+    ] {
+        assert_eq!(
+            health["build"][field].as_str(),
+            value.filter(|v| !v.is_empty()),
+            "{field}"
+        );
+    }
+    let (status, admin) = json_request(
+        f.admin(),
+        Method::GET,
+        "/api/addon/status",
+        Some(ADMIN),
+        json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(health["build"], admin["build"]);
+    assert!(health.get("server_instance_id").is_none());
+    assert!(!health.to_string().contains(ADMIN));
+    let (status, _) = json_request(f.admin(), Method::GET, "/health", None, json!({})).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}

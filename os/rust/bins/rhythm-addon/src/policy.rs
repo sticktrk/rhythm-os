@@ -175,6 +175,7 @@ pub async fn status(State(state): State<SharedState>) -> Json<serde_json::Value>
         "location_source": "home_assistant",
         "light_breaker_enabled": s.light_breaker_enabled,
         "version": s.firmware_version,
+        "build": crate::build_info::current(),
         "server_instance_id": s.server_instance_id,
         "capabilities": rhythm_os::api_types::DeploymentCapabilitiesDto::for_context("ha_addon"),
     }))

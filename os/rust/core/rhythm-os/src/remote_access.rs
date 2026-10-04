@@ -22,6 +22,9 @@ use serde_json::json;
 use crate::handlers::ApiResponse;
 use crate::state::SharedState;
 
+mod child_log;
+use child_log::LoggedChild;
+
 const RUNTIME_DIR: &str = "cloudflared";
 const CONNECTOR_TOKEN_FILE: &str = "connector_token";
 const HOSTNAME_FILE: &str = "hostname";
@@ -1081,9 +1084,10 @@ struct ChildProcessInner {
     metrics_addr: String,
     backoff_initial: Duration,
     backoff_max: Duration,
+    backoff_reset_after: Duration,
     stop_delay: Duration,
     shared: Mutex<ChildProcessShared>,
-    child: Mutex<Option<Child>>,
+    child: Mutex<Option<LoggedChild>>,
 }
 
 #[derive(Clone)]
@@ -1139,6 +1143,7 @@ impl ChildProcessRemoteAccessController {
                 metrics_addr: DEFAULT_METRICS_ADDR.to_string(),
                 backoff_initial: Duration::from_secs(2),
                 backoff_max: Duration::from_secs(60),
+                backoff_reset_after: Duration::from_secs(60),
                 stop_delay: Duration::from_millis(750),
                 shared: Mutex::new(ChildProcessShared::default()),
                 child: Mutex::new(None),
@@ -1407,6 +1412,7 @@ impl RemoteAccessController for ChildProcessRemoteAccessController {
 
 fn child_supervisor_loop(inner: Arc<ChildProcessInner>) {
     let mut backoff = inner.backoff_initial;
+    let mut previous_generation = None;
     loop {
         let (desired, generation) = {
             let Ok(mut shared) = inner.shared.lock() else {
@@ -1426,10 +1432,17 @@ fn child_supervisor_loop(inner: Arc<ChildProcessInner>) {
             (desired, shared.generation)
         };
 
+        // A newly requested configuration gets a fresh budget immediately.
+        if previous_generation != Some(generation) {
+            backoff = inner.backoff_initial;
+            previous_generation = Some(generation);
+        }
+        let started;
         let spawn_result = spawn_cloudflared(&inner, &desired);
         match spawn_result {
             Ok(child) => {
-                let child_pid = child.id();
+                started = Instant::now();
+                let child_pid = child.process.id();
                 {
                     let mut child_slot = inner
                         .child
@@ -1448,7 +1461,6 @@ fn child_supervisor_loop(inner: Arc<ChildProcessInner>) {
                     shared.status.next_restart_epoch_secs = None;
                     let _ = write_child_status_env(&desired.runtime_dir, &inner, &shared.status);
                 }
-                backoff = inner.backoff_initial;
             }
             Err(e) => {
                 let mut shared = inner
@@ -1484,11 +1496,17 @@ fn child_supervisor_loop(inner: Arc<ChildProcessInner>) {
                     .unwrap_or_else(|poisoned| poisoned.into_inner());
                 child_slot
                     .as_mut()
-                    .and_then(|child| child.try_wait().ok().flatten())
+                    .and_then(|child| child.process.try_wait().ok().flatten())
             };
 
             if let Some(exit_status) = exit_status {
+                let stable_run = started.elapsed() >= inner.backoff_reset_after;
                 clear_child_slot(&inner);
+                // Spawn success alone is not recovery: short-lived failures
+                // retain exponential backoff until a run lasts a full minute.
+                if stable_run {
+                    backoff = inner.backoff_initial;
+                }
                 let should_restart = {
                     let mut shared = inner
                         .shared
@@ -1519,15 +1537,11 @@ fn child_supervisor_loop(inner: Arc<ChildProcessInner>) {
     }
 }
 
-fn spawn_cloudflared(inner: &ChildProcessInner, desired: &ChildDesired) -> anyhow::Result<Child> {
+fn spawn_cloudflared(
+    inner: &ChildProcessInner,
+    desired: &ChildDesired,
+) -> anyhow::Result<LoggedChild> {
     std::fs::create_dir_all(&desired.runtime_dir)?;
-    let log_path = desired.runtime_dir.join("cloudflared.log");
-    let log_file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)?;
-    let err_file = log_file.try_clone()?;
-
     let mut command = Command::new(&inner.cloudflared_bin);
     command
         .arg("tunnel")
@@ -1545,10 +1559,8 @@ fn spawn_cloudflared(inner: &ChildProcessInner, desired: &ChildDesired) -> anyho
         .arg("run")
         .arg("--token-file")
         .arg(desired.runtime_dir.join(CONNECTOR_TOKEN_FILE))
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(log_file))
-        .stderr(Stdio::from(err_file));
-    Ok(command.spawn()?)
+        .stdin(Stdio::null());
+    LoggedChild::spawn(&mut command, &desired.runtime_dir)
 }
 
 fn desired_changed(inner: &ChildProcessInner, generation: u64) -> bool {
@@ -1570,23 +1582,23 @@ fn sleep_backoff_or_change(inner: &ChildProcessInner, generation: u64, backoff: 
 }
 
 fn kill_child(inner: &ChildProcessInner) {
-    let mut child_slot = inner
+    let mut slot = inner
         .child
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(child) = child_slot.as_mut() {
-        let _ = child.kill();
-        let _ = child.wait();
+    if let Some(child) = slot.take() {
+        child.terminate();
     }
-    *child_slot = None;
 }
 
 fn clear_child_slot(inner: &ChildProcessInner) {
-    let mut child_slot = inner
+    let mut slot = inner
         .child
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    *child_slot = None;
+    if let Some(child) = slot.take() {
+        child.finish();
+    }
 }
 
 fn write_child_status_env(
@@ -2672,6 +2684,198 @@ cloudflared_tunnel_server_locations{edge_location=\"iad\"} 1\n";
         assert!(controller.start(&root, &config).is_err());
         controller.shutdown().unwrap();
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    fn fixture_connector_config() -> StoredRemoteAccessConfig {
+        StoredRemoteAccessConfig {
+            schema_version: 1,
+            enabled: true,
+            hostname: "fixture.devices.rhythm.lighting".into(),
+            connector_token: "fixture-secret".into(),
+            tunnel_id: None,
+            tunnel_name: None,
+            updated_at_epoch_ms: 1,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_immediate_exits_increase_restart_delay() {
+        let root = temp_root("child-crash-backoff");
+        std::fs::create_dir_all(&root).unwrap();
+        let binary = root.join("cloudflared");
+        write_executable(
+            &binary,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fixture; exit 0; fi\nexit 1\n",
+        );
+        let mut controller = ChildProcessRemoteAccessController::new(&binary);
+        Arc::get_mut(&mut controller.inner).unwrap().backoff_initial = Duration::from_secs(1);
+        Arc::get_mut(&mut controller.inner).unwrap().backoff_max = Duration::from_secs(2);
+        controller
+            .start(&root, &fixture_connector_config())
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(12);
+        let mut delays = Vec::new();
+        while delays.len() < 3 && Instant::now() < deadline {
+            let status = controller.inner.shared.lock().unwrap().status.clone();
+            if status.restart_count == delays.len() as u64 + 1 && status.state == "backoff" {
+                delays.push(
+                    status.next_restart_epoch_secs.unwrap() - status.last_exit_epoch_secs.unwrap(),
+                );
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        controller.shutdown().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+        assert_eq!(
+            delays,
+            vec![1, 2, 2],
+            "a successful spawn must not reset a crash loop's backoff"
+        );
+    }
+
+    #[cfg(unix)]
+    fn wait_for_child_backoff(controller: &ChildProcessRemoteAccessController, count: u64) -> u64 {
+        let deadline = Instant::now() + Duration::from_secs(12);
+        loop {
+            let status = controller.inner.shared.lock().unwrap().status.clone();
+            if status.restart_count == count && status.state == "backoff" {
+                return status.next_restart_epoch_secs.unwrap()
+                    - status.last_exit_epoch_secs.unwrap();
+            }
+            if Instant::now() >= deadline {
+                controller.shutdown().unwrap();
+                panic!("connector did not reach restart {count}");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_stable_run_and_new_configuration_reset_restart_delay() {
+        let root = temp_root("child-backoff-recovery");
+        std::fs::create_dir_all(&root).unwrap();
+        let binary = root.join("cloudflared");
+        write_executable(&binary, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fixture; exit 0; fi\ncount_file=\"$0.count\"\ncount=0\nif [ -f \"$count_file\" ]; then read count < \"$count_file\"; fi\ncount=$((count + 1))\necho \"$count\" > \"$count_file\"\nif [ \"$count\" = 3 ]; then sleep 2; fi\nexit 1\n");
+        let mut controller = ChildProcessRemoteAccessController::new(&binary);
+        let inner = Arc::get_mut(&mut controller.inner).unwrap();
+        inner.backoff_initial = Duration::from_secs(1);
+        inner.backoff_max = Duration::from_secs(2);
+        inner.backoff_reset_after = Duration::from_secs(1);
+        let config = fixture_connector_config();
+        controller.start(&root, &config).unwrap();
+        let first = wait_for_child_backoff(&controller, 1);
+        let second = wait_for_child_backoff(&controller, 2);
+        let stable = wait_for_child_backoff(&controller, 3);
+        let fourth = wait_for_child_backoff(&controller, 4);
+        controller.start(&root, &config).unwrap();
+        let reconfigured = wait_for_child_backoff(&controller, 5);
+        controller.shutdown().unwrap();
+        let _ = std::fs::remove_dir_all(root);
+        assert_eq!(
+            [first, second, stable, fourth, reconfigured],
+            [1, 2, 1, 2, 1]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_inherited_output_pipe_does_not_block_restart_or_shutdown() {
+        let root = temp_root("child-inherited-pipe");
+        std::fs::create_dir_all(&root).unwrap();
+        let binary = root.join("cloudflared");
+        write_executable(&binary, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fixture; exit 0; fi\nsleep 3 &\nexit 1\n");
+        let controller = ChildProcessRemoteAccessController::new(&binary);
+        let started = Instant::now();
+        controller
+            .start(&root, &fixture_connector_config())
+            .unwrap();
+        wait_for_child_backoff(&controller, 1);
+        controller.shutdown().unwrap();
+        let elapsed = started.elapsed();
+        // Reset must not retain a writer that can recreate this directory.
+        std::fs::remove_dir_all(&root).unwrap();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "inherited pipe stalled lifecycle for {elapsed:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_log_write_failure_does_not_block_output_or_shutdown() {
+        let root = temp_root("child-log-failure");
+        std::fs::create_dir_all(&root).unwrap();
+        let binary = root.join("cloudflared");
+        write_executable(&binary, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fixture; exit 0; fi\nwhile [ ! -f \"$0.go\" ]; do sleep 0.05; done\ndd if=/dev/zero bs=1024 count=3072 2>/dev/null\ntouch \"$0.ready\"\nexec sleep 60\n");
+        let controller = ChildProcessRemoteAccessController::new(&binary);
+        controller
+            .start(&root, &fixture_connector_config())
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while controller.inner.child.lock().unwrap().is_none() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        // Make the next rotation fail after the file and pipes have opened.
+        std::fs::create_dir(root.join("cloudflared.log.1")).unwrap();
+        std::fs::write(root.join("cloudflared.go"), "").unwrap();
+        while !root.join("cloudflared.ready").exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let ready = root.join("cloudflared.ready").exists();
+        controller.shutdown().unwrap();
+        let bytes = std::fs::metadata(root.join("cloudflared.log"))
+            .unwrap()
+            .len();
+        let _ = std::fs::remove_dir_all(root);
+        assert!(ready, "disk failure must not block the child's pipe");
+        assert!(bytes <= 1024 * 1024);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_running_output_is_bounded_and_retains_both_streams() {
+        let root = temp_root("child-bounded-output");
+        std::fs::create_dir_all(&root).unwrap();
+        let binary = root.join("cloudflared");
+        write_executable(&binary, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo fixture; exit 0; fi\ndd if=/dev/zero bs=1024 count=3072 2>/dev/null\nprintf stdout-tail\nprintf stderr-tail >&2\ntouch \"$0.ready\"\nexec sleep 60\n");
+        for filename in ["cloudflared.log", "cloudflared.log.1"] {
+            std::fs::write(root.join(filename), vec![b'x'; 3 * 1024 * 1024]).unwrap();
+        }
+        let controller = ChildProcessRemoteAccessController::new(&binary);
+        controller
+            .start(&root, &fixture_connector_config())
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while !root.join("cloudflared.ready").exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        let ready = root.join("cloudflared.ready").exists();
+        // The process is still alive: restart-only rotation cannot pass this.
+        let was_running = controller.inner.child.lock().unwrap().is_some();
+        controller.shutdown().unwrap();
+        let mut output = Vec::new();
+        let mut sizes = Vec::new();
+        for filename in ["cloudflared.log.1", "cloudflared.log"] {
+            if let Ok(bytes) = std::fs::read(root.join(filename)) {
+                sizes.push(bytes.len());
+                output.extend(bytes);
+            }
+        }
+        let _ = std::fs::remove_dir_all(root);
+        assert!(
+            ready && was_running,
+            "fixture output must finish while the child remains alive"
+        );
+        assert!(
+            sizes.iter().all(|size| *size <= 1024 * 1024),
+            "log files exceed 1 MiB: {sizes:?}"
+        );
+        assert!(sizes.iter().sum::<usize>() <= 2 * 1024 * 1024);
+        assert!(output.windows(11).any(|bytes| bytes == b"stdout-tail"));
+        assert!(output.windows(11).any(|bytes| bytes == b"stderr-tail"));
     }
 
     #[test]

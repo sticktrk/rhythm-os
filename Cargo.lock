@@ -2082,6 +2082,7 @@ dependencies = [
  "chrono",
  "futures",
  "if-addrs",
+ "libc",
  "log",
  "mdns-sd",
  "rand 0.8.6",

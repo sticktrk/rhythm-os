@@ -3,6 +3,7 @@
 //! Connects to Home Assistant via WebSocket for events and REST API for
 //! light commands. Headless server with REST API only (no UI).
 
+mod build_info;
 mod http_server;
 mod hub;
 mod listeners;
@@ -428,6 +429,27 @@ mod tests {
         assert!(validate_security_stores(path).is_ok());
         std::fs::write(root.join("auth.json"), "{").unwrap();
         assert!(validate_security_stores(path).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn newer_security_schemas_block_older_readers_without_rewriting_backup_data() {
+        let root =
+            std::env::temp_dir().join(format!("rhythm-addon-future-data-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.to_str().unwrap();
+        let identity = br#"{"schema_version":2,"server_instance_id":"restored-installation"}"#;
+        for (file, bytes) in [
+            ("auth.json", br#"{"schema_version":2,"tokens":[]}"#.as_slice()),
+            ("remote_access.json", br#"{"schema_version":2,"enabled":false,"hostname":"fixture.devices.rhythm.lighting","connector_token":"fixture","updated_at_epoch_ms":1}"#),
+            ("server_metadata.json", br#"{"schema_version":3,"server_instance_id":"restored-installation"}"#),
+        ] {
+            std::fs::write(root.join("server_metadata.json"), identity).unwrap();
+            std::fs::write(root.join(file), bytes).unwrap();
+            assert!(validate_security_stores(path).is_err(), "{file}");
+            assert_eq!(std::fs::read(root.join(file)).unwrap(), bytes);
+            std::fs::remove_file(root.join(file)).unwrap();
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

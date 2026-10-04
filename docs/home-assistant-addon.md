@@ -15,6 +15,13 @@ The existing Rhythm tunnel keeps its `http://localhost:54448` origin inside the
 container. Host port changes do not change the tunnel origin. The child-process
 controller owns cloudflared; HA owns the container lifecycle.
 
+The child controller retains at most two 1 MiB connector log files, including
+while a connector runs continuously. Log storage failure does not block its
+output pipe. Repeated short-lived exits use exponential retry delays from two
+seconds to one minute. A run lasting a minute or a new configuration resets that
+delay. The image supplies a pinned cloudflared binary with runtime auto-update
+disabled; connector updates arrive through a new tested HA image.
+
 The internal Rust administration API binds **127.0.0.1:54449**. The Dart API
 binds **127.0.0.1:8787**, and only the trusted Ingress gateway can reach it.
 The gateway forwards Supervisor-authenticated identity headers. Dart verifies
@@ -70,6 +77,20 @@ cross-host handover and full device migration remain qualification work. Reset
 stops the connector and clears Rhythm state before restart, preserving HA devices,
 integrations and Supervisor options.
 
+Recovery pairs the immutable image digest with a cold backup of that
+installation's complete `/data`. Record the add-on repository/slug, image build
+identity, backup ID and retained backup hash before an upgrade. Restoring only
+profiles does not restore credentials or managed-light ownership. A backup
+created successfully is not evidence of a successful restore.
+
+There is no single global data-schema version. Security stores currently use
+auth and remote-access schema 1, server metadata schema 1 or 2, and reviewed HA
+selection schema 2. Legacy entity-ID selection is preserved and sealed for
+review, not silently granted authority. Unsupported security/selection schemas
+fail closed without rewriting them. These guards do not promise that a prior
+binary can read newer data: a rollback restores its matching image and cold data
+snapshot, then reconnects to HA and revalidates selected identities before writes.
+
 ## Build and qualification
 
 Run `cargo test -p rhythm-addon`, `cargo test -p rhythm-ha --features test-support`
@@ -78,6 +99,14 @@ and `cargo test -p rhythm-os --lib`. In `admin-api`, run `dart analyze` and
 `npm run build:homeassistant`. Run the SDK and affected Flutter tests, repository
 invariants and the packaging validation/smoke harness. Public image builds consume
 an immutable product revision.
+
+`/health` and `/api/addon/status` include the same additive `build` object with
+the product version, HA image version, product and packaging revisions, and
+build-input hash. The local Dart health endpoint relays this public provenance.
+An unpackaged build reports unknown image fields as null; its Cargo version must
+not be mistaken for an HA image version. Health is process/API liveness; use the
+connection and selection status for HA readiness. These responses contain no
+installation credentials. Other deployment variants retain their health schema.
 
 This remains an experimental deployment until the documented hardware and
 migration gates pass. Synthetic Supervisor tests do not establish real HAOS

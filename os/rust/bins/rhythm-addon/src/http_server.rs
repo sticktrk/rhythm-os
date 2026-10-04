@@ -35,6 +35,17 @@ fn shared_routes() -> Router<SharedState> {
             "/api/addon/mobile-tokens/:id",
             delete(crate::mobile_access::revoke_token),
         )
+        .layer(middleware::from_fn(image_health))
+}
+
+async fn image_health(request: Request<Body>, next: Next) -> Response {
+    // Platform-specific addition behind the same outer admission layers. The
+    // common server/appliance health contract and admin authentication stay intact.
+    if request.method() == axum::http::Method::GET && request.uri().path() == "/health" {
+        return Json(json!({"status": "healthy", "build": crate::build_info::current()}))
+            .into_response();
+    }
+    next.run(request).await
 }
 
 pub fn create_mobile_router(state: SharedState, access: Arc<MobileAccess>) -> Router {
