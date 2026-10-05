@@ -41,7 +41,8 @@ class HaMatterDevice {
 
 class HaMatterCatalog {
   HaMatterCatalog.fromJson(Map<String, dynamic> json)
-      : available = json['schema_version'] == 1 && json['available'] == true,
+      : _supportedSchema = json['schema_version'] == 1,
+        available = json['schema_version'] == 1 && json['available'] == true,
         devices = (json['devices'] as List? ?? const [])
             .whereType<Map>()
             .map((v) => HaMatterDevice.fromJson(Map<String, dynamic>.from(v)))
@@ -50,6 +51,7 @@ class HaMatterCatalog {
             ? Map<String, dynamic>.from(json['capabilities'] as Map)
             : const {};
   final bool available;
+  final bool _supportedSchema;
   final List<HaMatterDevice> devices;
   final Map<String, dynamic> _capabilities;
   bool get pairOnNetwork =>
@@ -60,6 +62,8 @@ class HaMatterCatalog {
   bool get remove => available && _capabilities['remove'] == true;
   bool get originalSetupCode =>
       available && _capabilities['original_setup_code'] == true;
+  bool get acknowledgePairing =>
+      _supportedSchema && _capabilities['acknowledge_pairing'] == true;
 }
 
 enum HaMatterPairingState { pending, completed, failed, unknown }
@@ -76,11 +80,13 @@ class HaMatterPairingReceipt {
         needsDeviceConfirmation = json['needs_device_confirmation'] == true,
         canCloseAfterReview =
             json['status'] == 'unknown' && json['can_close_attempt'] == true,
+        acknowledged = json['acknowledged'] == true,
         originalCodeSaved = json['original_code_saved'] == true;
   final String sessionId;
   final HaMatterPairingState state;
   final bool needsDeviceConfirmation;
   final bool canCloseAfterReview;
+  final bool acknowledged;
   final bool originalCodeSaved;
   bool get unresolved =>
       state == HaMatterPairingState.pending ||
@@ -147,6 +153,15 @@ class RhythmHaMatterApi {
   Future<HaMatterPairingReceipt> getPairing(String sessionId) async => _receipt(
       await _request('$_root/pairing/${Uri.encodeComponent(sessionId)}', 'GET'),
       sessionId);
+  Future<void> acknowledgePairing(String sessionId) async {
+    final response = await _request(
+        '$_root/pairing/${Uri.encodeComponent(sessionId)}', 'DELETE');
+    if (response['session_id'] != sessionId ||
+        response['acknowledged'] != true) {
+      throw const FormatException('Invalid pairing acknowledgement');
+    }
+  }
+
   Future<HaMatterPairingReceipt> confirmDevice(
           String sessionId, HaMatterDevice device) async =>
       _receipt(
@@ -159,8 +174,9 @@ class RhythmHaMatterApi {
           sessionId);
   HaMatterPairingReceipt _receipt(Map<String, dynamic> json, String expected) {
     final receipt = HaMatterPairingReceipt.fromJson(json);
-    if (receipt.sessionId != expected)
+    if (receipt.sessionId != expected) {
       throw const FormatException('Mismatched pairing receipt');
+    }
     return receipt;
   }
 
@@ -195,8 +211,9 @@ class RhythmHaMatterApi {
         '$_root/share/${Uri.encodeComponent(device.deviceId)}', 'POST',
         data: {'identity': device.identity});
     final code = data['manual_code'] ?? data['setup_code'];
-    if (code is! String || code.isEmpty)
+    if (code is! String || code.isEmpty) {
       throw const FormatException('Missing sharing code');
+    }
     return (
       code: code,
       expiresIn: (data['expires_in'] as num?)?.toInt() ?? 300

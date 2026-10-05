@@ -57,6 +57,7 @@ const READ_PATHS: &[&str] = &[
 
 const WRITE_PATHS: &[(&str, &str)] = &[
     ("POST", "/api/addon/matter/pair"),
+    ("DELETE", "/api/addon/matter/pairing/:session"),
     ("POST", "/api/addon/matter/pairing/:session/device"),
     ("PUT", "/api/addon/matter/setup-code/:id"),
     ("POST", "/api/addon/matter/share/:id"),

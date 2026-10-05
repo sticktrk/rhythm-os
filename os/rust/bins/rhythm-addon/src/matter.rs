@@ -187,10 +187,35 @@ pub async fn catalog(
     State(state): State<SharedState>,
     Extension(access): Extension<Arc<MobileAccess>>,
 ) -> Response {
-    let Ok((dir, scope)) = context(&state) else {
+    catalog_with_fetch(&state, &access, |scope| async move {
+        client().await?.catalog(&scope).await
+    })
+    .await
+}
+
+pub(super) async fn catalog_with_fetch<F, Fut>(
+    state: &SharedState,
+    access: &MobileAccess,
+    fetch: F,
+) -> Response
+where
+    F: FnOnce(String) -> Fut,
+    Fut: std::future::Future<Output = Result<MatterCatalog>>,
+{
+    let Ok((dir, scope)) = context(state) else {
         return unavailable();
     };
-    let result = async { client().await?.catalog(&scope).await }.await;
+    let observed_revision = {
+        let _guard = access.mutation_gate.lock().await;
+        if access.is_resetting() {
+            return unavailable();
+        }
+        let Ok(revision) = matter_store::revision(&dir, &scope) else {
+            return unavailable();
+        };
+        revision
+    };
+    let result = fetch(scope.clone()).await;
     let catalog = result.unwrap_or_else(|_| MatterCatalog::unavailable());
     if catalog.available {
         let _guard = access.mutation_gate.lock().await;
@@ -202,6 +227,7 @@ pub async fn catalog(
             &scope,
             &catalog.devices,
             &catalog.registry_device_ids,
+            observed_revision,
         )
         .is_err()
         {
@@ -211,11 +237,36 @@ pub async fn catalog(
     Json(catalog).into_response()
 }
 
+fn finish_acknowledgement(
+    state: &SharedState,
+    dir: &str,
+    scope: &str,
+    session: &str,
+) -> Result<()> {
+    anyhow::ensure!(
+        matches!(
+            pairing::acknowledge_pairing_result(state, session)?,
+            pairing::AcknowledgePairingResult::Acknowledged
+        ),
+        "Pairing is still pending"
+    );
+    matter_store::finish_acknowledgement(dir, scope, session)
+}
+
 fn receipt(state: &SharedState, session: &str, tombstone: bool) -> Result<Value> {
     pairing::validate_pairing_session_id(session).map_err(anyhow::Error::msg)?;
     let (dir, scope) = context(state)?;
-    let confirmed = matter_store::confirmed(&dir, &scope, session)?;
+    let mut confirmed = matter_store::confirmed(&dir, &scope, session)?;
+    if confirmed.as_ref().is_some_and(|record| record.acknowledged) {
+        // Recover either crash boundary of the two-store acknowledgement.
+        finish_acknowledgement(state, &dir, &scope, session)?;
+        confirmed = None;
+    }
     if let Some(success) = &confirmed {
+        anyhow::ensure!(
+            !pairing::pairing_result_is_tombstoned(state, session)?,
+            "Pairing receipt conflicts with an acknowledgement"
+        );
         pairing::reconcile_committed_pairing_success_with_fingerprint(
             state,
             session,
@@ -236,6 +287,7 @@ fn receipt(state: &SharedState, session: &str, tombstone: bool) -> Result<Value>
         "Pairing belongs to another backend"
     );
     let result = record.as_ref().and_then(|r| r.result.as_ref());
+    let acknowledged = record.is_none() && pairing::pairing_result_is_tombstoned(state, session)?;
     let status = match result {
         Some(r) if r.status == PairingStatus::Complete => "completed",
         Some(r)
@@ -255,7 +307,8 @@ fn receipt(state: &SharedState, session: &str, tombstone: bool) -> Result<Value>
     Ok(
         json!({"session_id":session,"status":status,"device":confirmed.as_ref().and_then(|c|c.device.as_ref()),
         "can_close_attempt":status == "unknown" && result.is_some(),
-        "error":if status == "unknown" {Some(UNKNOWN)} else if record.is_none() {Some("No active pairing receipt. Review Home Assistant before starting a new attempt.")} else {result.and_then(|r|r.error.as_deref())},
+        "acknowledged":acknowledged,
+        "error":if acknowledged {None} else if status == "unknown" {Some(UNKNOWN)} else if record.is_none() {Some("No active pairing receipt. Review Home Assistant before starting a new attempt.")} else {result.and_then(|r|r.error.as_deref())},
         "original_code_saved":original_code_saved,"needs_device_confirmation":needs_device_confirmation,
         "warnings":result.map(|r|r.warnings.clone()).unwrap_or_default()}),
     )
@@ -274,6 +327,35 @@ pub async fn pairing_status(
         Ok(value) => Json(value).into_response(),
         Err(_) => unavailable(),
     }
+}
+
+pub async fn acknowledge_pairing(
+    State(state): State<SharedState>,
+    Path(session): Path<String>,
+) -> Response {
+    // The router holds mutation_gate through this entire operation.
+    let Ok((dir, scope)) = context(&state) else {
+        return unavailable();
+    };
+    let current = match receipt(&state, &session, false) {
+        Ok(current) => current,
+        Err(_) => return unavailable(),
+    };
+    if current["status"] == "pending" {
+        return error(StatusCode::CONFLICT, "Pairing is still pending");
+    }
+    if current["needs_device_confirmation"] == true {
+        return error(
+            StatusCode::CONFLICT,
+            "Save the original label code to its device before closing this attempt",
+        );
+    }
+    if matter_store::begin_acknowledgement(&dir, &scope, &session).is_err()
+        || finish_acknowledgement(&state, &dir, &scope, &session).is_err()
+    {
+        return unavailable();
+    }
+    Json(json!({"session_id":session,"acknowledged":true})).into_response()
 }
 
 pub async fn pair(

@@ -156,6 +156,31 @@ void main() {
     expect(handoff.isSameSelection, isFalse);
   });
 
+  test('demo selection closes real transports even for a known rpiz', () {
+    final policy = DeviceAccessPolicy(
+        knownOwners: {}, persistOwner: (_, __) async {}, addonContext: false);
+    final rpiz = server('rpiz');
+    policy.observeServer(rpiz,
+        haDeviceManagement: false,
+        explicitDeployment: true,
+        platformContext: 'rpiz');
+    policy.select(homeId: rpiz.homeId, server: rpiz);
+    final realOperation = DirectHubAccess.capture();
+    expect(realOperation.isCurrent, isTrue);
+
+    policy.select(homeId: rpiz.homeId, server: rpiz, demoMode: true);
+    expect(policy.ownedByHomeAssistant, isFalse);
+    expect(policy.allowsDirectAccess, isFalse);
+    expect(DirectHubAccess.allowed, isFalse);
+    expect(realOperation.isCurrent, isFalse);
+    policy.select(homeId: 'demo-without-server', server: null, demoMode: true);
+    expect(DirectHubAccess.allowed, isFalse);
+
+    policy.select(homeId: rpiz.homeId, server: rpiz);
+    expect(DirectHubAccess.allowed, isTrue);
+    expect(realOperation.isCurrent, isFalse);
+  });
+
   test('already-created REST services send zero requests after a switch',
       () async {
     var requests = 0;

@@ -44,14 +44,21 @@ class DeviceAccessPolicy {
     DirectHubAccess.select(scope: 'home-loading', allowed: false);
   }
 
-  void select({required String? homeId, required Hub? server}) {
+  void select({
+    required String? homeId,
+    required Hub? server,
+    bool demoMode = false,
+  }) {
     final known = server == null ? null : _owner(server);
-    _ownedByHa = known ?? _addonContext;
+    _ownedByHa = !demoMode && (known ?? _addonContext);
     // A selected but as-yet unidentified server cannot authorize a parallel
     // device controller. A previously identified rpiz remains usable offline.
-    _allowsDirectAccess = !_ownedByHa && (server == null || known == false);
+    // Demo flows use simulated APIs and must never reopen real transports.
+    _allowsDirectAccess =
+        !demoMode && !_ownedByHa && (server == null || known == false);
+    final scope = server == null ? 'home:$homeId:local' : _hubKey(server);
     DirectHubAccess.select(
-      scope: server == null ? 'home:$homeId:local' : _hubKey(server),
+      scope: demoMode ? 'demo:$scope' : scope,
       allowed: _allowsDirectAccess,
     );
   }

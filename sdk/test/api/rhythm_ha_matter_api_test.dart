@@ -41,6 +41,31 @@ void main() {
             .phoneCommissioning,
         isFalse);
     expect(
+        HaMatterCatalog.fromJson({'schema_version': 1, 'available': true})
+            .acknowledgePairing,
+        isFalse);
+    expect(
+        HaMatterCatalog.fromJson({
+          'schema_version': 1,
+          'available': true,
+          'capabilities': {'acknowledge_pairing': true}
+        }).acknowledgePairing,
+        isTrue);
+    expect(
+        HaMatterCatalog.fromJson({
+          'schema_version': 1,
+          'available': false,
+          'capabilities': {'acknowledge_pairing': true}
+        }).acknowledgePairing,
+        isTrue);
+    expect(
+        HaMatterCatalog.fromJson({
+          'schema_version': 2,
+          'available': false,
+          'capabilities': {'acknowledge_pairing': true}
+        }).acknowledgePairing,
+        isFalse);
+    expect(
         RhythmDeploymentCapabilities.fromJson({'ha_device_management': true})
             .haMatterManagement,
         isFalse);
@@ -98,6 +123,33 @@ void main() {
     };
     expect(
         (await api.confirmDevice(session, device)).originalCodeSaved, isTrue);
+  });
+  test('acknowledgement uses matching terminal receipt identity', () async {
+    handler = (request) async {
+      expect(request.method, 'DELETE');
+      expect(request.uri.path, '/api/addon/matter/pairing/$session');
+      expect(request.headers.value('authorization'), 'Bearer owner-token');
+      expect(await utf8.decoder.bind(request).join(), isEmpty);
+      await reply(request, {'session_id': session, 'acknowledged': true});
+    };
+    await api.acknowledgePairing(session);
+    for (final response in [
+      {'session_id': 'other', 'acknowledged': true},
+      {'session_id': session, 'acknowledged': false},
+      {'session_id': session}
+    ]) {
+      handler = (request) => reply(request, response);
+      await expectLater(api.acknowledgePairing(session), throwsFormatException);
+    }
+  });
+  test('consumed receipt is explicit and old receipts default unacknowledged',
+      () async {
+    handler = (request) => reply(request,
+        {'session_id': session, 'status': 'failed', 'acknowledged': true});
+    expect((await api.getPairing(session)).acknowledged, isTrue);
+    handler = (request) =>
+        reply(request, {'session_id': session, 'status': 'completed'});
+    expect((await api.getPairing(session)).acknowledged, isFalse);
   });
   test('setup-code requires matching identity and original provenance',
       () async {

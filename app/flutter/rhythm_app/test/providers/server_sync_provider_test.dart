@@ -4042,6 +4042,53 @@ void main() {
           RhythmLightAvailability.unavailable);
     });
 
+    for (final identity in [
+      (saved: 'endpoint:http://fixture.invalid:54448', allowed: true),
+      (saved: 'durable-box-id', allowed: true),
+      (saved: 'another-durable-box-id', allowed: false),
+    ]) {
+      test('learns ownership only for compatible identity ${identity.saved}',
+          () async {
+        final home = _TestHomeProvider([
+          Hub.create(
+            id: 'identity-box',
+            homeId: 'identity-home',
+            type: HubType.server,
+            name: 'Box',
+            endpoint: const HubEndpoint(host: 'fixture.invalid', port: 54448),
+            token: 'saved-owner-token',
+            serverInstanceId: identity.saved,
+          ),
+        ]);
+        final provider = ServerSyncProvider(
+          connection: connection,
+          roomProvider: roomProvider,
+          homeProvider: home,
+          remoteAccessAutoEnableScheduler: ({
+            required home,
+            required serverHub,
+            required saveHub,
+            resolveLatestHub,
+            onEnabled,
+          }) {},
+          activityCloudCanProvision: () => false,
+        );
+        addTearDown(provider.dispose);
+
+        await provider.retryActiveServerConnection(assumeSavedAuth: true);
+        connection.emitHello(RhythmHello.fromJson({
+          'rooms': const <Map<String, dynamic>>[],
+          'location': const <String, dynamic>{},
+          'platform_context': 'rpiz',
+          'server_instance_id': 'durable-box-id',
+        }));
+        await Future<void>.delayed(Duration.zero);
+
+        expect(home.deviceAccessPolicy.allowsDirectAccess, identity.allowed);
+        expect(DirectHubAccess.allowed, identity.allowed);
+      });
+    }
+
     test('HA ownership overrides legacy physical setup and backup capabilities',
         () async {
       final provider = ServerSyncProvider(
@@ -9729,6 +9776,40 @@ void main() {
         expect(roomProvider.getRoomState('room-1'), scenario.expected);
       });
     }
+
+    test('demo Hue credentials use the simulator without reconnecting hardware',
+        () async {
+      final home = _TestHomeProvider([
+        Hub.create(
+          id: 'demo-server',
+          homeId: 'demo-home',
+          type: HubType.server,
+          name: 'Demo Server',
+          endpoint: const HubEndpoint(host: 'demo.rhythm.local', port: 54448),
+        ),
+        Hub.create(
+          id: 'demo-hue',
+          homeId: 'demo-home',
+          type: HubType.hue,
+          name: 'Demo Hue',
+          endpoint: const HubEndpoint(host: 'demo-hue.local', port: 443),
+          token: 'demo-key',
+        ),
+      ]);
+      final provider = ServerSyncProvider(
+        connection: connection,
+        roomProvider: roomProvider,
+        homeProvider: home,
+      );
+      addTearDown(provider.dispose);
+
+      expect(DirectHubAccess.allowed, isFalse);
+      expect(await provider.pushHubCredentials(RoomSourceDto.hue), isTrue);
+      expect(await provider.fetchHueAuthority(), isNotNull);
+      expect(connection.reconnectCalls, 0);
+      expect(api.hubCredentialsCalls, 0);
+      expect(DirectHubAccess.allowed, isFalse);
+    });
 
     test('populates topology and triage data from the shared demo state',
         () async {

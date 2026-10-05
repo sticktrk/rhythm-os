@@ -1443,6 +1443,27 @@ pub fn fail_pairing_result_before_start(
     )
 }
 
+/// Whether a durable causal fence still prevents this session from starting.
+/// Integrations use this to distinguish a consumed receipt from missing state.
+pub fn pairing_result_is_tombstoned(
+    state: &crate::state::SharedState,
+    session_id: &str,
+) -> anyhow::Result<bool> {
+    validate_pairing_session_id(session_id).map_err(anyhow::Error::msg)?;
+    let storage = pairing_storage(state)?;
+    let _guard = PAIRING_DOCUMENT_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| anyhow::anyhow!("pairing document lock poisoned"))?;
+    let document = load_pairing_document(storage.as_ref())?;
+    let now = crate::state::current_epoch_ms();
+    Ok(document.pairing_results.iter().any(|record| {
+        record.session_id == session_id
+            && record.hub_type == PAIRING_TOMBSTONE_HUB_TYPE
+            && now.saturating_sub(record.updated_at_epoch_ms) <= PAIRING_TOMBSTONE_TTL_MS
+    }))
+}
+
 /// Load a pairing reconciliation record without mutating it.
 pub fn lookup_pairing_result(
     state: &crate::state::SharedState,

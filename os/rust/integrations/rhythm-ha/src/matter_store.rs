@@ -23,6 +23,10 @@ pub struct ConfirmedSession {
     /// Present only after HA acknowledged commissioning, never a temporary handoff code.
     pub original: Option<String>,
     pub device: Option<MatterDevice>,
+    /// Written before compacting the shared pairing ledger. A restart must
+    /// finish acknowledgement instead of replaying this success into it.
+    #[serde(default)]
+    pub acknowledged: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -37,6 +41,8 @@ struct Store {
     installation_id: String,
     originals: BTreeMap<String, Original>,
     confirmed: BTreeMap<String, ConfirmedSession>,
+    #[serde(default)]
+    revision: u64,
 }
 
 fn write(dir: &Path, store: &Store) -> Result<()> {
@@ -122,6 +128,7 @@ fn access<T>(
             installation_id: installation.to_owned(),
             originals: BTreeMap::new(),
             confirmed: BTreeMap::new(),
+            revision: 0,
         },
         Err(e) => return Err(e.into()),
     };
@@ -129,9 +136,13 @@ fn access<T>(
         store.originals.len() <= 4096 && store.confirmed.len() <= 100,
         "Private Matter store exceeds limits"
     );
+    let confirmed_count = store.confirmed.len();
     store
         .confirmed
         .retain(|_, s| s.expires_at > chrono::Utc::now().timestamp());
+    if store.confirmed.len() != confirmed_count {
+        store.revision = store.revision.wrapping_add(1);
+    }
     let value = change(&mut store)?;
     write(dir, &store)?;
     Ok(value)
@@ -139,6 +150,43 @@ fn access<T>(
 
 pub fn confirmed(dir: &str, installation: &str, session: &str) -> Result<Option<ConfirmedSession>> {
     access(dir, installation, |s| Ok(s.confirmed.get(session).cloned()))
+}
+
+/// Capture before reading HA. Reads do not advance this revision.
+pub fn revision(dir: &str, installation: &str) -> Result<u64> {
+    access(dir, installation, |s| Ok(s.revision))
+}
+
+pub fn begin_acknowledgement(dir: &str, installation: &str, session: &str) -> Result<()> {
+    access(dir, installation, |s| {
+        if let Some(record) = s.confirmed.get_mut(session) {
+            anyhow::ensure!(
+                record.original.is_none(),
+                "Original label code still needs a device"
+            );
+            if !record.acknowledged {
+                record.acknowledged = true;
+                s.revision = s.revision.wrapping_add(1);
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Only call after the shared ledger has durably recorded its causal tombstone.
+pub fn finish_acknowledgement(dir: &str, installation: &str, session: &str) -> Result<()> {
+    access(dir, installation, |s| {
+        anyhow::ensure!(
+            s.confirmed
+                .get(session)
+                .is_none_or(|record| record.acknowledged),
+            "Pairing receipt acknowledgement has not started"
+        );
+        if s.confirmed.remove(session).is_some() {
+            s.revision = s.revision.wrapping_add(1);
+        }
+        Ok(())
+    })
 }
 
 pub fn remember_success(
@@ -170,8 +218,10 @@ pub fn remember_success(
                 expires_at: chrono::Utc::now().timestamp() + PENDING_TTL,
                 original: original.map(str::to_owned),
                 device: None,
+                acknowledged: false,
             },
         );
+        s.revision = s.revision.wrapping_add(1);
         Ok(())
     })
 }
@@ -187,6 +237,10 @@ pub fn bind_session(
             .confirmed
             .get_mut(session)
             .context("Confirmed original label code is unavailable or expired")?;
+        anyhow::ensure!(
+            !record.acknowledged,
+            "Pairing receipt was already acknowledged"
+        );
         if let Some(bound) = &record.device {
             anyhow::ensure!(
                 bound.identity == device.identity,
@@ -210,6 +264,7 @@ pub fn bind_session(
             },
         );
         record.device = Some(device.clone());
+        s.revision = s.revision.wrapping_add(1);
         Ok(())
     })
 }
@@ -233,6 +288,7 @@ pub fn save_original(
                 code: code.to_owned(),
             },
         );
+        s.revision = s.revision.wrapping_add(1);
         Ok(())
     })
 }
@@ -259,6 +315,7 @@ pub fn forget(dir: &str, installation: &str, device: &MatterDevice) -> Result<()
                 .as_ref()
                 .is_some_and(|d| d.identity == device.identity)
         });
+        s.revision = s.revision.wrapping_add(1);
         Ok(())
     })
 }
@@ -270,8 +327,14 @@ pub fn reconcile_devices(
     installation: &str,
     devices: &[MatterDevice],
     registry_ids: &[String],
+    observed_revision: u64,
 ) -> Result<()> {
     access(dir, installation, |s| {
+        // The HA snapshot was fetched without blocking ordinary mutations.
+        // Any intervening store update makes absence in that snapshot stale.
+        if s.revision != observed_revision {
+            return Ok(());
+        }
         let remains = |bound: &MatterDevice| {
             registry_ids.contains(&bound.device_id)
                 && devices
@@ -282,6 +345,7 @@ pub fn reconcile_devices(
         s.originals.retain(|_, entry| remains(&entry.device));
         s.confirmed
             .retain(|_, entry| entry.device.as_ref().is_none_or(remains));
+        s.revision = s.revision.wrapping_add(1);
         Ok(())
     })
 }
@@ -315,6 +379,23 @@ mod tests {
             Some("12345678901"),
         )
         .unwrap();
+        // Existing installations have neither additive lifecycle field.
+        let store_path = dir.join("matter").join(STORE_NAME);
+        let mut legacy: serde_json::Value =
+            serde_json::from_slice(&fs::read(&store_path).unwrap()).unwrap();
+        legacy.as_object_mut().unwrap().remove("revision");
+        legacy["confirmed"]["session"]
+            .as_object_mut()
+            .unwrap()
+            .remove("acknowledged");
+        fs::write(&store_path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        assert_eq!(revision(path, "installation").unwrap(), 0);
+        assert!(
+            !confirmed(path, "installation", "session")
+                .unwrap()
+                .unwrap()
+                .acknowledged
+        );
         assert_eq!(
             confirmed(path, "installation", "session")
                 .unwrap()
@@ -339,7 +420,14 @@ mod tests {
             .unwrap()
             .is_none());
         assert!(bind_session(path, "installation", "session", &replacement).is_err());
-        reconcile_devices(path, "installation", &[], &[device.device_id.clone()]).unwrap();
+        reconcile_devices(
+            path,
+            "installation",
+            &[],
+            &[device.device_id.clone()],
+            revision(path, "installation").unwrap(),
+        )
+        .unwrap();
         assert!(
             original(path, "installation", &device).unwrap().is_some(),
             "omitted metadata must preserve the code"
@@ -390,6 +478,80 @@ mod tests {
             fs::read_to_string(dir.join("matter").join(STORE_NAME)).unwrap(),
             future
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn delayed_catalog_cannot_delete_a_new_binding_or_replacement_code() {
+        let dir = std::env::temp_dir().join(format!(
+            "rhythm-ha-stale-catalog-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.to_str().unwrap();
+        let mut device = MatterDevice {
+            device_id: "ha-id".into(),
+            identity: "first-identity".into(),
+            node_id: 1,
+            name: "Synthetic light".into(),
+            entity_ids: vec![],
+            is_bridge: false,
+            config_entry_id: "matter".into(),
+        };
+        // A GET starts before HA reports the new node. Another request binds
+        // its original using a newer live registry while the GET is in flight.
+        let before_binding = revision(path, "installation").unwrap();
+        remember_success(
+            path,
+            "installation",
+            "session",
+            "fingerprint",
+            Some("12345678901"),
+        )
+        .unwrap();
+        bind_session(path, "installation", "session", &device).unwrap();
+        reconcile_devices(path, "installation", &[], &[], before_binding).unwrap();
+        assert_eq!(
+            original(path, "installation", &device).unwrap().as_deref(),
+            Some("12345678901")
+        );
+        assert!(confirmed(path, "installation", "session")
+            .unwrap()
+            .unwrap()
+            .device
+            .is_some());
+
+        // The same protection applies when a registry ID now refers to a new
+        // node and the owner has saved its replacement's physical label.
+        let old_device = device.clone();
+        let before_replacement = revision(path, "installation").unwrap();
+        device.identity = "replacement-identity".into();
+        save_original(path, "installation", &device, "23456789012").unwrap();
+        reconcile_devices(
+            path,
+            "installation",
+            &[old_device],
+            &[device.device_id.clone()],
+            before_replacement,
+        )
+        .unwrap();
+        assert_eq!(
+            original(path, "installation", &device).unwrap().as_deref(),
+            Some("23456789012")
+        );
+
+        // Read-only recovery does not invalidate a current snapshot, and a
+        // subsequent authoritative absence still retires the stale secrets.
+        let current = revision(path, "installation").unwrap();
+        confirmed(path, "installation", "session").unwrap();
+        original(path, "installation", &device).unwrap();
+        assert_eq!(revision(path, "installation").unwrap(), current);
+        reconcile_devices(path, "installation", &[], &[], current).unwrap();
+        assert!(original(path, "installation", &device).unwrap().is_none());
+        assert!(confirmed(path, "installation", "session")
+            .unwrap()
+            .is_none());
         fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -3559,12 +3559,14 @@ class ServerSyncProvider extends ChangeNotifier {
     final ownershipHub = _deviceOwnershipConnectionHub;
     // A hello can already be queued when the user changes homes. Only the
     // connection actually established for the still-selected server owns it.
+    // Legacy endpoint identities can be promoted to the live durable ID.
     if (ownershipHub != null &&
         _sameServerHubIdentity(ownershipHub, _homeProvider.activeServerHub) &&
         _sameServerHubIdentity(ownershipHub, _serverHub) &&
-        (ownershipHub.serverInstanceId == null ||
-            hello.serverInstanceId == null ||
-            ownershipHub.serverInstanceId == hello.serverInstanceId)) {
+        !serverIdentitiesConflict(
+          ownershipHub.serverInstanceId,
+          hello.serverInstanceId,
+        )) {
       _homeProvider.deviceAccessPolicy.observeServer(
         ownershipHub,
         haDeviceManagement:
@@ -5587,8 +5589,10 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Called after Hue pairing or other hub configuration changes so the
   /// server gets the credentials it needs to connect to the hub.
   Future<bool> pushHubCredentials(RoomSourceDto source) async {
-    if (deviceManagementOwnedByHomeAssistant ||
-        !_homeProvider.deviceAccessPolicy.allowsDirectAccess) {
+    final demoHue = HueServiceLocator.isDemoMode && source == RoomSourceDto.hue;
+    if (!demoHue &&
+        (deviceManagementOwnedByHomeAssistant ||
+            !_homeProvider.deviceAccessPolicy.allowsDirectAccess)) {
       return false;
     }
     if (!HueServiceLocator.isDemoMode && !_connection.connected) return false;
@@ -5717,8 +5721,10 @@ class ServerSyncProvider extends ChangeNotifier {
   }
 
   Future<bool> _pushHubCredentialsForSource(RoomSourceDto source) async {
-    if (deviceManagementOwnedByHomeAssistant ||
-        !_homeProvider.deviceAccessPolicy.allowsDirectAccess) {
+    final demoHue = HueServiceLocator.isDemoMode && source == RoomSourceDto.hue;
+    if (!demoHue &&
+        (deviceManagementOwnedByHomeAssistant ||
+            !_homeProvider.deviceAccessPolicy.allowsDirectAccess)) {
       return false;
     }
     final hubType = _hubTypeForSource(source);
@@ -5742,7 +5748,7 @@ class ServerSyncProvider extends ChangeNotifier {
     );
     _lastHubReconnectTime = DateTime.now();
     _beginRoomReadinessRefresh();
-    await _connection.reconnect();
+    if (!demoHue) await _connection.reconnect();
     return hubConnected;
   }
 

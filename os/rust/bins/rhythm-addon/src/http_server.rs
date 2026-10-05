@@ -28,7 +28,7 @@ fn shared_routes() -> Router<SharedState> {
         .route("/api/addon/matter/pair", post(crate::matter::pair))
         .route(
             "/api/addon/matter/pairing/:session",
-            get(crate::matter::pairing_status),
+            get(crate::matter::pairing_status).delete(crate::matter::acknowledge_pairing),
         )
         .route(
             "/api/addon/matter/pairing/:session/device",

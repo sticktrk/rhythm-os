@@ -84,6 +84,13 @@ The private store is `/data/rhythm/matter/ha-setup-payloads.json`; full cold bac
 include it, portable exports exclude it, and Rhythm reset clears it. Recovery
 checks the current HA registry and fabric identity before revealing a code.
 
+After the app consumes a terminal pairing result, it acknowledges the receipt to
+release space for later attempts. Pending attempts and original codes still
+awaiting device confirmation cannot be acknowledged. Acknowledgement preserves
+the device's saved original code and fences replay of the consumed attempt. The
+app retains its recovery pointer until acknowledgement succeeds; older add-ons
+without this capability keep the existing receipt workflow.
+
 Selecting the HA add-on disables direct hub connections in the mobile app,
 including saved bridge probes, discovery and background reads. This ownership
 policy remains active while HA is disconnected. Selecting an rpiz keeps the

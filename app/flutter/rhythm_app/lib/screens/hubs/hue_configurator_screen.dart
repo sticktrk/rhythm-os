@@ -400,7 +400,7 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
   }
 
   Future<void> _disconnect() async {
-    if (!_access.isCurrent) return;
+    if (!_access.isCurrent && !HueServiceLocator.isDemoMode) return;
     final syncProvider = context.read<ServerSyncProvider>();
     final hubConnectionProvider = context.read<HubConnectionProvider>();
     final roomProvider = context.read<RoomProvider>();
@@ -1083,7 +1083,7 @@ class _HueConfiguratorScreenState extends State<HueConfiguratorScreen>
   }
 
   Future<void> _reconnect() async {
-    if (!_access.isCurrent) return;
+    if (!_access.isCurrent && !HueServiceLocator.isDemoMode) return;
     if (_isReconnecting) return;
     final syncProvider = context.read<ServerSyncProvider>();
     if (!syncProvider.hueRoomAuthorityConsentSupported) {

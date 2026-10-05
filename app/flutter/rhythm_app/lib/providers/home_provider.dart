@@ -372,7 +372,11 @@ class HomeProvider extends ChangeNotifier {
       deviceAccessPolicy.suspendWhileLoading();
       return;
     }
-    deviceAccessPolicy.select(homeId: currentHome?.id, server: activeServerHub);
+    deviceAccessPolicy.select(
+      homeId: currentHome?.id,
+      server: activeServerHub,
+      demoMode: HueServiceLocator.isDemoMode,
+    );
   }
 
   @override
@@ -960,7 +964,7 @@ class HomeProvider extends ChangeNotifier {
     required String bridgeIp,
     required String appKey,
   }) async {
-    if (!DirectHubAccess.allowed) return null;
+    if (!HueServiceLocator.isDemoMode && !DirectHubAccess.allowed) return null;
     if (_currentHome == null) {
       _error = 'No home selected';
       notifyListeners();
@@ -1109,7 +1113,8 @@ class HomeProvider extends ChangeNotifier {
   }) async {
     if (hub.type != HubType.server &&
         hub.homeId == currentHome?.id &&
-        !DirectHubAccess.allowed) {
+        !DirectHubAccess.allowed &&
+        !(HueServiceLocator.isDemoMode && hub.type == HubType.hue)) {
       return false;
     }
     if (clearCloudRemoteEndpoint) {
@@ -1228,6 +1233,9 @@ class HomeProvider extends ChangeNotifier {
   /// Ensure the demo user has a Home + RhythmServer hub so they can reach
   /// surfaces like Matter pairing without manual setup.
   Future<void> _seedDemoEnvironment() async {
+    // Entering demo can reuse the selected home, so close its real transports
+    // even when no saved Home or Hub record needs to change.
+    refreshDirectHubAccess();
     if (_currentHome == null) {
       final home = await _repository.createHome(
         name: 'Demo Home',

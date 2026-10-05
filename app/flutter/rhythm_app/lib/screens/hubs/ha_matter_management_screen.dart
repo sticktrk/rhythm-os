@@ -21,13 +21,15 @@ import 'device_pairing_scanner_screen.dart';
 class HaMatterManagementScreen extends StatefulWidget {
   const HaMatterManagementScreen(
       {super.key,
-      required this.api,
+      required this.resolveApi,
       required this.journal,
       required this.isCurrentTarget,
+      this.targetChanges,
       this.phoneCommissioner = const PhoneMatterCommissioner()});
-  final RhythmHaMatterApi api;
+  final RhythmHaMatterApi Function() resolveApi;
   final HaMatterPairingJournal journal;
   final bool Function() isCurrentTarget;
+  final Listenable? targetChanges;
   final PhoneMatterCommissioner phoneCommissioner;
 
   static Future<void> show(BuildContext context) async {
@@ -46,7 +48,9 @@ class HaMatterManagementScreen extends StatefulWidget {
     final homeId = hub?.homeId ?? 'ingress';
     await Navigator.of(context).push<void>(MaterialPageRoute(
         builder: (_) => HaMatterManagementScreen(
-            api: sync.api.haMatter,
+            resolveApi: () => sync.api.haMatter,
+            targetChanges:
+                Listenable.merge([sync, homes, DirectHubAccess.changes]),
             journal: HaMatterPairingJournal('$homeId:$identity'),
             isCurrentTarget: () =>
                 selection.isSameSelection &&
@@ -76,13 +80,22 @@ class _HaMatterManagementScreenState extends State<HaMatterManagementScreen> {
   bool _journalReady = false;
 
   bool get _active => mounted && widget.isCurrentTarget();
+  RhythmHaMatterApi get _api {
+    if (!_active) throw StateError('Home Assistant target changed');
+    return widget.resolveApi();
+  }
+
+  void _targetChanged() {
+    if (mounted) setState(() {});
+  }
 
   @override
   void initState() {
     super.initState();
+    widget.targetChanges?.addListener(_targetChanged);
     _flow = DeviceCommissioningFlow(readReceipt: (id) async {
       if (!_active) return null;
-      final receipt = await widget.api.getPairing(id);
+      final receipt = await _api.getPairing(id);
       if (!_active) return null;
       return switch (receipt.state) {
         HaMatterPairingState.completed => CommissioningReceipt(
@@ -98,6 +111,15 @@ class _HaMatterManagementScreenState extends State<HaMatterManagementScreen> {
       };
     });
     unawaited(_initialize());
+  }
+
+  @override
+  void didUpdateWidget(covariant HaMatterManagementScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.targetChanges != widget.targetChanges) {
+      oldWidget.targetChanges?.removeListener(_targetChanged);
+      widget.targetChanges?.addListener(_targetChanged);
+    }
   }
 
   Future<void> _initialize() async {
@@ -121,11 +143,11 @@ class _HaMatterManagementScreenState extends State<HaMatterManagementScreen> {
 
   Future<void> _refresh() async {
     if (!_active) return;
-    final catalog = await widget.api.getCatalog();
+    final catalog = await _api.getCatalog();
     if (!_active) return;
     _catalog = catalog;
     if (_sessionId != null) {
-      final receipt = await widget.api.getPairing(_sessionId!);
+      final receipt = await _api.getPairing(_sessionId!);
       if (!_active) return;
       await _accept(receipt);
     }
@@ -134,6 +156,11 @@ class _HaMatterManagementScreenState extends State<HaMatterManagementScreen> {
   Future<void> _accept(HaMatterPairingReceipt receipt) async {
     if (!_active || receipt.sessionId != _sessionId) return;
     _receipt = receipt;
+    if (receipt.acknowledged) {
+      await _clearAttempt(receipt.sessionId);
+      if (_active) _message = 'Previous pairing attempt closed.';
+      return;
+    }
     _message = switch (receipt.state) {
       HaMatterPairingState.completed => receipt.needsDeviceConfirmation
           ? 'Added to Home Assistant. Review the correct device below and save its original label code. Then review which lights Rhythm may control in the addon.'
@@ -146,20 +173,36 @@ class _HaMatterManagementScreenState extends State<HaMatterManagementScreen> {
         'The outcome is not known. Keep the device powered on and check this attempt again. Do not pair it again yet.',
     };
     if (!receipt.unresolved) {
-      _flow.acceptTerminalResponse();
       if (receipt.originalCodeSaved) {
         _message =
             'Original label code saved. Review which lights Rhythm may control in the Home Assistant addon.';
       }
       if (!receipt.needsDeviceConfirmation) {
-        await widget.journal.clear(receipt.sessionId);
-        _sessionId = null;
+        await _acknowledgeAttempt(receipt.sessionId);
       }
     }
     unawaited(AnalyticsService().logHaMatterAction(
         action: 'check',
         outcome: receipt.state.name,
         sessionId: receipt.sessionId));
+  }
+
+  Future<void> _clearAttempt(String id) async {
+    if (!_active || id != _sessionId) return;
+    await widget.journal.clear(id);
+    if (!_active || id != _sessionId) return;
+    _flow.acceptTerminalResponse();
+    _sessionId = null;
+  }
+
+  Future<void> _acknowledgeAttempt(String id) async {
+    if (!_active || id != _sessionId) return;
+    // Older addons do not expose receipt acknowledgement. Keep compatibility
+    // with their existing terminal receipts while gating the new endpoint.
+    if (_catalog?.acknowledgePairing == true) {
+      await _api.acknowledgePairing(id);
+    }
+    await _clearAttempt(id);
   }
 
   Future<void> _run(String action, Future<void> Function() operation) async {
@@ -207,9 +250,10 @@ class _HaMatterManagementScreenState extends State<HaMatterManagementScreen> {
           final code = normalizeMatterSetupPayload(_code.text);
           if (phone) {
             try {
+              final api = _api;
               await widget.phoneCommissioner.commission(
-                  baseUrl: widget.api.baseUrl,
-                  authToken: widget.api.handoffAuthToken,
+                  baseUrl: api.baseUrl,
+                  authToken: api.handoffAuthToken,
                   originalSetupPayload: code,
                   sessionId: id,
                   backend: PhoneMatterBackend.haAddon,
@@ -219,14 +263,14 @@ class _HaMatterManagementScreenState extends State<HaMatterManagementScreen> {
               // A lost or cancelled callback never proves the server did not pair.
             }
             if (!_active) return;
-            await _accept(await widget.api.getPairing(id));
+            await _accept(await _api.getPairing(id));
           } else {
-            await _accept(await widget.api
-                .pair(sessionId: id, setupCode: code, codeSource: _source));
+            await _accept(await _api.pair(
+                sessionId: id, setupCode: code, codeSource: _source));
           }
           _code.clear();
           if (_active) {
-            _catalog = await widget.api.getCatalog();
+            _catalog = await _api.getCatalog();
           }
         } finally {
           _flow.end();
@@ -284,11 +328,14 @@ class _HaMatterManagementScreenState extends State<HaMatterManagementScreen> {
     if (!_active) return;
     await _run('check', () async {
       // Re-read before closing: never abandon work that is still pending.
-      final receipt = await widget.api.getPairing(id);
-      if (!_active || !receipt.canCloseAfterReview) return;
-      await widget.journal.clear(id);
-      _flow.acceptTerminalResponse();
-      _sessionId = null;
+      final receipt = await _api.getPairing(id);
+      if (!_active) return;
+      if (receipt.acknowledged || !receipt.canCloseAfterReview) {
+        await _accept(receipt);
+        return;
+      }
+      await _acknowledgeAttempt(id);
+      if (!_active) return;
       _receipt = null;
       _code.clear();
       _message = 'Reviewed attempt closed. No new pairing was started.';
@@ -327,7 +374,7 @@ class _HaMatterManagementScreenState extends State<HaMatterManagementScreen> {
                     ])));
     if (code == null || !_active) return;
     await _run('save_code', () async {
-      await widget.api.saveOriginalCode(device, code);
+      await _api.saveOriginalCode(device, code);
       if (_active) _message = 'Original label code saved for ${device.name}.';
       unawaited(AnalyticsService()
           .logHaMatterAction(action: 'save_code', outcome: 'completed'));
@@ -356,7 +403,7 @@ class _HaMatterManagementScreenState extends State<HaMatterManagementScreen> {
     await _run(action, () async {
       switch (action) {
         case 'read_code':
-          final code = await widget.api.getOriginalCode(device);
+          final code = await _api.getOriginalCode(device);
           if (code == null) {
             _message =
                 'No original code is saved. Use “Save original label code” with the code printed on this device. It cannot be retrieved from Home Assistant.';
@@ -364,19 +411,19 @@ class _HaMatterManagementScreenState extends State<HaMatterManagementScreen> {
             await _showCode(code);
           }
         case 'share':
-          final shared = await widget.api.shareDevice(device);
+          final shared = await _api.shareDevice(device);
           await _showCode(shared.code,
               sharing: true, expiresIn: shared.expiresIn);
         case 'remove':
-          await widget.api.removeDevice(device);
+          await _api.removeDevice(device);
           if (_active) {
-            _catalog = await widget.api.getCatalog();
+            _catalog = await _api.getCatalog();
             _message = 'Removed from Home Assistant.';
           }
         case 'confirm_device':
           final id = _sessionId;
           if (id != null) {
-            await _accept(await widget.api.confirmDevice(id, device));
+            await _accept(await _api.confirmDevice(id, device));
           }
       }
       unawaited(AnalyticsService()
@@ -386,6 +433,7 @@ class _HaMatterManagementScreenState extends State<HaMatterManagementScreen> {
 
   @override
   void dispose() {
+    widget.targetChanges?.removeListener(_targetChanged);
     if (_flow.isRunning && _sessionId != null) {
       unawaited(widget.phoneCommissioner.cancel(_sessionId!));
     }
