@@ -32,9 +32,20 @@ import UIKit
   }
 
   private var phoneMatterInFlight = false
+  private var phoneMatterSessionID: String?
+  private var phoneMatterTask: Task<Void, Never>?
 
   private func handlePhoneMatterCall(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
     switch call.method {
+    case "cancel":
+      let id = (call.arguments as? [String: Any])?["session_id"] as? String
+      if id != nil && id == phoneMatterSessionID {
+        phoneMatterTask?.cancel()
+        if let defaults = UserDefaults(suiteName: PhoneMatterBridge.appGroup) {
+          PhoneMatterBridge.clear(defaults)
+        }
+      }
+      result(nil)
     case "isSupported":
       if #available(iOS 17.6, *), PhoneMatterBridge.isExtensionPackaged() {
         result(MatterAddDeviceRequest.isSupported)
@@ -76,11 +87,20 @@ import UIKit
         return
       }
 
+      let backend = arguments["backend"] as? String
+      let codeSource = arguments["code_source"] as? String
+      guard (backend == nil || backend == "rhythm" || backend == "ha_addon"),
+        (codeSource == nil || codeSource == "original_label" || codeSource == "sharing"),
+        (backend != "ha_addon" || sessionID.range(of: "^[A-Za-z0-9_-]{1,128}$", options: .regularExpression) != nil) else {
+        result(FlutterError(code: "handoff", message: "Unsupported Matter handoff target.", details: nil))
+        return
+      }
       PhoneMatterBridge.clear(defaults)
       do {
         let requestContext = PhoneMatterRequestContext(
           baseURL: baseURL, authToken: arguments["auth_token"] as? String,
-          originalSetupPayload: setupCode, sessionID: sessionID, createdAt: Date())
+          originalSetupPayload: setupCode, sessionID: sessionID, createdAt: Date(),
+          backend: backend, codeSource: codeSource)
         let fileName = try requestContext.store(in: container)
         defaults.set(fileName, forKey: PhoneMatterBridge.requestFileKey)
         defaults.set(sessionID, forKey: PhoneMatterBridge.sessionIDKey)
@@ -91,11 +111,14 @@ import UIKit
         return
       }
       phoneMatterInFlight = true
+      phoneMatterSessionID = sessionID
 
-      Task { @MainActor in
+      phoneMatterTask = Task { @MainActor in
         defer {
           PhoneMatterBridge.clear(defaults)
           phoneMatterInFlight = false
+          phoneMatterSessionID = nil
+          phoneMatterTask = nil
         }
         do {
           guard let payload = PhoneMatterBridge.setupPayload(setupCode) else {

@@ -1109,6 +1109,9 @@ class _FakePhoneMatterCommissioner extends PhoneMatterCommissioner {
     required String originalSetupPayload,
     required String sessionId,
     String? authToken,
+    PhoneMatterBackend backend = PhoneMatterBackend.rhythm,
+    HaMatterCodeSource codeSource = HaMatterCodeSource.originalLabel,
+    bool Function()? isCurrentTarget,
   }) {
     sessionIds.add(sessionId);
     setupPayloads.add(originalSetupPayload);

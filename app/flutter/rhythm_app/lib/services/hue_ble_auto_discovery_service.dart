@@ -6,6 +6,7 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'analytics_service.dart';
+import 'package:rhythm_core/rhythm_core.dart' show DirectHubAccess;
 
 const _hueBleDiscoveryServiceUuid = '0000fe0f-0000-1000-8000-00805f9b34fb';
 
@@ -73,17 +74,28 @@ class HueBleAutoDiscoveryService {
   Future<HueBleDiscoveryResult> discover({
     required String source,
   }) {
+    if (!DirectHubAccess.allowed) {
+      return Future.value(
+          const HueBleDiscoveryResult(HueBleDiscoveryOutcome.unsupported));
+    }
+    final access = DirectHubAccess.capture();
     final existing = _inFlight;
     if (existing != null) return existing;
 
     late final Future<HueBleDiscoveryResult> request;
-    request = Future.sync(() => _platformScan(scanTimeout))
+    request = Future.sync(() {
+      access.check();
+      return _platformScan(scanTimeout);
+    })
         .onError(
       (error, stackTrace) => const HueBleDiscoveryResult(
         HueBleDiscoveryOutcome.failed,
       ),
     )
         .then((result) async {
+      if (!access.isCurrent) {
+        return const HueBleDiscoveryResult(HueBleDiscoveryOutcome.unsupported);
+      }
       await AnalyticsService().logHueBleNearbyDiscoveryCompleted(
         source: source,
         outcome: _analyticsOutcome(result.outcome),
@@ -110,6 +122,8 @@ class HueBleAutoDiscoveryService {
   static Future<HueBleDiscoveryResult> _scanWithFlutterBluePlus(
     Duration timeout,
   ) async {
+    final access = DirectHubAccess.capture();
+    access.check();
     if (kIsWeb || !(Platform.isAndroid || Platform.isIOS || Platform.isMacOS)) {
       return const HueBleDiscoveryResult(
         HueBleDiscoveryOutcome.unsupported,
@@ -163,7 +177,15 @@ class HueBleAutoDiscoveryService {
     final found = Completer<int>();
     final seen = <String>{};
     StreamSubscription<List<ScanResult>>? subscription;
+    var ownsScan = false;
+    final stopWatching = access.cancelOnChange(() {
+      if (ownsScan) {
+        ownsScan = false;
+        unawaited(FlutterBluePlus.stopScan().catchError((Object _) {}));
+      }
+    });
     try {
+      access.check();
       subscription = FlutterBluePlus.onScanResults.listen(
         (results) {
           for (final result in results) {
@@ -185,6 +207,8 @@ class HueBleAutoDiscoveryService {
         },
       );
 
+      access.check();
+      ownsScan = true;
       await FlutterBluePlus.startScan(
         withServices: [Guid(_hueBleDiscoveryServiceUuid)],
         timeout: timeout,
@@ -210,8 +234,9 @@ class HueBleAutoDiscoveryService {
     } catch (_) {
       return const HueBleDiscoveryResult(HueBleDiscoveryOutcome.failed);
     } finally {
+      stopWatching();
       await subscription?.cancel();
-      if (FlutterBluePlus.isScanningNow) {
+      if (ownsScan && FlutterBluePlus.isScanningNow) {
         try {
           await FlutterBluePlus.stopScan();
         } catch (_) {

@@ -7,6 +7,7 @@ mod build_info;
 mod http_server;
 mod hub;
 mod listeners;
+mod matter;
 mod mobile_access;
 mod policy;
 mod selection;

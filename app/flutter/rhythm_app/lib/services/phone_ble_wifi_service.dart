@@ -5,6 +5,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:rhythm_sdk/rhythm_sdk.dart';
+import 'package:rhythm_core/rhythm_core.dart'
+    show DirectHubAccess, DirectHubAccessLease;
 
 class BleWifiDiscoveredCandidate {
   const BleWifiDiscoveredCandidate({required this.dsn, required this.address});
@@ -72,7 +74,14 @@ class AylaPhoneBleWifiService implements PhoneBleWifiService {
     PhoneWifiTransport? transport,
     this.statusPollDelay = const Duration(milliseconds: 500),
     this.statusPollLimit = 120,
-  }) : _transport = transport ?? FlutterPhoneWifiTransport();
+  }) : _transport = transport ?? FlutterPhoneWifiTransport() {
+    _removeAccessListener = _access.cancelOnChange(() {
+      unawaited(dispose());
+    });
+  }
+
+  final DirectHubAccessLease _access = DirectHubAccess.capture();
+  late final VoidCallback _removeAccessListener;
 
   @override
   int get setupTokenLength => 8;
@@ -99,7 +108,7 @@ class AylaPhoneBleWifiService implements PhoneBleWifiService {
           defaultTargetPlatform == TargetPlatform.android);
 
   void _checkActive() {
-    if (_disposed) {
+    if (_disposed || !_access.isCurrent) {
       throw const PhoneBleWifiFailure('Phone setup was cancelled.');
     }
   }
@@ -250,18 +259,27 @@ class AylaPhoneBleWifiService implements PhoneBleWifiService {
 
   @override
   Future<void> dispose() async {
+    if (_disposed) return;
     _disposed = true;
+    _removeAccessListener();
     await _transport.dispose();
   }
 }
 
 class FlutterPhoneWifiTransport implements PhoneWifiTransport {
+  FlutterPhoneWifiTransport() {
+    _removeAccessListener = _access.cancelOnChange(() {
+      unawaited(dispose());
+    });
+  }
+  final DirectHubAccessLease _access = DirectHubAccess.capture();
+  late final VoidCallback _removeAccessListener;
   bool _disposed = false;
   bool _ownsScan = false;
   BluetoothDevice? _device;
 
   void _checkActive() {
-    if (_disposed) {
+    if (_disposed || !_access.isCurrent) {
       throw const PhoneBleWifiFailure('Phone setup was cancelled.');
     }
   }
@@ -344,7 +362,9 @@ class FlutterPhoneWifiTransport implements PhoneWifiTransport {
 
   @override
   Future<void> dispose() async {
+    if (_disposed) return;
     _disposed = true;
+    _removeAccessListener();
     if (_ownsScan) {
       _ownsScan = false;
       try {
@@ -360,9 +380,11 @@ class _FlutterPhoneWifiGatt implements PhoneWifiGatt {
   _FlutterPhoneWifiGatt(this.device, this.services);
   final BluetoothDevice device;
   final List<BluetoothService> services;
+  final DirectHubAccessLease _access = DirectHubAccess.capture();
 
   BluetoothCharacteristic _characteristic(
       String service, String characteristic) {
+    _access.check();
     final matches = services
         .where((s) => s.uuid == Guid(service))
         .expand((s) => s.characteristics)

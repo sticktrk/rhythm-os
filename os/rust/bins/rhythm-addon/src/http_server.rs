@@ -24,6 +24,25 @@ use crate::mobile_access::MobileAccess;
 fn shared_routes() -> Router<SharedState> {
     rhythm_os::axum_router::api_routes()
         .route("/api/addon/status", get(crate::policy::status))
+        .route("/api/addon/matter", get(crate::matter::catalog))
+        .route("/api/addon/matter/pair", post(crate::matter::pair))
+        .route(
+            "/api/addon/matter/pairing/:session",
+            get(crate::matter::pairing_status).delete(crate::matter::acknowledge_pairing),
+        )
+        .route(
+            "/api/addon/matter/pairing/:session/device",
+            post(crate::matter::bind_device),
+        )
+        .route(
+            "/api/addon/matter/setup-code/:id",
+            get(crate::matter::setup_code).put(crate::matter::save_code),
+        )
+        .route("/api/addon/matter/share/:id", post(crate::matter::share))
+        .route(
+            "/api/addon/matter/devices/:id",
+            delete(crate::matter::remove),
+        )
         .route(
             "/api/addon/lights",
             get(crate::selection::get).put(crate::selection::put),
@@ -222,7 +241,9 @@ async fn mobile_auth(
         )
             .into_response();
     }
-    if path.starts_with("/api/addon/mobile-tokens") && role != Some(ApiTokenRole::Owner) {
+    if (path.starts_with("/api/addon/mobile-tokens") || path.starts_with("/api/addon/matter"))
+        && role != Some(ApiTokenRole::Owner)
+    {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({"error":"Owner bearer token required"})),

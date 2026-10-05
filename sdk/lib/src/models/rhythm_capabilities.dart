@@ -130,6 +130,7 @@ class RhythmDeploymentCapabilities {
   final bool eventStreaming;
   final bool remoteAccess;
   final bool haDeviceManagement;
+  final bool haMatterManagement;
   final bool managedLightSelection;
   final bool portableProfiles;
   final bool portableSettings;
@@ -143,6 +144,7 @@ class RhythmDeploymentCapabilities {
     this.eventStreaming = false,
     this.remoteAccess = false,
     this.haDeviceManagement = false,
+    this.haMatterManagement = false,
     this.managedLightSelection = false,
     this.portableProfiles = false,
     this.portableSettings = false,
@@ -157,6 +159,7 @@ class RhythmDeploymentCapabilities {
         eventStreaming = true,
         remoteAccess = true,
         haDeviceManagement = false,
+        haMatterManagement = false,
         managedLightSelection = false,
         portableProfiles = true,
         portableSettings = false,
@@ -171,6 +174,7 @@ class RhythmDeploymentCapabilities {
         eventStreaming: json['event_streaming'] == true,
         remoteAccess: json['remote_access'] == true,
         haDeviceManagement: json['ha_device_management'] == true,
+        haMatterManagement: json['ha_matter_management'] == true,
         managedLightSelection: json['managed_light_selection'] == true,
         portableProfiles: json['portable_profiles'] == true,
         portableSettings: json['portable_settings'] == true,

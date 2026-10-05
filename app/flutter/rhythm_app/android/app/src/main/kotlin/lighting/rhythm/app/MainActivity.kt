@@ -23,6 +23,14 @@ class MainActivity : FlutterActivity() {
             .setMethodCallHandler { call, result ->
                 when (call.method) {
                     "isSupported" -> checkPhoneMatterSupport(result)
+                    "cancel" -> {
+                        val id = (call.arguments as? Map<*, *>)?.get("session_id") as? String
+                        PhoneMatterCommissioningCoordinator.shared.snapshot()?.takeIf { it.sessionId == id }?.let {
+                            PhoneMatterCommissioningCoordinator.shared.finishError(it, "cancelled",
+                                "The selected home changed. Check the previous pairing result before trying again.")
+                        }
+                        result.success(null)
+                    }
                     "commission" -> startPhoneMatterCommissioning(
                         call.arguments as? Map<*, *>,
                         result,
@@ -72,12 +80,21 @@ class MainActivity : FlutterActivity() {
             result.error("handoff", "The Matter commissioning request is incomplete.", null)
             return
         }
+        val backend = arguments?.get("backend") as? String ?: "rhythm"
+        val codeSource = arguments?.get("code_source") as? String ?: "original_label"
+        if (backend !in setOf("rhythm", "ha_addon") || codeSource !in setOf("original_label", "sharing") ||
+            (backend == "ha_addon" && !sessionId.matches(Regex("^[A-Za-z0-9_-]{1,128}$")))) {
+            result.error("handoff", "Unsupported Matter handoff target.", null)
+            return
+        }
         val session = PhoneMatterCommissioningSession(
             baseUrl = baseUrl,
             authToken = authToken,
             originalSetupPayload = setupPayload,
             sessionId = sessionId,
             flutterResult = result,
+            backend = backend,
+            codeSource = codeSource,
         )
         if (!PhoneMatterCommissioningCoordinator.shared.begin(session)) {
             result.error(
@@ -90,8 +107,8 @@ class MainActivity : FlutterActivity() {
 
         val request = CommissioningRequest.builder()
             .setOnboardingPayload(setupPayload)
-            // A custom CommissioningService keeps the resulting fabric in
-            // Rhythm instead of asking Google Home to own the accessory.
+            // The selected appliance/addon owns the fabric after this
+            // custom service hands over the phone network setup.
             .setCommissioningService(
                 ComponentName(this, PhoneMatterCommissioningService::class.java),
             )

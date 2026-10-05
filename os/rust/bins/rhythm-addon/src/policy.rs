@@ -50,9 +50,18 @@ const READ_PATHS: &[&str] = &[
     "/api/profile-bundle/factory-default",
     "/api/addon/status",
     "/api/addon/lights",
+    "/api/addon/matter",
+    "/api/addon/matter/pairing/:session",
+    "/api/addon/matter/setup-code/:id",
 ];
 
 const WRITE_PATHS: &[(&str, &str)] = &[
+    ("POST", "/api/addon/matter/pair"),
+    ("DELETE", "/api/addon/matter/pairing/:session"),
+    ("POST", "/api/addon/matter/pairing/:session/device"),
+    ("PUT", "/api/addon/matter/setup-code/:id"),
+    ("POST", "/api/addon/matter/share/:id"),
+    ("DELETE", "/api/addon/matter/devices/:id"),
     ("POST", "/api/addon/enrollment"),
     ("POST", "/api/addon/enrollment/exchange"),
     ("DELETE", "/api/addon/mobile-tokens/:id"),

@@ -25,53 +25,108 @@ void main() {
     BackendProvider.resetForTesting();
   });
 
-  test('lighting settings analytics bounds counts and excludes private failures', () async {
+  test('HA Matter analytics accepts only bounded action and outcome labels',
+      () async {
+    await analytics.logHaMatterAction(action: 'pair', outcome: 'unknown');
+    await analytics.logHaMatterAction(
+        action: 'save_code', outcome: 'completed');
+    await analytics.logHaMatterAction(
+        action: 'MT:PRIVATE', outcome: 'completed');
+    await analytics.logHaMatterAction(action: 'pair', outcome: 'owner-token');
+    expect(backend.events, hasLength(2));
+    expect(backend.events.first.properties, {
+      'deployment': 'home_assistant_addon',
+      'action': 'pair',
+      'outcome': 'unknown',
+    });
+    expect(backend.events.toString(), isNot(contains('PRIVATE')));
+    await analytics.logHaMatterAction(
+        action: 'pair',
+        outcome: 'attempt',
+        sessionId: '12345678-1234-4234-8234-123456789012');
+    expect(backend.events.last.properties['journey_id'],
+        '12345678-1234-4234-8234-123456789012');
+    await analytics.logHaMatterAction(
+        action: 'pair', outcome: 'unknown', sessionId: 'MT:PRIVATE');
+    expect(backend.events.last.properties.containsKey('journey_id'), isFalse);
+  });
+
+  test(
+      'lighting settings analytics bounds counts and excludes private failures',
+      () async {
     await analytics.logLightingSettingsRestore(
-      outcome: 'started', fromAppliance: true,
+      outcome: 'started',
+      fromAppliance: true,
     );
     await analytics.logLightingSettingsRestore(
-      outcome: 'succeeded', fromAppliance: true,
-      appliedNodes: 5, skippedNodes: 2,
+      outcome: 'succeeded',
+      fromAppliance: true,
+      appliedNodes: 5,
+      skippedNodes: 2,
     );
     await analytics.logLightingSettingsRestore(
-      outcome: 'failed', fromAppliance: false,
-      appliedNodes: -1, skippedNodes: 99999, failureStage: 'private-error-token',
+      outcome: 'failed',
+      fromAppliance: false,
+      appliedNodes: -1,
+      skippedNodes: 99999,
+      failureStage: 'private-error-token',
     );
     await analytics.logLightingSettingsRestore(
-      outcome: 'private-error-token', fromAppliance: false,
+      outcome: 'private-error-token',
+      fromAppliance: false,
     );
     expect(backend.events.map((event) => event.name), [
-      'backup_restore_started', 'backup_restore_succeeded', 'backup_restore_failed',
+      'backup_restore_started',
+      'backup_restore_succeeded',
+      'backup_restore_failed',
     ]);
     expect(backend.events[1].properties, {
-      'restore_kind': 'lighting_settings', 'deployment': 'home_assistant_addon',
-      'source_kind': 'appliance_backup', 'applied_nodes': 5, 'skipped_nodes': 2,
+      'restore_kind': 'lighting_settings',
+      'deployment': 'home_assistant_addon',
+      'source_kind': 'appliance_backup',
+      'applied_nodes': 5,
+      'skipped_nodes': 2,
     });
     expect(backend.events.last.properties['applied_nodes'], 0);
     expect(backend.events.last.properties['skipped_nodes'], 4096);
-    expect(backend.events.last.properties.containsKey('failure_stage'), isFalse);
+    expect(
+        backend.events.last.properties.containsKey('failure_stage'), isFalse);
     expect(backend.events.toString(), isNot(contains('private-error-token')));
   });
 
-  test('mobile enrollment analytics excludes approval, identity, and raw failures', () async {
+  test(
+      'mobile enrollment analytics excludes approval, identity, and raw failures',
+      () async {
     await analytics.logMobileEnrollmentCompleted(
-      journeyId: 'opaque-enrollment', outcome: 'failed', failureStage: 'exchange',
+      journeyId: 'opaque-enrollment',
+      outcome: 'failed',
+      failureStage: 'exchange',
     );
     await analytics.logMobileEnrollmentCompleted(
-      journeyId: 'opaque-enrollment', outcome: 'succeeded', failureStage: 'secret-approval',
+      journeyId: 'opaque-enrollment',
+      outcome: 'succeeded',
+      failureStage: 'secret-approval',
     );
     await analytics.logMobileEnrollmentCompleted(
-      journeyId: 'opaque-enrollment', outcome: 'raw-private-error',
+      journeyId: 'opaque-enrollment',
+      outcome: 'raw-private-error',
     );
     expect(backend.events, hasLength(2));
     expect(backend.events.first.name, 'mobile_enrollment_completed');
     expect(backend.events.first.properties.keys.toSet(), {
-      'journey_id', 'deployment', 'transport', 'outcome', 'failure_stage',
+      'journey_id',
+      'deployment',
+      'transport',
+      'outcome',
+      'failure_stage',
     });
-    expect(backend.events.last.properties.containsKey('failure_stage'), isFalse);
-    expect(backend.events.last.properties.toString(), isNot(contains('secret')));
+    expect(
+        backend.events.last.properties.containsKey('failure_stage'), isFalse);
+    expect(
+        backend.events.last.properties.toString(), isNot(contains('secret')));
     analytics.resetForTesting();
-    await analytics.logMobileEnrollmentCompleted(journeyId: 'opaque-enrollment', outcome: 'failed');
+    await analytics.logMobileEnrollmentCompleted(
+        journeyId: 'opaque-enrollment', outcome: 'failed');
     expect(backend.events, hasLength(2));
   });
 
