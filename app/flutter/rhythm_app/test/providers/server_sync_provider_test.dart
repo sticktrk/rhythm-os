@@ -1106,6 +1106,28 @@ class _FakeRhythmConnection extends RhythmConnection {
   }
 }
 
+class _WifiObservationApi extends _FakeRhythmServerApi {
+  int networkReads = 0;
+  Future<RhythmWifiNetwork> Function() readNetwork =
+      () async => const RhythmWifiNetwork('connected', ssid: 'Fixture network');
+
+  @override
+  Future<RhythmWifiNetwork> getMatterWifiNetwork(String deviceId) {
+    expect(deviceId, 'matter-42');
+    networkReads++;
+    return readNetwork();
+  }
+}
+
+class _SwitchingApiConnection extends _HelloRhythmConnection {
+  _SwitchingApiConnection(super.fakeApi) : currentApi = fakeApi;
+
+  RhythmServerApi? currentApi;
+
+  @override
+  RhythmServerApi get api => currentApi ?? (throw StateError('Not connected'));
+}
+
 class _FakeRhythmAuthApi extends RhythmAuthApi {
   _FakeRhythmAuthApi() : super(baseUrl: 'http://127.0.0.1');
 
@@ -1448,6 +1470,117 @@ RhythmSceneDefinition _testPresetOnlyScene(String id) =>
     });
 
 void main() {
+  testWidgets('device Wi-Fi reads survive rebuilds and follow the active API',
+      (tester) async {
+    _registerWidgetCleanup(tester);
+    final roomProvider = RoomProvider();
+    final api = _WifiObservationApi();
+    final firstRead = Completer<RhythmWifiNetwork>();
+    api.readNetwork = () => firstRead.future;
+    final connection = _SwitchingApiConnection(api);
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await tester.binding.setSurfaceSize(const Size(390, 1000));
+    api.canonicalDevices['light-1'] = {
+      'id': 'light-1',
+      'endpoints': [
+        {
+          'hub_key': {'hub_type': 'matter', 'address': 'local'},
+          'native_id': 'matter-42',
+          'preferred': true,
+        },
+      ],
+    };
+    final hello = RhythmHello.fromJson({
+      'nodes': const <Map<String, dynamic>>[],
+      'location': const <String, dynamic>{},
+      'capabilities': {
+        'features': [RhythmFeature.matterWifiChange]
+      },
+    });
+    connection.emitHello(hello);
+    await tester.pump();
+    await tester.pumpWidget(_buildTestApp(
+      roomProvider: roomProvider,
+      provider: provider,
+      child: const DeviceDetailSheet(
+        device: RhythmDevice(id: 'light-1', type: RhythmDeviceType.light),
+        roomId: '',
+      ),
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Network'));
+    await tester.pumpAndSettle();
+    expect(api.networkReads, 1);
+    for (var i = 0; i < 3; i++) {
+      connection.emitHello(hello);
+      await tester.pumpAndSettle();
+    }
+    expect(api.networkReads, 1,
+        reason: 'server updates must not restart an in-flight bulb read');
+    firstRead.complete(
+        const RhythmWifiNetwork('connected', ssid: 'Fixture network'));
+    await tester.pumpAndSettle();
+    connection.emitHello(hello);
+    await tester.pumpAndSettle();
+    expect(find.text('Fixture network'), findsOneWidget);
+    expect(api.networkReads, 1);
+
+    final staleRead = Completer<RhythmWifiNetwork>();
+    api.readNetwork = () => staleRead.future;
+    await tester.tap(find.byTooltip('Refresh current Wi-Fi'));
+    await tester.pump();
+    expect(api.networkReads, 2);
+    final replacement = _WifiObservationApi()
+      ..readNetwork = () async =>
+          const RhythmWifiNetwork('connected', ssid: 'Replacement network');
+    connection.currentApi = replacement;
+    connection.emitHello(hello);
+    await tester.pumpAndSettle();
+    expect(replacement.networkReads, 1);
+    expect(find.text('Replacement network'), findsOneWidget);
+    staleRead
+        .complete(const RhythmWifiNetwork('connected', ssid: 'Stale network'));
+    await tester.pumpAndSettle();
+    expect(find.text('Stale network'), findsNothing);
+    expect(find.text('Replacement network'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  test('API wrapper follows disconnect and demo transitions', () {
+    final roomProvider = RoomProvider();
+    final connection = _SwitchingApiConnection(_FakeRhythmServerApi());
+    final provider = ServerSyncProvider(
+      connection: connection,
+      roomProvider: roomProvider,
+      homeProvider: _TestHomeProvider(const []),
+    );
+    addTearDown(provider.dispose);
+    addTearDown(roomProvider.dispose);
+    addTearDown(connection.dispose);
+    addTearDown(() => HueServiceLocator.setDemoMode(false));
+    final physical = provider.api;
+    expect(provider.api, same(physical));
+    connection.currentApi = null;
+    expect(() => provider.api, throwsStateError);
+    HueServiceLocator.setDemoMode(true);
+    final demo = provider.api;
+    expect(demo, isNot(same(physical)));
+    expect(provider.api, same(demo));
+    HueServiceLocator.setDemoMode(false);
+    expect(() => provider.api, throwsStateError);
+    connection.currentApi = _FakeRhythmServerApi();
+    expect(provider.api, isNot(same(demo)));
+    expect(provider.api, isNot(same(physical)));
+  });
+
   test('additional motion preserves explicit targets over physical placement',
       () {
     expect(
