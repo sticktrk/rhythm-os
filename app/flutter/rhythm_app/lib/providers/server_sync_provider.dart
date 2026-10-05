@@ -2539,12 +2539,21 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Raw physical input events forwarded by the server.
   Stream<RhythmInputEvent> get inputEvents => _connection.inputEvents;
 
-  /// The server API client (available after connect).
-  CloudBackedServerApi get api => CloudBackedServerApi(
-        delegate: HueServiceLocator.isDemoMode
-            ? DemoServerApi.instance
-            : _connection.api,
-      );
+  RhythmServerApi? _apiDelegate;
+  CloudBackedServerApi? _apiWrapper;
+
+  /// Keep one wrapper per SDK client so rebuilds do not restart device reads.
+  /// Resolve the delegate first: disconnects must still throw, and reconnects
+  /// or demo transitions must never reuse the previous client's wrapper.
+  CloudBackedServerApi get api {
+    final delegate =
+        HueServiceLocator.isDemoMode ? DemoServerApi.instance : _connection.api;
+    if (!identical(_apiDelegate, delegate)) {
+      _apiDelegate = delegate;
+      _apiWrapper = CloudBackedServerApi(delegate: delegate);
+    }
+    return _apiWrapper!;
+  }
 
   ServerSyncProvider({
     required RhythmConnection connection,
