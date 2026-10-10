@@ -14292,24 +14292,38 @@ pub fn do_node_action(
         }
     };
 
+    // Like mode/default changes, direct actions can update a room's settings
+    // before it has any physical targets. Do not infer this from missing
+    // controller routes: populated/bound rooms must still report I/O failures.
+    let settings_only = EmptyTopologyRooms::from_state(state).contains(node_id);
     let event = InputEvent::new(node_id, action);
     let outcome = match runtime.plan_input_event(&event, None)? {
         RhythmInputPlanOutcome::RequiresLightCheck => {
-            let lights_on = runtime.any_lights_on(node_id)?;
+            let lights_on = if settings_only {
+                false
+            } else {
+                runtime.any_lights_on(node_id)?
+            };
             runtime.plan_input_event(&event, Some(lights_on))?
         }
         outcome => outcome,
     };
     let RhythmInputPlanOutcome::Plan {
-        plan,
+        mut plan,
         turned_on,
-        dispatch_records,
+        mut dispatch_records,
     } = outcome
     else {
         return Err(anyhow::anyhow!(
             "node action still required a light-state check after retry"
         ));
     };
+    if settings_only {
+        tracing::debug!(target: "cmd", node_id, ?action, reason = "empty_topology_room",
+            "node_action: applying settings without physical dispatch");
+        plan.dispatch.clear();
+        dispatch_records.clear();
+    }
     crate::light_runtime::apply_runtime_plan_to_handle_with_child_activation(
         state,
         crate::light_runtime::RHYTHM_ADAPTIVE_RUNTIME_ID,
@@ -14325,10 +14339,7 @@ pub fn do_node_action(
     // actual off commands. Preserve physical readback for mode-only actions.
     // Legacy RuntimeHandle implementations may execute I/O while returning an
     // empty plan, so plan emptiness cannot identify these no-output actions.
-    if !matches!(
-        action,
-        ButtonAction::RhythmOn | ButtonAction::RhythmOff
-    ) {
+    if !settings_only && !matches!(action, ButtonAction::RhythmOn | ButtonAction::RhythmOff) {
         update_lights_on_cache_for_runtime_node(state, &runtime, node_id, turned_on);
     }
 
