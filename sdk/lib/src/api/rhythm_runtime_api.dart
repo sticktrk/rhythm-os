@@ -90,6 +90,31 @@ class RhythmRuntimeApi {
     return const RhythmNodesPollResponse.empty();
   }
 
+  /// Unlike [getHistory], a failed/unsupported read never looks like empty data.
+  Future<RhythmHistory> getHistoryOrThrow({
+    int? limit,
+    String? area,
+    String? source,
+    String? action,
+  }) async {
+    final query = <String, dynamic>{
+      if (limit != null) 'limit': limit,
+      if (area != null && area.isNotEmpty) 'area': area,
+      if (source != null && source.isNotEmpty) 'source': source,
+      if (action != null && action.isNotEmpty) 'action': action,
+    };
+    final response = query.isEmpty
+        ? await _dio.get('api/history')
+        : await _dio.get('api/history', queryParameters: query);
+    final data = jsonMap(response.data);
+    if (data == null ||
+        data['activities'] is! List ||
+        (data['activities'] as List).any((event) => event is! Map)) {
+      throw const FormatException('Invalid activity history response');
+    }
+    return RhythmHistory.fromJson(data);
+  }
+
   Future<RhythmHistory> getHistory({
     int? limit,
     String? area,

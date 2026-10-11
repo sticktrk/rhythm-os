@@ -19,6 +19,9 @@ import 'api/hybrid_client.dart';
 import 'onboarding/screens/account_gate_screen.dart';
 import 'onboarding/screens/password_recovery_screen.dart';
 import 'services/auth_service.dart';
+import 'services/apple_health_service.dart';
+import 'services/apple_health_sync_binding.dart';
+import 'services/apple_health_sync_controller.dart';
 import 'services/analytics_service.dart';
 import 'services/app_log_service.dart';
 import 'services/entitlements_service.dart';
@@ -406,6 +409,12 @@ class RhythmApp extends StatelessWidget {
             return syncProvider!;
           },
         ),
+        if (AppleHealthService.supportedPlatform)
+          ChangeNotifierProvider<AppleHealthSyncController>(
+            lazy: false,
+            create: (context) => createAppleHealthSyncController(
+              context.read<HomeProvider>(), context.read<ServerSyncProvider>()),
+          ),
       ],
       child: MaterialApp(
         title: 'Rhythm Lighting',

@@ -5,6 +5,7 @@ import UIKit
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
+  private let appleHealthBridge = AppleHealthBridge()
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
@@ -14,6 +15,13 @@ import UIKit
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
+    if let healthRegistrar = engineBridge.pluginRegistry.registrar(forPlugin: "AppleHealthSync") {
+      let healthChannel = FlutterMethodChannel(name: "lighting.rhythm.app/apple_health",
+        binaryMessenger: healthRegistrar.messenger())
+      healthChannel.setMethodCallHandler { [weak self] call, result in
+        self?.appleHealthBridge.handle(call, result: result)
+      }
+    }
     guard let registrar = engineBridge.pluginRegistry.registrar(
       forPlugin: "PhoneMatterCommissioner"
     ) else { return }
