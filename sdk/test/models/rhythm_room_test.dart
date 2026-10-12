@@ -9,12 +9,15 @@ void main() {
         RhythmNodeProfileSettings.fromJson({'mood_scene_id': 'halloween'});
     expect(legacy.moodSceneId, 'halloween');
     expect(legacy.toJson().containsKey('mood_scene_palette_seed'), isFalse);
+    expect(legacy.toJson().containsKey('mood_scene_device_mode'), isFalse);
     final current = RhythmNodeProfileSettings.fromJson({
       'mood_scene_id': 'halloween',
       'mood_scene_palette_seed': 4294967295,
+      'mood_scene_device_mode': true,
     });
     expect(current.moodSceneId, 'halloween');
     expect(current.toJson()['mood_scene_palette_seed'], 4294967295);
+    expect(current.toJson()['mood_scene_device_mode'], isTrue);
   });
 
   group('RoomModeState', () {

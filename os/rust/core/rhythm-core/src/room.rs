@@ -1560,6 +1560,14 @@ pub struct RoomProfileSettings {
     )]
     pub mood_scene_palette_seed: Option<u32>,
 
+    /// The binding was rendered per light, including grouped-controller rooms.
+    /// Missing on legacy bindings, which retain the single-target planner.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub mood_scene_device_mode: Option<bool>,
+
     /// Optional per-room fade override.
     #[cfg_attr(
         feature = "serde",
@@ -1633,6 +1641,7 @@ impl RoomProfileSettings {
             && self.mood_scene_palette_offset.is_none()
             && self.mood_scene_palette_span.is_none()
             && self.mood_scene_palette_seed.is_none()
+            && self.mood_scene_device_mode.is_none()
             && self.fade_ms.is_none()
             && self.motion_timeout_secs.is_none()
             && self.motion_activation_enabled.is_none()
@@ -1757,6 +1766,11 @@ impl RoomProfileSettings {
                 self.mood_scene_palette_seed
             } else {
                 parent.mood_scene_palette_seed
+            },
+            mood_scene_device_mode: if self.mood_scene_id.is_some() {
+                self.mood_scene_device_mode
+            } else {
+                parent.mood_scene_device_mode
             },
             fade_ms: self.fade_ms.clone().or_else(|| parent.fade_ms.clone()),
             motion_timeout_secs: self
@@ -2403,6 +2417,7 @@ mod tests {
             mood_scene_palette_offset: None,
             mood_scene_palette_span: None,
             mood_scene_palette_seed: None,
+            mood_scene_device_mode: None,
             fade_ms: Some(TimerSetting::Fixed { value: 250 }),
             motion_timeout_secs: Some(TimerSetting::Fixed { value: 42 }),
             motion_activation_enabled: Some(false),
@@ -2545,6 +2560,36 @@ mod tests {
         let json = serde_json::to_value(&settings).unwrap();
         assert_eq!(json["mood_scene_id"], "icy-glow");
         assert!(json.get("active_light_scene_id").is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "serde")]
+    fn scene_device_mode_defaults_and_inherits_with_its_binding() {
+        let legacy: RoomProfileSettings =
+            serde_json::from_str(r#"{"mood_scene_id":"halloween"}"#).unwrap();
+        assert_eq!(legacy.mood_scene_device_mode, None);
+        let parent = RoomProfileSettings {
+            mood_scene_id: Some("halloween".into()),
+            mood_scene_device_mode: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            RoomProfileSettings::default()
+                .merged_with_parent(&parent)
+                .mood_scene_device_mode,
+            Some(true)
+        );
+        assert_eq!(
+            legacy.merged_with_parent(&parent).mood_scene_device_mode,
+            None
+        );
+        let json = serde_json::to_string(&parent).unwrap();
+        assert_eq!(
+            serde_json::from_str::<RoomProfileSettings>(&json)
+                .unwrap()
+                .mood_scene_device_mode,
+            Some(true)
+        );
     }
 
     #[test]
