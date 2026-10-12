@@ -1568,6 +1568,14 @@ pub struct RoomProfileSettings {
     )]
     pub mood_scene_device_mode: Option<bool>,
 
+    /// Stable palette slots by public light ID for a device-mode binding.
+    /// Retained when lights are disabled or disappear so other colors never shift.
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
+    pub mood_scene_device_slots: Option<BTreeMap<String, u32>>,
+
     /// Optional per-room fade override.
     #[cfg_attr(
         feature = "serde",
@@ -1642,6 +1650,7 @@ impl RoomProfileSettings {
             && self.mood_scene_palette_span.is_none()
             && self.mood_scene_palette_seed.is_none()
             && self.mood_scene_device_mode.is_none()
+            && self.mood_scene_device_slots.is_none()
             && self.fade_ms.is_none()
             && self.motion_timeout_secs.is_none()
             && self.motion_activation_enabled.is_none()
@@ -1771,6 +1780,11 @@ impl RoomProfileSettings {
                 self.mood_scene_device_mode
             } else {
                 parent.mood_scene_device_mode
+            },
+            mood_scene_device_slots: if self.mood_scene_id.is_some() {
+                self.mood_scene_device_slots.clone()
+            } else {
+                parent.mood_scene_device_slots.clone()
             },
             fade_ms: self.fade_ms.clone().or_else(|| parent.fade_ms.clone()),
             motion_timeout_secs: self
@@ -2418,6 +2432,7 @@ mod tests {
             mood_scene_palette_span: None,
             mood_scene_palette_seed: None,
             mood_scene_device_mode: None,
+            mood_scene_device_slots: None,
             fade_ms: Some(TimerSetting::Fixed { value: 250 }),
             motion_timeout_secs: Some(TimerSetting::Fixed { value: 42 }),
             motion_activation_enabled: Some(false),
@@ -2571,8 +2586,19 @@ mod tests {
         let parent = RoomProfileSettings {
             mood_scene_id: Some("halloween".into()),
             mood_scene_device_mode: Some(true),
+            mood_scene_device_slots: Some(BTreeMap::from([("light-a".into(), 3)])),
             ..Default::default()
         };
+        assert_eq!(
+            RoomProfileSettings::default()
+                .merged_with_parent(&parent)
+                .mood_scene_device_slots,
+            parent.mood_scene_device_slots
+        );
+        assert_eq!(
+            legacy.merged_with_parent(&parent).mood_scene_device_slots,
+            None
+        );
         assert_eq!(
             RoomProfileSettings::default()
                 .merged_with_parent(&parent)
@@ -2584,6 +2610,12 @@ mod tests {
             None
         );
         let json = serde_json::to_string(&parent).unwrap();
+        assert_eq!(
+            serde_json::from_str::<RoomProfileSettings>(&json)
+                .unwrap()
+                .mood_scene_device_slots,
+            parent.mood_scene_device_slots
+        );
         assert_eq!(
             serde_json::from_str::<RoomProfileSettings>(&json)
                 .unwrap()

@@ -37,6 +37,30 @@ fn scene_brightness_batch_preserves_colors_and_survives_backup_restart_and_sync(
         .profile_settings
         .mood_scene_palette_seed;
 
+    let assignments = source
+        .snapshot("kitchen")
+        .unwrap()
+        .profile_settings
+        .mood_scene_device_slots
+        .unwrap();
+    let disabled_light = assignments
+        .iter()
+        .min_by_key(|(_, slot)| *slot)
+        .unwrap()
+        .0
+        .clone();
+    commands::do_node_preferences_set(
+        &source.state,
+        &disabled_light,
+        None,
+        Some(true),
+        None,
+        None,
+        None,
+        true,
+    )
+    .unwrap();
+
     let (tx, rx) = std::sync::mpsc::sync_channel(32);
     source.state.lock().unwrap().work_tx = Some(tx);
     let response = handlers::handle_set_node_curve(
@@ -62,7 +86,7 @@ fn scene_brightness_batch_preserves_colors_and_survives_backup_restart_and_sync(
         event_loop::process_work_item(&source.state, item);
     }
     let changed = spy.turn_on_calls();
-    assert_eq!(changed.len(), 6);
+    assert_eq!(changed.len(), 5);
     for (node, command) in &changed[3..] {
         assert_eq!(
             command.rgb,
@@ -128,6 +152,16 @@ fn scene_brightness_batch_preserves_colors_and_survives_backup_restart_and_sync(
             .mood_scene_device_mode,
         Some(true)
     );
+    assert_eq!(
+        restored
+            .snapshot(&kitchen)
+            .unwrap()
+            .profile_settings
+            .mood_scene_device_slots
+            .as_ref(),
+        Some(&assignments)
+    );
+    assert!(restored.snapshot(&disabled_light).unwrap().disabled);
     restored_spy.reset();
     for room_id in [&kitchen, &hall] {
         commands::do_node_preferences_set(
@@ -143,7 +177,7 @@ fn scene_brightness_batch_preserves_colors_and_survives_backup_restart_and_sync(
         .unwrap();
     }
     let resumed = restored_spy.turn_on_calls();
-    assert_eq!(resumed.len(), 3);
+    assert_eq!(resumed.len(), 2);
     for (node, command) in &resumed {
         assert_eq!(
             command.rgb,
