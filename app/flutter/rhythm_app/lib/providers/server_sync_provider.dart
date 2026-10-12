@@ -1248,6 +1248,20 @@ class ServerSyncProvider extends ChangeNotifier {
       HueServiceLocator.isDemoMode ||
       _capabilities?.supportsFeature(RhythmFeature.homeSceneApply) == true;
 
+  bool get supportsSceneBrightness =>
+      HueServiceLocator.isDemoMode ||
+      _capabilities?.supportsFeature(RhythmFeature.sceneBrightness) == true;
+
+  /// Old whole-home bindings cannot say whether colors were grouped or per
+  /// light. A fresh apply on the supporting server establishes that authority.
+  bool sceneBrightnessNeedsReapply(String nodeId) {
+    if (_optimisticMoodSceneIds.containsKey(nodeId)) return false;
+    final settings = nodeById(nodeId)?.profileSettings;
+    return settings?.moodSceneId != null &&
+        settings!.raw['mood_scene_palette_span'] != null &&
+        settings.raw['mood_scene_device_mode'] == null;
+  }
+
   /// Device-health review is additive and must fail closed for older
   /// appliances so the app never probes routes they do not own.
   bool get matterUnreachableDeviceTriageSupported =>
@@ -4481,7 +4495,8 @@ class ServerSyncProvider extends ChangeNotifier {
   bool dispatchBrightness(String roomId, int brightness) =>
       dispatchNodeCurveBrightness(roomId, brightness);
 
-  /// Apply curve brightness modifiers to several nodes in one batch.
+  /// Set brightness on several nodes in one batch. Supporting servers preserve
+  /// bound Mood scenes; adaptive states continue to use curve modifiers.
   ///
   /// Returns the server's dispatch metadata and states, or null when the
   /// request cannot be sent. Demo mode preserves the single-node simulation

@@ -523,6 +523,7 @@ class AnalyticsService {
     required int attemptedCount,
     required int completedCount,
     required String outcome,
+    int? sceneRoomCount,
   }) async {
     await logEvent('global_room_action_completed', {
       'journey_id': journeyId,
@@ -531,6 +532,7 @@ class AnalyticsService {
       'attempted_count': attemptedCount,
       'completed_count': completedCount,
       'outcome': outcome,
+      if (sceneRoomCount != null) 'scene_room_count': sceneRoomCount,
     });
   }
 

@@ -72,6 +72,8 @@ fn portable_settings(mut settings: LightingSettingsBundle) -> Result<LightingSet
             profile.mood_scene_palette_offset = None;
             profile.mood_scene_palette_span = None;
             profile.mood_scene_palette_seed = None;
+            profile.mood_scene_device_mode = None;
+            profile.mood_scene_device_slots = None;
             warnings.insert("native_scene_bindings_excluded".into());
         }
         // The shape uses the existing typed assignment contract; its required
@@ -348,7 +350,15 @@ pub fn do_lighting_settings_import(
         );
         // Portable assignments contain a placeholder mode. The runtime resolves
         // the live destination mode atomically when applying all mapped nodes.
-        let profile = imported.room_profile.clone();
+        let mut profile = imported.room_profile.clone();
+        if let Some(slots) = &mut profile.mood_scene_device_slots {
+            *slots = slots
+                .iter()
+                .filter_map(|(source, slot)| {
+                    mappings.get(source).map(|target| (target.clone(), *slot))
+                })
+                .collect();
+        }
         validate_room_profile_settings(target, &profile, &profile_ids, Some(&scene_ids))?;
         for id in profile.profile_overrides.keys() {
             anyhow::ensure!(
