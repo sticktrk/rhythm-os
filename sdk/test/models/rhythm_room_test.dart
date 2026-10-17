@@ -17,6 +17,39 @@ void main() {
     expect(current.toJson()['mood_scene_palette_seed'], 4294967295);
   });
 
+  test('resolved schedule mode is optional readback on both node surfaces', () {
+    expect(
+        RhythmNodeProfileSettings.fromJson({'resolved_mode': 'sleep'}).isEmpty,
+        isTrue);
+
+    for (final value in ['sleep', 'day', 'future', null, 42]) {
+      final json = <String, dynamic>{
+        'id': 'room-a',
+        'profile_settings': {
+          if (value != null) 'resolved_mode': value,
+          'room_schedule': {'source': 'follow_time'},
+          'future_setting': 'retained',
+        },
+      };
+      final expected = value == 'sleep'
+          ? RhythmMode.sleep
+          : value == 'day'
+              ? RhythmMode.day
+              : null;
+      for (final settings in [
+        RhythmRoom.fromJson(json).profileSettings!,
+        RhythmRoomState.fromJson(json).profileSettings!,
+      ]) {
+        expect(settings.resolvedMode, expected);
+        expect(settings.lightScheduleMode, isNull);
+        expect(settings.toJson().containsKey('resolved_mode'), isFalse);
+        expect(settings.toJson()['future_setting'], 'retained');
+        expect(
+            settings.roomSchedule?.source, RhythmRoomScheduleSource.followTime);
+      }
+    }
+  });
+
   group('RoomModeState', () {
     test('separates mood from standby while accepting legacy idle', () {
       expect(RoomModeState.mood.wireValue, 'mood');

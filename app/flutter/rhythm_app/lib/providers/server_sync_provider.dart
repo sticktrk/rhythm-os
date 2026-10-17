@@ -1579,14 +1579,14 @@ class ServerSyncProvider extends ChangeNotifier {
   /// Whether moving along this node's active curve can change its white point.
   ///
   /// The server sends effective profile settings, including inherited settings
-  /// and the resolved named-schedule mode. Use those instead of the global Day
+  /// and the appliance-resolved schedule mode. Use those instead of the global Day
   /// curve. Unknown/older payloads keep the existing control available.
   bool? curveColorTemperatureAdjustableForNode(String nodeId) {
     final settings = nodeById(nodeId)?.profileSettings;
-    final scheduledMode = settings?.lightScheduleMode;
+    final scheduledMode = settings?.resolvedMode ?? settings?.lightScheduleMode;
     if (scheduledMode == null &&
         settings?.roomSchedule?.source == RhythmRoomScheduleSource.followTime) {
-      // Legacy schedules do not advertise their resolved mode. The phone's
+      // Older servers omit the resolved legacy-schedule mode. The phone's
       // clock/timezone is not authority for the appliance's schedule.
       return null;
     }
@@ -6162,6 +6162,8 @@ class ServerSyncProvider extends ChangeNotifier {
             right.lightCapabilities?.colorTemperature?.maxKelvin ||
         left.lightCapabilities?.individualProfileOverrides !=
             right.lightCapabilities?.individualProfileOverrides ||
+        left.profileSettings?.resolvedMode !=
+            right.profileSettings?.resolvedMode ||
         left.profileSettings?.toJson().toString() !=
             right.profileSettings?.toJson().toString() ||
         left.localProfileSettings?.toJson().toString() !=
