@@ -660,6 +660,10 @@ fn run_button_ingress_action(
         let Ok(_guard) = arbitration.read() else {
             return;
         };
+        // Authority may change while this automatic action waits for a scene.
+        if !commands::rhythm_automation_allowed_for_node(state, node_id) {
+            return;
+        }
         let scene_held = {
             let Ok(s) = state.lock() else { return };
             if !s.light_breaker_enabled {
