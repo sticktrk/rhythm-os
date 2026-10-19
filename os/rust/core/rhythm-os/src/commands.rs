@@ -2392,6 +2392,14 @@ fn mood_scene_display_output(
     snap: &rhythm_core::NodeSnapshot,
     room_state: RoomModeState,
 ) -> Option<LightSceneOutput> {
+    if let Some(runtime) = s.hub_runtime() {
+        if let Some(owner) = active_whole_home_scene_owner(s, runtime.as_ref(), &snap.id)
+            .filter(|owner| owner.id != snap.id)
+        {
+            let output = whole_home_child_display_output(s, &runtime, &owner, &snap.id)?;
+            return (output.power == LightScenePower::On).then_some(output);
+        }
+    }
     if room_state != RoomModeState::Mood {
         return None;
     }
@@ -2403,6 +2411,64 @@ fn mood_scene_display_output(
         first_scene_output_for_node(scene, &snap.id)
     }?;
     (output.power == LightScenePower::On).then_some(output)
+}
+
+/// Display the same parent assignment used for dispatch, even when a child
+/// retains a different local Mood binding for use after the scene exits.
+fn whole_home_child_display_output(
+    s: &AppState,
+    runtime: &Arc<dyn RuntimeHandle>,
+    owner: &rhythm_core::NodeSnapshot,
+    node_id: &str,
+) -> Option<LightSceneOutput> {
+    let scene = s
+        .scenes
+        .get(owner.profile_settings.mood_scene_id.as_ref()?)?;
+    let layer = scene.light.as_ref()?;
+    let palette = stored_mood_palette_window(runtime, &owner.id);
+    let assigned_slot = if palette.device_mode {
+        Some(
+            *owner
+                .profile_settings
+                .mood_scene_device_slots
+                .as_ref()?
+                .get(node_id)? as usize,
+        )
+    } else {
+        None
+    };
+    if let Some(entry) = layer
+        .entries
+        .iter()
+        .find(|entry| entry.target.node_id() == node_id)
+    {
+        return Some(entry.output.clone());
+    }
+    if let Some(slot) = assigned_slot {
+        return layer
+            .palette_output_with_seed(slot, palette.span_or(1), palette.seed)
+            .or_else(|| layer.default_output.clone());
+    }
+    // Rooms mode can use either one grouped output or distinct light outputs.
+    // Reuse its read-only planner so the display follows the actual route.
+    let planned = plan_scene_target_locked(s, runtime, scene, &owner.id, None, palette).ok()?;
+    if planned.managed_dispatches.is_empty()
+        && planned
+            .plan
+            .commands
+            .iter()
+            .any(|command| command.public_node_id == owner.id)
+    {
+        return layer
+            .palette_output_with_seed(palette.offset, palette.span_or(1), palette.seed)
+            .or_else(|| layer.default_output.clone());
+    }
+    render_scene_lights_locked(s, runtime, scene, &owner.id, None, palette)
+        .ok()?
+        .lights
+        .into_iter()
+        .find(|light| light.node_id == node_id)
+        .map(|light| light.output)
 }
 
 /// Fold the active mood scene's output into the node's display values.

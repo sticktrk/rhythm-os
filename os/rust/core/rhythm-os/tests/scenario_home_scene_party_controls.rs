@@ -492,3 +492,92 @@ fn queued_child_brightness_keeps_parent_and_siblings_canonical_after_restart() {
         }
     }
 }
+
+#[test]
+fn child_display_follows_parent_scene_assignment_until_explicit_exit() {
+    for mode in [
+        rhythm_os::scenes::HomeSceneTargetMode::Devices,
+        rhythm_os::scenes::HomeSceneTargetMode::Rooms,
+    ] {
+        let (h, spy, child, sibling) = fixture();
+        let parent = h.resolve("kitchen");
+        let blue = rhythm_core::Rgb::new(0, 0, 255);
+        commands::do_set_node_color(
+            &h.state,
+            &child,
+            commands::NodeColorUpdate {
+                rgb: blue,
+                xy: None,
+                brightness: Some(70),
+                transition_ms: None,
+                scope: commands::NodeColorScope::Mood,
+            },
+            false,
+        )
+        .unwrap();
+        spy.reset();
+        commands::do_home_scene_apply(
+            &h.state,
+            "halloween",
+            rhythm_os::scenes::HomeSceneApplyRequest {
+                target_mode: mode,
+                ..Default::default()
+            },
+            Duration::ZERO,
+        )
+        .unwrap();
+        for adjusted in [false, true] {
+            if adjusted {
+                spy.reset();
+                let response =
+                    commands::do_set_node_brightness(&h.state, &child, 23, false).unwrap();
+                let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+                assert_eq!(response["brightness"], 23);
+            }
+            let calls = spy.turn_on_calls();
+            for id in [&child, &sibling] {
+                let sent = output_for(&calls, id)
+                    .or_else(|| (calls.len() == 1).then(|| &calls[0].1))
+                    .unwrap();
+                let displayed = commands::build_node_state(&h.state, id).unwrap();
+                assert_eq!(
+                    displayed.brightness, sent.brightness,
+                    "reported brightness must match the active parent assignment"
+                );
+                assert_eq!(
+                    displayed.color,
+                    Some(sent.rgb),
+                    "saved child custom color must not mask its parent scene"
+                );
+                let runtime = h.state.lock().unwrap().hub_runtime().unwrap();
+                let snapshot = runtime.engine_effective_node_snapshot(id).unwrap();
+                let event = commands::build_node_state_event(&h.state, &snapshot);
+                let event = serde_json::to_value(event).unwrap();
+                assert_eq!(event["brightness"], sent.brightness);
+                assert_eq!(event["color"], serde_json::to_value(sent.rgb).unwrap());
+            }
+        }
+        commands::do_node_action(&h.state, &parent, "reset", false).unwrap();
+        assert!(!h.snapshot(&parent).unwrap().mood_active);
+        spy.reset();
+        commands::do_node_preferences_set(
+            &h.state,
+            &child,
+            None,
+            None,
+            None,
+            Some(rhythm_core::RoomModeState::Mood),
+            None,
+            false,
+        )
+        .unwrap();
+        let displayed = commands::build_node_state(&h.state, &child).unwrap();
+        assert_eq!(
+            displayed.color,
+            Some(blue),
+            "parent Reset releases the child's ordinary saved Mood"
+        );
+        assert_eq!(displayed.brightness, 70);
+        assert_eq!(spy.turn_on_calls().last().unwrap().1.rgb, blue);
+    }
+}
